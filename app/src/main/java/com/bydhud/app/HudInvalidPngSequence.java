@@ -1,0 +1,51 @@
+package com.bydhud.app;
+
+final class HudInvalidPngSequence {
+    private static final int[] MODES = {
+            HudState.TURN_BITMAP_OEM, HudState.TURN_BITMAP_BAD_1,
+            HudState.TURN_BITMAP_OEM, HudState.TURN_BITMAP_FAKE_JPEG,
+            HudState.TURN_BITMAP_OEM, HudState.TURN_BITMAP_ZERO_BYTES_34,
+            HudState.TURN_BITMAP_OEM_RAW, HudState.TURN_BITMAP_BAD_1,
+            HudState.TURN_BITMAP_OEM_RAW, HudState.TURN_BITMAP_FAKE_JPEG,
+            HudState.TURN_BITMAP_OEM_RAW, HudState.TURN_BITMAP_ZERO_BYTES_34
+    };
+
+    private static final String[] LABELS = {
+            "PNG OEM", "Bad 1B",
+            "PNG OEM", "Bad JPG",
+            "PNG OEM", "Zero 34",
+            "OEM Raw", "Bad 1B",
+            "OEM Raw", "Bad JPG",
+            "OEM Raw", "Zero 34"
+    };
+
+    private HudInvalidPngSequence() {
+    }
+
+    static int size() {
+        return MODES.length;
+    }
+
+    static int modeAt(int index) {
+        return MODES[normalize(index)];
+    }
+
+    static String labelAt(int index) {
+        return LABELS[normalize(index)];
+    }
+
+    static String roadLabelAt(int index) {
+        int step = normalize(index);
+        return String.format("IV%02d %s", step + 1, LABELS[step]);
+    }
+
+    static int nextIndex(int index) {
+        return (normalize(index) + 1) % MODES.length;
+    }
+
+    private static int normalize(int index) {
+        int size = MODES.length;
+        int normalized = index % size;
+        return normalized < 0 ? normalized + size : normalized;
+    }
+}

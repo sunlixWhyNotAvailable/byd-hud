@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="nav_accessibility_description">Captures navigation text from Google Maps and Waze for local diagnostics.</string>
+</resources>
