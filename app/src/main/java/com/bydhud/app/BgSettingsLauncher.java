@@ -1,19 +1,24 @@
 package com.bydhud.app;
 
+//guides users to DiLink background settings so collection can survive app updates and restarts.
+
 import android.content.Context;
 import android.content.Intent;
 import android.net.Uri;
 import android.provider.Settings;
 import android.widget.Toast;
 
+//defines the BgSettingsLauncher module boundary so related behavior stays readable inside one unit.
 final class BgSettingsLauncher {
     private static final String BYD_SETTINGS_PACKAGE = "com.byd.appstartmanagement";
     private static final String BYD_SETTINGS_CLASS =
             "com.byd.appstartmanagement.frame.AppStartManagement";
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private BgSettingsLauncher() {
     }
 
+    //opens the external boundary here so connection setup remains observable and retryable.
     static void open(Context context) {
         AppEventLogger.event(context, "bg_settings_open_requested");
         boolean opened = false;

@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//captures Waze screen crops so template and geometry parsers have reproducible visual evidence.
+
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -19,6 +21,7 @@ import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 
+//defines the WazeCropCapture module boundary so related behavior stays readable inside one unit.
 final class WazeCropCapture {
     static final boolean PRODUCTION_DELETE_AFTER_PARSE = false;
     static final String BUCKET_KNOWN = "known";
@@ -39,6 +42,7 @@ final class WazeCropCapture {
 
     private static WazeCropCapture instance;
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static synchronized WazeCropCapture get(Context context) {
         if (instance == null) {
             instance = new WazeCropCapture(context.getApplicationContext());
@@ -61,14 +65,17 @@ final class WazeCropCapture {
     private WazeAccessibilityGeometry latestAccessibilityGeometry = WazeAccessibilityGeometry.EMPTY;
     private long latestAccessibilityGeometryMs;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeCropCapture(Context context) {
         this.context = context.getApplicationContext();
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     static String classifyBucketForTest(NavSnapshot snapshot) {
         return classifyBucket(snapshot, false);
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     static String classifyBucketForTest(NavSnapshot snapshot, boolean missingLaneGuidance) {
         return classifyBucket(
                 snapshot,
@@ -78,6 +85,7 @@ final class WazeCropCapture {
                 !isIdleSnapshot(snapshot));
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     static String classifyBucketForTest(
             NavSnapshot snapshot, boolean missingLaneGuidance, boolean activeInstructionPanel) {
         return classifyBucket(
@@ -88,6 +96,7 @@ final class WazeCropCapture {
                 activeInstructionPanel);
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     static String classifyBucketForTest(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceStatus laneStatus,
@@ -98,6 +107,7 @@ final class WazeCropCapture {
                 activeInstructionPanel);
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     static String classifyBucketForTest(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis,
@@ -105,22 +115,26 @@ final class WazeCropCapture {
         return classifyBucket(snapshot, laneAnalysis, activeInstructionPanel);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String snapshotLanesForCropForTest(NavSnapshot snapshot) {
         return snapshotLanesForCrop(snapshot);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String trustedLanesForCropForTest(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis) {
         return trustedLanesForCrop(snapshot, laneAnalysis);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String trustedLanesForCropForTest(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceStatus laneStatus) {
         return trustedLanesForCrop(snapshot, laneStatus);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldCommitVisualFrameForTest(
             boolean activeGeneration,
             int frameId,
@@ -129,6 +143,7 @@ final class WazeCropCapture {
         return visualCommitSkipReason(activeGeneration, frameId, latestFrameId, ageMs).isEmpty();
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String visualCommitSkipReasonForTest(
             boolean activeGeneration,
             int frameId,
@@ -137,6 +152,7 @@ final class WazeCropCapture {
         return visualCommitSkipReason(activeGeneration, frameId, latestFrameId, ageMs);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     void start(String reason) {
         int workerGeneration;
         File dir;
@@ -175,6 +191,7 @@ final class WazeCropCapture {
         worker.start();
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stop(String reason) {
         File dir;
         synchronized (lock) {
@@ -193,12 +210,14 @@ final class WazeCropCapture {
         log(dir, "stop reason=" + safe(reason));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isRunning() {
         synchronized (lock) {
             return active;
         }
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateAccessibilityGeometry(WazeAccessibilityGeometry geometry) {
         if (geometry == null || !geometry.hasAnyBounds()) {
             return;
@@ -209,6 +228,7 @@ final class WazeCropCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void runLoop(int workerGeneration, File dir, String workerSessionName) {
         long lastInactiveRouteProbeMs = 0L;
         while (isActiveGeneration(workerGeneration)) {
@@ -263,6 +283,7 @@ final class WazeCropCapture {
         log(dir, "loop exit");
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private WazeAccessibilityGeometry freshAccessibilityGeometry(long now) {
         synchronized (lock) {
             if (latestAccessibilityGeometry == null
@@ -275,6 +296,7 @@ final class WazeCropCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private NavAppDisplayState displayStateForCrop(File dir, long now) {
         NavAppDisplayController controller = NavAppDisplayController.get(context);
         boolean due = lastDisplayState == null
@@ -294,6 +316,7 @@ final class WazeCropCapture {
         return lastDisplayState;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean cachedDisplayConflictsWithActiveDashboard(
             NavAppDisplayState state,
             String activeDashboardPackage) {
@@ -303,6 +326,7 @@ final class WazeCropCapture {
         return state.displayId == 0;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void captureScreenshot(
             int workerGeneration,
             int displayId,
@@ -496,6 +520,7 @@ final class WazeCropCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private String copyMissingCueIfNeeded(File dir, String fileName, String bucket) {
         if (!isMissingBucket(bucket) || dir == null) {
             return "";
@@ -517,6 +542,7 @@ final class WazeCropCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void exportMissingLaneCells(
             File dir,
             String fileName,
@@ -552,6 +578,7 @@ final class WazeCropCapture {
         log(dir, "missing lane cell artifacts file=" + fileName + " count=" + exported);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean shouldExportMissingLaneCell(WazeLaneCell cell) {
         if (cell == null) {
             return false;
@@ -560,6 +587,7 @@ final class WazeCropCapture {
         return !"NONE".equals(reason);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean exportLaneCell(
             Bitmap source,
             File targetDir,
@@ -601,6 +629,7 @@ final class WazeCropCapture {
         }
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static Bitmap normalizedCell(Bitmap raw) {
         final int targetWidth = 64;
         final int targetHeight = 96;
@@ -620,6 +649,7 @@ final class WazeCropCapture {
         return out;
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static boolean writePng(Bitmap bitmap, File file) {
         if (bitmap == null || file == null) {
             return false;
@@ -631,6 +661,7 @@ final class WazeCropCapture {
         }
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeCellMeta(
             File file,
             String sourceScreen,
@@ -655,10 +686,11 @@ final class WazeCropCapture {
                     + ",\"layout\":\"LANES\""
                     + "}");
         } catch (IOException ignored) {
-            // Best-effort debug artifact only.
+            //keeps debug export best-effort because missing artifacts must not block live navigation.
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String stripPngSuffix(String fileName) {
         String safeName = fileName == null ? "screen" : fileName.trim();
         if (safeName.toLowerCase(Locale.US).endsWith(".png")) {
@@ -667,10 +699,12 @@ final class WazeCropCapture {
         return safeName;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static void copyFile(File source, File target) throws IOException {
         FileInputStream in = new FileInputStream(source);
         try {
@@ -689,6 +723,7 @@ final class WazeCropCapture {
         }
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     private static String classifyBucket(NavSnapshot snapshot, boolean missingLaneGuidance) {
         return classifyBucket(
                 snapshot,
@@ -698,6 +733,7 @@ final class WazeCropCapture {
                 !isIdleSnapshot(snapshot));
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     private static String classifyBucket(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceStatus laneStatus,
@@ -708,6 +744,7 @@ final class WazeCropCapture {
                 activeInstructionPanel);
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     private static String classifyBucket(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis,
@@ -736,6 +773,7 @@ final class WazeCropCapture {
         return BUCKET_KNOWN;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysisFromStatus(
             WazeVisualCueParser.LaneGuidanceStatus laneStatus,
             boolean blocksSingleFallback) {
@@ -748,6 +786,7 @@ final class WazeCropCapture {
         return WazeVisualCueParser.LaneGuidanceAnalysis.none();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean blocksSingleFallback(
             WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis) {
         return laneAnalysis != null
@@ -755,10 +794,12 @@ final class WazeCropCapture {
                 && laneAnalysis.blocksSingleFallback;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isMissingBucket(String bucket) {
         return BUCKET_MISSING_MANEUVERS.equals(bucket) || BUCKET_MISSING_LANES.equals(bucket);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isIdleSnapshot(NavSnapshot snapshot) {
         return snapshot != null
                 && snapshot.maneuver == NavSnapshot.Maneuver.UNKNOWN
@@ -768,6 +809,7 @@ final class WazeCropCapture {
                 && safe(snapshot.laneString).isEmpty();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String snapshotLanesForCrop(NavSnapshot snapshot) {
         if (snapshot == null
                 || snapshot.sourceApp != NavSnapshot.SourceApp.WAZE
@@ -780,6 +822,7 @@ final class WazeCropCapture {
         return snapshot.laneString;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String trustedLanesForCrop(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis) {
@@ -789,6 +832,7 @@ final class WazeCropCapture {
         return trustedLanesForCrop(snapshot, status);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String trustedLanesForCrop(
             NavSnapshot snapshot,
             WazeVisualCueParser.LaneGuidanceStatus laneStatus) {
@@ -798,6 +842,7 @@ final class WazeCropCapture {
         return snapshotLanesForCrop(snapshot);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String snapshotManeuver(NavSnapshot snapshot) {
         if (snapshot == null) {
             return "UNKNOWN";
@@ -805,18 +850,21 @@ final class WazeCropCapture {
         return snapshot.maneuver.name();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isActiveGeneration(int workerGeneration) {
         synchronized (lock) {
             return active && generation == workerGeneration;
         }
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     private int latestFrameId() {
         synchronized (lock) {
             return screenshotIndex;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String visualCommitSkipReason(
             boolean activeGeneration,
             int frameId,
@@ -838,6 +886,7 @@ final class WazeCropCapture {
         return "";
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String timingDetail(
             int frameId,
             int latestFrameId,
@@ -866,18 +915,21 @@ final class WazeCropCapture {
                 + " skipReason=" + NavCaptureStore.esc(safe(commitSkipReason));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private String currentSessionShellDir() {
         synchronized (lock) {
             return sessionShellDir;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private boolean currentSessionShellWritable() {
         synchronized (lock) {
             return sessionShellWritable;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void log(File dir, String line) {
         String safeLine = safe(line);
         Log.i(TAG, safeLine);
@@ -889,6 +941,7 @@ final class WazeCropCapture {
                 + "}");
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void appendSessionLine(File dir, String line) {
         if (dir == null) {
             return;
@@ -905,6 +958,7 @@ final class WazeCropCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static void sleepQuietly(long delayMs) {
         try {
             Thread.sleep(delayMs);
@@ -913,12 +967,14 @@ final class WazeCropCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String timestampForFile() {
         synchronized (SESSION_FORMAT) {
             return SESSION_FORMAT.format(new Date());
         }
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }

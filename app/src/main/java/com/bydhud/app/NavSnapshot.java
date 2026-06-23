@@ -1,12 +1,16 @@
 package com.bydhud.app;
 
+//keeps current navigation state immutable so UI and sender can reason about the same route frame.
+
 public final class NavSnapshot {
+    //defines the SourceApp module boundary so related behavior stays readable inside one unit.
     public enum SourceApp {
         GOOGLE_MAPS,
         WAZE,
         UNKNOWN
     }
 
+    //defines the Maneuver module boundary so related behavior stays readable inside one unit.
     public enum Maneuver {
         UNKNOWN,
         STRAIGHT,
@@ -37,6 +41,7 @@ public final class NavSnapshot {
     public final int confidence;
     public final String rawReason;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     public NavSnapshot(long elapsedRealtimeMs, SourceApp sourceApp, String packageName,
             Maneuver maneuver, int distanceMeters, String streetName,
             int roundaboutExitNumber, String laneString, int confidence, String rawReason) {
@@ -52,10 +57,12 @@ public final class NavSnapshot {
         this.rawReason = rawReason == null ? "" : rawReason;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     public boolean isUsableForHud() {
         return confidence >= 70 && maneuver != Maneuver.UNKNOWN;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static int clampConfidence(int confidence) {
         if (confidence < 0) {
             return 0;

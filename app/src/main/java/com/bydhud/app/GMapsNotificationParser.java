@@ -1,8 +1,11 @@
 package com.bydhud.app;
 
+//parses google maps notifications so background navigation can keep the HUD route fresh.
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+//defines the GMapsNotificationParser parser boundary so raw app evidence is normalized before HUD decisions use it.
 final class GMapsNotificationParser {
     private static final int MAX_ROAD_NAME_CHARS = 64;
     private static final int UNKNOWN_NEXT_DISTANCE_METERS = 1;
@@ -11,6 +14,7 @@ final class GMapsNotificationParser {
     private static final Pattern MINUTES =
             Pattern.compile("([0-9]+)\\s*min\\b", Pattern.CASE_INSENSITIVE);
 
+    //defines the Result module boundary so related behavior stays readable inside one unit.
     static final class Result extends NavParserResult {
         Result(HudState state, NavSnapshot snapshot, String reason) {
             super(state, snapshot, reason);
@@ -22,19 +26,23 @@ final class GMapsNotificationParser {
         }
     }
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private GMapsNotificationParser() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCandidatePackage(String packageName) {
         return NavTextNormalizer.sourceApp(packageName) == NavSnapshot.SourceApp.GOOGLE_MAPS;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static Result parse(String packageName, String title, String text, String subText,
             String category, boolean ongoing) {
         return parse(packageName, title, text, subText, category, ongoing,
                 NavManeuverEvidence.NONE, System.currentTimeMillis());
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static Result parse(String packageName, String title, String text, String subText,
             String category, boolean ongoing, NavManeuverEvidence iconEvidence,
             long nowElapsedMs) {
@@ -118,6 +126,7 @@ final class GMapsNotificationParser {
         return new Result(state, snapshot, selectedReason, selectedEvidence);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     static Result arrivalResult(String packageName, String destination, String reason, int confidence) {
         HudState state = new HudState();
         state.distanceToIntersection = 0;
@@ -150,6 +159,7 @@ final class GMapsNotificationParser {
         return new Result(state, snapshot, detail);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static int timeSeconds(String subText) {
         Matcher matcher = MINUTES.matcher(subText);
         if (!matcher.find()) {
@@ -166,6 +176,7 @@ final class GMapsNotificationParser {
         }
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static String roadName(String text, String title) {
         String value = text;
         String lower = NavTextNormalizer.lower(value);
@@ -178,6 +189,7 @@ final class GMapsNotificationParser {
         return cap(value, MAX_ROAD_NAME_CHARS);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isArrivalNotification(
             String title,
             String text,
@@ -198,6 +210,7 @@ final class GMapsNotificationParser {
                 && remainingMeters <= ARRIVAL_FALLBACK_MAX_REMAINING_METERS;
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     static int sourceManeuver(String text) {
         String lower = NavTextNormalizer.lower(text);
         if (lower.contains("u-turn") || lower.contains("uturn")) {
@@ -218,6 +231,7 @@ final class GMapsNotificationParser {
         return 9;
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     static NavSnapshot.Maneuver maneuver(String text) {
         String lower = NavTextNormalizer.lower(text);
         if (lower.contains("u-turn") || lower.contains("uturn")) {
@@ -242,6 +256,7 @@ final class GMapsNotificationParser {
         return NavSnapshot.Maneuver.STRAIGHT;
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static int confidence(int nextMeters, int remainingMeters, String text, String subText) {
         int confidence = 50;
         if (nextMeters >= 0) {
@@ -259,6 +274,7 @@ final class GMapsNotificationParser {
         return Math.min(100, confidence);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static String cap(String value, int limit) {
         if (value == null) {
             return "";

@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//keeps last HUD output state so send policy can avoid stale or duplicated cluster writes.
+
 final class HudState {
     static final int NATIVE_BLANK_ID = 99;
     static final int TURN_BITMAP_BLANK_SOURCE_ID = 72;
@@ -46,6 +48,7 @@ final class HudState {
     boolean turnBitmapHiddenLocked = false;
     int turnBitmapHiddenMode = TURN_BITMAP_BLANK_TRANSPARENT_1;
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     HudState copy() {
         HudState state = new HudState();
         state.distanceToIntersection = distanceToIntersection;
@@ -75,6 +78,7 @@ final class HudState {
         return state;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     HudState copyForClear() {
         HudState state = new HudState();
         state.distanceToIntersection = 0;
@@ -104,6 +108,7 @@ final class HudState {
         return state;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     String summary() {
         return "nativeId=" + maneuverId
                 + " sourceId=" + turnBitmapId
@@ -124,10 +129,12 @@ final class HudState {
                 + " lane=\"" + laneString + "\"";
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     String turnBitmapModeName() {
         return turnBitmapModeName(turnBitmapMode);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static String turnBitmapModeName(int mode) {
         if (mode == TURN_BITMAP_OEM) {
             return "oem";
@@ -177,6 +184,7 @@ final class HudState {
         return "omit";
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void setSourceManeuver(int sourceId) {
         turnBitmapId = Math.max(0, Math.min(99, sourceId));
         maneuverId = Math.max(0, Math.min(99, HudManeuverMap.sourceToNative(turnBitmapId)));
@@ -186,6 +194,7 @@ final class HudState {
                 : (turnBitmapMode == TURN_BITMAP_OEM_RAW ? TURN_BITMAP_OEM_RAW : TURN_BITMAP_OEM);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void setTurnBitmapMode(int mode) {
         turnBitmapMode = mode;
         if (mode == TURN_BITMAP_OEM || mode == TURN_BITMAP_OEM_RAW) {
@@ -195,6 +204,7 @@ final class HudState {
         }
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void lockTurnBitmapHidden() {
         turnBitmapHiddenLocked = true;
         if (isNeutralTurnBitmapMode(turnBitmapMode)) {
@@ -203,28 +213,33 @@ final class HudState {
         turnBitmapMode = turnBitmapHiddenMode;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void lockTurnBitmapHiddenWithDefault() {
         turnBitmapHiddenLocked = true;
         turnBitmapHiddenMode = TURN_BITMAP_BLANK_TRANSPARENT_1;
         turnBitmapMode = turnBitmapHiddenMode;
     }
 
+    //clears state here so stale navigation output is removed before new evidence arrives.
     void hideTurnBitmapWithBlankSource() {
         turnBitmapId = TURN_BITMAP_BLANK_SOURCE_ID;
         turnBitmapMode = TURN_BITMAP_OEM;
         turnBitmapHiddenLocked = false;
     }
 
+    //clears state here so stale navigation output is removed before new evidence arrives.
     void hideNativeWithBlankId() {
         maneuverId = NATIVE_BLANK_ID;
         includeNativeArrow = true;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void unlockTurnBitmapHidden() {
         turnBitmapHiddenLocked = false;
         turnBitmapMode = TURN_BITMAP_OEM;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isNeutralTurnBitmapMode(int mode) {
         return mode == TURN_BITMAP_EMPTY_FIELD
                 || mode == TURN_BITMAP_BLANK_TRANSPARENT_1

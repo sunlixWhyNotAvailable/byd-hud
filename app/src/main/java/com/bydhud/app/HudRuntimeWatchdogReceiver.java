@@ -1,11 +1,15 @@
 package com.bydhud.app;
 
+//receives watchdog alarms so runtime recovery works even when the activity is closed.
+
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 
+//anchors the HudRuntimeWatchdogReceiver android entry point so lifecycle recovery stays separate from business logic.
 public final class HudRuntimeWatchdogReceiver extends BroadcastReceiver {
     @Override
+    //handles broadcast recovery here so the app can restart required services without user interaction.
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? "" : intent.getAction();
         AppEventLogger.event(context, "runtime_watchdog_receiver action=" + action

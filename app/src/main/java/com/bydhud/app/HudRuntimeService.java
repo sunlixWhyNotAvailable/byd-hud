@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//keeps the persistent foreground runtime alive so capture and HUD output continue outside the UI.
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -13,6 +15,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
 
+//anchors the HudRuntimeService android entry point so lifecycle recovery stays separate from business logic.
 public final class HudRuntimeService extends Service {
     private static final String TAG = "BydHudRuntimeService";
     private static final String CHANNEL_ID = "byd_hud_runtime";
@@ -28,12 +31,14 @@ public final class HudRuntimeService extends Service {
     private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             HudRuntimeState.markHeartbeat(HudRuntimeService.this, "periodic");
             heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
         }
     };
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startPersistent(Context context, String reason) {
         Intent intent = new Intent(context, HudRuntimeService.class);
         intent.setAction(ACTION_START_PERSISTENT);
@@ -45,6 +50,7 @@ public final class HudRuntimeService extends Service {
         }
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static void stopPersistent(Context context, String reason) {
         Intent intent = new Intent(context, HudRuntimeService.class);
         intent.setAction(ACTION_STOP_PERSISTENT);
@@ -53,6 +59,7 @@ public final class HudRuntimeService extends Service {
     }
 
     @Override
+    //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
         HudGraphicPayload.setContext(this);
@@ -66,6 +73,7 @@ public final class HudRuntimeService extends Service {
     }
 
     @Override
+    //handles service start intents here so boot, watchdog, and UI paths share one runtime entry point.
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
         String reason = intent == null ? "sticky-restart" : intent.getStringExtra(EXTRA_REASON);
@@ -95,6 +103,7 @@ public final class HudRuntimeService extends Service {
     }
 
     @Override
+    //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onTaskRemoved(Intent rootIntent) {
         log("runtime task removed boot=" + HudPrefs.isBootEnabled(this));
         HudRuntimeState.recordLifecycleHook(this, "task-removed",
@@ -109,6 +118,7 @@ public final class HudRuntimeService extends Service {
     }
 
     @Override
+    //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         HudPrefs.setRuntimeServiceRunning(this, false);
@@ -118,10 +128,12 @@ public final class HudRuntimeService extends Service {
     }
 
     @Override
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     public IBinder onBind(Intent intent) {
         return null;
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private Notification buildNotification(String text) {
         createNotificationChannel();
         Intent launchIntent = new Intent(this, MainActivity.class);
@@ -142,6 +154,7 @@ public final class HudRuntimeService extends Service {
                 .build();
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateNotification(String text) {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager != null) {
@@ -149,6 +162,7 @@ public final class HudRuntimeService extends Service {
         }
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return;
@@ -164,6 +178,7 @@ public final class HudRuntimeService extends Service {
         manager.createNotificationChannel(channel);
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -172,11 +187,13 @@ public final class HudRuntimeService extends Service {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleHeartbeat() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void log(String line) {
         Log.i(TAG, line);
         AppEventLogger.event(this, "runtime " + line);

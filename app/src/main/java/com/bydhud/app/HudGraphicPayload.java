@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//models binary HUD graphics so the sender can separate image transport from navigation decisions.
+
 import android.content.Context;
 import android.content.res.Resources;
 import android.graphics.Bitmap;
@@ -18,6 +20,7 @@ import java.util.Map;
 import java.util.zip.CRC32;
 import java.util.zip.DeflaterOutputStream;
 
+//models HudGraphicPayload data here so transport and parser layers share a stable contract.
 final class HudGraphicPayload {
     private static final String BLACK_JPEG_34_BASE64 =
             "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAMCAgMCAgMDAwMEAwMEBQgFBQQEBQoHBwYIDAoM"
@@ -56,13 +59,16 @@ final class HudGraphicPayload {
     private static String turnKey = "";
     private static byte[] turnBytes = new byte[0];
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudGraphicPayload() {
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized void setContext(Context context) {
         appContext = context == null ? null : context.getApplicationContext();
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     static synchronized byte[] buildLanePng(HudState state) {
         HudLaneModel.LaneSpec[] lanes = HudLaneModel.parse(state);
         if (lanes.length == 0) {
@@ -86,10 +92,12 @@ final class HudGraphicPayload {
         return laneBytes;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized int lanePngLength(HudState state) {
         return state.includeLaneBitmap ? buildLanePng(state).length : 0;
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     static synchronized byte[] buildTurnPng(HudState state) {
         String key = "turn|" + state.turnBitmapMode + "|" + state.turnBitmapId;
         if (key.equals(turnKey) && turnBytes.length > 0) {
@@ -133,10 +141,12 @@ final class HudGraphicPayload {
         return turnBytes;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized int turnPngLength(HudState state) {
         return state.turnBitmapMode == HudState.TURN_BITMAP_OMIT ? 0 : buildTurnPng(state).length;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized String turnFieldStatus(HudState state) {
         if (state.turnBitmapMode == HudState.TURN_BITMAP_OMIT) {
             return "absent:omit";
@@ -155,6 +165,7 @@ final class HudGraphicPayload {
         return "absent:failed";
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized String turnFieldMagic(HudState state) {
         if (state.turnBitmapMode == HudState.TURN_BITMAP_OMIT) {
             return "absent";
@@ -196,6 +207,7 @@ final class HudGraphicPayload {
         return "unknown";
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized String turnFieldDescriptor(HudState state) {
         String status = turnFieldStatus(state);
         if (!"present:bytes".equals(status)) {
@@ -228,6 +240,7 @@ final class HudGraphicPayload {
         return "png:" + width + "x" + height + ":color" + colorType;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized String turnResourceName(HudState state) {
         if (state.turnBitmapMode == HudState.TURN_BITMAP_OMIT) {
             return "omit";
@@ -279,6 +292,7 @@ final class HudGraphicPayload {
         return name.isEmpty() ? "missing" : name;
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildStaticLanePng(HudLaneModel.LaneSpec[] lanes, HudLaneGeometry.Geometry geometry) {
         if (appContext == null || lanes.length == 0) {
             return new byte[0];
@@ -305,6 +319,7 @@ final class HudGraphicPayload {
         return toPng(bitmap);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildBlankTurnPng(int width, int height, int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -353,14 +368,17 @@ final class HudGraphicPayload {
         return png.toByteArray();
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildBlackTurnRgbPng34() {
         return buildBlackTurnRgbPng(34, 34);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildBlackTurnRgbPng1() {
         return buildBlackTurnRgbPng(1, 1);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildBlackTurnRgbPng(int width, int height) {
         byte[] raw = new byte[height * (1 + width * 3)];
         int offset = 0;
@@ -404,6 +422,7 @@ final class HudGraphicPayload {
         return png.toByteArray();
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writePngChunk(ByteArrayOutputStream out, String type, byte[] data) {
         byte[] typeBytes = type.getBytes(StandardCharsets.US_ASCII);
         writePngInt(out, data.length);
@@ -416,6 +435,7 @@ final class HudGraphicPayload {
         writePngInt(out, (int) crc.getValue());
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writePngInt(ByteArrayOutputStream out, int value) {
         out.write((value >>> 24) & 0xff);
         out.write((value >>> 16) & 0xff);
@@ -423,6 +443,7 @@ final class HudGraphicPayload {
         out.write(value & 0xff);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static int readPngInt(byte[] bytes, int offset) {
         return ((bytes[offset] & 0xff) << 24)
                 | ((bytes[offset + 1] & 0xff) << 16)
@@ -430,20 +451,24 @@ final class HudGraphicPayload {
                 | (bytes[offset + 3] & 0xff);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isTransparentBlankMode(int mode) {
         return mode == HudState.TURN_BITMAP_BLANK_TRANSPARENT_1
                 || mode == HudState.TURN_BITMAP_BLANK_TRANSPARENT_34
                 || mode == HudState.TURN_BITMAP_BLANK_TRANSPARENT_120;
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildBlackTurnJpeg34() {
         return Base64.getDecoder().decode(BLACK_JPEG_34_BASE64);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildBlackTurnJpeg1() {
         return Base64.getDecoder().decode(BLACK_JPEG_1_BASE64);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static Bitmap loadStaticLaneIcon(HudLaneModel.LaneSpec lane) {
         if (!lane.customResourceName.isEmpty()) {
             return loadResourceBitmap(lane.customResourceName);
@@ -451,12 +476,14 @@ final class HudGraphicPayload {
         return loadOemIcon(lane);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static Bitmap loadOemIcon(HudLaneModel.LaneSpec lane) {
         String name = (lane.recommended ? "global_image_landfront_hud_" : "global_image_landback_hud_")
                 + resourceSuffix(lane.iconId);
         return loadResourceBitmap(name);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildOemTurnPng(int turnBitmapId) {
         if (appContext == null) {
             return isOemBlankTurnSource(turnBitmapId)
@@ -483,6 +510,7 @@ final class HudGraphicPayload {
         return toPng(bitmap);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static byte[] buildOemTurnRawBytes(int turnBitmapId) {
         if (appContext == null) {
             return new byte[0];
@@ -512,6 +540,7 @@ final class HudGraphicPayload {
         return out.toByteArray();
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static String resolveOemTurnResourceName(int turnBitmapId) {
         if (appContext == null) {
             return isOemBlankTurnSource(turnBitmapId)
@@ -533,10 +562,12 @@ final class HudGraphicPayload {
         return "";
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isOemBlankTurnSource(int turnBitmapId) {
         return turnBitmapId >= 72 && turnBitmapId <= 76;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static Bitmap loadResourceBitmap(String name) {
         Resources resources = appContext.getResources();
         Bitmap cached = OEM_ICON_CACHE.get(name);
@@ -555,6 +586,7 @@ final class HudGraphicPayload {
         return decoded;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static String resourceSuffix(int iconId) {
         if (iconId >= 0 && iconId <= 9) {
             return String.valueOf(iconId);
@@ -571,6 +603,7 @@ final class HudGraphicPayload {
         return String.valueOf(iconId);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static byte[] toPng(Bitmap bitmap) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);

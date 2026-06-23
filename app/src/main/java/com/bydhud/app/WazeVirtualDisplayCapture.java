@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//uses virtual display capture so Waze visuals can be parsed without depending on screenshots.
+
 import android.content.Context;
 import android.os.SystemClock;
 import android.util.Log;
@@ -13,6 +15,7 @@ import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+//defines the WazeVirtualDisplayCapture module boundary so related behavior stays readable inside one unit.
 final class WazeVirtualDisplayCapture {
     private static final String TAG = "BydHudWazeVD";
     private static final String WAZE_PACKAGE = "com.waze";
@@ -48,16 +51,20 @@ final class WazeVirtualDisplayCapture {
     private static final SimpleDateFormat SESSION_FORMAT =
             new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US);
 
+    //defines the Mode module boundary so related behavior stays readable inside one unit.
     enum Mode {
         LOG_ONLY
     }
 
+    //defines the Listener module boundary so related behavior stays readable inside one unit.
     interface Listener {
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         void onWazeVirtualDisplayChanged();
     }
 
     private static WazeVirtualDisplayCapture instance;
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static synchronized WazeVirtualDisplayCapture get(Context context) {
         if (instance == null) {
             instance = new WazeVirtualDisplayCapture(context.getApplicationContext());
@@ -80,16 +87,19 @@ final class WazeVirtualDisplayCapture {
     private boolean moveInProgress;
     private Listener listener;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeVirtualDisplayCapture(Context context) {
         this.context = context.getApplicationContext();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     void setListener(Listener listener) {
         synchronized (lock) {
             this.listener = listener;
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     void start(Mode mode, String reason) {
         final int workerGeneration;
         final File workerDir;
@@ -124,6 +134,7 @@ final class WazeVirtualDisplayCapture {
         notifyStatusChanged();
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stop(String reason) {
         final int restoreGeneration;
         synchronized (lock) {
@@ -145,12 +156,14 @@ final class WazeVirtualDisplayCapture {
         notifyStatusChanged();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isRunning() {
         synchronized (lock) {
             return active;
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isLogOnlyForPackage(String packageName) {
         synchronized (lock) {
             return active
@@ -159,27 +172,32 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isMoveInProgress() {
         synchronized (lock) {
             return moveInProgress;
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isKnownOnVirtualDisplay() {
         synchronized (lock) {
             return lastKnownDisplayId > MAIN_DISPLAY_ID;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     void moveToVirtualDisplay(String reason) {
         ensureSessionForManualMove(reason);
         runDisplayMove(true, reason);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     void moveToMainDisplay(String reason) {
         runDisplayMove(false, reason);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     int findWazeTaskDisplayId() {
         try {
             WazeTask task = findWazeTask(currentSessionDir());
@@ -197,6 +215,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     String statusText() {
         synchronized (lock) {
             String dir = sessionDir == null ? "" : sessionDir.getAbsolutePath();
@@ -207,6 +226,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void runCaptureLoop(int workerGeneration, File dir, String workerSessionName) {
         int targetDisplay = FALLBACK_VIRTUAL_DISPLAY_ID;
         try {
@@ -253,6 +273,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private WazeTask findWazeTask(File dir) throws IOException {
         LocalAdbBridge.ShellResult result =
                 runCommand("dumpsys activity activities", dir, "activity_dump");
@@ -263,6 +284,7 @@ final class WazeVirtualDisplayCapture {
         return parseWazeTask(result.output);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void restoreWazeToMain(int restoreGeneration, File dir, String reason) {
         try {
             if (!shouldRestoreForGeneration(restoreGeneration)) {
@@ -305,6 +327,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void ensureSessionForManualMove(String reason) {
         synchronized (lock) {
             if (active) {
@@ -314,6 +337,7 @@ final class WazeVirtualDisplayCapture {
         start(Mode.LOG_ONLY, "manual-virtual-display-" + safe(reason));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void runDisplayMove(boolean toVirtual, String reason) {
         final File dir = currentSessionDir();
         final String label = toVirtual ? "move_to_virtual" : "move_to_main";
@@ -328,6 +352,7 @@ final class WazeVirtualDisplayCapture {
         worker.start();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void moveWazeTask(boolean toVirtual, File dir, String reason) {
         String label = toVirtual ? "move_to_virtual" : "move_to_main";
         try {
@@ -379,6 +404,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private int resolveTargetDisplay(File dir) throws IOException {
         LocalAdbBridge.ShellResult displayDump =
                 runCommand("dumpsys display", dir, "display_dump");
@@ -388,6 +414,7 @@ final class WazeVirtualDisplayCapture {
         return FALLBACK_VIRTUAL_DISPLAY_ID;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private LocalAdbBridge.ShellResult moveStack(
             int taskId,
             int displayId,
@@ -399,6 +426,7 @@ final class WazeVirtualDisplayCapture {
                 label);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void captureScreenshot(int displayId, File dir, String workerSessionName)
             throws IOException {
         int index;
@@ -423,6 +451,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private LocalAdbBridge.ShellResult runCommand(String command, File dir, String label)
             throws IOException {
         LocalAdbBridge.ShellResult result =
@@ -434,6 +463,7 @@ final class WazeVirtualDisplayCapture {
         return result;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void setStatus(String value) {
         synchronized (lock) {
             status = value == null ? "" : value;
@@ -442,12 +472,14 @@ final class WazeVirtualDisplayCapture {
         notifyStatusChanged();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void setLastKnownDisplayId(int displayId) {
         synchronized (lock) {
             lastKnownDisplayId = displayId;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private boolean beginMove(String value) {
         synchronized (lock) {
             if (moveInProgress) {
@@ -462,6 +494,7 @@ final class WazeVirtualDisplayCapture {
         return true;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void endMove() {
         synchronized (lock) {
             moveInProgress = false;
@@ -469,6 +502,7 @@ final class WazeVirtualDisplayCapture {
         notifyStatusChanged();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void notifyStatusChanged() {
         Listener callback;
         synchronized (lock) {
@@ -479,6 +513,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void log(File dir, String line) {
         String safeLine = safe(line);
         Log.i(TAG, safeLine);
@@ -490,6 +525,7 @@ final class WazeVirtualDisplayCapture {
                 + "}");
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private void appendSessionLine(File dir, String line) {
         if (dir == null) {
             return;
@@ -506,44 +542,52 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isActiveGeneration(int workerGeneration) {
         synchronized (lock) {
             return active && generation == workerGeneration;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private File currentSessionDir() {
         synchronized (lock) {
             return sessionDir;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private String currentSessionShellDir() {
         synchronized (lock) {
             return sessionShellDir;
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private boolean currentSessionShellWritable() {
         synchronized (lock) {
             return sessionShellWritable;
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean shouldRestoreForGeneration(int restoreGeneration) {
         synchronized (lock) {
             return !active && generation == restoreGeneration;
         }
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static WazeTask parseWazeTaskForTest(String dumpsys) {
         return parseWazeTask(dumpsys);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static int parseVirtualDisplayIdForTest(String dumpsys) {
         return parseVirtualDisplayId(dumpsys);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static WazeTask parseWazeTask(String dumpsys) {
         if (dumpsys == null || dumpsys.isEmpty()) {
             return null;
@@ -575,6 +619,7 @@ final class WazeVirtualDisplayCapture {
         return taskFromBlock(currentRootTaskId, currentDisplayId, block);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int[] parseTaskHeader(String line, int fallbackDisplayId) {
         Matcher root = ROOT_TASK_PATTERN.matcher(line);
         if (!root.matches()) {
@@ -600,6 +645,7 @@ final class WazeVirtualDisplayCapture {
         };
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static WazeTask taskFromBlock(int rootTaskId, int displayId, StringBuilder block) {
         if (rootTaskId < 0 || block == null) {
             return null;
@@ -615,6 +661,7 @@ final class WazeVirtualDisplayCapture {
         return null;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int parseVirtualDisplayId(String dumpsys) {
         String safe = dumpsys == null ? "" : dumpsys;
         int primary = findDisplayByName(safe, PRIMARY_VIRTUAL_DISPLAY_NAME, false);
@@ -647,6 +694,7 @@ final class WazeVirtualDisplayCapture {
         return FALLBACK_VIRTUAL_DISPLAY_ID;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int findDisplayByName(String dumpsys, String name, boolean prefix) {
         String[] lines = dumpsys.split("\\r?\\n");
         int currentDisplayId = -1;
@@ -679,6 +727,7 @@ final class WazeVirtualDisplayCapture {
         return -1;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static void sleepQuietly(long delayMs) {
         try {
             Thread.sleep(delayMs);
@@ -687,12 +736,14 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String timestampForFile() {
         synchronized (SESSION_FORMAT) {
             return SESSION_FORMAT.format(new Date());
         }
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int parseInt(String value, int fallback) {
         try {
             return Integer.parseInt(value);
@@ -701,6 +752,7 @@ final class WazeVirtualDisplayCapture {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String shortOutput(String value) {
         String safe = safe(value).replace('\n', ' ').replace('\r', ' ');
         if (safe.length() > 180) {
@@ -709,14 +761,17 @@ final class WazeVirtualDisplayCapture {
         return safe;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }
 
+    //defines the WazeTask module boundary so related behavior stays readable inside one unit.
     static final class WazeTask {
         final int rootTaskId;
         final int displayId;

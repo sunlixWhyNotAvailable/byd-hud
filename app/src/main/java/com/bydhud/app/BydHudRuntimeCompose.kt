@@ -1,5 +1,7 @@
 package com.bydhud.app
 
+//builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
+
 import androidx.activity.compose.setContent
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.Canvas
@@ -64,8 +66,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.Locale
 
+//anchors BydHudRuntimeCompose UI orchestration so controls and diagnostics are wired from one place.
 object BydHudRuntimeCompose {
     @JvmStatic
+    //keeps update I/O here so network, file, and installer failures are handled in one path.
     fun install(activity: MainActivity) {
         activity.setContent {
             RuntimeApp(activity)
@@ -73,6 +77,7 @@ object BydHudRuntimeCompose {
     }
 }
 
+//defines class UI/state support so Compose code can keep rendering intent explicit.
 private enum class RuntimeTab {
     Main,
     Apps,
@@ -81,6 +86,7 @@ private enum class RuntimeTab {
     Manual
 }
 
+//defines class UI/state support so Compose code can keep rendering intent explicit.
 private enum class ManualMode {
     Supported,
     Lanes,
@@ -89,14 +95,21 @@ private enum class ManualMode {
 
 private const val AUTO_UPDATE_CHECK_DELAY_MS = 30_000L
 
+//models UpdateCheckState data here so transport and parser layers share a stable contract.
 private sealed class UpdateCheckState {
+    //defines Checking UI/state support so Compose code can keep rendering intent explicit.
     data object Checking : UpdateCheckState()
+    //defines Latest UI/state support so Compose code can keep rendering intent explicit.
     data object Latest : UpdateCheckState()
+    //defines Available UI/state support so Compose code can keep rendering intent explicit.
     data class Available(val info: AppUpdateManager.UpdateInfo) : UpdateCheckState()
+    //defines Downloading UI/state support so Compose code can keep rendering intent explicit.
     data class Downloading(val version: String, val progress: String) : UpdateCheckState()
+    //defines Error UI/state support so Compose code can keep rendering intent explicit.
     data class Error(val message: String) : UpdateCheckState()
 }
 
+//defines Palette UI/state support so Compose code can keep rendering intent explicit.
 private data class Palette(
     val dark: Boolean,
     val background: Color,
@@ -119,6 +132,7 @@ private data class Palette(
     val disabled: Color
 )
 
+//defines Copy UI/state support so Compose code can keep rendering intent explicit.
 private data class Copy(
     val title: String,
     val subtitle: String,
@@ -244,12 +258,14 @@ private data class Copy(
     val manualPreview: String
 )
 
+//defines PressFeedback UI/state support so Compose code can keep rendering intent explicit.
 private data class PressFeedback(
     val interactionSource: MutableInteractionSource,
     val modifier: Modifier
 )
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
@@ -267,6 +283,7 @@ private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun ModalInputBlocker() {
     val interactionSource = remember { MutableInteractionSource() }
     Box(
@@ -281,6 +298,7 @@ private fun ModalInputBlocker() {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun RuntimeApp(activity: MainActivity) {
     var snapshot by remember { mutableStateOf(activity.composeSnapshot()) }
     var selectedTab by rememberSaveable { mutableStateOf(RuntimeTab.Main) }
@@ -301,15 +319,18 @@ private fun RuntimeApp(activity: MainActivity) {
     val palette = if (snapshot.darkTheme) darkPalette() else lightPalette()
     val copy = if (snapshot.uaLanguage) uaCopy() else enCopy()
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun refresh() {
         snapshot = activity.composeSnapshot()
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun runAction(action: () -> Unit) {
         action()
         refresh()
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun beginUpdateCheck(force: Boolean, showLatestResult: Boolean) {
         //guard update checks behind explicit UI state so repeated taps cannot leave stale results visible.
         updateState = UpdateCheckState.Checking
@@ -507,6 +528,7 @@ private fun RuntimeApp(activity: MainActivity) {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun Header(
     copy: Copy,
     palette: Palette,
@@ -559,6 +581,7 @@ private fun Header(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun MainTab(
     copy: Copy,
     palette: Palette,
@@ -636,6 +659,7 @@ private fun MainTab(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun SetupReminderOverlay(
     copy: Copy,
     palette: Palette,
@@ -700,6 +724,7 @@ private fun SetupReminderOverlay(
 }
 
 @Composable
+//updates shared state here so freshness and lifecycle checks use the same evidence.
 private fun UpdateCheckOverlay(
     copy: Copy,
     palette: Palette,
@@ -801,6 +826,7 @@ private fun UpdateCheckOverlay(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun AvailableUpdateNotes(copy: Copy, palette: Palette, version: String, notes: String) {
     Column {
         Text(
@@ -815,6 +841,7 @@ private fun AvailableUpdateNotes(copy: Copy, palette: Palette, version: String, 
 }
 
 @Composable
+//updates shared state here so freshness and lifecycle checks use the same evidence.
 private fun MarkdownPatchNotesText(text: String, palette: Palette) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
         val lines = text.lines()
@@ -840,6 +867,7 @@ private fun MarkdownPatchNotesText(text: String, palette: Palette) {
 }
 
 @Composable
+//updates shared state here so freshness and lifecycle checks use the same evidence.
 private fun UpdateProgressBar(progress: String, palette: Palette) {
     val percent = progress.removeSuffix("%").toFloatOrNull()?.coerceIn(0f, 100f) ?: 0f
     Box(
@@ -859,6 +887,7 @@ private fun UpdateProgressBar(progress: String, palette: Palette) {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun SetupInstructionBlock(
     palette: Palette,
     text: String
@@ -886,6 +915,7 @@ private fun SetupInstructionBlock(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun AppsTab(
     copy: Copy,
     palette: Palette,
@@ -924,6 +954,7 @@ private fun AppsTab(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun AppRow(
     row: MainActivity.ComposeAppRow,
     copy: Copy,
@@ -989,6 +1020,7 @@ private fun AppRow(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun LogsTab(
     copy: Copy,
     palette: Palette,
@@ -1038,6 +1070,7 @@ private fun LogsTab(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun StorageTab(
     copy: Copy,
     palette: Palette,
@@ -1159,6 +1192,7 @@ private fun StorageTab(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun StorageLimitSlider(
     limit: Int,
     palette: Palette,
@@ -1210,6 +1244,7 @@ private fun StorageLimitSlider(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun StorageDayRow(
     day: MainActivity.ComposeStorageDay,
     copy: Copy,
@@ -1260,6 +1295,7 @@ private fun StorageDayRow(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun ManualTab(
     copy: Copy,
     palette: Palette,
@@ -1276,6 +1312,7 @@ private fun ManualTab(
     var manualLane by rememberSaveable { mutableStateOf(defaultLanePayload) }
     var laneIndex by rememberSaveable { mutableIntStateOf(0) }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     fun sendRaw() {
         if (snapshot.manualModeEnabled) {
             activity.composeSendRaw(
@@ -1288,6 +1325,7 @@ private fun ManualTab(
         }
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     fun sendManualLane(value: String) {
         if (snapshot.manualModeEnabled) {
             activity.composeSendManualLane(value)
@@ -1435,6 +1473,7 @@ private fun ManualTab(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun RawFields(
     copy: Copy,
     palette: Palette,
@@ -1480,6 +1519,7 @@ private fun RawFields(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun ManualLaneFieldRow(
     copy: Copy,
     palette: Palette,
@@ -1504,6 +1544,7 @@ private fun ManualLaneFieldRow(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun CurrentSelection(copy: Copy, palette: Palette, value: String) {
     Row(
         modifier = Modifier
@@ -1521,6 +1562,7 @@ private fun CurrentSelection(copy: Copy, palette: Palette, value: String) {
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun PageSurface(
     title: String,
     hint: String,
@@ -1549,6 +1591,7 @@ private fun PageSurface(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun Section(
     title: String,
     palette: Palette,
@@ -1575,6 +1618,7 @@ private fun Section(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun SettingRow(
     title: String,
     hint: String,
@@ -1596,6 +1640,7 @@ private fun SettingRow(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun SwitchRow(
     title: String,
     hint: String,
@@ -1609,6 +1654,7 @@ private fun SwitchRow(
 }
 
 @Composable
+//updates shared state here so freshness and lifecycle checks use the same evidence.
 private fun UpdateCheckLine(
     title: String,
     hint: String,
@@ -1627,6 +1673,7 @@ private fun UpdateCheckLine(
 }
 
 @Composable
+//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun ActionRow(
     title: String,
     hint: String,
@@ -1652,6 +1699,7 @@ private fun ActionRow(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun ManualModeTile(
     title: String,
     hint: String,
@@ -1682,6 +1730,7 @@ private fun ManualModeTile(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun LabeledInput(
     label: String,
     value: String,
@@ -1718,6 +1767,7 @@ private fun LabeledInput(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun CodeBlock(text: String, palette: Palette, compact: Boolean = false, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
@@ -1732,6 +1782,7 @@ private fun CodeBlock(text: String, palette: Palette, compact: Boolean = false, 
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun Divider(palette: Palette) {
     Box(
         modifier = Modifier
@@ -1742,6 +1793,7 @@ private fun Divider(palette: Palette) {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun HudButton(
     text: String,
     palette: Palette,
@@ -1790,6 +1842,7 @@ private fun HudButton(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun CompactSwitchBox(
     label: String,
     checked: Boolean,
@@ -1819,6 +1872,7 @@ private fun CompactSwitchBox(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun HudSwitch(
     checked: Boolean,
     onChecked: (Boolean) -> Unit,
@@ -1852,6 +1906,7 @@ private fun HudSwitch(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun Segmented(
     left: String,
     right: String,
@@ -1874,6 +1929,7 @@ private fun Segmented(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onClick: () -> Unit) {
     val press = rememberPressFeedback()
     Box(
@@ -1895,6 +1951,7 @@ private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onCli
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun Pill(text: String, color: Color, background: Color, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
@@ -1908,6 +1965,7 @@ private fun Pill(text: String, color: Color, background: Color, modifier: Modifi
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun StatusChip(text: String, kind: ChipKind, palette: Palette, width: Dp) {
     val colors = when (kind) {
         ChipKind.Green -> palette.green to palette.greenSoft
@@ -1918,6 +1976,7 @@ private fun StatusChip(text: String, kind: ChipKind, palette: Palette, width: Dp
     Pill(text, colors.first, colors.second, Modifier.width(width))
 }
 
+//defines class UI/state support so Compose code can keep rendering intent explicit.
 private enum class ChipKind {
     Green,
     Yellow,
@@ -1926,6 +1985,7 @@ private enum class ChipKind {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun HudStatusPill(status: String, copy: Copy, palette: Palette) {
     val normalized = status.lowercase()
     val text = when (normalized) {
@@ -1942,6 +2002,7 @@ private fun HudStatusPill(status: String, copy: Copy, palette: Palette) {
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSelect: (RuntimeTab) -> Unit) {
     Row(
         modifier = Modifier
@@ -1962,6 +2023,7 @@ private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSel
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun TabButton(
     text: String,
     tab: RuntimeTab,
@@ -1993,6 +2055,7 @@ private fun TabButton(
 }
 
 @Composable
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
     val color = if (active) palette.text else palette.muted
     Canvas(modifier = Modifier.size(19.dp)) {
@@ -2036,6 +2099,7 @@ private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
     }
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun appLabel(row: MainActivity.ComposeAppRow): String {
     return when (row.packageName) {
         "com.waze" -> "Waze"
@@ -2055,17 +2119,20 @@ private val lanePayloadSamples = listOf(
     "L | S*+L | S* | S* | R"
 )
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun validLane(value: String): Boolean {
     val cells = value.split("|").map { it.trim() }
     return cells.isNotEmpty() && cells.all { it.isNotEmpty() }
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun stepLane(current: String, index: Int, delta: Int): Pair<Int, String> {
     val base = if (validLane(current)) index else 0
     val next = (base + delta + lanePayloadSamples.size) % lanePayloadSamples.size
     return next to lanePayloadSamples[next]
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun manualNumber(value: String, defaultValue: Int): Int =
     value.trim().toIntOrNull()?.takeIf { it in 1..99 } ?: defaultValue
 
@@ -2074,6 +2141,7 @@ private fun stepNumber(value: String, delta: Int, defaultValue: Int): String {
     return ((zeroBased + delta + 99) % 99 + 1).toString()
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun manualId(prefix: String, value: String, defaultValue: Int): String =
     "$prefix${manualNumber(value, defaultValue).toString().padStart(2, '0')}"
 
@@ -2083,6 +2151,7 @@ private fun sanitizeStorageLimitInput(value: String): String {
     return digits.toIntOrNull()?.coerceIn(1, 10)?.toString() ?: "5"
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun formatBytes(bytes: Long): String {
     val gb = bytes / 1_000_000_000.0
     return if (gb >= 10.0) {
@@ -2092,6 +2161,7 @@ private fun formatBytes(bytes: Long): String {
     }
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun sessionLabel(count: Int, copy: Copy): String {
     if (copy.sessions == "sessions") {
         return if (count == 1) "session" else "sessions"
@@ -2106,12 +2176,14 @@ private fun sessionLabel(count: Int, copy: Copy): String {
     }
 }
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun previousPlural(copy: Copy): String =
     if (copy.previous == "Попередній") "Попередні" else copy.previous
 
 private fun nextPlural(copy: Copy): String =
     if (copy.next == "Наступний") "Наступні" else copy.next
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun darkPalette() = Palette(
     dark = true,
     background = Color(0xFF080D12),
@@ -2134,6 +2206,7 @@ private fun darkPalette() = Palette(
     disabled = Color(0xFF394453)
 )
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun lightPalette() = Palette(
     dark = false,
     background = Color(0xFFEAF1F8),
@@ -2156,6 +2229,7 @@ private fun lightPalette() = Palette(
     disabled = Color(0xFFE1E7EF)
 )
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun enCopy() = Copy(
     title = "BYD HUD",
     subtitle = "HUD navigation output | v${BuildConfig.VERSION_NAME}",
@@ -2281,6 +2355,7 @@ private fun enCopy() = Copy(
     manualPreview = "manual output preview"
 )
 
+//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun uaCopy() = enCopy().copy(
     subtitle = "Виведення навігації на HUD | v${BuildConfig.VERSION_NAME}",
     main = "Головна",

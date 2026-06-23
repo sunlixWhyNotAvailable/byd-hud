@@ -1,22 +1,28 @@
 package com.bydhud.app;
 
+//keeps adb key serialization isolated so the local bridge can sign packets without leaking crypto formatting into callers.
+
 import java.math.BigInteger;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.security.interfaces.RSAPublicKey;
 import java.util.Base64;
 
+//defines the AdbKeyFormatter module boundary so related behavior stays readable inside one unit.
 final class AdbKeyFormatter {
     private static final int MODULUS_BYTES = 256;
     private static final int MODULUS_WORDS = MODULUS_BYTES / 4;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private AdbKeyFormatter() {
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String formatPublicKey(RSAPublicKey publicKey) {
         return Base64.getEncoder().encodeToString(encodePublicKey(publicKey)) + " bydhud@dilink";
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static byte[] encodePublicKey(RSAPublicKey publicKey) {
         BigInteger modulus = publicKey.getModulus();
         BigInteger exponent = publicKey.getPublicExponent();
@@ -36,6 +42,7 @@ final class AdbKeyFormatter {
         return buffer.array();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static byte[] toFixedLittleEndian(BigInteger value, int length) {
         byte[] bigEndian = value.toByteArray();
         int start = 0;

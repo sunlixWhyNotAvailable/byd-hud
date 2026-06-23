@@ -1,9 +1,12 @@
 package com.bydhud.app;
 
+//keeps lane semantics compact so Waze and Google Maps can share HUD lane decisions.
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 
+//defines the HudLaneModel module boundary so related behavior stays readable inside one unit.
 final class HudLaneModel {
     static final int MAX_LANES = 8;
     private static final int ICON_SMOOTH_LEFT = 90;
@@ -11,9 +14,11 @@ final class HudLaneModel {
     private static final int ICON_RAMP_RIGHT = 70;
     private static final int ICON_RAMP_LEFT = 71;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudLaneModel() {
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static LaneSpec[] parse(HudState state) {
         String[] tokens = splitTokens(state.laneString);
         if (tokens.length == 0) {
@@ -34,6 +39,7 @@ final class HudLaneModel {
         return lanes;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static String signature(HudState state) {
         LaneSpec[] lanes = parse(state);
         StringBuilder out = new StringBuilder();
@@ -46,6 +52,7 @@ final class HudLaneModel {
         return out.toString();
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static String field29Value(HudState state) {
         LaneSpec[] lanes = parse(state);
         StringBuilder out = new StringBuilder();
@@ -58,6 +65,7 @@ final class HudLaneModel {
         return out.toString();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasMixedRecommendations(HudState state) {
         LaneSpec[] lanes = parse(state);
         for (LaneSpec lane : lanes) {
@@ -68,6 +76,7 @@ final class HudLaneModel {
         return false;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasSmoothDirections(HudState state) {
         LaneSpec[] lanes = parse(state);
         for (LaneSpec lane : lanes) {
@@ -78,6 +87,7 @@ final class HudLaneModel {
         return false;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasRampDirections(HudState state) {
         LaneSpec[] lanes = parse(state);
         for (LaneSpec lane : lanes) {
@@ -88,6 +98,7 @@ final class HudLaneModel {
         return false;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasCustomLaneResources(HudState state) {
         LaneSpec[] lanes = parse(state);
         for (LaneSpec lane : lanes) {
@@ -98,6 +109,7 @@ final class HudLaneModel {
         return false;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static LaneSpec parseLane(String rawToken, int index, int count) {
         String token = rawToken == null ? "" : rawToken.trim();
         token = token.replace(" ", "");
@@ -178,6 +190,7 @@ final class HudLaneModel {
         return defaultLane(index, count);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static LaneSpec parseNumericLane(String token, boolean forcedRecommended) {
         String[] parts = token.split(",", -1);
         if (parts.length < 1) {
@@ -194,6 +207,7 @@ final class HudLaneModel {
         }
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static LaneSpec defaultLane(int index, int count) {
         int centerLeft = (count - 1) / 2;
         int centerRight = count / 2;
@@ -201,6 +215,7 @@ final class HudLaneModel {
         return new LaneSpec(0, recommended, label("S", recommended));
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static LaneSpec parseCompoundLane(String token) {
         String[] rawParts = token.split("\\+", -1);
         if (rawParts.length < 2 || rawParts.length > 3) {
@@ -231,6 +246,7 @@ final class HudLaneModel {
         return new LaneSpec(iconId, recommended, label.toString(), parts);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static int compoundIconId(LanePart[] parts) {
         if (parts.length == 2) {
             LanePart left = parts[0];
@@ -270,10 +286,12 @@ final class HudLaneModel {
         return -1;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static String label(String base, boolean recommended) {
         return recommended ? base + "*" : base;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static String[] splitTokens(String laneString) {
         if (laneString == null || laneString.trim().isEmpty()) {
             return new String[0];
@@ -288,6 +306,7 @@ final class HudLaneModel {
         return tokens.toArray(new String[0]);
     }
 
+    //defines the LaneSpec module boundary so related behavior stays readable inside one unit.
     static final class LaneSpec {
         final int iconId;
         final boolean recommended;
@@ -311,6 +330,7 @@ final class HudLaneModel {
             this.customResourceName = customResourceName == null ? "" : customResourceName;
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean hasMixedRecommendations() {
             if (parts.length <= 1) {
                 return false;
@@ -324,6 +344,7 @@ final class HudLaneModel {
             return false;
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean hasSmoothDirection() {
             if ("Ls".equals(label.replace("*", "").replace("!", ""))
                     || "Rs".equals(label.replace("*", "").replace("!", ""))) {
@@ -337,16 +358,19 @@ final class HudLaneModel {
             return false;
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean hasRampDirection() {
             String clean = label.replace("*", "").replace("!", "");
             return "RampL".equals(clean) || "RampR".equals(clean);
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean hasCustomLaneResource() {
             return customResourceName.startsWith("global_image_landcustom_hud_");
         }
     }
 
+    //defines the LanePart module boundary so related behavior stays readable inside one unit.
     static final class LanePart {
         final String token;
         final boolean recommended;
@@ -356,6 +380,7 @@ final class HudLaneModel {
             this.recommended = recommended;
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LanePart parse(String rawPart) {
             String raw = rawPart == null ? "" : rawPart.trim();
             boolean recommended = raw.startsWith("*") || raw.startsWith("!")
@@ -369,19 +394,23 @@ final class HudLaneModel {
             return new LanePart(token, recommended);
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean is(String expected) {
             return expected.equals(token);
         }
 
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         String label() {
             return HudLaneModel.label(token, recommended);
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean isSmooth() {
             return "Ls".equals(token) || "Rs".equals(token);
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static String canonicalToken(String rawToken) {
         String token = rawToken == null ? "" : rawToken.trim().replace(" ", "");
         if ("Ls".equals(token) || "ls".equals(token)) {
@@ -399,6 +428,7 @@ final class HudLaneModel {
         return token.toUpperCase(Locale.ROOT);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static LanePart[] partsFromLabel(String label) {
         String clean = label == null ? "" : label.trim();
         if (clean.isEmpty() || clean.contains("I") || clean.contains("U")
@@ -419,6 +449,7 @@ final class HudLaneModel {
         return parts.toArray(new LanePart[0]);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static String customResourceName(String label) {
         String clean = label == null ? "" : label.trim();
         switch (clean) {
@@ -466,6 +497,7 @@ final class HudLaneModel {
         }
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static String resourceKey(String label) {
         StringBuilder out = new StringBuilder();
         for (int i = 0; i < label.length(); i++) {

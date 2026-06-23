@@ -12,8 +12,9 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        versionCode = 44
-        versionName = "0.33.0"
+        //keeps android upgrade ordering ahead of the previous 0.33.0 field build.
+        versionCode = 45
+        versionName = "1.0.0"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",

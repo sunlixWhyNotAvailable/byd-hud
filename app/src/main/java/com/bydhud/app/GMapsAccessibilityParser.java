@@ -1,8 +1,11 @@
 package com.bydhud.app;
 
+//extracts google maps foreground text so notification gaps still provide distance and road evidence.
+
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+//defines the GMapsAccessibilityParser parser boundary so raw app evidence is normalized before HUD decisions use it.
 final class GMapsAccessibilityParser {
     private static final int MAX_ROAD_NAME_CHARS = 64;
     private static final int UNKNOWN_NEXT_DISTANCE_METERS = 1;
@@ -12,9 +15,11 @@ final class GMapsAccessibilityParser {
             Pattern.compile("\\b(in|for)\\s+[0-9]+(?:[\\.,][0-9]+)?\\s*(km|m|\\u043a\\u043c|\\u043c)(?=$|\\s|[.,;:!?])",
                     Pattern.CASE_INSENSITIVE);
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private GMapsAccessibilityParser() {
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static GMapsNotificationParser.Result parse(String packageName, String payload, HudState baseline) {
         if (!GMapsNotificationParser.isCandidatePackage(packageName)) {
             return null;
@@ -109,6 +114,7 @@ final class GMapsAccessibilityParser {
         return new GMapsNotificationParser.Result(state, snapshot, reason);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static Candidate better(Candidate current, Candidate candidate) {
         if (candidate == null) {
             return current;
@@ -119,6 +125,7 @@ final class GMapsAccessibilityParser {
         return current;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static Candidate candidate(String value, int baseScore) {
         String clean = NavTextNormalizer.cleanText(value);
         if (clean.isEmpty() || baseScore <= 0) {
@@ -136,6 +143,7 @@ final class GMapsAccessibilityParser {
         return new Candidate(clean, distanceMeters, hasDistance, score);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static int scoreBaseForId(String idLower, boolean description) {
         if (idLower.endsWith(":id/navigation_instruction_panel")) {
             return description ? 100 : 90;
@@ -153,6 +161,7 @@ final class GMapsAccessibilityParser {
         return description ? 60 : 0;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isTurnLike(String lower) {
         return lower.contains("turn ")
                 || lower.contains("left")
@@ -164,12 +173,14 @@ final class GMapsAccessibilityParser {
                 || lower.contains("roundabout");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isStraightLike(String lower) {
         return lower.startsWith("head ")
                 || lower.startsWith("continue")
                 || lower.contains("straight");
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static String fieldValue(String segment, String marker) {
         int start = segment.indexOf(marker);
         if (start < 0) {
@@ -187,6 +198,7 @@ final class GMapsAccessibilityParser {
         return NavTextNormalizer.cleanText(segment.substring(start, end));
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static int timeSeconds(String text, int fallback) {
         Matcher matcher = MINUTES.matcher(NavTextNormalizer.cleanText(text));
         if (!matcher.find()) {
@@ -203,6 +215,7 @@ final class GMapsAccessibilityParser {
         }
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static String roadName(String topCue, String maneuverText) {
         String value = NavTextNormalizer.cleanText(topCue);
         String lower = NavTextNormalizer.lower(value);
@@ -215,6 +228,7 @@ final class GMapsAccessibilityParser {
         return cap(value, MAX_ROAD_NAME_CHARS);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static String stripManeuverDistance(String value) {
         String clean = NavTextNormalizer.cleanText(value);
         String lower = NavTextNormalizer.lower(clean);
@@ -224,6 +238,7 @@ final class GMapsAccessibilityParser {
         return cap(IN_DISTANCE.matcher(clean).replaceAll("").trim(), MAX_ROAD_NAME_CHARS);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static String cap(String value, int limit) {
         if (value == null) {
             return "";
@@ -235,6 +250,7 @@ final class GMapsAccessibilityParser {
         return clean.substring(0, limit);
     }
 
+    //defines the Candidate module boundary so related behavior stays readable inside one unit.
     private static final class Candidate {
         final String text;
         final int distanceMeters;
@@ -249,6 +265,7 @@ final class GMapsAccessibilityParser {
         }
     }
 
+    //defines the ArrivalSignal module boundary so related behavior stays readable inside one unit.
     private static final class ArrivalSignal {
         boolean hasArrivingAt;
         boolean hasRestart;
@@ -257,11 +274,13 @@ final class GMapsAccessibilityParser {
         boolean hasCloseButton;
         String destination = "";
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         void observe(String text, String desc) {
             observeValue(text, false);
             observeValue(desc, true);
         }
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         void observeValue(String value, boolean description) {
             String clean = NavTextNormalizer.cleanText(value);
             if (clean.isEmpty()) {
@@ -296,6 +315,7 @@ final class GMapsAccessibilityParser {
             }
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean isArrival() {
             return hasArrivingAt
                     || (hasHowWasNavigation && (hasRestart || hasSaveParking || hasCloseButton));

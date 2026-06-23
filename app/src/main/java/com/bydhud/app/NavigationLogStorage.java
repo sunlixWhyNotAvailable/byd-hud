@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//rotates navigation logs so long trips and idle runtime do not exhaust device storage.
+
 import android.content.Context;
 import android.os.Environment;
 import android.util.Log;
@@ -15,6 +17,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+//defines the NavigationLogStorage module boundary so related behavior stays readable inside one unit.
 final class NavigationLogStorage {
     static final String ROOT_DIR = "BYD-HUD";
     static final String LOGCAT_DIR = "logcat";
@@ -31,9 +34,11 @@ final class NavigationLogStorage {
     private static final String MISSING_MANEUVERS_DIR = "missing-maneuvers";
     private static final String MISSING_LANES_DIR = "missing-lanes";
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavigationLogStorage() {
     }
 
+    //defines the SessionPath module boundary so related behavior stays readable inside one unit.
     static final class SessionPath {
         final File localDir;
         final String shellDir;
@@ -46,34 +51,42 @@ final class NavigationLogStorage {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logcatDir(Context context) {
         return publicFirstDir(context, LOGCAT_DIR);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File navCaptureDir(Context context) {
         return publicFirstDir(context, NAV_CAPTURE_DIR);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String publicLogcatPath() {
         return PUBLIC_ROOT + "/" + LOGCAT_DIR;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String publicNavCapturePath() {
         return PUBLIC_ROOT + "/" + NAV_CAPTURE_DIR;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String publicWazeCropPath() {
         return publicNavCapturePath() + "/<yyyymmdd>/waze-crop/<session>/screen_*.png";
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String activeNavCaptureDay() {
         return NavCaptureStore.todayDir();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isActiveNavCaptureDay(String day) {
         return day != null && activeNavCaptureDay().equals(day);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void enforceNavCaptureRetention(Context context) {
         if (context == null) {
             return;
@@ -87,6 +100,7 @@ final class NavigationLogStorage {
                 retentionLimitBytes(context));
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void enforceNavCaptureRetention(
             Context context,
             String activeSessionDir,
@@ -104,6 +118,7 @@ final class NavigationLogStorage {
                 retentionLimitBytes(context));
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static void enforceNavCaptureRetentionForTest(
             File root,
             String activeDay,
@@ -120,6 +135,7 @@ final class NavigationLogStorage {
                 maxBytes);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static SessionPath navCaptureSessionDir(Context context, String sessionDir, String sessionName) {
         String dayDir = activeNavCaptureDay();
         String safeSessionDir = safePathSegment(sessionDir, "session");
@@ -139,6 +155,7 @@ final class NavigationLogStorage {
         return new SessionPath(fallback, shellPath, !shellPath.isEmpty());
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void enforceNavCaptureRetention(
             File root,
             String activeDay,
@@ -168,6 +185,7 @@ final class NavigationLogStorage {
         deleteOldSessionScreenshots(activeSession, safePathSegment(preserveScreenshotName, ""), root, maxBytes);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void deleteOldNavCaptureDays(File root, String activeDay, long maxBytes) {
         List<File> days = new ArrayList<>();
         File[] children = root.listFiles();
@@ -193,6 +211,7 @@ final class NavigationLogStorage {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void deleteOldNavCaptureSessions(
             File root,
             String activeDay,
@@ -235,6 +254,7 @@ final class NavigationLogStorage {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void deleteOldSessionScreenshots(
             File activeSession,
             String preserveScreenshotName,
@@ -269,11 +289,13 @@ final class NavigationLogStorage {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void removeScreenshotArtifacts(File activeSession, String screenshotName) {
         removeBucketScreenshotArtifacts(new File(activeSession, MISSING_MANEUVERS_DIR), screenshotName);
         removeBucketScreenshotArtifacts(new File(activeSession, MISSING_LANES_DIR), screenshotName);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void removeBucketScreenshotArtifacts(File bucketDir, String screenshotName) {
         if (bucketDir == null || !bucketDir.isDirectory()) {
             return;
@@ -295,10 +317,12 @@ final class NavigationLogStorage {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isOverLimit(File root, long maxBytes) {
         return folderSizeBytes(root) > maxBytes;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static long folderSizeBytes(File file) {
         if (file == null || !file.exists()) {
             return 0L;
@@ -320,6 +344,7 @@ final class NavigationLogStorage {
         return total;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean deleteRecursively(File file) {
         if (file == null || !file.exists()) {
             return false;
@@ -335,22 +360,26 @@ final class NavigationLogStorage {
         return file.delete();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void sortOldestFirst(List<File> files) {
         files.sort(Comparator
                 .comparingLong(File::lastModified)
                 .thenComparing(File::getAbsolutePath));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isDayFolder(File file) {
         return file != null && file.getName().matches("\\d{8}");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isScreenPng(String name) {
         return name != null
                 && name.startsWith(SCREEN_PREFIX)
                 && name.toLowerCase(Locale.US).endsWith(PNG_SUFFIX);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String stripPngSuffix(String fileName) {
         if (fileName != null && fileName.toLowerCase(Locale.US).endsWith(PNG_SUFFIX)) {
             return fileName.substring(0, fileName.length() - PNG_SUFFIX.length());
@@ -358,26 +387,30 @@ final class NavigationLogStorage {
         return fileName == null ? "" : fileName;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static long retentionLimitBytes(Context context) {
         return HudPrefs.storageLimitGb(context) * BYTES_PER_GB;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void logInfo(String message) {
         try {
             Log.i(TAG, message);
         } catch (RuntimeException | NoClassDefFoundError ignored) {
-            // Host-side Java probes do not provide Android logging.
+            //keeps host-side probes quiet because java-only tests do not provide android logging.
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void logWarn(String message) {
         try {
             Log.w(TAG, message);
         } catch (RuntimeException | NoClassDefFoundError ignored) {
-            // Host-side Java probes do not provide Android logging.
+            //keeps host-side probes quiet because java-only tests do not provide android logging.
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File publicFirstDir(Context context, String childDir) {
         File publicDir = new File(
                 new File(Environment.getExternalStoragePublicDirectory(
@@ -396,6 +429,7 @@ final class NavigationLogStorage {
         return fallback;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isUnderPublicRoot(File dir) {
         if (dir == null) {
             return false;
@@ -405,6 +439,7 @@ final class NavigationLogStorage {
                 || path.startsWith("/sdcard/Documents/" + ROOT_DIR + "/");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String shellPathForFallback(Context context, File dir) {
         if (dir == null) {
             return "";
@@ -422,6 +457,7 @@ final class NavigationLogStorage {
         return "";
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safePathSegment(String value, String fallback) {
         String safe = value == null ? "" : value.trim();
         if (safe.isEmpty()) {
@@ -430,6 +466,7 @@ final class NavigationLogStorage {
         return safe.replaceAll("[^A-Za-z0-9_.-]", "_");
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private static boolean ensureWritable(File dir) {
         if (!ensureDir(dir)) {
             return false;
@@ -461,6 +498,7 @@ final class NavigationLogStorage {
         return true;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String writableDirCacheKey(File dir) {
         try {
             return dir.getCanonicalPath();
@@ -469,6 +507,7 @@ final class NavigationLogStorage {
         }
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static boolean cleanupProbe(File probe) {
         if (probe == null || !probe.exists()) {
             return true;
@@ -480,6 +519,7 @@ final class NavigationLogStorage {
         return true;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean readProbe(File probe) {
         if (probe == null || !probe.exists()) {
             return false;
@@ -494,6 +534,7 @@ final class NavigationLogStorage {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private static boolean ensureDir(File dir) {
         return dir.exists() || dir.mkdirs();
     }

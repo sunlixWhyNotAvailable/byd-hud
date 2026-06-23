@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//keeps the legacy projection service entry point available for systems that bind to it directly.
+
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -23,6 +25,7 @@ import android.view.Surface;
 import android.view.TextureView;
 import android.view.WindowManager;
 
+//anchors the ClusterProjectionService android entry point so lifecycle recovery stays separate from business logic.
 public final class ClusterProjectionService extends Service
         implements TextureView.SurfaceTextureListener {
     static final String VIRTUAL_DISPLAY_NAME = "bydhud_remote_dashboard";
@@ -53,6 +56,7 @@ public final class ClusterProjectionService extends Service
     private boolean projectionRequested;
     private int projectionGeneration;
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startProjection(Context context, String packageName, String reason) {
         Intent intent = new Intent(context, ClusterProjectionService.class);
         intent.setAction(ACTION_PROJECT);
@@ -65,6 +69,7 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void returnToMain(Context context, String packageName, String reason) {
         Intent intent = new Intent(context, ClusterProjectionService.class);
         intent.setAction(ACTION_RETURN);
@@ -78,6 +83,7 @@ public final class ClusterProjectionService extends Service
     }
 
     @Override
+    //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
         startForeground(NOTIFICATION_ID, buildNotification("Dashboard projection idle"));
@@ -85,6 +91,7 @@ public final class ClusterProjectionService extends Service
     }
 
     @Override
+    //handles service start intents here so boot, watchdog, and UI paths share one runtime entry point.
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
         String packageName = safe(intent == null ? "" : intent.getStringExtra(EXTRA_PACKAGE));
@@ -102,6 +109,7 @@ public final class ClusterProjectionService extends Service
     }
 
     @Override
+    //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         releaseProjection("destroy");
         log("service destroyed");
@@ -109,11 +117,13 @@ public final class ClusterProjectionService extends Service
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public IBinder onBind(Intent intent) {
         return null;
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
         Surface surface = new Surface(surfaceTexture);
         String packageName;
@@ -125,21 +135,25 @@ public final class ClusterProjectionService extends Service
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int width, int height) {
-        // The cluster projection is fixed-size for this test build.
+        //keeps cluster projection fixed-size so this test build matches the car display contract.
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
         releaseProjection("surface-destroyed");
         return true;
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
-        // No frame-level work here; Waze crop runs separately through screencap.
+        //keeps frame work out of the overlay because Waze crop runs through screencap separately.
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestProjection(String packageName, String reason) {
         if (packageName.isEmpty()) {
             log("projection ignored empty package reason=" + reason);
@@ -168,6 +182,7 @@ public final class ClusterProjectionService extends Service
         createVirtualDisplayIfReady(packageName, reason);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void returnPackageToMain(String packageName, String reason, int startId) {
         String targetPackage;
         int returnGeneration;
@@ -202,6 +217,7 @@ public final class ClusterProjectionService extends Service
         stopSelf(startId);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void ensureOverlay() {
         synchronized (lock) {
             if (overlayTexture != null) {
@@ -250,6 +266,7 @@ public final class ClusterProjectionService extends Service
                 + " name=" + targetDisplay.getName());
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createVirtualDisplayIfReady(String packageName, String reason) {
         Surface surface;
         synchronized (lock) {
@@ -285,6 +302,7 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void movePackageToDisplay(String packageName, int displayId, String reason) {
         Thread worker = new Thread(
                 () -> NavAppDisplayController.get(this).moveTaskToDisplayBlocking(
@@ -295,6 +313,7 @@ public final class ClusterProjectionService extends Service
         worker.start();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Display chooseClusterDisplay() {
         DisplayManager displayManager =
                 (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -334,10 +353,12 @@ public final class ClusterProjectionService extends Service
         return defaultDisplay;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isClusterDisplayNameForTest(String name) {
         return isClusterDisplayName(name);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isClusterDisplayName(String name) {
         String value = NavTextNormalizer.lower(name);
         if (isVirtualProjectionDisplayName(value)) {
@@ -349,16 +370,19 @@ public final class ClusterProjectionService extends Service
                 || value.contains("dashboard");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isOwnProjectionDisplayName(String name) {
         return NavTextNormalizer.lower(name).contains(VIRTUAL_DISPLAY_NAME);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isVirtualProjectionDisplayName(String name) {
         String value = NavTextNormalizer.lower(name);
         return value.contains(VIRTUAL_DISPLAY_NAME)
                 || value.contains("remote_dashboard");
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void releaseProjection(String reason) {
         VirtualDisplay display;
         Surface surface;
@@ -394,6 +418,7 @@ public final class ClusterProjectionService extends Service
         log("releaseProjection reason=" + reason);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean shouldReleaseAfterReturn(String packageName, int generation) {
         synchronized (lock) {
             return projectionGeneration == generation
@@ -401,6 +426,7 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private Notification buildNotification(String text) {
         createNotificationChannel();
         Intent launchIntent = getPackageManager().getLaunchIntentForPackage(getPackageName());
@@ -424,6 +450,7 @@ public final class ClusterProjectionService extends Service
                 .build();
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateNotification(String text) {
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager != null) {
@@ -431,6 +458,7 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return;
@@ -446,6 +474,7 @@ public final class ClusterProjectionService extends Service
         manager.createNotificationChannel(channel);
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopForegroundCompat() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE);
@@ -454,6 +483,7 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void log(String line) {
         String safeLine = safe(line);
         Log.i(TAG, safeLine);
@@ -461,6 +491,7 @@ public final class ClusterProjectionService extends Service
         NavCaptureStore.rawEvent(this, "cluster_projection", projectedPackage, safeLine);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }

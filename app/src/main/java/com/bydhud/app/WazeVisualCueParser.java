@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//combines template and geometry evidence so Waze maneuvers stay robust across glyph variants.
+
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Rect;
@@ -14,6 +16,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 
+//defines the WazeVisualCueParser parser boundary so raw app evidence is normalized before HUD decisions use it.
 final class WazeVisualCueParser {
     private static final String WAZE_PACKAGE = "com.waze";
     private static final int ARRIVAL_SOURCE_MANEUVER = 10;
@@ -54,15 +57,18 @@ final class WazeVisualCueParser {
             "Ls+R", "Ls+R*", "Ls*+R",
             "S+L+R", "S+L+R*", "S+L*+R", "S*+L+R",
             "RampL*", "RampR*"));
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeVisualCueParser() {
     }
 
+    //defines the LaneGuidanceStatus module boundary so related behavior stays readable inside one unit.
     enum LaneGuidanceStatus {
         NONE,
         PARSED,
         UNPARSED_ROW
     }
 
+    //defines the LaneFailureReason module boundary so related behavior stays readable inside one unit.
     enum LaneFailureReason {
         NONE,
         NO_ACTIVE_PANEL,
@@ -81,10 +87,12 @@ final class WazeVisualCueParser {
         BITMAP_DECODE_FAILED
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseScreenshot(File screenshot, NavSnapshot baseline) {
         return parseScreenshot(screenshot, baseline, null);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseScreenshot(
             File screenshot,
             NavSnapshot baseline,
@@ -92,6 +100,7 @@ final class WazeVisualCueParser {
         return parseScreenshot(screenshot, baseline, laneAnalysis, WazeAccessibilityGeometry.EMPTY);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseScreenshot(
             File screenshot,
             NavSnapshot baseline,
@@ -100,6 +109,7 @@ final class WazeVisualCueParser {
         return parseScreenshot(screenshot, baseline, laneAnalysis, geometry, false);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseScreenshot(
             File screenshot,
             NavSnapshot baseline,
@@ -124,6 +134,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String laneCueForTest(
             int[] widths,
             int[] counts,
@@ -148,6 +159,7 @@ final class WazeVisualCueParser {
         return laneCue(components);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String screenLaneCueForTest(
             int[] x1s,
             int[] widths,
@@ -174,6 +186,7 @@ final class WazeVisualCueParser {
         return screenLaneCue(components, 150);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String glyphTokenForTest(boolean hasStraight, boolean straightRecommended,
             boolean hasLeft, boolean leftRecommended,
             boolean hasRight, boolean rightRecommended) {
@@ -194,6 +207,7 @@ final class WazeVisualCueParser {
         return KNOWN_LANE_GLYPHS.contains(token) ? token : "";
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String smoothGlyphTokenForTest(boolean hasStraight, boolean straightRecommended,
             boolean hasSmoothLeft, boolean smoothLeftRecommended,
             boolean hasSmoothRight, boolean smoothRightRecommended) {
@@ -212,14 +226,17 @@ final class WazeVisualCueParser {
         return KNOWN_LANE_GLYPHS.contains(token) ? token : "";
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static NavSnapshot.Maneuver maneuverFromLaneCueForTest(String laneString) {
         return maneuverFromLaneCue(laneString);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static NavSnapshot.Maneuver maneuverFromSingleTokenForTest(String token) {
         return maneuverFromSingleToken(token);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String singleManeuverTokenForTest(int width, int count, int whiteCount,
             double topAverageX, double midAverageX, double bottomAverageX) {
         Component component = new Component(
@@ -235,18 +252,22 @@ final class WazeVisualCueParser {
         return singleManeuverToken(component);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static int sourceFromManeuverForTest(NavSnapshot.Maneuver maneuver) {
         return sourceFromManeuver(maneuver);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static int roundaboutSourceForExitForTest(int exitNumber, boolean leftHandTraffic) {
         return roundaboutSourceForExit(exitNumber, leftHandTraffic);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static Set<String> knownLaneGlyphsForTest() {
         return Collections.unmodifiableSet(KNOWN_LANE_GLYPHS);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isKnownMultiLaneSignature(String laneString) {
         String clean = laneString == null ? "" : laneString.trim();
         if (WazeLaneParser.laneCountFromSignature(clean) <= 1 || !hasDirectionalLane(clean)) {
@@ -262,6 +283,7 @@ final class WazeVisualCueParser {
         return true;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasVisualNavigationCueCandidate(File screenshot) {
         if (screenshot == null || !screenshot.exists()) {
             return false;
@@ -277,19 +299,23 @@ final class WazeVisualCueParser {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasLaneGuidanceCandidate(File screenshot) {
         LaneGuidanceStatus status = laneGuidanceStatus(screenshot);
         return status == LaneGuidanceStatus.PARSED || status == LaneGuidanceStatus.UNPARSED_ROW;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static LaneGuidanceStatus laneGuidanceStatus(File screenshot) {
         return analyzeLaneGuidance(screenshot).status;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static LaneGuidanceAnalysis analyzeLaneGuidance(File screenshot) {
         return analyzeLaneGuidance(screenshot, WazeAccessibilityGeometry.EMPTY);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static LaneGuidanceAnalysis analyzeLaneGuidance(
             File screenshot,
             WazeAccessibilityGeometry geometry) {
@@ -314,6 +340,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String visualLayoutForTest(File screenshot) {
         if (screenshot == null || !screenshot.exists()) {
             return WazeVisualLayout.NO_ACTIVE_PANEL.name();
@@ -334,10 +361,12 @@ final class WazeVisualCueParser {
         }
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static LaneGuidanceAnalysisForTest analyzeLaneGuidanceForTest(File screenshot) {
         return LaneGuidanceAnalysisForTest.from(analyzeLaneGuidance(screenshot));
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static LaneGuidanceAnalysisForTest analyzeLaneComponentsDirectForTest(
             int[] x1s,
             int[] widths,
@@ -358,6 +387,7 @@ final class WazeVisualCueParser {
                 bottomAverageX);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static LaneGuidanceAnalysisForTest analyzeLaneComponentsDirectForTest(
             int[] x1s,
             int[] y1s,
@@ -388,6 +418,7 @@ final class WazeVisualCueParser {
         return LaneGuidanceAnalysisForTest.from(analyzeLaneComponentsDirect(null, components, 0, 0));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasActiveInstructionPanel(File screenshot) {
         if (screenshot == null || !screenshot.exists()) {
             return false;
@@ -403,14 +434,17 @@ final class WazeVisualCueParser {
         }
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static boolean activeInstructionPanelForTest(int darkPixels, int sampledPixels) {
         return darkPixels >= minInstructionPanelDarkPixels(sampledPixels);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isArrivalCueForTest(int redCount, int whiteCount, int grayCount) {
         return isArrivalCue(redCount, whiteCount, grayCount);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseBitmap(
             Bitmap bitmap,
             LaneGuidanceAnalysis laneAnalysis,
@@ -434,6 +468,7 @@ final class WazeVisualCueParser {
         return parseSingleCue(bitmap, geometry, false, leftHandRoundaboutTraffic);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasVisualNavigationCueCandidate(Bitmap bitmap) {
         ColorCounts arrival = colorCounts(bitmap, 30, 130, 130, 220);
         if (isArrivalCue(arrival.red, arrival.white, arrival.gray)) {
@@ -454,15 +489,18 @@ final class WazeVisualCueParser {
         return largest != null && largest.count >= 100 && largest.width() >= scaleX(bitmap, 10);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseLaneCue(Bitmap bitmap) {
         LaneGuidanceAnalysis lane = analyzeLaneGuidance(bitmap);
         return lane.status == LaneGuidanceStatus.PARSED ? lane.cue : null;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseSingleCue(Bitmap bitmap, boolean uturnOnly) {
         return parseSingleCue(bitmap, WazeAccessibilityGeometry.EMPTY, uturnOnly, false);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseSingleCue(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry,
@@ -470,6 +508,7 @@ final class WazeVisualCueParser {
         return parseSingleCue(bitmap, geometry, uturnOnly, false);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseSingleCue(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry,
@@ -506,6 +545,7 @@ final class WazeVisualCueParser {
         return null;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseSingleCueFromBounds(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry,
@@ -553,6 +593,7 @@ final class WazeVisualCueParser {
         return Cue.maneuver(maneuver, sourceFromManeuver(maneuver));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static Component primaryCueComponent(List<Component> components, int maxX) {
         Component largest = null;
         for (Component component : components) {
@@ -566,6 +607,7 @@ final class WazeVisualCueParser {
         return largest == null ? largest(components) : largest;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static NavParserResult toParserResult(Cue cue, NavSnapshot baseline) {
         String packageName = baseline == null || baseline.packageName.isEmpty()
                 ? WAZE_PACKAGE : baseline.packageName;
@@ -621,6 +663,7 @@ final class WazeVisualCueParser {
                 reason);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String laneCue(List<Component> components) {
         if (components == null || components.size() < 2) {
             return "";
@@ -640,6 +683,7 @@ final class WazeVisualCueParser {
         return builder.toString();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String screenLaneCue(List<Component> components, int minX) {
         if (components == null || components.size() < 2) {
             return "";
@@ -657,6 +701,7 @@ final class WazeVisualCueParser {
         return cue;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String screenLaneCueForBitmap(
             Bitmap bitmap,
             List<Component> components,
@@ -668,6 +713,7 @@ final class WazeVisualCueParser {
         return lane.status == LaneGuidanceStatus.PARSED ? lane.laneString : "";
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasLaneGuidanceLayoutForBitmap(
             Bitmap bitmap,
             List<Component> components,
@@ -678,10 +724,12 @@ final class WazeVisualCueParser {
         return !laneDividerColumns(bitmap, profile).isEmpty();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static LaneGuidanceAnalysis analyzeLaneGuidance(Bitmap bitmap) {
         return analyzeLaneGuidance(bitmap, WazeAccessibilityGeometry.EMPTY);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static LaneGuidanceAnalysis analyzeLaneGuidance(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry) {
@@ -705,6 +753,7 @@ final class WazeVisualCueParser {
         return analyzeLaneRows(bitmap);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static LaneGuidanceAnalysis analyzeLaneGuidanceFromBounds(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry) {
@@ -733,6 +782,7 @@ final class WazeVisualCueParser {
         return direct;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static LaneGuidanceAnalysis analyzeLaneRows(Bitmap bitmap) {
         LaneGuidanceAnalysis fallback = LaneGuidanceAnalysis.none(LaneFailureReason.NO_LANE_STRIP);
         for (LaneCropProfile profile : laneCropProfiles(bitmap)) {
@@ -855,6 +905,7 @@ final class WazeVisualCueParser {
         return fallback;
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private static LaneGuidanceAnalysis rememberLaneFallback(
             LaneGuidanceAnalysis current,
             LaneGuidanceAnalysis candidate) {
@@ -880,6 +931,7 @@ final class WazeVisualCueParser {
         return candidate;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static WazeVisualLayout visualLayout(Bitmap bitmap) {
         if (bitmap == null) {
             return WazeVisualLayout.NO_ACTIVE_PANEL;
@@ -900,6 +952,7 @@ final class WazeVisualCueParser {
         return WazeVisualLayout.UNKNOWN;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasStrongLaneRowEvidence(Bitmap bitmap) {
         for (LaneCropProfile profile : laneCropProfiles(bitmap)) {
             if (!hasLaneStripPanel(bitmap, profile)) {
@@ -926,12 +979,14 @@ final class WazeVisualCueParser {
         return false;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isBlockingLaneAnalysis(LaneGuidanceAnalysis direct) {
         return direct != null
                 && (direct.status == LaneGuidanceStatus.PARSED
                 || direct.status == LaneGuidanceStatus.UNPARSED_ROW);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static LaneGuidanceAnalysis analyzeLaneComponentsDirect(
             Bitmap bitmap,
             List<Component> components,
@@ -1016,6 +1071,7 @@ final class WazeVisualCueParser {
                 parsed.cells);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static LaneParseResult parseLaneComponentsDirect(Bitmap bitmap, List<Component> components) {
         List<String> tokens = new ArrayList<>();
         List<WazeLaneCell> debugCells = new ArrayList<>();
@@ -1043,6 +1099,7 @@ final class WazeVisualCueParser {
         return LaneParseResult.parsed(joinLaneTokens(tokens), debugCells);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> directLaneComponents(List<Component> components) {
         if (components == null || components.isEmpty()) {
             return Collections.emptyList();
@@ -1057,6 +1114,7 @@ final class WazeVisualCueParser {
         return filtered;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isDirectLaneComponent(Component component) {
         if (component == null) {
             return false;
@@ -1070,6 +1128,7 @@ final class WazeVisualCueParser {
         return count >= Math.max(180, width * 6);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasDirectLaneRowGeometry(List<Component> components) {
         if (components == null || components.size() < 2 || components.size() > 6) {
             return false;
@@ -1123,6 +1182,7 @@ final class WazeVisualCueParser {
         return maxGap * 100 <= minGap * 200;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isWideDirectLaneRowGeometry(List<Component> components,
             int minHeight, int centerYSpread, int maxGap, int maxWidth) {
         if (components == null || components.size() < 3) {
@@ -1135,14 +1195,17 @@ final class WazeVisualCueParser {
         return maxGap <= wideMaxGap;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int centerX(Component component) {
         return (component.x1 + component.x2) / 2;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int centerY(Component component) {
         return (component.y1 + component.y2) / 2;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Integer> laneDividerColumns(Bitmap bitmap, LaneCropProfile profile) {
         if (bitmap == null || profile == null || !hasLaneStripPanel(bitmap, profile)) {
             return Collections.emptyList();
@@ -1195,6 +1258,7 @@ final class WazeVisualCueParser {
         return dividers;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static void addDividerRun(List<Integer> dividers,
             int runStart, int runEnd, int runScore, int maxRunWidth, int minGap) {
         if (runStart < 0 || runEnd < runStart || runScore <= 0) {
@@ -1211,6 +1275,7 @@ final class WazeVisualCueParser {
         dividers.add(center);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<LaneCell> laneCellsFromDividers(
             Bitmap bitmap, LaneCropProfile profile, List<Integer> dividers) {
         if (bitmap == null || profile == null || dividers == null || dividers.isEmpty()) {
@@ -1241,6 +1306,7 @@ final class WazeVisualCueParser {
         return cells;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Integer> selectLaneDividers(
             Bitmap bitmap, LaneCropProfile profile, List<Integer> candidates) {
         int count = Math.min(candidates.size(), 12);
@@ -1298,14 +1364,17 @@ final class WazeVisualCueParser {
         return best;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int laneCellMinWidth(Bitmap bitmap) {
         return Math.max(60, scaleX(bitmap, 110));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int laneCellMaxWidth(Bitmap bitmap, int minWidth) {
         return Math.max(minWidth + 1, scaleX(bitmap, 560));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean addLaneCell(List<LaneCell> cells,
             int left, int right, int top, int bottom, int minWidth, int maxWidth) {
         int width = right - left + 1;
@@ -1316,6 +1385,7 @@ final class WazeVisualCueParser {
         return true;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static LaneParseResult parseLaneCells(
             Bitmap bitmap,
             List<Component> components,
@@ -1357,6 +1427,7 @@ final class WazeVisualCueParser {
         return LaneParseResult.parsed(joinLaneTokens(tokens), debugCells);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String chooseTemplateOrGeometry(String template, String geometry) {
         String cleanTemplate = template == null ? "" : template;
         String cleanGeometry = geometry == null ? "" : geometry;
@@ -1372,6 +1443,7 @@ final class WazeVisualCueParser {
         return cleanTemplate;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String glyphSource(String templateToken, String geometryToken, String finalToken) {
         String template = templateToken == null ? "" : templateToken.trim();
         String geometry = geometryToken == null ? "" : geometryToken.trim();
@@ -1394,11 +1466,13 @@ final class WazeVisualCueParser {
         return "none";
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isStraightOnlyToken(String token) {
         String clean = token == null ? "" : token.trim();
         return "S".equals(clean) || "S*".equals(clean);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static WazeLaneCell debugCell(
             int zeroBasedIndex,
             LaneCell cell,
@@ -1419,6 +1493,7 @@ final class WazeVisualCueParser {
                 reason == null ? "" : reason.name());
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static WazeLaneCell debugCell(
             int zeroBasedIndex,
             Component component,
@@ -1439,6 +1514,7 @@ final class WazeVisualCueParser {
                 reason == null ? "" : reason.name());
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static Component componentForCell(List<Component> components, LaneCell cell) {
         Component best = null;
         int bestCount = 0;
@@ -1459,6 +1535,7 @@ final class WazeVisualCueParser {
         return best;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String joinLaneTokens(List<String> tokens) {
         if (tokens == null || tokens.isEmpty()) {
             return "";
@@ -1476,6 +1553,7 @@ final class WazeVisualCueParser {
         return builder.toString();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> laneComponentsAfterMinX(
             Bitmap bitmap,
             List<Component> components,
@@ -1490,6 +1568,7 @@ final class WazeVisualCueParser {
         return filtered;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeLaneGuidanceLayout(
             Bitmap bitmap,
             List<Component> components,
@@ -1516,6 +1595,7 @@ final class WazeVisualCueParser {
         return maxCenterY - minCenterY <= scaleY(bitmap, 46, profile.referenceHeight);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasDirectionalLane(String laneString) {
         String clean = laneString == null ? "" : laneString.trim();
         if (clean.isEmpty()) {
@@ -1540,6 +1620,7 @@ final class WazeVisualCueParser {
         return false;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static LaneCropProfile[] laneCropProfiles(Bitmap bitmap) {
         if (bitmap != null && bitmap.getHeight() <= 800) {
             return new LaneCropProfile[] {
@@ -1553,6 +1634,7 @@ final class WazeVisualCueParser {
         };
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> laneComponents(Bitmap bitmap, LaneCropProfile profile) {
         if (bitmap == null || profile == null || !hasLaneStripPanel(bitmap, profile)) {
             return Collections.emptyList();
@@ -1566,6 +1648,7 @@ final class WazeVisualCueParser {
                 profile.referenceHeight);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasLaneStripPanel(Bitmap bitmap, LaneCropProfile profile) {
         int x1 = scaleX(bitmap, profile.x1);
         int y1 = scaleY(bitmap, profile.y1, profile.referenceHeight);
@@ -1586,6 +1669,7 @@ final class WazeVisualCueParser {
         return dark >= Math.max(4000, sampled / 5);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static NavSnapshot.Maneuver maneuverFromLaneCue(String laneString) {
         String clean = laneString == null ? "" : laneString.trim();
         if (clean.isEmpty()) {
@@ -1635,10 +1719,12 @@ final class WazeVisualCueParser {
         return fallback;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static boolean isPartialLaneParseForTest(String laneString, int expectedLaneCount) {
         return isPartialLaneParse(laneString, expectedLaneCount);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static boolean isPartialLaneParse(String laneString, int expectedLaneCount) {
         if (expectedLaneCount <= 1) {
             return false;
@@ -1647,6 +1733,7 @@ final class WazeVisualCueParser {
         return actualLaneCount > 0 && actualLaneCount < expectedLaneCount;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static NavSnapshot.Maneuver maneuverFromSingleToken(String token) {
         String clean = canonicalToken(stripRecommendation(token == null ? "" : token.trim()));
         if ("U".equals(clean) || "U*".equals(clean)) {
@@ -1658,6 +1745,7 @@ final class WazeVisualCueParser {
         return maneuverFromToken(clean);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static NavSnapshot.Maneuver maneuverFromToken(String token) {
         String clean = canonicalToken(stripRecommendation(token == null ? "" : token.trim()));
         if ("U".equals(clean)) {
@@ -1708,6 +1796,7 @@ final class WazeVisualCueParser {
         return NavSnapshot.Maneuver.UNKNOWN;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int sourceFromManeuver(NavSnapshot.Maneuver maneuver) {
         if (maneuver == NavSnapshot.Maneuver.LEFT_90) {
             return 2;
@@ -1743,11 +1832,13 @@ final class WazeVisualCueParser {
         return 9;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isRoundaboutManeuver(NavSnapshot.Maneuver maneuver) {
         return maneuver == NavSnapshot.Maneuver.ROUNDABOUT_RIGHT_EXIT
                 || maneuver == NavSnapshot.Maneuver.ROUNDABOUT_LEFT_EXIT;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static Cue roundaboutCue(Bitmap bitmap, boolean leftHandRoundaboutTraffic) {
         int exitNumber = roundaboutExitNumber(bitmap);
         if (exitNumber < ROUNDABOUT_MIN_EXIT || exitNumber > ROUNDABOUT_MAX_EXIT) {
@@ -1759,6 +1850,7 @@ final class WazeVisualCueParser {
                 exitNumber);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int roundaboutSourceForExit(int exitNumber, boolean leftHandTraffic) {
         if (exitNumber < ROUNDABOUT_MIN_EXIT || exitNumber > ROUNDABOUT_MAX_EXIT) {
             return 0;
@@ -1769,14 +1861,17 @@ final class WazeVisualCueParser {
         return base + exitNumber - 1;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isArrivalCue(int redCount, int whiteCount, int grayCount) {
         return redCount >= 10 && whiteCount >= 200 && whiteCount > grayCount;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isRecommended(Component component) {
         return component.count > 0 && component.whiteCount * 100 >= component.count * 35;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean straightRecommended(Component component) {
         if (component.topCount > 0) {
             return component.topWhiteCount * 100 >= component.topCount * 35;
@@ -1784,6 +1879,7 @@ final class WazeVisualCueParser {
         return false;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean sideRecommended(Component component) {
         int sideCount = component.midCount + component.bottomCount;
         if (sideCount > 0) {
@@ -1793,6 +1889,7 @@ final class WazeVisualCueParser {
         return isRecommended(component);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean smoothStraightRecommended(Component component) {
         if (component != null && component.topCount > 0) {
             return component.topWhiteCount * 100 >= component.topCount * 55;
@@ -1800,6 +1897,7 @@ final class WazeVisualCueParser {
         return false;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean smoothSideRecommended(Component component) {
         if (component == null) {
             return false;
@@ -1812,10 +1910,12 @@ final class WazeVisualCueParser {
         return false;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String direction(Component component) {
         return direction(GlyphGeometry.from(component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String direction(GlyphGeometry geometry) {
         Component component = geometry == null ? null : geometry.component;
         if (component == null || component.count < 100) {
@@ -1861,6 +1961,7 @@ final class WazeVisualCueParser {
         return "";
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String singleManeuverToken(Component component) {
         GlyphGeometry geometry = GlyphGeometry.from(component);
         String roundabout = roundaboutToken(geometry);
@@ -1875,10 +1976,12 @@ final class WazeVisualCueParser {
         return direction.isEmpty() ? "" : laneGlyph(direction, isRecommended(geometry.component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String uturnToken(Component component) {
         return uturnToken(GlyphGeometry.from(component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String uturnToken(GlyphGeometry geometry) {
         if (geometry == null
                 || geometry.component == null
@@ -1897,10 +2000,12 @@ final class WazeVisualCueParser {
         return "";
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String glyphToken(Component component) {
         return glyphTokenInternal(component);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String glyphTokenInternal(Component component) {
         GlyphGeometry geometry = GlyphGeometry.from(component);
         if (geometry == null) {
@@ -1937,16 +2042,19 @@ final class WazeVisualCueParser {
         return laneGlyph(direction, isRecommended(component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String laneGlyph(String direction, boolean recommended) {
         return recommended ? direction + "*" : direction;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String compoundGlyph(String firstDirection, boolean firstRecommended,
             String secondDirection, boolean secondRecommended) {
         return laneGlyph(firstDirection, firstRecommended) + "+"
                 + laneGlyph(secondDirection, secondRecommended);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String roundaboutToken(GlyphGeometry geometry) {
         if (geometry == null
                 || geometry.component == null
@@ -1961,6 +2069,7 @@ final class WazeVisualCueParser {
         return laneGlyph("RoundR", isRecommended(geometry.component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int roundaboutExitNumber(Bitmap bitmap) {
         if (bitmap == null) {
             return 0;
@@ -1989,6 +2098,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<DigitBlob> digitBlobs(Bitmap bitmap, int x1, int y1, int x2, int y2) {
         List<DigitBlob> blobs = new ArrayList<>();
         if (bitmap == null || x2 <= x1 || y2 <= y1) {
@@ -2022,6 +2132,7 @@ final class WazeVisualCueParser {
         return blobs.size() > 2 ? Collections.emptyList() : blobs;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static void addDigitBlob(
             Bitmap bitmap, List<DigitBlob> blobs, int x1, int x2, int y1, int y2) {
         if (bitmap == null || x1 < 0 || x2 < x1) {
@@ -2047,6 +2158,7 @@ final class WazeVisualCueParser {
         blobs.add(new DigitBlob(x1, x2 + 1, minY, maxY + 1, count));
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     private static int classifyDigit(Bitmap bitmap, DigitBlob blob) {
         boolean[][] bits = digitBits(bitmap, blob);
         int bestDigit = -1;
@@ -2065,6 +2177,7 @@ final class WazeVisualCueParser {
         return bestScore <= 12 && secondScore - bestScore >= 2 ? bestDigit : -1;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean[][] digitBits(Bitmap bitmap, DigitBlob blob) {
         boolean[][] bits = new boolean[DIGIT_ROWS][DIGIT_COLS];
         for (int row = 0; row < DIGIT_ROWS; row++) {
@@ -2089,6 +2202,7 @@ final class WazeVisualCueParser {
         return bits;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isRoundaboutDigitPixel(int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -2098,6 +2212,7 @@ final class WazeVisualCueParser {
         return max > 165 && max - min < 80;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int digitScore(boolean[][] bits, String[] template) {
         int score = 0;
         for (int row = 0; row < DIGIT_ROWS; row++) {
@@ -2111,10 +2226,12 @@ final class WazeVisualCueParser {
         return score;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightRightCompound(Component component) {
         return looksLikeStraightRightCompound(GlyphGeometry.from(component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightRightCompound(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.width > 42
@@ -2122,10 +2239,12 @@ final class WazeVisualCueParser {
                 && geometry.midDelta > 8.0d;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightLeftCompound(Component component) {
         return looksLikeStraightLeftCompound(GlyphGeometry.from(component));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightLeftCompound(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.width > 42
@@ -2133,6 +2252,7 @@ final class WazeVisualCueParser {
                 && geometry.midDelta < -8.0d;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightSmoothRightCompound(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.width > 42
@@ -2141,6 +2261,7 @@ final class WazeVisualCueParser {
                 && sideRecommended(geometry.component);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightSmoothLeftCompound(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.width > 42
@@ -2149,6 +2270,7 @@ final class WazeVisualCueParser {
                 && sideRecommended(geometry.component);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeSmoothSharpRightCompound(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.width > 42
@@ -2156,6 +2278,7 @@ final class WazeVisualCueParser {
                 && Math.abs(geometry.midDelta) < 5.0d;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeSmoothSharpLeftCompound(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.width > 42
@@ -2163,6 +2286,7 @@ final class WazeVisualCueParser {
                 && Math.abs(geometry.midDelta) < 5.0d;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeSingleSmoothSide(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.component != null
@@ -2171,6 +2295,7 @@ final class WazeVisualCueParser {
                 && Math.abs(geometry.bottomDelta) >= 12.0d;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static NavSnapshot.Maneuver maneuverFromLaneToken(String token) {
         String clean = token == null ? "" : token.trim();
         if (clean.isEmpty()) {
@@ -2212,6 +2337,7 @@ final class WazeVisualCueParser {
         return maneuverFromToken(stripRecommendation(clean));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isSideManeuver(NavSnapshot.Maneuver maneuver) {
         return maneuver == NavSnapshot.Maneuver.LEFT_90
                 || maneuver == NavSnapshot.Maneuver.RIGHT_90
@@ -2223,14 +2349,17 @@ final class WazeVisualCueParser {
                 || maneuver == NavSnapshot.Maneuver.UTURN_RIGHT;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasRecommendation(String token) {
         return token != null && (token.indexOf('*') >= 0 || token.indexOf('!') >= 0);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String stripRecommendation(String token) {
         return token == null ? "" : token.replace("*", "").replace("!", "");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static String canonicalToken(String token) {
         String clean = token == null ? "" : token.trim().replace(" ", "");
         if ("Ls".equals(clean) || "ls".equals(clean)) {
@@ -2260,6 +2389,7 @@ final class WazeVisualCueParser {
         return clean.toUpperCase(Locale.ROOT);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String templateToken(Bitmap bitmap, Component component, boolean singleContext) {
         if (bitmap == null || component == null) {
             return "";
@@ -2274,6 +2404,7 @@ final class WazeVisualCueParser {
         return templateToken(bitmap, rect, singleContext);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String templateToken(Bitmap bitmap, LaneCell cell, boolean singleContext) {
         if (cell == null) {
             return "";
@@ -2281,6 +2412,7 @@ final class WazeVisualCueParser {
         return templateToken(bitmap, new Rect(cell.x1, cell.y1, cell.x2 + 1, cell.y2 + 1), singleContext);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String templateToken(Bitmap bitmap, Rect rect, boolean singleContext) {
         TemplateSignature signature = templateSignature(bitmap, rect);
         if (signature == null || signature.bitCount < 20) {
@@ -2314,6 +2446,7 @@ final class WazeVisualCueParser {
         return best.token;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isTemplateAllowed(String token, boolean singleContext) {
         if (token == null || token.isEmpty()) {
             return false;
@@ -2324,6 +2457,7 @@ final class WazeVisualCueParser {
         return KNOWN_LANE_GLYPHS.contains(token);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int templateScore(TemplateSignature signature, WazeGlyphTemplates.Template template) {
         int shapeDiff = hamming(signature.bits, template.bits);
         int whiteDiff = hamming(signature.whiteBits, template.whiteBits);
@@ -2333,6 +2467,7 @@ final class WazeVisualCueParser {
         return shapeDiff + countDelta / 2 + whitePenalty;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int hamming(long[] left, long[] right) {
         int length = Math.min(left.length, right.length);
         int diff = 0;
@@ -2348,6 +2483,7 @@ final class WazeVisualCueParser {
         return diff;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static TemplateSignature templateSignature(Bitmap bitmap, Rect rect) {
         Rect safe = clampRect(rect, bitmap);
         if (safe == null) {
@@ -2375,6 +2511,7 @@ final class WazeVisualCueParser {
         return new TemplateSignature(bits, whiteBits, bitCount, whiteBitCount);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static PixelClass templatePixelClass(Bitmap bitmap, Rect rect, int normalizedX, int normalizedY) {
         int x1 = rect.left + normalizedX * rect.width() / WazeGlyphTemplates.WIDTH;
         int x2 = rect.left + Math.max(
@@ -2399,11 +2536,13 @@ final class WazeVisualCueParser {
         return hasCue ? PixelClass.GRAY : PixelClass.NONE;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> components(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2) {
         return components(bitmap, normX1, normY1, normX2, normY2, 1080);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> components(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2, int referenceHeight) {
         int x1 = scaleX(bitmap, normX1);
@@ -2413,6 +2552,7 @@ final class WazeVisualCueParser {
         return componentsRaw(bitmap, x1, y1, x2, y2);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> componentsRaw(Bitmap bitmap, int rawX1, int rawY1, int rawX2, int rawY2) {
         if (bitmap == null) {
             return Collections.emptyList();
@@ -2456,6 +2596,7 @@ final class WazeVisualCueParser {
         return components;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static Rect clampRect(Rect source, Bitmap bitmap) {
         if (source == null || bitmap == null || bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) {
             return null;
@@ -2470,6 +2611,7 @@ final class WazeVisualCueParser {
         return new Rect(left, top, right, bottom);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasDarkPanelRaw(Bitmap bitmap, Rect rect) {
         Rect safe = clampRect(rect, bitmap);
         if (safe == null) {
@@ -2490,6 +2632,7 @@ final class WazeVisualCueParser {
         return dark >= Math.max(300, sampled / 5);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static void addComponent(Bitmap bitmap, List<Component> components,
             int x1, int x2, int y1, int y2) {
         if (x1 < 0 || x2 < x1) {
@@ -2570,6 +2713,7 @@ final class WazeVisualCueParser {
                 bottomWhite));
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static Component largest(List<Component> components) {
         Component largest = components.get(0);
         for (Component component : components) {
@@ -2580,6 +2724,7 @@ final class WazeVisualCueParser {
         return largest;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static ColorCounts colorCounts(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2) {
         int x1 = scaleX(bitmap, normX1);
@@ -2602,6 +2747,7 @@ final class WazeVisualCueParser {
         return counts;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isNeutralCuePixel(int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -2611,6 +2757,7 @@ final class WazeVisualCueParser {
         return max > 90 && max - min < 45;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isLaneDividerPixel(int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -2620,6 +2767,7 @@ final class WazeVisualCueParser {
         return max > 90 && max < 210 && max - min < 45;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isWhiteCuePixel(int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -2627,11 +2775,13 @@ final class WazeVisualCueParser {
         return red > 240 && green > 240 && blue > 240;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isTemplateWhiteCuePixelForTest(int red, int green, int blue) {
         int color = ((red & 0xff) << 16) | ((green & 0xff) << 8) | (blue & 0xff);
         return isWhiteCuePixel(color);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isRedCuePixel(int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -2639,16 +2789,19 @@ final class WazeVisualCueParser {
         return red > 210 && green < 120 && blue < 140;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasActiveInstructionPanel(Bitmap bitmap) {
         int sampled = sampledPixelCount(bitmap, 15, 95, 600, 250);
         int dark = darkPixelCount(bitmap, 15, 95, 600, 250);
         return activeInstructionPanelForTest(dark, sampled);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int minInstructionPanelDarkPixels(int sampledPixels) {
         return Math.max(5000, sampledPixels / 3);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int sampledPixelCount(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2) {
         int x1 = scaleX(bitmap, normX1);
@@ -2658,6 +2811,7 @@ final class WazeVisualCueParser {
         return Math.max(0, x2 - x1) * Math.max(0, y2 - y1);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int darkPixelCount(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2) {
         int x1 = scaleX(bitmap, normX1);
@@ -2675,6 +2829,7 @@ final class WazeVisualCueParser {
         return count;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isDarkPanelPixel(int color) {
         int red = (color >> 16) & 0xff;
         int green = (color >> 8) & 0xff;
@@ -2682,31 +2837,38 @@ final class WazeVisualCueParser {
         return red < 35 && green < 35 && blue < 35;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int scaleX(Bitmap bitmap, int normalized) {
         return Math.max(0, normalized * bitmap.getWidth() / 1920);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int scaleY(Bitmap bitmap, int normalized) {
         return scaleY(bitmap, normalized, 1080);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int scaleY(Bitmap bitmap, int normalized, int referenceHeight) {
         int safeReference = referenceHeight <= 0 ? 1080 : referenceHeight;
         return Math.max(0, normalized * bitmap.getHeight() / safeReference);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static double average(double sum, int count, int x1, int x2) {
         return count <= 0 ? (x1 + x2) / 2.0d : sum / count;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int value(int[] values, int index) {
         return values == null || index >= values.length ? 0 : values[index];
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static double value(double[] values, int index) {
         return values == null || index >= values.length ? 0.0d : values[index];
     }
 
+    //defines the LaneGuidanceAnalysisForTest module boundary so related behavior stays readable inside one unit.
     static final class LaneGuidanceAnalysisForTest {
         final String statusName;
         final String reasonName;
@@ -2733,6 +2895,7 @@ final class WazeVisualCueParser {
             this.blocksSingleFallback = blocksSingleFallback;
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static LaneGuidanceAnalysisForTest from(LaneGuidanceAnalysis analysis) {
             LaneGuidanceAnalysis safe = analysis == null
                     ? LaneGuidanceAnalysis.none(LaneFailureReason.UNKNOWN_GLYPH)
@@ -2748,6 +2911,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //defines the LaneGuidanceAnalysis module boundary so related behavior stays readable inside one unit.
     static final class LaneGuidanceAnalysis {
         final LaneGuidanceStatus status;
         final LaneFailureReason reason;
@@ -2793,14 +2957,17 @@ final class WazeVisualCueParser {
             this.cells = cells == null ? Collections.emptyList() : Collections.unmodifiableList(cells);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static LaneGuidanceAnalysis none() {
             return none(LaneFailureReason.NONE);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static LaneGuidanceAnalysis none(LaneFailureReason reason) {
             return none(reason, 0, 0, 0, false);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static LaneGuidanceAnalysis none(
                 LaneFailureReason reason,
                 int dividerCount,
@@ -2818,10 +2985,12 @@ final class WazeVisualCueParser {
                     blocksSingleFallback);
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneGuidanceAnalysis unparsed() {
             return unparsed(LaneFailureReason.UNKNOWN_GLYPH, 0, 0, 0);
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneGuidanceAnalysis unparsed(
                 LaneFailureReason reason,
                 int dividerCount,
@@ -2830,6 +2999,7 @@ final class WazeVisualCueParser {
             return unparsed(reason, dividerCount, cellCount, componentCount, Collections.emptyList());
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneGuidanceAnalysis unparsed(
                 LaneFailureReason reason,
                 int dividerCount,
@@ -2848,10 +3018,12 @@ final class WazeVisualCueParser {
                     cells);
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneGuidanceAnalysis parsed(Cue cue, String laneString) {
             return parsed(cue, laneString, 0, 0, 0);
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneGuidanceAnalysis parsed(
                 Cue cue,
                 String laneString,
@@ -2862,6 +3034,7 @@ final class WazeVisualCueParser {
                     Collections.emptyList());
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneGuidanceAnalysis parsed(
                 Cue cue,
                 String laneString,
@@ -2882,6 +3055,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //defines the LaneParseResult parser boundary so raw app evidence is normalized before HUD decisions use it.
     private static final class LaneParseResult {
         final String laneString;
         final LaneFailureReason reason;
@@ -2897,23 +3071,28 @@ final class WazeVisualCueParser {
             this.cells = cells == null ? Collections.emptyList() : Collections.unmodifiableList(cells);
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneParseResult parsed(String laneString) {
             return new LaneParseResult(laneString, LaneFailureReason.NONE);
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static LaneParseResult parsed(String laneString, List<WazeLaneCell> cells) {
             return new LaneParseResult(laneString, LaneFailureReason.NONE, cells);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static LaneParseResult empty(LaneFailureReason reason) {
             return new LaneParseResult("", reason);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static LaneParseResult empty(LaneFailureReason reason, List<WazeLaneCell> cells) {
             return new LaneParseResult("", reason, cells);
         }
     }
 
+    //defines the LaneCell module boundary so related behavior stays readable inside one unit.
     private static final class LaneCell {
         final int x1;
         final int x2;
@@ -2928,6 +3107,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //defines the Cue module boundary so related behavior stays readable inside one unit.
     private static final class Cue {
         final NavSnapshot.Maneuver maneuver;
         final int sourceManeuver;
@@ -2944,28 +3124,34 @@ final class WazeVisualCueParser {
             this.missingLaneGuidance = missingLaneGuidance;
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static Cue lanes(NavSnapshot.Maneuver maneuver, int sourceManeuver, String laneString) {
             return new Cue(maneuver, sourceManeuver, 0, laneString, false);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static Cue maneuver(NavSnapshot.Maneuver maneuver, int sourceManeuver) {
             return new Cue(maneuver, sourceManeuver, 0, "", false);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static Cue roundabout(
                 NavSnapshot.Maneuver maneuver, int sourceManeuver, int roundaboutExitNumber) {
             return new Cue(maneuver, sourceManeuver, roundaboutExitNumber, "", false);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static Cue arrival() {
             return new Cue(NavSnapshot.Maneuver.ARRIVE, ARRIVAL_SOURCE_MANEUVER, 0, "", false);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static Cue missingLaneGuidance() {
             return new Cue(NavSnapshot.Maneuver.UNKNOWN, 0, 0, "", true);
         }
     }
 
+    //defines the TemplateSignature module boundary so related behavior stays readable inside one unit.
     private static final class TemplateSignature {
         final long[] bits;
         final long[] whiteBits;
@@ -2980,6 +3166,7 @@ final class WazeVisualCueParser {
         }
     }
 
+    //defines the TemplateMatch module boundary so related behavior stays readable inside one unit.
     private static final class TemplateMatch {
         final String token;
         final int score;
@@ -2990,12 +3177,14 @@ final class WazeVisualCueParser {
         }
     }
 
+    //defines the PixelClass module boundary so related behavior stays readable inside one unit.
     private enum PixelClass {
         NONE,
         GRAY,
         WHITE
     }
 
+    //defines the Component module boundary so related behavior stays readable inside one unit.
     private static final class Component {
         final int x1;
         final int x2;
@@ -3041,15 +3230,18 @@ final class WazeVisualCueParser {
             this.bottomWhiteCount = bottomWhiteCount;
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         int width() {
             return x2 - x1 + 1;
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         int height() {
             return y2 - y1 + 1;
         }
     }
 
+    //defines the DigitBlob module boundary so related behavior stays readable inside one unit.
     private static final class DigitBlob {
         final int x1;
         final int x2;
@@ -3065,15 +3257,18 @@ final class WazeVisualCueParser {
             this.count = count;
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         int width() {
             return Math.max(1, x2 - x1);
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         int height() {
             return Math.max(1, y2 - y1);
         }
     }
 
+    //defines the GlyphGeometry module boundary so related behavior stays readable inside one unit.
     private static final class GlyphGeometry {
         final Component component;
         final int width;
@@ -3087,11 +3282,13 @@ final class WazeVisualCueParser {
             this.bottomDelta = component.bottomAverageX - component.topAverageX;
         }
 
+        //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static GlyphGeometry from(Component component) {
             return component == null ? null : new GlyphGeometry(component);
         }
     }
 
+    //defines the LaneCropProfile module boundary so related behavior stays readable inside one unit.
     private static final class LaneCropProfile {
         final int x1;
         final int y1;
@@ -3110,12 +3307,14 @@ final class WazeVisualCueParser {
         }
     }
 
+    //defines the ColorCounts module boundary so related behavior stays readable inside one unit.
     private static final class ColorCounts {
         int red;
         int white;
         int gray;
     }
 
+    //defines the PartCue module boundary so related behavior stays readable inside one unit.
     private static final class PartCue {
         final String token;
         final boolean recommended;
@@ -3125,6 +3324,7 @@ final class WazeVisualCueParser {
             this.recommended = recommended;
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static PartCue parse(String rawToken) {
             String raw = rawToken == null ? "" : rawToken.trim();
             String token = raw.toUpperCase(Locale.ROOT);

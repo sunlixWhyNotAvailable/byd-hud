@@ -1,12 +1,17 @@
 package com.bydhud.app;
 
+//models road text payloads so street names can be sent independently from maneuver art.
+
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 
+//models HudRoadPayload data here so transport and parser layers share a stable contract.
 final class HudRoadPayload {
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudRoadPayload() {
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     static byte[] build(HudState state) {
         ByteArrayOutputStream road = new ByteArrayOutputStream();
         HudLaneModel.LaneSpec[] trustedLanes =
@@ -51,12 +56,14 @@ final class HudRoadPayload {
         return wrapper.toByteArray();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldWriteLaneMetadata(HudState state) {
         return shouldWriteLaneMetadata(
                 state,
                 state.includeLaneBitmap ? HudLaneModel.parse(state).length : 0);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean shouldWriteLaneMetadata(HudState state, int trustedLaneCount) {
         return state.includeLaneBitmap
                 && trustedLaneCount > 1
@@ -66,11 +73,13 @@ final class HudRoadPayload {
                 && !HudLaneModel.hasRampDirections(state);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeInt32(ByteArrayOutputStream out, int field, int value) {
         writeTag(out, field, 0);
         writeVarint(out, value);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeString(ByteArrayOutputStream out, int field, String value) {
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         writeTag(out, field, 2);
@@ -78,12 +87,14 @@ final class HudRoadPayload {
         out.write(bytes, 0, bytes.length);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeBytes(ByteArrayOutputStream out, int field, byte[] bytes) {
         writeTag(out, field, 2);
         writeVarint(out, bytes.length);
         out.write(bytes, 0, bytes.length);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeDouble(ByteArrayOutputStream out, int field, double value) {
         writeTag(out, field, 1);
         long bits = Double.doubleToLongBits(value);
@@ -92,10 +103,12 @@ final class HudRoadPayload {
         }
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeTag(ByteArrayOutputStream out, int field, int wireType) {
         writeVarint(out, (field << 3) | wireType);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeVarint(ByteArrayOutputStream out, int value) {
         long v = value & 0xffffffffL;
         while ((v & ~0x7fL) != 0L) {

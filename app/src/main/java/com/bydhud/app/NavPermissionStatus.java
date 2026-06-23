@@ -1,10 +1,13 @@
 package com.bydhud.app;
 
+//models install-time permission readiness so setup screens can show actionable status.
+
 import android.Manifest;
 import android.content.Context;
 import android.content.pm.PackageManager;
 import android.provider.Settings;
 
+//defines the NavPermissionStatus module boundary so related behavior stays readable inside one unit.
 final class NavPermissionStatus {
     final boolean notificationListenerEnabled;
     final boolean accessibilityServiceEnabled;
@@ -15,6 +18,7 @@ final class NavPermissionStatus {
     final String notificationListenersRaw;
     final String accessibilityServicesRaw;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavPermissionStatus(
             boolean notificationListenerEnabled,
             boolean accessibilityServiceEnabled,
@@ -34,6 +38,7 @@ final class NavPermissionStatus {
         this.accessibilityServicesRaw = accessibilityServicesRaw;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavPermissionStatus check(Context context) {
         String packageName = context.getPackageName();
         NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
@@ -61,6 +66,7 @@ final class NavPermissionStatus {
                 accessibilityServices);
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static NavPermissionStatus forTest(
             boolean notificationListenerEnabled,
             boolean accessibilityServiceEnabled,
@@ -79,6 +85,7 @@ final class NavPermissionStatus {
                 accessibilityServicesRaw);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean allGranted() {
         return notificationListenerEnabled
                 && accessibilityServiceEnabled
@@ -88,6 +95,7 @@ final class NavPermissionStatus {
                 && storageWriteEnabled;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String summary() {
         if (allGranted()) {
             return "nav permissions OK";
@@ -114,6 +122,7 @@ final class NavPermissionStatus {
         return builder.toString();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasPermission(Context context, String permission) {
         return context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
     }

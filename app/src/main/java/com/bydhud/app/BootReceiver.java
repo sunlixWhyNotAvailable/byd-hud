@@ -1,14 +1,18 @@
 package com.bydhud.app;
 
+//restarts the persistent runtime after Android boot so HUD output recovers without opening the app.
+
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 
+//anchors the BootReceiver android entry point so lifecycle recovery stays separate from business logic.
 public final class BootReceiver extends BroadcastReceiver {
     private static final String ACTION_QUICKBOOT_POWERON =
             "android.intent.action.QUICKBOOT_POWERON";
 
     @Override
+    //handles broadcast recovery here so the app can restart required services without user interaction.
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? "" : intent.getAction();
         AppEventLogger.event(context, "boot_receiver action=" + action
@@ -25,6 +29,7 @@ public final class BootReceiver extends BroadcastReceiver {
         HudRuntimeSupervisor.ensureStarted(context, "receiver:" + action);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isRuntimeRecoveryAction(String action) {
         return Intent.ACTION_BOOT_COMPLETED.equals(action)
                 || ACTION_QUICKBOOT_POWERON.equals(action)

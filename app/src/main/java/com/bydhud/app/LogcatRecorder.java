@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//captures device logs into app storage so field issues can be analyzed without a live laptop.
+
 import android.content.Context;
 import android.util.Log;
 
@@ -11,6 +13,7 @@ import java.util.Date;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 
+//defines the LogcatRecorder module boundary so related behavior stays readable inside one unit.
 final class LogcatRecorder {
     static final String STATUS_WAITING = "Очікування запису";
     static final String STATUS_RECORDING = "Йде запис логу";
@@ -29,9 +32,11 @@ final class LogcatRecorder {
     private static String lastStatus = STATUS_WAITING;
     private static String lastDetail = "";
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private LogcatRecorder() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static synchronized boolean isRecording() {
         if (process == null) {
             return false;
@@ -47,6 +52,7 @@ final class LogcatRecorder {
         return false;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static synchronized String statusText() {
         isRecording();
         StringBuilder text = new StringBuilder(lastStatus);
@@ -60,6 +66,7 @@ final class LogcatRecorder {
         return text.toString();
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     static synchronized Result start(Context context) {
         Context appContext = context.getApplicationContext();
         if (isRecording()) {
@@ -103,6 +110,7 @@ final class LogcatRecorder {
         }
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static synchronized Result stop(Context context) {
         Context appContext = context.getApplicationContext();
         if (!isRecording()) {
@@ -143,6 +151,7 @@ final class LogcatRecorder {
         return Result.saved(file, lastDetail);
     }
 
+    //clears state here so stale navigation output is removed before new evidence arrives.
     private static ClearResult clearLogcat(File file) {
         try {
             ProcessBuilder builder = new ProcessBuilder("logcat", "-c");
@@ -164,6 +173,7 @@ final class LogcatRecorder {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void append(File file, String text) {
         try (FileWriter writer = new FileWriter(file, true)) {
             writer.write(text);
@@ -173,24 +183,28 @@ final class LogcatRecorder {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String timestampForFile() {
         synchronized (FILE_FORMAT) {
             return FILE_FORMAT.format(new Date());
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String timestampForLine() {
         synchronized (LINE_FORMAT) {
             return LINE_FORMAT.format(new Date());
         }
     }
 
+    //defines the Result module boundary so related behavior stays readable inside one unit.
     static final class Result {
         final boolean ok;
         final boolean recording;
         final File file;
         final String detail;
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         private Result(boolean ok, boolean recording, File file, String detail) {
             this.ok = ok;
             this.recording = recording;
@@ -198,19 +212,23 @@ final class LogcatRecorder {
             this.detail = detail == null ? "" : detail;
         }
 
+        //updates shared state here so freshness and lifecycle checks use the same evidence.
         static Result recording(File file, String detail) {
             return new Result(true, true, file, detail);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result saved(File file, String detail) {
             return new Result(true, false, file, detail);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result failed(File file, String detail) {
             return new Result(false, false, file, detail);
         }
     }
 
+    //defines the ClearResult module boundary so related behavior stays readable inside one unit.
     private static final class ClearResult {
         final int exitCode;
         final String detail;

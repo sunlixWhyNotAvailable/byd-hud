@@ -1,11 +1,16 @@
 package com.bydhud.app;
 
+//keeps output toggles persistent so testing can switch native, PNG, and log-only modes safely.
+
 import android.content.Context;
 
+//defines the HudOutputPreferences module boundary so related behavior stays readable inside one unit.
 final class HudOutputPreferences {
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudOutputPreferences() {
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static HudState applyToCopy(Context context, HudState rawState) {
         if (rawState == null) {
             return null;
@@ -15,6 +20,7 @@ final class HudOutputPreferences {
         return state;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void apply(Context context, HudState payloadState) {
         if (payloadState == null) {
             return;

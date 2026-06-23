@@ -1,11 +1,15 @@
 package com.bydhud.app;
 
+//chooses what the HUD should show so stale navigation data is cleared before it misleads the driver.
+
 final class HudDisplayPolicy {
     static final int SMALL_DISTANCE_MIN_METERS = 20;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudDisplayPolicy() {
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int displayDistanceMeters(int rawDistanceMeters, boolean clampSmallDistance) {
         if (!clampSmallDistance) {
             return rawDistanceMeters;
@@ -16,6 +20,7 @@ final class HudDisplayPolicy {
         return rawDistanceMeters;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static HudState apply(HudState rawState, boolean clampSmallDistance) {
         if (rawState == null) {
             return null;

@@ -1,16 +1,20 @@
 package com.bydhud.app;
 
+//tracks active route state so foreground and background sources can share continuity.
+
 import android.content.Context;
 import android.os.SystemClock;
 
 import java.util.HashMap;
 import java.util.Map;
 
+//models NavRouteStateStore data here so transport and parser layers share a stable contract.
 final class NavRouteStateStore {
     static final long ROUTE_EVIDENCE_TTL_MS = 30000L;
 
     private static NavRouteStateStore instance;
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static synchronized NavRouteStateStore get(Context context) {
         if (instance == null) {
             instance = new NavRouteStateStore();
@@ -21,9 +25,11 @@ final class NavRouteStateStore {
     private final Object lock = new Object();
     private final Map<String, RouteState> states = new HashMap<>();
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     NavRouteStateStore() {
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromSnapshot(NavSnapshot snapshot, String channel, long nowElapsedMs) {
         if (snapshot == null || snapshot.packageName.isEmpty()) {
             return;
@@ -38,6 +44,7 @@ final class NavRouteStateStore {
                 nowElapsedMs);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromRawPayload(String packageName, String channel,
             String payload, long nowElapsedMs) {
         String normalized = safe(packageName);
@@ -50,6 +57,7 @@ final class NavRouteStateStore {
         remember(normalized, channel, "raw route evidence", null, nowElapsedMs);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromVisualRouteEvidence(String packageName, String channel,
             String reason, long nowElapsedMs) {
         String normalized = safe(packageName);
@@ -59,6 +67,7 @@ final class NavRouteStateStore {
         remember(normalized, channel, safe(reason), null, nowElapsedMs);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     void onRouteRemoved(String packageName, String reason, long nowElapsedMs) {
         String normalized = safe(packageName);
         if (normalized.isEmpty()) {
@@ -93,6 +102,7 @@ final class NavRouteStateStore {
         }
     }
 
+    //clears state here so stale navigation output is removed before new evidence arrives.
     void clearRoute(String packageName, String reason, long nowElapsedMs) {
         String normalized = safe(packageName);
         if (normalized.isEmpty()) {
@@ -110,14 +120,17 @@ final class NavRouteStateStore {
         }
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void markRouteEnded(String packageName, String reason, long nowElapsedMs) {
         clearRoute(packageName, reason, nowElapsedMs);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean hasFreshWazeRouteEvidence(long nowElapsedMs) {
         return isRouteActive("com.waze", nowElapsedMs);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isRouteActive(String packageName, long nowElapsedMs) {
         synchronized (lock) {
             RouteState state = states.get(safe(packageName));
@@ -128,6 +141,7 @@ final class NavRouteStateStore {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     long evidenceAgeMs(String packageName, long nowElapsedMs) {
         synchronized (lock) {
             RouteState state = states.get(safe(packageName));
@@ -138,6 +152,7 @@ final class NavRouteStateStore {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String reason(String packageName) {
         synchronized (lock) {
             RouteState state = states.get(safe(packageName));
@@ -148,6 +163,7 @@ final class NavRouteStateStore {
         }
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     NavSnapshot latestSnapshot(String packageName) {
         synchronized (lock) {
             RouteState state = states.get(safe(packageName));
@@ -155,6 +171,7 @@ final class NavRouteStateStore {
         }
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private void remember(String packageName, String channel, String reason,
             NavSnapshot snapshot, long nowElapsedMs) {
         long safeNow = nowElapsedMs > 0L ? nowElapsedMs : SystemClock.elapsedRealtime();
@@ -172,6 +189,7 @@ final class NavRouteStateStore {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasSnapshotRouteEvidence(NavSnapshot snapshot) {
         if (snapshot.sourceApp == NavSnapshot.SourceApp.WAZE
                 && snapshot.maneuver == NavSnapshot.Maneuver.UNKNOWN
@@ -188,16 +206,19 @@ final class NavRouteStateStore {
                 || snapshot.rawReason.contains("lanes=\"");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasNonEmptyField(String rawReason, String field) {
         String safe = rawReason == null ? "" : rawReason;
         String prefix = field + "=\"";
         return safe.contains(prefix) && !safe.contains(prefix + "\"");
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }
 
+    //models RouteState data here so transport and parser layers share a stable contract.
     private static final class RouteState {
         final long lastEvidenceMs;
         final String channel;

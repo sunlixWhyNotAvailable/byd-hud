@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//keeps supported package rules centralized so app detection stays consistent across sources.
+
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -11,13 +13,16 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 
+//defines the NavAppFilter module boundary so related behavior stays readable inside one unit.
 final class NavAppFilter {
     private static final String DEFAULT_SELF_PACKAGE = "com.bydhud.app";
     private static final Set<String> HIDDEN_PACKAGES = hiddenPackages();
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAppFilter() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldHideFromCaptureList(String packageName) {
         String normalized = normalize(packageName);
         if (normalized.isEmpty()) {
@@ -32,6 +37,7 @@ final class NavAppFilter {
                 || normalized.contains("launcher");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldHideFromCaptureList(Context context, String packageName) {
         String normalized = normalize(packageName);
         if (context != null && normalized.equals(normalize(context.getPackageName()))) {
@@ -46,6 +52,7 @@ final class NavAppFilter {
         return isInstalledSystemPackage(context, normalized);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> visibleCapturePackages(Collection<String> packages) {
         Set<String> visible = new TreeSet<>();
         if (packages == null) {
@@ -60,6 +67,7 @@ final class NavAppFilter {
         return visible;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> visibleCapturePackages(Context context, Collection<String> packages) {
         Set<String> visible = new TreeSet<>();
         if (packages == null) {
@@ -74,6 +82,7 @@ final class NavAppFilter {
         return visible;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> curatedNavigationPackages() {
         Set<String> packages = new TreeSet<>();
         packages.add("app.revanced.android.apps.maps");
@@ -83,10 +92,12 @@ final class NavAppFilter {
         return Collections.unmodifiableSet(packages);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCuratedNavigationPackage(String packageName) {
         return isKnownNavigationPackage(normalize(packageName));
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static Set<String> hiddenPackages() {
         Set<String> packages = new HashSet<>();
         packages.add(DEFAULT_SELF_PACKAGE);
@@ -111,6 +122,7 @@ final class NavAppFilter {
         return Collections.unmodifiableSet(packages);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isKnownNavigationPackage(String normalizedPackage) {
         return "com.waze".equals(normalizedPackage)
                 || "com.google.android.apps.maps".equals(normalizedPackage)
@@ -118,6 +130,7 @@ final class NavAppFilter {
                 || "com.iternio.abrpapp".equals(normalizedPackage);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isInstalledSystemPackage(Context context, String packageName) {
         if (context == null || packageName.isEmpty()) {
             return false;
@@ -135,6 +148,7 @@ final class NavAppFilter {
         }
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalize(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
     }

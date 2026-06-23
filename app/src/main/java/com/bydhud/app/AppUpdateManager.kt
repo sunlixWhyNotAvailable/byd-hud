@@ -1,5 +1,7 @@
 package com.bydhud.app
 
+//checks GitHub releases so the app can offer updates without baking release metadata into the UI.
+
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
@@ -16,6 +18,7 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
 
+//defines AppUpdateManager UI/state support so Compose code can keep rendering intent explicit.
 object AppUpdateManager {
     private const val PREFS_NAME = "bydhud_update_prefs"
     private const val KEY_AUTO_CHECK = "auto_check_enabled"
@@ -24,22 +27,28 @@ object AppUpdateManager {
     private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
     private const val EXPECTED_PACKAGE_NAME = "com.bydhud.app"
 
+    //defines UpdateInfo UI/state support so Compose code can keep rendering intent explicit.
     data class UpdateInfo(
         val version: String,
         val downloadUrl: String,
         val releaseNotes: String
     )
 
+    //defines CheckResult UI/state support so Compose code can keep rendering intent explicit.
     sealed class CheckResult {
+        //defines UpToDate UI/state support so Compose code can keep rendering intent explicit.
         data object UpToDate : CheckResult()
+        //defines Available UI/state support so Compose code can keep rendering intent explicit.
         data class Available(val info: UpdateInfo) : CheckResult()
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     fun isAutoCheckEnabled(context: Context): Boolean {
         return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_AUTO_CHECK, true)
     }
 
+    //keeps this Compose helper focused so UI state changes remain easy to audit.
     fun setAutoCheckEnabled(context: Context, enabled: Boolean) {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
@@ -47,6 +56,7 @@ object AppUpdateManager {
             .apply()
     }
 
+    //keeps this Compose helper focused so UI state changes remain easy to audit.
     suspend fun checkForUpdate(context: Context, forceCheck: Boolean): CheckResult = withContext(Dispatchers.IO) {
         val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         val now = System.currentTimeMillis()
@@ -74,6 +84,7 @@ object AppUpdateManager {
         )
     }
 
+    //keeps update I/O here so network, file, and installer failures are handled in one path.
     suspend fun downloadAndInstall(
         context: Context,
         update: UpdateInfo,
@@ -104,6 +115,7 @@ object AppUpdateManager {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     internal fun isNewerVersion(remote: String, local: String): Boolean {
         val remoteParts = parseVersion(remote)
         val localParts = parseVersion(local)
@@ -116,6 +128,7 @@ object AppUpdateManager {
         return false
     }
 
+    //keeps update I/O here so network, file, and installer failures are handled in one path.
     private fun fetchLatestReleaseJson(): JSONObject {
         val connection = (URL(BuildConfig.UPDATE_RELEASE_API_URL).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
@@ -137,6 +150,7 @@ object AppUpdateManager {
         }
     }
 
+    //keeps this Compose helper focused so UI state changes remain easy to audit.
     private fun findApkAssetUrl(json: JSONObject): String {
         val assets = json.optJSONArray("assets") ?: throw IllegalStateException("GitHub release has no assets")
         for (index in 0 until assets.length()) {
@@ -150,6 +164,7 @@ object AppUpdateManager {
         throw IllegalStateException("GitHub release has no APK asset")
     }
 
+    //keeps this Compose helper focused so UI state changes remain easy to audit.
     private suspend fun pollDownload(
         manager: DownloadManager,
         downloadId: Long,
@@ -176,6 +191,7 @@ object AppUpdateManager {
         }
     }
 
+    //handles this branch here so source-specific edge cases stay out of the main flow.
     private suspend fun handleDownloadRow(cursor: Cursor, onProgress: (String) -> Unit): Boolean {
         return when (cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS))) {
             DownloadManager.STATUS_RUNNING -> {
@@ -202,12 +218,14 @@ object AppUpdateManager {
         }
     }
 
+    //keeps this Compose helper focused so UI state changes remain easy to audit.
     private suspend fun emitProgress(progress: String, onProgress: (String) -> Unit) {
         withContext(Dispatchers.Main) {
             onProgress(progress)
         }
     }
 
+    //keeps update I/O here so network, file, and installer failures are handled in one path.
     private fun installDownloadedApk(context: Context, file: File) {
         if (!file.exists()) {
             throw IllegalStateException("Downloaded APK not found")
@@ -223,6 +241,7 @@ object AppUpdateManager {
         context.startActivity(intent)
     }
 
+    //keeps update I/O here so network, file, and installer failures are handled in one path.
     private fun validateDownloadedApk(context: Context, file: File) {
         val info = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
             ?: throw IllegalStateException("Downloaded APK cannot be inspected")
@@ -234,6 +253,7 @@ object AppUpdateManager {
         }
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private fun parseVersion(value: String): List<Int> {
         val normalized = value.trim().removePrefix("v")
         require(Regex("""\d+(\.\d+)*""").matches(normalized)) {

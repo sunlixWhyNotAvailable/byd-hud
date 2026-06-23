@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//checks live permission state so the UI can tell whether capture is actually usable.
+
 final class NavPermissionRuntimeProbe {
     private static final String[] ACCESSIBILITY_SECTION_LABELS = new String[]{
             "Bound services:",
@@ -8,9 +10,11 @@ final class NavPermissionRuntimeProbe {
             "Crashed services:"
     };
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavPermissionRuntimeProbe() {
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static Result parseAccessibilityDumpsys(String packageName, String dumpsys) {
         String normalized = packageName == null ? "" : packageName.trim();
         String service = normalized + "/" + normalized + ".NavAccessibilityService";
@@ -22,6 +26,7 @@ final class NavPermissionRuntimeProbe {
         return new Result(enabled, bound, crashed, value.trim());
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean sectionContains(String value, String label,
             String service, String shortService) {
         int start = value.indexOf(label);
@@ -42,6 +47,7 @@ final class NavPermissionRuntimeProbe {
         return section.contains(service) || section.contains(shortService);
     }
 
+    //defines the Result module boundary so related behavior stays readable inside one unit.
     static final class Result {
         final boolean accessibilityEnabledInDumpsys;
         final boolean accessibilityBoundInDumpsys;
@@ -59,6 +65,7 @@ final class NavPermissionRuntimeProbe {
             this.raw = raw == null ? "" : raw;
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         boolean accessibilityRuntimeOk() {
             return accessibilityEnabledInDumpsys
                     && accessibilityBoundInDumpsys

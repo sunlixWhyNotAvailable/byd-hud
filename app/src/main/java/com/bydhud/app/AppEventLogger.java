@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//keeps diagnostic events centralized so runtime, parser, and capture logs remain comparable across field tests.
+
 import android.content.Context;
 import android.util.Log;
 
@@ -10,6 +12,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+//defines the AppEventLogger module boundary so related behavior stays readable inside one unit.
 final class AppEventLogger {
     private static final String TAG = "BydHudEventLog";
     private static final String EVENTS_FILE = "events.log";
@@ -17,18 +20,22 @@ final class AppEventLogger {
     private static final SimpleDateFormat FORMAT =
             new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private AppEventLogger() {
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void event(Context context, String line) {
         Log.i(TAG, line);
         append(context, EVENTS_FILE, timestamp() + " " + line + "\n", false);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logDir(Context context) {
         return NavigationLogStorage.logcatDir(context);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File file(Context context, String name) {
         File file = new File(logDir(context), name);
         if (file.exists() && file.length() > MAX_FILE_BYTES) {
@@ -43,6 +50,7 @@ final class AppEventLogger {
         return file;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void append(Context context, String name, String text, boolean ignored) {
         File file = file(context, name);
         try (FileWriter writer = new FileWriter(file, true)) {
@@ -52,6 +60,7 @@ final class AppEventLogger {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String timestamp() {
         synchronized (FORMAT) {
             return FORMAT.format(new Date());

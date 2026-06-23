@@ -1,18 +1,23 @@
 package com.bydhud.app;
 
+//extracts Waze foreground text so route state can survive visual capture gaps.
+
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+//defines the WazeAccessibilityParser parser boundary so raw app evidence is normalized before HUD decisions use it.
 final class WazeAccessibilityParser {
     private static final int MAX_ROAD_NAME_CHARS = 64;
     private static final int ARRIVAL_SOURCE_MANEUVER = 10;
     private static final Pattern MINUTES =
             Pattern.compile("([0-9]+)\\s*min\\b", Pattern.CASE_INSENSITIVE);
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeAccessibilityParser() {
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parse(String packageName, String payload, HudState baseline) {
         if (NavTextNormalizer.sourceApp(packageName) != NavSnapshot.SourceApp.WAZE) {
             return null;
@@ -154,18 +159,22 @@ final class WazeAccessibilityParser {
                 reason);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isUsableWazePayload(String payload) {
         return isUsableWazePayload(NavAccessibilityPayload.nodes(payload));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isUsableWazePayloadForTest(String payload) {
         return isUsableWazePayload(payload);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static WazeAccessibilityGeometry geometry(String payload) {
         return WazeAccessibilityGeometry.fromPayload(payload);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static NavParserResult arrivalResult(String packageName, String destination,
             String fallbackRoad, String reason, int confidence) {
         String cleanDestination = cap(
@@ -204,6 +213,7 @@ final class WazeAccessibilityParser {
                 detail);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isManeuverText(String value) {
         String lower = NavTextNormalizer.lower(value);
         return lower.contains("turn ")
@@ -217,10 +227,12 @@ final class WazeAccessibilityParser {
                 || lower.startsWith("keep ");
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static int sourceManeuver(String text) {
         return GMapsNotificationParser.sourceManeuver(text);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static NavSnapshot.Maneuver maneuver(String text) {
         if (!isManeuverText(text)) {
             return NavSnapshot.Maneuver.UNKNOWN;
@@ -228,6 +240,7 @@ final class WazeAccessibilityParser {
         return GMapsNotificationParser.maneuver(text);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isUsableWazePayload(List<NavAccessibilityPayload.Node> nodes) {
         boolean hasWazeRouteNode = false;
         boolean hasForeignMeaningfulNode = false;
@@ -250,6 +263,7 @@ final class WazeAccessibilityParser {
         return hasWazeRouteNode || !hasForeignMeaningfulNode;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isInstructionLikeStreet(String value) {
         String lower = NavTextNormalizer.lower(value);
         if (lower.isEmpty()) {
@@ -269,6 +283,7 @@ final class WazeAccessibilityParser {
                 || lower.contains("arriving at");
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String routeLabel(String value) {
         String clean = NavTextNormalizer.cleanText(value);
         String lower = NavTextNormalizer.lower(clean);
@@ -278,6 +293,7 @@ final class WazeAccessibilityParser {
         return isInstructionLikeStreet(clean) ? "" : clean;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isForeignResourceId(String idLower) {
         if (idLower.isEmpty() || idLower.startsWith("com.waze:id/")) {
             return false;
@@ -285,6 +301,7 @@ final class WazeAccessibilityParser {
         return idLower.indexOf(":id/") > 0;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int timeSeconds(String text, int fallback) {
         Matcher matcher = MINUTES.matcher(NavTextNormalizer.cleanText(text));
         if (!matcher.find()) {
@@ -298,6 +315,7 @@ final class WazeAccessibilityParser {
         }
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String cap(String value, int limit) {
         String clean = NavTextNormalizer.cleanText(value);
         if (clean.length() <= limit) {
@@ -306,6 +324,7 @@ final class WazeAccessibilityParser {
         return clean.substring(0, limit);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String arrivingDestination(String value) {
         String clean = NavTextNormalizer.cleanText(value);
         String lower = NavTextNormalizer.lower(clean);

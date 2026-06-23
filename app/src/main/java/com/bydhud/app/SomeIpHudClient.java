@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//sends SOME/IP HUD payloads so app-level route decisions reach the BYD cluster protocol.
+
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
@@ -8,8 +10,11 @@ import android.os.IBinder;
 import android.os.Parcel;
 import android.os.RemoteException;
 
+//contains the SomeIpHudClient transport boundary so external communication is isolated from app logic.
 final class SomeIpHudClient {
+    //defines the Listener module boundary so related behavior stays readable inside one unit.
     interface Listener {
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         void onClientLog(String line);
     }
 
@@ -36,6 +41,7 @@ final class SomeIpHudClient {
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void onServiceConnected(ComponentName name, IBinder service) {
             binder = service;
             log("connected: " + name.flattenToShortString());
@@ -47,6 +53,7 @@ final class SomeIpHudClient {
         }
 
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void onServiceDisconnected(ComponentName name) {
             log("disconnected: " + name.flattenToShortString());
             binder = null;
@@ -54,15 +61,18 @@ final class SomeIpHudClient {
         }
     };
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     SomeIpHudClient(Context context, Listener listener) {
         this.context = context.getApplicationContext();
         this.listener = listener;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isBound() {
         return binder != null;
     }
 
+    //opens the external boundary here so connection setup remains observable and retryable.
     void bind() {
         if (bound) {
             return;
@@ -74,22 +84,26 @@ final class SomeIpHudClient {
         log("bindService=" + bound);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     int start() throws RemoteException {
         int ret = transactLong(TRANSACTION_START_SERVICE, HUD_NAVI_INFO_SERVICE_ID);
         log("startSomeIpService ret=" + ret);
         return ret;
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     int stop() throws RemoteException {
         int ret = transactLong(TRANSACTION_STOP_SERVICE, HUD_NAVI_INFO_SERVICE_ID);
         log("stopSomeIpService ret=" + ret);
         return ret;
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     int send(byte[] payload) throws RemoteException {
         return sendToTopic(HUD_ROAD_INFO_TOPIC, payload);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     int sendToTopic(long topic, byte[] payload) throws RemoteException {
         if (binder == null) {
             throw new RemoteException("SomeIpServerService is not connected");
@@ -113,6 +127,7 @@ final class SomeIpHudClient {
         }
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void unbind() {
         if (!bound) {
             return;
@@ -120,12 +135,13 @@ final class SomeIpHudClient {
         try {
             context.unbindService(connection);
         } catch (IllegalArgumentException ignored) {
-            // Already unbound.
+            //returns early because the service connection has already been unbound.
         }
         binder = null;
         bound = false;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isReady() throws RemoteException {
         if (binder == null) {
             return false;
@@ -143,6 +159,7 @@ final class SomeIpHudClient {
         }
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private int transactLong(int transaction, long value) throws RemoteException {
         if (binder == null) {
             throw new RemoteException("SomeIpServerService is not connected");
@@ -161,6 +178,7 @@ final class SomeIpHudClient {
         }
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void log(String line) {
         listener.onClientLog(line);
     }

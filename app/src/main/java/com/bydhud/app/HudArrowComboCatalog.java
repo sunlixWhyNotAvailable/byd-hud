@@ -1,8 +1,11 @@
 package com.bydhud.app;
 
+//centralizes lane and arrow asset combinations so native HUD payloads stay deterministic.
+
 final class HudArrowComboCatalog {
     private static final int DEFAULT_INDEX = 12;
 
+    //defines the Combo module boundary so related behavior stays readable inside one unit.
     static final class Combo {
         final String label;
         final int sourceId;
@@ -18,6 +21,7 @@ final class HudArrowComboCatalog {
             this.nativeVisible = nativeVisible;
         }
 
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         String roadLabel() {
             return label + " N" + two(nativeId) + " S" + two(sourceId);
         }
@@ -69,29 +73,36 @@ final class HudArrowComboCatalog {
             new Combo("Exit ramp left", 71, 1, true, true)
     };
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudArrowComboCatalog() {
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int size() {
         return CURATED.length;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int defaultIndex() {
         return DEFAULT_INDEX;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static Combo curatedAt(int index) {
         return CURATED[wrap(index, CURATED.length)];
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int next(int index) {
         return wrap(index + 1, CURATED.length);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int prev(int index) {
         return wrap(index - 1, CURATED.length);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static String two(int value) {
         if (value < 0) {
             return String.valueOf(value);
@@ -99,10 +110,12 @@ final class HudArrowComboCatalog {
         return value < 10 ? "0" + value : String.valueOf(value);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static int wrapRaw(int value) {
         return wrap(value, 100);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static int wrap(int value, int size) {
         int result = value % size;
         return result < 0 ? result + size : result;

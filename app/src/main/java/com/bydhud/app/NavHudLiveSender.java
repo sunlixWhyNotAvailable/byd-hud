@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//converts parser snapshots into HUD commands so live route evidence reaches the cluster consistently.
+
 import android.content.Context;
 import android.os.Handler;
 import android.os.Looper;
@@ -7,6 +9,7 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
+//defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
 final class NavHudLiveSender {
     private static final String TAG = "BydHudNavLive";
     private static final String WAZE_PACKAGE = "com.waze";
@@ -24,6 +27,7 @@ final class NavHudLiveSender {
 
     private static NavHudLiveSender instance;
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized NavHudLiveSender get(Context context) {
         if (instance == null) {
             instance = new NavHudLiveSender(context.getApplicationContext());
@@ -60,6 +64,7 @@ final class NavHudLiveSender {
 
     private final Runnable bindRetryRunnable = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             if (!active) {
                 return;
@@ -84,6 +89,7 @@ final class NavHudLiveSender {
 
     private final Runnable sendLoop = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             sendLoopScheduled = false;
             if (!active) {
@@ -96,6 +102,7 @@ final class NavHudLiveSender {
 
     private final Runnable notificationRemovedStop = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             String key = pendingRemovalKey;
             String packageName = pendingRemovalPackage;
@@ -126,6 +133,7 @@ final class NavHudLiveSender {
 
     private final Runnable routeHealthLoop = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             routeHealthScheduled = false;
             if (!active || activePackage.isEmpty()) {
@@ -151,6 +159,7 @@ final class NavHudLiveSender {
 
     private final Runnable accessibilityNoRouteStop = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             String packageName = pendingNoRoutePackage;
             pendingNoRoutePackage = "";
@@ -183,6 +192,7 @@ final class NavHudLiveSender {
 
     private final Runnable arrivalRouteEndStop = new Runnable() {
         @Override
+        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
             String packageName = pendingArrivalPackage;
             pendingArrivalPackage = "";
@@ -198,20 +208,24 @@ final class NavHudLiveSender {
         }
     };
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavHudLiveSender(Context context) {
         this.context = context;
         this.hudClient = new SomeIpHudClient(context, line -> log("someip " + line));
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     void start(String packageName, String reason) {
         final String normalized = normalizePackage(packageName);
         handler.post(() -> startOnMain(normalized, reason));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isRunning() {
         return active;
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stop(String packageName, String reason, boolean clearHud) {
         final String normalized = normalizePackage(packageName);
         handler.post(() -> {
@@ -222,11 +236,13 @@ final class NavHudLiveSender {
         });
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromGMapsNotification(String packageName, String notificationKey,
             GMapsNotificationParser.Result result) {
         updateFromNavigationNotification(packageName, notificationKey, result);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromNavigationNotification(String packageName, String notificationKey,
             NavParserResult result) {
         if (result == null) {
@@ -237,22 +253,26 @@ final class NavHudLiveSender {
         handler.post(() -> updateOnMain(normalized, safeKey, result));
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromGMapsAccessibility(String packageName, String payload) {
         updateFromNavigationAccessibility(packageName, payload);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromNavigationAccessibility(String packageName, String payload) {
         final String normalized = normalizePackage(packageName);
         final String safePayload = normalizeString(payload);
         handler.post(() -> updateAccessibilityOnMain(normalized, safePayload));
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateWazeAccessibilityGeometry(String packageName, String payload) {
         final String normalized = normalizePackage(packageName);
         final String safePayload = normalizeString(payload);
         handler.post(() -> updateWazeAccessibilityGeometryOnMain(normalized, safePayload));
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromWazeVisualCue(String packageName, NavParserResult result) {
         if (result == null) {
             return;
@@ -261,6 +281,7 @@ final class NavHudLiveSender {
         handler.post(() -> updateVisualCueOnMain(normalized, result));
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void onWazeVisualRouteEvidence(String reason) {
         final String safeReason = normalizeString(reason);
         handler.post(() -> {
@@ -278,6 +299,7 @@ final class NavHudLiveSender {
         });
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void onWazeCropUnavailable(String reason) {
         final String safeReason = normalizeString(reason);
         handler.post(() -> {
@@ -296,6 +318,7 @@ final class NavHudLiveSender {
         });
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void onWazeRouteNodesMissing(String reason) {
         final String safeReason = normalizeString(reason);
         handler.post(() -> {
@@ -310,6 +333,7 @@ final class NavHudLiveSender {
         });
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     void onWazeUnknownLaneRow(String reason) {
         final String safeReason = normalizeString(reason);
         handler.post(() -> {
@@ -340,11 +364,13 @@ final class NavHudLiveSender {
         });
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stopForRemovedGMapsNotification(String packageName, String notificationKey,
             String reason, boolean clearHud) {
         stopForRemovedNavigationNotification(packageName, notificationKey, reason, clearHud);
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stopForRemovedNavigationNotification(String packageName, String notificationKey,
             String reason, boolean clearHud) {
         final String normalized = normalizePackage(packageName);
@@ -368,6 +394,7 @@ final class NavHudLiveSender {
         });
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startOnMain(String packageName, String reason) {
         if (packageName.isEmpty()) {
             return;
@@ -392,6 +419,7 @@ final class NavHudLiveSender {
         scheduleRouteHealthLoop();
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateOnMain(String packageName, String notificationKey,
             NavParserResult result) {
         if (packageName.isEmpty()) {
@@ -467,6 +495,7 @@ final class NavHudLiveSender {
         scheduleSendLoop();
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateAccessibilityOnMain(String packageName, String payload) {
         if (packageName.isEmpty() || payload.isEmpty()) {
             return;
@@ -545,6 +574,7 @@ final class NavHudLiveSender {
         scheduleSendLoop();
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateVisualCueOnMain(String packageName, NavParserResult result) {
         if (packageName.isEmpty()) {
             return;
@@ -600,6 +630,7 @@ final class NavHudLiveSender {
         scheduleSendLoop();
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void sanitizeWazeVisualLanes(String packageName, HudState state) {
         if (!"com.waze".equals(packageName) || state == null) {
             return;
@@ -617,6 +648,7 @@ final class NavHudLiveSender {
         state.includeLaneBitmap = laneCount > 1;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void requestActiveInputState(String packageName, String reason) {
         NavRuntimePermissionStatus permissionStatus = NavRuntimePermissionStatus.check(context);
         if (!permissionStatus.notificationListenerConnected) {
@@ -639,6 +671,7 @@ final class NavHudLiveSender {
         }
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private void sendLatestIfReady(String reason) {
         if (!active || latestState == null) {
             return;
@@ -677,6 +710,7 @@ final class NavHudLiveSender {
         }
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopOnMain(String reason, boolean clearHud) {
         String packageName = activePackage;
         handler.removeCallbacks(bindRetryRunnable);
@@ -719,6 +753,7 @@ final class NavHudLiveSender {
         log("stopped reason=" + reason);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void forceClearNavigator(String packageName, String reason, long now) {
         NavRouteStateStore.get(context).markRouteEnded(packageName, reason, now);
         if (WAZE_PACKAGE.equals(packageName)) {
@@ -729,6 +764,7 @@ final class NavHudLiveSender {
         stopOnMain(reason, true);
     }
 
+    //handles this branch here so source-specific edge cases stay out of the main flow.
     private void handleWazeNoRouteOrVisualUnavailable(
             String clearReason, String visualReason, long now) {
         latestVisualState = null;
@@ -749,6 +785,7 @@ final class NavHudLiveSender {
         forceClearNavigator(WAZE_PACKAGE, clearReason + ":" + visualReason, now);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean hasCurrentWazeRouteNodeState(long now) {
         if (!lastWazeRouteNodeScanHadRoute
                 || lastWazeRouteNodeResultMs <= 0L
@@ -763,6 +800,7 @@ final class NavHudLiveSender {
                 && latestSnapshot.maneuver != NavSnapshot.Maneuver.HIDE);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateWazeAccessibilityGeometryOnMain(String packageName, String payload) {
         if (!WAZE_PACKAGE.equals(packageName)) {
             return;
@@ -774,6 +812,7 @@ final class NavHudLiveSender {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void ensureWazeCropRunning(String reason) {
         if (!WAZE_PACKAGE.equals(activePackage)) {
             return;
@@ -784,6 +823,7 @@ final class NavHudLiveSender {
         WazeCropCapture.get(context).start("runtime-" + safeReason(reason));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean shouldStopWazeCrop(String reason) {
         if (!NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE)) {
             log("waze-clear decision=stop-crop reason=" + normalizeString(reason)
@@ -801,6 +841,7 @@ final class NavHudLiveSender {
         return true;
     }
 
+    //clears state here so stale navigation output is removed before new evidence arrives.
     private void resetLatestPayload() {
         latestState = null;
         latestRouteState = null;
@@ -820,6 +861,7 @@ final class NavHudLiveSender {
         lastWazeRouteNodeScanHadRoute = false;
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateArrivalRouteEndForResult(String packageName, NavParserResult result) {
         long now = SystemClock.elapsedRealtime();
         boolean hasFreshVisualCue = WAZE_PACKAGE.equals(packageName)
@@ -846,6 +888,7 @@ final class NavHudLiveSender {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleArrivalRouteEndStop(String packageName, String reason) {
         pendingArrivalPackage = packageName;
         handler.removeCallbacks(arrivalRouteEndStop);
@@ -855,11 +898,13 @@ final class NavHudLiveSender {
                 + " delayMs=" + ARRIVAL_ROUTE_END_STOP_DELAY_MS);
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelArrivalRouteEndStop() {
         handler.removeCallbacks(arrivalRouteEndStop);
         pendingArrivalPackage = "";
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleAccessibilityNoRouteStop(String packageName, String reason) {
         long now = SystemClock.elapsedRealtime();
         if (packageName.equals(pendingNoRoutePackage) && pendingNoRouteScheduledAtMs > 0L) {
@@ -879,6 +924,7 @@ final class NavHudLiveSender {
                 + " delayMs=" + ACCESSIBILITY_NO_ROUTE_STOP_DELAY_MS);
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelPendingRouteEndStops() {
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
@@ -891,12 +937,14 @@ final class NavHudLiveSender {
         pendingNoRouteScheduledAtMs = 0L;
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelAccessibilityNoRouteStop() {
         handler.removeCallbacks(accessibilityNoRouteStop);
         pendingNoRoutePackage = "";
         pendingNoRouteScheduledAtMs = 0L;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean shouldBlankGMapsNotificationTextOnlyStraightManeuver(String packageName,
             NavParserResult result) {
         return NavTextNormalizer.sourceApp(packageName) == NavSnapshot.SourceApp.GOOGLE_MAPS
@@ -907,6 +955,7 @@ final class NavHudLiveSender {
                 && result.maneuverEvidence.source == NavManeuverEvidence.Source.TEXT;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private HudState blankGMapsNotificationTextOnlyStraightManeuver(HudState notificationState) {
         HudState blankState = notificationState == null ? new HudState() : notificationState.copy();
         blankState.hideNativeWithBlankId();
@@ -914,11 +963,13 @@ final class NavHudLiveSender {
         return blankState;
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleBindRetry() {
         handler.removeCallbacks(bindRetryRunnable);
         handler.postDelayed(bindRetryRunnable, START_BIND_RETRY_MS);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleSendLoop() {
         if (sendLoopScheduled) {
             return;
@@ -927,6 +978,7 @@ final class NavHudLiveSender {
         handler.postDelayed(sendLoop, SEND_INTERVAL_MS);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleRouteHealthLoop() {
         if (routeHealthScheduled) {
             return;
@@ -935,19 +987,23 @@ final class NavHudLiveSender {
         handler.postDelayed(routeHealthLoop, ROUTE_HEALTH_INTERVAL_MS);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void log(String line) {
         Log.i(TAG, line);
         AppEventLogger.event(context, "nav_live " + line);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim();
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizeString(String value) {
         return value == null ? "" : value.trim();
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safeReason(String reason) {
         String normalized = normalizeString(reason).toLowerCase();
         if (normalized.isEmpty()) {

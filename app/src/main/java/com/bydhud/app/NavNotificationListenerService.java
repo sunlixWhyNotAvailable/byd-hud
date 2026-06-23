@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//listens to navigation notifications so background routes can update without screen capture.
+
 import android.app.Notification;
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -13,6 +15,7 @@ import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 
+//anchors the NavNotificationListenerService android entry point so lifecycle recovery stays separate from business logic.
 public final class NavNotificationListenerService extends NotificationListenerService {
     private static final int FIELD_CHAR_LIMIT = 300;
     private static final int TEXT_LINES_CHAR_LIMIT = 1200;
@@ -25,6 +28,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     private static volatile long lastDisconnectedElapsedMs;
     private static volatile String lastRuntimeDetail = "never connected";
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveNotificationScan(Context context, String reason) {
         NavNotificationListenerService service = activeService;
         if (service == null) {
@@ -38,10 +42,12 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         worker.start();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isConnectedForRuntimeCheck() {
         return activeService != null;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String runtimeDetailForRuntimeCheck() {
         NavNotificationListenerService service = activeService;
         if (service != null) {
@@ -50,6 +56,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return lastRuntimeDetail;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestRuntimeRebind(Context context, String reason) {
         try {
             android.content.ComponentName component = new android.content.ComponentName(
@@ -65,6 +72,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onListenerConnected() {
         super.onListenerConnected();
         activeService = this;
@@ -75,6 +83,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onListenerDisconnected() {
         if (activeService == this) {
             activeService = null;
@@ -86,6 +95,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     @Override
+    //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         if (activeService == this) {
             activeService = null;
@@ -96,10 +106,12 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationPosted(StatusBarNotification sbn) {
         processPostedNotification(sbn, "posted");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void processActiveNotifications(String reason) {
         try {
             StatusBarNotification[] notifications = getActiveNotifications();
@@ -118,6 +130,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void processPostedNotification(StatusBarNotification sbn, String source) {
         if (sbn == null) {
             return;
@@ -159,6 +172,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationRemoved(StatusBarNotification sbn) {
         if (sbn == null) {
             return;
@@ -180,6 +194,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static NotificationFields notificationFields(StatusBarNotification sbn) {
         Notification notification = sbn.getNotification();
         Bundle extras = notification == null ? null : notification.extras;
@@ -194,6 +209,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 isOngoing(notification));
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavManeuverEvidence largeIconEvidence(String packageName, Notification notification,
             long nowElapsedMs) {
         if (NavTextNormalizer.sourceApp(packageName) != NavSnapshot.SourceApp.GOOGLE_MAPS) {
@@ -215,6 +231,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return evidence;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavManeuverEvidence largeIconMatchEvidence(String packageName, Bitmap bitmap,
             long nowElapsedMs) {
         try {
@@ -229,6 +246,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Bitmap notificationLargeIconBitmap(String packageName, Notification notification) {
         if (notification == null) {
             return null;
@@ -249,6 +267,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static Bitmap drawableToBitmap(Drawable drawable) {
         if (drawable == null) {
             return null;
@@ -273,6 +292,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return bitmap;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static Bitmap bitmapToSafeArgbBitmap(Bitmap source) {
         int[] scaled = scaleToFit(source.getWidth(), source.getHeight(), MAX_LARGE_ICON_DIMENSION);
         Bitmap bitmap = Bitmap.createBitmap(scaled[0], scaled[1], Bitmap.Config.ARGB_8888);
@@ -283,6 +303,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return bitmap;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static int[] scaleToFit(int width, int height, int maxDimension) {
         int safeWidth = width > 0 ? width : DEFAULT_LARGE_ICON_DIMENSION;
         int safeHeight = height > 0 ? height : DEFAULT_LARGE_ICON_DIMENSION;
@@ -296,6 +317,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return new int[] { scaledWidth, scaledHeight };
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String bitmapSummary(Bitmap bitmap) {
         if (bitmap == null) {
             return "bitmap=none";
@@ -307,6 +329,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private static String buildPostedPayload(NotificationFields fields, String source) {
         StringBuilder builder = new StringBuilder(256);
         appendField(builder, "source", source);
@@ -321,6 +344,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return capValue(builder.toString(), PAYLOAD_CHAR_LIMIT);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String charSequenceExtra(Bundle extras, String key) {
         if (extras == null) {
             return "";
@@ -329,6 +353,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return value == null ? "" : value.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String textLinesExtra(Bundle extras) {
         if (extras == null) {
             return "";
@@ -350,11 +375,13 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return capValue(builder.toString(), TEXT_LINES_CHAR_LIMIT);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isOngoing(Notification notification) {
         return notification != null
                 && (notification.flags & Notification.FLAG_ONGOING_EVENT) != 0;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void appendField(StringBuilder builder, String key, String value) {
         if (builder.length() > 0) {
             builder.append("; ");
@@ -362,6 +389,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         builder.append(key).append('=').append(capValue(safe(value), FIELD_CHAR_LIMIT));
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         if (value == null) {
             return "";
@@ -369,6 +397,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return value.replace('\n', ' ').replace('\r', ' ').trim();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String capValue(String value, int limit) {
         if (value == null) {
             return "";
@@ -380,6 +409,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         return value.substring(0, prefixLength) + TRUNCATED_MARKER;
     }
 
+    //defines the NotificationFields module boundary so related behavior stays readable inside one unit.
     private static final class NotificationFields {
         final String key;
         final String title;
@@ -403,6 +433,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static String capParserField(String value) {
         return capValue(safe(value), FIELD_CHAR_LIMIT);
     }

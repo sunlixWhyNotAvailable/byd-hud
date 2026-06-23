@@ -1,9 +1,13 @@
 package com.bydhud.app;
 
+//detects route completion so the HUD clears promptly when navigation ends.
+
 final class NavRouteEndPolicy {
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavRouteEndPolicy() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldStopForRemovedNotification(boolean active,
             String removedPackage, String activePackage, String removedKey, String activeNotificationKey) {
         String safeRemovedPackage = normalizePackage(removedPackage);
@@ -20,6 +24,7 @@ final class NavRouteEndPolicy {
         return !safeRemovedKey.isEmpty() && safeRemovedKey.equals(safeActiveKey);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldScheduleNoRouteAccessibilityStop(boolean active,
             String packageName, String activePackage, String payload) {
         String safePackage = normalizePackage(packageName);
@@ -36,12 +41,14 @@ final class NavRouteEndPolicy {
                 || state == NavRouteEvidencePolicy.RawRouteState.PREVIEW;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldScheduleArrivalStop(boolean active,
             String packageName, String activePackage, NavParserResult result) {
         return shouldScheduleArrivalStop(active, packageName, activePackage, result,
                 false, false, false, Long.MAX_VALUE);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldScheduleArrivalStop(boolean active,
             String packageName, String activePackage, NavParserResult result,
             boolean hasFreshVisualCue, boolean hasFreshRouteText,
@@ -74,6 +81,7 @@ final class NavRouteEndPolicy {
                 && hasUsefulRoad(snapshot.streetName);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldEndWazeRouteOnArrival(String payload,
             boolean hasFreshVisualCue,
             boolean hasFreshRouteText,
@@ -91,6 +99,7 @@ final class NavRouteEndPolicy {
         return candidateAgeMs >= 3000L;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasActiveRouteSnapshot(NavParserResult result) {
         if (result == null || result.snapshot == null) {
             return false;
@@ -106,25 +115,30 @@ final class NavRouteEndPolicy {
         return hasEtaOrLane(snapshot.rawReason);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim();
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizeString(String value) {
         return value == null ? "" : value.trim();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasUsefulRoad(String roadName) {
         String clean = normalizeString(roadName);
         return !clean.isEmpty() && !"Waze".equals(clean);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasNonEmptyDistanceText(String rawReason) {
         String clean = normalizeString(rawReason);
         return clean.contains("distance=\"")
                 && !clean.contains("distance=\"\"");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasEtaOrLane(String rawReason) {
         String clean = normalizeString(rawReason);
         return clean.contains("eta=\"")
@@ -133,6 +147,7 @@ final class NavRouteEndPolicy {
                 && !clean.contains("lanes=\"\"");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean containsWazeArrivalText(String payload) {
         String lower = NavTextNormalizer.lower(payload);
         return lower.contains("arriving at")

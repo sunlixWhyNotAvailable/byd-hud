@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//models one Waze lane cell so lane parsing can compare arrows and active state consistently.
+
 final class WazeLaneCell {
     final int index;
     final int x1;
@@ -13,11 +15,13 @@ final class WazeLaneCell {
     final String source;
     final String failureReason;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     WazeLaneCell(int index, int x1, int y1, int x2, int y2,
             String geometryGuess, String failureReason) {
         this(index, x1, y1, x2, y2, "", "", geometryGuess, "", failureReason);
     }
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     WazeLaneCell(int index, int x1, int y1, int x2, int y2,
             String templateToken, String geometryToken, String finalToken,
             String source, String failureReason) {

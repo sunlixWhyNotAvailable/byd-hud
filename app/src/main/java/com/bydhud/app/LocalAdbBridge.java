@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//owns localhost adb transport so privileged BYD commands stay behind one authenticated bridge.
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.util.Log;
@@ -31,6 +33,7 @@ import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
 
+//contains the LocalAdbBridge transport boundary so external communication is isolated from app logic.
 final class LocalAdbBridge {
     private static final String TAG = "BydHudAdbBridge";
     private static final String HOST = "127.0.0.1";
@@ -73,15 +76,18 @@ final class LocalAdbBridge {
     private static Connection runtimeConnection;
     private static long runtimeLastUsedMs;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private LocalAdbBridge() {
     }
 
+    //defines the AuthorizationPromptMode module boundary so related behavior stays readable inside one unit.
     enum AuthorizationPromptMode {
         AUTO_ONCE,
         FORCE,
         NEVER
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldSendPublicKeyForMode(
             AuthorizationPromptMode mode,
             boolean autoPromptAlreadySentForKey) {
@@ -94,14 +100,17 @@ final class LocalAdbBridge {
         return true;
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static List<String> adbEndpointLabelsForTest() {
         return Arrays.asList(endpointLabel(PORT));
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String adbEndpointSummaryForTest() {
         return endpointSummary();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String adbKeyFingerprint(Context context) {
         try {
             return fingerprint(loadOrCreateKeyPair(context.getApplicationContext()));
@@ -111,10 +120,12 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Result grantNavCapturePermissions(Context context) {
         return grantNavCapturePermissions(context, AuthorizationPromptMode.AUTO_ONCE);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Result grantNavCapturePermissions(
             Context context,
             AuthorizationPromptMode authorizationPromptMode) {
@@ -220,6 +231,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void grantStoragePermissionsBestEffort(
             Connection connection,
             Context appContext,
@@ -237,6 +249,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static List<String> storageGrantCommands(String normalizedPackage) {
         return Arrays.asList(
                 "pm grant " + normalizedPackage + " android.permission.READ_EXTERNAL_STORAGE",
@@ -246,6 +259,7 @@ final class LocalAdbBridge {
                 "appops set " + normalizedPackage + " LEGACY_STORAGE allow");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static ShellResult runRuntimeShellCommand(Context context, String command) throws IOException {
         String safeCommand = command == null ? "" : command.trim();
         if (!isAllowedRuntimeShellCommand(safeCommand)) {
@@ -287,6 +301,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static Result rebindAccessibilityRuntimeIfNeeded(
             Connection connection,
             Context appContext,
@@ -321,14 +336,17 @@ final class LocalAdbBridge {
         return null;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isAllowedRuntimeShellCommandForTest(String command) {
         return isAllowedRuntimeShellCommand(command == null ? "" : command.trim());
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String notificationAllowListenerCommandForTest(String packageName) {
         return notificationAllowListenerCommand(packageName);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isAllowedRuntimeShellCommand(String command) {
         return "dumpsys display".equals(command)
                 || "dumpsys activity activities".equals(command)
@@ -337,6 +355,7 @@ final class LocalAdbBridge {
                 || APP_LOCAL_RM_COMMAND.matcher(command).matches();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static Connection runtimeConnectionLocked(Context appContext) throws Exception {
         long nowMs = android.os.SystemClock.elapsedRealtime();
         if (runtimeConnection != null
@@ -360,10 +379,12 @@ final class LocalAdbBridge {
         return runtimeConnection;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static OpenResult runtimeOpenLocked(Context appContext) throws Exception {
         return Connection.open(appContext, AuthorizationPromptMode.NEVER);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void closeRuntimeConnectionLocked(Context context, String reason) {
         if (runtimeConnection == null) {
             return;
@@ -374,17 +395,21 @@ final class LocalAdbBridge {
         runtimeLog(context, "adb_runtime close reason=" + reason);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static ShellResult unauthorizedRuntimeShellResult() {
         return new ShellResult("ADB key is not authorized.", 126, "");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void runtimeLog(Context context, String message) {
         if (context != null) {
             AppEventLogger.event(context, message);
         }
     }
 
+    //defines the Result module boundary so related behavior stays readable inside one unit.
     static final class Result {
+        //defines the Code module boundary so related behavior stays readable inside one unit.
         enum Code {
             ALREADY_GRANTED,
             GRANTED,
@@ -397,48 +422,59 @@ final class LocalAdbBridge {
         final Code code;
         final String message;
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         private Result(Code code, String message) {
             this.code = code;
             this.message = message == null ? "" : message;
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean shouldRecheckPermissions() {
             return code == Code.ALREADY_GRANTED || code == Code.GRANTED || code == Code.PARTIAL;
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result alreadyGranted(String message) {
             return new Result(Code.ALREADY_GRANTED, message);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result granted(String message) {
             return new Result(Code.GRANTED, message);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result partial(String message) {
             return new Result(Code.PARTIAL, message);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result authorizationRequired(String message) {
             return new Result(Code.AUTHORIZATION_REQUIRED, message);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result adbUnavailable(String message) {
             return new Result(Code.ADB_UNAVAILABLE, message);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         static Result failed(String message) {
             return new Result(Code.FAILED, message);
         }
 
+        //exposes this helper so parser behavior can be verified without depending on Android runtime state.
         static Result postGrantVerificationForTest(NavPermissionStatus after, String detail) {
             return postGrantVerification(after, detail);
         }
 
+        //exposes this helper so parser behavior can be verified without depending on Android runtime state.
         static Result runtimeReconnectingAfterGrantForTest(
                 NavRuntimePermissionStatus status, String endpointSuffix) {
             return runtimeReconnectingAfterGrant(status, endpointSuffix);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         private static Result postGrantVerification(NavPermissionStatus after, String detail) {
             String safeDetail = detail == null ? "" : detail.trim();
             if (after == null || !after.allGranted()) {
@@ -450,6 +486,7 @@ final class LocalAdbBridge {
                     + (safeDetail.isEmpty() ? "" : ": " + safeDetail));
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         private static Result runtimeReconnectingAfterGrant(
                 NavRuntimePermissionStatus status, String endpointSuffix) {
             String safeEndpoint = endpointSuffix == null ? "" : endpointSuffix;
@@ -459,6 +496,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static Result waitForRuntimeReady(Context appContext, String endpointSuffix)
             throws InterruptedException {
         long deadline = android.os.SystemClock.elapsedRealtime() + POST_GRANT_POLL_TIMEOUT_MS;
@@ -473,6 +511,7 @@ final class LocalAdbBridge {
         return Result.runtimeReconnectingAfterGrant(last, endpointSuffix);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static NavPermissionStatus waitForSettingsGranted(Context appContext)
             throws InterruptedException {
         long deadline = android.os.SystemClock.elapsedRealtime() + POST_SETTINGS_POLL_TIMEOUT_MS;
@@ -487,6 +526,7 @@ final class LocalAdbBridge {
         return last;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String notificationAllowListenerCommand(String packageName) {
         NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
                 packageName,
@@ -499,12 +539,14 @@ final class LocalAdbBridge {
         return "cmd notification allow_listener " + plan.notificationService;
     }
 
+    //defines the OpenResult module boundary so related behavior stays readable inside one unit.
     private static final class OpenResult {
         final Connection connection;
         final boolean authorizationRequired;
         final boolean authorizationPromptSent;
         final String endpointLabel;
 
+        //opens the external boundary here so connection setup remains observable and retryable.
         private OpenResult(
                 Connection connection,
                 boolean authorizationRequired,
@@ -517,6 +559,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //defines the Connection module boundary so related behavior stays readable inside one unit.
     private static final class Connection {
         private final Socket socket;
         private final InputStream in;
@@ -524,6 +567,7 @@ final class LocalAdbBridge {
         private final KeyPair keyPair;
         private int nextLocalId = 1;
 
+        //opens the external boundary here so connection setup remains observable and retryable.
         private Connection(Socket socket, KeyPair keyPair) throws IOException {
             this.socket = socket;
             this.in = socket.getInputStream();
@@ -531,6 +575,7 @@ final class LocalAdbBridge {
             this.keyPair = keyPair;
         }
 
+        //opens the external boundary here so connection setup remains observable and retryable.
         static OpenResult open(
                 Context context,
                 AuthorizationPromptMode authorizationPromptMode) throws Exception {
@@ -560,6 +605,7 @@ final class LocalAdbBridge {
             }
         }
 
+        //opens the external boundary here so connection setup remains observable and retryable.
         private static OpenResult openConnectedSocket(
                 Context context,
                 AuthorizationPromptMode authorizationPromptMode,
@@ -633,12 +679,14 @@ final class LocalAdbBridge {
             }
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         ShellResult shellWithExit(String command) throws IOException {
             String wrapped = command + "; echo " + EXIT_MARKER + "$?";
             String output = shell(wrapped);
             return ShellResult.parse(output);
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         private String shell(String command) throws IOException {
             int localId = nextLocalId++;
             int remoteId = 0;
@@ -668,6 +716,7 @@ final class LocalAdbBridge {
             }
         }
 
+        //handles this branch here so source-specific edge cases stay out of the main flow.
         private void handleStalePacket(AdbPacket packet) throws IOException {
             if (packet.command == AdbPacket.A_WRTE) {
                 AdbPacket.write(out, AdbPacket.A_OKAY, packet.arg1, packet.arg0, new byte[0]);
@@ -676,26 +725,31 @@ final class LocalAdbBridge {
             }
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         void close() {
             closeQuietly(socket);
         }
     }
 
+    //defines the ShellResult module boundary so related behavior stays readable inside one unit.
     static final class ShellResult {
         final String output;
         final int exitCode;
         final String raw;
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         private ShellResult(String output, int exitCode, String raw) {
             this.output = output == null ? "" : output;
             this.exitCode = exitCode;
             this.raw = raw == null ? "" : raw;
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         boolean success() {
             return exitCode == 0;
         }
 
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         String shortDetail() {
             String trimmed = output.trim();
             if (trimmed.length() > 160) {
@@ -704,6 +758,7 @@ final class LocalAdbBridge {
             return "exit=" + exitCode + " output=" + trimmed;
         }
 
+        //parses source data here so downstream HUD code receives normalized navigation fields.
         static ShellResult parse(String raw) {
             String safeRaw = raw == null ? "" : raw;
             int markerIndex = safeRaw.lastIndexOf(EXIT_MARKER);
@@ -727,6 +782,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static byte[] signAuthToken(PrivateKey privateKey, byte[] token) throws Exception {
         byte[] safeToken = token == null ? new byte[0] : token;
         byte[] padded = Arrays.copyOf(ADB_AUTH_PADDING, ADB_AUTH_PADDING.length + safeToken.length);
@@ -737,6 +793,7 @@ final class LocalAdbBridge {
         return signature.sign();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static KeyPair loadOrCreateKeyPair(Context context) throws Exception {
         File keyDir = new File(context.getFilesDir(), KEY_DIR);
         File privateFile = new File(keyDir, PRIVATE_KEY_FILE);
@@ -772,6 +829,7 @@ final class LocalAdbBridge {
         return keyPair;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static KeyPair loadPersistedKeyPair(File privateFile, File publicFile) throws Exception {
         if (!privateFile.exists() || !publicFile.exists()) {
             return null;
@@ -789,6 +847,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static KeyPair loadPrivateOnlyKeyPair(File privateFile) throws Exception {
         if (!privateFile.exists()) {
             return null;
@@ -808,6 +867,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeKeyPairFiles(
             File keyDir,
             File privateFile,
@@ -820,6 +880,7 @@ final class LocalAdbBridge {
         writeFile(publicFile, keyPair.getPublic().getEncoded());
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static byte[] readFile(File file) throws IOException {
         FileInputStream in = new FileInputStream(file);
         try {
@@ -835,6 +896,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeFile(File file, byte[] bytes) throws IOException {
         FileOutputStream out = new FileOutputStream(file);
         try {
@@ -844,6 +906,7 @@ final class LocalAdbBridge {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String fingerprint(KeyPair keyPair) throws Exception {
         MessageDigest digest = MessageDigest.getInstance("SHA-256");
         byte[] value = digest.digest(keyPair.getPublic().getEncoded());
@@ -862,17 +925,20 @@ final class LocalAdbBridge {
         return builder.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean autoPromptAlreadySentForKey(Context context, String keyFingerprint) {
         return autoPromptKey(keyFingerprint).equals(
                 prefs(context).getString(KEY_AUTO_PROMPT_FINGERPRINT, ""));
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private static void markAuthorizationPromptSent(Context context, String keyFingerprint) {
         prefs(context).edit()
                 .putString(KEY_AUTO_PROMPT_FINGERPRINT, autoPromptKey(keyFingerprint))
                 .apply();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String autoPromptKey(String keyFingerprint) {
         String safeFingerprint = keyFingerprint == null ? "unknown" : keyFingerprint.trim();
         if (safeFingerprint.isEmpty()) {
@@ -881,27 +947,32 @@ final class LocalAdbBridge {
         return BuildConfig.VERSION_CODE + ":" + safeFingerprint;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String endpointLabel(int port) {
         return HOST + ":" + port;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String endpointSummary() {
         return endpointLabel(PORT);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void closeQuietly(Socket socket) {
         try {
             socket.close();
         } catch (IOException ignored) {
-            // Closing a best-effort local diagnostic bridge.
+            //closes the diagnostic bridge defensively because this path runs during failure cleanup.
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static byte[] nulPayload(String text) {
         byte[] value = text.getBytes(StandardCharsets.UTF_8);
         byte[] payload = new byte[value.length + 1];

@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//hosts the Compose UI so diagnostics, permissions, logs, and update controls share one app surface.
+
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageManager;
@@ -41,6 +43,7 @@ import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+//anchors MainActivity UI orchestration so controls and diagnostics are wired from one place.
 public final class MainActivity extends ComponentActivity {
     private static final String TAG = "BydHudTest";
     private static final long SEND_INTERVAL_MS = 1000L;
@@ -178,6 +181,7 @@ public final class MainActivity extends ComponentActivity {
 
     private final Runnable sendLoop = new Runnable() {
         @Override
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         public void run() {
             if (!sending) {
                 return;
@@ -189,6 +193,7 @@ public final class MainActivity extends ComponentActivity {
 
     private final Runnable startAfterBindRunnable = new Runnable() {
         @Override
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         public void run() {
             pendingStartAfterBindRunnable = null;
             if (!startAfterBindPending) {
@@ -212,6 +217,7 @@ public final class MainActivity extends ComponentActivity {
     };
 
     @Override
+    //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         destroyed = false;
@@ -243,6 +249,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStart() {
         super.onStart();
         if (HudPrefs.isBootEnabled(this)) {
@@ -253,6 +260,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
         maybeRunPendingNavPermissionSelfCheck();
@@ -260,6 +268,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStop() {
         super.onStop();
         if (exitRequested || isFinishing()) {
@@ -270,6 +279,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     protected void onDestroy() {
         destroyed = true;
         if (pendingNavPermissionSelfCheckRunnable != null) {
@@ -286,11 +296,13 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onBackPressed() {
         appendStatus("back pressed: moving task to background");
         moveTaskToBack(true);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private View buildUi() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -510,6 +522,7 @@ public final class MainActivity extends ComponentActivity {
         return root;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private LinearLayout tabContentRoot() {
         LinearLayout content = new LinearLayout(this);
         content.setOrientation(LinearLayout.VERTICAL);
@@ -517,6 +530,7 @@ public final class MainActivity extends ComponentActivity {
         return content;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private LinearLayout.LayoutParams tabLayoutParams() {
         return new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
@@ -524,6 +538,7 @@ public final class MainActivity extends ComponentActivity {
                 1f);
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private void selectTab(int tabIndex) {
         selectedTabIndex = tabIndex;
         boolean showMain = tabIndex == 0;
@@ -548,6 +563,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startLogcatRecording() {
         setLogcatRecorderStatus(LogcatRecorder.STATUS_RECORDING);
         LogcatRecorder.Result result = LogcatRecorder.start(this);
@@ -556,6 +572,7 @@ public final class MainActivity extends ComponentActivity {
         refreshLogcatControls();
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopLogcatRecording() {
         setLogcatRecorderStatus(LogcatRecorder.STATUS_SAVING);
         if (logcatStartButton != null) {
@@ -572,12 +589,14 @@ public final class MainActivity extends ComponentActivity {
         });
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setLogcatRecorderStatus(String status) {
         if (logcatRecorderStatusView != null) {
             logcatRecorderStatusView.setText(status);
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshLogcatControls() {
         boolean recording = LogcatRecorder.isRecording();
         if (logcatStartButton != null) {
@@ -594,6 +613,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String logPathsText() {
         return "Logcat:\n"
                 + NavigationLogStorage.publicLogcatPath()
@@ -607,6 +627,7 @@ public final class MainActivity extends ComponentActivity {
                 + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private List<ComposeStorageDay> composeStorageDays() {
         List<ComposeStorageDay> days = new ArrayList<>();
         File root = NavigationLogStorage.navCaptureDir(this);
@@ -630,10 +651,12 @@ public final class MainActivity extends ComponentActivity {
         return days;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private long navCaptureFolderSizeBytes() {
         return folderSizeBytes(NavigationLogStorage.navCaptureDir(this));
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int countSessionDirs(File dayDir) {
         int count = 0;
         File[] children = dayDir.listFiles();
@@ -655,6 +678,7 @@ public final class MainActivity extends ComponentActivity {
         return count;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private long folderSizeBytes(File file) {
         if (file == null || !file.exists()) {
             return 0L;
@@ -673,6 +697,7 @@ public final class MainActivity extends ComponentActivity {
         return total;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public ComposeSnapshot composeSnapshot() {
         NavRuntimePermissionStatus permissionStatus = NavRuntimePermissionStatus.check(this);
         NavAppDisplayController displayController = NavAppDisplayController.get(this);
@@ -733,6 +758,7 @@ public final class MainActivity extends ComponentActivity {
                 allRows);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private List<ActiveAppRow> activeRowsFromScan(List<NavAppTaskScanner.Row> scanRows) {
         List<ActiveAppRow> rows = new ArrayList<>();
         if (scanRows == null) {
@@ -756,6 +782,7 @@ public final class MainActivity extends ComponentActivity {
         return rows;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private List<ComposeAppRow> composeRows(List<ActiveAppRow> apps, String hudPackage,
             Set<String> logOnlyPackages, Set<String> observedPackages, boolean supportedSection) {
         List<ComposeAppRow> rows = new ArrayList<>();
@@ -765,6 +792,7 @@ public final class MainActivity extends ComponentActivity {
         return rows;
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private ComposeAppRow composeRow(ActiveAppRow app, String hudPackage,
             Set<String> logOnlyPackages, Set<String> observedPackages, boolean supportedSection) {
         NavAppDisplayController controller = NavAppDisplayController.get(this);
@@ -794,6 +822,7 @@ public final class MainActivity extends ComponentActivity {
                 app.importance);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isPackageInstalled(String packageName) {
         try {
             getPackageManager().getApplicationInfo(packageName, 0);
@@ -803,6 +832,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String hudStatus(NavRuntimePermissionStatus permissionStatus) {
         if (!permissionStatus.readyForCapture()) {
             return "failed";
@@ -813,6 +843,7 @@ public final class MainActivity extends ComponentActivity {
         return "idle";
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String composeApplicationState(NavRuntimePermissionStatus permissionStatus) {
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         return "HUD package: " + (hudPackage.isEmpty() ? "(none)" : hudPackage)
@@ -824,20 +855,24 @@ public final class MainActivity extends ComponentActivity {
                 + "\nPermissions: " + permissionStatus.summary();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeGrantAdb() {
         requestAdbPermissionGrant(
                 "manual-grant-button",
                 LocalAdbBridge.AuthorizationPromptMode.FORCE);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeOpenBackgroundSettings() {
         composeOpenBackgroundSettingsFromReminder();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public boolean composeShouldShowBackgroundReminder() {
         return HudPrefs.shouldShowBackgroundReminder(this);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeDismissBackgroundReminder() {
         HudPrefs.markBackgroundReminderSeen(this);
         navPermissionSelfCheckPending = false;
@@ -845,6 +880,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeOpenBackgroundSettingsFromReminder() {
         HudPrefs.markBackgroundReminderSeen(this);
         navPermissionSelfCheckPending = true;
@@ -852,52 +888,64 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetBootEnabled(boolean enabled) {
         setBootMode(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetPngOutputEnabled(boolean enabled) {
         setPngOutputEnabled(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetNativeOutputEnabled(boolean enabled) {
         setNativeOutputEnabled(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetLaneOutputEnabled(boolean enabled) {
         setLaneOutputEnabled(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetDistanceOutputEnabled(boolean enabled) {
         setDistanceOutputEnabled(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetStreetOutputEnabled(boolean enabled) {
         setStreetOutputEnabled(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetSmallDistanceClamp(boolean enabled) {
         setSmallDistanceClamp(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetRoundaboutLeftHandTraffic(boolean enabled) {
         setRoundaboutLeftHandTraffic(enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetUaLanguage(boolean ua) {
         setUiLanguage(ua);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetDarkTheme(boolean dark) {
         setUiTheme(dark);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetStorageLimitGb(int value) {
         HudPrefs.setStorageLimitGb(this, value);
         appendStatus("Storage limit " + HudPrefs.storageLimitGb(this) + " GB");
         refreshControls();
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     public void composeDeleteStorageDays(List<String> days) {
         if (days == null || days.isEmpty()) {
             return;
@@ -923,6 +971,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isDirectChild(File parent, File child) {
         try {
             return parent.getCanonicalFile().equals(child.getParentFile().getCanonicalFile());
@@ -931,6 +980,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean deleteRecursively(File file) {
         if (file == null || !file.exists()) {
             return false;
@@ -946,14 +996,17 @@ public final class MainActivity extends ComponentActivity {
         return file.delete();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeMaybeRefreshApps() {
         scheduleAppScan(false);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeRefreshApps() {
         scheduleAppScan(true);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleAppScan(boolean force) {
         NavAppTaskScanner.Snapshot current = NavAppTaskScanner.get(this).currentSnapshot();
         long ageMs = current.scannedAtMs <= 0
@@ -981,26 +1034,32 @@ public final class MainActivity extends ComponentActivity {
         }, "bydhud-app-scan").start();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetHudForPackage(String packageName, boolean enabled) {
         setNavHudForPackage(packageName, enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetLogOnlyForPackage(String packageName, boolean enabled) {
         setNavLogOnlyForPackage(packageName, enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeToggleDashboard(String packageName, boolean runtimeBacked) {
         toggleIndependentDashboardDisplay(packageName, runtimeBacked);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStartLogcat() {
         startLogcatRecording();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStopLogcat() {
         stopLogcatRecording();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetManualMode(boolean enabled) {
         setManualMode(enabled);
         if (enabled) {
@@ -1020,6 +1079,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStepCurated(int delta) {
         arrowCuratedMode = true;
         curatedIndex = delta >= 0
@@ -1028,6 +1088,7 @@ public final class MainActivity extends ComponentActivity {
         applyCuratedCombo(canUseManualHud());
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSendRaw(int pngSourceId, int nativeId, int distanceMeters,
             String street, String lanes) {
         arrowCuratedMode = false;
@@ -1049,6 +1110,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSendManualLane(String lanes) {
         state.laneString = lanes == null ? "" : lanes.trim();
         state.numOfLanes = countLaneTokens(state.laneString);
@@ -1061,6 +1123,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int countLaneTokens(String lanes) {
         if (lanes == null || lanes.trim().isEmpty()) {
             return 0;
@@ -1075,10 +1138,12 @@ public final class MainActivity extends ComponentActivity {
         return count;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }
 
+    //models ComposeSnapshot data here so transport and parser layers share a stable contract.
     public static final class ComposeSnapshot {
         public final boolean uaLanguage;
         public final boolean darkTheme;
@@ -1176,6 +1241,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //anchors ComposeStorageDay UI orchestration so controls and diagnostics are wired from one place.
     public static final class ComposeStorageDay {
         public final String name;
         public final String createdLabel;
@@ -1192,6 +1258,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //anchors ComposeAppRow UI orchestration so controls and diagnostics are wired from one place.
     public static final class ComposeAppRow {
         public final String label;
         public final String packageName;
@@ -1229,10 +1296,12 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshUiState() {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshActiveAppsList() {
         if (appsCuratedListRoot == null || appsRawListRoot == null) {
             return;
@@ -1282,11 +1351,13 @@ public final class MainActivity extends ComponentActivity {
         refreshDynamicAppsUi();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshDynamicAppsUi() {
         applyUiLanguage();
         applyUiTheme();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String formatCapturePackages(Set<String> packages) {
         if (packages == null || packages.isEmpty()) {
             return "none";
@@ -1301,6 +1372,7 @@ public final class MainActivity extends ComponentActivity {
         return builder.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private List<ActiveAppRow> loadCuratedApps(
             List<ActiveAppRow> rawApps,
             Set<String> capturePackages,
@@ -1333,6 +1405,7 @@ public final class MainActivity extends ComponentActivity {
         }
         Collections.sort(curated, new Comparator<ActiveAppRow>() {
             @Override
+            //keeps this step explicit so callers can rely on one documented behavior boundary.
             public int compare(ActiveAppRow left, ActiveAppRow right) {
                 return left.label.compareToIgnoreCase(right.label);
             }
@@ -1340,6 +1413,7 @@ public final class MainActivity extends ComponentActivity {
         return curated;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private View activeAppView(ActiveAppRow app, boolean hudEnabled, boolean logOnlyEnabled,
             boolean supportedHud) {
         LinearLayout container = new LinearLayout(this);
@@ -1370,6 +1444,7 @@ public final class MainActivity extends ComponentActivity {
         return container;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String displayPackageLine(String packageName) {
         String normalized = normalizePackage(packageName);
         if ("com.google.android.apps.maps".equals(normalized)
@@ -1379,6 +1454,7 @@ public final class MainActivity extends ComponentActivity {
         return packageName;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Button displayActionForApp(ActiveAppRow app) {
         String packageName = app == null ? "" : app.packageName;
         String normalized = normalizePackage(packageName);
@@ -1400,6 +1476,7 @@ public final class MainActivity extends ComponentActivity {
         return button;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void toggleIndependentDashboardDisplay(String packageName, boolean runtimeBacked) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
@@ -1425,10 +1502,12 @@ public final class MainActivity extends ComponentActivity {
         refreshAppsSoon();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshAppsSoon() {
         handler.postDelayed(this::refreshActiveAppsList, 500L);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String navCaptureModeLabel(boolean hudEnabled, boolean logOnlyEnabled) {
         if (hudEnabled) {
             return "hud";
@@ -1439,6 +1518,7 @@ public final class MainActivity extends ComponentActivity {
         return "off";
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setNavHudForPackage(String packageName, boolean enabled) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
@@ -1491,6 +1571,7 @@ public final class MainActivity extends ComponentActivity {
         refreshActiveAppsList();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void returnPreviousHudAppToMain(String previousPackage, String nextPackage) {
         String previous = normalizePackage(previousPackage);
         if (previous.isEmpty()) {
@@ -1504,10 +1585,12 @@ public final class MainActivity extends ComponentActivity {
         controller.moveToMain(previous, "hud-switch-to-" + normalizePackage(nextPackage));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedHudPackage(String packageName) {
         return NavCapturePrefs.isSupportedHudPackage(packageName);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setNavLogOnlyForPackage(String packageName, boolean enabled) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
@@ -1534,6 +1617,7 @@ public final class MainActivity extends ComponentActivity {
         refreshActiveAppsList();
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopNavCaptureForPackage(String packageName) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
@@ -1557,6 +1641,7 @@ public final class MainActivity extends ComponentActivity {
         refreshActiveAppsList();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String appLabel(String packageName) {
         PackageManager packageManager = getPackageManager();
         try {
@@ -1566,19 +1651,22 @@ public final class MainActivity extends ComponentActivity {
                 return label.toString();
             }
         } catch (PackageManager.NameNotFoundException ignored) {
-            // Package can disappear between process listing and label lookup.
+            //guards label lookup because packages can disappear between process listing and UI rendering.
         }
         return packageName;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String filePath(java.io.File file) {
         return file == null ? "" : file.getAbsolutePath();
     }
 
+    //opens the external boundary here so connection setup remains observable and retryable.
     private void connectSomeIp() {
         if (hudClient.isBound()) {
             appendStatus("connect skipped: already connected");
@@ -1590,6 +1678,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startSending() {
         if (!hudClient.isBound()) {
             appendStatus("start blocked: Connect first");
@@ -1623,6 +1712,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleStartAfterBind() {
         if (pendingStartAfterBindRunnable != null) {
             handler.removeCallbacks(pendingStartAfterBindRunnable);
@@ -1631,6 +1721,7 @@ public final class MainActivity extends ComponentActivity {
         handler.postDelayed(pendingStartAfterBindRunnable, START_BIND_RETRY_MS);
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopSending(boolean clearHud) {
         sending = false;
         startAfterBindPending = false;
@@ -1647,6 +1738,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private void sendClearFrame(int index) {
         if (!clearSequenceActive) {
             return;
@@ -1686,6 +1778,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopHudService(String reason, boolean unbindClient) {
         try {
             if (hudClient.isBound()) {
@@ -1705,6 +1798,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopImmediately(String reason, boolean clearHud, boolean unbindClient) {
         sending = false;
         clearSequenceActive = false;
@@ -1737,6 +1831,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelPendingHudCallbacks() {
         handler.removeCallbacks(sendLoop);
         startAfterBindPending = false;
@@ -1748,12 +1843,14 @@ public final class MainActivity extends ComponentActivity {
         pendingClearStopRunnable = null;
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelRunnable(Runnable runnable) {
         if (runnable != null) {
             handler.removeCallbacks(runnable);
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void exitAndFinish() {
         appendStatus("exit requested");
         exitRequested = true;
@@ -1766,16 +1863,19 @@ public final class MainActivity extends ComponentActivity {
         finishAfterStop();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void finishAfterStop() {
         finishAndRemoveTask();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void disconnectHud() {
         stopActiveNavHud("disconnect");
         stopImmediately("disconnect", true, true);
         refreshControls();
     }
 
+    //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopActiveNavHud(String reason) {
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         if (hudPackage.isEmpty()) {
@@ -1792,6 +1892,7 @@ public final class MainActivity extends ComponentActivity {
         refreshActiveAppsList();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setBootMode(boolean enabled) {
         HudPrefs.setBootEnabled(this, enabled);
         appendStatus("Boot " + (enabled ? "ON" : "OFF"));
@@ -1805,6 +1906,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setSmallDistanceClamp(boolean enabled) {
         HudPrefs.setSmallDistanceClampEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -1815,6 +1917,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setRoundaboutLeftHandTraffic(boolean enabled) {
         HudPrefs.setRoundaboutLeftHandTraffic(this, enabled);
         cachedPayloadKey = "";
@@ -1825,6 +1928,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setPngOutputEnabled(boolean enabled) {
         HudPrefs.setPngOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -1833,6 +1937,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setNativeOutputEnabled(boolean enabled) {
         HudPrefs.setNativeOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -1841,6 +1946,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setLaneOutputEnabled(boolean enabled) {
         HudPrefs.setLaneOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -1849,6 +1955,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setDistanceOutputEnabled(boolean enabled) {
         HudPrefs.setDistanceOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -1857,6 +1964,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setStreetOutputEnabled(boolean enabled) {
         HudPrefs.setStreetOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -1865,6 +1973,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setManualMode(boolean enabled) {
         manualModeEnabled = enabled;
         appendStatus("Manual mode " + (enabled ? "ON" : "OFF"));
@@ -1872,6 +1981,7 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setUiLanguage(boolean ua) {
         HudPrefs.setUaLanguage(this, ua);
         appendStatus("UI language " + (ua ? "UA" : "ENG"));
@@ -1879,12 +1989,14 @@ public final class MainActivity extends ComponentActivity {
         applyUiLanguage();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setUiTheme(boolean dark) {
         HudPrefs.setDarkTheme(this, dark);
         appendStatus("UI theme " + (dark ? "dark" : "light"));
         applyUiTheme();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyUiTheme() {
         if (rootView != null) {
             applyUiTheme(rootView);
@@ -1893,6 +2005,7 @@ public final class MainActivity extends ComponentActivity {
         refreshTabButtons();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyUiTheme(View view) {
         if (view instanceof LinearLayout || view instanceof ScrollView) {
             view.setBackgroundColor(uiBackgroundColor());
@@ -1920,12 +2033,14 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyUiLanguage() {
         if (rootView != null) {
             applyUiLanguage(rootView);
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyUiLanguage(View view) {
         if (view instanceof TextView) {
             TextView textView = (TextView) view;
@@ -1946,10 +2061,12 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String localizeUiText(String value) {
         return HudPrefs.isUaLanguage(this) ? toUkrainianUiText(value) : toEnglishUiText(value);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String toUkrainianUiText(String value) {
         switch (value) {
             case "Main":
@@ -2100,6 +2217,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String toEnglishUiText(String value) {
         switch (value) {
             case "Головна":
@@ -2247,6 +2365,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshUiModeButtons() {
         boolean ua = HudPrefs.isUaLanguage(this);
         boolean dark = HudPrefs.isDarkTheme(this);
@@ -2256,6 +2375,7 @@ public final class MainActivity extends ComponentActivity {
         setModeButton(themeLightButton, !dark);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setModeButton(Button button, boolean active) {
         if (button == null) {
             return;
@@ -2269,6 +2389,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshTabButtons() {
         styleTabButton(mainTabButton, selectedTabIndex == 0);
         styleTabButton(appsTabButton, selectedTabIndex == 1);
@@ -2276,6 +2397,7 @@ public final class MainActivity extends ComponentActivity {
         styleTabButton(manualTabButton, selectedTabIndex == 3);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void styleTabButton(Button button, boolean active) {
         if (button == null) {
             return;
@@ -2289,47 +2411,58 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void styleButton(Button button, boolean enabled) {
         button.setTextColor(enabled ? uiButtonTextColor() : uiMutedTextColor());
         button.setBackgroundColor(enabled ? uiButtonBackgroundColor() : uiDisabledBackgroundColor());
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiBackgroundColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFF07111D : 0xFFF4F7FB;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiFieldBackgroundColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFF111C2A : 0xFFFFFFFF;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiButtonBackgroundColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFF142338 : 0xFFE8EEF7;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiDisabledBackgroundColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFF0D1724 : 0xFFD8E1EE;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiActiveBackgroundColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFF245FAD : 0xFF1D6FE8;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiTextColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFFEAF2FF : 0xFF111827;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiMutedTextColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFF9CAFC5 : 0xFF5B677A;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiButtonTextColor() {
         return HudPrefs.isDarkTheme(this) ? 0xFFEAF2FF : 0xFF162235;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int uiActiveTextColor() {
         return 0xFFFFFFFF;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean showBackgroundReminderIfNeeded() {
         if (!HudPrefs.shouldShowBackgroundReminder(this)) {
             return false;
@@ -2339,10 +2472,12 @@ public final class MainActivity extends ComponentActivity {
         return true;
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleNavPermissionSelfCheck(boolean autoGrant) {
         scheduleNavPermissionSelfCheck(autoGrant, NAV_PERMISSION_SELF_CHECK_DELAY_MS);
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleNavPermissionSelfCheck(boolean autoGrant, long delayMs) {
         if (pendingNavPermissionSelfCheckRunnable != null) {
             handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);
@@ -2356,6 +2491,7 @@ public final class MainActivity extends ComponentActivity {
         handler.postDelayed(pendingNavPermissionSelfCheckRunnable, delayMs);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void maybeRunPendingNavPermissionSelfCheck() {
         if (!navPermissionSelfCheckPending || HudPrefs.shouldShowBackgroundReminder(this)) {
             return;
@@ -2364,6 +2500,7 @@ public final class MainActivity extends ComponentActivity {
         scheduleNavPermissionSelfCheck(true);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void runNavPermissionSelfCheck(boolean autoGrant) {
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         String adbKey = LocalAdbBridge.adbKeyFingerprint(this);
@@ -2394,6 +2531,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private boolean ensureNavCaptureRuntimeReadyForStart(String mode, String packageName) {
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         if (status.readyForCapture()) {
@@ -2416,6 +2554,7 @@ public final class MainActivity extends ComponentActivity {
         return false;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestNavCaptureRuntimeReconnect(
             String reason,
             NavRuntimePermissionStatus status) {
@@ -2440,12 +2579,14 @@ public final class MainActivity extends ComponentActivity {
                 LocalAdbBridge.AuthorizationPromptMode.NEVER);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestAdbPermissionGrant(
             String reason,
             LocalAdbBridge.AuthorizationPromptMode authorizationPromptMode) {
         requestAdbPermissionGrant(reason, authorizationPromptMode, null);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestAdbPermissionGrant(
             String reason,
             LocalAdbBridge.AuthorizationPromptMode authorizationPromptMode,
@@ -2485,6 +2626,7 @@ public final class MainActivity extends ComponentActivity {
         thread.start();
     }
 
+    //handles this branch here so source-specific edge cases stay out of the main flow.
     private void handleAdbGrantResult(LocalAdbBridge.Result result) {
         if (destroyed) {
             AppEventLogger.event(getApplicationContext(), "adb_bridge_result_after_destroy "
@@ -2544,12 +2686,14 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateAdbBridgeStatus(String text) {
         if (adbBridgeStatusView != null) {
             adbBridgeStatusView.setText(text);
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String navPermissionStatusRows(NavPermissionStatus status) {
         return "Notification listener: " + enabledDisabled(status.notificationListenerEnabled)
                 + "\nAccessibility service: " + enabledDisabled(status.accessibilityServiceEnabled)
@@ -2559,10 +2703,12 @@ public final class MainActivity extends ComponentActivity {
                 + "\nStorage write: " + enabledDisabled(status.storageWriteEnabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String enabledDisabled(boolean value) {
         return value ? "enabled" : "disabled";
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private void sendCurrentState(String reason) {
         if (!"loop".equals(reason)) {
             applyNavigationFields();
@@ -2596,6 +2742,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private PayloadSnapshot getPayloadSnapshot() {
         String key = buildPayloadKey();
         if (key.equals(cachedPayloadKey) && cachedPayload.length > 0) {
@@ -2621,6 +2768,7 @@ public final class MainActivity extends ComponentActivity {
                 cachedTurnResource, cachedDisplayDistance);
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private String buildPayloadKey() {
         return state.distanceToIntersection
                 + "|" + state.maneuverId
@@ -2651,6 +2799,7 @@ public final class MainActivity extends ComponentActivity {
                 + "|" + HudPrefs.isStreetOutputEnabled(this);
     }
 
+    //models PayloadSnapshot data here so transport and parser layers share a stable contract.
     private static final class PayloadSnapshot {
         final byte[] bytes;
         final int laneBytes;
@@ -2675,6 +2824,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void switchArrowMode(boolean curated) {
         if (!canUseManualHud()) {
             appendStatus("arrow mode blocked: Connect + Start first");
@@ -2691,6 +2841,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void stepCurated(int delta) {
         if (!canUseManualHud() || !arrowCuratedMode) {
             appendStatus("curated step blocked");
@@ -2703,6 +2854,7 @@ public final class MainActivity extends ComponentActivity {
         applyCuratedCombo(true);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyCuratedCombo(boolean send) {
         HudArrowComboCatalog.Combo combo = HudArrowComboCatalog.curatedAt(curatedIndex);
         pngVisible = combo.pngVisible;
@@ -2730,6 +2882,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void stepRawPng(int delta) {
         if (!canUseManualHud() || arrowCuratedMode) {
             appendStatus("raw png step blocked");
@@ -2741,6 +2894,7 @@ public final class MainActivity extends ComponentActivity {
         applyRawArrowsAndSend();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void stepRawNative(int delta) {
         if (!canUseManualHud() || arrowCuratedMode) {
             appendStatus("raw native step blocked");
@@ -2752,6 +2906,7 @@ public final class MainActivity extends ComponentActivity {
         applyRawArrowsAndSend();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyRawArrowsAndSend() {
         if (!canUseManualHud() || arrowCuratedMode) {
             appendStatus("raw apply blocked");
@@ -2783,6 +2938,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState("raw");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setPngVisible(boolean visible) {
         if (!canUseManualHud()) {
             appendStatus("png visibility blocked: Connect + Start first");
@@ -2803,6 +2959,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState(visible ? "png-show" : "png-hide");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setNativeVisible(boolean visible) {
         if (!canUseManualHud()) {
             appendStatus("native visibility blocked: Connect + Start first");
@@ -2823,6 +2980,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState(visible ? "native-show" : "native-hide");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setBothArrowsHidden() {
         if (!canUseManualHud()) {
             appendStatus("hide arrows blocked: Connect + Start first");
@@ -2849,6 +3007,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState("arrows-hide-all");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyArrowVisibility() {
         if (pngVisible) {
             state.unlockTurnBitmapHidden();
@@ -2862,6 +3021,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void syncRawEditsFromState() {
         if (rawPngIdEdit != null) {
             rawPngIdEdit.setText(String.valueOf(state.turnBitmapId));
@@ -2871,6 +3031,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyDistanceAndSend() {
         if (distanceEdit != null) {
             state.distanceToIntersection = parseInt(distanceEdit, state.distanceToIntersection, 0, 99999);
@@ -2880,6 +3041,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState("distance");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setLaneBitmap(boolean value) {
         if (!canUseManualHud()) {
             appendStatus("lanes visibility blocked: Connect + Start first");
@@ -2894,6 +3056,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState(value ? "lanes-show" : "lanes-hide");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyLaneCountAndSend() {
         if (!canUseManualHud()) {
             appendStatus("apply lanes blocked: Connect + Start first");
@@ -2911,6 +3074,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState("lanes-apply");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void randomizeLanesAndSend() {
         if (!canUseManualHud()) {
             appendStatus("randomize lanes blocked: Connect + Start first");
@@ -2928,6 +3092,7 @@ public final class MainActivity extends ComponentActivity {
         sendCurrentState("lanes-random");
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private int parseLaneCount() {
         int count = parseInt(laneCountEdit, state.numOfLanes, 0, 8);
         if (laneCountEdit != null) {
@@ -2936,6 +3101,7 @@ public final class MainActivity extends ComponentActivity {
         return count;
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private String buildStraightLaneString(int count) {
         if (count <= 0) {
             return "";
@@ -2950,6 +3116,7 @@ public final class MainActivity extends ComponentActivity {
         return builder.toString();
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private String buildRandomLaneString(int count) {
         String[] directions = {"L", "SL", "S", "SR", "R"};
         StringBuilder builder = new StringBuilder();
@@ -2965,6 +3132,7 @@ public final class MainActivity extends ComponentActivity {
         return builder.toString();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean canUseManualHud() {
         return manualModeEnabled
                 && hudClient != null
@@ -2972,18 +3140,21 @@ public final class MainActivity extends ComponentActivity {
                 && sending;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyTextFieldsAndSend() {
         applyNavigationFields();
         refreshStateView();
         sendCurrentState("fields");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyNavigationFieldsAndSend() {
         applyNavigationFields();
         refreshStateView();
         sendCurrentState("fields");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyNavigationFields() {
         if (distanceEdit != null) {
             state.distanceToIntersection = parseInt(distanceEdit, state.distanceToIntersection, 0, 99999);
@@ -2996,6 +3167,7 @@ public final class MainActivity extends ComponentActivity {
         applyTextFields();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyTextFields() {
         if (roadNameEdit != null) {
             state.roadName = roadNameEdit.getText().toString();
@@ -3008,6 +3180,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshStateView() {
         if (currentStateView == null) {
             return;
@@ -3049,6 +3222,7 @@ public final class MainActivity extends ComponentActivity {
                         + "\nlane=\"" + state.laneString + "\"");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshControls() {
         if (bootSwitch != null) {
             bootSwitch.setOnCheckedChangeListener(null);
@@ -3184,6 +3358,7 @@ public final class MainActivity extends ComponentActivity {
         applyUiLanguage();
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private String buildSafetyBanner() {
         return "BYD HUD " + BuildConfig.VERSION_NAME
                 + " / code " + BuildConfig.VERSION_CODE
@@ -3194,6 +3369,7 @@ public final class MainActivity extends ComponentActivity {
                 + "\n" + BG_SETTINGS_LINE;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void appendStatus(String line) {
         Log.i(TAG, line);
         if (statusView != null) {
@@ -3209,12 +3385,14 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private TextView section(String text) {
         TextView view = label(text, 18, true);
         view.setPadding(0, 18, 0, 8);
         return view;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private TextView label(String text, int sizeSp, boolean bold) {
         TextView view = new TextView(this);
         view.setText(text);
@@ -3225,6 +3403,7 @@ public final class MainActivity extends ComponentActivity {
         return view;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private TextView warningLabel(String text) {
         TextView view = label(text, 14, true);
         view.setTag(THEME_WARNING_TAG);
@@ -3233,6 +3412,7 @@ public final class MainActivity extends ComponentActivity {
         return view;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private EditText editText(String value) {
         EditText editText = new EditText(this);
         editText.setSingleLine(true);
@@ -3241,6 +3421,7 @@ public final class MainActivity extends ComponentActivity {
         return editText;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private EditText numberEditText(int value, String hint) {
         EditText editText = editText(String.valueOf(value));
         editText.setHint(hint);
@@ -3248,6 +3429,7 @@ public final class MainActivity extends ComponentActivity {
         return editText;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private int parseInt(EditText editText, int fallback, int min, int max) {
         if (editText == null) {
             return fallback;
@@ -3260,6 +3442,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Button button(String text, View.OnClickListener listener) {
         Button button = new Button(this);
         button.setText(text);
@@ -3268,6 +3451,7 @@ public final class MainActivity extends ComponentActivity {
         return button;
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private Switch switchRow(LinearLayout parent, String text, boolean initial,
             CompoundButton.OnCheckedChangeListener listener) {
         LinearLayout row = new LinearLayout(this);
@@ -3284,6 +3468,7 @@ public final class MainActivity extends ComponentActivity {
         return sw;
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private LinearLayout row(View... views) {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
@@ -3298,6 +3483,7 @@ public final class MainActivity extends ComponentActivity {
         return row;
     }
 
+    //defines the ActiveAppRow module boundary so related behavior stays readable inside one unit.
     private static final class ActiveAppRow {
         final String label;
         final String packageName;
@@ -3334,6 +3520,7 @@ public final class MainActivity extends ComponentActivity {
             this.visible = visible;
         }
 
+        //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean isRuntimeBacked() {
             return hasTask || hasProcess;
         }

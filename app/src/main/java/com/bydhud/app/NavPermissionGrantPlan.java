@@ -1,9 +1,12 @@
 package com.bydhud.app;
 
+//documents required adb grants so setup can be repeated after installs and updates.
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
+//defines the NavPermissionGrantPlan module boundary so related behavior stays readable inside one unit.
 final class NavPermissionGrantPlan {
     static final String NOTIFICATION_LISTENERS = "enabled_notification_listeners";
     static final String ACCESSIBILITY_SERVICES = "enabled_accessibility_services";
@@ -15,6 +18,7 @@ final class NavPermissionGrantPlan {
     final String accessibilityServicesValue;
     final List<String> shellCommands;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavPermissionGrantPlan(
             String notificationService,
             String accessibilityService,
@@ -28,6 +32,7 @@ final class NavPermissionGrantPlan {
         this.shellCommands = Collections.unmodifiableList(new ArrayList<>(shellCommands));
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavPermissionGrantPlan fromCurrentSettings(
             String packageName,
             String currentNotificationListeners,
@@ -42,6 +47,7 @@ final class NavPermissionGrantPlan {
                 true);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavPermissionGrantPlan fromCurrentSettings(
             String packageName,
             String currentNotificationListeners,
@@ -59,6 +65,7 @@ final class NavPermissionGrantPlan {
                 true);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavPermissionGrantPlan fromCurrentSettings(
             String packageName,
             String currentNotificationListeners,
@@ -101,10 +108,12 @@ final class NavPermissionGrantPlan {
                 commands);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static boolean containsService(String currentValue, String service) {
         return containsEquivalentService(splitSettingList(currentValue), service);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static List<String> accessibilityRuntimeRebindCommands(
             String packageName,
             String currentAccessibilityServices) {
@@ -126,6 +135,7 @@ final class NavPermissionGrantPlan {
         return Collections.unmodifiableList(commands);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static List<String> splitSettingList(String currentValue) {
         List<String> values = new ArrayList<>();
         if (currentValue == null) {
@@ -145,6 +155,7 @@ final class NavPermissionGrantPlan {
         return values;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static List<String> addUnique(List<String> values, String service) {
         List<String> updated = new ArrayList<>(values);
         if (!containsEquivalentService(updated, service)) {
@@ -153,6 +164,7 @@ final class NavPermissionGrantPlan {
         return updated;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static List<String> removeEquivalentService(List<String> values, String service) {
         List<String> updated = new ArrayList<>();
         String normalizedService = normalizeComponentName(service);
@@ -164,6 +176,7 @@ final class NavPermissionGrantPlan {
         return updated;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean containsEquivalentService(List<String> values, String service) {
         String normalizedService = normalizeComponentName(service);
         for (String value : values) {
@@ -175,6 +188,7 @@ final class NavPermissionGrantPlan {
         return false;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizeComponentName(String component) {
         String value = component == null ? "" : component.trim();
         int slash = value.indexOf('/');
@@ -191,6 +205,7 @@ final class NavPermissionGrantPlan {
         return packageName + "/" + className;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String joinSettingList(List<String> values, boolean leadingColon) {
         StringBuilder builder = new StringBuilder();
         if (leadingColon) {
@@ -205,6 +220,7 @@ final class NavPermissionGrantPlan {
         return builder.toString();
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackageName(String packageName) {
         String normalized = packageName == null ? "" : packageName.trim();
         if (normalized.isEmpty()

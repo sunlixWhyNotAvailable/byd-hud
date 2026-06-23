@@ -1,12 +1,16 @@
 package com.bydhud.app;
 
+//describes lane geometry so parser output can become stable native HUD lane payloads.
+
 final class HudLaneGeometry {
     static final int OEM_ICON_WIDTH = 37;
     static final int OEM_ICON_HEIGHT = 60;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudLaneGeometry() {
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static Geometry calculate(HudState state, int laneCount) {
         int count = Math.max(1, Math.min(HudLaneModel.MAX_LANES, laneCount));
         int canvasScale = clamp(state.laneCanvasScalePercent, 30, 150);
@@ -21,14 +25,17 @@ final class HudLaneGeometry {
         return new Geometry(slotWidth, slotHeight, iconWidth, iconHeight, gap, bitmapWidth, slotHeight);
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static int gapPx(HudState state) {
         return clamp(state.laneGapPx, 0, 80);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
     }
 
+    //defines the Geometry module boundary so related behavior stays readable inside one unit.
     static final class Geometry {
         final int slotWidth;
         final int slotHeight;

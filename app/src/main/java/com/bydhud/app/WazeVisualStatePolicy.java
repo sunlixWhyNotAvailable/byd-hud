@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//decides whether visual evidence is usable so stale crops do not override fresh route state.
+
 final class WazeVisualStatePolicy {
     private static final long VISUAL_STICKY_MS = NavRouteStateStore.ROUTE_EVIDENCE_TTL_MS;
     private static final int WAZE_LEFT_45_SOURCE_ID = 4;
@@ -9,9 +11,11 @@ final class WazeVisualStatePolicy {
     private static final int WAZE_ROUNDABOUT_RIGHT_HAND_MIN_SOURCE_ID = 50;
     private static final int WAZE_ROUNDABOUT_LEFT_HAND_MAX_SOURCE_ID = 69;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeVisualStatePolicy() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldPreserveWazeVisual(String packageName,
             HudState latestVisualState,
             NavParserResult incoming,
@@ -28,11 +32,13 @@ final class WazeVisualStatePolicy {
         return latestVisualState.turnBitmapId != HudState.TURN_BITMAP_BLANK_SOURCE_ID;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static HudState mergeRouteFieldsKeepingVisual(HudState visualState, HudState routeState) {
         return mergeRouteFieldsKeepingVisual(
                 visualState, routeState, NavSnapshot.Maneuver.UNKNOWN);
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static HudState mergeRouteFieldsKeepingVisual(
             HudState visualState, HudState routeState, NavSnapshot.Maneuver routeManeuver) {
         if (visualState == null) {
@@ -63,12 +69,14 @@ final class WazeVisualStatePolicy {
         return merged;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean shouldKeepRouteRoundaboutManeuver(
             HudState visualState, HudState routeState, NavSnapshot.Maneuver routeManeuver) {
         return isRouteRoundabout(routeState, routeManeuver)
                 && isSimpleVisualManeuver(visualState);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isRouteRoundabout(HudState routeState, NavSnapshot.Maneuver routeManeuver) {
         if (routeManeuver == NavSnapshot.Maneuver.ROUNDABOUT_RIGHT_EXIT
                 || routeManeuver == NavSnapshot.Maneuver.ROUNDABOUT_LEFT_EXIT) {
@@ -79,17 +87,20 @@ final class WazeVisualStatePolicy {
                 || isNumberedRoundaboutSource(routeState.turnBitmapId));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isNumberedRoundaboutSource(int sourceId) {
         return sourceId >= WAZE_ROUNDABOUT_RIGHT_HAND_MIN_SOURCE_ID
                 && sourceId <= WAZE_ROUNDABOUT_LEFT_HAND_MAX_SOURCE_ID;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isSimpleVisualManeuver(HudState visualState) {
         return visualState.turnBitmapId == WAZE_LEFT_45_SOURCE_ID
                 || visualState.turnBitmapId == WAZE_RIGHT_45_SOURCE_ID
                 || visualState.turnBitmapId == WAZE_STRAIGHT_SOURCE_ID;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldClearVisualWhenCropUnavailable(
             boolean activeHud, String reason, long unavailableMs) {
         return activeHud
@@ -97,6 +108,7 @@ final class WazeVisualStatePolicy {
                 && unavailableMs >= 0L;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldTreatCropUnavailableAsRouteEnd(boolean activeHud, String reason) {
         if (!activeHud) {
             return false;
@@ -105,6 +117,7 @@ final class WazeVisualStatePolicy {
         return safe.contains("no-route") || safe.contains("route-ended");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldTreatCropUnavailableAsVisualMissing(boolean activeHud, String reason) {
         if (!activeHud) {
             return false;
@@ -117,6 +130,7 @@ final class WazeVisualStatePolicy {
                 || safe.contains("screencap");
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static HudState routeOnlyWithoutVisual(HudState routeState) {
         if (routeState == null) {
             return null;
@@ -130,6 +144,7 @@ final class WazeVisualStatePolicy {
         return state;
     }
 
+    //clears state here so stale navigation output is removed before new evidence arrives.
     static HudState clearLanesForCurrentUnknownRow(HudState state) {
         if (state == null) {
             return null;

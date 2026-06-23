@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//summarizes runtime grants so diagnostics can show which capability is missing.
+
 final class NavRuntimePermissionStatus {
     final NavPermissionStatus settings;
     final boolean notificationListenerConnected;
@@ -8,6 +10,7 @@ final class NavRuntimePermissionStatus {
     final String notificationDetail;
     final String accessibilityDetail;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavRuntimePermissionStatus(
             NavPermissionStatus settings,
             boolean notificationListenerConnected,
@@ -23,6 +26,7 @@ final class NavRuntimePermissionStatus {
         this.accessibilityDetail = safe(accessibilityDetail);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavRuntimePermissionStatus check(android.content.Context context) {
         NavPermissionStatus settings = NavPermissionStatus.check(context);
         return new NavRuntimePermissionStatus(
@@ -34,6 +38,7 @@ final class NavRuntimePermissionStatus {
                 NavAccessibilityService.runtimeDetailForRuntimeCheck());
     }
 
+    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static NavRuntimePermissionStatus fromSettingsForTest(
             NavPermissionStatus settings,
             boolean notificationListenerConnected,
@@ -50,10 +55,12 @@ final class NavRuntimePermissionStatus {
                 accessibilityDetail);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean settingsGranted() {
         return settings != null && settings.allGranted();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean readyForCapture() {
         return settingsGranted()
                 && notificationListenerConnected
@@ -61,10 +68,12 @@ final class NavRuntimePermissionStatus {
                 && !accessibilityServiceCrashed;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean needsAdbGrant() {
         return settings == null || !settings.allGranted();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String uiSummary(boolean autoGrantAttempted, String adbKeyFingerprint) {
         StringBuilder builder = new StringBuilder();
         if (!needsAdbGrant()) {
@@ -95,6 +104,7 @@ final class NavRuntimePermissionStatus {
         return builder.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String summary() {
         if (readyForCapture()) {
             return "nav capture runtime OK";
@@ -130,6 +140,7 @@ final class NavRuntimePermissionStatus {
         return builder.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String rows() {
         StringBuilder builder = new StringBuilder();
         append(builder, "Notification listener",
@@ -173,6 +184,7 @@ final class NavRuntimePermissionStatus {
         return builder.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void append(StringBuilder builder, String label, boolean ok,
             String okText, String badText) {
         if (builder.length() > 0) {
@@ -181,6 +193,7 @@ final class NavRuntimePermissionStatus {
         builder.append(label).append(": ").append(ok ? okText : badText);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void appendMissingPermission(StringBuilder builder, String label, boolean granted) {
         if (granted) {
             return;
@@ -188,6 +201,7 @@ final class NavRuntimePermissionStatus {
         builder.append(' ').append(label);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }

@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//observes foreground navigation apps so HUD output can react when notifications are incomplete.
+
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
 import android.os.SystemClock;
@@ -9,6 +11,7 @@ import android.view.accessibility.AccessibilityWindowInfo;
 
 import java.util.List;
 
+//anchors the NavAccessibilityService android entry point so lifecycle recovery stays separate from business logic.
 public final class NavAccessibilityService extends AccessibilityService {
     private static final long THROTTLE_MS = 500L;
     private static final int MAX_DEPTH = 8;
@@ -25,14 +28,17 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     private long lastCaptureElapsedMs;
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isConnectedForRuntimeCheck() {
         return activeService != null;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCrashedForRuntimeCheck() {
         return runtimeCrashed;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String runtimeDetailForRuntimeCheck() {
         NavAccessibilityService service = activeService;
         if (service != null) {
@@ -42,6 +48,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         return lastRuntimeDetail;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveWindowCapture(Context context, String packageName, String reason) {
         NavAccessibilityService service = activeService;
         if (service == null) {
@@ -53,6 +60,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onServiceConnected() {
         super.onServiceConnected();
         activeService = this;
@@ -63,6 +71,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) {
             return;
@@ -81,6 +90,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     }
 
     @Override
+    //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         if (activeService == this) {
             activeService = null;
@@ -91,10 +101,12 @@ public final class NavAccessibilityService extends AccessibilityService {
     }
 
     @Override
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onInterrupt() {
         NavCaptureStore.rawEvent(this, "accessibility_interrupt", "", "service interrupted");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void captureActiveWindow(String packageName, String source) {
         try {
             lastEventElapsedMs = SystemClock.elapsedRealtime();
@@ -149,11 +161,13 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavRouteEvidencePolicy.RawRouteState publishAccessibilityPayload(
             String packageName, String payload) {
         return publishAccessibilityPayload(packageName, payload, true);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavRouteEvidencePolicy.RawRouteState publishAccessibilityPayload(
             String packageName, String payload, boolean feedLiveParser) {
         NavCaptureStore.rawEvent(this, "accessibility", packageName, payload);
@@ -172,6 +186,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         return rawState;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private WazeRouteNodeScanResult captureWazeRouteNodesAcrossWindows(String source) {
         StringBuilder builder = new StringBuilder(512);
         builder.append(source)
@@ -220,6 +235,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         return new WazeRouteNodeScanResult(payload, hasRouteEvidence, windowCount);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void appendWazeRouteNodes(
             AccessibilityNodeInfo root,
             StringBuilder builder,
@@ -241,6 +257,7 @@ public final class NavAccessibilityService extends AccessibilityService {
                 root.findAccessibilityNodeInfosByViewId("com.waze:id/pillViewLabel"));
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void appendWazeRouteNodeMatches(
             StringBuilder builder,
             int[] nodeIndex,
@@ -263,6 +280,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean appendDirectWazeNode(
             StringBuilder builder,
             int index,
@@ -283,6 +301,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         return true;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void collectNode(
             String packageName,
             AccessibilityNodeInfo node,
@@ -315,6 +334,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void appendNode(
             String packageName,
             StringBuilder builder,
@@ -352,6 +372,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean shouldAppendBoundsForCapture(String packageName, String viewId) {
         if (NavTextNormalizer.sourceApp(packageName) != NavSnapshot.SourceApp.WAZE) {
             return false;
@@ -362,6 +383,7 @@ public final class NavAccessibilityService extends AccessibilityService {
                 || idLower.contains("laneguidance");
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(CharSequence value) {
         if (value == null) {
             return "";
@@ -369,14 +391,17 @@ public final class NavAccessibilityService extends AccessibilityService {
         return value.toString().replace('\n', ' ').replace('\r', ' ').trim();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String capField(String value) {
         return cap(value, FIELD_CHAR_LIMIT);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String capPayload(String value) {
         return cap(value, PAYLOAD_CHAR_LIMIT);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String cap(String value, int limit) {
         if (value == null) {
             return "";
@@ -388,11 +413,13 @@ public final class NavAccessibilityService extends AccessibilityService {
         return value.substring(0, prefixLength) + TRUNCATED_MARKER;
     }
 
+    //models CaptureState data here so transport and parser layers share a stable contract.
     private static final class CaptureState {
         int nodes;
         boolean truncated;
     }
 
+    //defines the WazeRouteNodeScanResult module boundary so related behavior stays readable inside one unit.
     private static final class WazeRouteNodeScanResult {
         final String payload;
         final boolean hasRouteEvidence;

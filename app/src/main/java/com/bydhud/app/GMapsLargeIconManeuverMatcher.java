@@ -1,14 +1,19 @@
 package com.bydhud.app;
 
+//maps google maps notification icons to maneuvers so HUD arrows can use native notification evidence.
+
 import android.graphics.Bitmap;
 
+//defines the GMapsLargeIconManeuverMatcher module boundary so related behavior stays readable inside one unit.
 final class GMapsLargeIconManeuverMatcher {
     private static final long ICON_TTL_MS = 5000L;
     private static final int MIN_CONFIDENCE = 70;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private GMapsLargeIconManeuverMatcher() {
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     static NavManeuverEvidence match(Bitmap bitmap, long nowElapsedMs) {
         if (bitmap == null || bitmap.getWidth() <= 0 || bitmap.getHeight() <= 0) {
             return NavManeuverEvidence.NONE;
@@ -22,6 +27,7 @@ final class GMapsLargeIconManeuverMatcher {
                 nowElapsedMs + ICON_TTL_MS, "largeIcon:" + best.name);
     }
 
+    //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static Known bestMatch(Signature signature) {
         Known best = null;
         for (Known candidate : KNOWN) {
@@ -70,6 +76,7 @@ final class GMapsLargeIconManeuverMatcher {
                             + "000000000000000")
     };
 
+    //defines the Known module boundary so related behavior stays readable inside one unit.
     private static final class Known {
         final String name;
         final NavSnapshot.Maneuver maneuver;
@@ -86,20 +93,24 @@ final class GMapsLargeIconManeuverMatcher {
             this.confidence = confidence;
         }
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         static Known fromBits(String name, NavSnapshot.Maneuver maneuver,
                 int sourceManeuver, String bits) {
             return new Known(name, maneuver, sourceManeuver, Signature.fromBits(bits), 100);
         }
     }
 
+    //defines the Signature module boundary so related behavior stays readable inside one unit.
     static final class Signature {
         private static final int SIZE = 15;
         private final boolean[] bits;
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         private Signature(boolean[] bits) {
             this.bits = bits;
         }
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         static Signature from(Bitmap bitmap) {
             boolean[] bits = new boolean[SIZE * SIZE];
             for (int y = 0; y < SIZE; y++) {
@@ -118,6 +129,7 @@ final class GMapsLargeIconManeuverMatcher {
             return new Signature(bits);
         }
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         static Signature fromBits(String value) {
             if (value == null || value.length() != SIZE * SIZE) {
                 throw new IllegalArgumentException("signature must be 225 bits");
@@ -129,6 +141,7 @@ final class GMapsLargeIconManeuverMatcher {
             return new Signature(bits);
         }
 
+        //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
         int hammingDistance(Signature other) {
             int distance = 0;
             for (int i = 0; i < bits.length; i++) {

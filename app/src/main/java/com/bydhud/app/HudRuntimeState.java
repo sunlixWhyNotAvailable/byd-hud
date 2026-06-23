@@ -1,9 +1,12 @@
 package com.bydhud.app;
 
+//records runtime heartbeat state so supervisor decisions can distinguish alive and stale services.
+
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.SystemClock;
 
+//models HudRuntimeState data here so transport and parser layers share a stable contract.
 final class HudRuntimeState {
     private static final String PREFS_NAME = "byd_hud_runtime_state";
     private static final String KEY_RUNNING = "running";
@@ -13,9 +16,11 @@ final class HudRuntimeState {
     private static final String KEY_STOP_REASON = "stop_reason";
     private static final long LIVE_TTL_MS = 90_000L;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudRuntimeState() {
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void markStarted(Context context, String reason) {
         long now = SystemClock.elapsedRealtime();
         prefs(context).edit()
@@ -27,6 +32,7 @@ final class HudRuntimeState {
         recordLifecycleHook(context, "started", reason);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void markHeartbeat(Context context, String reason) {
         long now = SystemClock.elapsedRealtime();
         prefs(context).edit()
@@ -37,6 +43,7 @@ final class HudRuntimeState {
         recordLifecycleHook(context, "heartbeat", reason);
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void markStopped(Context context, String reason) {
         prefs(context).edit()
                 .putBoolean(KEY_RUNNING, false)
@@ -45,6 +52,7 @@ final class HudRuntimeState {
         recordLifecycleHook(context, "stopped", reason);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isAlive(Context context, long nowElapsedMs) {
         SharedPreferences prefs = prefs(context);
         if (!prefs.getBoolean(KEY_RUNNING, false)) {
@@ -55,6 +63,7 @@ final class HudRuntimeState {
         return lastHeartbeat > 0L && ageMs >= 0L && ageMs <= LIVE_TTL_MS;
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static String summary(Context context, long nowElapsedMs) {
         SharedPreferences prefs = prefs(context);
         long lastHeartbeat = prefs.getLong(KEY_LAST_HEARTBEAT, 0L);
@@ -69,10 +78,12 @@ final class HudRuntimeState {
         return "stopped reason=" + prefs.getString(KEY_STOP_REASON, "");
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void recordLifecycleHook(Context context, String lifecycle, String reason) {
         recordLifecycleHook(context, lifecycle, reason, SystemClock.elapsedRealtime());
     }
 
+    //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void recordLifecycleHook(
             Context context,
             String lifecycle,
@@ -89,15 +100,18 @@ final class HudRuntimeState {
                         + " state=" + safeLog(summary(context, nowElapsedMs)));
     }
 
+    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safeLog(String value) {
         return safe(value).replace(' ', '_');
     }

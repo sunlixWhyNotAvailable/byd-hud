@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//checks visible app state so visual capture only runs when the target app is actually on screen.
+
 import android.content.Context;
 import android.util.Log;
 
@@ -10,6 +12,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+//defines the NavAppDisplayController module boundary so related behavior stays readable inside one unit.
 final class NavAppDisplayController {
     private static final String TAG = "BydHudNavAppDisplay";
     private static final String CHANNEL = "nav_app_display";
@@ -51,12 +54,15 @@ final class NavAppDisplayController {
     private static final Pattern TASK_ID_PATTERN =
             Pattern.compile(".*taskId=([0-9]+).*");
 
+    //defines the Listener module boundary so related behavior stays readable inside one unit.
     interface Listener {
+        //keeps this step explicit so callers can rely on one documented behavior boundary.
         void onNavAppDisplayChanged();
     }
 
     private static NavAppDisplayController instance;
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static synchronized NavAppDisplayController get(Context context) {
         if (instance == null) {
             instance = new NavAppDisplayController(context.getApplicationContext());
@@ -64,10 +70,12 @@ final class NavAppDisplayController {
         return instance;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavAppDisplayState parseTaskForTest(String packageName, String dumpsys) {
         return parseTask(packageName, dumpsys);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static int parseDashboardDisplayIdForTest(String dumpsys) {
         return parseDashboardDisplayId(dumpsys);
     }
@@ -79,28 +87,33 @@ final class NavAppDisplayController {
     private String activeDashboardPackage = "";
     private Listener listener;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAppDisplayController(Context context) {
         this.context = context.getApplicationContext();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     void setListener(Listener listener) {
         synchronized (lock) {
             this.listener = listener;
         }
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isMoveInProgress() {
         synchronized (lock) {
             return moveInProgress;
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String activeDashboardPackage() {
         synchronized (lock) {
             return activeDashboardPackage;
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     NavAppDisplayState lastState(String packageName) {
         String normalized = normalizePackage(packageName);
         synchronized (lock) {
@@ -117,6 +130,7 @@ final class NavAppDisplayController {
                 "unknown");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     NavAppDisplayState checkDisplay(String packageName, String reason) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
@@ -165,18 +179,22 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveToDashboard(String packageName, String reason) {
         move(packageName, true, reason);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveToMain(String packageName, String reason) {
         move(packageName, false, reason);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     void toggleDisplay(String packageName, String reason) {
         move(packageName, null, reason);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveIndependentDashboardApp(String packageName, boolean toDashboard, String reason) {
         String normalized = normalizePackage(packageName);
         String label = toDashboard ? "independent_dashboard_on" : "independent_dashboard_off";
@@ -190,6 +208,7 @@ final class NavAppDisplayController {
         worker.start();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void move(String packageName, Boolean toDashboard, String reason) {
         String normalized = normalizePackage(packageName);
         String label = toDashboard == null
@@ -209,6 +228,7 @@ final class NavAppDisplayController {
         worker.start();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void moveTask(String packageName, Boolean toDashboard, String reason) {
         String label = toDashboard == null
                 ? "toggle_display"
@@ -278,6 +298,7 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void moveIndependentDashboardAppBlocking(
             String packageName,
             boolean toDashboard,
@@ -371,6 +392,7 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean returnPreviousDashboardApp(String nextPackageName, String reason) {
         String previous;
         synchronized (lock) {
@@ -402,6 +424,7 @@ final class NavAppDisplayController {
         return false;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     NavAppDisplayState moveTaskToDisplayBlocking(
             String packageName,
             int targetDisplay,
@@ -471,6 +494,7 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavAppDisplayState waitForDashboardDisplay(String packageName, String reason) {
         NavAppDisplayState last = checkDisplay(packageName, reason + "-initial");
         long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
@@ -482,6 +506,7 @@ final class NavAppDisplayController {
         return last;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavAppDisplayState waitForMainDisplay(String packageName, String reason) {
         NavAppDisplayState last = checkDisplay(packageName, reason + "-initial");
         long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
@@ -494,6 +519,7 @@ final class NavAppDisplayController {
         return last;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void sleepDisplayConfirmInterval() {
         try {
             Thread.sleep(DISPLAY_CONFIRM_INTERVAL_MS);
@@ -502,6 +528,7 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int resolveDashboardDisplay(String packageName) throws IOException {
         LocalAdbBridge.ShellResult displayDump = runCommand(
                 packageName,
@@ -513,6 +540,7 @@ final class NavAppDisplayController {
         return FALLBACK_DASHBOARD_DISPLAY_ID;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private LocalAdbBridge.ShellResult runCommand(
             String packageName,
             String command,
@@ -526,6 +554,7 @@ final class NavAppDisplayController {
         return result;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean beginMove(String packageName, String status) {
         synchronized (lock) {
             if (moveInProgress) {
@@ -542,6 +571,7 @@ final class NavAppDisplayController {
         return true;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void endMove(String packageName) {
         synchronized (lock) {
             moveInProgress = false;
@@ -550,6 +580,7 @@ final class NavAppDisplayController {
         notifyStatusChanged();
     }
 
+    //renders this UI section here so screen structure stays traceable during preview and car testing.
     private NavAppDisplayState remember(NavAppDisplayState state) {
         NavAppDisplayState safeState = state == null
                 ? new NavAppDisplayState(
@@ -572,6 +603,7 @@ final class NavAppDisplayController {
         return safeState;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void notifyStatusChanged() {
         Listener callback;
         synchronized (lock) {
@@ -582,6 +614,7 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void log(String packageName, String line) {
         String safePackage = normalizePackage(packageName);
         String safeLine = safe(line);
@@ -590,6 +623,7 @@ final class NavAppDisplayController {
         NavCaptureStore.rawEvent(context, CHANNEL, safePackage, safeLine);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static NavAppDisplayState parseTask(String packageName, String dumpsys) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty() || dumpsys == null || dumpsys.isEmpty()) {
@@ -638,6 +672,7 @@ final class NavAppDisplayController {
         return taskFromBlock(normalized, currentTaskId, currentDisplayId, block);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int[] parseTaskHeader(String line, int fallbackDisplayId) {
         Matcher root = ROOT_TASK_PATTERN.matcher(line);
         if (!root.matches()) {
@@ -662,6 +697,7 @@ final class NavAppDisplayController {
         return null;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int[] parseInlineTaskValues(String line, int fallbackDisplayId) {
         Matcher taskDisplay = TASK_ID_DISPLAY_PATTERN.matcher(line);
         if (taskDisplay.matches()) {
@@ -694,6 +730,7 @@ final class NavAppDisplayController {
         return null;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static NavAppDisplayState taskFromBlock(
             String packageName,
             int taskId,
@@ -714,6 +751,7 @@ final class NavAppDisplayController {
                 "parsed");
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int parseDashboardDisplayId(String dumpsys) {
         String safe = dumpsys == null ? "" : dumpsys;
         int primary = findDisplayByName(safe, PRIMARY_DASHBOARD_DISPLAY_NAME, false);
@@ -746,6 +784,7 @@ final class NavAppDisplayController {
         return FALLBACK_DASHBOARD_DISPLAY_ID;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static int findDisplayByName(String dumpsys, String name, boolean prefix) {
         String[] lines = dumpsys.split("\\r?\\n");
         int currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -782,6 +821,7 @@ final class NavAppDisplayController {
         return NavAppDisplayState.DISPLAY_UNKNOWN;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean containsPackage(String text, String packageName) {
         if (text == null || packageName == null || packageName.isEmpty()) {
             return false;
@@ -793,6 +833,7 @@ final class NavAppDisplayController {
         return packagePattern.matcher(text).find();
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static boolean parseVisible(String text) {
         String value = text == null ? "" : text;
         if (value.contains("visible=false")) {
@@ -804,6 +845,7 @@ final class NavAppDisplayController {
         return true;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int parseInt(String value, int fallback) {
         try {
             return Integer.parseInt(value);
@@ -812,6 +854,7 @@ final class NavAppDisplayController {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String shortOutput(String value) {
         String safe = safe(value).replace('\n', ' ').replace('\r', ' ');
         if (safe.length() > 180) {
@@ -820,10 +863,12 @@ final class NavAppDisplayController {
         return safe;
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }

@@ -1,7 +1,10 @@
 package com.bydhud.app;
 
+//repairs runtime permissions through adb so DiLink updates do not silently break capture.
+
 import android.content.Context;
 
+//defines the NavRuntimePermissionRepair module boundary so related behavior stays readable inside one unit.
 final class NavRuntimePermissionRepair {
     private static final Object LOCK = new Object();
     private static final long MIN_REPAIR_INTERVAL_MS = 60_000L;
@@ -9,9 +12,11 @@ final class NavRuntimePermissionRepair {
     private static boolean running;
     private static long lastStartedMs;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavRuntimePermissionRepair() {
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void checkAndRepairAsync(
             Context context,
             String reason,
@@ -40,6 +45,7 @@ final class NavRuntimePermissionRepair {
         worker.start();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static LocalAdbBridge.Result checkAndRepairBlocking(
             Context context,
             String reason,
@@ -78,6 +84,7 @@ final class NavRuntimePermissionRepair {
         return result;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void sleepQuietly(long delayMs) {
         try {
             Thread.sleep(delayMs);
@@ -86,6 +93,7 @@ final class NavRuntimePermissionRepair {
         }
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.trim();
     }

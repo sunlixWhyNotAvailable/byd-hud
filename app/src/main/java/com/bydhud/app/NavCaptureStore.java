@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//writes navigation evidence to dated folders so parser regressions can be reproduced from field data.
+
 import android.content.Context;
 import android.os.SystemClock;
 import android.util.Log;
@@ -11,6 +13,7 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
+//defines the NavCaptureStore module boundary so related behavior stays readable inside one unit.
 final class NavCaptureStore {
     private static final String TAG = "BydHudNavCapture";
     private static final String DIR = "nav-capture";
@@ -18,9 +21,11 @@ final class NavCaptureStore {
     private static final String SNAPSHOTS_FILE = "nav_snapshots.jsonl";
     static final long MAX_LOG_BYTES = 2L * 1024L * 1024L;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavCaptureStore() {
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logDir(Context context) {
         File dir = new File(NavigationLogStorage.navCaptureDir(context), todayDir());
         if (!dir.exists() && !dir.mkdirs()) {
@@ -29,10 +34,12 @@ final class NavCaptureStore {
         return dir;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String todayDir() {
         return new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date());
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void rawEvent(Context context, String channel, String packageName, String payload) {
         append(context, RAW_EVENTS_FILE, "{"
                 + "\"t\":" + SystemClock.elapsedRealtime()
@@ -42,6 +49,7 @@ final class NavCaptureStore {
                 + "}");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void snapshot(Context context, NavSnapshot snapshot) {
         if (snapshot == null) {
             return;
@@ -60,6 +68,7 @@ final class NavCaptureStore {
                 + "}");
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static synchronized void append(Context context, String fileName, String line) {
         File file = new File(logDir(context), fileName);
         try (FileWriter writer = new FileWriter(file, true)) {
@@ -74,6 +83,7 @@ final class NavCaptureStore {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean rotateIfNeeded(File file) {
         if (!shouldRotate(file.length())) {
             return false;
@@ -101,10 +111,12 @@ final class NavCaptureStore {
         return true;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldRotate(long byteCount) {
         return byteCount > MAX_LOG_BYTES;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String esc(String value) {
         if (value == null) {
             return "";
@@ -146,6 +158,7 @@ final class NavCaptureStore {
         return builder.toString();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void appendHexControl(StringBuilder builder, char c) {
         final String hex = "0123456789ABCDEF";
         builder.append("\\u00");

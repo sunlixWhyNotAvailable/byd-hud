@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//models crop candidates so visual parsing can choose the most plausible HUD cue region.
+
 final class WazeCropCandidate {
     final long elapsedRealtimeMs;
     final int displayId;
@@ -20,6 +22,7 @@ final class WazeCropCandidate {
     final int laneComponents;
     final boolean laneBlocksSingleFallback;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     WazeCropCandidate(
             long elapsedRealtimeMs,
             int displayId,
@@ -47,6 +50,7 @@ final class WazeCropCandidate {
                 null);
     }
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     WazeCropCandidate(
             long elapsedRealtimeMs,
             int displayId,
@@ -83,6 +87,7 @@ final class WazeCropCandidate {
         this.laneBlocksSingleFallback = safeAnalysis.blocksSingleFallback;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     String toJsonLine() {
         return "{"
                 + "\"t\":" + elapsedRealtimeMs

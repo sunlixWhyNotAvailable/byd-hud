@@ -1,9 +1,12 @@
 package com.bydhud.app;
 
+//keeps adb wire packets explicit so the bridge can validate headers before talking to DiLink adb.
+
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 
+//defines the AdbPacket module boundary so related behavior stays readable inside one unit.
 final class AdbPacket {
     static final int A_CNXN = command("CNXN");
     static final int A_AUTH = command("AUTH");
@@ -24,6 +27,7 @@ final class AdbPacket {
     final int arg1;
     final byte[] payload;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     AdbPacket(int command, int arg0, int arg1, byte[] payload) {
         this.command = command;
         this.arg0 = arg0;
@@ -31,6 +35,7 @@ final class AdbPacket {
         this.payload = payload == null ? new byte[0] : payload;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static int command(String ascii) {
         if (ascii == null || ascii.length() != 4) {
             throw new IllegalArgumentException("ADB command must be four ASCII chars");
@@ -41,6 +46,7 @@ final class AdbPacket {
                 | (ascii.charAt(3) << 24);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static int checksum(byte[] payload) {
         int checksum = 0;
         if (payload != null) {
@@ -51,6 +57,7 @@ final class AdbPacket {
         return checksum;
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     static void write(OutputStream out, int command, int arg0, int arg1, byte[] payload)
             throws IOException {
         byte[] safePayload = payload == null ? new byte[0] : payload;
@@ -66,6 +73,7 @@ final class AdbPacket {
         out.flush();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static AdbPacket read(InputStream in) throws IOException {
         byte[] header = new byte[24];
         readFully(in, header);
@@ -85,6 +93,7 @@ final class AdbPacket {
         return new AdbPacket(command, arg0, arg1, payload);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void readFully(InputStream in, byte[] buffer) throws IOException {
         int offset = 0;
         while (offset < buffer.length) {
@@ -96,6 +105,7 @@ final class AdbPacket {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static int intLe(byte[] buffer, int offset) {
         return (buffer[offset] & 0xff)
                 | ((buffer[offset + 1] & 0xff) << 8)
@@ -103,6 +113,7 @@ final class AdbPacket {
                 | ((buffer[offset + 3] & 0xff) << 24);
     }
 
+    //sends encoded data here so transport side effects stay behind a single boundary.
     private static void writeIntLe(OutputStream out, int value) throws IOException {
         out.write(value & 0xff);
         out.write((value >>> 8) & 0xff);

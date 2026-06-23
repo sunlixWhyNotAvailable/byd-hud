@@ -1,6 +1,9 @@
 package com.bydhud.app;
 
+//keeps route evidence thresholds explicit so short parser gaps are not mistaken for route end.
+
 final class NavRouteEvidencePolicy {
+    //models RawRouteState data here so transport and parser layers share a stable contract.
     enum RawRouteState {
         ACTIVE_ROUTE,
         PREVIEW,
@@ -9,13 +12,16 @@ final class NavRouteEvidencePolicy {
         UNKNOWN
     }
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavRouteEvidencePolicy() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasRawRouteEvidence(String packageName, String payload) {
         return classifyRawPayload(packageName, payload) == RawRouteState.ACTIVE_ROUTE;
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     static RawRouteState classifyRawPayload(String packageName, String payload) {
         String safePayload = payload == null ? "" : payload;
         if (safePayload.trim().isEmpty()) {
@@ -42,6 +48,7 @@ final class NavRouteEvidencePolicy {
                 : RawRouteState.UNKNOWN;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isRelevantAccessibilityPayload(String packageName, String payload) {
         NavSnapshot.SourceApp sourceApp = NavTextNormalizer.sourceApp(packageName);
         if (sourceApp == NavSnapshot.SourceApp.WAZE) {
@@ -50,6 +57,7 @@ final class NavRouteEvidencePolicy {
         return true;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasWazeRouteEvidence(String payload) {
         String lower = NavTextNormalizer.lower(payload);
         boolean hasDistance = NavTextNormalizer.distanceMeters(payload, -1) >= 0
@@ -68,6 +76,7 @@ final class NavRouteEvidencePolicy {
         return hasDistance && (hasRoad || hasEta);
     }
 
+    //classifies raw evidence here so later decisions can use stable route state labels.
     private static RawRouteState classifyGoogleMapsPayload(String payload) {
         String lower = NavTextNormalizer.lower(payload);
         if (isGoogleMapsNoRouteOrPreview(lower)) {
@@ -79,6 +88,7 @@ final class NavRouteEvidencePolicy {
         return RawRouteState.NO_ROUTE;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasGoogleMapsRouteEvidence(String payload) {
         String lower = NavTextNormalizer.lower(payload);
         boolean hasDistance = NavTextNormalizer.distanceMeters(payload, -1) >= 0
@@ -103,6 +113,7 @@ final class NavRouteEvidencePolicy {
         return hasDistance && (hasInstruction || hasEta);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isGoogleMapsNoRouteOrPreview(String lower) {
         boolean previewMarker = lower.contains("route preview")
                 || lower.contains("selected route")
@@ -115,6 +126,7 @@ final class NavRouteEvidencePolicy {
         return previewMarker && !hasGoogleMapsInstructionPanel(lower);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasGoogleMapsInstructionPanel(String lower) {
         return lower.contains("navigation_instruction_panel")
                 || lower.contains("step_instruction_container")
@@ -124,6 +136,7 @@ final class NavRouteEvidencePolicy {
                 || lower.contains("close navigation");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isWazeArrivalCandidate(String payload) {
         String lower = NavTextNormalizer.lower(payload);
         return lower.contains("arriving at")
@@ -131,6 +144,7 @@ final class NavRouteEvidencePolicy {
                 || lower.contains("you have arrived");
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasGenericRouteEvidence(String payload) {
         String lower = NavTextNormalizer.lower(payload);
         boolean hasDistance = NavTextNormalizer.distanceMeters(payload, -1) >= 0

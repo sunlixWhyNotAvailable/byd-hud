@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//parses activity tasks so runtime can detect whether navigation apps are visible or backgrounded.
+
 import android.app.ActivityManager;
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
@@ -20,6 +22,7 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+//defines the NavAppTaskScanner module boundary so related behavior stays readable inside one unit.
 final class NavAppTaskScanner {
     private static final String COMMAND = "dumpsys activity activities";
     private static final int MAIN_DISPLAY_ID = 0;
@@ -41,6 +44,7 @@ final class NavAppTaskScanner {
 
     private static NavAppTaskScanner instance;
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static synchronized NavAppTaskScanner get(Context context) {
         if (instance == null) {
             instance = new NavAppTaskScanner(context.getApplicationContext());
@@ -52,10 +56,12 @@ final class NavAppTaskScanner {
     private final Object lock = new Object();
     private Snapshot snapshot;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAppTaskScanner(Context context) {
         this.context = context.getApplicationContext();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     Snapshot currentSnapshot() {
         synchronized (lock) {
             if (snapshot != null) {
@@ -71,6 +77,7 @@ final class NavAppTaskScanner {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     Snapshot forceScan() {
         Snapshot scanned = scanWithTasks();
         synchronized (lock) {
@@ -79,6 +86,7 @@ final class NavAppTaskScanner {
         return scanned;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Snapshot scanWithTasks() {
         long now = System.currentTimeMillis();
         Map<String, RowBuilder> rows = collectProcessRows();
@@ -106,11 +114,13 @@ final class NavAppTaskScanner {
         return result;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Snapshot scanProcessOnly(String status) {
         long now = System.currentTimeMillis();
         return buildSnapshot(collectProcessRows(), now, "process", status, false);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Map<String, RowBuilder> collectProcessRows() {
         Map<String, RowBuilder> rows = new HashMap<>();
         ActivityManager manager = (ActivityManager) context.getSystemService(Context.ACTIVITY_SERVICE);
@@ -143,6 +153,7 @@ final class NavAppTaskScanner {
         return rows;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private void parseTaskRows(String dumpsys, Map<String, RowBuilder> rows) {
         String safeDump = dumpsys == null ? "" : dumpsys;
         String[] lines = safeDump.split("\\r?\\n");
@@ -169,6 +180,7 @@ final class NavAppTaskScanner {
         parseTaskBlock(currentTaskId, currentDisplayId, block, rows);
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private void parseTaskBlock(
             int taskId,
             int displayId,
@@ -197,6 +209,7 @@ final class NavAppTaskScanner {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private Set<String> extractInstalledPackages(String value) {
         Set<String> packages = new HashSet<>();
         Matcher matcher = PACKAGE_PATTERN.matcher(value == null ? "" : value);
@@ -209,11 +222,13 @@ final class NavAppTaskScanner {
         return packages;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isVisiblePackage(String packageName) {
         return !packageName.isEmpty()
                 && !NavAppFilter.shouldHideFromCaptureList(context, packageName);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isInstalledPackage(String packageName) {
         try {
             context.getPackageManager().getApplicationInfo(packageName, 0);
@@ -223,6 +238,7 @@ final class NavAppTaskScanner {
         }
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int[] parseTaskHeader(String line, int fallbackDisplayId) {
         Matcher root = ROOT_TASK_PATTERN.matcher(line);
         if (!root.matches()) {
@@ -248,6 +264,7 @@ final class NavAppTaskScanner {
         };
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static boolean parseVisible(String block) {
         String safe = block == null ? "" : block;
         if (safe.contains("visible=false") || safe.contains("isVisible=false")) {
@@ -256,6 +273,7 @@ final class NavAppTaskScanner {
         return safe.contains("visible=true") || safe.contains("isVisible=true") || !safe.isEmpty();
     }
 
+    //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private Snapshot buildSnapshot(
             Map<String, RowBuilder> rows,
             long scannedAtMs,
@@ -274,6 +292,7 @@ final class NavAppTaskScanner {
         }
         Collections.sort(result, new Comparator<Row>() {
             @Override
+            //keeps this step explicit so callers can rely on one documented behavior boundary.
             public int compare(Row left, Row right) {
                 if (left.hasTask != right.hasTask) {
                     return left.hasTask ? -1 : 1;
@@ -292,12 +311,14 @@ final class NavAppTaskScanner {
         return new Snapshot(result, scannedAtMs, formatScanTime(scannedAtMs), source, status);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static String formatScanTime(long timeMs) {
         synchronized (TIME_FORMAT) {
             return TIME_FORMAT.format(new Date(timeMs));
         }
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int parseInt(String value, int fallback) {
         try {
             return Integer.parseInt(value);
@@ -306,14 +327,17 @@ final class NavAppTaskScanner {
         }
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String safe(String value) {
         return value == null ? "" : value.replace('\n', ' ').replace('\r', ' ').trim();
     }
 
+    //models Snapshot data here so transport and parser layers share a stable contract.
     static final class Snapshot {
         final List<Row> rows;
         final long scannedAtMs;
@@ -330,6 +354,7 @@ final class NavAppTaskScanner {
         }
     }
 
+    //defines the Row module boundary so related behavior stays readable inside one unit.
     static final class Row {
         final String packageName;
         final String processName;
@@ -360,6 +385,7 @@ final class NavAppTaskScanner {
         }
     }
 
+    //defines the RowBuilder module boundary so related behavior stays readable inside one unit.
     private static final class RowBuilder {
         final String packageName;
         String processName = "";
@@ -374,6 +400,7 @@ final class NavAppTaskScanner {
             this.packageName = packageName;
         }
 
+        //renders this UI section here so screen structure stays traceable during preview and car testing.
         Row toRow() {
             return new Row(
                     packageName,

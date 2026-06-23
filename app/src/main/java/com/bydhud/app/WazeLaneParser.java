@@ -1,9 +1,13 @@
 package com.bydhud.app;
 
+//parses Waze lane graphics so HUD lanes can mirror the app guidance.
+
 final class WazeLaneParser {
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeLaneParser() {
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static String parseLaneText(String text) {
         String lower = NavTextNormalizer.lower(text);
         if (lower.isEmpty()) {
@@ -39,6 +43,7 @@ final class WazeLaneParser {
         return builder.toString();
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static int laneCountFromSignature(String laneString) {
         String clean = laneString == null ? "" : laneString.trim();
         if (clean.isEmpty()) {
@@ -54,10 +59,12 @@ final class WazeLaneParser {
         return count;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasMultiLaneSignature(String laneString) {
         return laneCountFromSignature(laneString) > 1;
     }
 
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static int laneCount(String lower) {
         if (lower.contains("2 lane") || lower.contains("two lane")
                 || lower.contains("either lane")) {

@@ -1,9 +1,13 @@
 package com.bydhud.app;
 
+//limits accessibility node capture so logs contain useful navigation evidence without excessive noise.
+
 final class NavAccessibilityNodeCapturePolicy {
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAccessibilityNodeCapturePolicy() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldLogNodeForCapture(
             String packageName,
             String viewId,

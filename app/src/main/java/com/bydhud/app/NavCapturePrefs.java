@@ -1,5 +1,7 @@
 package com.bydhud.app;
 
+//stores capture limits so field logging can be enabled without unbounded storage growth.
+
 import android.content.Context;
 import android.content.SharedPreferences;
 
@@ -9,6 +11,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.TreeSet;
 
+//defines the NavCapturePrefs module boundary so related behavior stays readable inside one unit.
 final class NavCapturePrefs {
     private static final String PREFS_NAME = "byd_hud_nav_capture_prefs";
     private static final String KEY_CAPTURE_PACKAGES = "capture_packages";
@@ -16,9 +19,11 @@ final class NavCapturePrefs {
     private static final String KEY_LOG_ONLY_PACKAGES = "log_only_packages";
     private static final String KEY_OBSERVED_PACKAGES = "observed_packages";
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavCapturePrefs() {
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> getCapturePackages(Context context) {
         pruneHiddenPackages(
                 context,
@@ -33,6 +38,7 @@ final class NavCapturePrefs {
         return packages;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String getHudPackage(Context context) {
         String normalized = normalizePackage(prefs(context).getString(KEY_HUD_PACKAGE, ""));
         if (normalized.isEmpty() || NavAppFilter.shouldHideFromCaptureList(context, normalized)) {
@@ -48,6 +54,7 @@ final class NavCapturePrefs {
         return normalized;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> getLogOnlyPackages(Context context) {
         Set<String> stored =
                 prefs(context).getStringSet(KEY_LOG_ONLY_PACKAGES, Collections.emptySet());
@@ -56,6 +63,7 @@ final class NavCapturePrefs {
         return visible;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> getObservedPackages(Context context) {
         Set<String> stored = prefs(context).getStringSet(KEY_OBSERVED_PACKAGES, Collections.emptySet());
         Set<String> visible = NavAppFilter.visibleCapturePackages(context, stored);
@@ -63,6 +71,7 @@ final class NavCapturePrefs {
         return visible;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void addObservedPackage(Context context, String packageName) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty() || NavAppFilter.shouldHideFromCaptureList(context, normalized)) {
@@ -76,10 +85,12 @@ final class NavCapturePrefs {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void setCaptureEnabled(Context context, String packageName, boolean enabled) {
         setHudEnabled(context, packageName, enabled);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void setHudEnabled(Context context, String packageName, boolean enabled) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty() || NavAppFilter.shouldHideFromCaptureList(context, normalized)) {
@@ -108,6 +119,7 @@ final class NavCapturePrefs {
         editor.apply();
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void setLogOnlyEnabled(Context context, String packageName, boolean enabled) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty() || NavAppFilter.shouldHideFromCaptureList(context, normalized)) {
@@ -126,6 +138,7 @@ final class NavCapturePrefs {
         editor.putStringSet(KEY_LOG_ONLY_PACKAGES, packages).apply();
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCaptureEnabled(Context context, String packageName) {
         String normalized = normalizePackage(packageName);
         return !normalized.isEmpty()
@@ -134,6 +147,7 @@ final class NavCapturePrefs {
                 || getLogOnlyPackages(context).contains(normalized));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isHudEnabled(Context context, String packageName) {
         String normalized = normalizePackage(packageName);
         return !normalized.isEmpty()
@@ -141,11 +155,13 @@ final class NavCapturePrefs {
                 && normalized.equals(getHudPackage(context));
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isLogOnlyEnabled(Context context, String packageName) {
         String normalized = normalizePackage(packageName);
         return !normalized.isEmpty() && getLogOnlyPackages(context).contains(normalized);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedHudPackage(String packageName) {
         String normalized = normalizePackage(packageName);
         return "com.google.android.apps.maps".equals(normalized)
@@ -153,6 +169,7 @@ final class NavCapturePrefs {
                 || "com.waze".equals(normalized);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void migrateUnsupportedHudPackage(Context context, String normalizedPackage) {
         Set<String> logOnlyPackages = new HashSet<>(getLogOnlyPackages(context));
         logOnlyPackages.add(normalizedPackage);
@@ -162,10 +179,12 @@ final class NavCapturePrefs {
                 .apply();
     }
 
+    //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void pruneHiddenPackages(
             Context context,
             String key,
@@ -185,6 +204,7 @@ final class NavCapturePrefs {
         }
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);

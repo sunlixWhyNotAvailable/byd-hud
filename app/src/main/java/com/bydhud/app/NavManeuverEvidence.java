@@ -1,6 +1,9 @@
 package com.bydhud.app;
 
+//scores maneuver evidence so native, PNG, accessibility, and notification signals can be compared safely.
+
 final class NavManeuverEvidence {
+    //defines the Source module boundary so related behavior stays readable inside one unit.
     enum Source {
         NONE,
         LARGE_ICON,
@@ -18,6 +21,7 @@ final class NavManeuverEvidence {
     final long freshUntilElapsedMs;
     final String reason;
 
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavManeuverEvidence(Source source, NavSnapshot.Maneuver maneuver,
             int sourceManeuver, int confidence, long freshUntilElapsedMs, String reason) {
         this.source = source == null ? Source.NONE : source;
@@ -28,24 +32,28 @@ final class NavManeuverEvidence {
         this.reason = reason == null ? "" : reason;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavManeuverEvidence icon(NavSnapshot.Maneuver maneuver, int sourceManeuver,
             int confidence, long freshUntilElapsedMs, String reason) {
         return new NavManeuverEvidence(Source.LARGE_ICON, maneuver, sourceManeuver,
                 confidence, freshUntilElapsedMs, reason);
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     static NavManeuverEvidence text(NavSnapshot.Maneuver maneuver, int sourceManeuver,
             int confidence, long freshUntilElapsedMs, String reason) {
         return new NavManeuverEvidence(Source.TEXT, maneuver, sourceManeuver,
                 confidence, freshUntilElapsedMs, reason);
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isFreshAt(long nowElapsedMs) {
         return confidence >= 70
                 && maneuver != NavSnapshot.Maneuver.UNKNOWN
                 && nowElapsedMs <= freshUntilElapsedMs;
     }
 
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
     String summary() {
         return "source=" + source
                 + " maneuver=" + maneuver

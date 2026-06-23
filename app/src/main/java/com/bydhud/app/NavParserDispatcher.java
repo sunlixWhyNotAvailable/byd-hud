@@ -1,15 +1,20 @@
 package com.bydhud.app;
 
+//routes raw app evidence to the right parser so source-specific quirks stay isolated.
+
 final class NavParserDispatcher {
+    //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavParserDispatcher() {
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedPackage(String packageName) {
         NavSnapshot.SourceApp source = NavTextNormalizer.sourceApp(packageName);
         return source == NavSnapshot.SourceApp.GOOGLE_MAPS
                 || source == NavSnapshot.SourceApp.WAZE;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseNotification(
             String packageName,
             String title,
@@ -23,6 +28,7 @@ final class NavParserDispatcher {
                 category, ongoing, NavManeuverEvidence.NONE, System.currentTimeMillis());
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseNotification(
             String packageName,
             String title,
@@ -42,6 +48,7 @@ final class NavParserDispatcher {
         return null;
     }
 
+    //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseAccessibility(String packageName, String payload, HudState baseline) {
         NavSnapshot.SourceApp source = NavTextNormalizer.sourceApp(packageName);
         if (source == NavSnapshot.SourceApp.GOOGLE_MAPS) {
