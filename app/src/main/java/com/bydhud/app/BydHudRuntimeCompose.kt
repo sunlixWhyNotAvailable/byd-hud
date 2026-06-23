@@ -93,8 +93,6 @@ private enum class ManualMode {
     Raw
 }
 
-private const val AUTO_UPDATE_CHECK_DELAY_MS = 30_000L
-
 //models UpdateCheckState data here so transport and parser layers share a stable contract.
 private sealed class UpdateCheckState {
     //defines Checking UI/state support so Compose code can keep rendering intent explicit.
@@ -309,8 +307,6 @@ private fun RuntimeApp(activity: MainActivity) {
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     var updateState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Checking) }
     var appInForeground by remember { mutableStateOf(false) }
-    var autoUpdateDelayElapsed by rememberSaveable { mutableStateOf(false) }
-    var autoUpdateCheckAttempted by rememberSaveable { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
     val latestAutoUpdateCheckEnabled by rememberUpdatedState(autoUpdateCheckEnabled)
     val latestAppInForeground by rememberUpdatedState(appInForeground)
@@ -376,27 +372,30 @@ private fun RuntimeApp(activity: MainActivity) {
         onDispose { activity.lifecycle.removeObserver(observer) }
     }
 
-    LaunchedEffect(Unit) {
-        delay(AUTO_UPDATE_CHECK_DELAY_MS)
-        autoUpdateDelayElapsed = true
-    }
-
     LaunchedEffect(
-        autoUpdateDelayElapsed,
         latestAutoUpdateCheckEnabled,
         latestAppInForeground,
         latestShowSetupDialog,
         latestShowUpdateDialog
     ) {
-        //guard auto-check behind user setting, foreground, and no other modal.
-        if (autoUpdateDelayElapsed &&
-            !autoUpdateCheckAttempted &&
-            latestAutoUpdateCheckEnabled &&
+        //guard auto-check behind a background-armed timer so foreground opening can consume pending work immediately.
+        if (!latestAutoUpdateCheckEnabled ||
+            !latestAppInForeground ||
+            latestShowSetupDialog ||
+            latestShowUpdateDialog
+        ) {
+            return@LaunchedEffect
+        }
+        val remainingMs = AppUpdateManager.autoCheckDelayRemainingMs(activity) ?: return@LaunchedEffect
+        if (remainingMs > 0L) {
+            delay(remainingMs)
+        }
+        if (latestAutoUpdateCheckEnabled &&
             latestAppInForeground &&
             !latestShowSetupDialog &&
-            !latestShowUpdateDialog
+            !latestShowUpdateDialog &&
+            AppUpdateManager.consumeAutoCheckReady(activity)
         ) {
-            autoUpdateCheckAttempted = true
             beginUpdateCheck(force = false, showLatestResult = false)
         }
     }

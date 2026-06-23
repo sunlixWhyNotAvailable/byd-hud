@@ -20,9 +20,11 @@ import java.util.Locale
 
 //defines AppUpdateManager UI/state support so Compose code can keep rendering intent explicit.
 object AppUpdateManager {
+    const val AUTO_CHECK_DELAY_MS = 30_000L
     private const val PREFS_NAME = "bydhud_update_prefs"
     private const val KEY_AUTO_CHECK = "auto_check_enabled"
     private const val KEY_LAST_CHECK_MS = "last_check_ms"
+    private const val KEY_AUTO_CHECK_READY_AT_MS = "auto_check_ready_at_ms"
     private const val CHECK_THROTTLE_MS = 10 * 60 * 1000L
     private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
     private const val EXPECTED_PACKAGE_NAME = "com.bydhud.app"
@@ -53,7 +55,71 @@ object AppUpdateManager {
         context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_AUTO_CHECK, enabled)
+            .also { editor ->
+                if (!enabled) {
+                    editor.remove(KEY_AUTO_CHECK_READY_AT_MS)
+                }
+            }
             .apply()
+    }
+
+    @JvmStatic
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
+    fun armAutoCheckTimer(context: Context, delayMs: Long) {
+        armAutoCheckTimer(context, delayMs, System.currentTimeMillis())
+    }
+
+    @JvmStatic
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
+    fun armAutoCheckTimer(context: Context, delayMs: Long, nowMs: Long) {
+        if (!isAutoCheckEnabled(context)) {
+            return
+        }
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val readyAt = prefs.getLong(KEY_AUTO_CHECK_READY_AT_MS, 0L)
+        if (readyAt > 0L) {
+            return
+        }
+        prefs.edit()
+            .putLong(KEY_AUTO_CHECK_READY_AT_MS, nowMs + delayMs.coerceAtLeast(0L))
+            .apply()
+    }
+
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    fun autoCheckDelayRemainingMs(context: Context): Long? {
+        return autoCheckDelayRemainingMs(context, System.currentTimeMillis())
+    }
+
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    internal fun autoCheckDelayRemainingMs(context: Context, nowMs: Long): Long? {
+        if (!isAutoCheckEnabled(context)) {
+            return null
+        }
+        val readyAt = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getLong(KEY_AUTO_CHECK_READY_AT_MS, 0L)
+        if (readyAt <= 0L) {
+            return null
+        }
+        return (readyAt - nowMs).coerceAtLeast(0L)
+    }
+
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    fun consumeAutoCheckReady(context: Context): Boolean {
+        return consumeAutoCheckReady(context, System.currentTimeMillis())
+    }
+
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    internal fun consumeAutoCheckReady(context: Context, nowMs: Long): Boolean {
+        if (!isAutoCheckEnabled(context)) {
+            return false
+        }
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val readyAt = prefs.getLong(KEY_AUTO_CHECK_READY_AT_MS, 0L)
+        if (readyAt <= 0L || nowMs < readyAt) {
+            return false
+        }
+        prefs.edit().remove(KEY_AUTO_CHECK_READY_AT_MS).apply()
+        return true
     }
 
     //keeps this Compose helper focused so UI state changes remain easy to audit.

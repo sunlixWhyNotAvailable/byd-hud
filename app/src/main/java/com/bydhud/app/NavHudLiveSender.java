@@ -299,6 +299,26 @@ final class NavHudLiveSender {
         });
     }
 
+    //starts or schedules work here so lifecycle recovery follows one controlled path.
+    void onDashboardProjectionConfirmed(String packageName, NavAppDisplayState state) {
+        final String normalized = normalizePackage(packageName);
+        final boolean onDashboardDisplay = state != null && state.isOnDashboardDisplay();
+        handler.post(() -> {
+            if (!DashboardProjectionPolicy.shouldRestartWazeCropAfterDashboardProjection(
+                    normalized,
+                    activePackage,
+                    onDashboardDisplay)) {
+                return;
+            }
+            ensureWazeCropRunning("dashboard-projection-confirmed");
+            sendLatestIfReady("dashboard-projection-confirmed");
+            scheduleSendLoop();
+            log("dashboard projection confirmed package=" + normalized
+                    + " display=" + (state == null ? -1 : state.displayId)
+                    + " crop restart requested");
+        });
+    }
+
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void onWazeCropUnavailable(String reason) {
         final String safeReason = normalizeString(reason);

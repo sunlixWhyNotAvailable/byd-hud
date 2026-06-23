@@ -275,6 +275,7 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("onStop after explicit exit");
             return;
         }
+        AppUpdateManager.armAutoCheckTimer(this, AppUpdateManager.AUTO_CHECK_DELAY_MS);
         appendStatus("onStop background keepalive sending=" + sending);
     }
 
@@ -800,9 +801,9 @@ public final class MainActivity extends ComponentActivity {
         String activeDashboardPackage = controller.activeDashboardPackage();
         boolean runtimeBacked = app.isRuntimeBacked();
         boolean observed = observedPackages.contains(app.packageName);
-        boolean onDashboard = app.packageName.equals(activeDashboardPackage)
-                || (runtimeBacked && app.displayId > 0)
-                || (runtimeBacked && displayState.taskId >= 0 && displayState.isOnDashboardDisplay());
+        boolean onDashboard = DashboardProjectionPolicy.isManagedDashboardPackage(
+                app.packageName,
+                activeDashboardPackage);
         boolean supportedHud = isSupportedHudPackage(app.packageName);
         boolean installed = isPackageInstalled(app.packageName);
         return new ComposeAppRow(
@@ -1464,11 +1465,9 @@ public final class MainActivity extends ComponentActivity {
         NavAppDisplayController controller = NavAppDisplayController.get(this);
         NavAppDisplayState state = controller.lastState(normalized);
         String activeDashboardPackage = controller.activeDashboardPackage();
-        boolean cachedRuntimeDashboard = app.isRuntimeBacked()
-                && state.taskId >= 0
-                && state.isOnDashboardDisplay();
-        boolean onDashboard = normalized.equals(activeDashboardPackage)
-                || cachedRuntimeDashboard;
+        boolean onDashboard = DashboardProjectionPolicy.isManagedDashboardPackage(
+                normalized,
+                activeDashboardPackage);
         String label = onDashboard ? "Send to main" : "Send to dashboard";
         Button button = button(label,
                 v -> toggleIndependentDashboardDisplay(normalized, app.isRuntimeBacked()));
@@ -1490,8 +1489,9 @@ public final class MainActivity extends ComponentActivity {
         }
         NavAppDisplayState state = controller.lastState(normalized);
         String activeDashboardPackage = controller.activeDashboardPackage();
-        boolean currentlyProjected = normalized.equals(activeDashboardPackage)
-                || (runtimeBacked && state.isOnDashboardDisplay());
+        boolean currentlyProjected = DashboardProjectionPolicy.isManagedDashboardPackage(
+                normalized,
+                activeDashboardPackage);
         controller.moveIndependentDashboardApp(
                 normalized,
                 !currentlyProjected,

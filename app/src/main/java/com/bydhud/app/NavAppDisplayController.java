@@ -374,6 +374,7 @@ final class NavAppDisplayController {
             synchronized (lock) {
                 activeDashboardPackage = packageName;
             }
+            NavHudLiveSender.get(context).onDashboardProjectionConfirmed(packageName, confirmed);
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
