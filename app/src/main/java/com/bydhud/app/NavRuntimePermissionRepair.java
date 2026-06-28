@@ -55,11 +55,15 @@ final class NavRuntimePermissionRepair {
         NavRuntimePermissionStatus before = NavRuntimePermissionStatus.check(appContext);
         AppEventLogger.event(appContext, "nav_permission_repair start reason="
                 + safe(reason) + " status=" + before.summary());
-        if (before.readyForCapture()) {
+        LocalAdbBridge.AuthorizationPromptMode safeMode =
+                promptMode == null ? LocalAdbBridge.AuthorizationPromptMode.NEVER : promptMode;
+        if (before.readyForCapture()
+                && LocalAdbBridge.canShortCircuitReadyForCapture(safeMode)) {
             return LocalAdbBridge.Result.alreadyGranted(before.summary());
         }
 
-        if (before.settingsGranted()) {
+        if (before.settingsGranted()
+                && LocalAdbBridge.canShortCircuitReadyForCapture(safeMode)) {
             NavNotificationListenerService.requestRuntimeRebind(appContext, reason);
             sleepQuietly(REBIND_SETTLE_MS);
             NavRuntimePermissionStatus rebound = NavRuntimePermissionStatus.check(appContext);
@@ -75,8 +79,6 @@ final class NavRuntimePermissionRepair {
             return LocalAdbBridge.Result.partial(afterRebind.summary());
         }
 
-        LocalAdbBridge.AuthorizationPromptMode safeMode =
-                promptMode == null ? LocalAdbBridge.AuthorizationPromptMode.NEVER : promptMode;
         LocalAdbBridge.Result result =
                 LocalAdbBridge.grantNavCapturePermissions(appContext, safeMode);
         AppEventLogger.event(appContext, "nav_permission_repair adb_result "

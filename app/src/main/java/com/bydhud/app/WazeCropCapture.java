@@ -64,10 +64,13 @@ final class WazeCropCapture {
     private long lastDisplayCheckMs;
     private WazeAccessibilityGeometry latestAccessibilityGeometry = WazeAccessibilityGeometry.EMPTY;
     private long latestAccessibilityGeometryMs;
+    private final WazeFrameCaptureBackend frameBackend;
+    private final WazeCaptureDebugArtifacts debugArtifacts = new WazeCaptureDebugArtifacts();
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private WazeCropCapture(Context context) {
         this.context = context.getApplicationContext();
+        this.frameBackend = new WazeFrameCaptureBackend(this.context);
     }
 
     //classifies raw evidence here so later decisions can use stable route state labels.
@@ -234,12 +237,6 @@ final class WazeCropCapture {
         while (isActiveGeneration(workerGeneration)) {
             long now = SystemClock.elapsedRealtime();
             String shellDir = currentSessionShellDir();
-            if (!currentSessionShellWritable() || shellDir.isEmpty()) {
-                log(dir, "crop idle: shell capture path unavailable");
-                NavHudLiveSender.get(context).onWazeCropUnavailable("shell-path-unavailable");
-                sleepQuietly(CAPTURE_INTERVAL_MS);
-                continue;
-            }
             if (!NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE)) {
                 log(dir, "crop stopped: Waze not active HUD");
                 stop("not-active-hud");
@@ -271,9 +268,9 @@ final class WazeCropCapture {
             if (!isActiveGeneration(workerGeneration)) {
                 break;
             }
-            captureScreenshot(
+            captureFrame(
                     workerGeneration,
-                    state.displayId,
+                    state,
                     dir,
                     shellDir,
                     workerSessionName,
@@ -327,9 +324,9 @@ final class WazeCropCapture {
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private void captureScreenshot(
+    private void captureFrame(
             int workerGeneration,
-            int displayId,
+            NavAppDisplayState state,
             File dir,
             String shellDir,
             String workerSessionName,
@@ -342,25 +339,73 @@ final class WazeCropCapture {
             screenshotIndex++;
             index = screenshotIndex;
         }
-        String fileName = String.format(Locale.US, "screen_%04d.png", index);
-        String path = shellDir + "/" + fileName;
+        int displayId = state == null ? NavAppDisplayState.DISPLAY_UNKNOWN : state.displayId;
+        WazeFrameCaptureBackend.CaptureResult capture = frameBackend.capture(state);
+        String sourceFileName = "";
         try {
-            long captureStartMs = SystemClock.elapsedRealtime();
-            LocalAdbBridge.ShellResult result =
-                    LocalAdbBridge.runRuntimeShellCommand(
-                            context, "screencap -d " + displayId + " -p " + path);
-            long captureEndMs = SystemClock.elapsedRealtime();
-            if (result.success()) {
+            if (capture.frame == null) {
+                if (!currentSessionShellWritable() || shellDir.isEmpty()) {
+                    log(dir, "frame unavailable frameId=" + index
+                            + " backend=" + capture.backend
+                            + " reason=" + capture.reason
+                            + " fallbackSkipped=shell-path-unavailable");
+                    NavHudLiveSender.get(context).onWazeCropUnavailable(
+                            "frame-unavailable " + capture.reason);
+                    return;
+                }
+                sourceFileName = String.format(Locale.US, "screen_%04d.png", index);
+                String path = shellDir + "/" + sourceFileName;
+                long fallbackStartMs = SystemClock.elapsedRealtime();
+                LocalAdbBridge.ShellResult result =
+                        LocalAdbBridge.runRuntimeShellCommand(
+                                context, "screencap -d " + displayId + " -p " + path);
+                long fallbackEndMs = SystemClock.elapsedRealtime();
+                if (!result.success()) {
+                    log(dir, "frame unavailable frameId=" + index
+                            + " backend=" + capture.backend
+                            + " reason=" + capture.reason
+                            + " fallbackBackend=" + WazeFrameCaptureBackend.BACKEND_SCREENCAP_FALLBACK
+                            + " captureMs=" + (fallbackEndMs - fallbackStartMs)
+                            + " " + result.shortDetail());
+                    NavHudLiveSender.get(context).onWazeCropUnavailable(
+                            "frame-unavailable " + capture.reason);
+                    return;
+                }
+                Bitmap fallback = BitmapFactory.decodeFile(new File(dir, sourceFileName).getAbsolutePath());
+                if (fallback == null) {
+                    log(dir, "screencap fallback decode failed frameId=" + index);
+                    NavHudLiveSender.get(context).onWazeCropUnavailable(
+                            "screencap-fallback-decode-failed display=" + displayId);
+                    return;
+                }
+                capture = WazeFrameCaptureBackend.CaptureResult.okWithTiming(
+                        WazeFrameCaptureBackend.BACKEND_SCREENCAP_FALLBACK,
+                        fallback,
+                        fallbackStartMs,
+                        fallbackEndMs);
+            }
+            try {
                 if (!isActiveGeneration(workerGeneration)) {
                     return;
                 }
                 NavSnapshot snapshot = WazeRouteTracker.get(context).latestSnapshot();
-                File screenshot = new File(dir, fileName);
+                if (sourceFileName.isEmpty()) {
+                    sourceFileName = debugArtifacts.saveSourceFrame(dir, index, capture.frame);
+                }
                 long parseStartMs = SystemClock.elapsedRealtime();
                 long geometryStartMs = parseStartMs;
                 WazeAccessibilityGeometry geometry =
                         freshAccessibilityGeometry(geometryStartMs);
                 long geometryEndMs = SystemClock.elapsedRealtime();
+                String arrowInput = geometry.hasDirectionBounds()
+                        ? debugArtifacts.saveArrowInput(dir, index, capture.frame, geometry.directionBounds)
+                        : "";
+                String lanesInput = geometry.hasLaneGuidanceBounds()
+                        ? debugArtifacts.saveLanesInput(dir, index, capture.frame, geometry.laneGuidanceBounds)
+                        : "";
+                if (debugArtifacts.shouldWriteCompare(SystemClock.elapsedRealtime())) {
+                    saveScreencapCompare(displayId, shellDir, index);
+                }
                 long laneAnalysisStartMs = geometryEndMs;
                 long laneAnalysisEndMs = laneAnalysisStartMs;
                 long visualParseStartMs = laneAnalysisStartMs;
@@ -374,11 +419,11 @@ final class WazeCropCapture {
                 NavParserResult visualResult = null;
                 boolean activeInstructionPanel = false;
                 boolean visualNavigationCandidate = false;
-                laneAnalysis = WazeVisualCueParser.analyzeLaneGuidance(screenshot, geometry);
+                laneAnalysis = WazeVisualCueParser.analyzeLaneGuidance(capture.frame, geometry);
                 laneAnalysisEndMs = SystemClock.elapsedRealtime();
                 visualParseStartMs = laneAnalysisEndMs;
-                visualResult = WazeVisualCueParser.parseScreenshot(
-                        screenshot,
+                visualResult = WazeVisualCueParser.parseFrame(
+                        capture.frame,
                         snapshot,
                         laneAnalysis,
                         geometry,
@@ -386,11 +431,11 @@ final class WazeCropCapture {
                 visualParseEndMs = SystemClock.elapsedRealtime();
                 panelStartMs = visualParseEndMs;
                 activeInstructionPanel =
-                        WazeVisualCueParser.hasActiveInstructionPanel(screenshot);
+                        WazeVisualCueParser.hasActiveInstructionPanel(capture.frame);
                 panelEndMs = SystemClock.elapsedRealtime();
                 candidateStartMs = panelEndMs;
                 visualNavigationCandidate =
-                        WazeVisualCueParser.hasVisualNavigationCueCandidate(screenshot);
+                        WazeVisualCueParser.hasVisualNavigationCueCandidate(capture.frame);
                 candidateEndMs = SystemClock.elapsedRealtime();
                 long parseEndMs = candidateEndMs;
                 if (!isActiveGeneration(workerGeneration)) {
@@ -401,13 +446,13 @@ final class WazeCropCapture {
                         true,
                         index,
                         latestFrameId,
-                        parseEndMs - captureStartMs);
+                        parseEndMs - capture.captureStartMs);
                 boolean commitEligible = commitSkipReason.isEmpty();
                 String timingDetail = timingDetail(
                         index,
                         latestFrameId,
-                        captureStartMs,
-                        captureEndMs,
+                        capture.captureStartMs,
+                        capture.captureEndMs,
                         parseStartMs,
                         parseEndMs,
                         geometryEndMs - geometryStartMs,
@@ -423,10 +468,10 @@ final class WazeCropCapture {
                             "visual navigation cue", now);
                     NavHudLiveSender.get(context).onWazeVisualRouteEvidence(
                             "visual navigation cue");
-                    log(dir, "visual route evidence navigation cue file=" + fileName
+                    log(dir, "visual route evidence navigation cue file=" + sourceFileName
                             + " " + timingDetail);
                 } else if (visualNavigationCandidate) {
-                    log(dir, "visual route evidence skipped file=" + fileName
+                    log(dir, "visual route evidence skipped file=" + sourceFileName
                             + " " + timingDetail);
                 }
                 if (visualResult != null) {
@@ -435,7 +480,7 @@ final class WazeCropCapture {
                                 .updateFromWazeVisualCue(WAZE_PACKAGE, visualResult);
                     } else {
                         NavSnapshot visualSnapshot = visualResult.snapshot;
-                        log(dir, "visual commit skipped file=" + fileName
+                        log(dir, "visual commit skipped file=" + sourceFileName
                                 + " maneuver=" + snapshotManeuver(visualSnapshot)
                                 + " lanes=" + (visualSnapshot == null
                                 ? "" : safe(visualSnapshot.laneString))
@@ -444,18 +489,18 @@ final class WazeCropCapture {
                 } else if (blocksSingleFallback(laneAnalysis)) {
                     if (commitEligible) {
                         NavHudLiveSender.get(context).onWazeUnknownLaneRow(
-                                "file=" + fileName + " reason=" + laneAnalysis.reason.name());
+                                "file=" + sourceFileName + " reason=" + laneAnalysis.reason.name());
                     } else {
-                        log(dir, "unknown lane row skipped file=" + fileName
+                        log(dir, "unknown lane row skipped file=" + sourceFileName
                                 + " reason=" + laneAnalysis.reason.name()
                                 + " " + timingDetail);
                     }
                 } else if (!visualNavigationCandidate) {
                     if (commitEligible) {
                         NavHudLiveSender.get(context).onWazeCropUnavailable(
-                                "main-visible-no-cue file=" + fileName);
+                                "main-visible-no-cue file=" + sourceFileName);
                     } else {
-                        log(dir, "crop unavailable skipped file=" + fileName
+                        log(dir, "crop unavailable skipped file=" + sourceFileName
                                 + " " + timingDetail);
                     }
                 }
@@ -466,15 +511,16 @@ final class WazeCropCapture {
                 String snapshotManeuver = snapshotManeuver(snapshot);
                 String effectiveManeuver = snapshotManeuver(effectiveSnapshot);
                 String trustedLanes = trustedLanesForCrop(effectiveSnapshot, laneAnalysis);
-                String missingFile = copyMissingCueIfNeeded(dir, fileName, bucket);
+                String missingFile = copyMissingCueIfNeeded(dir, sourceFileName, bucket);
                 if (BUCKET_MISSING_LANES.equals(bucket)) {
-                    exportMissingLaneCells(dir, fileName, laneAnalysis);
+                    exportMissingLaneCells(dir, sourceFileName, laneAnalysis);
                 }
                 WazeCropCandidate candidate = new WazeCropCandidate(
                         SystemClock.elapsedRealtime(),
                         displayId,
-                        fileName,
-                        "routeAgeMs=" + evidenceAgeMs + " " + timingDetail,
+                        sourceFileName,
+                        "backend=" + capture.backend
+                                + " routeAgeMs=" + evidenceAgeMs + " " + timingDetail,
                         effectiveManeuver,
                         trustedLanes,
                         effectiveSnapshot == null ? 0 : effectiveSnapshot.confidence,
@@ -485,6 +531,19 @@ final class WazeCropCapture {
                         laneAnalysis);
                 appendSessionLine(dir, candidate.toJsonLine());
                 NavCaptureStore.rawEvent(context, "waze_crop", WAZE_PACKAGE, candidate.toJsonLine());
+                debugArtifacts.appendEvent(dir, captureEventJson(
+                        index,
+                        displayId,
+                        capture,
+                        geometry,
+                        sourceFileName,
+                        arrowInput,
+                        lanesInput,
+                        bucket,
+                        effectiveManeuver,
+                        trustedLanes,
+                        commitEligible,
+                        commitSkipReason));
                 if (isMissingBucket(bucket)) {
                     NavCaptureStore.rawEvent(context, "waze_crop_missing", WAZE_PACKAGE,
                             "bucket=" + bucket
@@ -493,31 +552,74 @@ final class WazeCropCapture {
                                     + " lanes=" + trustedLanes);
                 }
                 AppEventLogger.event(context, "waze_crop ok display=" + displayId
-                        + " file=" + fileName
+                        + " file=" + sourceFileName
                         + " bucket=" + bucket
+                        + " backend=" + capture.backend
                         + " " + timingDetail);
-                if (PRODUCTION_DELETE_AFTER_PARSE) {
-                    LocalAdbBridge.runRuntimeShellCommand(context, "rm " + path);
-                }
-                NavigationLogStorage.enforceNavCaptureRetention(context, SESSION_DIR, workerSessionName, fileName);
+                NavigationLogStorage.enforceNavCaptureRetention(
+                        context, SESSION_DIR, workerSessionName, sourceFileName);
                 return;
+            } finally {
+                capture.frame.recycle();
             }
-            log(dir, "screencap failed frameId=" + index
-                    + " captureMs=" + (captureEndMs - captureStartMs)
-                    + " " + result.shortDetail());
-            NavHudLiveSender.get(context).onWazeCropUnavailable(
-                    "screencap-failed display=" + displayId);
         } catch (RuntimeException e) {
-            log(dir, "screencap parse fatal " + e.getClass().getSimpleName()
+            log(dir, "frame parse fatal " + e.getClass().getSimpleName()
                     + " " + safe(e.getMessage()));
             NavHudLiveSender.get(context).onWazeCropUnavailable(
-                    "screencap-parse-fatal " + e.getClass().getSimpleName());
+                    "frame-parse-fatal " + e.getClass().getSimpleName());
         } catch (IOException e) {
-            log(dir, "screencap fatal " + e.getClass().getSimpleName()
+            log(dir, "frame fatal " + e.getClass().getSimpleName()
                     + " " + safe(e.getMessage()));
             NavHudLiveSender.get(context).onWazeCropUnavailable(
-                    "screencap-fatal " + e.getClass().getSimpleName());
+                    "frame-fatal " + e.getClass().getSimpleName());
         }
+    }
+
+    //writes periodic old-path screenshots so beta sessions can compare projection vs screencap.
+    private void saveScreencapCompare(int displayId, String shellDir, int index) {
+        if (!currentSessionShellWritable() || shellDir == null || shellDir.isEmpty()) {
+            return;
+        }
+        String compareName = WazeCaptureDebugArtifacts.screencapCompareName(index);
+        String comparePath = shellDir + "/" + compareName;
+        try {
+            LocalAdbBridge.runRuntimeShellCommand(
+                    context, "screencap -d " + displayId + " -p " + comparePath);
+        } catch (IOException | RuntimeException e) {
+            log(sessionDir, "screencap compare failed file=" + compareName
+                    + " " + safe(e.getMessage()));
+        }
+    }
+
+    //records per-frame beta capture metadata without adding a JSON dependency.
+    private static String captureEventJson(
+            int frameId,
+            int displayId,
+            WazeFrameCaptureBackend.CaptureResult capture,
+            WazeAccessibilityGeometry geometry,
+            String sourceFrame,
+            String arrowInput,
+            String lanesInput,
+            String bucket,
+            String maneuver,
+            String lanes,
+            boolean commitEligible,
+            String commitSkipReason) {
+        return "{"
+                + "\"frameId\":" + frameId
+                + ",\"displayId\":" + displayId
+                + ",\"backend\":\"" + NavCaptureStore.esc(capture.backend) + "\""
+                + ",\"captureMs\":" + Math.max(0L, capture.captureEndMs - capture.captureStartMs)
+                + ",\"geometry\":\"" + NavCaptureStore.esc(geometry.summary()) + "\""
+                + ",\"sourceFrame\":\"" + NavCaptureStore.esc(sourceFrame) + "\""
+                + ",\"arrowInput\":\"" + NavCaptureStore.esc(arrowInput) + "\""
+                + ",\"lanesInput\":\"" + NavCaptureStore.esc(lanesInput) + "\""
+                + ",\"bucket\":\"" + NavCaptureStore.esc(bucket) + "\""
+                + ",\"maneuver\":\"" + NavCaptureStore.esc(maneuver) + "\""
+                + ",\"lanes\":\"" + NavCaptureStore.esc(lanes) + "\""
+                + ",\"commitEligible\":" + commitEligible
+                + ",\"commitSkipReason\":\"" + NavCaptureStore.esc(commitSkipReason) + "\""
+                + "}";
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.

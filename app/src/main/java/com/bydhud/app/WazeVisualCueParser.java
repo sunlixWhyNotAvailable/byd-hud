@@ -134,6 +134,20 @@ final class WazeVisualCueParser {
         }
     }
 
+    //parses in-memory frames so beta capture can avoid using PNG files as the parser transport.
+    static NavParserResult parseFrame(
+            Bitmap bitmap,
+            NavSnapshot baseline,
+            LaneGuidanceAnalysis laneAnalysis,
+            WazeAccessibilityGeometry geometry,
+            boolean leftHandRoundaboutTraffic) {
+        if (bitmap == null) {
+            return null;
+        }
+        Cue cue = parseBitmap(bitmap, laneAnalysis, geometry, leftHandRoundaboutTraffic);
+        return cue == null ? null : toParserResult(cue, baseline);
+    }
+
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String laneCueForTest(
             int[] widths,
@@ -469,7 +483,7 @@ final class WazeVisualCueParser {
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean hasVisualNavigationCueCandidate(Bitmap bitmap) {
+    static boolean hasVisualNavigationCueCandidate(Bitmap bitmap) {
         ColorCounts arrival = colorCounts(bitmap, 30, 130, 130, 220);
         if (isArrivalCue(arrival.red, arrival.white, arrival.gray)) {
             return true;
@@ -725,12 +739,12 @@ final class WazeVisualCueParser {
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static LaneGuidanceAnalysis analyzeLaneGuidance(Bitmap bitmap) {
+    static LaneGuidanceAnalysis analyzeLaneGuidance(Bitmap bitmap) {
         return analyzeLaneGuidance(bitmap, WazeAccessibilityGeometry.EMPTY);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static LaneGuidanceAnalysis analyzeLaneGuidance(
+    static LaneGuidanceAnalysis analyzeLaneGuidance(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry) {
         WazeVisualLayout layout = visualLayout(bitmap);
@@ -2790,7 +2804,7 @@ final class WazeVisualCueParser {
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean hasActiveInstructionPanel(Bitmap bitmap) {
+    static boolean hasActiveInstructionPanel(Bitmap bitmap) {
         int sampled = sampledPixelCount(bitmap, 15, 95, 600, 250);
         int dark = darkPixelCount(bitmap, 15, 95, 600, 250);
         return activeInstructionPanelForTest(dark, sampled);

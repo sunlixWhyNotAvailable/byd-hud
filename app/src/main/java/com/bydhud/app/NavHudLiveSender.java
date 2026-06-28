@@ -22,6 +22,7 @@ final class NavHudLiveSender {
     private static final long ACTIVE_ROUTE_STALE_CLEAR_MS = 15000L;
     private static final long WAZE_VISUAL_FRESH_MS = 2500L;
     private static final long WAZE_ROUTE_NODE_FRESH_MS = 3000L;
+    private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
     private static final int START_BIND_RETRY_LIMIT = 30;
     private static final int CLEAR_FRAME_COUNT = 5;
 
@@ -60,6 +61,7 @@ final class NavHudLiveSender {
     private long lastAccessibilityResultMs;
     private long lastVisualResultMs;
     private long lastWazeRouteNodeResultMs;
+    private long latestRouteStateMs;
     private boolean lastWazeRouteNodeScanHadRoute;
 
     private final Runnable bindRetryRunnable = new Runnable() {
@@ -427,6 +429,10 @@ final class NavHudLiveSender {
         activePackage = packageName;
         bindAttempts = 0;
         log("start package=" + packageName + " reason=" + reason);
+        if (WAZE_PACKAGE.equals(packageName)) {
+            WazeMediaProjectionController.ensureReadyOrPrompt(
+                    context, "start-" + safeReason(reason));
+        }
         ensureWazeCropRunning("start-" + reason);
         requestActiveInputState(packageName, reason);
         if (!hudClient.isBound()) {
@@ -495,6 +501,7 @@ final class NavHudLiveSender {
             latestRouteState = result.state.copy();
             latestRouteManeuver = result.snapshot.maneuver;
         }
+        latestRouteStateMs = now;
         if (WazeVisualStatePolicy.shouldPreserveWazeVisual(packageName, latestVisualState, result,
                 now - lastVisualResultMs)) {
             latestState = WazeVisualStatePolicy.mergeRouteFieldsKeepingVisual(
@@ -576,6 +583,7 @@ final class NavHudLiveSender {
         lastAccessibilityResultMs = now;
         latestRouteState = result.state.copy();
         latestRouteManeuver = result.snapshot.maneuver;
+        latestRouteStateMs = now;
         if (WazeVisualStatePolicy.shouldPreserveWazeVisual(packageName, latestVisualState, result,
                 now - lastVisualResultMs)) {
             latestState = WazeVisualStatePolicy.mergeRouteFieldsKeepingVisual(
@@ -633,10 +641,15 @@ final class NavHudLiveSender {
         lastVisualResultMs = now;
         latestVisualState = result.state.copy();
         sanitizeWazeVisualLanes(packageName, latestVisualState);
-        if ("com.waze".equals(packageName) && latestRouteState != null) {
+        if (WAZE_PACKAGE.equals(packageName) && freshWazeRouteState(now)) {
             latestState = WazeVisualStatePolicy.mergeRouteFieldsKeepingVisual(
                     latestVisualState, latestRouteState, latestRouteManeuver);
             latestReason = result.reason + " mergedWithRoute";
+        } else if (WAZE_PACKAGE.equals(packageName) && latestRouteState != null) {
+            latestVisualState =
+                    WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
+            latestState = latestVisualState.copy();
+            latestReason = result.reason + " routeFieldsExpired";
         } else {
             latestState = latestVisualState.copy();
             latestReason = result.reason;
@@ -696,6 +709,7 @@ final class NavHudLiveSender {
         if (!active || latestState == null) {
             return;
         }
+        clearExpiredWazeRouteFieldsForSend(SystemClock.elapsedRealtime());
         if (!hudClient.isBound()) {
             hudClient.bind();
             scheduleBindRetry();
@@ -820,6 +834,33 @@ final class NavHudLiveSender {
                 && latestSnapshot.maneuver != NavSnapshot.Maneuver.HIDE);
     }
 
+    //guards visual payloads from carrying old Waze route text after accessibility disappears.
+    private boolean freshWazeRouteState(long now) {
+        return latestRouteState != null
+                && latestRouteStateMs > 0L
+                && now - latestRouteStateMs <= WAZE_ROUTE_FIELD_TTL_MS;
+    }
+
+    //clears route text before send so looped HUD frames cannot keep stale distance or street.
+    private void clearExpiredWazeRouteFieldsForSend(long now) {
+        if (!WAZE_PACKAGE.equals(activePackage)
+                || latestState == null
+                || latestRouteState == null
+                || freshWazeRouteState(now)) {
+            return;
+        }
+        if (latestVisualState != null) {
+            latestVisualState =
+                    WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
+            latestState = latestVisualState.copy();
+        } else {
+            latestState = WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestState);
+        }
+        if (!latestReason.contains("routeFieldsExpired")) {
+            latestReason = latestReason + " routeFieldsExpired";
+        }
+    }
+
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateWazeAccessibilityGeometryOnMain(String packageName, String payload) {
         if (!WAZE_PACKAGE.equals(packageName)) {
@@ -840,6 +881,8 @@ final class NavHudLiveSender {
         if (!NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE)) {
             return;
         }
+        WazeMediaProjectionController.ensureReadyOrPrompt(
+                context, "crop-" + safeReason(reason));
         WazeCropCapture.get(context).start("runtime-" + safeReason(reason));
     }
 
@@ -878,6 +921,7 @@ final class NavHudLiveSender {
         lastAccessibilityResultMs = 0L;
         lastVisualResultMs = 0L;
         lastWazeRouteNodeResultMs = 0L;
+        latestRouteStateMs = 0L;
         lastWazeRouteNodeScanHadRoute = false;
     }
 

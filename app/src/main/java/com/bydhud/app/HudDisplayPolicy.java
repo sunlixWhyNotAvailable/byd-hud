@@ -26,7 +26,9 @@ final class HudDisplayPolicy {
             return null;
         }
         HudState displayState = rawState.copy();
-        if (displayState.navigationStatus != 1) {
+        //preserves explicit zero so stale-distance clearing is not shown as a fake 20 m.
+        if (displayState.navigationStatus != 1
+                && displayState.distanceToIntersection != 0) {
             displayState.distanceToIntersection =
                     displayDistanceMeters(displayState.distanceToIntersection, clampSmallDistance);
         }

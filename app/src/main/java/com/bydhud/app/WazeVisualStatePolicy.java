@@ -144,6 +144,21 @@ final class WazeVisualStatePolicy {
         return state;
     }
 
+    //clears stale route text while keeping crop-derived maneuver and lane evidence visible.
+    static HudState staleRouteFieldsClearedForVisual(HudState visualState) {
+        if (visualState == null) {
+            return null;
+        }
+        HudState state = visualState.copy();
+        state.distanceToIntersection = 0;
+        state.carToDestination = 0;
+        state.timeToDestination = 0;
+        state.roadName = "";
+        state.guidePoint = "";
+        state.navigationRatio = 0.0d;
+        return state;
+    }
+
     //clears state here so stale navigation output is removed before new evidence arrives.
     static HudState clearLanesForCurrentUnknownRow(HudState state) {
         if (state == null) {

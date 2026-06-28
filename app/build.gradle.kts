@@ -12,15 +12,17 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        //keeps android upgrade ordering ahead of the previous 0.33.0 field build.
-        versionCode = 46
-        versionName = "1.0.1"
+        //keeps android upgrade ordering ahead of the previous 1.0.1 field build.
+        versionCode = 47
+        versionName = "1.1.0-beta.1"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
             "\"https://api.github.com/repos/sunlixWhyNotAvailable/byd-hud/releases/latest\""
         )
         buildConfigField("String", "UPDATE_USER_AGENT", "\"BYD-HUD-UpdateCheck\"")
+        buildConfigField("boolean", "WAZE_FRAME_CAPTURE_BETA", "true")
+        buildConfigField("long", "WAZE_COMPARE_SCREENSHOT_INTERVAL_MS", "5000L")
     }
 
     lint {

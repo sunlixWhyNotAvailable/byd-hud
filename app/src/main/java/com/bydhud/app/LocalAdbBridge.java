@@ -60,7 +60,7 @@ final class LocalAdbBridge {
             "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD/nav-capture"
                     + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/nav-capture)";
     private static final String CAPTURE_SESSION_PATH =
-            "(/[0-9]{8})?/(waze-virtual-display|waze-crop)/[A-Za-z0-9_.-]{1,80}/screen_[0-9]{4}\\.png";
+            "(/[0-9]{8})?/(waze-virtual-display|waze-crop)/[A-Za-z0-9_.-]{1,80}/(screen|screencap_compare)_[0-9]{4}\\.png";
     private static final Pattern WAZE_SCREENSHOT_COMMAND = Pattern.compile(
             "screencap -d [0-9]{1,3} -p "
                     + CAPTURE_SHELL_ROOT
@@ -100,6 +100,11 @@ final class LocalAdbBridge {
         return true;
     }
 
+    //guards adb repair so auto and manual flows can authorize a fresh app key after reinstall.
+    static boolean canShortCircuitReadyForCapture(AuthorizationPromptMode mode) {
+        return mode == AuthorizationPromptMode.NEVER;
+    }
+
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static List<String> adbEndpointLabelsForTest() {
         return Arrays.asList(endpointLabel(PORT));
@@ -133,7 +138,8 @@ final class LocalAdbBridge {
         String normalizedPackage = appContext.getPackageName();
         NavPermissionStatus before = NavPermissionStatus.check(appContext);
         NavRuntimePermissionStatus runtimeBefore = NavRuntimePermissionStatus.check(appContext);
-        if (runtimeBefore.readyForCapture()) {
+        if (runtimeBefore.readyForCapture()
+                && canShortCircuitReadyForCapture(authorizationPromptMode)) {
             return Result.alreadyGranted(runtimeBefore.summary());
         }
         boolean grantNotificationListener = !before.notificationListenerEnabled
@@ -635,6 +641,9 @@ final class LocalAdbBridge {
                     throw e;
                 }
                 if (packet.command == AdbPacket.A_CNXN) {
+                    if (publicKeySent) {
+                        markAuthorizationPromptSent(context, keyFingerprint);
+                    }
                     return new OpenResult(connection, false, publicKeySent, endpoint);
                 }
                 if (packet.command != AdbPacket.A_AUTH
@@ -663,7 +672,6 @@ final class LocalAdbBridge {
                             (RSAPublicKey) keyPair.getPublic());
                     Log.i(TAG, "ADB public key sent key=" + keyFingerprint);
                     AppEventLogger.event(context, "adb_bridge public_key_sent key=" + keyFingerprint);
-                    markAuthorizationPromptSent(context, keyFingerprint);
                     AdbPacket.write(
                             connection.out,
                             AdbPacket.A_AUTH,
