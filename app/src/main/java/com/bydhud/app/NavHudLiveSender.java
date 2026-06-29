@@ -646,10 +646,18 @@ final class NavHudLiveSender {
                     latestVisualState, latestRouteState, latestRouteManeuver);
             latestReason = result.reason + " mergedWithRoute";
         } else if (WAZE_PACKAGE.equals(packageName) && latestRouteState != null) {
-            latestVisualState =
-                    WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
-            latestState = latestVisualState.copy();
-            latestReason = result.reason + " routeFieldsExpired";
+            if (shouldKeepExpiredWazeRouteFields(now)) {
+                latestVisualState = WazeVisualStatePolicy.routeFieldsKeptForVisual(
+                        latestVisualState, latestRouteState, latestRouteManeuver);
+                latestState = latestVisualState.copy();
+                latestReason = result.reason + " routeFieldsKeptByRouteEvidence";
+                log("waze route fields kept by route evidence reason=" + result.reason);
+            } else {
+                latestVisualState =
+                        WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
+                latestState = latestVisualState.copy();
+                latestReason = result.reason + " routeFieldsExpired";
+            }
         } else {
             latestState = latestVisualState.copy();
             latestReason = result.reason;
@@ -841,12 +849,32 @@ final class NavHudLiveSender {
                 && now - latestRouteStateMs <= WAZE_ROUTE_FIELD_TTL_MS;
     }
 
+    //keeps route text while fresh visual evidence proves Waze is still actively navigating.
+    boolean shouldKeepExpiredWazeRouteFields(long now) {
+        return WAZE_PACKAGE.equals(activePackage)
+                && latestRouteState != null
+                && NavRouteStateStore.get(context).hasFreshWazeRouteEvidence(now)
+                && latestVisualState != null
+                && lastVisualResultMs > 0L
+                && now - lastVisualResultMs <= WAZE_VISUAL_FRESH_MS;
+    }
+
     //clears route text before send so looped HUD frames cannot keep stale distance or street.
     private void clearExpiredWazeRouteFieldsForSend(long now) {
         if (!WAZE_PACKAGE.equals(activePackage)
                 || latestState == null
                 || latestRouteState == null
                 || freshWazeRouteState(now)) {
+            return;
+        }
+        if (shouldKeepExpiredWazeRouteFields(now)) {
+            latestVisualState = WazeVisualStatePolicy.routeFieldsKeptForVisual(
+                    latestVisualState, latestRouteState, latestRouteManeuver);
+            latestState = latestVisualState.copy();
+            if (!latestReason.contains("routeFieldsKeptByRouteEvidence")) {
+                latestReason = latestReason + " routeFieldsKeptByRouteEvidence";
+                log("waze route fields kept by route evidence reason=send-boundary");
+            }
             return;
         }
         if (latestVisualState != null) {

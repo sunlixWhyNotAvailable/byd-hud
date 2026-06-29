@@ -69,6 +69,12 @@ final class WazeVisualStatePolicy {
         return merged;
     }
 
+    //keeps route text during fresh visual route evidence without changing visual maneuver evidence.
+    static HudState routeFieldsKeptForVisual(
+            HudState visualState, HudState routeState, NavSnapshot.Maneuver routeManeuver) {
+        return mergeRouteFieldsKeepingVisual(visualState, routeState, routeManeuver);
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean shouldKeepRouteRoundaboutManeuver(
             HudState visualState, HudState routeState, NavSnapshot.Maneuver routeManeuver) {
