@@ -19,6 +19,7 @@ final class HudPrefs {
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
+    private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_BG_REMINDER_VERSION = "bg_reminder_version";
     private static final String KEY_RUNTIME_SERVICE_RUNNING = "runtime_service_running";
 
@@ -136,6 +137,16 @@ final class HudPrefs {
         prefs(context).edit()
                 .putInt(KEY_STORAGE_LIMIT_GB, Math.max(1, Math.min(10, value)))
                 .apply();
+    }
+
+    //keeps debug artifact volume user-controlled while preserving operational logs.
+    static boolean isDetailedDebugArtifactsEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, true);
+    }
+
+    //keeps debug artifact volume user-controlled while preserving operational logs.
+    static void setDetailedDebugArtifactsEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, enabled).apply();
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

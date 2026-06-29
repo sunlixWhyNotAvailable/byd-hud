@@ -3,7 +3,13 @@ package com.bydhud.app
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
 import androidx.activity.compose.setContent
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateDpAsState
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -21,6 +27,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -62,8 +69,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.util.Locale
 
 //anchors BydHudRuntimeCompose UI orchestration so controls and diagnostics are wired from one place.
@@ -142,6 +151,7 @@ private data class Copy(
     val hudIdle: String,
     val hudFailed: String,
     val adbOk: String,
+    val adbNotGranted: String,
     val permissionsOk: String,
     val permissionsMissing: String,
     val ukr: String,
@@ -163,6 +173,8 @@ private data class Copy(
     val setupDialogDismiss: String,
     val bootRuntime: String,
     val bootRuntimeHint: String,
+    val saveScreenshotsLogs: String,
+    val saveScreenshotsLogsHint: String,
     val checkForUpdates: String,
     val checkForUpdatesHint: String,
     val checkForUpdatesButton: String,
@@ -234,6 +246,14 @@ private data class Copy(
     val folderSelected: String,
     val folderNotSelected: String,
     val storageNoDayFolders: String,
+    val storageDeleteTitle: String,
+    val storageDeleteSelected: String,
+    val storageDeleteQuestion: String,
+    val storageDeleteCannotStop: String,
+    val storageDeleteYes: String,
+    val storageDeleteNo: String,
+    val storageDeletingFolder: String,
+    val storageDeleteStep: String,
     val manualHint: String,
     val manualHudOutput: String,
     val supportedArrows: String,
@@ -259,6 +279,7 @@ private data class Copy(
 //defines PressFeedback UI/state support so Compose code can keep rendering intent explicit.
 private data class PressFeedback(
     val interactionSource: MutableInteractionSource,
+    val pressed: Boolean,
     val modifier: Modifier
 )
 
@@ -273,11 +294,17 @@ private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
     )
     return PressFeedback(
         interactionSource = interactionSource,
+        pressed = enabled && pressed,
         modifier = Modifier.graphicsLayer {
             scaleX = scale
             scaleY = scale
         }
     )
+}
+
+//adds a short color response so a tap is visible even when the next action is slow.
+private fun pressBackground(base: Color, palette: Palette, pressed: Boolean): Color {
+    return if (pressed) palette.accent.copy(alpha = if (palette.dark) 0.24f else 0.14f) else base
 }
 
 @Composable
@@ -302,6 +329,10 @@ private fun RuntimeApp(activity: MainActivity) {
     var selectedTab by rememberSaveable { mutableStateOf(RuntimeTab.Main) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var storageDeleteStep by rememberSaveable { mutableIntStateOf(0) }
+    var storageDeleteBusy by remember { mutableStateOf(false) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -348,6 +379,17 @@ private fun RuntimeApp(activity: MainActivity) {
             updateState = nextState
             showUpdateDialog = true
         }
+    }
+
+    //runs storage deletion as folder steps so the UI can stay responsive without a pre-scan.
+    fun beginStorageDelete(days: List<String>) {
+        if (days.isEmpty() || storageDeleteBusy) {
+            return
+        }
+        pendingStorageDeleteDays = emptyList()
+        storageDeleteQueue = days
+        storageDeleteStep = 0
+        storageDeleteBusy = true
     }
 
     LaunchedEffect(selectedTab) {
@@ -407,6 +449,35 @@ private fun RuntimeApp(activity: MainActivity) {
                 activity.composeMaybeRefreshApps()
             }
             refresh()
+        }
+    }
+
+    LaunchedEffect(storageDeleteBusy, storageDeleteStep, storageDeleteQueue) {
+        if (!storageDeleteBusy) {
+            return@LaunchedEffect
+        }
+        val day = storageDeleteQueue.getOrNull(storageDeleteStep)
+        if (day == null) {
+            storageDeleteBusy = false
+            storageDeleteQueue = emptyList()
+            storageDeleteStep = 0
+            selectedStorageDays = emptyList()
+            refresh()
+            return@LaunchedEffect
+        }
+        val result = withContext(Dispatchers.IO) {
+            activity.composeDeleteStorageDay(day)
+        }
+        activity.composeAppendStatus("Storage delete ${result.day}: ${result.message}")
+        val nextStep = storageDeleteStep + 1
+        if (nextStep >= storageDeleteQueue.size) {
+            storageDeleteBusy = false
+            storageDeleteQueue = emptyList()
+            storageDeleteStep = 0
+            selectedStorageDays = emptyList()
+            refresh()
+        } else {
+            storageDeleteStep = nextStep
         }
     }
 
@@ -473,8 +544,7 @@ private fun RuntimeApp(activity: MainActivity) {
                                 }
                             },
                             onDeleteSelected = { deletableSelectedDays ->
-                                runAction { activity.composeDeleteStorageDays(deletableSelectedDays) }
-                                selectedStorageDays = emptyList()
+                                pendingStorageDeleteDays = deletableSelectedDays
                             }
                         )
                         RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
@@ -523,6 +593,26 @@ private fun RuntimeApp(activity: MainActivity) {
                 onClose = { showUpdateDialog = false }
             )
         }
+
+        if (pendingStorageDeleteDays.isNotEmpty()) {
+            StorageDeleteConfirmOverlay(
+                copy = copy,
+                palette = palette,
+                folderCount = pendingStorageDeleteDays.size,
+                onConfirm = { beginStorageDelete(pendingStorageDeleteDays) },
+                onDismiss = { pendingStorageDeleteDays = emptyList() }
+            )
+        }
+
+        if (storageDeleteBusy) {
+            StorageDeleteOverlay(
+                copy = copy,
+                palette = palette,
+                folderName = storageDeleteQueue.getOrNull(storageDeleteStep).orEmpty(),
+                step = storageDeleteStep + 1,
+                total = storageDeleteQueue.size.coerceAtLeast(1)
+            )
+        }
     }
 }
 
@@ -565,7 +655,10 @@ private fun Header(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             HudStatusPill(snapshot.hudStatus, copy, palette)
-            Pill(copy.adbOk, palette.green, palette.greenSoft)
+            //guard top-bar adb status so OK means grant-backed capture permissions are already present.
+            Pill(if (snapshot.settingsPermissionsGranted) copy.adbOk else copy.adbNotGranted,
+                if (snapshot.settingsPermissionsGranted) palette.green else palette.red,
+                if (snapshot.settingsPermissionsGranted) palette.greenSoft else palette.redSoft)
             Pill(if (snapshot.captureReady) copy.permissionsOk else copy.permissionsMissing,
                 if (snapshot.captureReady) palette.green else palette.red,
                 if (snapshot.captureReady) palette.greenSoft else palette.redSoft)
@@ -610,6 +703,15 @@ private fun MainTab(
             Divider(palette)
             SwitchRow(copy.bootRuntime, copy.bootRuntimeHint, snapshot.bootEnabled, palette) {
                 runAction { activity.composeSetBootEnabled(it) }
+            }
+            Divider(palette)
+            SwitchRow(
+                copy.saveScreenshotsLogs,
+                copy.saveScreenshotsLogsHint,
+                snapshot.detailedDebugArtifactsEnabled,
+                palette
+            ) {
+                runAction { activity.composeSetDetailedDebugArtifactsEnabled(it) }
             }
             Divider(palette)
             UpdateCheckLine(
@@ -705,17 +807,17 @@ private fun SetupReminderOverlay(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 HudButton(
-                    text = copy.setupDialogDismiss,
-                    palette = palette,
-                    width = 138.dp,
-                    onClick = onDismiss
-                )
-                HudButton(
                     text = copy.setupDialogPrimary,
                     palette = palette,
                     primary = true,
                     width = 138.dp,
                     onClick = onPrimary
+                )
+                HudButton(
+                    text = copy.setupDialogDismiss,
+                    palette = palette,
+                    width = 138.dp,
+                    onClick = onDismiss
                 )
             }
         }
@@ -789,12 +891,11 @@ private fun UpdateCheckOverlay(
                         )
                         is UpdateCheckState.Downloading -> {
                             Text(
-                                "${copy.updateDownloading} ${state.progress}",
+                                copy.updateDownloading,
                                 color = palette.text,
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            UpdateProgressBar(progress = state.progress, palette = palette)
                         }
                         is UpdateCheckState.Error -> Text(
                             state.message,
@@ -805,12 +906,14 @@ private fun UpdateCheckOverlay(
                     }
                 }
             }
+            if (state is UpdateCheckState.Downloading) {
+                UpdateProgressBar(progress = state.progress, palette = palette)
+            }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                HudButton(copy.updateClose, palette, width = 138.dp, onClick = onClose)
                 HudButton(
                     copy.updateAction,
                     palette,
@@ -819,6 +922,7 @@ private fun UpdateCheckOverlay(
                     width = 138.dp,
                     onClick = onUpdate
                 )
+                HudButton(copy.updateClose, palette, width = 138.dp, onClick = onClose)
             }
         }
     }
@@ -872,15 +976,172 @@ private fun UpdateProgressBar(progress: String, palette: Palette) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .height(8.dp)
-            .clip(RoundedCornerShape(100.dp))
+            .height(22.dp)
+            .clip(RoundedCornerShape(8.dp))
             .background(palette.disabled)
+            .border(1.dp, palette.border, RoundedCornerShape(8.dp)),
+        contentAlignment = Alignment.Center
     ) {
         Box(
             modifier = Modifier
-                .fillMaxWidth(percent / 100f)
+                .fillMaxWidth((percent / 100f).coerceIn(0.02f, 1f))
                 .fillMaxHeight()
+                .align(Alignment.CenterStart)
                 .background(palette.accent)
+        )
+        Text(
+            "${percent.toInt()}%",
+            color = palette.text,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Bold
+        )
+    }
+}
+
+@Composable
+//asks once before deleting folders so a miss-click cannot start destructive cleanup.
+private fun StorageDeleteConfirmOverlay(
+    copy: Copy,
+    palette: Palette,
+    folderCount: Int,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(copy.storageDeleteTitle, color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    String.format(Locale.US, copy.storageDeleteSelected, folderCount),
+                    color = palette.yellow,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold
+                )
+                Text(copy.storageDeleteQuestion, color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                Text(copy.storageDeleteCannotStop, color = palette.muted, fontSize = 14.sp, lineHeight = 19.sp)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                HudButton(copy.storageDeleteYes, palette, primary = true, width = 138.dp, onClick = onConfirm)
+                HudButton(copy.storageDeleteNo, palette, width = 138.dp, onClick = onDismiss)
+            }
+        }
+    }
+}
+
+@Composable
+//keeps deletion visibly alive while the filesystem work happens off the UI thread.
+private fun StorageDeleteOverlay(
+    copy: Copy,
+    palette: Palette,
+    folderName: String,
+    step: Int,
+    total: Int
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(copy.storageDeleteTitle, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(160.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(18.dp),
+                verticalArrangement = Arrangement.Center
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LoadingSpinner(palette)
+                    Spacer(Modifier.width(18.dp))
+                    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            String.format(Locale.US, copy.storageDeleteStep, step.coerceAtLeast(1), total.coerceAtLeast(1)),
+                            color = palette.muted,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                "${copy.storageDeletingFolder} ",
+                                color = palette.text,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
+                            Text(
+                                folderName,
+                                color = palette.yellow,
+                                fontSize = 18.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    }
+                }
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                HudButton(copy.updateClose, palette, enabled = false, width = 138.dp, onClick = {})
+            }
+        }
+    }
+}
+
+@Composable
+//draws an indeterminate spinner without adding a progress pre-scan or extra filesystem work.
+private fun LoadingSpinner(palette: Palette) {
+    val transition = rememberInfiniteTransition(label = "storageDeleteSpinner")
+    val angle by transition.animateFloat(
+        initialValue = 0f,
+        targetValue = 360f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 900, easing = LinearEasing)),
+        label = "storageDeleteSpinnerAngle"
+    )
+    Canvas(modifier = Modifier.size(22.dp)) {
+        drawArc(
+            color = palette.accent,
+            startAngle = angle,
+            sweepAngle = 270f,
+            useCenter = false,
+            style = Stroke(width = 3.4f, cap = StrokeCap.Round)
         )
     }
 }
@@ -1253,12 +1514,13 @@ private fun StorageDayRow(
 ) {
     val canSelect = !day.active
     val press = rememberPressFeedback(canSelect)
+    val baseBackground = if (selected) palette.active else palette.panelAlt
     Row(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
-            .background(if (selected) palette.active else palette.panelAlt)
+            .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 enabled = canSelect,
@@ -1708,12 +1970,13 @@ private fun ManualModeTile(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback()
+    val baseBackground = if (selected) palette.active else palette.panelAlt
     Column(
         modifier = modifier
             .height(74.dp)
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
-            .background(if (selected) palette.active else palette.panelAlt)
+            .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
@@ -1804,17 +2067,16 @@ private fun HudButton(
 ) {
     val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)
     val press = rememberPressFeedback(enabled)
+    val baseBackground = when {
+        !enabled -> Color.Transparent
+        primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
+        else -> palette.panelAlt
+    }
     Box(
         modifier = base
             .clip(RoundedCornerShape(7.dp))
             .border(1.dp, if (primary) palette.accent else palette.borderStrong, RoundedCornerShape(7.dp))
-            .background(
-                when {
-                    !enabled -> Color.Transparent
-                    primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
-                    else -> palette.panelAlt
-                }
-            )
+            .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 enabled = enabled,
@@ -1856,7 +2118,7 @@ private fun CompactSwitchBox(
             .height(44.dp)
             .clip(RoundedCornerShape(7.dp))
             .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-            .background(palette.panelAlt)
+            .background(pressBackground(palette.panelAlt, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
@@ -1882,22 +2144,44 @@ private fun HudSwitch(
     val width = if (compact) 42.dp else 56.dp
     val height = if (compact) 27.dp else 32.dp
     val knob = if (compact) 20.dp else 25.dp
+    var settleTarget by remember { mutableStateOf<Boolean?>(null) }
+    var lastChecked by remember { mutableStateOf(checked) }
+    val travel = width - knob - 6.dp
+    val settling = settleTarget != null || lastChecked != checked
+    val knobOffset by animateDpAsState(
+        targetValue = when {
+            settling -> 3.dp + travel / 2f
+            checked -> 3.dp + travel
+            else -> 3.dp
+        },
+        animationSpec = tween(durationMillis = 140),
+        label = "switchKnobOffset"
+    )
+    LaunchedEffect(checked) {
+        if (lastChecked != checked) {
+            settleTarget = checked
+            delay(120)
+            lastChecked = checked
+            settleTarget = null
+        }
+    }
     Box(
         modifier = Modifier
             .size(width = width, height = height)
             .clip(RoundedCornerShape(100.dp))
-            .background(if (checked) palette.accent else palette.disabled)
+            .background(pressBackground(if (checked) palette.accent else palette.disabled, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null
             ) { onChecked(!checked) }
-            .padding(3.dp),
-        contentAlignment = if (checked) Alignment.CenterEnd else Alignment.CenterStart
+            .padding(0.dp),
+        contentAlignment = Alignment.CenterStart
     ) {
         Box(
             modifier = Modifier
                 .size(knob)
+                .offset(x = knobOffset, y = 3.dp)
                 .clip(RoundedCornerShape(100.dp))
                 .background(if (checked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
         )
@@ -1931,12 +2215,13 @@ private fun Segmented(
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onClick: () -> Unit) {
     val press = rememberPressFeedback()
+    val baseBackground = if (active) palette.accent else Color.Transparent
     Box(
         modifier = Modifier
             .height(32.dp)
             .width(64.dp)
             .clip(RoundedCornerShape(18.dp))
-            .background(if (active) palette.accent else Color.Transparent)
+            .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
@@ -2033,12 +2318,13 @@ private fun TabButton(
 ) {
     val active = tab == selected
     val press = rememberPressFeedback()
+    val baseBackground = if (active) palette.active else Color.Transparent
     Row(
         modifier = modifier
             .fillMaxHeight()
             .clip(RoundedCornerShape(6.dp))
             .border(1.dp, if (active) palette.accent else Color.Transparent, RoundedCornerShape(6.dp))
-            .background(if (active) palette.active else Color.Transparent)
+            .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
@@ -2240,6 +2526,7 @@ private fun enCopy() = Copy(
     hudIdle = "HUD: idle",
     hudFailed = "HUD: failed",
     adbOk = "ADB: OK",
+    adbNotGranted = "ADB: not granted",
     permissionsOk = "Permissions: OK",
     permissionsMissing = "Permissions: missing",
     ukr = "Укр",
@@ -2261,6 +2548,8 @@ private fun enCopy() = Copy(
     setupDialogDismiss = "Got it",
     bootRuntime = "Boot runtime service",
     bootRuntimeHint = "Start foreground HUD runtime after boot and watchdog events.",
+    saveScreenshotsLogs = "Save screenshots and detailed logs",
+    saveScreenshotsLogsHint = "Data for app debugging.",
     checkForUpdates = "Check for updates",
     checkForUpdatesHint = "Check for new version and offer updating",
     checkForUpdatesButton = "Check for updates",
@@ -2332,6 +2621,14 @@ private fun enCopy() = Copy(
     folderSelected = "selected",
     folderNotSelected = "tap to select",
     storageNoDayFolders = "No day folders yet. New navigation logs will appear here after dated sessions are created.",
+    storageDeleteTitle = "Delete selected",
+    storageDeleteSelected = "Selected %d folders for deletion",
+    storageDeleteQuestion = "Run deletion?",
+    storageDeleteCannotStop = "After it starts, the operation cannot be stopped from the app.",
+    storageDeleteYes = "Yes",
+    storageDeleteNo = "No",
+    storageDeletingFolder = "Deleting data folder",
+    storageDeleteStep = "step %d/%d",
     manualHint = "Direct manual payload checks for HUD output.",
     manualHudOutput = "Manual HUD output",
     supportedArrows = "Supported arrows",
@@ -2364,6 +2661,7 @@ private fun uaCopy() = enCopy().copy(
     hudRunning = "HUD: працює",
     hudIdle = "HUD: очікує",
     hudFailed = "HUD: помилка",
+    adbNotGranted = "ADB: не видано",
     permissionsOk = "Права: OK",
     permissionsMissing = "Права: немає",
     dark = "Темна",
@@ -2383,6 +2681,8 @@ private fun uaCopy() = enCopy().copy(
     setupDialogDismiss = "Зрозуміло",
     bootRuntime = "Авто-запуск",
     bootRuntimeHint = "Запускати foreground HUD runtime після boot та watchdog подій.",
+    saveScreenshotsLogs = "Зберігати скріншоти та детальні логи",
+    saveScreenshotsLogsHint = "Дані для відладки роботи програми.",
     checkForUpdates = "Перевіряти оновлення",
     checkForUpdatesHint = "Перевіряти наявність нової версії та пропонувати оновитись",
     checkForUpdatesButton = "Перевірити оновлення",
@@ -2452,6 +2752,14 @@ private fun uaCopy() = enCopy().copy(
     folderSelected = "вибрано",
     folderNotSelected = "натисни для вибору",
     storageNoDayFolders = "Денних тек ще немає. Нові навігаційні логи з'являться після створення сесій.",
+    storageDeleteTitle = "Видалення вибраного",
+    storageDeleteSelected = "Обрано %d тек для видалення",
+    storageDeleteQuestion = "Виконати видалення?",
+    storageDeleteCannotStop = "Після початку зупинити операцію із застосунку неможливо.",
+    storageDeleteYes = "Так",
+    storageDeleteNo = "Ні",
+    storageDeletingFolder = "Видаляємо теку з даними",
+    storageDeleteStep = "крок %d/%d",
     manualHint = "Пряма ручна перевірка HUD payload.",
     manualHudOutput = "Ручний HUD вивід",
     supportedArrows = "Підтримувані стрілки",

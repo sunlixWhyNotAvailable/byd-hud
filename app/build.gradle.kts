@@ -13,8 +13,8 @@ android {
         minSdk = 29
         targetSdk = 29
         //keeps android upgrade ordering ahead of the previous 1.0.1 field build.
-        versionCode = 47
-        versionName = "1.1.0-beta.1"
+        versionCode = 49
+        versionName = "1.2.0-beta"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
