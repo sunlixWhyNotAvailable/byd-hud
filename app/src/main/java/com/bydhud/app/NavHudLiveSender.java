@@ -660,6 +660,7 @@ final class NavHudLiveSender {
             return;
         }
         long now = SystemClock.elapsedRealtime();
+        boolean virtualWazeVisual = WAZE_PACKAGE.equals(packageName) && result.sourceDisplayId > 0;
         lastVisualResultMs = now;
         latestVisualState = result.state.copy();
         sanitizeWazeVisualLanes(packageName, latestVisualState);
@@ -668,7 +669,7 @@ final class NavHudLiveSender {
                     latestVisualState, latestRouteState, latestRouteManeuver);
             latestReason = result.reason + " mergedWithRoute";
         } else if (WAZE_PACKAGE.equals(packageName) && latestRouteState != null) {
-            if (shouldKeepExpiredWazeRouteFields(now)) {
+            if (!virtualWazeVisual && shouldKeepExpiredWazeRouteFields(now)) {
                 latestVisualState = WazeVisualStatePolicy.routeFieldsKeptForVisual(
                         latestVisualState, latestRouteState, latestRouteManeuver);
                 latestState = latestVisualState.copy();
@@ -688,6 +689,7 @@ final class NavHudLiveSender {
                 + " dist=" + latestState.distanceToIntersection
                 + " road=\"" + latestState.roadName + "\""
                 + " lanes=" + latestState.numOfLanes
+                + " sourceDisplay=" + result.sourceDisplayId
                 + " maneuver=" + result.snapshot.maneuver);
         sendLatestIfReady("visual");
         scheduleSendLoop();

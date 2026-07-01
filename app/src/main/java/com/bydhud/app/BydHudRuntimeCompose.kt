@@ -3,6 +3,7 @@ package com.bydhud.app
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
 import androidx.activity.compose.setContent
+import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloat
@@ -35,14 +36,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.outlined.Article
-import androidx.compose.material.icons.outlined.Apps
-import androidx.compose.material.icons.outlined.Edit
-import androidx.compose.material.icons.outlined.Home
-import androidx.compose.material.icons.outlined.PowerSettingsNew
-import androidx.compose.material.icons.outlined.Storage
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -62,7 +58,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
@@ -79,6 +74,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.Locale
+import kotlin.math.roundToInt
 
 //anchors BydHudRuntimeCompose UI orchestration so controls and diagnostics are wired from one place.
 object BydHudRuntimeCompose {
@@ -739,7 +735,7 @@ private fun MainTab(
                 palette = palette,
                 action = {
                     HudIconButton(
-                        icon = Icons.Outlined.PowerSettingsNew,
+                        icon = R.drawable.ic_shutdown,
                         contentDescription = copy.shutdown,
                         palette = palette,
                         tint = palette.red,
@@ -1411,8 +1407,7 @@ private fun StorageTab(
                     )
                 }
             )
-            StorageLimitSlider(snapshot.storageLimitGb, palette) {
-                val next = if (snapshot.storageLimitGb >= 10) 1 else snapshot.storageLimitGb + 1
+            StorageLimitSlider(snapshot.storageLimitGb, palette) { next ->
                 limitText = next.toString()
                 onStorageLimitGb(next)
             }
@@ -1490,56 +1485,47 @@ private fun StorageTab(
 }
 
 @Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
+//guards storage-limit selection with a real draggable control and no zero-weight endpoint layout.
 private fun StorageLimitSlider(
     limit: Int,
     palette: Palette,
-    onStep: () -> Unit
+    onLimit: (Int) -> Unit
 ) {
-    val press = rememberPressFeedback()
-    val progress = ((limit - 1).coerceIn(0, 9)) / 9f
-    Box(
+    val coerced = limit.coerceIn(1, 10)
+    var sliderValue by remember(coerced) { mutableStateOf(coerced.toFloat()) }
+    val preview = storageLimitFromSliderValue(sliderValue)
+    Slider(
+        value = sliderValue,
+        onValueChange = { raw ->
+            sliderValue = raw.coerceIn(1f, 10f)
+        },
+        onValueChangeFinished = {
+            val next = storageLimitFromSliderValue(sliderValue)
+            sliderValue = next.toFloat()
+            onLimit(next)
+        },
+        valueRange = 1f..10f,
+        steps = 8,
+        colors = SliderDefaults.colors(
+            thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
+            activeTrackColor = palette.accent,
+            inactiveTrackColor = palette.disabled
+        ),
         modifier = Modifier
             .fillMaxWidth()
-            .height(32.dp)
-            .then(press.modifier)
-            .clickable(
-                interactionSource = press.interactionSource,
-                indication = null,
-                onClick = onStep
-            ),
-        contentAlignment = Alignment.Center
-    ) {
-        Box(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(8.dp)
-                .clip(RoundedCornerShape(100.dp))
-                .background(palette.disabled)
-        )
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Box(
-                modifier = Modifier
-                    .weight(progress.coerceAtLeast(0.01f))
-                    .height(8.dp)
-                    .clip(RoundedCornerShape(100.dp))
-                    .background(palette.accent)
-            )
-            Box(modifier = Modifier.weight((1f - progress).coerceAtLeast(0.01f)))
-        }
-        Row(modifier = Modifier.fillMaxWidth()) {
-            Spacer(Modifier.weight(progress.coerceIn(0f, 1f)))
-            Box(
-                modifier = Modifier
-                    .size(22.dp)
-                    .clip(RoundedCornerShape(100.dp))
-                    .border(2.dp, palette.accent, RoundedCornerShape(100.dp))
-                    .background(if (palette.dark) Color(0xFFD9ECFF) else Color.White)
-            )
-            Spacer(Modifier.weight((1f - progress).coerceIn(0f, 1f)))
-        }
-    }
+            .height(42.dp)
+    )
+    Text(
+        "$preview GB",
+        color = palette.muted,
+        fontSize = 12.sp,
+        modifier = Modifier.padding(start = 2.dp, top = 2.dp)
+    )
 }
+
+//guards persisted storage limit from drag/tap float noise before it reaches prefs.
+private fun storageLimitFromSliderValue(value: Float): Int =
+    value.roundToInt().coerceIn(1, 10)
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
@@ -2143,7 +2129,8 @@ private fun HudButton(
 @Composable
 //keeps destructive icon actions visually distinct while reusing the same tap scale feedback.
 private fun HudIconButton(
-    icon: ImageVector,
+    @DrawableRes
+    icon: Int,
     contentDescription: String,
     palette: Palette,
     tint: Color,
@@ -2169,7 +2156,7 @@ private fun HudIconButton(
         contentAlignment = Alignment.Center
     ) {
         Icon(
-            imageVector = icon,
+            painter = painterResource(id = icon),
             contentDescription = contentDescription,
             tint = if (press.pressed) Color.White else tint,
             modifier = Modifier.size(28.dp)
@@ -2417,19 +2404,22 @@ private fun TabButton(
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
-    val icon = when (tab) {
-        RuntimeTab.Main -> Icons.Outlined.Home
-        RuntimeTab.Apps -> Icons.Outlined.Apps
-        RuntimeTab.Logs -> Icons.AutoMirrored.Outlined.Article
-        RuntimeTab.Storage -> Icons.Outlined.Storage
-        RuntimeTab.Manual -> Icons.Outlined.Edit
-    }
     Icon(
-        imageVector = icon,
+        painter = painterResource(id = iconFor(tab)),
         contentDescription = null,
         tint = if (active) palette.text else palette.muted,
         modifier = Modifier.size(20.dp)
     )
+}
+
+//keeps tab icon resources local so production does not pull the full material-icons-extended dex payload.
+@DrawableRes
+private fun iconFor(tab: RuntimeTab): Int = when (tab) {
+    RuntimeTab.Main -> R.drawable.ic_tab_home
+    RuntimeTab.Apps -> R.drawable.ic_tab_apps
+    RuntimeTab.Logs -> R.drawable.ic_tab_logs
+    RuntimeTab.Storage -> R.drawable.ic_tab_storage
+    RuntimeTab.Manual -> R.drawable.ic_tab_manual
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.

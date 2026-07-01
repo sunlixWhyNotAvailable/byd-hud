@@ -485,7 +485,9 @@ final class WazeCropCapture {
                 if (visualResult != null) {
                     if (commitEligible) {
                         NavHudLiveSender.get(context)
-                                .updateFromWazeVisualCue(WAZE_PACKAGE, visualResult);
+                                .updateFromWazeVisualCue(
+                                        WAZE_PACKAGE,
+                                        visualResult.withSourceDisplayId(displayId));
                     } else {
                         NavSnapshot visualSnapshot = visualResult.snapshot;
                         log(dir, "visual commit skipped file=" + sourceFileName

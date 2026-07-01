@@ -13,8 +13,8 @@ android {
         minSdk = 29
         targetSdk = 29
         //keeps android upgrade ordering ahead of the previous 1.0.1 field build.
-        versionCode = 50
-        versionName = "1.2.1"
+        versionCode = 51
+        versionName = "1.2.2"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
@@ -46,7 +46,6 @@ kotlin {
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.10.00"))
     implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")

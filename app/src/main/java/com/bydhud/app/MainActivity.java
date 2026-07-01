@@ -953,7 +953,12 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetStorageLimitGb(int value) {
-        HudPrefs.setStorageLimitGb(this, value);
+        int current = HudPrefs.storageLimitGb(this);
+        int next = Math.max(1, Math.min(10, value));
+        if (next == current) {
+            return;
+        }
+        HudPrefs.setStorageLimitGb(this, next);
         appendStatus("Storage limit " + HudPrefs.storageLimitGb(this) + " GB");
         refreshControls();
     }

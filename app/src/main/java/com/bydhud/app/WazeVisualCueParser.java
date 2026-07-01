@@ -497,17 +497,31 @@ final class WazeVisualCueParser {
                 && projected.white > projected.gray;
     }
 
+    //guard for destination-style top cues so arrival cards do not get parsed as ordinary arrows.
+    private static boolean hasTopArrivalInstruction(Bitmap bitmap) {
+        if (bitmap == null) {
+            return false;
+        }
+        if (bitmap.getHeight() <= 800) {
+            ColorCounts projected = colorCounts(bitmap, 30, 60, 190, 190, 720);
+            return projected.red >= 4 && projected.white >= 120;
+        }
+        ColorCounts distance = colorCounts(bitmap, 140, 110, 300, 190);
+        return distance.red == 0 && distance.white >= 80 && distance.white <= 240;
+    }
+
     //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseBitmap(
             Bitmap bitmap,
             LaneGuidanceAnalysis laneAnalysis,
             WazeAccessibilityGeometry geometry,
             boolean leftHandRoundaboutTraffic) {
-        if (isArrivalPanel(bitmap)) {
+        boolean arrivalPanel = isArrivalPanel(bitmap);
+        if (arrivalPanel && hasTopArrivalInstruction(bitmap)) {
             return Cue.arrival();
         }
         if (!hasActiveInstructionPanel(bitmap)) {
-            return null;
+            return arrivalPanel ? Cue.arrival() : null;
         }
 
         LaneGuidanceAnalysis lane = laneAnalysis == null ? analyzeLaneGuidance(bitmap) : laneAnalysis;
@@ -520,7 +534,8 @@ final class WazeVisualCueParser {
             }
             return null;
         }
-        return parseSingleCue(bitmap, geometry, false, leftHandRoundaboutTraffic);
+        Cue single = parseSingleCue(bitmap, geometry, false, leftHandRoundaboutTraffic);
+        return single != null ? single : (arrivalPanel ? Cue.arrival() : null);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -1248,7 +1263,7 @@ final class WazeVisualCueParser {
         for (int i = 0; i < components.size(); i++) {
             Component component = components.get(i);
             GlyphClassification glyph = classifyGlyph(bitmap, component, false);
-            String token = collapseDirectSmoothSideToken(component, glyph.finalToken);
+            String token = collapseDirectSmoothSideToken(i, components.size(), component, glyph.finalToken);
             GlyphClassification finalGlyph = token.equals(glyph.finalToken)
                     ? glyph
                     : new GlyphClassification(
@@ -1289,8 +1304,23 @@ final class WazeVisualCueParser {
     }
 
     //keeps divider-free lane rows from treating a single smooth side arrow stem as a straight+side split.
-    private static String collapseDirectSmoothSideToken(Component component, String token) {
-        if (component == null || token == null || component.topCount > 0 || component.width() > 64) {
+    private static String collapseDirectSmoothSideToken(
+            int index,
+            int componentCount,
+            Component component,
+            String token) {
+        if (component == null || token == null) {
+            return token;
+        }
+        if (index == componentCount - 1
+                && "L+Rs*".equals(token)
+                && looksLikeDirectSharpRightEdge(component)) {
+            return "R*";
+        }
+        if (component.topCount > 0) {
+            return token;
+        }
+        if (component.width() > 64) {
             return token;
         }
         if ("S+Rs*".equals(token)) {
@@ -2604,6 +2634,19 @@ final class WazeVisualCueParser {
                 && geometry.midDelta < -8.0d
                 && geometry.bottomDelta < -10.0d
                 && isRecommended(geometry.component);
+    }
+
+    //guard for Waze direct-row right turns that otherwise look like a left+smooth-right compound.
+    private static boolean looksLikeDirectSharpRightEdge(Component component) {
+        GlyphGeometry geometry = GlyphGeometry.from(component);
+        return geometry != null
+                && geometry.component != null
+                && geometry.width >= 64
+                && geometry.width <= 92
+                && geometry.component.height() >= 75
+                && geometry.midDelta < -8.0d
+                && geometry.bottomDelta < -10.0d
+                && isRecommended(component);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
