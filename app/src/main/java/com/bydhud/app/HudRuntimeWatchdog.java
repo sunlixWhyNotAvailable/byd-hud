@@ -24,8 +24,18 @@ final class HudRuntimeWatchdog {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void schedule(Context context, String reason) {
+        scheduleInternal(context, reason, WATCHDOG_INTERVAL_MS);
+    }
+
+    //starts or schedules quick post-update recovery without waiting for the normal watchdog interval.
+    static void scheduleSoon(Context context, String reason, long delayMs) {
+        scheduleInternal(context, reason, Math.max(500L, delayMs));
+    }
+
+    //keeps watchdog alarm setup in one place so normal and urgent recovery use identical intents.
+    private static void scheduleInternal(Context context, String reason, long delayMs) {
         Context appContext = context.getApplicationContext();
-        if (!HudPrefs.isBootEnabled(appContext)) {
+        if (!HudPrefs.isBootEnabled(appContext) || HudPrefs.isUserShutdownActive(appContext)) {
             cancel(appContext);
             return;
         }
@@ -35,13 +45,13 @@ final class HudRuntimeWatchdog {
             Log.w(TAG, "schedule failed: no AlarmManager");
             return;
         }
-        long triggerAt = SystemClock.elapsedRealtime() + WATCHDOG_INTERVAL_MS;
+        long triggerAt = SystemClock.elapsedRealtime() + delayMs;
         alarmManager.set(
                 AlarmManager.ELAPSED_REALTIME_WAKEUP,
                 triggerAt,
                 pendingIntent(appContext));
         AppEventLogger.event(appContext, "runtime_watchdog scheduled reason=" + reason
-                + " intervalMs=" + WATCHDOG_INTERVAL_MS);
+                + " intervalMs=" + delayMs);
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.

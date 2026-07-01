@@ -221,6 +221,11 @@ public final class MainActivity extends ComponentActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         destroyed = false;
+        HudRuntimeUpgradeGuard.recordVersionStart(this, "activity-create");
+        if (HudPrefs.isUserShutdownActive(this)) {
+            HudPrefs.setUserShutdownActive(this, false);
+            AppEventLogger.event(this, "shutdown cleared reason=activity-create");
+        }
         HudGraphicPayload.setContext(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-create");
@@ -1081,6 +1086,11 @@ public final class MainActivity extends ComponentActivity {
         stopLogcatRecording();
     }
 
+    //stops all active runtime work after explicit user shutdown so auto-start stays blocked until the next manual open.
+    public void composeShutdownAndExit() {
+        shutdownAndExit("ui-shutdown");
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetManualMode(boolean enabled) {
         setManualMode(enabled);
@@ -1902,6 +1912,47 @@ public final class MainActivity extends ComponentActivity {
         finishAfterStop();
     }
 
+    //stops runtime-owned work without deleting stored HUD/log selections.
+    private void shutdownAndExit(String reason) {
+        String safeReason = reason == null ? "shutdown" : reason;
+        appendStatus("shutdown requested reason=" + safeReason);
+        exitRequested = true;
+        HudPrefs.setUserShutdownActive(this, true);
+        AppEventLogger.event(this, "shutdown requested reason=" + safeReason);
+
+        if (pendingNavPermissionSelfCheckRunnable != null) {
+            handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);
+            pendingNavPermissionSelfCheckRunnable = null;
+        }
+        navPermissionSelfCheckPending = false;
+
+        String hudPackage = NavCapturePrefs.getHudPackage(this);
+        NavHudLiveSender.get(this).stop(hudPackage, safeReason, true);
+        WazeCropCapture.get(this).stop(safeReason);
+        WazeMediaProjectionController.resetForRuntimeReinit(this, safeReason);
+
+        String dashboardPackage = NavAppDisplayController.get(this).activeDashboardPackage();
+        if (!dashboardPackage.isEmpty()) {
+            NavAppDisplayController.get(this)
+                    .moveIndependentDashboardApp(dashboardPackage, false, safeReason);
+        }
+
+        if (LogcatRecorder.isRecording()) {
+            LogcatRecorder.Result result = LogcatRecorder.stop(this);
+            appendStatus("logcat saved on shutdown " + result.detail
+                    + " file=" + filePath(result.file));
+        }
+
+        manualModeEnabled = false;
+        HudRuntimeWatchdog.cancel(this);
+        HudRuntimeService.stopPersistent(this, safeReason);
+        HudPrefs.setRuntimeServiceRunning(this, false);
+        HudRuntimeState.markStopped(this, safeReason);
+
+        stopImmediately(safeReason, true, true);
+        finishAfterStop();
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void finishAfterStop() {
         finishAndRemoveTask();
@@ -2503,11 +2554,14 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean showBackgroundReminderIfNeeded() {
+        long token = HudRuntimeUpgradeGuard.packageReplaceToken(this);
         if (!HudPrefs.shouldShowBackgroundReminder(this)) {
+            AppEventLogger.event(this, "bg_settings_reminder_skipped version="
+                    + BuildConfig.VERSION_NAME + " token=" + token);
             return false;
         }
         AppEventLogger.event(this, "bg_settings_reminder_shown version="
-                + BuildConfig.VERSION_NAME);
+                + BuildConfig.VERSION_NAME + " token=" + token);
         return true;
     }
 

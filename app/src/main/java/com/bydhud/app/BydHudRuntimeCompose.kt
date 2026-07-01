@@ -35,6 +35,14 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.Article
+import androidx.compose.material.icons.outlined.Apps
+import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.Home
+import androidx.compose.material.icons.outlined.PowerSettingsNew
+import androidx.compose.material.icons.outlined.Storage
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -50,14 +58,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.CornerRadius
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
@@ -178,6 +183,8 @@ private data class Copy(
     val checkForUpdates: String,
     val checkForUpdatesHint: String,
     val checkForUpdatesButton: String,
+    val shutdown: String,
+    val shutdownHint: String,
     val updateTitle: String,
     val updateCurrentVersion: String,
     val updateAvailableVersion: String,
@@ -524,7 +531,8 @@ private fun RuntimeApp(activity: MainActivity) {
                                 AppUpdateManager.setAutoCheckEnabled(activity, enabled)
                             },
                             onManualUpdateCheck = { beginUpdateCheck(force = true, showLatestResult = true) },
-                            onDisableBgApps = { showSetupDialog = true }
+                            onDisableBgApps = { showSetupDialog = true },
+                            onShutdownClick = { runAction { activity.composeShutdownAndExit() } }
                         )
                         RuntimeTab.Apps -> AppsTab(copy, palette, snapshot, activity, ::runAction)
                         RuntimeTab.Logs -> LogsTab(copy, palette, snapshot, activity, ::runAction)
@@ -683,7 +691,8 @@ private fun MainTab(
     autoUpdateCheckEnabled: Boolean,
     onAutoUpdateCheckChange: (Boolean) -> Unit,
     onManualUpdateCheck: () -> Unit,
-    onDisableBgApps: () -> Unit
+    onDisableBgApps: () -> Unit,
+    onShutdownClick: () -> Unit
 ) {
     PageSurface(copy.main, copy.mainHint, palette) {
         Section(copy.permissionsRuntime, palette) {
@@ -722,6 +731,21 @@ private fun MainTab(
                 onCheckedChange = onAutoUpdateCheckChange,
                 onCheckClick = onManualUpdateCheck,
                 palette = palette
+            )
+            Divider(palette)
+            SettingRow(
+                title = copy.shutdown,
+                hint = copy.shutdownHint,
+                palette = palette,
+                action = {
+                    HudIconButton(
+                        icon = Icons.Outlined.PowerSettingsNew,
+                        contentDescription = copy.shutdown,
+                        palette = palette,
+                        tint = palette.red,
+                        onClick = onShutdownClick
+                    )
+                }
             )
         }
 
@@ -1308,10 +1332,24 @@ private fun LogsTab(
                     modifier = Modifier.padding(14.dp),
                     horizontalArrangement = Arrangement.spacedBy(12.dp)
                 ) {
-                    HudButton(copy.startLogcat, palette, primary = true, width = 0.dp, modifier = Modifier.weight(0.65f)) {
+                    HudButton(
+                        copy.startLogcat,
+                        palette,
+                        primary = !snapshot.logcatRecording,
+                        enabled = !snapshot.logcatRecording,
+                        width = 0.dp,
+                        modifier = Modifier.weight(0.65f)
+                    ) {
                         runAction { activity.composeStartLogcat() }
                     }
-                    HudButton(copy.stopLogcat, palette, width = 0.dp, modifier = Modifier.weight(0.35f)) {
+                    HudButton(
+                        copy.stopLogcat,
+                        palette,
+                        primary = snapshot.logcatRecording,
+                        enabled = snapshot.logcatRecording,
+                        width = 0.dp,
+                        modifier = Modifier.weight(0.35f)
+                    ) {
                         runAction { activity.composeStopLogcat() }
                     }
                 }
@@ -2103,6 +2141,43 @@ private fun HudButton(
 }
 
 @Composable
+//keeps destructive icon actions visually distinct while reusing the same tap scale feedback.
+private fun HudIconButton(
+    icon: ImageVector,
+    contentDescription: String,
+    palette: Palette,
+    tint: Color,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback()
+    val baseBackground = tint.copy(alpha = if (palette.dark) 0.20f else 0.12f)
+    val pressedBackground = tint.copy(alpha = if (palette.dark) 0.88f else 0.72f)
+    Box(
+        modifier = modifier
+            .size(42.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, tint.copy(alpha = 0.85f), RoundedCornerShape(7.dp))
+            .background(if (press.pressed) pressedBackground else baseBackground)
+            .then(press.modifier)
+            .clickable(
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .padding(6.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = contentDescription,
+            tint = if (press.pressed) Color.White else tint,
+            modifier = Modifier.size(28.dp)
+        )
+    }
+}
+
+@Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun CompactSwitchBox(
     label: String,
@@ -2181,7 +2256,7 @@ private fun HudSwitch(
         Box(
             modifier = Modifier
                 .size(knob)
-                .offset(x = knobOffset, y = 3.dp)
+                .offset(x = knobOffset, y = 0.dp)
                 .clip(RoundedCornerShape(100.dp))
                 .background(if (checked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
         )
@@ -2342,46 +2417,19 @@ private fun TabButton(
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
-    val color = if (active) palette.text else palette.muted
-    Canvas(modifier = Modifier.size(19.dp)) {
-        val stroke = Stroke(width = 2.1f, cap = StrokeCap.Round, join = StrokeJoin.Round)
-        when (tab) {
-            RuntimeTab.Main -> {
-                drawLine(color, Offset(size.width * 0.18f, size.height * 0.50f), Offset(size.width * 0.50f, size.height * 0.22f), strokeWidth = 2.1f, cap = StrokeCap.Round)
-                drawLine(color, Offset(size.width * 0.50f, size.height * 0.22f), Offset(size.width * 0.82f, size.height * 0.50f), strokeWidth = 2.1f, cap = StrokeCap.Round)
-                drawLine(color, Offset(size.width * 0.28f, size.height * 0.50f), Offset(size.width * 0.28f, size.height * 0.82f), strokeWidth = 2.1f, cap = StrokeCap.Round)
-                drawLine(color, Offset(size.width * 0.72f, size.height * 0.50f), Offset(size.width * 0.72f, size.height * 0.82f), strokeWidth = 2.1f, cap = StrokeCap.Round)
-                drawLine(color, Offset(size.width * 0.28f, size.height * 0.82f), Offset(size.width * 0.72f, size.height * 0.82f), strokeWidth = 2.1f, cap = StrokeCap.Round)
-            }
-            RuntimeTab.Apps -> {
-                repeat(2) { row ->
-                    repeat(2) { col ->
-                        drawRoundRect(
-                            color = color,
-                            topLeft = Offset(size.width * (0.18f + col * 0.38f), size.height * (0.18f + row * 0.38f)),
-                            size = Size(size.width * 0.22f, size.height * 0.22f),
-                            cornerRadius = CornerRadius(3f, 3f),
-                            style = stroke
-                        )
-                    }
-                }
-            }
-            RuntimeTab.Logs -> {
-                drawRoundRect(color, Offset(size.width * 0.24f, size.height * 0.12f), Size(size.width * 0.52f, size.height * 0.76f), CornerRadius(5f, 5f), style = stroke)
-                drawLine(color, Offset(size.width * 0.36f, size.height * 0.35f), Offset(size.width * 0.64f, size.height * 0.35f), strokeWidth = 2f)
-                drawLine(color, Offset(size.width * 0.36f, size.height * 0.53f), Offset(size.width * 0.64f, size.height * 0.53f), strokeWidth = 2f)
-            }
-            RuntimeTab.Storage -> {
-                drawRoundRect(color, Offset(size.width * 0.20f, size.height * 0.20f), Size(size.width * 0.60f, size.height * 0.18f), CornerRadius(6f, 6f), style = stroke)
-                drawRoundRect(color, Offset(size.width * 0.20f, size.height * 0.41f), Size(size.width * 0.60f, size.height * 0.18f), CornerRadius(6f, 6f), style = stroke)
-                drawRoundRect(color, Offset(size.width * 0.20f, size.height * 0.62f), Size(size.width * 0.60f, size.height * 0.18f), CornerRadius(6f, 6f), style = stroke)
-            }
-            RuntimeTab.Manual -> {
-                drawRoundRect(color, Offset(size.width * 0.18f, size.height * 0.18f), Size(size.width * 0.64f, size.height * 0.64f), CornerRadius(5f, 5f), style = stroke)
-                drawLine(color, Offset(size.width * 0.34f, size.height * 0.66f), Offset(size.width * 0.66f, size.height * 0.34f), strokeWidth = 2.4f, cap = StrokeCap.Round)
-            }
-        }
+    val icon = when (tab) {
+        RuntimeTab.Main -> Icons.Outlined.Home
+        RuntimeTab.Apps -> Icons.Outlined.Apps
+        RuntimeTab.Logs -> Icons.AutoMirrored.Outlined.Article
+        RuntimeTab.Storage -> Icons.Outlined.Storage
+        RuntimeTab.Manual -> Icons.Outlined.Edit
     }
+    Icon(
+        imageVector = icon,
+        contentDescription = null,
+        tint = if (active) palette.text else palette.muted,
+        modifier = Modifier.size(20.dp)
+    )
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -2553,6 +2601,8 @@ private fun enCopy() = Copy(
     checkForUpdates = "Check for updates",
     checkForUpdatesHint = "Check for new version and offer updating",
     checkForUpdatesButton = "Check for updates",
+    shutdown = "Shutdown",
+    shutdownHint = "Stop the app until it is opened again",
     updateTitle = "Update",
     updateCurrentVersion = "Current version:",
     updateAvailableVersion = "Available version:",
@@ -2686,6 +2736,8 @@ private fun uaCopy() = enCopy().copy(
     checkForUpdates = "Перевіряти оновлення",
     checkForUpdatesHint = "Перевіряти наявність нової версії та пропонувати оновитись",
     checkForUpdatesButton = "Перевірити оновлення",
+    shutdown = "Виключити",
+    shutdownHint = "Завершити роботу застосунку до наступного відкриття",
     updateTitle = "Оновлення",
     updateCurrentVersion = "Поточна версія:",
     updateAvailableVersion = "Доступна версія:",

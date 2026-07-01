@@ -342,10 +342,16 @@ final class WazeCropCapture {
         int displayId = state == null ? NavAppDisplayState.DISPLAY_UNKNOWN : state.displayId;
         WazeFrameCaptureBackend.CaptureResult capture = frameBackend.capture(state);
         String sourceFileName = "";
+        String backendUnavailableReason = "";
         boolean detailedDebugArtifacts =
                 HudPrefs.isDetailedDebugArtifactsEnabled(context);
         try {
             if (capture.frame == null) {
+                backendUnavailableReason = capture.reason;
+                log(dir, "frame backend unavailable frameId=" + index
+                        + " backend=" + capture.backend
+                        + " reason=" + capture.reason
+                        + " fallbackBackend=" + WazeFrameCaptureBackend.BACKEND_SCREENCAP_FALLBACK);
                 if (!currentSessionShellWritable() || shellDir.isEmpty()) {
                     log(dir, "frame unavailable frameId=" + index
                             + " backend=" + capture.backend
@@ -524,6 +530,7 @@ final class WazeCropCapture {
                         displayId,
                         sourceFileName,
                         "backend=" + capture.backend
+                                + backendUnavailableDetail(backendUnavailableReason)
                                 + " routeAgeMs=" + evidenceAgeMs + " " + timingDetail,
                         effectiveManeuver,
                         trustedLanes,
@@ -540,6 +547,7 @@ final class WazeCropCapture {
                             index,
                             displayId,
                             capture,
+                            backendUnavailableReason,
                             geometry,
                             sourceFileName,
                             arrowInput,
@@ -586,6 +594,7 @@ final class WazeCropCapture {
             int frameId,
             int displayId,
             WazeFrameCaptureBackend.CaptureResult capture,
+            String backendUnavailableReason,
             WazeAccessibilityGeometry geometry,
             String sourceFrame,
             String arrowInput,
@@ -599,6 +608,8 @@ final class WazeCropCapture {
                 + "\"frameId\":" + frameId
                 + ",\"displayId\":" + displayId
                 + ",\"backend\":\"" + NavCaptureStore.esc(capture.backend) + "\""
+                + ",\"backendUnavailableReason\":\""
+                + NavCaptureStore.esc(backendUnavailableReason) + "\""
                 + ",\"captureMs\":" + Math.max(0L, capture.captureEndMs - capture.captureStartMs)
                 + ",\"geometry\":\"" + NavCaptureStore.esc(geometry.summary()) + "\""
                 + ",\"sourceFrame\":\"" + NavCaptureStore.esc(sourceFrame) + "\""
@@ -610,6 +621,15 @@ final class WazeCropCapture {
                 + ",\"commitEligible\":" + commitEligible
                 + ",\"commitSkipReason\":\"" + NavCaptureStore.esc(commitSkipReason) + "\""
                 + "}";
+    }
+
+    //keeps fallback diagnostics attached to successful screencap frames without changing parser behavior.
+    private static String backendUnavailableDetail(String reason) {
+        String safeReason = safe(reason);
+        if (safeReason.isEmpty()) {
+            return "";
+        }
+        return " backendUnavailableReason=" + safeReason;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.

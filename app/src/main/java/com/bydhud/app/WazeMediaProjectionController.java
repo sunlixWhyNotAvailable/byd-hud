@@ -113,6 +113,21 @@ final class WazeMediaProjectionController {
         }
     }
 
+    //clears capture ownership after package replacement so stale ImageReader frames cannot feed Waze parsing.
+    static void resetForRuntimeReinit(Context context, String reason) {
+        Context appContext = context == null ? null : context.getApplicationContext();
+        synchronized (LOCK) {
+            resultCode = 0;
+            resultData = null;
+            lastPromptElapsedMs = 0L;
+        }
+        if (appContext != null) {
+            appContext.stopService(new Intent(appContext, WazeMediaProjectionService.class));
+            AppEventLogger.event(appContext, "waze_frame_capture reset_for_runtime_reinit reason="
+                    + safe(reason));
+        }
+    }
+
     //normalizes log fields so event lines stay single-line JSON-friendly text.
     private static String safe(String value) {
         return value == null ? "" : value.replace('\n', ' ').replace('\r', ' ').trim();

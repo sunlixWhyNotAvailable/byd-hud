@@ -4,6 +4,8 @@
 >
 > HUD navigation app for Chinise BYD cars on DiLink: captures navigation data and projects maneuver, distance, street, and lane guidance to the vehicle HUD
 >
+> I manuall created most of the lanes and maneuvers which were not originally supported by by base nav app but used in Waze app
+>
 > AI was used to analize and write the code
 
 ## Supported Navigation Apps
@@ -14,10 +16,11 @@
 ## Features
 
 - HUD output for navigation maneuver, distance, road name, ETA, and remaining distance
-- Google Maps foreground and notification-based route detection
-- Waze accessibility and visual crop parsing
-- Waze lane guidance support where available
-- Background runtime service with watchdog recovery
+- `Google Maps` foreground and notification-based route detection
+- `Waze` accessibility and visual crop parsing
+- `Waze` lane guidance support where available
+- background runtime service with watchdog recovery
+- storage management
 
 ## Installation
 
@@ -28,19 +31,22 @@ After first launch:
 3. Set `Disable background Apps -> BYD HUD = OFF` in the BYD system settings.
 4. Optionally change prefered navigation settings.
 5. Choose supported navigation app from the list of supported apps and toogle "HUD"
-6. Optionally "Send to dashboard" (WIP)
+6. Optionally "Send to dashboard".
 
 ## Known Limitations
 
-Navigation parsing depends on the UI and notification structure of third-party apps.
-Google Maps notification mode may provide text route data but not full maneuver or lane graphics.
-Waze visual parsing may require template updates when Waze changes its UI. Heavily dependent on the screen capture
+Navigation parsing depends on the UI and notification structure of navigator apps.
+`Google Maps` accessibility mode doensn't provide lane guidance.
+`Google Maps` notification mode may provide text route data but no maneuvers or lane guidance.
+`Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture
+`Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created by me using `GIMP`
 
 ## Tested
 
 Tested on *Chinese version* of `BYD Sea Lion 07 EV 2025`, `DiLink 5.0`
+If there are missing glyphs or inconsistency in glyph outputs, archive of relevant sessions for the day (paths are shown in the app) needs to be sent to me for analysis
 
 ## TO DO
 
-- add dashboard HUD output support (prio!)
-- add base abrp support. as of now abrp is the same as waze: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). potentially explore SDK maybe something usefull here
+- add dashboard HUD output support for waze (testing)
+- add base `ABRP` support. as of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here
