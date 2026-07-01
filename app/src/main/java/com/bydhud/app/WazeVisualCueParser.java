@@ -1,6 +1,6 @@
 package com.bydhud.app;
 
-//combines template and geometry evidence so Waze maneuvers stay robust across glyph variants.
+//uses geometry-first Waze visual parsing so runtime work stays deterministic and cheap.
 
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -354,6 +354,27 @@ final class WazeVisualCueParser {
         }
     }
 
+    //lets the host tester use the same bounds-first production path without hardcoded virtual parsing.
+    static WazeAccessibilityGeometry detectNavigationBoundsForTest(File screenshot) {
+        if (screenshot == null || !screenshot.exists()) {
+            return WazeAccessibilityGeometry.EMPTY;
+        }
+        Bitmap bitmap;
+        try {
+            bitmap = BitmapFactory.decodeFile(screenshot.getAbsolutePath());
+        } catch (NoClassDefFoundError | RuntimeException e) {
+            return WazeAccessibilityGeometry.EMPTY;
+        }
+        if (bitmap == null) {
+            return WazeAccessibilityGeometry.EMPTY;
+        }
+        try {
+            return detectNavigationBounds(bitmap);
+        } finally {
+            bitmap.recycle();
+        }
+    }
+
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     static String visualLayoutForTest(File screenshot) {
         if (screenshot == null || !screenshot.exists()) {
@@ -458,14 +479,31 @@ final class WazeVisualCueParser {
         return isArrivalCue(redCount, whiteCount, grayCount);
     }
 
+    //recognizes Waze arrival panels before roundabout/single-cue parsing can misclassify the flag icon.
+    private static boolean isArrivalPanel(Bitmap bitmap) {
+        ColorCounts main = colorCounts(bitmap, 30, 130, 130, 220);
+        if (isArrivalCue(main.red, main.white, main.gray)) {
+            return true;
+        }
+        if (hasArrivalDetailCard(bitmap)) {
+            return true;
+        }
+        if (bitmap == null || bitmap.getHeight() > 800) {
+            return false;
+        }
+        ColorCounts projected = colorCounts(bitmap, 30, 60, 190, 190, 720);
+        return projected.red >= 4
+                && projected.white >= 120
+                && projected.white > projected.gray;
+    }
+
     //parses source data here so downstream HUD code receives normalized navigation fields.
     private static Cue parseBitmap(
             Bitmap bitmap,
             LaneGuidanceAnalysis laneAnalysis,
             WazeAccessibilityGeometry geometry,
             boolean leftHandRoundaboutTraffic) {
-        ColorCounts arrival = colorCounts(bitmap, 30, 130, 130, 220);
-        if (isArrivalCue(arrival.red, arrival.white, arrival.gray)) {
+        if (isArrivalPanel(bitmap)) {
             return Cue.arrival();
         }
         if (!hasActiveInstructionPanel(bitmap)) {
@@ -477,6 +515,9 @@ final class WazeVisualCueParser {
             return lane.cue;
         }
         if (lane.status == LaneGuidanceStatus.UNPARSED_ROW && lane.blocksSingleFallback) {
+            if (isWeakLaneBlocker(lane)) {
+                return parseSingleCue(bitmap, geometry, false, leftHandRoundaboutTraffic);
+            }
             return null;
         }
         return parseSingleCue(bitmap, geometry, false, leftHandRoundaboutTraffic);
@@ -484,8 +525,7 @@ final class WazeVisualCueParser {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean hasVisualNavigationCueCandidate(Bitmap bitmap) {
-        ColorCounts arrival = colorCounts(bitmap, 30, 130, 130, 220);
-        if (isArrivalCue(arrival.red, arrival.white, arrival.gray)) {
+        if (isArrivalPanel(bitmap)) {
             return true;
         }
         if (!hasActiveInstructionPanel(bitmap)) {
@@ -539,10 +579,7 @@ final class WazeVisualCueParser {
         List<Component> mainComponents = components(bitmap, 20, 95, 190, 230);
         if (!mainComponents.isEmpty()) {
             Component largest = primaryCueComponent(mainComponents, scaleX(bitmap, 140));
-            String direction = templateToken(bitmap, largest, true);
-            if (direction.isEmpty()) {
-                direction = singleManeuverToken(largest);
-            }
+            String direction = classifyGlyph(bitmap, largest, true).finalToken;
             NavSnapshot.Maneuver maneuver = maneuverFromSingleToken(direction);
             if (isRoundaboutManeuver(maneuver)) {
                 return null;
@@ -571,27 +608,12 @@ final class WazeVisualCueParser {
         if (rect == null || rect.width() < scaleX(bitmap, 10) || rect.height() < scaleY(bitmap, 16)) {
             return null;
         }
-        String templateDirection = templateToken(bitmap, rect, true);
-        if (!templateDirection.isEmpty()) {
-            NavSnapshot.Maneuver maneuver = maneuverFromSingleToken(templateDirection);
-            if (isRoundaboutManeuver(maneuver)) {
-                return null;
-            }
-            if (uturnOnly
-                    && maneuver != NavSnapshot.Maneuver.UTURN_LEFT
-                    && maneuver != NavSnapshot.Maneuver.UTURN_RIGHT) {
-                return null;
-            }
-            if (maneuver != NavSnapshot.Maneuver.UNKNOWN) {
-                return Cue.maneuver(maneuver, sourceFromManeuver(maneuver));
-            }
-        }
         List<Component> components = componentsRaw(bitmap, rect.left, rect.top, rect.right, rect.bottom);
         if (components.isEmpty()) {
             return null;
         }
         Component largest = primaryCueComponent(components, Integer.MAX_VALUE);
-        String direction = singleManeuverToken(largest);
+        String direction = classifyGlyph(bitmap, largest, true).finalToken;
         NavSnapshot.Maneuver maneuver = maneuverFromSingleToken(direction);
         if (isRoundaboutManeuver(maneuver)) {
             return null;
@@ -755,7 +777,7 @@ final class WazeVisualCueParser {
             return LaneGuidanceAnalysis.none(LaneFailureReason.NO_ACTIVE_PANEL);
         }
         LaneGuidanceAnalysis boundsLane = analyzeLaneGuidanceFromBounds(bitmap, geometry);
-        if (isBlockingLaneAnalysis(boundsLane)) {
+        if (boundsLane.status == LaneGuidanceStatus.PARSED) {
             return boundsLane;
         }
         if (layout == WazeVisualLayout.SINGLE_MANEUVER) {
@@ -774,7 +796,7 @@ final class WazeVisualCueParser {
         if (bitmap == null || geometry == null || !geometry.hasLaneGuidanceBounds()) {
             return LaneGuidanceAnalysis.none(LaneFailureReason.NO_LANE_STRIP);
         }
-        Rect rect = clampRect(geometry.laneGuidanceBounds, bitmap);
+        Rect rect = laneGuidanceParseBounds(bitmap, clampRect(geometry.laneGuidanceBounds, bitmap));
         if (rect == null || rect.width() < scaleX(bitmap, 80) || rect.height() < scaleY(bitmap, 24)) {
             return LaneGuidanceAnalysis.none(LaneFailureReason.BAD_CELL_GRID);
         }
@@ -794,6 +816,95 @@ final class WazeVisualCueParser {
                     direct.componentCount);
         }
         return direct;
+    }
+
+    //guards projected top-lane crops from map bleed that merges separate lane glyphs into one component.
+    private static Rect laneGuidanceParseBounds(Bitmap bitmap, Rect rect) {
+        if (bitmap == null || rect == null || bitmap.getHeight() > 800
+                || rect.top > scaleY(bitmap, 32, 720)) {
+            return rect;
+        }
+        int searchBottom = Math.min(bitmap.getHeight(), Math.max(rect.bottom, scaleY(bitmap, 180, 720)));
+        int panelTop = darkPanelTop(bitmap, rect.left, rect.right, rect.top, searchBottom);
+        if (panelTop < 0) {
+            return rect;
+        }
+        int panelLeft = darkPanelLeft(bitmap, rect.left, rect.right, panelTop, searchBottom);
+        int panelRight = darkPanelRight(bitmap, rect.left, rect.right, panelTop, searchBottom);
+        if (panelLeft < 0 || panelRight <= panelLeft) {
+            return rect;
+        }
+        int left = Math.max(rect.left, panelLeft + scaleX(bitmap, 4));
+        int right = Math.min(rect.right, panelRight - scaleX(bitmap, 4));
+        int top = Math.max(rect.top, panelTop + scaleY(bitmap, 3, 720));
+        int bottom = Math.min(rect.bottom, panelTop + scaleY(bitmap, 145, 720));
+        if (right - left < scaleX(bitmap, 80) || bottom - top < scaleY(bitmap, 24, 720)) {
+            return rect;
+        }
+        return new Rect(left, top, right, bottom);
+    }
+
+    //finds the top edge of the Waze black panel so projected map labels above it do not enter glyph parsing.
+    private static int darkPanelTop(Bitmap bitmap, int left, int right, int top, int bottom) {
+        int x1 = Math.max(0, Math.min(left, bitmap.getWidth()));
+        int x2 = Math.max(x1, Math.min(right, bitmap.getWidth()));
+        int y1 = Math.max(0, Math.min(top, bitmap.getHeight()));
+        int y2 = Math.max(y1, Math.min(bottom, bitmap.getHeight()));
+        int minSamples = Math.max(1, (x2 - x1 + 3) / 4);
+        for (int y = y1; y < y2; y++) {
+            int dark = 0;
+            for (int x = x1; x < x2; x += 4) {
+                if (isDarkPanelPixel(bitmap.getPixel(x, y))) {
+                    dark++;
+                }
+            }
+            if (dark * 4 >= minSamples * 3) {
+                return y;
+            }
+        }
+        return -1;
+    }
+
+    //finds the left edge of the Waze black panel for projected screenshots with bounds expanded to x=0.
+    private static int darkPanelLeft(Bitmap bitmap, int left, int right, int top, int bottom) {
+        int x1 = Math.max(0, Math.min(left, bitmap.getWidth()));
+        int x2 = Math.max(x1, Math.min(right, bitmap.getWidth()));
+        int y1 = Math.max(0, Math.min(top, bitmap.getHeight()));
+        int y2 = Math.max(y1, Math.min(bottom, bitmap.getHeight()));
+        int minSamples = Math.max(1, (y2 - y1 + 3) / 4);
+        for (int x = x1; x < x2; x++) {
+            int dark = 0;
+            for (int y = y1; y < y2; y += 4) {
+                if (isDarkPanelPixel(bitmap.getPixel(x, y))) {
+                    dark++;
+                }
+            }
+            if (dark * 4 >= minSamples * 3) {
+                return x;
+            }
+        }
+        return -1;
+    }
+
+    //finds the right edge of the Waze black panel so projected lane parsing ignores map content after it.
+    private static int darkPanelRight(Bitmap bitmap, int left, int right, int top, int bottom) {
+        int x1 = Math.max(0, Math.min(left, bitmap.getWidth()));
+        int x2 = Math.max(x1, Math.min(right, bitmap.getWidth()));
+        int y1 = Math.max(0, Math.min(top, bitmap.getHeight()));
+        int y2 = Math.max(y1, Math.min(bottom, bitmap.getHeight()));
+        int minSamples = Math.max(1, (y2 - y1 + 3) / 4);
+        for (int x = x2 - 1; x >= x1; x--) {
+            int dark = 0;
+            for (int y = y1; y < y2; y += 4) {
+                if (isDarkPanelPixel(bitmap.getPixel(x, y))) {
+                    dark++;
+                }
+            }
+            if (dark * 4 >= minSamples * 3) {
+                return x + 1;
+            }
+        }
+        return -1;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -950,8 +1061,7 @@ final class WazeVisualCueParser {
         if (bitmap == null) {
             return WazeVisualLayout.NO_ACTIVE_PANEL;
         }
-        ColorCounts arrival = colorCounts(bitmap, 30, 130, 130, 220);
-        if (isArrivalCue(arrival.red, arrival.white, arrival.gray)) {
+        if (isArrivalPanel(bitmap)) {
             return WazeVisualLayout.ARRIVAL;
         }
         if (!hasActiveInstructionPanel(bitmap)) {
@@ -991,6 +1101,43 @@ final class WazeVisualCueParser {
             }
         }
         return false;
+    }
+
+    //guards direct lane parsing so lower overlays are not mistaken for lane guidance.
+    private static boolean hasReliableDirectLaneEvidence(
+            Bitmap bitmap,
+            List<Component> directComponents,
+            int cellCount) {
+        if (directComponents == null || directComponents.size() < 2) {
+            return false;
+        }
+        if (cellCount > 0) {
+            return true;
+        }
+        int minY = Integer.MAX_VALUE;
+        int maxY = 0;
+        int minX = Integer.MAX_VALUE;
+        int maxX = 0;
+        for (Component component : directComponents) {
+            if (component == null) {
+                continue;
+            }
+            minX = Math.min(minX, component.x1);
+            maxX = Math.max(maxX, component.x2);
+            minY = Math.min(minY, component.y1);
+            maxY = Math.max(maxY, component.y2);
+        }
+        int minSpan = bitmap == null ? 450 : scaleX(bitmap, 450);
+        return maxY <= 230 && maxX - minX >= minSpan;
+    }
+
+    //lets obvious single-maneuver cards recover from weak false lane rows without hiding real lane rows.
+    private static boolean isWeakLaneBlocker(LaneGuidanceAnalysis lane) {
+        return lane != null
+                && (lane.reason == LaneFailureReason.UNKNOWN_GLYPH
+                || lane.reason == LaneFailureReason.EMPTY_CELL)
+                && lane.cellCount <= 2
+                && lane.componentCount <= 1;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -1033,6 +1180,14 @@ final class WazeVisualCueParser {
                     false);
         }
         if (!hasDirectLaneRowGeometry(laneLike)) {
+            return LaneGuidanceAnalysis.none(
+                    LaneFailureReason.BAD_CELL_GRID,
+                    dividerCount,
+                    cellCount,
+                    componentCount,
+                    false);
+        }
+        if (cellCount == 0 && !hasReliableDirectLaneEvidence(bitmap, laneLike, cellCount)) {
             return LaneGuidanceAnalysis.none(
                     LaneFailureReason.BAD_CELL_GRID,
                     dividerCount,
@@ -1092,19 +1247,24 @@ final class WazeVisualCueParser {
         LaneFailureReason failure = LaneFailureReason.NONE;
         for (int i = 0; i < components.size(); i++) {
             Component component = components.get(i);
-            String template = templateToken(bitmap, component, false);
-            String geometry = glyphToken(component);
-            String token = chooseTemplateOrGeometry(template, geometry);
+            GlyphClassification glyph = classifyGlyph(bitmap, component, false);
+            String token = collapseDirectSmoothSideToken(component, glyph.finalToken);
+            GlyphClassification finalGlyph = token.equals(glyph.finalToken)
+                    ? glyph
+                    : new GlyphClassification(
+                    glyph.geometryToken,
+                    token,
+                    glyphSource(token),
+                    glyph.geometryCount,
+                    glyph.geometryNs);
             if (token.isEmpty() || !KNOWN_LANE_GLYPHS.contains(token)) {
                 if (failure == LaneFailureReason.NONE) {
                     failure = LaneFailureReason.UNKNOWN_GLYPH;
                 }
-                debugCells.add(debugCell(i, component, template, geometry, token,
-                        LaneFailureReason.UNKNOWN_GLYPH));
+                debugCells.add(debugCell(i, component, finalGlyph, LaneFailureReason.UNKNOWN_GLYPH));
                 continue;
             }
-            debugCells.add(debugCell(i, component, template, geometry, token,
-                    LaneFailureReason.NONE));
+            debugCells.add(debugCell(i, component, finalGlyph, LaneFailureReason.NONE));
             tokens.add(token);
         }
         if (failure != LaneFailureReason.NONE) {
@@ -1128,6 +1288,26 @@ final class WazeVisualCueParser {
         return filtered;
     }
 
+    //keeps divider-free lane rows from treating a single smooth side arrow stem as a straight+side split.
+    private static String collapseDirectSmoothSideToken(Component component, String token) {
+        if (component == null || token == null || component.topCount > 0 || component.width() > 64) {
+            return token;
+        }
+        if ("S+Rs*".equals(token)) {
+            return "Rs*";
+        }
+        if ("S+Rs".equals(token)) {
+            return "Rs";
+        }
+        if ("S+Ls*".equals(token)) {
+            return "Ls*";
+        }
+        if ("S+Ls".equals(token)) {
+            return "Ls";
+        }
+        return token;
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isDirectLaneComponent(Component component) {
         if (component == null) {
@@ -1136,7 +1316,7 @@ final class WazeVisualCueParser {
         int width = component.width();
         int height = component.height();
         int count = component.count;
-        if (width < 18 || width > 95 || height < 18 || height > 120 || count < 100) {
+        if (width < 18 || width > 130 || height < 18 || height > 180 || count < 100) {
             return false;
         }
         return count >= Math.max(180, width * 6);
@@ -1414,25 +1594,20 @@ final class WazeVisualCueParser {
                 if (failure == LaneFailureReason.NONE) {
                     failure = LaneFailureReason.EMPTY_CELL;
                 }
-                debugCells.add(debugCell(i, cell, "", "", "", LaneFailureReason.EMPTY_CELL));
+                debugCells.add(debugCell(i, cell, "", "", LaneFailureReason.EMPTY_CELL));
                 continue;
             }
-            String template = templateToken(bitmap, component, false);
-            if (template.isEmpty()) {
-                template = templateToken(bitmap, cell, false);
-            }
-            String geometry = glyphToken(component);
-            String token = chooseTemplateOrGeometry(template, geometry);
+            Component clipped = clippedComponentForCell(bitmap, component, cell);
+            GlyphClassification glyph = classifyGlyph(bitmap, cell, clipped, false);
+            String token = glyph.finalToken;
             if (token.isEmpty() || !KNOWN_LANE_GLYPHS.contains(token)) {
                 if (failure == LaneFailureReason.NONE) {
                     failure = LaneFailureReason.UNKNOWN_GLYPH;
                 }
-                debugCells.add(debugCell(i, cell, template, geometry, token,
-                        LaneFailureReason.UNKNOWN_GLYPH));
+                debugCells.add(debugCell(i, cell, glyph, LaneFailureReason.UNKNOWN_GLYPH));
                 continue;
             }
-            debugCells.add(debugCell(i, cell, template, geometry, token,
-                    LaneFailureReason.NONE));
+            debugCells.add(debugCell(i, clipped, glyph, LaneFailureReason.NONE));
             tokens.add(token);
         }
         if (failure != LaneFailureReason.NONE) {
@@ -1442,42 +1617,79 @@ final class WazeVisualCueParser {
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static String chooseTemplateOrGeometry(String template, String geometry) {
-        String cleanTemplate = template == null ? "" : template;
-        String cleanGeometry = geometry == null ? "" : geometry;
-        if (cleanTemplate.isEmpty()) {
-            return cleanGeometry;
+    private static GlyphClassification classifyGlyph(
+            Bitmap bitmap,
+            Component component,
+            boolean singleContext) {
+        if (component == null) {
+            return GlyphClassification.empty();
         }
-        if (isStraightOnlyToken(cleanTemplate) && hasDirectionalLane(cleanGeometry)) {
-            return cleanGeometry;
-        }
-        if (isStraightOnlyToken(cleanGeometry) && hasDirectionalLane(cleanTemplate)) {
-            return cleanGeometry;
-        }
-        return cleanTemplate;
+        return classifyGlyph(bitmap, paddedRect(component), component, singleContext);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static String glyphSource(String templateToken, String geometryToken, String finalToken) {
-        String template = templateToken == null ? "" : templateToken.trim();
-        String geometry = geometryToken == null ? "" : geometryToken.trim();
+    private static GlyphClassification classifyGlyph(
+            Bitmap bitmap,
+            LaneCell cell,
+            Component component,
+            boolean singleContext) {
+        if (cell == null) {
+            return GlyphClassification.empty();
+        }
+        long geometryStart = System.nanoTime();
+        String geometry = component == null ? "" : geometryToken(component, singleContext);
+        long geometryNs = System.nanoTime() - geometryStart;
+        return new GlyphClassification(
+                geometry,
+                geometry,
+                glyphSource(geometry),
+                component == null ? 0 : 1,
+                geometryNs);
+    }
+
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
+    private static GlyphClassification classifyGlyph(
+            Bitmap bitmap,
+            Rect rect,
+            Component component,
+            boolean singleContext) {
+        long geometryStart = System.nanoTime();
+        String geometry = component == null ? "" : geometryToken(component, singleContext);
+        long geometryNs = System.nanoTime() - geometryStart;
+        return new GlyphClassification(
+                geometry,
+                geometry,
+                glyphSource(geometry),
+                component == null ? 0 : 1,
+                geometryNs);
+    }
+
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
+    private static Rect paddedRect(Component component) {
+        if (component == null) {
+            return null;
+        }
+        int padX = Math.max(2, component.width() / 10);
+        int padY = Math.max(2, component.height() / 10);
+        return new Rect(
+                component.x1 - padX,
+                component.y1 - padY,
+                component.x2 + 1 + padX,
+                component.y2 + 1 + padY);
+    }
+
+    //routes single arrows and lane glyphs through their own geometry rules so refactors do not mix models.
+    private static String geometryToken(Component component, boolean singleContext) {
+        if (component == null) {
+            return "";
+        }
+        return singleContext ? singleManeuverToken(component) : glyphToken(component);
+    }
+
+    //marks geometry as the only production glyph source after template/signature removal.
+    private static String glyphSource(String finalToken) {
         String token = finalToken == null ? "" : finalToken.trim();
-        if (!token.isEmpty() && token.equals(geometry) && !token.equals(template)) {
-            return "geometry";
-        }
-        if (!token.isEmpty() && token.equals(template)) {
-            return "template";
-        }
-        if (!template.isEmpty() && geometry.isEmpty()) {
-            return "template";
-        }
-        if (template.isEmpty() && !geometry.isEmpty()) {
-            return "geometry";
-        }
-        if (!template.isEmpty()) {
-            return "template";
-        }
-        return "none";
+        return token.isEmpty() ? "none" : "geometry";
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -1490,7 +1702,27 @@ final class WazeVisualCueParser {
     private static WazeLaneCell debugCell(
             int zeroBasedIndex,
             LaneCell cell,
-            String templateToken,
+            GlyphClassification glyph,
+            LaneFailureReason reason) {
+        GlyphClassification safe = glyph == null ? GlyphClassification.empty() : glyph;
+        return new WazeLaneCell(
+                zeroBasedIndex + 1,
+                cell.x1,
+                cell.y1,
+                cell.x2,
+                cell.y2,
+                safe.geometryToken,
+                safe.finalToken,
+                safe.source,
+                reason == null ? "" : reason.name(),
+                safe.geometryCount,
+                safe.geometryNs);
+    }
+
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
+    private static WazeLaneCell debugCell(
+            int zeroBasedIndex,
+            LaneCell cell,
             String geometryToken,
             String finalToken,
             LaneFailureReason reason) {
@@ -1500,10 +1732,9 @@ final class WazeVisualCueParser {
                 cell.y1,
                 cell.x2,
                 cell.y2,
-                templateToken,
                 geometryToken,
                 finalToken,
-                glyphSource(templateToken, geometryToken, finalToken),
+                glyphSource(finalToken),
                 reason == null ? "" : reason.name());
     }
 
@@ -1511,7 +1742,27 @@ final class WazeVisualCueParser {
     private static WazeLaneCell debugCell(
             int zeroBasedIndex,
             Component component,
-            String templateToken,
+            GlyphClassification glyph,
+            LaneFailureReason reason) {
+        GlyphClassification safe = glyph == null ? GlyphClassification.empty() : glyph;
+        return new WazeLaneCell(
+                zeroBasedIndex + 1,
+                component.x1,
+                component.y1,
+                component.x2,
+                component.y2,
+                safe.geometryToken,
+                safe.finalToken,
+                safe.source,
+                reason == null ? "" : reason.name(),
+                safe.geometryCount,
+                safe.geometryNs);
+    }
+
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
+    private static WazeLaneCell debugCell(
+            int zeroBasedIndex,
+            Component component,
             String geometryToken,
             String finalToken,
             LaneFailureReason reason) {
@@ -1521,10 +1772,9 @@ final class WazeVisualCueParser {
                 component.y1,
                 component.x2,
                 component.y2,
-                templateToken,
                 geometryToken,
                 finalToken,
-                glyphSource(templateToken, geometryToken, finalToken),
+                glyphSource(finalToken),
                 reason == null ? "" : reason.name());
     }
 
@@ -1547,6 +1797,24 @@ final class WazeVisualCueParser {
             }
         }
         return best;
+    }
+
+    //keeps cell parsing from inheriting geometry that belongs to a neighboring lane cell.
+    private static Component clippedComponentForCell(Bitmap bitmap, Component component, LaneCell cell) {
+        if (bitmap == null || component == null || cell == null) {
+            return component;
+        }
+        int x1 = Math.max(component.x1, cell.x1);
+        int x2 = Math.min(component.x2, cell.x2);
+        if (x2 <= x1) {
+            return component;
+        }
+        if (x1 == component.x1 && x2 == component.x2) {
+            return component;
+        }
+        List<Component> clipped = new ArrayList<>();
+        addComponent(bitmap, clipped, x1, x2, cell.y1, cell.y2);
+        return clipped.isEmpty() ? component : largest(clipped);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -1858,10 +2126,21 @@ final class WazeVisualCueParser {
         if (exitNumber < ROUNDABOUT_MIN_EXIT || exitNumber > ROUNDABOUT_MAX_EXIT) {
             return null;
         }
+        if (!hasRoundaboutShape(bitmap)) {
+            return null;
+        }
         return Cue.roundabout(
                 NavSnapshot.Maneuver.ROUNDABOUT_RIGHT_EXIT,
                 roundaboutSourceForExit(exitNumber, leftHandRoundaboutTraffic),
                 exitNumber);
+    }
+
+    //guard for false exit badge matches on ordinary turn and arrival-transition arrows.
+    private static boolean hasRoundaboutShape(Bitmap bitmap) {
+        return cuePixelCount(bitmap, 55, 125, 100, 145) >= 18
+                && cuePixelCount(bitmap, 55, 185, 100, 208) >= 18
+                && (cuePixelCount(bitmap, 40, 145, 62, 180) >= 18
+                || cuePixelCount(bitmap, 93, 145, 116, 180) >= 18);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -1878,6 +2157,16 @@ final class WazeVisualCueParser {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isArrivalCue(int redCount, int whiteCount, int grayCount) {
         return redCount >= 10 && whiteCount >= 200 && whiteCount > grayCount;
+    }
+
+    //guard for Waze destination cards without treating zero distance as arrival evidence.
+    private static boolean hasArrivalDetailCard(Bitmap bitmap) {
+        ColorCounts title = bitmap == null ? new ColorCounts() : colorCounts(bitmap, 220, 255, 470, 340);
+        return bitmap != null
+                && bitmap.getHeight() > 800
+                && darkishPixelCount(bitmap, 0, 245, 980, 430) >= 8000
+                && darkishPixelCount(bitmap, 220, 255, 470, 340) >= 800
+                && title.white + title.gray >= 60;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -1916,10 +2205,8 @@ final class WazeVisualCueParser {
         if (component == null) {
             return false;
         }
-        int sideCount = component.midCount + component.bottomCount;
-        if (sideCount > 0) {
-            int sideWhite = component.midWhiteCount + component.bottomWhiteCount;
-            return sideWhite * 100 >= sideCount * 70;
+        if (component.midCount > 0) {
+            return component.midWhiteCount * 100 >= component.midCount * 70;
         }
         return false;
     }
@@ -2001,6 +2288,7 @@ final class WazeVisualCueParser {
                 || geometry.component == null
                 || geometry.component.count < 300
                 || geometry.width < 50
+                || geometry.component.bottomCount * 2 < geometry.component.midCount
                 || (geometry.component.height() > 1
                 && geometry.component.height() * 10 < geometry.width * 13)) {
             return "";
@@ -2034,6 +2322,12 @@ final class WazeVisualCueParser {
         }
         if (looksLikeSmoothSharpLeftCompound(geometry)) {
             return compoundGlyph("Ls", isRecommended(component), "L", false);
+        }
+        if (looksLikeStraightLeftRightCompound(geometry)) {
+            return tripleGlyph("S", false, "L", true, "R", false);
+        }
+        if (looksLikeSharpLeftSmoothRightCompound(geometry)) {
+            return compoundGlyph("L", false, "Rs", isRecommended(component));
         }
         if (looksLikeStraightSmoothRightCompound(geometry)) {
             return compoundGlyph("S", smoothStraightRecommended(component),
@@ -2069,6 +2363,15 @@ final class WazeVisualCueParser {
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
+    private static String tripleGlyph(String firstDirection, boolean firstRecommended,
+            String secondDirection, boolean secondRecommended,
+            String thirdDirection, boolean thirdRecommended) {
+        return laneGlyph(firstDirection, firstRecommended) + "+"
+                + laneGlyph(secondDirection, secondRecommended) + "+"
+                + laneGlyph(thirdDirection, thirdRecommended);
+    }
+
+    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static String roundaboutToken(GlyphGeometry geometry) {
         if (geometry == null
                 || geometry.component == null
@@ -2088,10 +2391,10 @@ final class WazeVisualCueParser {
         if (bitmap == null) {
             return 0;
         }
-        int x1 = scaleX(bitmap, 58);
-        int y1 = scaleY(bitmap, 150);
-        int x2 = Math.min(scaleX(bitmap, 98), bitmap.getWidth());
-        int y2 = Math.min(scaleY(bitmap, 192), bitmap.getHeight());
+        int x1 = scaleX(bitmap, 66);
+        int y1 = scaleY(bitmap, 154);
+        int x2 = Math.min(scaleX(bitmap, 92), bitmap.getWidth());
+        int y2 = Math.min(scaleY(bitmap, 188), bitmap.getHeight());
         List<DigitBlob> blobs = digitBlobs(bitmap, x1, y1, x2, y2);
         if (blobs.isEmpty()) {
             return 0;
@@ -2166,7 +2469,9 @@ final class WazeVisualCueParser {
         }
         int width = x2 - x1 + 1;
         int height = maxY - minY + 1;
-        if (count < 8 || maxY <= minY || width < 3 || height * 4 > (y2 - y1) * 3) {
+        if (count < 8 || maxY <= minY || width < 3
+                || width > Math.max(scaleX(bitmap, 16), height)
+                || height * 4 > (y2 - y1) * 3) {
             return;
         }
         blobs.add(new DigitBlob(x1, x2 + 1, minY, maxY + 1, count));
@@ -2174,6 +2479,9 @@ final class WazeVisualCueParser {
 
     //classifies raw evidence here so later decisions can use stable route state labels.
     private static int classifyDigit(Bitmap bitmap, DigitBlob blob) {
+        if (looksLikeRoundaboutDigitOne(bitmap, blob)) {
+            return 1;
+        }
         boolean[][] bits = digitBits(bitmap, blob);
         int bestDigit = -1;
         int bestScore = Integer.MAX_VALUE;
@@ -2189,6 +2497,15 @@ final class WazeVisualCueParser {
             }
         }
         return bestScore <= 12 && secondScore - bestScore >= 2 ? bestDigit : -1;
+    }
+
+    //guards slanted narrow "1" badges before coarse 5x7 scoring can confuse them with "3".
+    private static boolean looksLikeRoundaboutDigitOne(Bitmap bitmap, DigitBlob blob) {
+        return bitmap != null
+                && blob != null
+                && blob.width() <= Math.max(4, scaleX(bitmap, 14))
+                && blob.height() >= blob.width() * 2
+                && blob.count >= 8;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -2266,6 +2583,29 @@ final class WazeVisualCueParser {
                 && geometry.midDelta < -8.0d;
     }
 
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    private static boolean looksLikeStraightLeftRightCompound(GlyphGeometry geometry) {
+        return geometry != null
+                && geometry.component != null
+                && geometry.width >= 70
+                && geometry.width <= 92
+                && geometry.component.height() >= 75
+                && Math.abs(geometry.midDelta) < 8.0d
+                && Math.abs(geometry.bottomDelta) < 8.0d
+                && isRecommended(geometry.component);
+    }
+
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    private static boolean looksLikeSharpLeftSmoothRightCompound(GlyphGeometry geometry) {
+        return geometry != null
+                && geometry.component != null
+                && geometry.width >= 64
+                && geometry.width <= 92
+                && geometry.midDelta < -8.0d
+                && geometry.bottomDelta < -10.0d
+                && isRecommended(geometry.component);
+    }
+
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeStraightSmoothRightCompound(GlyphGeometry geometry) {
         return geometry != null
@@ -2287,16 +2627,20 @@ final class WazeVisualCueParser {
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeSmoothSharpRightCompound(GlyphGeometry geometry) {
         return geometry != null
+                && geometry.component != null
                 && geometry.width > 42
-                && geometry.bottomDelta < -14.0d
+                && geometry.component.topCount <= 0
+                && geometry.bottomDelta < -10.0d
                 && Math.abs(geometry.midDelta) < 5.0d;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static boolean looksLikeSmoothSharpLeftCompound(GlyphGeometry geometry) {
         return geometry != null
+                && geometry.component != null
                 && geometry.width > 42
-                && geometry.bottomDelta > 14.0d
+                && geometry.component.topCount <= 0
+                && geometry.bottomDelta > 10.0d
                 && Math.abs(geometry.midDelta) < 5.0d;
     }
 
@@ -2304,9 +2648,10 @@ final class WazeVisualCueParser {
     private static boolean looksLikeSingleSmoothSide(GlyphGeometry geometry) {
         return geometry != null
                 && geometry.component != null
-                && geometry.width <= 48
-                && geometry.component.height() >= 90
-                && Math.abs(geometry.bottomDelta) >= 12.0d;
+                && geometry.width <= 52
+                && geometry.component.height() >= 80
+                && Math.abs(geometry.midDelta) < 18.0d
+                && Math.abs(geometry.bottomDelta) >= 16.0d;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -2404,153 +2749,6 @@ final class WazeVisualCueParser {
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static String templateToken(Bitmap bitmap, Component component, boolean singleContext) {
-        if (bitmap == null || component == null) {
-            return "";
-        }
-        int padX = Math.max(2, component.width() / 10);
-        int padY = Math.max(2, component.height() / 10);
-        Rect rect = new Rect(
-                component.x1 - padX,
-                component.y1 - padY,
-                component.x2 + 1 + padX,
-                component.y2 + 1 + padY);
-        return templateToken(bitmap, rect, singleContext);
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static String templateToken(Bitmap bitmap, LaneCell cell, boolean singleContext) {
-        if (cell == null) {
-            return "";
-        }
-        return templateToken(bitmap, new Rect(cell.x1, cell.y1, cell.x2 + 1, cell.y2 + 1), singleContext);
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static String templateToken(Bitmap bitmap, Rect rect, boolean singleContext) {
-        TemplateSignature signature = templateSignature(bitmap, rect);
-        if (signature == null || signature.bitCount < 20) {
-            return "";
-        }
-        TemplateMatch best = null;
-        TemplateMatch second = null;
-        for (WazeGlyphTemplates.Template template : WazeGlyphTemplates.ALL) {
-            if (!isTemplateAllowed(template.token, singleContext)) {
-                continue;
-            }
-            int min = Math.min(signature.bitCount, template.bitCount);
-            int max = Math.max(signature.bitCount, template.bitCount);
-            if (max > 0 && min * 100 < max * 45) {
-                continue;
-            }
-            TemplateMatch candidate = new TemplateMatch(template.token, templateScore(signature, template));
-            if (best == null || candidate.score < best.score) {
-                second = best;
-                best = candidate;
-            } else if (second == null || candidate.score < second.score) {
-                second = candidate;
-            }
-        }
-        if (best == null || best.score > 95) {
-            return "";
-        }
-        if (second != null && best.score > 55 && second.score - best.score < 10) {
-            return "";
-        }
-        return best.token;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean isTemplateAllowed(String token, boolean singleContext) {
-        if (token == null || token.isEmpty()) {
-            return false;
-        }
-        if (singleContext) {
-            return token.indexOf('+') < 0 && !"RampL".equals(token) && !"RampR".equals(token);
-        }
-        return KNOWN_LANE_GLYPHS.contains(token);
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static int templateScore(TemplateSignature signature, WazeGlyphTemplates.Template template) {
-        int shapeDiff = hamming(signature.bits, template.bits);
-        int whiteDiff = hamming(signature.whiteBits, template.whiteBits);
-        int countDelta = Math.abs(signature.bitCount - template.bitCount);
-        int whiteDelta = Math.abs(signature.whiteBitCount - template.whiteBitCount);
-        int whitePenalty = hasRecommendation(template.token) ? whiteDiff * 2 + whiteDelta : whiteDiff;
-        return shapeDiff + countDelta / 2 + whitePenalty;
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static int hamming(long[] left, long[] right) {
-        int length = Math.min(left.length, right.length);
-        int diff = 0;
-        for (int i = 0; i < length; i++) {
-            diff += Long.bitCount(left[i] ^ right[i]);
-        }
-        for (int i = length; i < left.length; i++) {
-            diff += Long.bitCount(left[i]);
-        }
-        for (int i = length; i < right.length; i++) {
-            diff += Long.bitCount(right[i]);
-        }
-        return diff;
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static TemplateSignature templateSignature(Bitmap bitmap, Rect rect) {
-        Rect safe = clampRect(rect, bitmap);
-        if (safe == null) {
-            return null;
-        }
-        long[] bits = new long[(WazeGlyphTemplates.WIDTH * WazeGlyphTemplates.HEIGHT + 63) / 64];
-        long[] whiteBits = new long[bits.length];
-        int bitCount = 0;
-        int whiteBitCount = 0;
-        for (int y = 0; y < WazeGlyphTemplates.HEIGHT; y++) {
-            for (int x = 0; x < WazeGlyphTemplates.WIDTH; x++) {
-                PixelClass pixelClass = templatePixelClass(bitmap, safe, x, y);
-                if (pixelClass == PixelClass.NONE) {
-                    continue;
-                }
-                int index = y * WazeGlyphTemplates.WIDTH + x;
-                bits[index / 64] |= 1L << (index % 64);
-                bitCount++;
-                if (pixelClass == PixelClass.WHITE) {
-                    whiteBits[index / 64] |= 1L << (index % 64);
-                    whiteBitCount++;
-                }
-            }
-        }
-        return new TemplateSignature(bits, whiteBits, bitCount, whiteBitCount);
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    private static PixelClass templatePixelClass(Bitmap bitmap, Rect rect, int normalizedX, int normalizedY) {
-        int x1 = rect.left + normalizedX * rect.width() / WazeGlyphTemplates.WIDTH;
-        int x2 = rect.left + Math.max(
-                normalizedX * rect.width() / WazeGlyphTemplates.WIDTH + 1,
-                (normalizedX + 1) * rect.width() / WazeGlyphTemplates.WIDTH);
-        int y1 = rect.top + normalizedY * rect.height() / WazeGlyphTemplates.HEIGHT;
-        int y2 = rect.top + Math.max(
-                normalizedY * rect.height() / WazeGlyphTemplates.HEIGHT + 1,
-                (normalizedY + 1) * rect.height() / WazeGlyphTemplates.HEIGHT);
-        boolean hasCue = false;
-        for (int y = y1; y < y2 && y < rect.bottom; y++) {
-            for (int x = x1; x < x2 && x < rect.right; x++) {
-                int color = bitmap.getPixel(x, y);
-                if (isWhiteCuePixel(color)) {
-                    return PixelClass.WHITE;
-                }
-                if (isNeutralCuePixel(color)) {
-                    hasCue = true;
-                }
-            }
-        }
-        return hasCue ? PixelClass.GRAY : PixelClass.NONE;
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<Component> components(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2) {
         return components(bitmap, normX1, normY1, normX2, normY2, 1080);
@@ -2623,6 +2821,82 @@ final class WazeVisualCueParser {
             return null;
         }
         return new Rect(left, top, right, bottom);
+    }
+
+    //detects offline Waze navigation bounds so parser-tester can exercise the production bounds path.
+    private static WazeAccessibilityGeometry detectNavigationBounds(Bitmap bitmap) {
+        if (bitmap == null) {
+            return WazeAccessibilityGeometry.EMPTY;
+        }
+        Rect laneBounds = detectCueBounds(
+                bitmap,
+                0,
+                0,
+                Math.min(bitmap.getWidth(), scaleX(bitmap, 980)),
+                Math.min(bitmap.getHeight(), bitmap.getHeight() <= 800
+                        ? scaleY(bitmap, 150, 720)
+                        : scaleY(bitmap, 220)));
+        Rect directionBounds = detectCueBounds(
+                bitmap,
+                0,
+                bitmap.getHeight() <= 800 ? scaleY(bitmap, 300, 720) : scaleY(bitmap, 330),
+                Math.min(bitmap.getWidth(), scaleX(bitmap, 190)),
+                bitmap.getHeight() <= 800 ? scaleY(bitmap, 430, 720) : scaleY(bitmap, 520));
+        return new WazeAccessibilityGeometry(directionBounds, laneBounds);
+    }
+
+    //keeps the detector conservative by only accepting cue pixels that sit on a dark Waze panel.
+    private static Rect detectCueBounds(Bitmap bitmap, int rawX1, int rawY1, int rawX2, int rawY2) {
+        if (bitmap == null) {
+            return null;
+        }
+        int x1 = Math.max(0, Math.min(rawX1, bitmap.getWidth()));
+        int y1 = Math.max(0, Math.min(rawY1, bitmap.getHeight()));
+        int x2 = Math.max(x1, Math.min(rawX2, bitmap.getWidth()));
+        int y2 = Math.max(y1, Math.min(rawY2, bitmap.getHeight()));
+        int minX = Integer.MAX_VALUE;
+        int minY = Integer.MAX_VALUE;
+        int maxX = Integer.MIN_VALUE;
+        int maxY = Integer.MIN_VALUE;
+        int count = 0;
+        for (int y = y1; y < y2; y += 2) {
+            for (int x = x1; x < x2; x += 2) {
+                if (!isNeutralCuePixel(bitmap.getPixel(x, y)) || !hasDarkNeighbor(bitmap, x, y)) {
+                    continue;
+                }
+                count++;
+                minX = Math.min(minX, x);
+                maxX = Math.max(maxX, x);
+                minY = Math.min(minY, y);
+                maxY = Math.max(maxY, y);
+            }
+        }
+        if (count < 50 || maxX <= minX || maxY <= minY) {
+            return null;
+        }
+        Rect rect = new Rect(
+                Math.max(0, minX - 24),
+                Math.max(0, minY - 24),
+                Math.min(bitmap.getWidth(), maxX),
+                Math.min(bitmap.getHeight(), maxY + 12));
+        return hasDarkPanelRaw(bitmap, rect) ? rect : null;
+    }
+
+    //guards offline bounds detection from map labels that are bright but not drawn on the Waze panel.
+    private static boolean hasDarkNeighbor(Bitmap bitmap, int x, int y) {
+        for (int dx = -3; dx <= 3; dx += 3) {
+            for (int dy = -3; dy <= 3; dy += 3) {
+                int nx = x + dx;
+                int ny = y + dy;
+                if (nx < 0 || ny < 0 || nx >= bitmap.getWidth() || ny >= bitmap.getHeight()) {
+                    continue;
+                }
+                if (isDarkPanelPixel(bitmap.getPixel(nx, ny))) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -2741,10 +3015,16 @@ final class WazeVisualCueParser {
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static ColorCounts colorCounts(Bitmap bitmap,
             int normX1, int normY1, int normX2, int normY2) {
+        return colorCounts(bitmap, normX1, normY1, normX2, normY2, 1080);
+    }
+
+    //samples projected 720px and main 1080px panels with the same normalized coordinates.
+    private static ColorCounts colorCounts(Bitmap bitmap,
+            int normX1, int normY1, int normX2, int normY2, int referenceHeight) {
         int x1 = scaleX(bitmap, normX1);
-        int y1 = scaleY(bitmap, normY1);
+        int y1 = scaleY(bitmap, normY1, referenceHeight);
         int x2 = Math.min(scaleX(bitmap, normX2), bitmap.getWidth());
-        int y2 = Math.min(scaleY(bitmap, normY2), bitmap.getHeight());
+        int y2 = Math.min(scaleY(bitmap, normY2, referenceHeight), bitmap.getHeight());
         ColorCounts counts = new ColorCounts();
         for (int x = x1; x < x2; x += 2) {
             for (int y = y1; y < y2; y += 2) {
@@ -2759,6 +3039,49 @@ final class WazeVisualCueParser {
             }
         }
         return counts;
+    }
+
+    //counts cue pixels in small badge regions so roundabout digits do not match ordinary arrows.
+    private static int cuePixelCount(Bitmap bitmap,
+            int normX1, int normY1, int normX2, int normY2) {
+        if (bitmap == null) {
+            return 0;
+        }
+        int x1 = scaleX(bitmap, normX1);
+        int y1 = scaleY(bitmap, normY1);
+        int x2 = Math.min(scaleX(bitmap, normX2), bitmap.getWidth());
+        int y2 = Math.min(scaleY(bitmap, normY2), bitmap.getHeight());
+        int count = 0;
+        for (int x = x1; x < x2; x += 2) {
+            for (int y = y1; y < y2; y += 2) {
+                int color = bitmap.getPixel(x, y);
+                if (isWhiteCuePixel(color) || isNeutralCuePixel(color)) {
+                    count++;
+                }
+            }
+        }
+        return count;
+    }
+
+    //counts dark card pixels for arrival detail panels without depending on text OCR.
+    private static int darkishPixelCount(Bitmap bitmap,
+            int normX1, int normY1, int normX2, int normY2) {
+        if (bitmap == null) {
+            return 0;
+        }
+        int x1 = scaleX(bitmap, normX1);
+        int y1 = scaleY(bitmap, normY1);
+        int x2 = Math.min(scaleX(bitmap, normX2), bitmap.getWidth());
+        int y2 = Math.min(scaleY(bitmap, normY2), bitmap.getHeight());
+        int count = 0;
+        for (int x = x1; x < x2; x += 3) {
+            for (int y = y1; y < y2; y += 3) {
+                if (isDarkCardPixel(bitmap.getPixel(x, y))) {
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -2849,6 +3172,14 @@ final class WazeVisualCueParser {
         int green = (color >> 8) & 0xff;
         int blue = color & 0xff;
         return red < 35 && green < 35 && blue < 35;
+    }
+
+    //matches Waze card backgrounds that are visually black but not pure black pixels.
+    private static boolean isDarkCardPixel(int color) {
+        int red = (color >> 16) & 0xff;
+        int green = (color >> 8) & 0xff;
+        int blue = color & 0xff;
+        return red < 55 && green < 60 && blue < 70;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3165,37 +3496,30 @@ final class WazeVisualCueParser {
         }
     }
 
-    //defines the TemplateSignature module boundary so related behavior stays readable inside one unit.
-    private static final class TemplateSignature {
-        final long[] bits;
-        final long[] whiteBits;
-        final int bitCount;
-        final int whiteBitCount;
+    //carries geometry-only glyph evidence so parser-tester can compare cost without re-parsing.
+    private static final class GlyphClassification {
+        final String geometryToken;
+        final String finalToken;
+        final String source;
+        final int geometryCount;
+        final long geometryNs;
 
-        TemplateSignature(long[] bits, long[] whiteBits, int bitCount, int whiteBitCount) {
-            this.bits = bits;
-            this.whiteBits = whiteBits;
-            this.bitCount = bitCount;
-            this.whiteBitCount = whiteBitCount;
+        GlyphClassification(
+                String geometryToken,
+                String finalToken,
+                String source,
+                int geometryCount,
+                long geometryNs) {
+            this.geometryToken = geometryToken == null ? "" : geometryToken;
+            this.finalToken = finalToken == null ? "" : finalToken;
+            this.source = source == null ? "" : source;
+            this.geometryCount = Math.max(0, geometryCount);
+            this.geometryNs = Math.max(0L, geometryNs);
         }
-    }
 
-    //defines the TemplateMatch module boundary so related behavior stays readable inside one unit.
-    private static final class TemplateMatch {
-        final String token;
-        final int score;
-
-        TemplateMatch(String token, int score) {
-            this.token = token == null ? "" : token;
-            this.score = score;
+        static GlyphClassification empty() {
+            return new GlyphClassification("", "", "none", 0, 0L);
         }
-    }
-
-    //defines the PixelClass module boundary so related behavior stays readable inside one unit.
-    private enum PixelClass {
-        NONE,
-        GRAY,
-        WHITE
     }
 
     //defines the Component module boundary so related behavior stays readable inside one unit.

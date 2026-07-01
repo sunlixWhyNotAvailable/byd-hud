@@ -14,9 +14,15 @@ public final class HudRuntimeWatchdogReceiver extends BroadcastReceiver {
         String action = intent == null ? "" : intent.getAction();
         AppEventLogger.event(context, "runtime_watchdog_receiver action=" + action
                 + " boot=" + HudPrefs.isBootEnabled(context)
-                + " runtimeRunning=" + HudPrefs.isRuntimeServiceRunning(context));
+                + " runtimeRunning=" + HudPrefs.isRuntimeServiceRunning(context)
+                + " shutdown=" + HudPrefs.isUserShutdownActive(context));
         if (!HudRuntimeWatchdog.ACTION_RUNTIME_WATCHDOG.equals(action)) {
             AppEventLogger.event(context, "runtime_watchdog_receiver ignored action=" + action);
+            return;
+        }
+        if (HudPrefs.isUserShutdownActive(context)) {
+            HudRuntimeWatchdog.cancel(context);
+            AppEventLogger.event(context, "runtime_watchdog_receiver shutdown_active");
             return;
         }
         if (!HudPrefs.isBootEnabled(context)) {

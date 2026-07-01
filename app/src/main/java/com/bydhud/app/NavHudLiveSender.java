@@ -63,6 +63,8 @@ final class NavHudLiveSender {
     private long lastWazeRouteNodeResultMs;
     private long latestRouteStateMs;
     private boolean lastWazeRouteNodeScanHadRoute;
+    private boolean firstNavAfterPackageReplaceAwaitingSomeIp;
+    private long firstNavAfterPackageReplaceConnectStartMs;
 
     private final Runnable bindRetryRunnable = new Runnable() {
         @Override
@@ -351,6 +353,22 @@ final class NavHudLiveSender {
             if (!active || !WAZE_PACKAGE.equals(activePackage)) {
                 return;
             }
+            if (shouldKeepWazeVisualOnly(now)) {
+                NavRouteStateStore.get(context).updateFromVisualRouteEvidence(
+                        WAZE_PACKAGE,
+                        "waze_visual_only",
+                        "route-nodes-missing:" + safeReason,
+                        now);
+                WazeRouteTracker.get(context).onVisualRouteEvidence(
+                        "route-nodes-missing:" + safeReason, now);
+                log("waze route-node missing ignored: fresh visual state ageMs="
+                        + (now - lastVisualResultMs) + " reason=" + safeReason);
+                ensureWazeCropRunning("route-nodes-missing-visual-only");
+                sendLatestIfReady("waze-visual-only");
+                scheduleSendLoop();
+                scheduleRouteHealthLoop();
+                return;
+            }
             forceClearNavigator(WAZE_PACKAGE, "waze-route-nodes-missing", now);
         });
     }
@@ -420,6 +438,10 @@ final class NavHudLiveSender {
     private void startOnMain(String packageName, String reason) {
         if (packageName.isEmpty()) {
             return;
+        }
+        if (HudRuntimeUpgradeGuard.consumePendingReinit(
+                context, "nav-start:" + packageName + ":" + safeReason(reason))) {
+            resetRuntimeAfterPackageReplace(packageName, reason);
         }
         if ("ui-start".equals(reason) || !packageName.equals(activePackage)) {
             resetLatestPayload();
@@ -849,11 +871,16 @@ final class NavHudLiveSender {
                 && now - latestRouteStateMs <= WAZE_ROUTE_FIELD_TTL_MS;
     }
 
-    //keeps route text while fresh visual evidence proves Waze is still actively navigating.
+    //keeps route text while bounded route evidence proves Waze is still actively navigating.
     boolean shouldKeepExpiredWazeRouteFields(long now) {
         return WAZE_PACKAGE.equals(activePackage)
                 && latestRouteState != null
-                && NavRouteStateStore.get(context).hasFreshWazeRouteEvidence(now)
+                && NavRouteStateStore.get(context).hasFreshWazeRouteEvidence(now);
+    }
+
+    //keeps dashboard Waze alive when route text disappears but PixelCopy still provides fresh visual HUD data.
+    private boolean shouldKeepWazeVisualOnly(long now) {
+        return WAZE_PACKAGE.equals(activePackage)
                 && latestVisualState != null
                 && lastVisualResultMs > 0L
                 && now - lastVisualResultMs <= WAZE_VISUAL_FRESH_MS;
@@ -868,9 +895,12 @@ final class NavHudLiveSender {
             return;
         }
         if (shouldKeepExpiredWazeRouteFields(now)) {
-            latestVisualState = WazeVisualStatePolicy.routeFieldsKeptForVisual(
+            HudState keptState = WazeVisualStatePolicy.routeFieldsKeptForVisual(
                     latestVisualState, latestRouteState, latestRouteManeuver);
-            latestState = latestVisualState.copy();
+            if (latestVisualState != null) {
+                latestVisualState = keptState;
+            }
+            latestState = keptState.copy();
             if (!latestReason.contains("routeFieldsKeptByRouteEvidence")) {
                 latestReason = latestReason + " routeFieldsKeptByRouteEvidence";
                 log("waze route fields kept by route evidence reason=send-boundary");
@@ -951,6 +981,47 @@ final class NavHudLiveSender {
         lastWazeRouteNodeResultMs = 0L;
         latestRouteStateMs = 0L;
         lastWazeRouteNodeScanHadRoute = false;
+    }
+
+    //resets stale post-update state before the first new navigation session binds SOME/IP again.
+    private void resetRuntimeAfterPackageReplace(String packageName, String reason) {
+        handler.removeCallbacks(bindRetryRunnable);
+        handler.removeCallbacks(sendLoop);
+        handler.removeCallbacks(routeHealthLoop);
+        handler.removeCallbacks(notificationRemovedStop);
+        handler.removeCallbacks(accessibilityNoRouteStop);
+        handler.removeCallbacks(arrivalRouteEndStop);
+        sendLoopScheduled = false;
+        routeHealthScheduled = false;
+        active = false;
+        activePackage = "";
+        WazeCropCapture.get(context).stop("package-replaced-reinit");
+        WazeMediaProjectionController.resetForRuntimeReinit(
+                context, "nav-start:" + packageName + ":" + safeReason(reason));
+        if (hudClient.isBound()) {
+            if (hudStarted) {
+                try {
+                    hudClient.stop();
+                } catch (RemoteException e) {
+                    log("post-update stop error: " + e.getMessage());
+                }
+            }
+            hudClient.unbind();
+        }
+        hudStarted = false;
+        bindAttempts = 0;
+        sendCount = 0;
+        resetLatestPayload();
+        firstNavAfterPackageReplaceAwaitingSomeIp = true;
+        firstNavAfterPackageReplaceConnectStartMs = SystemClock.elapsedRealtime();
+        log("firstNavStartAfterPackageReplace package=" + packageName
+                + " reason=" + safeReason(reason)
+                + " reset=runtime,capture,someip");
+        NavRuntimePermissionRepair.checkAndRepairAsync(
+                context,
+                "first-nav-after-package-replace",
+                true,
+                LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
@@ -1081,8 +1152,20 @@ final class NavHudLiveSender {
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void log(String line) {
-        Log.i(TAG, line);
-        AppEventLogger.event(context, "nav_live " + line);
+        String output = line;
+        if (firstNavAfterPackageReplaceAwaitingSomeIp
+                && (line.startsWith("someip connected:")
+                || line.startsWith("bind timeout"))) {
+            long ageMs = firstNavAfterPackageReplaceConnectStartMs <= 0L
+                    ? -1L
+                    : SystemClock.elapsedRealtime() - firstNavAfterPackageReplaceConnectStartMs;
+            output = output + " firstNavStartAfterPackageReplace someipConnectMs="
+                    + Math.max(0L, ageMs);
+            firstNavAfterPackageReplaceAwaitingSomeIp = false;
+            firstNavAfterPackageReplaceConnectStartMs = 0L;
+        }
+        Log.i(TAG, output);
+        AppEventLogger.event(context, "nav_live " + output);
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.

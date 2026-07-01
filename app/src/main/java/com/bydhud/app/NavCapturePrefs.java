@@ -140,6 +140,9 @@ final class NavCapturePrefs {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCaptureEnabled(Context context, String packageName) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            return false;
+        }
         String normalized = normalizePackage(packageName);
         return !normalized.isEmpty()
                 && !NavAppFilter.shouldHideFromCaptureList(context, normalized)
@@ -149,6 +152,9 @@ final class NavCapturePrefs {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isHudEnabled(Context context, String packageName) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            return false;
+        }
         String normalized = normalizePackage(packageName);
         return !normalized.isEmpty()
                 && isSupportedHudPackage(normalized)
@@ -157,6 +163,9 @@ final class NavCapturePrefs {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isLogOnlyEnabled(Context context, String packageName) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            return false;
+        }
         String normalized = normalizePackage(packageName);
         return !normalized.isEmpty() && getLogOnlyPackages(context).contains(normalized);
     }

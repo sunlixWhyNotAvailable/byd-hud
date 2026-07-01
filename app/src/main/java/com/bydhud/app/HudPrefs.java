@@ -21,7 +21,9 @@ final class HudPrefs {
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_BG_REMINDER_VERSION = "bg_reminder_version";
+    private static final String KEY_BG_REMINDER_TOKEN = "bg_reminder_token";
     private static final String KEY_RUNTIME_SERVICE_RUNNING = "runtime_service_running";
+    private static final String KEY_USER_SHUTDOWN_ACTIVE = "user_shutdown_active";
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudPrefs() {
@@ -151,14 +153,21 @@ final class HudPrefs {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean shouldShowBackgroundReminder(Context context) {
+        long packageReplaceToken = HudRuntimeUpgradeGuard.packageReplaceToken(context);
+        if (packageReplaceToken > 0L) {
+            long seenToken = prefs(context).getLong(KEY_BG_REMINDER_TOKEN, 0L);
+            return seenToken != packageReplaceToken;
+        }
         String seenVersion = prefs(context).getString(KEY_BG_REMINDER_VERSION, "");
         return !BuildConfig.VERSION_NAME.equals(seenVersion);
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void markBackgroundReminderSeen(Context context) {
+        long packageReplaceToken = HudRuntimeUpgradeGuard.packageReplaceToken(context);
         prefs(context).edit()
                 .putString(KEY_BG_REMINDER_VERSION, BuildConfig.VERSION_NAME)
+                .putLong(KEY_BG_REMINDER_TOKEN, packageReplaceToken)
                 .apply();
     }
 
@@ -170,6 +179,16 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setRuntimeServiceRunning(Context context, boolean running) {
         prefs(context).edit().putBoolean(KEY_RUNTIME_SERVICE_RUNNING, running).apply();
+    }
+
+    //guards auto-start after explicit user shutdown until MainActivity is opened again.
+    static boolean isUserShutdownActive(Context context) {
+        return prefs(context).getBoolean(KEY_USER_SHUTDOWN_ACTIVE, false);
+    }
+
+    //records explicit shutdown separately from boot preference so auto-start can be restored on next manual open.
+    static void setUserShutdownActive(Context context, boolean active) {
+        prefs(context).edit().putBoolean(KEY_USER_SHUTDOWN_ACTIVE, active).apply();
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
