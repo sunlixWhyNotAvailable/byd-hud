@@ -44,6 +44,7 @@ public final class ClusterProjectionService extends Service
             "com.bydhud.app.action.CLUSTER_RETURN";
     private static final String EXTRA_PACKAGE = "package";
     private static final String EXTRA_REASON = "reason";
+    private static ClusterProjectionService instance;
 
     private final Object lock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
@@ -82,10 +83,23 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    //returns a read-only snapshot of the app-owned projection surface for PixelCopy.
+    static ProjectedSurface projectedSurfaceForPackage(String packageName) {
+        ClusterProjectionService service = instance;
+        return service == null ? null : service.currentProjectedSurface(packageName);
+    }
+
+    //checks that a borrowed surface snapshot still belongs to the active dashboard projection.
+    static boolean isProjectedSurfaceCurrent(ProjectedSurface surface) {
+        ClusterProjectionService service = instance;
+        return service != null && service.isCurrentProjectedSurface(surface);
+    }
+
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
+        instance = this;
         startForeground(NOTIFICATION_ID, buildNotification("Dashboard projection idle"));
         log("service created");
     }
@@ -112,6 +126,9 @@ public final class ClusterProjectionService extends Service
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         releaseProjection("destroy");
+        if (instance == this) {
+            instance = null;
+        }
         log("service destroyed");
         super.onDestroy();
     }
@@ -150,7 +167,7 @@ public final class ClusterProjectionService extends Service
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
-        //keeps frame work out of the overlay because Waze crop runs through screencap separately.
+        //keeps frame parsing outside the overlay; dashboard Waze capture reads this surface through PixelCopy.
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -416,6 +433,57 @@ public final class ClusterProjectionService extends Service
             }
         }
         log("releaseProjection reason=" + reason);
+    }
+
+    //copies the current surface metadata without transferring ownership to the caller.
+    private ProjectedSurface currentProjectedSurface(String packageName) {
+        synchronized (lock) {
+            if (!projectionRequested
+                    || virtualDisplay == null
+                    || projectionSurface == null
+                    || !projectionSurface.isValid()
+                    || !safe(projectedPackage).equals(safe(packageName))) {
+                return null;
+            }
+            return new ProjectedSurface(
+                    projectionSurface,
+                    VIRTUAL_WIDTH,
+                    VIRTUAL_HEIGHT,
+                    projectedPackage,
+                    projectionGeneration);
+        }
+    }
+
+    //guards PixelCopy from consuming a surface after return-to-main or reprojection.
+    private boolean isCurrentProjectedSurface(ProjectedSurface surface) {
+        synchronized (lock) {
+            return surface != null
+                    && projectionRequested
+                    && virtualDisplay != null
+                    && projectionSurface != null
+                    && projectionSurface == surface.surface
+                    && projectionSurface.isValid()
+                    && projectionGeneration == surface.generation
+                    && safe(projectedPackage).equals(surface.packageName);
+        }
+    }
+
+    //models a borrowed projection surface so PixelCopy callers cannot release it accidentally.
+    static final class ProjectedSurface {
+        final Surface surface;
+        final int width;
+        final int height;
+        final String packageName;
+        final int generation;
+
+        //keeps immutable metadata beside the borrowed surface reference for stale-result checks.
+        ProjectedSurface(Surface surface, int width, int height, String packageName, int generation) {
+            this.surface = surface;
+            this.width = width;
+            this.height = height;
+            this.packageName = safe(packageName);
+            this.generation = generation;
+        }
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

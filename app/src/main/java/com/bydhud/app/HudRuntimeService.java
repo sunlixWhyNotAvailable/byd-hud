@@ -40,6 +40,11 @@ public final class HudRuntimeService extends Service {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startPersistent(Context context, String reason) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            HudRuntimeWatchdog.cancel(context);
+            AppEventLogger.event(context, "runtime startPersistent skipped shutdown_active reason=" + reason);
+            return;
+        }
         Intent intent = new Intent(context, HudRuntimeService.class);
         intent.setAction(ACTION_START_PERSISTENT);
         intent.putExtra(EXTRA_REASON, reason);
@@ -62,6 +67,7 @@ public final class HudRuntimeService extends Service {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
+        HudRuntimeUpgradeGuard.recordVersionStart(this, "service-create");
         HudGraphicPayload.setContext(this);
         startForeground(NOTIFICATION_ID, buildNotification("Runtime active"));
         HudPrefs.setRuntimeServiceRunning(this, true);
@@ -79,10 +85,18 @@ public final class HudRuntimeService extends Service {
         String reason = intent == null ? "sticky-restart" : intent.getStringExtra(EXTRA_REASON);
         log("runtime onStartCommand action=" + action
                 + " reason=" + reason
-                + " boot=" + HudPrefs.isBootEnabled(this));
+                + " boot=" + HudPrefs.isBootEnabled(this)
+                + " shutdown=" + HudPrefs.isUserShutdownActive(this));
         if (ACTION_STOP_PERSISTENT.equals(action)) {
             HudRuntimeWatchdog.cancel(this);
             HudRuntimeState.markStopped(this, "stop:" + reason);
+            stopForegroundCompat();
+            stopSelf(startId);
+            return START_NOT_STICKY;
+        }
+        if (HudPrefs.isUserShutdownActive(this)) {
+            HudRuntimeWatchdog.cancel(this);
+            HudRuntimeState.markStopped(this, "shutdown-active:" + reason);
             stopForegroundCompat();
             stopSelf(startId);
             return START_NOT_STICKY;
@@ -99,16 +113,25 @@ public final class HudRuntimeService extends Service {
         scheduleHeartbeat();
         updateNotification("Runtime active");
         HudRuntimeWatchdog.schedule(this, "service-start");
+        if (HudRuntimeUpgradeGuard.isPendingReinit(this)) {
+            NavRuntimePermissionRepair.checkAndRepairAsync(
+                    this,
+                    "service-start-after-package-replace",
+                    true,
+                    LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+        }
         return START_STICKY;
     }
 
     @Override
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onTaskRemoved(Intent rootIntent) {
-        log("runtime task removed boot=" + HudPrefs.isBootEnabled(this));
+        log("runtime task removed boot=" + HudPrefs.isBootEnabled(this)
+                + " shutdown=" + HudPrefs.isUserShutdownActive(this));
         HudRuntimeState.recordLifecycleHook(this, "task-removed",
-                "boot=" + HudPrefs.isBootEnabled(this));
-        if (HudPrefs.isBootEnabled(this)) {
+                "boot=" + HudPrefs.isBootEnabled(this)
+                        + " shutdown=" + HudPrefs.isUserShutdownActive(this));
+        if (HudPrefs.isBootEnabled(this) && !HudPrefs.isUserShutdownActive(this)) {
             HudRuntimeWatchdog.schedule(this, "task-removed");
             startPersistent(this, "task-removed");
         } else {

@@ -17,9 +17,34 @@ public final class BootReceiver extends BroadcastReceiver {
         String action = intent == null ? "" : intent.getAction();
         AppEventLogger.event(context, "boot_receiver action=" + action
                 + " boot=" + HudPrefs.isBootEnabled(context)
-                + " runtimeRunning=" + HudPrefs.isRuntimeServiceRunning(context));
+                + " runtimeRunning=" + HudPrefs.isRuntimeServiceRunning(context)
+                + " shutdown=" + HudPrefs.isUserShutdownActive(context));
+        if (Intent.ACTION_MY_PACKAGE_REPLACED.equals(action)) {
+            if (!HudRuntimeUpgradeGuard.markPackageReplaced(context, "receiver")) {
+                AppEventLogger.event(context, "boot_receiver package_replace_mark_failed action=" + action);
+                return;
+            }
+            if (HudPrefs.isUserShutdownActive(context)) {
+                HudRuntimeWatchdog.cancel(context);
+                AppEventLogger.event(context, "boot_receiver shutdown_active action=" + action);
+                return;
+            }
+            if (!HudPrefs.isBootEnabled(context)) {
+                HudRuntimeWatchdog.cancel(context);
+                return;
+            }
+            HudRuntimeSupervisor.hardResetAfterPackageReplace(context, "receiver");
+            return;
+        } else {
+            HudRuntimeUpgradeGuard.recordVersionStart(context, "receiver:" + action);
+        }
         if (!isRuntimeRecoveryAction(action)) {
             AppEventLogger.event(context, "boot_receiver ignored action=" + action);
+            return;
+        }
+        if (HudPrefs.isUserShutdownActive(context)) {
+            HudRuntimeWatchdog.cancel(context);
+            AppEventLogger.event(context, "boot_receiver shutdown_active action=" + action);
             return;
         }
         if (!HudPrefs.isBootEnabled(context)) {

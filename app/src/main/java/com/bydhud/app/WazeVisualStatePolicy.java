@@ -69,6 +69,12 @@ final class WazeVisualStatePolicy {
         return merged;
     }
 
+    //keeps route text during fresh visual route evidence without changing visual maneuver evidence.
+    static HudState routeFieldsKeptForVisual(
+            HudState visualState, HudState routeState, NavSnapshot.Maneuver routeManeuver) {
+        return mergeRouteFieldsKeepingVisual(visualState, routeState, routeManeuver);
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean shouldKeepRouteRoundaboutManeuver(
             HudState visualState, HudState routeState, NavSnapshot.Maneuver routeManeuver) {
@@ -141,6 +147,21 @@ final class WazeVisualStatePolicy {
         state.numOfLanes = 0;
         state.includeLaneBitmap = false;
         state.laneString = "";
+        return state;
+    }
+
+    //clears stale route text while keeping crop-derived maneuver and lane evidence visible.
+    static HudState staleRouteFieldsClearedForVisual(HudState visualState) {
+        if (visualState == null) {
+            return null;
+        }
+        HudState state = visualState.copy();
+        state.distanceToIntersection = 0;
+        state.carToDestination = 0;
+        state.timeToDestination = 0;
+        state.roadName = "";
+        state.guidePoint = "";
+        state.navigationRatio = 0.0d;
         return state;
     }
 

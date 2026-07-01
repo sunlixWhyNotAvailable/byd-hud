@@ -5,6 +5,8 @@ package com.bydhud.app
 import android.app.DownloadManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageInfo
+import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
@@ -165,7 +167,7 @@ object AppUpdateManager {
         }
 
         //download through Android DownloadManager so DiLink keeps a visible system-owned transfer.
-        val request = DownloadManager.Request(Uri.parse(update.downloadUrl))
+        val request = DownloadManager.Request(Uri.parse(requireHttpsDownloadUrl(update.downloadUrl)))
             .setTitle("BYD HUD ${update.version}")
             .setDescription("BYD HUD update")
             .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
@@ -174,10 +176,11 @@ object AppUpdateManager {
         val downloadId = manager.enqueue(request)
         emitProgress("0%", onProgress)
         pollDownload(manager, downloadId, onProgress)
+        val staged = stageDownloadedApk(context, destination, fileName)
 
         //install downloaded APK through content URI; file:// is rejected on modern Android.
         withContext(Dispatchers.Main) {
-            installDownloadedApk(context, destination)
+            installDownloadedApk(context, staged)
         }
     }
 
@@ -216,7 +219,7 @@ object AppUpdateManager {
         }
     }
 
-    //keeps this Compose helper focused so UI state changes remain easy to audit.
+    //guard update downloads so a release asset cannot downgrade transport security.
     private fun findApkAssetUrl(json: JSONObject): String {
         val assets = json.optJSONArray("assets") ?: throw IllegalStateException("GitHub release has no assets")
         for (index in 0 until assets.length()) {
@@ -224,10 +227,19 @@ object AppUpdateManager {
             val name = asset.optString("name", "")
             val url = asset.optString("browser_download_url", "")
             if (name.lowercase(Locale.US).endsWith(".apk") && url.isNotBlank()) {
-                return url
+                return requireHttpsDownloadUrl(url)
             }
         }
         throw IllegalStateException("GitHub release has no APK asset")
+    }
+
+    //guard update downloads so only HTTPS GitHub asset URLs reach DownloadManager.
+    private fun requireHttpsDownloadUrl(url: String): String {
+        val uri = Uri.parse(url)
+        if (!uri.scheme.equals("https", ignoreCase = true)) {
+            throw IllegalStateException("GitHub APK asset must use HTTPS")
+        }
+        return url
     }
 
     //keeps this Compose helper focused so UI state changes remain easy to audit.
@@ -291,6 +303,22 @@ object AppUpdateManager {
         }
     }
 
+    //guard the installer handoff so Package Installer reads an app-private staged APK.
+    private fun stageDownloadedApk(context: Context, downloaded: File, fileName: String): File {
+        if (!downloaded.isFile) {
+            throw IllegalStateException("Downloaded APK not found")
+        }
+        val updateDir = File(context.filesDir, "updates")
+        updateDir.mkdirs()
+        val staged = File(updateDir, fileName)
+        if (staged.exists() && !staged.delete()) {
+            throw IllegalStateException("Could not replace staged update APK")
+        }
+        downloaded.copyTo(staged, overwrite = true)
+        downloaded.delete()
+        return staged
+    }
+
     //keeps update I/O here so network, file, and installer failures are handled in one path.
     private fun installDownloadedApk(context: Context, file: File) {
         if (!file.exists()) {
@@ -308,23 +336,49 @@ object AppUpdateManager {
     }
 
     //keeps update I/O here so network, file, and installer failures are handled in one path.
+    @Suppress("DEPRECATION")
     private fun validateDownloadedApk(context: Context, file: File) {
-        val info = context.packageManager.getPackageArchiveInfo(file.absolutePath, 0)
-            ?: throw IllegalStateException("Downloaded APK cannot be inspected")
+        val info = context.packageManager.getPackageArchiveInfo(
+            file.absolutePath,
+            PackageManager.GET_SIGNING_CERTIFICATES
+        ) ?: throw IllegalStateException("Downloaded APK cannot be inspected")
         if (info.packageName != EXPECTED_PACKAGE_NAME) {
             throw IllegalStateException("Downloaded APK package mismatch: ${info.packageName}")
         }
         if (info.longVersionCode <= BuildConfig.VERSION_CODE.toLong()) {
             throw IllegalStateException("Downloaded APK is not newer")
         }
+        if (!hasSameSigningCertificate(context, info)) {
+            throw IllegalStateException("Downloaded APK signature mismatch")
+        }
     }
 
-    //parses source data here so downstream HUD code receives normalized navigation fields.
+    //guard app updates so only APKs signed like the installed app are installable.
+    @Suppress("DEPRECATION")
+    private fun hasSameSigningCertificate(context: Context, archiveInfo: PackageInfo): Boolean {
+        val installedInfo = context.packageManager.getPackageInfo(
+            EXPECTED_PACKAGE_NAME,
+            PackageManager.GET_SIGNING_CERTIFICATES
+        )
+        val installedSigners = signingCertificateSet(installedInfo)
+        val archiveSigners = signingCertificateSet(archiveInfo)
+        return installedSigners.isNotEmpty() && installedSigners == archiveSigners
+    }
+
+    //normalize signer bytes so PackageManager Signature instances compare by content.
+    private fun signingCertificateSet(info: PackageInfo): Set<List<Byte>> {
+        val signingInfo = info.signingInfo ?: return emptySet()
+        return signingInfo.apkContentsSigners
+            .map { signature -> signature.toByteArray().toList() }
+            .toSet()
+    }
+
+    //parses release tags here so prerelease labels work without allowing path-like suffixes.
     private fun parseVersion(value: String): List<Int> {
         val normalized = value.trim().removePrefix("v")
-        require(Regex("""\d+(\.\d+)*""").matches(normalized)) {
+        require(Regex("""\d+(\.\d+)*(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?""").matches(normalized)) {
             "Unsupported version tag: $value"
         }
-        return normalized.split('.').map { part -> part.toInt() }
+        return normalized.substringBefore('-').split('.').map { part -> part.toInt() }
     }
 }

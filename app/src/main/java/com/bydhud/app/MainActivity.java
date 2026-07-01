@@ -221,6 +221,11 @@ public final class MainActivity extends ComponentActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         destroyed = false;
+        HudRuntimeUpgradeGuard.recordVersionStart(this, "activity-create");
+        if (HudPrefs.isUserShutdownActive(this)) {
+            HudPrefs.setUserShutdownActive(this, false);
+            AppEventLogger.event(this, "shutdown cleared reason=activity-create");
+        }
         HudGraphicPayload.setContext(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-create");
@@ -624,7 +629,6 @@ public final class MainActivity extends ComponentActivity {
                 + "\nFiles: raw_nav_events.jsonl, nav_snapshots.jsonl"
                 + "\n\nWaze crop:\n"
                 + NavigationLogStorage.publicWazeCropPath()
-                + "\n\nPath to navigation logs on tablet."
                 + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";
     }
 
@@ -721,6 +725,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isUaLanguage(this),
                 HudPrefs.isDarkTheme(this),
                 HudPrefs.isBootEnabled(this),
+                HudPrefs.isDetailedDebugArtifactsEnabled(this),
                 HudPrefs.isPngOutputEnabled(this),
                 HudPrefs.isNativeOutputEnabled(this),
                 HudPrefs.isLaneOutputEnabled(this),
@@ -894,6 +899,13 @@ public final class MainActivity extends ComponentActivity {
         setBootMode(enabled);
     }
 
+    //keeps this Compose helper focused so UI state changes remain easy to audit.
+    public void composeSetDetailedDebugArtifactsEnabled(boolean enabled) {
+        HudPrefs.setDetailedDebugArtifactsEnabled(this, enabled);
+        appendStatus("Detailed debug artifacts " + (enabled ? "enabled" : "disabled"));
+        refreshControls();
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetPngOutputEnabled(boolean enabled) {
         setPngOutputEnabled(enabled);
@@ -946,30 +958,44 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    //exposes one-folder deletion so Compose can show progress instead of blocking the UI.
+    public ComposeDeleteDayResult composeDeleteStorageDay(String day) {
+        File root = NavigationLogStorage.navCaptureDir(this);
+        if (day == null || !day.matches("\\d{8}")) {
+            return new ComposeDeleteDayResult(day, false, false, "invalid day");
+        }
+        if (NavigationLogStorage.isActiveNavCaptureDay(day)) {
+            return new ComposeDeleteDayResult(day, false, true, "active day skipped");
+        }
+        File dir = new File(root, day);
+        boolean deleted = isDirectChild(root, dir) && deleteRecursively(dir);
+        return new ComposeDeleteDayResult(day, deleted, false,
+                deleted ? "deleted" : "delete failed");
+    }
+
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
     public void composeDeleteStorageDays(List<String> days) {
         if (days == null || days.isEmpty()) {
             return;
         }
-        File root = NavigationLogStorage.navCaptureDir(this);
         int deleted = 0;
         int skippedActiveDays = 0;
         for (String day : days) {
-            if (day == null || !day.matches("\\d{8}")) {
-                continue;
-            }
-            if (NavigationLogStorage.isActiveNavCaptureDay(day)) {
+            ComposeDeleteDayResult result = composeDeleteStorageDay(day);
+            if (result.skippedActive) {
                 skippedActiveDays++;
-                continue;
-            }
-            File dir = new File(root, day);
-            if (isDirectChild(root, dir) && deleteRecursively(dir)) {
+            } else if (result.deleted) {
                 deleted++;
             }
         }
         appendStatus("Storage deleted day folders=" + deleted
                 + (skippedActiveDays > 0 ? " skipped active=" + skippedActiveDays : ""));
         refreshControls();
+    }
+
+    //keeps long-running Compose workflows from reaching into legacy TextView internals directly.
+    public void composeAppendStatus(String text) {
+        appendStatus(text);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -1058,6 +1084,11 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStopLogcat() {
         stopLogcatRecording();
+    }
+
+    //stops all active runtime work after explicit user shutdown so auto-start stays blocked until the next manual open.
+    public void composeShutdownAndExit() {
+        shutdownAndExit("ui-shutdown");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1149,6 +1180,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean uaLanguage;
         public final boolean darkTheme;
         public final boolean bootEnabled;
+        public final boolean detailedDebugArtifactsEnabled;
         public final boolean pngOutputEnabled;
         public final boolean nativeOutputEnabled;
         public final boolean laneOutputEnabled;
@@ -1187,6 +1219,7 @@ public final class MainActivity extends ComponentActivity {
         public final List<ComposeAppRow> allApps;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
+                boolean detailedDebugArtifactsEnabled,
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled, boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
@@ -1203,6 +1236,7 @@ public final class MainActivity extends ComponentActivity {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
+            this.detailedDebugArtifactsEnabled = detailedDebugArtifactsEnabled;
             this.pngOutputEnabled = pngOutputEnabled;
             this.nativeOutputEnabled = nativeOutputEnabled;
             this.laneOutputEnabled = laneOutputEnabled;
@@ -1239,6 +1273,21 @@ public final class MainActivity extends ComponentActivity {
             this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
             this.supportedApps = supportedApps == null ? Collections.emptyList() : supportedApps;
             this.allApps = allApps == null ? Collections.emptyList() : allApps;
+        }
+    }
+
+    //models one storage deletion result so Compose can report progress without rescanning first.
+    public static final class ComposeDeleteDayResult {
+        public final String day;
+        public final boolean deleted;
+        public final boolean skippedActive;
+        public final String message;
+
+        ComposeDeleteDayResult(String day, boolean deleted, boolean skippedActive, String message) {
+            this.day = day == null ? "" : day;
+            this.deleted = deleted;
+            this.skippedActive = skippedActive;
+            this.message = message == null ? "" : message;
         }
     }
 
@@ -1863,6 +1912,47 @@ public final class MainActivity extends ComponentActivity {
         finishAfterStop();
     }
 
+    //stops runtime-owned work without deleting stored HUD/log selections.
+    private void shutdownAndExit(String reason) {
+        String safeReason = reason == null ? "shutdown" : reason;
+        appendStatus("shutdown requested reason=" + safeReason);
+        exitRequested = true;
+        HudPrefs.setUserShutdownActive(this, true);
+        AppEventLogger.event(this, "shutdown requested reason=" + safeReason);
+
+        if (pendingNavPermissionSelfCheckRunnable != null) {
+            handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);
+            pendingNavPermissionSelfCheckRunnable = null;
+        }
+        navPermissionSelfCheckPending = false;
+
+        String hudPackage = NavCapturePrefs.getHudPackage(this);
+        NavHudLiveSender.get(this).stop(hudPackage, safeReason, true);
+        WazeCropCapture.get(this).stop(safeReason);
+        WazeMediaProjectionController.resetForRuntimeReinit(this, safeReason);
+
+        String dashboardPackage = NavAppDisplayController.get(this).activeDashboardPackage();
+        if (!dashboardPackage.isEmpty()) {
+            NavAppDisplayController.get(this)
+                    .moveIndependentDashboardApp(dashboardPackage, false, safeReason);
+        }
+
+        if (LogcatRecorder.isRecording()) {
+            LogcatRecorder.Result result = LogcatRecorder.stop(this);
+            appendStatus("logcat saved on shutdown " + result.detail
+                    + " file=" + filePath(result.file));
+        }
+
+        manualModeEnabled = false;
+        HudRuntimeWatchdog.cancel(this);
+        HudRuntimeService.stopPersistent(this, safeReason);
+        HudPrefs.setRuntimeServiceRunning(this, false);
+        HudRuntimeState.markStopped(this, safeReason);
+
+        stopImmediately(safeReason, true, true);
+        finishAfterStop();
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void finishAfterStop() {
         finishAndRemoveTask();
@@ -2464,11 +2554,14 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean showBackgroundReminderIfNeeded() {
+        long token = HudRuntimeUpgradeGuard.packageReplaceToken(this);
         if (!HudPrefs.shouldShowBackgroundReminder(this)) {
+            AppEventLogger.event(this, "bg_settings_reminder_skipped version="
+                    + BuildConfig.VERSION_NAME + " token=" + token);
             return false;
         }
         AppEventLogger.event(this, "bg_settings_reminder_shown version="
-                + BuildConfig.VERSION_NAME);
+                + BuildConfig.VERSION_NAME + " token=" + token);
         return true;
     }
 
