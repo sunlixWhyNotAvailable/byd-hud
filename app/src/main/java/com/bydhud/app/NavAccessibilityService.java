@@ -4,6 +4,8 @@ package com.bydhud.app;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -26,6 +28,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     private static volatile boolean runtimeCrashed;
     private static volatile String lastRuntimeDetail = "never connected";
 
+    private final Handler captureHandler = new Handler(Looper.getMainLooper());
     private long lastCaptureElapsedMs;
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -56,7 +59,7 @@ public final class NavAccessibilityService extends AccessibilityService {
                     + safe(reason));
             return;
         }
-        service.captureActiveWindow(packageName, "active-" + safe(reason));
+        service.postCaptureActiveWindow(packageName, "active-" + safe(reason));
     }
 
     @Override
@@ -86,7 +89,7 @@ public final class NavAccessibilityService extends AccessibilityService {
             return;
         }
         lastCaptureElapsedMs = now;
-        captureActiveWindow(packageName, "eventType=" + event.getEventType());
+        postCaptureActiveWindow(packageName, "eventType=" + event.getEventType());
     }
 
     @Override
@@ -95,6 +98,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         if (activeService == this) {
             activeService = null;
         }
+        captureHandler.removeCallbacksAndMessages(null);
         lastRuntimeDetail = "destroyed";
         AppEventLogger.event(this, "accessibility_service destroyed");
         super.onDestroy();
@@ -104,6 +108,11 @@ public final class NavAccessibilityService extends AccessibilityService {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onInterrupt() {
         NavCaptureStore.rawEvent(this, "accessibility_interrupt", "", "service interrupted");
+    }
+
+    //guard active-window traversal so accessibility node trees are captured by one serialized path.
+    private void postCaptureActiveWindow(String packageName, String source) {
+        captureHandler.post(() -> captureActiveWindow(packageName, source));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

@@ -37,6 +37,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -60,11 +61,16 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
@@ -964,27 +970,140 @@ private fun AvailableUpdateNotes(copy: Copy, palette: Palette, version: String, 
 }
 
 @Composable
-//updates shared state here so freshness and lifecycle checks use the same evidence.
+//render release-note markdown locally so update UI stays dependency-free and predictable.
 private fun MarkdownPatchNotesText(text: String, palette: Palette) {
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        val lines = text.lines()
+        val lines = text
+            .replace("\r\n", "\n")
+            .lines()
             .map { it.trimEnd() }
             .dropWhile { it.isBlank() }
+            .dropLastWhile { it.isBlank() }
         if (lines.isEmpty()) {
             Text("", color = palette.muted, fontSize = 13.sp)
         } else {
-            lines.forEach { line ->
+            lines.forEach { rawLine ->
+                val line = rawLine.trim()
                 when {
                     line.isBlank() -> Spacer(Modifier.height(6.dp))
-                    line.startsWith("## ") -> Text(
-                        line.removePrefix("## ").trim(),
-                        color = palette.text,
-                        fontSize = 14.sp,
+                    line == "---" -> HorizontalDivider(color = palette.border)
+                    line.startsWith("### ") -> MarkdownTextLine(
+                        text = line.removePrefix("### ").trim(),
+                        palette = palette,
+                        fontSize = 13.sp,
                         fontWeight = FontWeight.Bold
                     )
-                    else -> Text(line, color = palette.text, fontSize = 13.sp, lineHeight = 18.sp)
+                    line.startsWith("## ") -> Text(
+                        markdownInline(line.removePrefix("## ").trim(), palette),
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = palette.text
+                    )
+                    line.startsWith("# ") -> MarkdownTextLine(
+                        text = line.removePrefix("# ").trim(),
+                        palette = palette,
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.Bold
+                    )
+                    line.startsWith("- ") || line.startsWith("* ") -> MarkdownBulletLine(
+                        bullet = "•",
+                        text = line.drop(2).trim(),
+                        palette = palette
+                    )
+                    ORDERED_LIST_REGEX.containsMatchIn(line) -> {
+                        val match = ORDERED_LIST_REGEX.find(line)
+                        MarkdownBulletLine(
+                            bullet = (match?.groupValues?.getOrNull(1) ?: "") + ".",
+                            text = line.replaceFirst(ORDERED_LIST_REGEX, "").trim(),
+                            palette = palette
+                        )
+                    }
+                    else -> MarkdownTextLine(
+                        text = line,
+                        palette = palette,
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Normal
+                    )
                 }
             }
+        }
+    }
+}
+
+private val ORDERED_LIST_REGEX = Regex("""^(\d+)\.\s+""")
+
+@Composable
+//render list rows with stable indentation so long release-note items wrap cleanly.
+private fun MarkdownBulletLine(bullet: String, text: String, palette: Palette) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(bullet, color = palette.text, fontSize = 13.sp, lineHeight = 18.sp)
+        Text(
+            markdownInline(text, palette),
+            color = palette.text,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            modifier = Modifier.weight(1f)
+        )
+    }
+}
+
+@Composable
+//render one markdown paragraph without supporting full GitHub-flavored markdown.
+private fun MarkdownTextLine(
+    text: String,
+    palette: Palette,
+    fontSize: TextUnit,
+    fontWeight: FontWeight
+) {
+    Text(
+        markdownInline(text, palette),
+        color = palette.text,
+        fontSize = fontSize,
+        fontWeight = fontWeight,
+        lineHeight = 18.sp
+    )
+}
+
+//parse only the inline subset used by BYD HUD release notes: bold and code.
+private fun markdownInline(text: String, palette: Palette): AnnotatedString = buildAnnotatedString {
+    var index = 0
+    while (index < text.length) {
+        val bold = text.indexOf("**", index)
+        val code = text.indexOf("`", index)
+        val next = listOf(bold, code).filter { it >= 0 }.minOrNull() ?: -1
+        if (next < 0) {
+            append(text.substring(index))
+            break
+        }
+        if (next > index) {
+            append(text.substring(index, next))
+        }
+        if (next == bold) {
+            val end = text.indexOf("**", next + 2)
+            if (end < 0) {
+                append(text.substring(next))
+                break
+            }
+            withStyle(SpanStyle(fontWeight = FontWeight.Bold)) {
+                append(text.substring(next + 2, end))
+            }
+            index = end + 2
+        } else {
+            val end = text.indexOf("`", next + 1)
+            if (end < 0) {
+                append(text.substring(next))
+                break
+            }
+            withStyle(
+                SpanStyle(
+                    fontFamily = FontFamily.Monospace,
+                    background = palette.disabled,
+                    color = palette.text
+                )
+            ) {
+                append(text.substring(next + 1, end))
+            }
+            index = end + 1
         }
     }
 }
@@ -2519,7 +2638,7 @@ private fun darkPalette() = Palette(
     text = Color(0xFFF1F6FF),
     muted = Color(0xFFAAB8CA),
     active = Color(0xFF173A5C),
-    accent = Color(0xFF2F86F6),
+    accent = Color(0xFF1F6FD8),
     green = Color(0xFF54D898),
     greenSoft = Color(0xFF123C2B),
     yellow = Color(0xFFF2C34E),
@@ -2542,12 +2661,12 @@ private fun lightPalette() = Palette(
     text = Color(0xFF121A23),
     muted = Color(0xFF526274),
     active = Color(0xFFD9EAFE),
-    accent = Color(0xFF2F86F6),
-    green = Color(0xFF36CF88),
+    accent = Color(0xFF1F6FD8),
+    green = Color(0xFF147A55),
     greenSoft = Color(0xFFD8F4E7),
-    yellow = Color(0xFFF1C04C),
+    yellow = Color(0xFF7A5A00),
     yellowSoft = Color(0xFFFFF1C9),
-    red = Color(0xFFFF7C7C),
+    red = Color(0xFFB42318),
     redSoft = Color(0xFFFFE1E1),
     disabled = Color(0xFFE1E7EF)
 )

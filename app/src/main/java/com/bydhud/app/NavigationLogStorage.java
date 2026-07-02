@@ -4,6 +4,7 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.os.Environment;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.File;
@@ -28,7 +29,9 @@ final class NavigationLogStorage {
     private static final String WRITE_PROBE = ".write_probe";
     private static final Object WRITABLE_DIR_LOCK = new Object();
     private static final Set<String> WRITABLE_DIR_CACHE = new HashSet<>();
+    private static final Object RETENTION_THROTTLE_LOCK = new Object();
     private static final long BYTES_PER_GB = 1024L * 1024L * 1024L;
+    private static final long RETENTION_MIN_INTERVAL_MS = 30000L;
     private static final String SCREEN_PREFIX = "screen_";
     private static final String PNG_SUFFIX = ".png";
     private static final String MISSING_MANEUVERS_DIR = "missing-maneuvers";
@@ -91,6 +94,9 @@ final class NavigationLogStorage {
         if (context == null) {
             return;
         }
+        if (!shouldRunRetentionNow()) {
+            return;
+        }
         enforceNavCaptureRetention(
                 navCaptureDir(context),
                 activeNavCaptureDay(),
@@ -107,6 +113,9 @@ final class NavigationLogStorage {
             String activeSessionName,
             String preserveScreenshotName) {
         if (context == null) {
+            return;
+        }
+        if (!shouldRunRetentionNow()) {
             return;
         }
         enforceNavCaptureRetention(
@@ -320,6 +329,21 @@ final class NavigationLogStorage {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isOverLimit(File root, long maxBytes) {
         return folderSizeBytes(root) > maxBytes;
+    }
+
+    private static long lastRetentionElapsedMs;
+
+    //guard recursive folder scans so capture frames do not pay retention cost every time.
+    private static boolean shouldRunRetentionNow() {
+        long now = SystemClock.elapsedRealtime();
+        synchronized (RETENTION_THROTTLE_LOCK) {
+            if (lastRetentionElapsedMs > 0L
+                    && now - lastRetentionElapsedMs < RETENTION_MIN_INTERVAL_MS) {
+                return false;
+            }
+            lastRetentionElapsedMs = now;
+            return true;
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

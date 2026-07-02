@@ -17,6 +17,7 @@ final class AppEventLogger {
     private static final String TAG = "BydHudEventLog";
     private static final String EVENTS_FILE = "events.log";
     private static final long MAX_FILE_BYTES = 5L * 1024L * 1024L;
+    private static final Object WRITE_LOCK = new Object();
     private static final SimpleDateFormat FORMAT =
             new SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", Locale.US);
 
@@ -50,13 +51,15 @@ final class AppEventLogger {
         return file;
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    //guard event log rotation and append because runtime callbacks write from multiple threads.
     private static void append(Context context, String name, String text, boolean ignored) {
-        File file = file(context, name);
-        try (FileWriter writer = new FileWriter(file, true)) {
-            writer.write(text);
-        } catch (IOException e) {
-            Log.e(TAG, "write failed: " + file.getAbsolutePath(), e);
+        synchronized (WRITE_LOCK) {
+            File file = file(context, name);
+            try (FileWriter writer = new FileWriter(file, true)) {
+                writer.write(text);
+            } catch (IOException e) {
+                Log.e(TAG, "write failed: " + file.getAbsolutePath(), e);
+            }
         }
     }
 

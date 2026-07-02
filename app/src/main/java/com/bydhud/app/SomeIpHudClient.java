@@ -72,6 +72,11 @@ final class SomeIpHudClient {
         return binder != null;
     }
 
+    //keeps pending bind state visible so package-replace reset can release stale connections.
+    boolean hasBinding() {
+        return bound || binder != null;
+    }
+
     //opens the external boundary here so connection setup remains observable and retryable.
     void bind() {
         if (bound) {

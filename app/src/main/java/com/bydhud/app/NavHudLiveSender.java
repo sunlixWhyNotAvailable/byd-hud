@@ -4,6 +4,7 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.RemoteException;
 import android.os.SystemClock;
@@ -38,14 +39,19 @@ final class NavHudLiveSender {
 
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final HandlerThread sendThread = new HandlerThread("BydHudSomeIpSend");
+    private final Handler sendHandler;
     private final SomeIpHudClient hudClient;
     private String activePackage = "";
     private boolean active;
     private boolean hudStarted;
     private boolean sendLoopScheduled;
     private boolean routeHealthScheduled;
+    private boolean runtimeReinitInProgress;
+    private boolean runtimeReinitPreviousHudStarted;
     private int bindAttempts;
     private int sendCount;
+    private volatile int transportGeneration;
     private HudState latestState;
     private HudState latestRouteState;
     private HudState latestVisualState;
@@ -57,6 +63,8 @@ final class NavHudLiveSender {
     private String pendingRemovalActiveKey = "";
     private String pendingNoRoutePackage = "";
     private String pendingArrivalPackage = "";
+    private String pendingReinitStartPackage = "";
+    private String pendingReinitStartReason = "";
     private long pendingNoRouteScheduledAtMs;
     private long lastAccessibilityResultMs;
     private long lastVisualResultMs;
@@ -216,6 +224,8 @@ final class NavHudLiveSender {
     private NavHudLiveSender(Context context) {
         this.context = context;
         this.hudClient = new SomeIpHudClient(context, line -> log("someip " + line));
+        sendThread.start();
+        sendHandler = new Handler(sendThread.getLooper());
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -439,9 +449,17 @@ final class NavHudLiveSender {
         if (packageName.isEmpty()) {
             return;
         }
+        if (runtimeReinitInProgress) {
+            pendingReinitStartPackage = packageName;
+            pendingReinitStartReason = reason;
+            log("start deferred during package reinit package=" + packageName
+                    + " reason=" + safeReason(reason));
+            return;
+        }
         if (HudRuntimeUpgradeGuard.consumePendingReinit(
                 context, "nav-start:" + packageName + ":" + safeReason(reason))) {
             resetRuntimeAfterPackageReplace(packageName, reason);
+            return;
         }
         if ("ui-start".equals(reason) || !packageName.equals(activePackage)) {
             resetLatestPayload();
@@ -450,6 +468,7 @@ final class NavHudLiveSender {
         active = true;
         activePackage = packageName;
         bindAttempts = 0;
+        transportGeneration++;
         log("start package=" + packageName + " reason=" + reason);
         if (WAZE_PACKAGE.equals(packageName)) {
             WazeMediaProjectionController.ensureReadyOrPrompt(
@@ -747,33 +766,26 @@ final class NavHudLiveSender {
             scheduleBindRetry();
             return;
         }
-        try {
-            if (!hudStarted) {
-                hudClient.start();
-                hudStarted = true;
-                sendCount = 0;
-                log("hud started package=" + activePackage);
-            }
-            boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(context);
-            HudState displayState = HudDisplayPolicy.apply(latestState, clampSmallDistance);
-            HudOutputPreferences.apply(context, displayState);
-            byte[] payload = HudRoadPayload.build(displayState);
-            int ret = hudClient.send(payload);
-            sendCount++;
-            log("live-send ret=" + ret
-                    + " reason=" + reason
-                    + " sendCount=" + sendCount
-                    + " payload=" + payload.length
-                    + " latest=" + latestReason
-                    + " rawDist=" + latestState.distanceToIntersection
-                    + " displayDist=" + displayState.distanceToIntersection
-                    + " clampSmallDist=" + clampSmallDistance
-                    + " " + displayState.summary());
-        } catch (RemoteException e) {
-            log("send error: " + e.getMessage());
-            Log.e(TAG, "sendLatestIfReady failed", e);
-            stopOnMain("send-error", false);
+        boolean startBeforeSend = !hudStarted;
+        int sendGeneration = transportGeneration;
+        if (startBeforeSend) {
+            hudStarted = true;
+            sendCount = 0;
+            log("hud started package=" + activePackage);
         }
+        boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(context);
+        HudState displayState = HudDisplayPolicy.apply(latestState, clampSmallDistance);
+        HudOutputPreferences.apply(context, displayState);
+        byte[] payload = HudRoadPayload.build(displayState);
+        sendCount++;
+        String detail = " sendCount=" + sendCount
+                + " payload=" + payload.length
+                + " latest=" + latestReason
+                + " rawDist=" + latestState.distanceToIntersection
+                + " displayDist=" + displayState.distanceToIntersection
+                + " clampSmallDist=" + clampSmallDistance
+                + " " + displayState.summary();
+        postHudSend(payload, reason, detail, startBeforeSend, true, sendGeneration);
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -785,31 +797,25 @@ final class NavHudLiveSender {
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
         handler.removeCallbacks(arrivalRouteEndStop);
+        sendHandler.removeCallbacksAndMessages(null);
+        boolean stopReinitHud = false;
+        if (runtimeReinitInProgress) {
+            stopReinitHud = runtimeReinitPreviousHudStarted;
+            runtimeReinitInProgress = false;
+            runtimeReinitPreviousHudStarted = false;
+            pendingReinitStartPackage = "";
+            pendingReinitStartReason = "";
+            log("package reinit cancelled reason=" + reason);
+        }
+        transportGeneration++;
+        int stopGeneration = transportGeneration;
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
         resetLatestPayload();
-        if (hudClient.isBound()) {
-            if (clearHud && hudStarted) {
-                HudState clearState = new HudState().copyForClear();
-                for (int i = 1; i <= CLEAR_FRAME_COUNT; i++) {
-                    try {
-                        int ret = hudClient.send(HudRoadPayload.build(clearState));
-                        log("clear frame=" + i + "/" + CLEAR_FRAME_COUNT + " ret=" + ret);
-                    } catch (RemoteException e) {
-                        log("clear error: " + e.getMessage());
-                        break;
-                    }
-                }
-            }
-            if (hudStarted) {
-                try {
-                    hudClient.stop();
-                } catch (RemoteException e) {
-                    log("stop error: " + e.getMessage());
-                }
-            }
-            hudClient.unbind();
+        boolean stopHud = hudStarted || stopReinitHud;
+        if (hudClient.hasBinding()) {
+            postHudClearStopAndUnbind(clearHud && stopHud, stopHud, reason, stopGeneration);
         }
         hudStarted = false;
         sendCount = 0;
@@ -993,6 +999,14 @@ final class NavHudLiveSender {
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
         handler.removeCallbacks(arrivalRouteEndStop);
+        sendHandler.removeCallbacksAndMessages(null);
+        transportGeneration++;
+        int resetGeneration = transportGeneration;
+        runtimeReinitInProgress = true;
+        pendingReinitStartPackage = packageName;
+        pendingReinitStartReason = reason;
+        boolean stopPreviousHud = hudStarted;
+        runtimeReinitPreviousHudStarted = stopPreviousHud;
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
@@ -1000,16 +1014,6 @@ final class NavHudLiveSender {
         WazeCropCapture.get(context).stop("package-replaced-reinit");
         WazeMediaProjectionController.resetForRuntimeReinit(
                 context, "nav-start:" + packageName + ":" + safeReason(reason));
-        if (hudClient.isBound()) {
-            if (hudStarted) {
-                try {
-                    hudClient.stop();
-                } catch (RemoteException e) {
-                    log("post-update stop error: " + e.getMessage());
-                }
-            }
-            hudClient.unbind();
-        }
         hudStarted = false;
         bindAttempts = 0;
         sendCount = 0;
@@ -1024,6 +1028,12 @@ final class NavHudLiveSender {
                 "first-nav-after-package-replace",
                 true,
                 LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+        if (hudClient.hasBinding()) {
+            postPackageReinitTransportReset(stopPreviousHud, "package-replaced-reinit",
+                    resetGeneration);
+        } else {
+            finishPackageReinitAndRestart(resetGeneration);
+        }
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
@@ -1150,6 +1160,157 @@ final class NavHudLiveSender {
         }
         routeHealthScheduled = true;
         handler.postDelayed(routeHealthLoop, ROUTE_HEALTH_INTERVAL_MS);
+    }
+
+    //guard blocking binder sends so route parsing and UI callbacks stay on the main handler.
+    private void postHudSend(byte[] payload, String reason, String detail,
+            boolean startBeforeSend, boolean stopOnError, int sendGeneration) {
+        sendHandler.post(() -> {
+            if (!isTransportGenerationCurrent(sendGeneration)) {
+                handler.post(() -> log("live-send skipped stale generation=" + sendGeneration
+                        + " current=" + transportGeneration + " reason=" + reason));
+                return;
+            }
+            try {
+                if (startBeforeSend) {
+                    hudClient.start();
+                }
+                int ret = hudClient.send(payload);
+                handler.post(() -> {
+                    if (sendGeneration != transportGeneration) {
+                        log("live-send result ignored stale generation=" + sendGeneration
+                                + " current=" + transportGeneration + " reason=" + reason);
+                        return;
+                    }
+                    log("live-send ret=" + ret + " reason=" + reason + detail);
+                });
+            } catch (RemoteException e) {
+                handler.post(() -> {
+                    log("send error reason=" + reason + ": " + e.getMessage());
+                    Log.e(TAG, "postHudSend failed", e);
+                    if (stopOnError && sendGeneration == transportGeneration) {
+                        stopOnMain("send-error", false);
+                    }
+                });
+            }
+        });
+    }
+
+    //guard shutdown transport work so clear frames keep order without blocking the main handler.
+    private void postHudClearStopAndUnbind(boolean clearHud, boolean stopHud, String reason,
+            int stopGeneration) {
+        sendHandler.post(() -> {
+            if (!isTransportGenerationCurrent(stopGeneration)) {
+                handler.post(() -> log("teardown skipped stale generation=" + stopGeneration
+                        + " current=" + transportGeneration + " reason=" + reason));
+                return;
+            }
+            if (clearHud) {
+                HudState clearState = new HudState().copyForClear();
+                for (int i = 1; i <= CLEAR_FRAME_COUNT; i++) {
+                    if (!isTransportGenerationCurrent(stopGeneration)) {
+                        handler.post(() -> log("clear stopped stale generation=" + stopGeneration
+                                + " current=" + transportGeneration + " reason=" + reason));
+                        return;
+                    }
+                    try {
+                        int ret = hudClient.send(HudRoadPayload.build(clearState));
+                        int frame = i;
+                        handler.post(() -> log("clear frame=" + frame + "/"
+                                + CLEAR_FRAME_COUNT + " ret=" + ret
+                                + " reason=" + reason));
+                    } catch (RemoteException e) {
+                        handler.post(() -> log("clear error: " + e.getMessage()));
+                        break;
+                    }
+                }
+            }
+            if (!isTransportGenerationCurrent(stopGeneration)) {
+                return;
+            }
+            if (stopHud) {
+                try {
+                    hudClient.stop();
+                } catch (RemoteException e) {
+                    handler.post(() -> log("stop error: " + e.getMessage()));
+                }
+            }
+            handler.post(() -> {
+                if (!active && stopGeneration == transportGeneration) {
+                    hudClient.unbind();
+                    log("someip unbound generation=" + stopGeneration + " reason=" + reason);
+                } else {
+                    log("someip unbind skipped generation=" + stopGeneration
+                            + " current=" + transportGeneration
+                            + " active=" + active
+                            + " reason=" + reason);
+                }
+            });
+        });
+    }
+
+    //resets update-stale SOME/IP state before a deferred first post-update start can bind again.
+    private void postPackageReinitTransportReset(boolean stopHud, String reason,
+            int resetGeneration) {
+        sendHandler.post(() -> {
+            if (!isTransportGenerationCurrent(resetGeneration)) {
+                handler.post(() -> {
+                    log("package reinit transport reset skipped stale generation="
+                            + resetGeneration + " current=" + transportGeneration
+                            + " reason=" + reason);
+                    if (runtimeReinitInProgress) {
+                        runtimeReinitInProgress = false;
+                        runtimeReinitPreviousHudStarted = false;
+                        pendingReinitStartPackage = "";
+                        pendingReinitStartReason = "";
+                    }
+                });
+                return;
+            }
+            if (stopHud) {
+                try {
+                    hudClient.stop();
+                } catch (RemoteException e) {
+                    handler.post(() -> log("package reinit stop error: " + e.getMessage()));
+                }
+            }
+            handler.post(() -> {
+                if (runtimeReinitInProgress && resetGeneration == transportGeneration) {
+                    hudClient.unbind();
+                    log("package reinit someip unbound generation=" + resetGeneration
+                            + " reason=" + reason);
+                    finishPackageReinitAndRestart(resetGeneration);
+                } else {
+                    log("package reinit unbind skipped generation=" + resetGeneration
+                            + " current=" + transportGeneration
+                            + " active=" + active
+                            + " reinit=" + runtimeReinitInProgress
+                            + " reason=" + reason);
+                }
+            });
+        });
+    }
+
+    //restarts only after the package-replace transport reset has released stale bindings.
+    private void finishPackageReinitAndRestart(int resetGeneration) {
+        if (!runtimeReinitInProgress || resetGeneration != transportGeneration) {
+            return;
+        }
+        String restartPackage = pendingReinitStartPackage;
+        String restartReason = pendingReinitStartReason;
+        runtimeReinitInProgress = false;
+        runtimeReinitPreviousHudStarted = false;
+        pendingReinitStartPackage = "";
+        pendingReinitStartReason = "";
+        log("package reinit complete generation=" + resetGeneration
+                + " restartPackage=" + restartPackage
+                + " reason=" + safeReason(restartReason));
+        startOnMain(restartPackage, restartReason);
+    }
+
+    //guard transport worker tasks so old stop/send callbacks cannot affect a newer route session.
+    private boolean isTransportGenerationCurrent(int generation) {
+        return generation == transportGeneration;
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

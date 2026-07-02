@@ -36,9 +36,9 @@ public final class WazeMediaProjectionService extends Service {
     private static final String VIRTUAL_DISPLAY_NAME = "bydhud_waze_main_capture";
 
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private MediaProjection projection;
-    private VirtualDisplay virtualDisplay;
-    private ImageReader imageReader;
+    private volatile MediaProjection projection;
+    private volatile VirtualDisplay virtualDisplay;
+    private volatile ImageReader imageReader;
 
     @Override
     //registers the foreground service before MediaProjection work so Android keeps capture alive.

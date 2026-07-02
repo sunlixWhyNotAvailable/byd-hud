@@ -30,6 +30,9 @@ object AppUpdateManager {
     private const val CHECK_THROTTLE_MS = 10 * 60 * 1000L
     private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
     private const val EXPECTED_PACKAGE_NAME = "com.bydhud.app"
+    private const val RELEASE_API_HOST = "api.github.com"
+    private const val APK_DOWNLOAD_HOST = "github.com"
+    private const val RELEASE_PATH_MARKER = "/sunlixWhyNotAvailable/byd-hud/releases/download/"
 
     //defines UpdateInfo UI/state support so Compose code can keep rendering intent explicit.
     data class UpdateInfo(
@@ -199,7 +202,8 @@ object AppUpdateManager {
 
     //keeps update I/O here so network, file, and installer failures are handled in one path.
     private fun fetchLatestReleaseJson(): JSONObject {
-        val connection = (URL(BuildConfig.UPDATE_RELEASE_API_URL).openConnection() as HttpURLConnection).apply {
+        val releaseUrl = requireReleaseApiUrl(BuildConfig.UPDATE_RELEASE_API_URL)
+        val connection = (URL(releaseUrl).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 15_000
             requestMethod = "GET"
@@ -217,6 +221,17 @@ object AppUpdateManager {
         } finally {
             connection.disconnect()
         }
+    }
+
+    //guard release metadata fetches so app updates only trust the configured GitHub API host.
+    private fun requireReleaseApiUrl(url: String): String {
+        val uri = Uri.parse(url)
+        if (!uri.scheme.equals("https", ignoreCase = true)
+            || !uri.host.equals(RELEASE_API_HOST, ignoreCase = true)
+        ) {
+            throw IllegalStateException("GitHub release API host is not allowed")
+        }
+        return url
     }
 
     //guard update downloads so a release asset cannot downgrade transport security.
@@ -238,6 +253,11 @@ object AppUpdateManager {
         val uri = Uri.parse(url)
         if (!uri.scheme.equals("https", ignoreCase = true)) {
             throw IllegalStateException("GitHub APK asset must use HTTPS")
+        }
+        if (!uri.host.equals(APK_DOWNLOAD_HOST, ignoreCase = true)
+            || !uri.encodedPath.orEmpty().contains(RELEASE_PATH_MARKER)
+        ) {
+            throw IllegalStateException("GitHub APK asset host is not allowed")
         }
         return url
     }

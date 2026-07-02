@@ -321,13 +321,45 @@ public final class ClusterProjectionService extends Service
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void movePackageToDisplay(String packageName, int displayId, String reason) {
+        final int moveGeneration;
+        synchronized (lock) {
+            moveGeneration = projectionGeneration;
+        }
         Thread worker = new Thread(
-                () -> NavAppDisplayController.get(this).moveTaskToDisplayBlocking(
-                        packageName,
-                        displayId,
-                        "cluster-projection " + reason),
+                () -> {
+                    String staleReason = staleMoveReason(packageName, displayId, moveGeneration);
+                    if (!staleReason.isEmpty()) {
+                        log("move skipped stale " + staleReason + " package=" + safe(packageName)
+                                + " display=" + displayId + " reason=" + reason);
+                        return;
+                    }
+                    NavAppDisplayController.get(this).moveTaskToDisplayBlocking(
+                            packageName,
+                            displayId,
+                            "cluster-projection " + reason);
+                },
                 "BydHudClusterProjectionMove");
         worker.start();
+    }
+
+    //guard dashboard moves so old workers cannot move an app after projection state changes.
+    private String staleMoveReason(String packageName, int displayId, int moveGeneration) {
+        synchronized (lock) {
+            if (moveGeneration != projectionGeneration) {
+                return "generation=" + moveGeneration + " current=" + projectionGeneration;
+            }
+            if (!safe(packageName).equals(projectedPackage)) {
+                return "projectedPackage=" + projectedPackage;
+            }
+            if (virtualDisplay == null || virtualDisplay.getDisplay() == null) {
+                return "display=missing";
+            }
+            int currentDisplayId = virtualDisplay.getDisplay().getDisplayId();
+            if (displayId != currentDisplayId) {
+                return "display=" + displayId + " current=" + currentDisplayId;
+            }
+            return "";
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

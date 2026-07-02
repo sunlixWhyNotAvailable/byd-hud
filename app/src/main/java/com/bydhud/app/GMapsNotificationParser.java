@@ -82,11 +82,8 @@ final class GMapsNotificationParser {
                 confidence(nextMeters, remainingMeters, cleanText, cleanSubText),
                 Long.MAX_VALUE,
                 "text:" + cleanText);
-        NavManeuverEvidence selectedEvidence = iconEvidence != null
-                && iconEvidence.source == NavManeuverEvidence.Source.LARGE_ICON
-                && iconEvidence.isFreshAt(nowElapsedMs)
-                ? iconEvidence
-                : textEvidence;
+        NavManeuverEvidence selectedEvidence =
+                selectManeuverEvidence(cleanText, textEvidence, iconEvidence, nowElapsedMs);
 
         HudState state = new HudState();
         state.distanceToIntersection = nextMeters >= 0
@@ -254,6 +251,43 @@ final class GMapsNotificationParser {
             return NavSnapshot.Maneuver.RIGHT_90;
         }
         return NavSnapshot.Maneuver.STRAIGHT;
+    }
+
+    //guard notification icon fallback so weak image evidence cannot overwrite stronger text evidence.
+    private static NavManeuverEvidence selectManeuverEvidence(
+            String cleanText,
+            NavManeuverEvidence textEvidence,
+            NavManeuverEvidence iconEvidence,
+            long nowElapsedMs) {
+        if (iconEvidence == null
+                || iconEvidence.source != NavManeuverEvidence.Source.LARGE_ICON
+                || !iconEvidence.isFreshAt(nowElapsedMs)) {
+            return textEvidence;
+        }
+        if (isWeakTextManeuver(cleanText, textEvidence)) {
+            return iconEvidence;
+        }
+        if (textEvidence != null && textEvidence.maneuver == iconEvidence.maneuver) {
+            return textEvidence;
+        }
+        return textEvidence;
+    }
+
+    //guard largeIcon fallback to cases where notification text does not describe an actual maneuver.
+    private static boolean isWeakTextManeuver(String text, NavManeuverEvidence evidence) {
+        if (evidence == null || evidence.maneuver != NavSnapshot.Maneuver.STRAIGHT) {
+            return false;
+        }
+        String lower = NavTextNormalizer.lower(text);
+        return !lower.contains("straight")
+                && !lower.contains("continue")
+                && !lower.contains("left")
+                && !lower.contains("right")
+                && !lower.contains("u-turn")
+                && !lower.contains("uturn")
+                && !lower.contains("exit")
+                && !lower.contains("ramp")
+                && !lower.contains("roundabout");
     }
 
     //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
