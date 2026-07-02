@@ -1,6 +1,6 @@
 name: Missing or incorrect navigation output
 description: Report missing or incorrect HUD navigation output.
-title: "[nav-output] "
+title: ""
 labels: ["navigation-output"]
 body:
   - type: markdown
