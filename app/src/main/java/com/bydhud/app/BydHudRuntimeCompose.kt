@@ -118,7 +118,7 @@ private sealed class UpdateCheckState {
     //defines Available UI/state support so Compose code can keep rendering intent explicit.
     data class Available(val info: AppUpdateManager.UpdateInfo) : UpdateCheckState()
     //defines Downloading UI/state support so Compose code can keep rendering intent explicit.
-    data class Downloading(val version: String, val progress: String) : UpdateCheckState()
+    data class Downloading(val info: AppUpdateManager.UpdateInfo, val progress: String) : UpdateCheckState()
     //defines Error UI/state support so Compose code can keep rendering intent explicit.
     data class Error(val message: String) : UpdateCheckState()
 }
@@ -588,11 +588,11 @@ private fun RuntimeApp(activity: MainActivity) {
                 onUpdate = {
                     val available = updateState
                     if (available is UpdateCheckState.Available) {
-                        updateState = UpdateCheckState.Downloading(available.info.version, "0%")
+                        updateState = UpdateCheckState.Downloading(available.info, "0%")
                         updateScope.launch {
                             try {
                                 AppUpdateManager.downloadAndInstall(activity, available.info) { progress ->
-                                    updateState = UpdateCheckState.Downloading(available.info.version, progress)
+                                    updateState = UpdateCheckState.Downloading(available.info, progress)
                                 }
                             } catch (e: Exception) {
                                 updateState = UpdateCheckState.Error(e.message ?: "Download failed")
@@ -921,6 +921,13 @@ private fun UpdateCheckOverlay(
                                 color = palette.text,
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold
+                            )
+                            Spacer(Modifier.height(12.dp))
+                            AvailableUpdateNotes(
+                                copy = copy,
+                                palette = palette,
+                                version = state.info.version,
+                                notes = state.info.releaseNotes
                             )
                         }
                         is UpdateCheckState.Error -> Text(

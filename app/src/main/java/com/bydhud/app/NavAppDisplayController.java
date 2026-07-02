@@ -3,6 +3,7 @@ package com.bydhud.app;
 //checks visible app state so visual capture only runs when the target app is actually on screen.
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.util.Log;
 
 import java.io.IOException;
@@ -16,6 +17,10 @@ import java.util.regex.Pattern;
 final class NavAppDisplayController {
     private static final String TAG = "BydHudNavAppDisplay";
     private static final String CHANNEL = "nav_app_display";
+    private static final String PREFS = "bydhud_dashboard_projection";
+    private static final String KEY_ACTIVE_PACKAGE = "active_package";
+    private static final String KEY_ACTIVE_REASON = "active_reason";
+    private static final String KEY_ACTIVE_UPDATED_MS = "active_updated_ms";
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
@@ -108,9 +113,16 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     String activeDashboardPackage() {
+        String current;
         synchronized (lock) {
-            return activeDashboardPackage;
+            current = activeDashboardPackage;
         }
+        return current.isEmpty() ? persistedDashboardPackage() : current;
+    }
+
+    //persists dashboard ownership so sticky service restarts do not lose the target app.
+    String persistedDashboardPackage() {
+        return normalizePackage(dashboardPrefs().getString(KEY_ACTIVE_PACKAGE, ""));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -258,6 +270,7 @@ final class NavAppDisplayController {
                     : toDashboard;
             label = targetDashboard ? "move_to_dashboard" : "move_to_main";
             if (targetDashboard) {
+                persistDashboardProjection(packageName, label + ":" + safe(reason));
                 ClusterProjectionService.startProjection(
                         context,
                         packageName,
@@ -279,6 +292,7 @@ final class NavAppDisplayController {
                     activeDashboardPackage = "";
                 }
             }
+            clearDashboardProjection(label + ":" + safe(reason));
             remember(new NavAppDisplayState(
                     packageName,
                     current.taskId,
@@ -327,6 +341,9 @@ final class NavAppDisplayController {
                         activeDashboardPackage = "";
                     }
                 }
+                if (confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID) {
+                    clearDashboardProjection("independent-dashboard-return:" + safe(reason));
+                }
                 remember(new NavAppDisplayState(
                         packageName,
                         confirmed.taskId,
@@ -374,6 +391,7 @@ final class NavAppDisplayController {
             synchronized (lock) {
                 activeDashboardPackage = packageName;
             }
+            persistDashboardProjection(packageName, "independent-dashboard-confirmed:" + safe(reason));
             NavHudLiveSender.get(context).onDashboardProjectionConfirmed(packageName, confirmed);
             remember(new NavAppDisplayState(
                     packageName,
@@ -418,6 +436,7 @@ final class NavAppDisplayController {
                     activeDashboardPackage = "";
                 }
             }
+            clearDashboardProjection("return-previous-dashboard:" + safe(reason));
             return true;
         }
         log(previous, "return_previous_dashboard_app failed display=" + confirmed.displayId
@@ -570,6 +589,41 @@ final class NavAppDisplayController {
                 false,
                 status == null ? "move running" : status));
         return true;
+    }
+
+    //keeps dashboard projection intent outside process memory for projection-service recovery.
+    private void persistDashboardProjection(String packageName, String reason) {
+        String normalized = normalizePackage(packageName);
+        if (normalized.isEmpty()) {
+            return;
+        }
+        dashboardPrefs()
+                .edit()
+                .putString(KEY_ACTIVE_PACKAGE, normalized)
+                .putString(KEY_ACTIVE_REASON, safe(reason))
+                .putLong(KEY_ACTIVE_UPDATED_MS, System.currentTimeMillis())
+                .apply();
+        log(normalized, "dashboard_projection_persist package=" + normalized
+                + " reason=" + safe(reason));
+    }
+
+    //clears dashboard projection intent when the app is intentionally returned to main.
+    private void clearDashboardProjection(String reason) {
+        String previous = persistedDashboardPackage();
+        dashboardPrefs()
+                .edit()
+                .remove(KEY_ACTIVE_PACKAGE)
+                .putString(KEY_ACTIVE_REASON, safe(reason))
+                .putLong(KEY_ACTIVE_UPDATED_MS, System.currentTimeMillis())
+                .apply();
+        if (!previous.isEmpty()) {
+            log(previous, "dashboard_projection_persist_clear reason=" + safe(reason));
+        }
+    }
+
+    //centralizes storage access so all dashboard ownership reads use the same preferences file.
+    private SharedPreferences dashboardPrefs() {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

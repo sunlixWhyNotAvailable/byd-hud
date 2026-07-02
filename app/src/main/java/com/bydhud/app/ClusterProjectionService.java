@@ -95,6 +95,12 @@ public final class ClusterProjectionService extends Service
         return service != null && service.isCurrentProjectedSurface(surface);
     }
 
+    //checks projection ownership without borrowing a Surface, used by the low-cadence watchdog.
+    static boolean isProjectedPackageCurrent(String packageName) {
+        ClusterProjectionService service = instance;
+        return service != null && service.hasCurrentProjection(packageName);
+    }
+
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
@@ -107,9 +113,13 @@ public final class ClusterProjectionService extends Service
     @Override
     //handles service start intents here so boot, watchdog, and UI paths share one runtime entry point.
     public int onStartCommand(Intent intent, int flags, int startId) {
-        String action = intent == null ? "" : intent.getAction();
+        String action = safe(intent == null ? "" : intent.getAction());
         String packageName = safe(intent == null ? "" : intent.getStringExtra(EXTRA_PACKAGE));
         String reason = safe(intent == null ? "" : intent.getStringExtra(EXTRA_REASON));
+        if (action.isEmpty()) {
+            restorePersistedProjection("sticky-restart-empty-action");
+            return START_STICKY;
+        }
         if (ACTION_RETURN.equals(action)) {
             returnPackageToMain(packageName, reason, startId);
             return START_NOT_STICKY;
@@ -120,6 +130,17 @@ public final class ClusterProjectionService extends Service
         }
         log("unknown action=" + action + " reason=" + reason);
         return START_NOT_STICKY;
+    }
+
+    //restores app-owned dashboard projection after Android restarts this sticky service without extras.
+    private void restorePersistedProjection(String reason) {
+        String packageName = NavAppDisplayController.get(this).persistedDashboardPackage();
+        if (packageName.isEmpty()) {
+            log("sticky restore skipped empty package reason=" + safe(reason));
+            return;
+        }
+        log("sticky restore package=" + packageName + " reason=" + safe(reason));
+        requestProjection(packageName, "restore:" + safe(reason));
     }
 
     @Override
@@ -497,6 +518,18 @@ public final class ClusterProjectionService extends Service
                     && projectionSurface.isValid()
                     && projectionGeneration == surface.generation
                     && safe(projectedPackage).equals(surface.packageName);
+        }
+    }
+
+    //guards watchdog repair so it only recreates projection when the current owned projection is missing.
+    private boolean hasCurrentProjection(String packageName) {
+        synchronized (lock) {
+            return projectionRequested
+                    && virtualDisplay != null
+                    && virtualDisplay.getDisplay() != null
+                    && projectionSurface != null
+                    && projectionSurface.isValid()
+                    && safe(projectedPackage).equals(safe(packageName));
         }
     }
 

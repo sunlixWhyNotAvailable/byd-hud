@@ -356,6 +356,11 @@ final class WazeVisualCueParser {
 
     //lets the host tester use the same bounds-first production path without hardcoded virtual parsing.
     static WazeAccessibilityGeometry detectNavigationBoundsForTest(File screenshot) {
+        return detectNavigationBoundsForTest(screenshot, "cue");
+    }
+
+    //lets benchmark runs compare the current cue-first detector with the proposed panel-first detector.
+    static WazeAccessibilityGeometry detectNavigationBoundsForTest(File screenshot, String mode) {
         if (screenshot == null || !screenshot.exists()) {
             return WazeAccessibilityGeometry.EMPTY;
         }
@@ -369,7 +374,10 @@ final class WazeVisualCueParser {
             return WazeAccessibilityGeometry.EMPTY;
         }
         try {
-            return detectNavigationBounds(bitmap);
+            String cleanMode = mode == null ? "" : mode.trim().toLowerCase(Locale.ROOT);
+            return "panel".equals(cleanMode)
+                    ? detectNavigationPanelBounds(bitmap)
+                    : detectNavigationBounds(bitmap);
         } finally {
             bitmap.recycle();
         }
@@ -497,6 +505,21 @@ final class WazeVisualCueParser {
                 && projected.white > projected.gray;
     }
 
+    //guard for final-destination output; distance text such as 0 m is not arrival evidence.
+    private static boolean hasExplicitArrivalEvidence(Bitmap bitmap) {
+        ColorCounts main = colorCounts(bitmap, 30, 130, 130, 220);
+        if (isArrivalCue(main.red, main.white, main.gray)) {
+            return true;
+        }
+        if (bitmap == null || bitmap.getHeight() > 800) {
+            return false;
+        }
+        ColorCounts projected = colorCounts(bitmap, 30, 60, 190, 190, 720);
+        return projected.red >= 4
+                && projected.white >= 120
+                && projected.white > projected.gray;
+    }
+
     //guard for destination-style top cues so arrival cards do not get parsed as ordinary arrows.
     private static boolean hasTopArrivalInstruction(Bitmap bitmap) {
         if (bitmap == null) {
@@ -516,7 +539,7 @@ final class WazeVisualCueParser {
             LaneGuidanceAnalysis laneAnalysis,
             WazeAccessibilityGeometry geometry,
             boolean leftHandRoundaboutTraffic) {
-        boolean arrivalPanel = isArrivalPanel(bitmap);
+        boolean arrivalPanel = hasExplicitArrivalEvidence(bitmap);
         if (arrivalPanel && hasTopArrivalInstruction(bitmap)) {
             return Cue.arrival();
         }
@@ -931,7 +954,8 @@ final class WazeVisualCueParser {
             }
             List<Component> components = laneComponents(bitmap, profile);
             List<Component> directComponents = laneComponentsAfterMinX(bitmap, components, profile);
-            List<Integer> dividers = laneDividerColumns(bitmap, profile);
+            List<Integer> dividers =
+                    laneDividerColumnsOutsideComponents(bitmap, laneDividerColumns(bitmap, profile), components);
             if (dividers.isEmpty()) {
                 LaneGuidanceAnalysis direct = analyzeLaneComponentsDirect(bitmap, directComponents, 0, 0);
                 if (isBlockingLaneAnalysis(direct)) {
@@ -1499,6 +1523,47 @@ final class WazeVisualCueParser {
         dividers.add(center);
     }
 
+    //guards compound lane glyphs from being split when their own vertical stroke looks like a divider.
+    private static List<Integer> laneDividerColumnsOutsideComponents(
+            Bitmap bitmap,
+            List<Integer> dividers,
+            List<Component> components) {
+        if (dividers == null || dividers.isEmpty()) {
+            return Collections.emptyList();
+        }
+        if (bitmap == null || components == null || components.isEmpty()) {
+            return dividers;
+        }
+        int margin = Math.max(6, scaleX(bitmap, 6));
+        int maxGlyphWidth = Math.max(margin * 4, scaleX(bitmap, 160));
+        List<Integer> filtered = new ArrayList<>();
+        for (Integer divider : dividers) {
+            if (divider != null && !splitsLaneComponent(divider, components, margin, maxGlyphWidth)) {
+                filtered.add(divider);
+            }
+        }
+        return filtered;
+    }
+
+    //keeps divider filtering geometric so real L+Rs* cells are not rewritten by token-specific rules.
+    private static boolean splitsLaneComponent(
+            int divider,
+            List<Component> components,
+            int margin,
+            int maxGlyphWidth) {
+        for (Component component : components) {
+            if (component == null
+                    || component.width() < margin * 3
+                    || component.width() > maxGlyphWidth) {
+                continue;
+            }
+            if (divider > component.x1 + margin && divider < component.x2 - margin) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     private static List<LaneCell> laneCellsFromDividers(
             Bitmap bitmap, LaneCropProfile profile, List<Integer> dividers) {
@@ -1812,10 +1877,16 @@ final class WazeVisualCueParser {
     private static Component componentForCell(List<Component> components, LaneCell cell) {
         Component best = null;
         int bestCount = 0;
+        Component bestOverlap = null;
+        int bestOverlapWidth = 0;
         for (Component component : components) {
             int overlap = Math.min(component.x2, cell.x2) - Math.max(component.x1, cell.x1) + 1;
             if (overlap <= 0) {
                 continue;
+            }
+            if (overlap > bestOverlapWidth) {
+                bestOverlap = component;
+                bestOverlapWidth = overlap;
             }
             int center = (component.x1 + component.x2) / 2;
             if (center < cell.x1 || center > cell.x2) {
@@ -1826,7 +1897,7 @@ final class WazeVisualCueParser {
                 bestCount = component.count;
             }
         }
-        return best;
+        return best == null ? bestOverlap : best;
     }
 
     //keeps cell parsing from inheriting geometry that belongs to a neighboring lane cell.
@@ -1842,8 +1913,8 @@ final class WazeVisualCueParser {
         if (x1 == component.x1 && x2 == component.x2) {
             return component;
         }
-        List<Component> clipped = new ArrayList<>();
-        addComponent(bitmap, clipped, x1, x2, cell.y1, cell.y2);
+        int borderCrop = Math.max(2, (cell.y2 - cell.y1 + 1) / 8);
+        List<Component> clipped = componentsRaw(bitmap, x1, cell.y1 + borderCrop, x2, cell.y2);
         return clipped.isEmpty() ? component : largest(clipped);
     }
 
@@ -1942,6 +2013,7 @@ final class WazeVisualCueParser {
         }
         return new LaneCropProfile[] {
                 new LaneCropProfile(20, 95, 970, 195, 1080, 20),
+                new LaneCropProfile(20, 120, 970, 220, 1080, 20),
                 new LaneCropProfile(20, 245, 900, 335, 1080, 150)
         };
     }
@@ -2633,6 +2705,9 @@ final class WazeVisualCueParser {
                 && geometry.width <= 92
                 && geometry.midDelta < -8.0d
                 && geometry.bottomDelta < -10.0d
+                && geometry.bottomDelta > -28.0d
+                && geometry.lowerRightMassRatio() >= 0.07d
+                && geometry.midRightMassRatio() >= 0.18d
                 && isRecommended(geometry.component);
     }
 
@@ -2646,6 +2721,8 @@ final class WazeVisualCueParser {
                 && geometry.component.height() >= 75
                 && geometry.midDelta < -8.0d
                 && geometry.bottomDelta < -10.0d
+                && (geometry.bottomDelta <= -28.0d
+                || geometry.lowerRightMassRatio() < 0.05d)
                 && isRecommended(component);
     }
 
@@ -2871,21 +2948,190 @@ final class WazeVisualCueParser {
         if (bitmap == null) {
             return WazeAccessibilityGeometry.EMPTY;
         }
+        boolean virtual = bitmap.getHeight() <= 800;
         Rect laneBounds = detectCueBounds(
                 bitmap,
                 0,
                 0,
                 Math.min(bitmap.getWidth(), scaleX(bitmap, 980)),
-                Math.min(bitmap.getHeight(), bitmap.getHeight() <= 800
-                        ? scaleY(bitmap, 150, 720)
+                Math.min(bitmap.getHeight(), virtual
+                        ? scaleY(bitmap, 230, 720)
                         : scaleY(bitmap, 220)));
         Rect directionBounds = detectCueBounds(
                 bitmap,
                 0,
-                bitmap.getHeight() <= 800 ? scaleY(bitmap, 300, 720) : scaleY(bitmap, 330),
-                Math.min(bitmap.getWidth(), scaleX(bitmap, 190)),
-                bitmap.getHeight() <= 800 ? scaleY(bitmap, 430, 720) : scaleY(bitmap, 520));
+                virtual ? scaleY(bitmap, 260, 720) : scaleY(bitmap, 280),
+                Math.min(bitmap.getWidth(), scaleX(bitmap, 220)),
+                virtual ? scaleY(bitmap, 520, 720) : scaleY(bitmap, 580));
         return new WazeAccessibilityGeometry(directionBounds, laneBounds);
+    }
+
+    //finds Waze's dark navigation panels first so shifted layouts do not depend on fixed crop rows.
+    private static WazeAccessibilityGeometry detectNavigationPanelBounds(Bitmap bitmap) {
+        if (bitmap == null) {
+            return WazeAccessibilityGeometry.EMPTY;
+        }
+        boolean virtual = bitmap.getHeight() <= 800;
+        Rect lanePanel = detectDarkPanelBounds(
+                bitmap,
+                0,
+                0,
+                Math.min(bitmap.getWidth(), scaleX(bitmap, 1080)),
+                Math.min(bitmap.getHeight(), virtual ? scaleY(bitmap, 300, 720) : scaleY(bitmap, 420)),
+                true);
+        Rect directionPanel = detectDarkPanelBounds(
+                bitmap,
+                0,
+                virtual ? scaleY(bitmap, 190, 720) : scaleY(bitmap, 260),
+                Math.min(bitmap.getWidth(), scaleX(bitmap, 300)),
+                virtual ? scaleY(bitmap, 510, 720) : scaleY(bitmap, 650),
+                false);
+        Rect directionBounds = directionPanel == null
+                ? null
+                : detectCueBounds(
+                        bitmap,
+                        directionPanel.left,
+                        directionPanel.top,
+                        directionPanel.right,
+                        directionPanel.bottom);
+        return new WazeAccessibilityGeometry(directionBounds, lanePanel);
+    }
+
+    //keeps the panel detector cheap: sample a small ROI, find dark row/column bands, then validate cue evidence.
+    private static Rect detectDarkPanelBounds(
+            Bitmap bitmap,
+            int rawX1,
+            int rawY1,
+            int rawX2,
+            int rawY2,
+            boolean lanePanel) {
+        if (bitmap == null) {
+            return null;
+        }
+        int x1 = Math.max(0, Math.min(rawX1, bitmap.getWidth()));
+        int y1 = Math.max(0, Math.min(rawY1, bitmap.getHeight()));
+        int x2 = Math.max(x1, Math.min(rawX2, bitmap.getWidth()));
+        int y2 = Math.max(y1, Math.min(rawY2, bitmap.getHeight()));
+        if (x2 <= x1 || y2 <= y1) {
+            return null;
+        }
+        final int step = 4;
+        int rows = Math.max(1, ((y2 - y1) + step - 1) / step);
+        int cols = Math.max(1, ((x2 - x1) + step - 1) / step);
+        int[] rowDark = new int[rows];
+        for (int row = 0; row < rows; row++) {
+            int y = Math.min(y2 - 1, y1 + row * step);
+            int dark = 0;
+            for (int col = 0; col < cols; col++) {
+                int x = Math.min(x2 - 1, x1 + col * step);
+                if (isDarkCardPixel(bitmap.getPixel(x, y))) {
+                    dark++;
+                }
+            }
+            rowDark[row] = dark;
+        }
+        int rowThreshold = Math.max(lanePanel ? 8 : 4, cols / (lanePanel ? 4 : 5));
+        int minRows = Math.max(3, (lanePanel ? scaleY(bitmap, 28, 720) : scaleY(bitmap, 36, 720)) / step);
+        int[] rowBand = bestDarkBand(rowDark, rowThreshold, minRows);
+        if (rowBand == null) {
+            return null;
+        }
+        int[] colDark = new int[cols];
+        for (int row = rowBand[0]; row <= rowBand[1]; row++) {
+            int y = Math.min(y2 - 1, y1 + row * step);
+            for (int col = 0; col < cols; col++) {
+                int x = Math.min(x2 - 1, x1 + col * step);
+                if (isDarkCardPixel(bitmap.getPixel(x, y))) {
+                    colDark[col]++;
+                }
+            }
+        }
+        int bandRows = (rowBand[1] - rowBand[0]) + 1;
+        int colThreshold = Math.max(2, bandRows / (lanePanel ? 4 : 5));
+        int minCols = Math.max(4, (lanePanel ? scaleX(bitmap, 180) : scaleX(bitmap, 45)) / step);
+        int[] colBand = bestDarkBand(colDark, colThreshold, minCols);
+        if (colBand == null) {
+            return null;
+        }
+        Rect rect = new Rect(
+                Math.max(0, x1 + colBand[0] * step - step),
+                Math.max(0, y1 + rowBand[0] * step - step),
+                Math.min(bitmap.getWidth(), x1 + (colBand[1] + 1) * step + step),
+                Math.min(bitmap.getHeight(), y1 + (rowBand[1] + 1) * step + step));
+        return validDarkPanelCandidate(bitmap, rect, lanePanel) ? rect : null;
+    }
+
+    //selects the strongest contiguous dark band instead of accepting the first dark row/column.
+    private static int[] bestDarkBand(int[] counts, int threshold, int minLength) {
+        int bestStart = -1;
+        int bestEnd = -1;
+        int bestScore = -1;
+        int start = -1;
+        int score = 0;
+        for (int i = 0; i <= counts.length; i++) {
+            boolean active = i < counts.length && counts[i] >= threshold;
+            if (active) {
+                if (start < 0) {
+                    start = i;
+                    score = 0;
+                }
+                score += counts[i];
+                continue;
+            }
+            if (start >= 0) {
+                int end = i - 1;
+                int length = (end - start) + 1;
+                if (length >= minLength && score > bestScore) {
+                    bestStart = start;
+                    bestEnd = end;
+                    bestScore = score;
+                }
+                start = -1;
+                score = 0;
+            }
+        }
+        return bestStart < 0 ? null : new int[] { bestStart, bestEnd };
+    }
+
+    //rejects dark map fragments by requiring Waze-card proportions and visible glyph/divider-like pixels.
+    private static boolean validDarkPanelCandidate(Bitmap bitmap, Rect rect, boolean lanePanel) {
+        Rect safe = clampRect(rect, bitmap);
+        if (safe == null) {
+            return false;
+        }
+        int minWidth = lanePanel ? scaleX(bitmap, 220) : scaleX(bitmap, 45);
+        int maxWidth = lanePanel ? scaleX(bitmap, 1120) : scaleX(bitmap, 310);
+        int minHeight = lanePanel ? scaleY(bitmap, 32, 720) : scaleY(bitmap, 38, 720);
+        int maxHeight = lanePanel ? scaleY(bitmap, 210, 720) : scaleY(bitmap, 240, 720);
+        if (safe.width() < minWidth || safe.width() > maxWidth
+                || safe.height() < minHeight || safe.height() > maxHeight) {
+            return false;
+        }
+        if (!hasDarkPanelRaw(bitmap, safe)) {
+            return false;
+        }
+        int minCuePixels = lanePanel ? 35 : 12;
+        return cuePixelsOnDarkPanel(bitmap, safe, minCuePixels) >= minCuePixels;
+    }
+
+    //uses cue pixels only as confirmation of a detected dark panel, not as a production fallback source.
+    private static int cuePixelsOnDarkPanel(Bitmap bitmap, Rect rect, int stopAt) {
+        Rect safe = clampRect(rect, bitmap);
+        if (safe == null) {
+            return 0;
+        }
+        int found = 0;
+        for (int y = safe.top; y < safe.bottom; y += 3) {
+            for (int x = safe.left; x < safe.right; x += 3) {
+                if (isNeutralCuePixel(bitmap.getPixel(x, y)) && hasDarkNeighbor(bitmap, x, y)) {
+                    found++;
+                    if (found >= stopAt) {
+                        return found;
+                    }
+                }
+            }
+        }
+        return found;
     }
 
     //keeps the detector conservative by only accepting cue pixels that sit on a dark Waze panel.
@@ -2982,8 +3228,11 @@ final class WazeVisualCueParser {
         int topWhite = 0;
         int midWhite = 0;
         int bottomWhite = 0;
+        int midRight = 0;
+        int bottomRight = 0;
         int topBand = y1 + (y2 - y1) / 3;
         int bottomBand = y1 + ((y2 - y1) * 2) / 3;
+        double centerX = x1 + ((x2 - x1) / 2.0d);
         for (int x = x1; x <= x2; x++) {
             for (int y = y1; y < y2; y++) {
                 int color = bitmap.getPixel(x, y);
@@ -3006,12 +3255,18 @@ final class WazeVisualCueParser {
                 } else if (y < bottomBand) {
                     midSum += x;
                     midCount++;
+                    if (x >= centerX) {
+                        midRight++;
+                    }
                     if (whitePixel) {
                         midWhite++;
                     }
                 } else {
                     bottomSum += x;
                     bottomCount++;
+                    if (x >= centerX) {
+                        bottomRight++;
+                    }
                     if (whitePixel) {
                         bottomWhite++;
                     }
@@ -3041,7 +3296,9 @@ final class WazeVisualCueParser {
                 midCount,
                 midWhite,
                 bottomCount,
-                bottomWhite));
+                bottomWhite,
+                midRight,
+                bottomRight));
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3582,18 +3839,21 @@ final class WazeVisualCueParser {
         final int midWhiteCount;
         final int bottomCount;
         final int bottomWhiteCount;
+        final int midRightCount;
+        final int bottomRightCount;
 
         Component(int x1, int x2, int y1, int y2, int count, int whiteCount,
                 double topAverageX, double midAverageX, double bottomAverageX) {
             this(x1, x2, y1, y2, count, whiteCount, topAverageX, midAverageX, bottomAverageX,
-                    0, 0, 0, 0, 0, 0);
+                    0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         Component(int x1, int x2, int y1, int y2, int count, int whiteCount,
                 double topAverageX, double midAverageX, double bottomAverageX,
                 int topCount, int topWhiteCount,
                 int midCount, int midWhiteCount,
-                int bottomCount, int bottomWhiteCount) {
+                int bottomCount, int bottomWhiteCount,
+                int midRightCount, int bottomRightCount) {
             this.x1 = x1;
             this.x2 = x2;
             this.y1 = y1;
@@ -3609,6 +3869,8 @@ final class WazeVisualCueParser {
             this.midWhiteCount = midWhiteCount;
             this.bottomCount = bottomCount;
             this.bottomWhiteCount = bottomWhiteCount;
+            this.midRightCount = midRightCount;
+            this.bottomRightCount = bottomRightCount;
         }
 
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3666,6 +3928,16 @@ final class WazeVisualCueParser {
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static GlyphGeometry from(Component component) {
             return component == null ? null : new GlyphGeometry(component);
+        }
+
+        //measures real lower-right cue mass so R* is not confused with L+Rs* by centroid deltas alone.
+        double lowerRightMassRatio() {
+            return component.count <= 0 ? 0.0d : component.bottomRightCount / (double) component.count;
+        }
+
+        //measures right-side middle mass that is required for the smooth-right half of L+Rs*.
+        double midRightMassRatio() {
+            return component.count <= 0 ? 0.0d : component.midRightCount / (double) component.count;
         }
     }
 
