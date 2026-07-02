@@ -1,0 +1,72 @@
+name: Missing or incorrect navigation output
+description: Report missing or incorrect HUD navigation output.
+title: "[nav-output] "
+labels: ["navigation-output"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template when BYD HUD shows missing or incorrect maneuver, lane, distance, street, or dashboard output.
+
+        Please attach the session logs and screenshots from the affected trip.
+
+  - type: input
+    id: car-model
+    attributes:
+      label: Car model
+      placeholder: "BYD Sea Lion 07 EV 2025"
+    validations:
+      required: true
+
+  - type: input
+    id: dilink-version
+    attributes:
+      label: DiLink version
+      placeholder: "DiLink 5.0"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: BYD HUD app version
+      placeholder: "v1.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: navigator
+    attributes:
+      label: Navigator
+      options:
+        - Waze
+        - Google Maps
+        - ABRP
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: display-mode
+    attributes:
+      label: Display mode
+      options:
+        - Main screen
+        - Dashboard / virtual screen
+        - Background / notification
+        - Unknown
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: Session logs and screenshots
+      description: Drag and drop files here, or link to a folder/archive with the affected session.
+      placeholder: |
+        Attach or link:
+        - nav-capture session archive or folder
+        - relevant screenshots / source_frame_*.png / screen_*.png
+        - logcat if available
+    validations:
+      required: true
