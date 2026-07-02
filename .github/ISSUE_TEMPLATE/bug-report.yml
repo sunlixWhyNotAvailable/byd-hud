@@ -1,0 +1,91 @@
+name: Bug report
+description: Report crashes, broken controls, permissions, update, storage, or runtime issues.
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this template for app bugs that are not just missing or incorrect navigation glyphs.
+
+        For missing lanes, maneuvers, or wrong HUD navigation output, use the navigation output template instead.
+
+  - type: dropdown
+    id: bug-area
+    attributes:
+      label: Bug area
+      options:
+        - Crash
+        - Install or update
+        - ADB or permissions
+        - UI controls
+        - HUD runtime
+        - Dashboard / virtual screen
+        - Storage
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: car-model
+    attributes:
+      label: Car model
+      placeholder: "BYD Sea Lion 07 EV 2025"
+    validations:
+      required: true
+
+  - type: input
+    id: dilink-version
+    attributes:
+      label: DiLink version
+      placeholder: "DiLink 5.0"
+    validations:
+      required: true
+
+  - type: input
+    id: app-version
+    attributes:
+      label: BYD HUD app version
+      placeholder: "v1.3.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the visible problem.
+      placeholder: "The app crashes when I open Storage tab."
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Write the shortest sequence that triggers the bug.
+      placeholder: |
+        1. Open BYD HUD
+        2. Go to Storage
+        3. Tap ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and screenshots
+      description: Drag and drop screenshots, crash logs, logcat, or session archive here.
+      placeholder: |
+        Attach or link:
+        - screenshots or screen recording
+        - logcat if available
+        - nav-capture/session archive if relevant
+    validations:
+      required: false
