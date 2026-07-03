@@ -78,9 +78,11 @@ final class HudRuntimeSupervisor {
                     appContext, "package-replace-hard-reset:" + safeReason);
             appContext.stopService(new android.content.Intent(appContext, HudRuntimeService.class));
             HudPrefs.setRuntimeServiceRunning(appContext, false);
-            HudRuntimeState.markStopped(appContext, "package-replace-hard-reset:" + safeReason);
+            HudRuntimeState.markPackageReplaceReset(appContext, safeReason);
             HudRuntimeWatchdog.scheduleSoon(
                     appContext, "package-replace-hard-reset", PACKAGE_REPLACE_RESTART_DELAY_MS);
+            AppEventLogger.event(appContext, "runtime_supervisor package_replace_force_start_scheduled reason="
+                    + safeReason + " restartDelayMs=" + PACKAGE_REPLACE_RESTART_DELAY_MS);
             AppEventLogger.event(appContext, "runtime_supervisor package_replace_hard_reset_exit reason="
                     + safeReason + " restartDelayMs=" + PACKAGE_REPLACE_RESTART_DELAY_MS);
         } finally {

@@ -87,6 +87,20 @@ final class WazeVisualCueParser {
         BITMAP_DECODE_FAILED
     }
 
+    //labels parser evidence so field logs can show whether accessibility bounds, cue bounds, or fixed profiles won.
+    enum VisualEvidenceSource {
+        NONE("none"),
+        ACCESSIBILITY("accessibility"),
+        CUE("cue"),
+        FIXED("fixed");
+
+        final String logValue;
+
+        VisualEvidenceSource(String logValue) {
+            this.logValue = logValue;
+        }
+    }
+
     //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavParserResult parseScreenshot(File screenshot, NavSnapshot baseline) {
         return parseScreenshot(screenshot, baseline, null);
@@ -610,9 +624,15 @@ final class WazeVisualCueParser {
         if (roundaboutCue != null) {
             return roundaboutCue;
         }
-        Cue geometryCue = parseSingleCueFromBounds(bitmap, geometry, uturnOnly);
+        Cue geometryCue = parseSingleCueFromBounds(
+                bitmap, geometry, uturnOnly, VisualEvidenceSource.ACCESSIBILITY);
         if (geometryCue != null) {
             return geometryCue;
+        }
+        Cue cueBoundsCue = parseSingleCueFromBounds(
+                bitmap, detectNavigationBounds(bitmap), uturnOnly, VisualEvidenceSource.CUE);
+        if (cueBoundsCue != null) {
+            return cueBoundsCue;
         }
         List<Component> mainComponents = components(bitmap, 20, 95, 190, 230);
         if (!mainComponents.isEmpty()) {
@@ -628,7 +648,8 @@ final class WazeVisualCueParser {
                 return null;
             }
             if (maneuver != NavSnapshot.Maneuver.UNKNOWN) {
-                return Cue.maneuver(maneuver, sourceFromManeuver(maneuver));
+                return Cue.maneuver(maneuver, sourceFromManeuver(maneuver))
+                        .withSource(VisualEvidenceSource.FIXED);
             }
         }
         return null;
@@ -638,7 +659,8 @@ final class WazeVisualCueParser {
     private static Cue parseSingleCueFromBounds(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry,
-            boolean uturnOnly) {
+            boolean uturnOnly,
+            VisualEvidenceSource source) {
         if (bitmap == null || geometry == null || !geometry.hasDirectionBounds()) {
             return null;
         }
@@ -664,7 +686,7 @@ final class WazeVisualCueParser {
         if (maneuver == NavSnapshot.Maneuver.UNKNOWN) {
             return null;
         }
-        return Cue.maneuver(maneuver, sourceFromManeuver(maneuver));
+        return Cue.maneuver(maneuver, sourceFromManeuver(maneuver)).withSource(source);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -718,9 +740,13 @@ final class WazeVisualCueParser {
 
         int confidence = cue.maneuver == NavSnapshot.Maneuver.ARRIVE
                 ? 92 : (laneCount > 1 ? 88 : 80);
+        String maneuverSource = cue.source.logValue;
+        String laneSource = laneCount > 1 ? cue.source.logValue : "none";
         String reason = "waze visual cue maneuver=\"" + cue.maneuver.name()
                 + "\" lanes=\"" + cue.laneString
-                + "\" roundaboutExit=" + cue.roundaboutExitNumber;
+                + "\" roundaboutExit=" + cue.roundaboutExitNumber
+                + " maneuverSource=" + maneuverSource
+                + " laneSource=" + laneSource;
         return new NavParserResult(
                 state,
                 new NavSnapshot(
@@ -734,7 +760,11 @@ final class WazeVisualCueParser {
                         laneCount > 1 ? cue.laneString : "",
                         confidence,
                         reason),
-                reason);
+                reason,
+                NavManeuverEvidence.NONE,
+                0,
+                maneuverSource,
+                laneSource);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -807,6 +837,21 @@ final class WazeVisualCueParser {
     static LaneGuidanceAnalysis analyzeLaneGuidance(
             Bitmap bitmap,
             WazeAccessibilityGeometry geometry) {
+        return analyzeLaneGuidanceInternal(bitmap, geometry, false);
+    }
+
+    //uses cue-detected bounds as the live fallback before legacy fixed profiles.
+    static LaneGuidanceAnalysis analyzeLaneGuidanceWithCueFallback(
+            Bitmap bitmap,
+            WazeAccessibilityGeometry geometry) {
+        return analyzeLaneGuidanceInternal(bitmap, geometry, true);
+    }
+
+    //keeps live and tester lane parsing on one path while allowing live cue fallback to be explicit.
+    private static LaneGuidanceAnalysis analyzeLaneGuidanceInternal(
+            Bitmap bitmap,
+            WazeAccessibilityGeometry geometry,
+            boolean cueFallback) {
         WazeVisualLayout layout = visualLayout(bitmap);
         if (layout == WazeVisualLayout.ARRIVAL) {
             return LaneGuidanceAnalysis.none(LaneFailureReason.ARRIVAL_PANEL);
@@ -816,7 +861,14 @@ final class WazeVisualCueParser {
         }
         LaneGuidanceAnalysis boundsLane = analyzeLaneGuidanceFromBounds(bitmap, geometry);
         if (boundsLane.status == LaneGuidanceStatus.PARSED) {
-            return boundsLane;
+            return boundsLane.withSource(VisualEvidenceSource.ACCESSIBILITY);
+        }
+        if (cueFallback) {
+            LaneGuidanceAnalysis cueLane =
+                    analyzeLaneGuidanceFromBounds(bitmap, detectNavigationBounds(bitmap));
+            if (cueLane.status == LaneGuidanceStatus.PARSED) {
+                return cueLane.withSource(VisualEvidenceSource.CUE);
+            }
         }
         if (layout == WazeVisualLayout.SINGLE_MANEUVER) {
             return LaneGuidanceAnalysis.none(LaneFailureReason.FALSE_ROW_SINGLE_CARD);
@@ -824,7 +876,10 @@ final class WazeVisualCueParser {
         if (layout != WazeVisualLayout.LANES) {
             return LaneGuidanceAnalysis.none(LaneFailureReason.NO_LANE_STRIP);
         }
-        return analyzeLaneRows(bitmap);
+        LaneGuidanceAnalysis fixedLane = analyzeLaneRows(bitmap);
+        return fixedLane.status == LaneGuidanceStatus.PARSED
+                ? fixedLane.withSource(VisualEvidenceSource.FIXED)
+                : fixedLane;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3522,6 +3577,7 @@ final class WazeVisualCueParser {
         final int cellCount;
         final int componentCount;
         final boolean blocksSingleFallback;
+        final String sourceName;
 
         LaneGuidanceAnalysisForTest(
                 String statusName,
@@ -3530,7 +3586,8 @@ final class WazeVisualCueParser {
                 int dividerCount,
                 int cellCount,
                 int componentCount,
-                boolean blocksSingleFallback) {
+                boolean blocksSingleFallback,
+                String sourceName) {
             this.statusName = statusName == null ? "" : statusName;
             this.reasonName = reasonName == null ? "" : reasonName;
             this.laneString = laneString == null ? "" : laneString;
@@ -3538,6 +3595,7 @@ final class WazeVisualCueParser {
             this.cellCount = cellCount;
             this.componentCount = componentCount;
             this.blocksSingleFallback = blocksSingleFallback;
+            this.sourceName = sourceName == null ? "" : sourceName;
         }
 
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3552,7 +3610,8 @@ final class WazeVisualCueParser {
                     safe.dividerCount,
                     safe.cellCount,
                     safe.componentCount,
-                    safe.blocksSingleFallback);
+                    safe.blocksSingleFallback,
+                    safe.source.logValue);
         }
     }
 
@@ -3567,6 +3626,7 @@ final class WazeVisualCueParser {
         final int componentCount;
         final boolean blocksSingleFallback;
         final List<WazeLaneCell> cells;
+        final VisualEvidenceSource source;
 
         LaneGuidanceAnalysis(
                 LaneGuidanceStatus status,
@@ -3591,6 +3651,21 @@ final class WazeVisualCueParser {
                 int componentCount,
                 boolean blocksSingleFallback,
                 List<WazeLaneCell> cells) {
+            this(status, reason, cue, laneString, dividerCount, cellCount, componentCount,
+                    blocksSingleFallback, cells, VisualEvidenceSource.NONE);
+        }
+
+        LaneGuidanceAnalysis(
+                LaneGuidanceStatus status,
+                LaneFailureReason reason,
+                Cue cue,
+                String laneString,
+                int dividerCount,
+                int cellCount,
+                int componentCount,
+                boolean blocksSingleFallback,
+                List<WazeLaneCell> cells,
+                VisualEvidenceSource source) {
             this.status = status;
             this.reason = reason == null ? LaneFailureReason.UNKNOWN_GLYPH : reason;
             this.cue = cue;
@@ -3600,6 +3675,23 @@ final class WazeVisualCueParser {
             this.componentCount = Math.max(0, componentCount);
             this.blocksSingleFallback = blocksSingleFallback;
             this.cells = cells == null ? Collections.emptyList() : Collections.unmodifiableList(cells);
+            this.source = source == null ? VisualEvidenceSource.NONE : source;
+        }
+
+        //labels already-parsed lane evidence without rerunning geometry work.
+        LaneGuidanceAnalysis withSource(VisualEvidenceSource source) {
+            VisualEvidenceSource safeSource = source == null ? VisualEvidenceSource.NONE : source;
+            return new LaneGuidanceAnalysis(
+                    status,
+                    reason,
+                    cue == null ? null : cue.withSource(safeSource),
+                    laneString,
+                    dividerCount,
+                    cellCount,
+                    componentCount,
+                    blocksSingleFallback,
+                    cells,
+                    safeSource);
         }
 
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3759,14 +3851,34 @@ final class WazeVisualCueParser {
         final int roundaboutExitNumber;
         final String laneString;
         final boolean missingLaneGuidance;
+        final VisualEvidenceSource source;
 
         Cue(NavSnapshot.Maneuver maneuver, int sourceManeuver,
                 int roundaboutExitNumber, String laneString, boolean missingLaneGuidance) {
+            this(maneuver, sourceManeuver, roundaboutExitNumber, laneString,
+                    missingLaneGuidance, VisualEvidenceSource.FIXED);
+        }
+
+        Cue(NavSnapshot.Maneuver maneuver, int sourceManeuver,
+                int roundaboutExitNumber, String laneString, boolean missingLaneGuidance,
+                VisualEvidenceSource source) {
             this.maneuver = maneuver;
             this.sourceManeuver = sourceManeuver;
             this.roundaboutExitNumber = Math.max(0, roundaboutExitNumber);
             this.laneString = laneString == null ? "" : laneString;
             this.missingLaneGuidance = missingLaneGuidance;
+            this.source = source == null ? VisualEvidenceSource.NONE : source;
+        }
+
+        //carries detector provenance alongside the parsed cue without changing glyph classification.
+        Cue withSource(VisualEvidenceSource source) {
+            return new Cue(
+                    maneuver,
+                    sourceManeuver,
+                    roundaboutExitNumber,
+                    laneString,
+                    missingLaneGuidance,
+                    source);
         }
 
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3792,7 +3904,8 @@ final class WazeVisualCueParser {
 
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
         static Cue missingLaneGuidance() {
-            return new Cue(NavSnapshot.Maneuver.UNKNOWN, 0, 0, "", true);
+            return new Cue(NavSnapshot.Maneuver.UNKNOWN, 0, 0, "", true,
+                    VisualEvidenceSource.NONE);
         }
     }
 

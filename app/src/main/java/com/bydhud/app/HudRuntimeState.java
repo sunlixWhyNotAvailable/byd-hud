@@ -52,6 +52,15 @@ final class HudRuntimeState {
         recordLifecycleHook(context, "stopped", reason);
     }
 
+    //guards package-replace restart from losing the stopped flag when the process is killed immediately.
+    static void markPackageReplaceReset(Context context, String reason) {
+        prefs(context).edit()
+                .putBoolean(KEY_RUNNING, false)
+                .putString(KEY_STOP_REASON, safe(reason))
+                .commit();
+        recordLifecycleHook(context, "stopped", "package-replace-hard-reset:" + safe(reason));
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isAlive(Context context, long nowElapsedMs) {
         SharedPreferences prefs = prefs(context);

@@ -426,7 +426,8 @@ final class WazeCropCapture {
                 NavParserResult visualResult = null;
                 boolean activeInstructionPanel = false;
                 boolean visualNavigationCandidate = false;
-                laneAnalysis = WazeVisualCueParser.analyzeLaneGuidance(capture.frame, geometry);
+                laneAnalysis =
+                        WazeVisualCueParser.analyzeLaneGuidanceWithCueFallback(capture.frame, geometry);
                 laneAnalysisEndMs = SystemClock.elapsedRealtime();
                 visualParseStartMs = laneAnalysisEndMs;
                 visualResult = WazeVisualCueParser.parseFrame(
@@ -521,6 +522,8 @@ final class WazeCropCapture {
                 String snapshotManeuver = snapshotManeuver(snapshot);
                 String effectiveManeuver = snapshotManeuver(effectiveSnapshot);
                 String trustedLanes = trustedLanesForCrop(effectiveSnapshot, laneAnalysis);
+                String laneSource = laneAnalysis.source.logValue;
+                String maneuverSource = visualResult == null ? "none" : visualResult.maneuverSource;
                 String missingFile = detailedDebugArtifacts
                         ? copyMissingCueIfNeeded(dir, sourceFileName, bucket)
                         : "";
@@ -541,7 +544,9 @@ final class WazeCropCapture {
                         missingFile,
                         snapshotManeuver,
                         snapshot == null ? "" : snapshot.laneString,
-                        laneAnalysis);
+                        laneAnalysis,
+                        laneSource,
+                        maneuverSource);
                 appendSessionLine(dir, candidate.toJsonLine());
                 NavCaptureStore.rawEvent(context, "waze_crop", WAZE_PACKAGE, candidate.toJsonLine());
                 if (detailedDebugArtifacts) {
@@ -557,6 +562,8 @@ final class WazeCropCapture {
                             bucket,
                             effectiveManeuver,
                             trustedLanes,
+                            laneSource,
+                            maneuverSource,
                             commitEligible,
                             commitSkipReason));
                 }
@@ -571,6 +578,8 @@ final class WazeCropCapture {
                         + " file=" + sourceFileName
                         + " bucket=" + bucket
                         + " backend=" + capture.backend
+                        + " laneSource=" + laneSource
+                        + " maneuverSource=" + maneuverSource
                         + " " + timingDetail);
                 NavigationLogStorage.enforceNavCaptureRetention(
                         context, SESSION_DIR, workerSessionName, sourceFileName);
@@ -604,6 +613,8 @@ final class WazeCropCapture {
             String bucket,
             String maneuver,
             String lanes,
+            String laneSource,
+            String maneuverSource,
             boolean commitEligible,
             String commitSkipReason) {
         return "{"
@@ -620,6 +631,8 @@ final class WazeCropCapture {
                 + ",\"bucket\":\"" + NavCaptureStore.esc(bucket) + "\""
                 + ",\"maneuver\":\"" + NavCaptureStore.esc(maneuver) + "\""
                 + ",\"lanes\":\"" + NavCaptureStore.esc(lanes) + "\""
+                + ",\"laneSource\":\"" + NavCaptureStore.esc(laneSource) + "\""
+                + ",\"maneuverSource\":\"" + NavCaptureStore.esc(maneuverSource) + "\""
                 + ",\"commitEligible\":" + commitEligible
                 + ",\"commitSkipReason\":\"" + NavCaptureStore.esc(commitSkipReason) + "\""
                 + "}";

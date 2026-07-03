@@ -19,6 +19,8 @@ final class NavCaptureStore {
     private static final String DIR = "nav-capture";
     private static final String RAW_EVENTS_FILE = "raw_nav_events.jsonl";
     private static final String SNAPSHOTS_FILE = "nav_snapshots.jsonl";
+    private static final SimpleDateFormat LOCAL_TS_FORMAT =
+            new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US);
     static final long MAX_LOG_BYTES = 2L * 1024L * 1024L;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
@@ -42,7 +44,7 @@ final class NavCaptureStore {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void rawEvent(Context context, String channel, String packageName, String payload) {
         append(context, RAW_EVENTS_FILE, "{"
-                + "\"t\":" + SystemClock.elapsedRealtime()
+                + timeFields(SystemClock.elapsedRealtime())
                 + ",\"channel\":\"" + esc(channel) + "\""
                 + ",\"package\":\"" + esc(packageName) + "\""
                 + ",\"payload\":\"" + esc(payload) + "\""
@@ -55,7 +57,7 @@ final class NavCaptureStore {
             return;
         }
         append(context, SNAPSHOTS_FILE, "{"
-                + "\"t\":" + snapshot.elapsedRealtimeMs
+                + timeFields(snapshot.elapsedRealtimeMs)
                 + ",\"source\":\"" + snapshot.sourceApp + "\""
                 + ",\"package\":\"" + esc(snapshot.packageName) + "\""
                 + ",\"maneuver\":\"" + snapshot.maneuver + "\""
@@ -66,6 +68,21 @@ final class NavCaptureStore {
                 + ",\"confidence\":" + snapshot.confidence
                 + ",\"reason\":\"" + esc(snapshot.rawReason) + "\""
                 + "}");
+    }
+
+    //keeps elapsed and wall-clock times together so pulled raw logs can be correlated without anchor math.
+    private static String timeFields(long elapsedRealtimeMs) {
+        long wallMs = System.currentTimeMillis();
+        return "\"t\":" + Math.max(0L, elapsedRealtimeMs)
+                + ",\"ts\":" + wallMs
+                + ",\"localTs\":\"" + esc(localTimestamp(wallMs)) + "\"";
+    }
+
+    //keeps SimpleDateFormat behind one lock because navigation events can arrive from multiple services.
+    private static String localTimestamp(long wallMs) {
+        synchronized (LOCAL_TS_FORMAT) {
+            return LOCAL_TS_FORMAT.format(new Date(wallMs));
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

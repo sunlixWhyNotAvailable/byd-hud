@@ -21,6 +21,8 @@ final class WazeCropCandidate {
     final int laneCells;
     final int laneComponents;
     final boolean laneBlocksSingleFallback;
+    final String laneSource;
+    final String maneuverSource;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     WazeCropCandidate(
@@ -47,7 +49,9 @@ final class WazeCropCandidate {
                 missingFile,
                 snapshotManeuver,
                 snapshotLanes,
-                null);
+                null,
+                "none",
+                "none");
     }
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
@@ -63,7 +67,9 @@ final class WazeCropCandidate {
             String missingFile,
             String snapshotManeuver,
             String snapshotLanes,
-            WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis) {
+            WazeVisualCueParser.LaneGuidanceAnalysis laneAnalysis,
+            String laneSource,
+            String maneuverSource) {
         this.elapsedRealtimeMs = elapsedRealtimeMs;
         this.displayId = displayId;
         this.file = file == null ? "" : file;
@@ -85,6 +91,8 @@ final class WazeCropCandidate {
         this.laneCells = safeAnalysis.cellCount;
         this.laneComponents = safeAnalysis.componentCount;
         this.laneBlocksSingleFallback = safeAnalysis.blocksSingleFallback;
+        this.laneSource = safeSource(laneSource);
+        this.maneuverSource = safeSource(maneuverSource);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -108,6 +116,20 @@ final class WazeCropCandidate {
                 + ",\"laneCells\":" + laneCells
                 + ",\"laneComponents\":" + laneComponents
                 + ",\"laneBlocksSingleFallback\":" + laneBlocksSingleFallback
+                + ",\"laneSource\":\"" + NavCaptureStore.esc(laneSource) + "\""
+                + ",\"maneuverSource\":\"" + NavCaptureStore.esc(maneuverSource) + "\""
                 + "}";
+    }
+
+    //keeps diagnostic source labels stable for grep and spreadsheet filters.
+    private static String safeSource(String value) {
+        String clean = value == null ? "" : value.trim().toLowerCase();
+        if ("accessibility".equals(clean)
+                || "cue".equals(clean)
+                || "fixed".equals(clean)
+                || "none".equals(clean)) {
+            return clean;
+        }
+        return "none";
     }
 }

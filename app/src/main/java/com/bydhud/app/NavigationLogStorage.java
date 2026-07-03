@@ -280,7 +280,7 @@ final class NavigationLogStorage {
         for (File file : files) {
             if (file != null
                     && file.isFile()
-                    && isScreenPng(file.getName())
+                    && isCaptureFramePng(file.getName())
                     && !file.getName().equals(preserveScreenshotName)) {
                 screenshots.add(file);
             }
@@ -397,10 +397,10 @@ final class NavigationLogStorage {
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean isScreenPng(String name) {
-        return name != null
-                && name.startsWith(SCREEN_PREFIX)
-                && name.toLowerCase(Locale.US).endsWith(PNG_SUFFIX);
+    private static boolean isCaptureFramePng(String name) {
+        String lower = name == null ? "" : name.toLowerCase(Locale.US);
+        return lower.endsWith(PNG_SUFFIX)
+                && (name.startsWith(SCREEN_PREFIX) || name.startsWith("source_frame_"));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

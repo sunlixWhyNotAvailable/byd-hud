@@ -56,6 +56,7 @@ final class NavHudLiveSender {
     private HudState latestState;
     private HudState latestRouteState;
     private HudState latestVisualState;
+    private int latestVisualSourceDisplayId;
     private NavSnapshot.Maneuver latestRouteManeuver = NavSnapshot.Maneuver.UNKNOWN;
     private String latestReason = "";
     private String activeNotificationKey = "";
@@ -685,9 +686,16 @@ final class NavHudLiveSender {
         long now = SystemClock.elapsedRealtime();
         boolean virtualWazeVisual = WAZE_PACKAGE.equals(packageName) && result.sourceDisplayId > 0;
         lastVisualResultMs = now;
+        latestVisualSourceDisplayId = result.sourceDisplayId;
         latestVisualState = result.state.copy();
         sanitizeWazeVisualLanes(packageName, latestVisualState);
-        if (WAZE_PACKAGE.equals(packageName) && freshWazeRouteState(now)) {
+        if (virtualWazeVisual) {
+            latestVisualState =
+                    WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
+            latestState = latestVisualState.copy();
+            latestReason = result.reason + " virtualDisplayRouteFieldsCleared";
+            log("virtualDisplayRouteFieldsCleared sourceDisplay=" + result.sourceDisplayId);
+        } else if (WAZE_PACKAGE.equals(packageName) && freshWazeRouteState(now)) {
             latestState = WazeVisualStatePolicy.mergeRouteFieldsKeepingVisual(
                     latestVisualState, latestRouteState, latestRouteManeuver);
             latestReason = result.reason + " mergedWithRoute";
@@ -844,6 +852,7 @@ final class NavHudLiveSender {
     private void handleWazeNoRouteOrVisualUnavailable(
             String clearReason, String visualReason, long now) {
         latestVisualState = null;
+        latestVisualSourceDisplayId = 0;
         lastVisualResultMs = 0L;
         if (hasCurrentWazeRouteNodeState(now)) {
             HudState routeSource = latestRouteState != null ? latestRouteState : latestState;
@@ -931,8 +940,21 @@ final class NavHudLiveSender {
     private void clearExpiredWazeRouteFieldsForSend(long now) {
         if (!WAZE_PACKAGE.equals(activePackage)
                 || latestState == null
-                || latestRouteState == null
-                || freshWazeRouteState(now)) {
+                || (latestVisualSourceDisplayId <= 0 && freshWazeRouteState(now))) {
+            return;
+        }
+        if (latestVisualSourceDisplayId > 0 && latestVisualState != null) {
+            latestVisualState =
+                    WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
+            latestState = latestVisualState.copy();
+            if (!latestReason.contains("virtualDisplayRouteFieldsCleared")) {
+                latestReason = latestReason + " virtualDisplayRouteFieldsCleared";
+                log("virtualDisplayRouteFieldsCleared sourceDisplay=" + latestVisualSourceDisplayId
+                        + " reason=send-boundary");
+            }
+            return;
+        }
+        if (latestRouteState == null) {
             return;
         }
         if (shouldKeepExpiredWazeRouteFields(now)) {
@@ -1010,6 +1032,7 @@ final class NavHudLiveSender {
         latestVisualState = null;
         latestRouteManeuver = NavSnapshot.Maneuver.UNKNOWN;
         latestReason = "";
+        latestVisualSourceDisplayId = 0;
         activeNotificationKey = "";
         pendingRemovalKey = "";
         pendingRemovalPackage = "";
