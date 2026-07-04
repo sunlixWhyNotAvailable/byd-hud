@@ -33,7 +33,7 @@ After first launch:
 4. Optionally change prefered navigation settings.
 5. Choose supported navigation app from the list of supported apps and toogle `HUD`
 6. Optionally use `Send to dashboard`.
-7. If do not plan to debug - turn off `Save screenshots and detailed logs` option to prevent space clogging 
+7. If do not plan to debug - turn off `Save screenshots and detailed logs` option to prevent storage clogging 
    
 ## Known Limitations
 
@@ -48,17 +48,19 @@ Navigation parsing depends on the UI and notification structure of navigator app
 Tested on *Chinese version* of `BYD Sea Lion 07 EV 2025`, `DiLink 5.0`
 If there are missing glyphs or inconsistency in glyph outputs, archive of relevant sessions for the day (paths are shown in the app) needs to be sent for analysis
 
-## Known bugs and troubleshooting
+## Known bugs and troubleshooting (v1.4.1)
 
-Waze maneuver/lanes parsing might break on different tablet resolution and depend on maneuvers position on the screen (meaning `No GPS` additional row at the top can break HUD parsing). This was partially addressed in v1.4.1 by introducing waze navigation bounds (black square in top right corner) parsing. Also should help in case of other resolution.
-While `Waze` maneuvers parsing from main tablet screen is stable, virtual screen parsing (from dashboard) is still under testing - sometimes there are breaks between HUD projection, sometimes parser detects "unreal" lanes, but where there are lanes - projection should be correct. This is known issue in v1.4.1 which can happen occasionally and will be patched in v1.4.2.
-Dashboard output sometimes lags as of v1.4.1 and will be patched in v1.4.2 (WIP).
-`Waze` roundabouts might be broken as of v1.4.1. Need additional testing.
-In UI there is redundant `GMaps` row for separate non-revanced version, will be removed in v1.4.2.
-If there are missing glyphs or incorrect HUD outputs, please open an `Issue` and attach the relevant session archive for that day. Session paths are shown inside the app.
+- Waze maneuver/lanes parsing might break on different tablet resolution and depend on maneuvers position on the screen (meaning `No GPS` additional row at the top can break HUD parsing). This was partially addressed in v1.4.1 by introducing waze navigation bounds (black square in top right corner) parsing. Also should help in case of other resolution.
+- While `Waze` maneuvers parsing from main tablet screen is stable, virtual screen parsing (from dashboard) is still under testing - sometimes there are breaks between HUD projection, sometimes parser detects "unreal" lanes, but where there are "real" lanes - projection should be correct. This is known issue which can happen occasionally and will be patched in v1.4.2.
+- Dashboard output sometimes lags and will be patched in v1.4.2.
+- `Waze` roundabouts might be broken after recent general geometry improvement. Need additional testing.
+- In main screen tab there is a redundant `GMaps` row for separate non-revanced version, will be removed in v1.4.2.
+- If there are missing glyphs or incorrect HUD outputs, please open an `Issue` and attach the relevant session archive for that day. Session paths are shown inside the app.
+- Storage retention is a bit heavy right now and can cause lag.
 
 ## To Do
 
+- improve automatic/manual storage retention;
 - add dashboard window mode toggle support;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here.
 
