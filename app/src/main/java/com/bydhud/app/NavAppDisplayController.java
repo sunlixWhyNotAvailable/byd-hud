@@ -220,6 +220,17 @@ final class NavAppDisplayController {
         worker.start();
     }
 
+    //returns the current dashboard-owned app to main before diagnostic projection mode switches.
+    void returnActiveDashboardToMain(String reason) {
+        String active = activeDashboardPackage();
+        if (active.isEmpty()) {
+            clearDashboardProjection("return-active-empty:" + safe(reason));
+            notifyStatusChanged();
+            return;
+        }
+        moveIndependentDashboardApp(active, false, reason);
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void move(String packageName, Boolean toDashboard, String reason) {
         String normalized = normalizePackage(packageName);
@@ -293,6 +304,8 @@ final class NavAppDisplayController {
                 }
             }
             clearDashboardProjection(label + ":" + safe(reason));
+            log(packageName, "dashboard_return_main_requested package=" + packageName
+                    + " reason=" + safe(reason));
             remember(new NavAppDisplayState(
                     packageName,
                     current.taskId,
@@ -332,6 +345,14 @@ final class NavAppDisplayController {
                         context,
                         packageName,
                         "independent-dashboard return-main " + safe(reason));
+                synchronized (lock) {
+                    if (packageName.equals(activeDashboardPackage)) {
+                        activeDashboardPackage = "";
+                    }
+                }
+                clearDashboardProjection("independent-dashboard-return-request:" + safe(reason));
+                log(packageName, "dashboard_return_main_requested package=" + packageName
+                        + " reason=" + safe(reason));
                 NavAppDisplayState confirmed = waitForMainDisplay(
                         packageName,
                         "independent-return-confirm");
@@ -343,6 +364,7 @@ final class NavAppDisplayController {
                 }
                 if (confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID) {
                     clearDashboardProjection("independent-dashboard-return:" + safe(reason));
+                    log(packageName, "dashboard_return_main_confirmed package=" + packageName);
                 }
                 remember(new NavAppDisplayState(
                         packageName,
