@@ -39,6 +39,12 @@ final class HudRuntimeWatchdog {
             cancel(appContext);
             return;
         }
+        if (delayMs >= WATCHDOG_INTERVAL_MS
+                && !HudRuntimeSupervisor.hasActiveRuntimeWork(appContext)) {
+            cancel(appContext);
+            AppEventLogger.event(appContext, "runtime_watchdog idle_not_scheduled reason=" + reason);
+            return;
+        }
         AlarmManager alarmManager =
                 (AlarmManager) appContext.getSystemService(Context.ALARM_SERVICE);
         if (alarmManager == null) {

@@ -27,14 +27,18 @@ public final class HudRuntimeService extends Service {
             "com.bydhud.app.action.STOP_PERSISTENT_RUNTIME";
     private static final String EXTRA_REASON = "reason";
     private static final long HEARTBEAT_INTERVAL_MS = 30_000L;
+    private static final long IDLE_HEARTBEAT_INTERVAL_MS = 5L * 60L * 1000L;
 
     private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
     private final Runnable heartbeatRunnable = new Runnable() {
         @Override
         //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
-            HudRuntimeState.markHeartbeat(HudRuntimeService.this, "periodic");
-            heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
+            boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(HudRuntimeService.this);
+            HudRuntimeState.markHeartbeat(HudRuntimeService.this,
+                    activeWork ? "periodic" : "idle-periodic");
+            heartbeatHandler.postDelayed(this,
+                    activeWork ? HEARTBEAT_INTERVAL_MS : IDLE_HEARTBEAT_INTERVAL_MS);
         }
     };
 
@@ -111,8 +115,13 @@ public final class HudRuntimeService extends Service {
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
         scheduleHeartbeat();
-        updateNotification("Runtime active");
-        HudRuntimeWatchdog.schedule(this, "service-start");
+        boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
+        updateNotification(activeWork ? "Runtime active" : "Runtime idle");
+        if (activeWork) {
+            HudRuntimeWatchdog.schedule(this, "service-start");
+        } else {
+            HudRuntimeWatchdog.cancel(this);
+        }
         if (HudRuntimeUpgradeGuard.isPendingReinit(this)) {
             NavRuntimePermissionRepair.checkAndRepairAsync(
                     this,
@@ -131,7 +140,9 @@ public final class HudRuntimeService extends Service {
         HudRuntimeState.recordLifecycleHook(this, "task-removed",
                 "boot=" + HudPrefs.isBootEnabled(this)
                         + " shutdown=" + HudPrefs.isUserShutdownActive(this));
-        if (HudPrefs.isBootEnabled(this) && !HudPrefs.isUserShutdownActive(this)) {
+        if (HudPrefs.isBootEnabled(this)
+                && !HudPrefs.isUserShutdownActive(this)
+                && HudRuntimeSupervisor.hasActiveRuntimeWork(this)) {
             HudRuntimeWatchdog.schedule(this, "task-removed");
             startPersistent(this, "task-removed");
         } else {

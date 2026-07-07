@@ -84,6 +84,9 @@ final class GMapsNotificationParser {
                 "text:" + cleanText);
         NavManeuverEvidence selectedEvidence =
                 selectManeuverEvidence(cleanText, textEvidence, iconEvidence, nowElapsedMs);
+        if (nextMeters < 0 && selectedEvidence.maneuver == NavSnapshot.Maneuver.UNKNOWN) {
+            return null;
+        }
 
         HudState state = new HudState();
         state.distanceToIntersection = nextMeters >= 0

@@ -2,6 +2,7 @@ package com.bydhud.app
 
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
+import android.os.SystemClock
 import androidx.activity.compose.setContent
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.LinearEasing
@@ -44,6 +45,8 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -292,6 +295,28 @@ private data class PressFeedback(
     val modifier: Modifier
 )
 
+//guards button callbacks so the visible press state renders before expensive actions start.
+private const val VISUAL_PRESS_BEFORE_ACTION_MS = 90L
+
+//guards switch actions so the knob reaches the pending center before backend work starts.
+private const val SWITCH_CENTER_BEFORE_ACTION_MS = 120L
+
+//guards stalled switch actions so controls never stay blocked indefinitely.
+private const val SWITCH_PENDING_TIMEOUT_MS = 2_000L
+
+//tracks switch transition intent so success can complete and failure can roll back.
+private data class SwitchPendingState(
+    val from: Boolean,
+    val target: Boolean,
+    val startedAtMs: Long
+)
+
+//shares the nested switch trigger with row-style switch controls without duplicating switch logic.
+private data class SwitchExternalControl(
+    val trigger: () -> Unit,
+    val pending: Boolean
+)
+
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
@@ -314,6 +339,21 @@ private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
 //adds a short color response so a tap is visible even when the next action is slow.
 private fun pressBackground(base: Color, palette: Palette, pressed: Boolean): Color {
     return if (pressed) palette.accent.copy(alpha = if (palette.dark) 0.24f else 0.14f) else base
+}
+
+@Composable
+//delays action launch briefly so tap feedback is visible before synchronous work can block recomposition.
+private fun rememberVisualFirstClick(onClick: () -> Unit): () -> Unit {
+    val scope = rememberCoroutineScope()
+    val latestOnClick by rememberUpdatedState(onClick)
+    return remember {
+        {
+            scope.launch {
+                delay(VISUAL_PRESS_BEFORE_ACTION_MS)
+                latestOnClick()
+            }
+        }
+    }
 }
 
 @Composable
@@ -1664,6 +1704,7 @@ private fun StorageDayRow(
 ) {
     val canSelect = !day.active
     val press = rememberPressFeedback(canSelect)
+    val visualClick = rememberVisualFirstClick(onToggle)
     val baseBackground = if (selected) palette.active else palette.panelAlt
     Row(
         modifier = Modifier
@@ -1676,7 +1717,7 @@ private fun StorageDayRow(
                 enabled = canSelect,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = onToggle
+                onClick = visualClick
             )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -2120,6 +2161,7 @@ private fun ManualModeTile(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = if (selected) palette.active else palette.panelAlt
     Column(
         modifier = modifier
@@ -2131,7 +2173,7 @@ private fun ManualModeTile(
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = onClick
+                onClick = visualClick
             )
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.Center
@@ -2217,8 +2259,9 @@ private fun HudButton(
 ) {
     val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)
     val press = rememberPressFeedback(enabled)
+    val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = when {
-        !enabled -> Color.Transparent
+        !enabled -> palette.disabled
         primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
         else -> palette.panelAlt
     }
@@ -2232,7 +2275,7 @@ private fun HudButton(
                 enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = onClick
+                onClick = visualClick
             )
             .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center
@@ -2264,6 +2307,7 @@ private fun HudIconButton(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = tint.copy(alpha = if (palette.dark) 0.20f else 0.12f)
     val pressedBackground = tint.copy(alpha = if (palette.dark) 0.88f else 0.72f)
     Box(
@@ -2276,7 +2320,7 @@ private fun HudIconButton(
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = onClick
+                onClick = visualClick
             )
             .padding(6.dp),
         contentAlignment = Alignment.Center
@@ -2299,7 +2343,12 @@ private fun CompactSwitchBox(
     width: Dp,
     onChecked: (Boolean) -> Unit
 ) {
-    val press = rememberPressFeedback()
+    val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
+    val rowEnabled = switchControl.value?.pending != true
+    val press = rememberPressFeedback(rowEnabled)
+    val visualClick = rememberVisualFirstClick {
+        switchControl.value?.trigger?.invoke()
+    }
     Row(
         modifier = Modifier
             .width(width)
@@ -2309,14 +2358,15 @@ private fun CompactSwitchBox(
             .background(pressBackground(palette.panelAlt, palette, press.pressed))
             .then(press.modifier)
             .clickable(
+                enabled = rowEnabled,
                 interactionSource = press.interactionSource,
                 indication = null
-            ) { onChecked(!checked) }
+            ) { visualClick() }
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Text(label, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 14.sp, modifier = Modifier.weight(1f))
-        HudSwitch(checked, onChecked, palette, compact = true)
+        HudSwitch(checked, onChecked, palette, compact = true, externalControl = switchControl)
     }
 }
 
@@ -2326,43 +2376,70 @@ private fun HudSwitch(
     checked: Boolean,
     onChecked: (Boolean) -> Unit,
     palette: Palette,
-    compact: Boolean = false
+    compact: Boolean = false,
+    externalControl: MutableState<SwitchExternalControl?>? = null
 ) {
-    val press = rememberPressFeedback()
     val width = if (compact) 42.dp else 56.dp
     val height = if (compact) 27.dp else 32.dp
     val knob = if (compact) 20.dp else 25.dp
-    var settleTarget by remember { mutableStateOf<Boolean?>(null) }
-    var lastChecked by remember { mutableStateOf(checked) }
+    val pendingHolder = remember { mutableStateOf<SwitchPendingState?>(null) }
+    val pendingState = pendingHolder.value
+    val isPending = pendingState != null
+    val press = rememberPressFeedback(!isPending)
+    val scope = rememberCoroutineScope()
+    val latestOnChecked by rememberUpdatedState(onChecked)
+    val latestChecked by rememberUpdatedState(checked)
+    val triggerToggle = remember(scope) {
+        {
+            if (pendingHolder.value == null) {
+                val from = latestChecked
+                val target = !from
+                pendingHolder.value = SwitchPendingState(
+                    from = from,
+                    target = target,
+                    startedAtMs = SystemClock.elapsedRealtime()
+                )
+                scope.launch {
+                    delay(SWITCH_CENTER_BEFORE_ACTION_MS)
+                    latestOnChecked(target)
+                    val deadline = SystemClock.elapsedRealtime() + SWITCH_PENDING_TIMEOUT_MS
+                    while (SystemClock.elapsedRealtime() < deadline) {
+                        if (latestChecked == target) {
+                            pendingHolder.value = null
+                            return@launch
+                        }
+                        delay(50L)
+                    }
+                    pendingHolder.value = null
+                }
+            }
+        }
+    }
     val travel = width - knob - 6.dp
-    val settling = settleTarget != null || lastChecked != checked
+    val trackChecked = pendingState?.from ?: checked
     val knobOffset by animateDpAsState(
         targetValue = when {
-            settling -> 3.dp + travel / 2f
+            isPending -> 3.dp + travel / 2f
             checked -> 3.dp + travel
             else -> 3.dp
         },
         animationSpec = tween(durationMillis = 140),
         label = "switchKnobOffset"
     )
-    LaunchedEffect(checked) {
-        if (lastChecked != checked) {
-            settleTarget = checked
-            delay(120)
-            lastChecked = checked
-            settleTarget = null
-        }
+    SideEffect {
+        externalControl?.value = SwitchExternalControl(triggerToggle, isPending)
     }
     Box(
         modifier = Modifier
             .size(width = width, height = height)
             .clip(RoundedCornerShape(100.dp))
-            .background(pressBackground(if (checked) palette.accent else palette.disabled, palette, press.pressed))
+            .background(pressBackground(if (trackChecked) palette.accent else palette.disabled, palette, press.pressed))
             .then(press.modifier)
             .clickable(
+                enabled = !isPending,
                 interactionSource = press.interactionSource,
                 indication = null
-            ) { onChecked(!checked) }
+            ) { triggerToggle() }
             .padding(0.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -2371,7 +2448,7 @@ private fun HudSwitch(
                 .size(knob)
                 .offset(x = knobOffset, y = 0.dp)
                 .clip(RoundedCornerShape(100.dp))
-                .background(if (checked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
+                .background(if (trackChecked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
         )
     }
 }
@@ -2403,6 +2480,7 @@ private fun Segmented(
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onClick: () -> Unit) {
     val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = if (active) palette.accent else Color.Transparent
     Box(
         modifier = Modifier
@@ -2414,7 +2492,7 @@ private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onCli
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = onClick
+                onClick = visualClick
             ),
         contentAlignment = Alignment.Center
     ) {
@@ -2506,6 +2584,7 @@ private fun TabButton(
 ) {
     val active = tab == selected
     val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick { onSelect(tab) }
     val baseBackground = if (active) palette.active else Color.Transparent
     Row(
         modifier = modifier
@@ -2517,7 +2596,7 @@ private fun TabButton(
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null
-            ) { onSelect(tab) },
+            ) { visualClick() },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {

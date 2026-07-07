@@ -892,6 +892,13 @@ final class NavHudLiveSender {
                 && now - latestRouteStateMs <= WAZE_ROUTE_FIELD_TTL_MS;
     }
 
+    //guards virtual-display visual payloads so stale frames cannot override fresh route text.
+    private boolean freshWazeVisualState(long now) {
+        return latestVisualState != null
+                && lastVisualResultMs > 0L
+                && now - lastVisualResultMs <= WAZE_VISUAL_FRESH_MS;
+    }
+
     //keeps route text while bounded route evidence proves Waze is still actively navigating.
     boolean shouldKeepExpiredWazeRouteFields(long now) {
         return WAZE_PACKAGE.equals(activePackage)
@@ -944,15 +951,27 @@ final class NavHudLiveSender {
             return;
         }
         if (latestVisualSourceDisplayId > 0 && latestVisualState != null) {
-            latestVisualState =
-                    WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
-            latestState = latestVisualState.copy();
-            if (!latestReason.contains("virtualDisplayRouteFieldsCleared")) {
-                latestReason = latestReason + " virtualDisplayRouteFieldsCleared";
-                log("virtualDisplayRouteFieldsCleared sourceDisplay=" + latestVisualSourceDisplayId
-                        + " reason=send-boundary");
+            if (freshWazeVisualState(now)) {
+                latestVisualState =
+                        WazeVisualStatePolicy.staleRouteFieldsClearedForVisual(latestVisualState);
+                latestState = latestVisualState.copy();
+                if (!latestReason.contains("virtualDisplayRouteFieldsCleared")) {
+                    latestReason = latestReason + " virtualDisplayRouteFieldsCleared";
+                    log("virtualDisplayRouteFieldsCleared sourceDisplay=" + latestVisualSourceDisplayId
+                            + " reason=send-boundary");
+                }
+                return;
             }
-            return;
+            log("virtualDisplayVisualExpired sourceDisplay=" + latestVisualSourceDisplayId
+                    + " ageMs=" + (lastVisualResultMs > 0L ? (now - lastVisualResultMs) : -1L));
+            latestVisualSourceDisplayId = 0;
+            if (freshWazeRouteState(now)) {
+                latestState = latestRouteState.copy();
+                if (!latestReason.contains("visualExpiredRouteRestored")) {
+                    latestReason = latestReason + " visualExpiredRouteRestored";
+                }
+                return;
+            }
         }
         if (latestRouteState == null) {
             return;

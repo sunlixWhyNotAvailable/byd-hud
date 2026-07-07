@@ -1749,15 +1749,23 @@ final class WazeVisualCueParser {
             }
             Component clipped = clippedComponentForCell(bitmap, component, cell);
             GlyphClassification glyph = classifyGlyph(bitmap, cell, clipped, false);
-            String token = glyph.finalToken;
+            String token = collapseDirectSmoothSideToken(i, cells.size(), clipped, glyph.finalToken);
+            GlyphClassification finalGlyph = token.equals(glyph.finalToken)
+                    ? glyph
+                    : new GlyphClassification(
+                    glyph.geometryToken,
+                    token,
+                    glyphSource(token),
+                    glyph.geometryCount,
+                    glyph.geometryNs);
             if (token.isEmpty() || !KNOWN_LANE_GLYPHS.contains(token)) {
                 if (failure == LaneFailureReason.NONE) {
                     failure = LaneFailureReason.UNKNOWN_GLYPH;
                 }
-                debugCells.add(debugCell(i, cell, glyph, LaneFailureReason.UNKNOWN_GLYPH));
+                debugCells.add(debugCell(i, cell, finalGlyph, LaneFailureReason.UNKNOWN_GLYPH));
                 continue;
             }
-            debugCells.add(debugCell(i, clipped, glyph, LaneFailureReason.NONE));
+            debugCells.add(debugCell(i, clipped, finalGlyph, LaneFailureReason.NONE));
             tokens.add(token);
         }
         if (failure != LaneFailureReason.NONE) {

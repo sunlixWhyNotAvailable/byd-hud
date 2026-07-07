@@ -29,6 +29,11 @@ public final class HudRuntimeWatchdogReceiver extends BroadcastReceiver {
             HudRuntimeWatchdog.cancel(context);
             return;
         }
+        if (!HudRuntimeSupervisor.hasActiveRuntimeWork(context)) {
+            HudRuntimeWatchdog.cancel(context);
+            AppEventLogger.event(context, "runtime_watchdog_receiver idle_no_work");
+            return;
+        }
         HudRuntimeSupervisor.ensureStarted(context, "watchdog");
     }
 }

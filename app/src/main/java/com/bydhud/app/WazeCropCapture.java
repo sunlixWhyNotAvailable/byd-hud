@@ -348,54 +348,16 @@ final class WazeCropCapture {
         try {
             if (capture.frame == null) {
                 backendUnavailableReason = capture.reason;
-                log(dir, "frame backend unavailable frameId=" + index
+                log(dir, "frame_dropped frameId=" + index
                         + " backend=" + capture.backend
                         + " reason=" + capture.reason
-                        + " fallbackBackend=" + WazeFrameCaptureBackend.BACKEND_SCREENCAP_FALLBACK);
-                if (!currentSessionShellWritable() || shellDir.isEmpty()) {
-                    log(dir, "frame unavailable frameId=" + index
-                            + " backend=" + capture.backend
-                            + " reason=" + capture.reason
-                            + " fallbackSkipped=shell-path-unavailable");
-                    NavHudLiveSender.get(context).onWazeCropUnavailable(
-                            "frame-unavailable " + capture.reason);
-                    return;
-                }
-                sourceFileName = String.format(Locale.US, "screen_%04d.png", index);
-                String path = shellDir + "/" + sourceFileName;
-                long fallbackStartMs = SystemClock.elapsedRealtime();
-                LocalAdbBridge.ShellResult result =
-                        LocalAdbBridge.runRuntimeShellCommand(
-                                context, "screencap -d " + displayId + " -p " + path);
-                long fallbackEndMs = SystemClock.elapsedRealtime();
-                if (!result.success()) {
-                    log(dir, "frame unavailable frameId=" + index
-                            + " backend=" + capture.backend
-                            + " reason=" + capture.reason
-                            + " fallbackBackend=" + WazeFrameCaptureBackend.BACKEND_SCREENCAP_FALLBACK
-                            + " captureMs=" + (fallbackEndMs - fallbackStartMs)
-                            + " " + result.shortDetail());
-                    NavHudLiveSender.get(context).onWazeCropUnavailable(
-                            "frame-unavailable " + capture.reason);
-                    return;
-                }
-                Bitmap fallback = BitmapFactory.decodeFile(new File(dir, sourceFileName).getAbsolutePath());
-                if (fallback == null) {
-                    log(dir, "screencap fallback decode failed frameId=" + index);
-                    NavHudLiveSender.get(context).onWazeCropUnavailable(
-                            "screencap-fallback-decode-failed display=" + displayId);
-                    return;
-                }
-                capture = WazeFrameCaptureBackend.CaptureResult.okWithTiming(
-                        WazeFrameCaptureBackend.BACKEND_SCREENCAP_FALLBACK,
-                        fallback,
-                        fallbackStartMs,
-                        fallbackEndMs);
-                if (!detailedDebugArtifacts) {
-                    deleteQuietly(new File(dir, sourceFileName));
-                    sourceFileName = "";
-                }
+                        + " display=" + displayId
+                        + " timeout_streak=" + capture.pixelCopyTimeoutStreak);
+                NavHudLiveSender.get(context).onWazeCropUnavailable(
+                        "frame-unavailable " + capture.reason);
+                return;
             }
+            NavigationLogStorage.beginCaptureFrame();
             try {
                 if (!isActiveGeneration(workerGeneration)) {
                     return;
@@ -586,17 +548,13 @@ final class WazeCropCapture {
                 return;
             } finally {
                 capture.frame.recycle();
+                NavigationLogStorage.endCaptureFrame();
             }
         } catch (RuntimeException e) {
             log(dir, "frame parse fatal " + e.getClass().getSimpleName()
                     + " " + safe(e.getMessage()));
             NavHudLiveSender.get(context).onWazeCropUnavailable(
                     "frame-parse-fatal " + e.getClass().getSimpleName());
-        } catch (IOException e) {
-            log(dir, "frame fatal " + e.getClass().getSimpleName()
-                    + " " + safe(e.getMessage()));
-            NavHudLiveSender.get(context).onWazeCropUnavailable(
-                    "frame-fatal " + e.getClass().getSimpleName());
         }
     }
 
@@ -638,7 +596,7 @@ final class WazeCropCapture {
                 + "}";
     }
 
-    //keeps fallback diagnostics attached to successful screencap frames without changing parser behavior.
+    //keeps unavailable backend diagnostics attached to frame metadata without changing parser behavior.
     private static String backendUnavailableDetail(String reason) {
         String safeReason = safe(reason);
         if (safeReason.isEmpty()) {
@@ -1093,13 +1051,6 @@ final class WazeCropCapture {
             Thread.sleep(delayMs);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-        }
-    }
-
-    //keeps fallback screencaps temporary unless detailed artifact capture is enabled.
-    private static void deleteQuietly(File file) {
-        if (file != null && file.exists() && !file.delete()) {
-            //best effort cleanup; parse already has the decoded frame.
         }
     }
 

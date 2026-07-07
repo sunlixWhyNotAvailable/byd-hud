@@ -143,7 +143,7 @@ final class HudPrefs {
 
     //keeps debug artifact volume user-controlled while preserving operational logs.
     static boolean isDetailedDebugArtifactsEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, true);
+        return prefs(context).getBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, false);
     }
 
     //keeps debug artifact volume user-controlled while preserving operational logs.

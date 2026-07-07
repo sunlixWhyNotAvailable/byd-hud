@@ -1,6 +1,6 @@
 package com.bydhud.app;
 
-//selects the Waze frame source while preserving screencap as beta fallback evidence.
+//selects the Waze frame source while keeping live capture in memory-only paths.
 
 import android.content.Context;
 import android.graphics.Bitmap;
@@ -18,14 +18,16 @@ import java.util.concurrent.atomic.AtomicInteger;
 final class WazeFrameCaptureBackend {
     static final String BACKEND_MEDIAPROJECTION = "mediaprojection";
     static final String BACKEND_PIXELCOPY = "pixelcopy";
-    static final String BACKEND_SCREENCAP_FALLBACK = "screencap_fallback";
     static final String BACKEND_UNAVAILABLE = "unavailable";
 
     private static final String WAZE_PACKAGE = "com.waze";
     private static final long PIXELCOPY_TIMEOUT_MS = 800L;
+    private static final int PIXELCOPY_RESTART_TIMEOUTS = 3;
+    private static final long PIXELCOPY_RESTART_BACKOFF_MS = 250L;
 
     private final Context context;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private int consecutivePixelCopyTimeouts;
 
     //holds application context so worker threads never retain an Activity.
     WazeFrameCaptureBackend(Context context) {
@@ -89,7 +91,7 @@ final class WazeFrameCaptureBackend {
         try {
             if (!latch.await(PIXELCOPY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
                 bitmap.recycle();
-                return CaptureResult.unavailable("pixelcopy-timeout", start);
+                return pixelCopyTimeout(start);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -104,7 +106,45 @@ final class WazeFrameCaptureBackend {
             bitmap.recycle();
             return CaptureResult.unavailable("pixelcopy-stale-surface", start);
         }
+        resetPixelCopyTimeouts();
         return CaptureResult.ok(BACKEND_PIXELCOPY, bitmap, start);
+    }
+
+    //drops timed-out dashboard frames and refreshes surface metadata without moving Waze between displays.
+    private CaptureResult pixelCopyTimeout(long start) {
+        int timeoutStreak = ++consecutivePixelCopyTimeouts;
+        AppEventLogger.event(context, "waze_crop pixelcopy_timeout timeout_streak=" + timeoutStreak);
+        if (timeoutStreak >= PIXELCOPY_RESTART_TIMEOUTS) {
+            AppEventLogger.event(context,
+                    "waze_crop dashboard_capture_restart reason=pixelcopy-timeout-streak timeout_streak="
+                            + timeoutStreak);
+            ClusterProjectionService.softReattachProjection(
+                    context,
+                    WAZE_PACKAGE,
+                    "pixelcopy-timeout-streak");
+            sleepQuietly(PIXELCOPY_RESTART_BACKOFF_MS);
+            consecutivePixelCopyTimeouts = 0;
+        }
+        return CaptureResult.unavailable("pixelcopy-timeout", start, timeoutStreak);
+    }
+
+    //resets timeout streaks only after a real PixelCopy frame was obtained.
+    private void resetPixelCopyTimeouts() {
+        if (consecutivePixelCopyTimeouts != 0) {
+            AppEventLogger.event(context,
+                    "waze_crop pixelcopy_timeout_recovered previous_streak="
+                            + consecutivePixelCopyTimeouts);
+        }
+        consecutivePixelCopyTimeouts = 0;
+    }
+
+    //keeps timeout backoff local to dashboard capture so the main capture path remains unaffected.
+    private static void sleepQuietly(long delayMs) {
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     //carries timing and frame ownership from capture into parser logging.
@@ -114,31 +154,38 @@ final class WazeFrameCaptureBackend {
         final long captureStartMs;
         final long captureEndMs;
         final String reason;
+        final int pixelCopyTimeoutStreak;
 
         //keeps result fields immutable so parse logs reflect the actual capture attempt.
         private CaptureResult(String backend, Bitmap frame, long captureStartMs, long captureEndMs,
-                String reason) {
+                String reason, int pixelCopyTimeoutStreak) {
             this.backend = backend;
             this.frame = frame;
             this.captureStartMs = captureStartMs;
             this.captureEndMs = captureEndMs;
             this.reason = reason == null ? "" : reason;
+            this.pixelCopyTimeoutStreak = pixelCopyTimeoutStreak;
         }
 
         //marks a successful frame capture and leaves bitmap recycling to the caller.
         static CaptureResult ok(String backend, Bitmap frame, long start) {
-            return new CaptureResult(backend, frame, start, SystemClock.elapsedRealtime(), "");
+            return new CaptureResult(backend, frame, start, SystemClock.elapsedRealtime(), "", 0);
         }
 
         //marks a successful fallback frame when capture timing was measured by the caller.
         static CaptureResult okWithTiming(String backend, Bitmap frame, long start, long end) {
-            return new CaptureResult(backend, frame, start, end, "");
+            return new CaptureResult(backend, frame, start, end, "", 0);
         }
 
         //marks why an in-memory frame was not available.
         static CaptureResult unavailable(String reason, long start) {
+            return unavailable(reason, start, 0);
+        }
+
+        //marks why an in-memory frame was not available with dashboard timeout streak context.
+        static CaptureResult unavailable(String reason, long start, int pixelCopyTimeoutStreak) {
             return new CaptureResult(BACKEND_UNAVAILABLE, null, start,
-                    SystemClock.elapsedRealtime(), reason);
+                    SystemClock.elapsedRealtime(), reason, pixelCopyTimeoutStreak);
         }
     }
 }

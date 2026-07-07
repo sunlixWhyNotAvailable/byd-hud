@@ -30,12 +30,20 @@ final class NavigationLogStorage {
     private static final Object WRITABLE_DIR_LOCK = new Object();
     private static final Set<String> WRITABLE_DIR_CACHE = new HashSet<>();
     private static final Object RETENTION_THROTTLE_LOCK = new Object();
+    private static final Object RETENTION_WORKER_LOCK = new Object();
     private static final long BYTES_PER_GB = 1024L * 1024L * 1024L;
     private static final long RETENTION_MIN_INTERVAL_MS = 30000L;
+    private static final long RETENTION_CRITICAL_OVERAGE_BYTES = 256L * 1024L * 1024L;
+    private static final long RETENTION_BATCH_FILE_LIMIT = 64L;
+    private static final long RETENTION_BATCH_TIME_MS = 150L;
+    private static final long RETENTION_BATCH_PAUSE_MS = 20L;
     private static final String SCREEN_PREFIX = "screen_";
     private static final String PNG_SUFFIX = ".png";
     private static final String MISSING_MANEUVERS_DIR = "missing-maneuvers";
     private static final String MISSING_LANES_DIR = "missing-lanes";
+    private static int activeCaptureFrames;
+    private static boolean retentionWorkerRunning;
+    private static RetentionRequest pendingRetentionRequest;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavigationLogStorage() {
@@ -97,13 +105,15 @@ final class NavigationLogStorage {
         if (!shouldRunRetentionNow()) {
             return;
         }
-        enforceNavCaptureRetention(
+        scheduleNavCaptureRetention(new RetentionRequest(
+                context.getApplicationContext(),
                 navCaptureDir(context),
                 activeNavCaptureDay(),
                 "",
                 "",
                 "",
-                retentionLimitBytes(context));
+                retentionLimitBytes(context),
+                "general"));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -118,13 +128,15 @@ final class NavigationLogStorage {
         if (!shouldRunRetentionNow()) {
             return;
         }
-        enforceNavCaptureRetention(
+        scheduleNavCaptureRetention(new RetentionRequest(
+                context.getApplicationContext(),
                 navCaptureDir(context),
                 activeNavCaptureDay(),
                 activeSessionDir,
                 activeSessionName,
                 preserveScreenshotName,
-                retentionLimitBytes(context));
+                retentionLimitBytes(context),
+                "active-session"));
     }
 
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
@@ -135,13 +147,101 @@ final class NavigationLogStorage {
             String activeSessionName,
             String preserveScreenshotName,
             long maxBytes) {
-        enforceNavCaptureRetention(
+        runNavCaptureRetention(
                 root,
                 activeDay,
                 activeSessionDir,
                 activeSessionName,
                 preserveScreenshotName,
-                maxBytes);
+                maxBytes,
+                null);
+    }
+
+    //marks active frame work so retention can avoid deleting during parser-critical sections.
+    static void beginCaptureFrame() {
+        synchronized (RETENTION_WORKER_LOCK) {
+            activeCaptureFrames++;
+        }
+    }
+
+    //captures one coalesced retention request so worker threads do not touch UI or capture state.
+    private static final class RetentionRequest {
+        final Context context;
+        final File root;
+        final String activeDay;
+        final String activeSessionDir;
+        final String activeSessionName;
+        final String preserveScreenshotName;
+        final long maxBytes;
+        final String reason;
+
+        RetentionRequest(
+                Context context,
+                File root,
+                String activeDay,
+                String activeSessionDir,
+                String activeSessionName,
+                String preserveScreenshotName,
+                long maxBytes,
+                String reason) {
+            this.context = context;
+            this.root = root;
+            this.activeDay = activeDay;
+            this.activeSessionDir = activeSessionDir;
+            this.activeSessionName = activeSessionName;
+            this.preserveScreenshotName = preserveScreenshotName;
+            this.maxBytes = maxBytes;
+            this.reason = safePathSegment(reason, "unknown");
+        }
+    }
+
+    //records coarse retention progress without per-file verbose logging.
+    private static final class RetentionStats {
+        final Context context;
+        final long beforeBytes;
+        final long maxBytes;
+        final long startMs = SystemClock.elapsedRealtime();
+        long deletedFiles;
+        long deletedBytes;
+        private long batchFiles;
+        private long batchStartMs = startMs;
+
+        RetentionStats(Context context, long beforeBytes, long maxBytes) {
+            this.context = context;
+            this.beforeBytes = beforeBytes;
+            this.maxBytes = maxBytes;
+        }
+
+        void recordDelete(long bytes) {
+            deletedFiles++;
+            deletedBytes += Math.max(0L, bytes);
+            batchFiles++;
+            long now = SystemClock.elapsedRealtime();
+            if (batchFiles >= RETENTION_BATCH_FILE_LIMIT
+                    || now - batchStartMs >= RETENTION_BATCH_TIME_MS) {
+                logRetention(context, "retention_progress files=" + deletedFiles
+                        + " bytesDeleted=" + deletedBytes
+                        + " beforeBytes=" + beforeBytes
+                        + " maxBytes=" + maxBytes
+                        + " elapsedMs=" + elapsedMs());
+                batchFiles = 0L;
+                batchStartMs = now;
+                sleepQuietly(RETENTION_BATCH_PAUSE_MS);
+            }
+        }
+
+        long elapsedMs() {
+            return Math.max(0L, SystemClock.elapsedRealtime() - startMs);
+        }
+    }
+
+    //marks frame completion so deferred retention can run during quieter periods.
+    static void endCaptureFrame() {
+        synchronized (RETENTION_WORKER_LOCK) {
+            if (activeCaptureFrames > 0) {
+                activeCaptureFrames--;
+            }
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -164,14 +264,96 @@ final class NavigationLogStorage {
         return new SessionPath(fallback, shellPath, !shellPath.isEmpty());
     }
 
+    //schedules retention off the capture path so parser timing is not blocked by recursive deletion.
+    private static void scheduleNavCaptureRetention(RetentionRequest request) {
+        if (request == null) {
+            return;
+        }
+        synchronized (RETENTION_WORKER_LOCK) {
+            pendingRetentionRequest = request;
+            if (retentionWorkerRunning) {
+                logRetention(request.context, "retention_deferred reason=worker-running");
+                return;
+            }
+            retentionWorkerRunning = true;
+        }
+        Thread worker = new Thread(NavigationLogStorage::drainRetentionRequests,
+                "BydHudNavRetention");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        worker.start();
+    }
+
+    //drains the latest pending retention request and coalesces bursts from capture/log writers.
+    private static void drainRetentionRequests() {
+        while (true) {
+            RetentionRequest request;
+            synchronized (RETENTION_WORKER_LOCK) {
+                request = pendingRetentionRequest;
+                pendingRetentionRequest = null;
+                if (request == null) {
+                    retentionWorkerRunning = false;
+                    return;
+                }
+            }
+            runScheduledRetention(request);
+        }
+    }
+
+    //runs one retention pass only when storage is over limit and parser-critical work is quiet.
+    private static void runScheduledRetention(RetentionRequest request) {
+        if (request.root == null
+                || request.maxBytes <= 0L
+                || !request.root.exists()
+                || !request.root.isDirectory()) {
+            return;
+        }
+        long beforeBytes = folderSizeBytes(request.root);
+        if (beforeBytes <= request.maxBytes) {
+            return;
+        }
+        int activeFrames;
+        synchronized (RETENTION_WORKER_LOCK) {
+            activeFrames = activeCaptureFrames;
+        }
+        boolean criticalOverLimit = beforeBytes - request.maxBytes >= RETENTION_CRITICAL_OVERAGE_BYTES;
+        if (activeFrames > 0 && !criticalOverLimit) {
+            logRetention(request.context, "retention_deferred reason=active_capture"
+                    + " activeFrames=" + activeFrames
+                    + " bytes=" + beforeBytes
+                    + " maxBytes=" + request.maxBytes);
+            return;
+        }
+        RetentionStats stats = new RetentionStats(request.context, beforeBytes, request.maxBytes);
+        logRetention(request.context, "retention_start reason=" + request.reason
+                + " bytes=" + beforeBytes
+                + " maxBytes=" + request.maxBytes
+                + " activeFrames=" + activeFrames);
+        runNavCaptureRetention(
+                request.root,
+                request.activeDay,
+                request.activeSessionDir,
+                request.activeSessionName,
+                request.preserveScreenshotName,
+                request.maxBytes,
+                stats);
+        long afterBytes = folderSizeBytes(request.root);
+        logRetention(request.context, "retention_end reason=" + request.reason
+                + " files=" + stats.deletedFiles
+                + " bytesDeleted=" + stats.deletedBytes
+                + " beforeBytes=" + beforeBytes
+                + " afterBytes=" + afterBytes
+                + " elapsedMs=" + stats.elapsedMs());
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static void enforceNavCaptureRetention(
+    private static void runNavCaptureRetention(
             File root,
             String activeDay,
             String activeSessionDir,
             String activeSessionName,
             String preserveScreenshotName,
-            long maxBytes) {
+            long maxBytes,
+            RetentionStats stats) {
         if (root == null || maxBytes <= 0L || !root.exists() || !root.isDirectory()) {
             return;
         }
@@ -181,21 +363,25 @@ final class NavigationLogStorage {
         String safeActiveDay = safePathSegment(activeDay, "");
         String safeSessionDir = safePathSegment(activeSessionDir, "");
         String safeSessionName = safePathSegment(activeSessionName, "");
-        deleteOldNavCaptureDays(root, safeActiveDay, maxBytes);
+        deleteOldNavCaptureDays(root, safeActiveDay, maxBytes, stats);
         if (!isOverLimit(root, maxBytes) || safeActiveDay.isEmpty()
                 || safeSessionDir.isEmpty() || safeSessionName.isEmpty()) {
             return;
         }
-        deleteOldNavCaptureSessions(root, safeActiveDay, safeSessionDir, safeSessionName, maxBytes);
+        deleteOldNavCaptureSessions(root, safeActiveDay, safeSessionDir, safeSessionName, maxBytes, stats);
         if (!isOverLimit(root, maxBytes)) {
             return;
         }
         File activeSession = new File(new File(new File(root, safeActiveDay), safeSessionDir), safeSessionName);
-        deleteOldSessionScreenshots(activeSession, safePathSegment(preserveScreenshotName, ""), root, maxBytes);
+        deleteOldSessionScreenshots(activeSession, safePathSegment(preserveScreenshotName, ""), root, maxBytes, stats);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static void deleteOldNavCaptureDays(File root, String activeDay, long maxBytes) {
+    private static void deleteOldNavCaptureDays(
+            File root,
+            String activeDay,
+            long maxBytes,
+            RetentionStats stats) {
         List<File> days = new ArrayList<>();
         File[] children = root.listFiles();
         if (children == null) {
@@ -214,7 +400,7 @@ final class NavigationLogStorage {
             if (!isOverLimit(root, maxBytes)) {
                 return;
             }
-            if (deleteRecursively(day)) {
+            if (deleteRecursively(day, stats)) {
                 logInfo("retention deleted day=" + day.getName());
             }
         }
@@ -226,7 +412,8 @@ final class NavigationLogStorage {
             String activeDay,
             String activeSessionDir,
             String activeSessionName,
-            long maxBytes) {
+            long maxBytes,
+            RetentionStats stats) {
         File dayDir = new File(root, activeDay);
         File[] sessionParents = dayDir.listFiles();
         if (sessionParents == null) {
@@ -257,7 +444,7 @@ final class NavigationLogStorage {
             if (!isOverLimit(root, maxBytes)) {
                 return;
             }
-            if (deleteRecursively(session)) {
+            if (deleteRecursively(session, stats)) {
                 logInfo("retention deleted session=" + session.getAbsolutePath());
             }
         }
@@ -268,7 +455,8 @@ final class NavigationLogStorage {
             File activeSession,
             String preserveScreenshotName,
             File root,
-            long maxBytes) {
+            long maxBytes,
+            RetentionStats stats) {
         if (activeSession == null || !activeSession.isDirectory()) {
             return;
         }
@@ -291,27 +479,44 @@ final class NavigationLogStorage {
                 return;
             }
             String screenshotName = screenshot.getName();
-            removeScreenshotArtifacts(activeSession, screenshotName);
+            removeScreenshotArtifacts(activeSession, screenshotName, stats);
+            long length = Math.max(0L, screenshot.length());
             if (screenshot.delete()) {
+                if (stats != null) {
+                    stats.recordDelete(length);
+                }
                 logInfo("retention deleted screenshot=" + screenshot.getAbsolutePath());
             }
         }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static void removeScreenshotArtifacts(File activeSession, String screenshotName) {
-        removeBucketScreenshotArtifacts(new File(activeSession, MISSING_MANEUVERS_DIR), screenshotName);
-        removeBucketScreenshotArtifacts(new File(activeSession, MISSING_LANES_DIR), screenshotName);
+    private static void removeScreenshotArtifacts(
+            File activeSession,
+            String screenshotName,
+            RetentionStats stats) {
+        removeBucketScreenshotArtifacts(new File(activeSession, MISSING_MANEUVERS_DIR), screenshotName, stats);
+        removeBucketScreenshotArtifacts(new File(activeSession, MISSING_LANES_DIR), screenshotName, stats);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static void removeBucketScreenshotArtifacts(File bucketDir, String screenshotName) {
+    private static void removeBucketScreenshotArtifacts(
+            File bucketDir,
+            String screenshotName,
+            RetentionStats stats) {
         if (bucketDir == null || !bucketDir.isDirectory()) {
             return;
         }
         File copiedScreenshot = new File(bucketDir, screenshotName);
-        if (copiedScreenshot.isFile() && !copiedScreenshot.delete()) {
-            logWarn("retention delete artifact failed: " + copiedScreenshot.getAbsolutePath());
+        if (copiedScreenshot.isFile()) {
+            long length = Math.max(0L, copiedScreenshot.length());
+            if (copiedScreenshot.delete()) {
+                if (stats != null) {
+                    stats.recordDelete(length);
+                }
+            } else {
+                logWarn("retention delete artifact failed: " + copiedScreenshot.getAbsolutePath());
+            }
         }
         String base = stripPngSuffix(screenshotName) + ".cell_";
         File[] files = bucketDir.listFiles();
@@ -319,9 +524,15 @@ final class NavigationLogStorage {
             return;
         }
         for (File file : files) {
-            if (file != null && file.isFile() && file.getName().startsWith(base)
-                    && !file.delete()) {
-                logWarn("retention delete cell artifact failed: " + file.getAbsolutePath());
+            if (file != null && file.isFile() && file.getName().startsWith(base)) {
+                long length = Math.max(0L, file.length());
+                if (file.delete()) {
+                    if (stats != null) {
+                        stats.recordDelete(length);
+                    }
+                } else {
+                    logWarn("retention delete cell artifact failed: " + file.getAbsolutePath());
+                }
             }
         }
     }
@@ -369,19 +580,25 @@ final class NavigationLogStorage {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static boolean deleteRecursively(File file) {
+    private static boolean deleteRecursively(File file, RetentionStats stats) {
         if (file == null || !file.exists()) {
             return false;
         }
+        boolean wasFile = file.isFile();
+        long length = wasFile ? Math.max(0L, file.length()) : 0L;
         if (file.isDirectory()) {
             File[] children = file.listFiles();
             if (children != null) {
                 for (File child : children) {
-                    deleteRecursively(child);
+                    deleteRecursively(child, stats);
                 }
             }
         }
-        return file.delete();
+        boolean deleted = file.delete();
+        if (deleted && wasFile && stats != null) {
+            stats.recordDelete(length);
+        }
+        return deleted;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -425,12 +642,34 @@ final class NavigationLogStorage {
         }
     }
 
+    //writes retention telemetry to the same field log stream used by runtime/capture diagnostics.
+    private static void logRetention(Context context, String message) {
+        logInfo(message);
+        if (context == null) {
+            return;
+        }
+        try {
+            AppEventLogger.event(context, "nav_capture " + message);
+        } catch (RuntimeException ignored) {
+            //retention must stay best-effort because logging can itself depend on external storage.
+        }
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void logWarn(String message) {
         try {
             Log.w(TAG, message);
         } catch (RuntimeException | NoClassDefFoundError ignored) {
             //keeps host-side probes quiet because java-only tests do not provide android logging.
+        }
+    }
+
+    //pauses retention batches briefly so UI/capture threads can regain CPU while deleting many files.
+    private static void sleepQuietly(long delayMs) {
+        try {
+            Thread.sleep(delayMs);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
         }
     }
 

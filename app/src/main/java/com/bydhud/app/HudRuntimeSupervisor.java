@@ -51,12 +51,26 @@ final class HudRuntimeSupervisor {
             AppEventLogger.event(appContext, "runtime_supervisor alive reason="
                     + safeReason + " state=" + HudRuntimeState.summary(appContext, now));
         }
-        HudRuntimeWatchdog.schedule(appContext, "supervisor:" + safeReason);
-        NavRuntimePermissionRepair.checkAndRepairAsync(
-                appContext,
-                "supervisor:" + safeReason,
-                true,
-                LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+        if (hasActiveRuntimeWork(appContext)) {
+            HudRuntimeWatchdog.schedule(appContext, "supervisor:" + safeReason);
+            NavRuntimePermissionRepair.checkAndRepairAsync(
+                    appContext,
+                    "supervisor:" + safeReason,
+                    true,
+                    LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+        } else {
+            HudRuntimeWatchdog.cancel(appContext);
+            AppEventLogger.event(appContext,
+                    "runtime_supervisor idle_no_watchdog reason=" + safeReason);
+        }
+    }
+
+    //keeps watchdog and permission repair active only when HUD/log/dashboard/update work exists.
+    static boolean hasActiveRuntimeWork(Context context) {
+        Context appContext = context.getApplicationContext();
+        return HudRuntimeUpgradeGuard.isPendingReinit(appContext)
+                || !NavCapturePrefs.getCapturePackages(appContext).isEmpty()
+                || !NavAppDisplayController.get(appContext).persistedDashboardPackage().isEmpty();
     }
 
     //hard-resets post-update runtime state so stale service/capture binders cannot survive install replace.

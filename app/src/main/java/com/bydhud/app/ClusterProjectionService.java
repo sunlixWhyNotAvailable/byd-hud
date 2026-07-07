@@ -101,6 +101,18 @@ public final class ClusterProjectionService extends Service
         return service != null && service.hasCurrentProjection(packageName);
     }
 
+    //refreshes borrowed surface metadata after PixelCopy stalls without moving the app between displays.
+    static boolean softReattachProjection(Context context, String packageName, String reason) {
+        ClusterProjectionService service = instance;
+        if (service == null) {
+            AppEventLogger.event(context,
+                    "cluster_projection soft_reattach_skipped reason=service-missing package="
+                            + safe(packageName));
+            return false;
+        }
+        return service.softReattachProjectedSurface(packageName, reason);
+    }
+
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
@@ -531,6 +543,37 @@ public final class ClusterProjectionService extends Service
                     && projectionSurface.isValid()
                     && safe(projectedPackage).equals(safe(packageName));
         }
+    }
+
+    //bumps generation so future PixelCopy borrows a fresh snapshot without issuing display move commands.
+    private boolean softReattachProjectedSurface(String packageName, String reason) {
+        Surface oldSurface;
+        Surface newSurface;
+        synchronized (lock) {
+            if (!projectionRequested
+                    || virtualDisplay == null
+                    || virtualDisplay.getDisplay() == null
+                    || projectionSurface == null
+                    || !projectionSurface.isValid()
+                    || overlayTexture == null
+                    || overlayTexture.getSurfaceTexture() == null
+                    || !safe(projectedPackage).equals(safe(packageName))) {
+                log("soft_reattach_skipped reason=projection-not-current package="
+                        + safe(packageName) + " requestReason=" + safe(reason));
+                return false;
+            }
+            oldSurface = projectionSurface;
+            newSurface = new Surface(overlayTexture.getSurfaceTexture());
+            virtualDisplay.setSurface(newSurface);
+            projectionSurface = newSurface;
+            projectionGeneration++;
+        }
+        if (oldSurface != null) {
+            oldSurface.release();
+        }
+        log("soft_reattach surface_reset package=" + safe(packageName)
+                + " reason=" + safe(reason));
+        return true;
     }
 
     //models a borrowed projection surface so PixelCopy callers cannot release it accidentally.
