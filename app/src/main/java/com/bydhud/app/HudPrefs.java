@@ -20,7 +20,6 @@ final class HudPrefs {
     private static final String KEY_UA_LANGUAGE = "ua_language";
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
-    private static final String KEY_DASHBOARD_PROJECTION_MODE = "dashboard_projection_mode";
     private static final String KEY_BG_REMINDER_VERSION = "bg_reminder_version";
     private static final String KEY_BG_REMINDER_TOKEN = "bg_reminder_token";
     private static final String KEY_RUNTIME_SERVICE_RUNNING = "runtime_service_running";
@@ -150,21 +149,6 @@ final class HudPrefs {
     //keeps debug artifact volume user-controlled while preserving operational logs.
     static void setDetailedDebugArtifactsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, enabled).apply();
-    }
-
-    //keeps dashboard projection experiments selectable without changing the production default path.
-    static DashboardProjectionMode dashboardProjectionMode(Context context) {
-        return DashboardProjectionMode.fromId(prefs(context).getString(
-                KEY_DASHBOARD_PROJECTION_MODE,
-                DashboardProjectionMode.TEXTURE_VIEW.id));
-    }
-
-    //records the next projection path so mode switches survive activity refreshes during car testing.
-    static void setDashboardProjectionMode(Context context, DashboardProjectionMode mode) {
-        prefs(context).edit()
-                .putString(KEY_DASHBOARD_PROJECTION_MODE,
-                        (mode == null ? DashboardProjectionMode.TEXTURE_VIEW : mode).id)
-                .apply();
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

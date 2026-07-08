@@ -21,8 +21,18 @@ final class HudLaneGeometry {
         int slotHeight = Math.max(1, Math.round(OEM_ICON_HEIGHT * canvasScale / 100f));
         int iconWidth = Math.max(1, Math.round(slotWidth * iconScale / 100f));
         int iconHeight = Math.max(1, Math.round(slotHeight * iconScale / 100f));
-        int bitmapWidth = count * slotWidth + Math.max(0, count - 1) * gap;
-        return new Geometry(slotWidth, slotHeight, iconWidth, iconHeight, gap, bitmapWidth, slotHeight);
+        int edgePadding = Math.max(0, (iconWidth - slotWidth + 1) / 2);
+        int bitmapWidth = count * slotWidth + Math.max(0, count - 1) * gap
+                + edgePadding * 2;
+        return new Geometry(
+                slotWidth,
+                slotHeight,
+                iconWidth,
+                iconHeight,
+                gap,
+                edgePadding,
+                bitmapWidth,
+                slotHeight);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -42,16 +52,18 @@ final class HudLaneGeometry {
         final int iconWidth;
         final int iconHeight;
         final int gapPx;
+        final int edgePaddingPx;
         final int bitmapWidth;
         final int bitmapHeight;
 
         Geometry(int slotWidth, int slotHeight, int iconWidth, int iconHeight,
-                int gapPx, int bitmapWidth, int bitmapHeight) {
+                int gapPx, int edgePaddingPx, int bitmapWidth, int bitmapHeight) {
             this.slotWidth = slotWidth;
             this.slotHeight = slotHeight;
             this.iconWidth = iconWidth;
             this.iconHeight = iconHeight;
             this.gapPx = gapPx;
+            this.edgePaddingPx = edgePaddingPx;
             this.bitmapWidth = bitmapWidth;
             this.bitmapHeight = bitmapHeight;
         }

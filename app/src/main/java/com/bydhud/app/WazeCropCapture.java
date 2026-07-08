@@ -257,7 +257,20 @@ final class WazeCropCapture {
             }
             NavAppDisplayState state = displayStateForCrop(dir, now);
             int displayId = state.displayId;
-            if (!(displayId == 0 || displayId > 0) || !state.isUsableForCrop()) {
+            String activeDashboardPackage =
+                    NavAppDisplayController.get(context).activeDashboardPackage();
+            boolean projectedSurface =
+                    ClusterProjectionService.isProjectedPackageCurrent(WAZE_PACKAGE);
+            boolean canCrop = isUsableWazeCropState(
+                    state,
+                    activeDashboardPackage,
+                    projectedSurface);
+            if (!canCrop) {
+                log(dir, "waze_crop availability display=" + state.displayId
+                        + " visible=" + state.visible
+                        + " activeDashboard=" + safe(activeDashboardPackage)
+                        + " projectedSurface=" + projectedSurface
+                        + " decision=stop status=" + state.status);
                 log(dir, "crop idle: waze background display=" + state.displayId
                         + " status=" + state.status);
                 NavHudLiveSender.get(context).onWazeCropUnavailable(
@@ -278,6 +291,23 @@ final class WazeCropCapture {
             sleepQuietly(CAPTURE_INTERVAL_MS);
         }
         log(dir, "loop exit");
+    }
+
+    //keeps projected Waze crop alive even when BYD HUD itself is no longer the foreground Activity.
+    private static boolean isUsableWazeCropState(
+            NavAppDisplayState state,
+            String activeDashboardPackage,
+            boolean projectedSurface) {
+        if (state == null) {
+            return false;
+        }
+        if (state.isUsableForCrop()) {
+            return true;
+        }
+        return state.taskId >= 0
+                && state.displayId > 0
+                && WAZE_PACKAGE.equals(safe(activeDashboardPackage))
+                && projectedSurface;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.

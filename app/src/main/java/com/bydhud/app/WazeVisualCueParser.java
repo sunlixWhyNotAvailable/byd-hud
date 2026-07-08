@@ -55,6 +55,7 @@ final class WazeVisualCueParser {
             "Rs+R", "Rs+R*", "Rs*+R", "Rs*+R*",
             "L+Rs", "L+Rs*", "L*+Rs",
             "Ls+R", "Ls+R*", "Ls*+R",
+            "L+R", "L+R*", "L*+R", "L*+R*",
             "S+L+R", "S+L+R*", "S+L*+R", "S*+L+R",
             "RampL*", "RampR*"));
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
@@ -223,6 +224,8 @@ final class WazeVisualCueParser {
             token = compoundGlyph("S", straightRecommended, "R", rightRecommended);
         } else if (hasStraight && hasLeft && !hasRight) {
             token = compoundGlyph("S", straightRecommended, "L", leftRecommended);
+        } else if (!hasStraight && hasLeft && hasRight) {
+            token = compoundGlyph("L", leftRecommended, "R", rightRecommended);
         } else if (hasStraight && !hasLeft && !hasRight) {
             token = laneGlyph("S", straightRecommended);
         } else if (hasLeft && !hasStraight && !hasRight) {
@@ -1201,12 +1204,16 @@ final class WazeVisualCueParser {
     private static boolean hasReliableDirectLaneEvidence(
             Bitmap bitmap,
             List<Component> directComponents,
+            int dividerCount,
             int cellCount) {
         if (directComponents == null || directComponents.size() < 2) {
             return false;
         }
         if (cellCount > 0) {
             return true;
+        }
+        if (directComponents.size() < 3 && dividerCount <= 0) {
+            return false;
         }
         int minY = Integer.MAX_VALUE;
         int maxY = 0;
@@ -1281,7 +1288,8 @@ final class WazeVisualCueParser {
                     componentCount,
                     false);
         }
-        if (cellCount == 0 && !hasReliableDirectLaneEvidence(bitmap, laneLike, cellCount)) {
+        if (cellCount == 0
+                && !hasReliableDirectLaneEvidence(bitmap, laneLike, dividerCount, cellCount)) {
             return LaneGuidanceAnalysis.none(
                     LaneFailureReason.BAD_CELL_GRID,
                     dividerCount,
@@ -2106,14 +2114,26 @@ final class WazeVisualCueParser {
             return false;
         }
         int dark = 0;
+        int upperDark = 0;
+        int lowerDark = 0;
+        int midY = y1 + Math.max(1, y2 - y1) / 2;
         for (int x = x1; x < x2; x += 2) {
             for (int y = y1; y < y2; y += 2) {
                 if (isDarkPanelPixel(bitmap.getPixel(x, y))) {
                     dark += 4;
+                    if (y < midY) {
+                        upperDark += 4;
+                    } else {
+                        lowerDark += 4;
+                    }
                 }
             }
         }
-        return dark >= Math.max(4000, sampled / 5);
+        int upperSampled = Math.max(0, x2 - x1) * Math.max(0, midY - y1);
+        int lowerSampled = Math.max(0, x2 - x1) * Math.max(0, y2 - midY);
+        return dark >= Math.max(4000, sampled / 5)
+                && upperDark >= Math.max(1600, upperSampled / 5)
+                && lowerDark >= Math.max(1600, lowerSampled / 5);
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -2488,6 +2508,13 @@ final class WazeVisualCueParser {
         if (looksLikeSmoothSharpLeftCompound(geometry)) {
             return compoundGlyph("Ls", isRecommended(component), "L", false);
         }
+        if (looksLikeSharpLeftRightCompound(geometry)) {
+            return compoundGlyph(
+                    "L",
+                    sideRecommended(component, true),
+                    "R",
+                    sideRecommended(component, false));
+        }
         if (looksLikeStraightLeftRightCompound(geometry)) {
             return tripleGlyph("S", false, "L", true, "R", false);
         }
@@ -2760,6 +2787,19 @@ final class WazeVisualCueParser {
                 && isRecommended(geometry.component);
     }
 
+    //distinguishes two-way sharp left/right lane glyphs from straight+left+right compounds.
+    private static boolean looksLikeSharpLeftRightCompound(GlyphGeometry geometry) {
+        return geometry != null
+                && geometry.component != null
+                && geometry.width >= 64
+                && geometry.width <= 96
+                && geometry.component.height() >= 75
+                && Math.abs(geometry.midDelta) < 8.0d
+                && Math.abs(geometry.bottomDelta) < 8.0d
+                && geometry.component.topCount * 100 >= geometry.component.count * 32
+                && geometry.component.midCount * 100 <= geometry.component.count * 50;
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean looksLikeSharpLeftSmoothRightCompound(GlyphGeometry geometry) {
         return geometry != null
@@ -2835,6 +2875,16 @@ final class WazeVisualCueParser {
                 && geometry.component.height() >= 80
                 && Math.abs(geometry.midDelta) < 18.0d
                 && Math.abs(geometry.bottomDelta) >= 16.0d;
+    }
+
+    //uses per-side white mass so mixed compound lanes can mark only the chosen branch.
+    private static boolean sideRecommended(Component component, boolean leftSide) {
+        if (component == null) {
+            return false;
+        }
+        int sideCount = leftSide ? component.leftCount : component.rightCount;
+        int sideWhite = leftSide ? component.leftWhiteCount : component.rightWhiteCount;
+        return sideCount > 0 && sideWhite * 100 >= sideCount * 55;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3293,6 +3343,10 @@ final class WazeVisualCueParser {
         int bottomWhite = 0;
         int midRight = 0;
         int bottomRight = 0;
+        int leftCount = 0;
+        int rightCount = 0;
+        int leftWhite = 0;
+        int rightWhite = 0;
         int topBand = y1 + (y2 - y1) / 3;
         int bottomBand = y1 + ((y2 - y1) * 2) / 3;
         double centerX = x1 + ((x2 - x1) / 2.0d);
@@ -3306,6 +3360,17 @@ final class WazeVisualCueParser {
                 boolean whitePixel = isWhiteCuePixel(color);
                 if (whitePixel) {
                     white++;
+                }
+                if (x >= centerX) {
+                    rightCount++;
+                    if (whitePixel) {
+                        rightWhite++;
+                    }
+                } else {
+                    leftCount++;
+                    if (whitePixel) {
+                        leftWhite++;
+                    }
                 }
                 minY = Math.min(minY, y);
                 maxY = Math.max(maxY, y);
@@ -3361,7 +3426,11 @@ final class WazeVisualCueParser {
                 bottomCount,
                 bottomWhite,
                 midRight,
-                bottomRight));
+                bottomRight,
+                leftCount,
+                rightCount,
+                leftWhite,
+                rightWhite));
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -3962,11 +4031,15 @@ final class WazeVisualCueParser {
         final int bottomWhiteCount;
         final int midRightCount;
         final int bottomRightCount;
+        final int leftCount;
+        final int rightCount;
+        final int leftWhiteCount;
+        final int rightWhiteCount;
 
         Component(int x1, int x2, int y1, int y2, int count, int whiteCount,
                 double topAverageX, double midAverageX, double bottomAverageX) {
             this(x1, x2, y1, y2, count, whiteCount, topAverageX, midAverageX, bottomAverageX,
-                    0, 0, 0, 0, 0, 0, 0, 0);
+                    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
         }
 
         Component(int x1, int x2, int y1, int y2, int count, int whiteCount,
@@ -3974,7 +4047,9 @@ final class WazeVisualCueParser {
                 int topCount, int topWhiteCount,
                 int midCount, int midWhiteCount,
                 int bottomCount, int bottomWhiteCount,
-                int midRightCount, int bottomRightCount) {
+                int midRightCount, int bottomRightCount,
+                int leftCount, int rightCount,
+                int leftWhiteCount, int rightWhiteCount) {
             this.x1 = x1;
             this.x2 = x2;
             this.y1 = y1;
@@ -3992,6 +4067,10 @@ final class WazeVisualCueParser {
             this.bottomWhiteCount = bottomWhiteCount;
             this.midRightCount = midRightCount;
             this.bottomRightCount = bottomRightCount;
+            this.leftCount = leftCount;
+            this.rightCount = rightCount;
+            this.leftWhiteCount = leftWhiteCount;
+            this.rightWhiteCount = rightWhiteCount;
         }
 
         //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.

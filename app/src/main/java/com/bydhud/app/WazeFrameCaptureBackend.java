@@ -6,12 +6,13 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.Rect;
 import android.os.Handler;
-import android.os.Looper;
+import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.view.PixelCopy;
 
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 //keeps frame acquisition separate from parser decisions so old Waze merge behavior stays intact.
@@ -26,12 +27,15 @@ final class WazeFrameCaptureBackend {
     private static final long PIXELCOPY_RESTART_BACKOFF_MS = 250L;
 
     private final Context context;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final HandlerThread pixelCopyThread = new HandlerThread("BydHudPixelCopy");
+    private final Handler pixelCopyHandler;
     private int consecutivePixelCopyTimeouts;
 
     //holds application context so worker threads never retain an Activity.
     WazeFrameCaptureBackend(Context context) {
         this.context = context.getApplicationContext();
+        pixelCopyThread.start();
+        pixelCopyHandler = new Handler(pixelCopyThread.getLooper());
     }
 
     //returns the best currently available in-memory frame for the observed Waze display.
@@ -67,7 +71,14 @@ final class WazeFrameCaptureBackend {
         Bitmap bitmap = Bitmap.createBitmap(projected.width, projected.height, Bitmap.Config.ARGB_8888);
         CountDownLatch latch = new CountDownLatch(1);
         AtomicInteger resultCode = new AtomicInteger(PixelCopy.ERROR_UNKNOWN);
-        mainHandler.post(() -> {
+        AtomicBoolean timedOut = new AtomicBoolean(false);
+        AtomicBoolean bitmapRecycled = new AtomicBoolean(false);
+        pixelCopyHandler.post(() -> {
+            if (timedOut.get()) {
+                resultCode.set(PixelCopy.ERROR_TIMEOUT);
+                latch.countDown();
+                return;
+            }
             if (!ClusterProjectionService.isProjectedSurfaceCurrent(projected)) {
                 resultCode.set(PixelCopy.ERROR_SOURCE_INVALID);
                 latch.countDown();
@@ -80,9 +91,12 @@ final class WazeFrameCaptureBackend {
                         bitmap,
                         result -> {
                             resultCode.set(result);
+                            if (timedOut.get()) {
+                                recycleOnce(bitmap, bitmapRecycled);
+                            }
                             latch.countDown();
                         },
-                        mainHandler);
+                        pixelCopyHandler);
             } catch (RuntimeException e) {
                 resultCode.set(PixelCopy.ERROR_SOURCE_INVALID);
                 latch.countDown();
@@ -90,24 +104,32 @@ final class WazeFrameCaptureBackend {
         });
         try {
             if (!latch.await(PIXELCOPY_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                bitmap.recycle();
+                timedOut.set(true);
+                recycleOnce(bitmap, bitmapRecycled);
                 return pixelCopyTimeout(start);
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            bitmap.recycle();
+            recycleOnce(bitmap, bitmapRecycled);
             return CaptureResult.unavailable("pixelcopy-interrupted", start);
         }
         if (resultCode.get() != PixelCopy.SUCCESS) {
-            bitmap.recycle();
+            recycleOnce(bitmap, bitmapRecycled);
             return CaptureResult.unavailable("pixelcopy-result=" + resultCode.get(), start);
         }
         if (!ClusterProjectionService.isProjectedSurfaceCurrent(projected)) {
-            bitmap.recycle();
+            recycleOnce(bitmap, bitmapRecycled);
             return CaptureResult.unavailable("pixelcopy-stale-surface", start);
         }
         resetPixelCopyTimeouts();
         return CaptureResult.ok(BACKEND_PIXELCOPY, bitmap, start);
+    }
+
+    //bounds timed-out PixelCopy bitmap lifetime without double-recycling late callbacks.
+    private static void recycleOnce(Bitmap bitmap, AtomicBoolean recycled) {
+        if (bitmap != null && recycled != null && recycled.compareAndSet(false, true)) {
+            bitmap.recycle();
+        }
     }
 
     //drops timed-out dashboard frames and refreshes surface metadata without moving Waze between displays.
@@ -118,7 +140,7 @@ final class WazeFrameCaptureBackend {
             AppEventLogger.event(context,
                     "waze_crop dashboard_capture_restart reason=pixelcopy-timeout-streak timeout_streak="
                             + timeoutStreak);
-            ClusterProjectionService.softReattachProjection(
+            ClusterProjectionService.recoverProjectedSurface(
                     context,
                     WAZE_PACKAGE,
                     "pixelcopy-timeout-streak");

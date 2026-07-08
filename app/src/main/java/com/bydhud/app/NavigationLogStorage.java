@@ -13,9 +13,11 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 //defines the NavigationLogStorage module boundary so related behavior stays readable inside one unit.
@@ -27,7 +29,9 @@ final class NavigationLogStorage {
     private static final String TAG = "BydHudLogStorage";
     private static final String PUBLIC_ROOT = "/sdcard/Documents/" + ROOT_DIR;
     private static final String WRITE_PROBE = ".write_probe";
+    private static final Object PUBLIC_DIR_CACHE_LOCK = new Object();
     private static final Object WRITABLE_DIR_LOCK = new Object();
+    private static final Map<String, CachedDir> PUBLIC_DIR_CACHE = new HashMap<>();
     private static final Set<String> WRITABLE_DIR_CACHE = new HashSet<>();
     private static final Object RETENTION_THROTTLE_LOCK = new Object();
     private static final Object RETENTION_WORKER_LOCK = new Object();
@@ -37,6 +41,7 @@ final class NavigationLogStorage {
     private static final long RETENTION_BATCH_FILE_LIMIT = 64L;
     private static final long RETENTION_BATCH_TIME_MS = 150L;
     private static final long RETENTION_BATCH_PAUSE_MS = 20L;
+    private static final long PUBLIC_DIR_CACHE_TTL_MS = 30000L;
     private static final String SCREEN_PREFIX = "screen_";
     private static final String PNG_SUFFIX = ".png";
     private static final String MISSING_MANEUVERS_DIR = "missing-maneuvers";
@@ -44,6 +49,19 @@ final class NavigationLogStorage {
     private static int activeCaptureFrames;
     private static boolean retentionWorkerRunning;
     private static RetentionRequest pendingRetentionRequest;
+
+    //stores resolved public/fallback roots briefly so hot paths avoid repeated storage probing.
+    private static final class CachedDir {
+        final File dir;
+        final boolean publicStorage;
+        final long checkedMs;
+
+        CachedDir(File dir, boolean publicStorage, long checkedMs) {
+            this.dir = dir;
+            this.publicStorage = publicStorage;
+            this.checkedMs = checkedMs;
+        }
+    }
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavigationLogStorage() {
@@ -675,11 +693,21 @@ final class NavigationLogStorage {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File publicFirstDir(Context context, String childDir) {
+        long now = SystemClock.elapsedRealtime();
+        synchronized (PUBLIC_DIR_CACHE_LOCK) {
+            CachedDir cached = PUBLIC_DIR_CACHE.get(childDir);
+            if (cached != null
+                    && cached.dir != null
+                    && now - cached.checkedMs < PUBLIC_DIR_CACHE_TTL_MS) {
+                return cached.dir;
+            }
+        }
         File publicDir = new File(
                 new File(Environment.getExternalStoragePublicDirectory(
                         Environment.DIRECTORY_DOCUMENTS), ROOT_DIR),
                 childDir);
         if (ensureWritable(publicDir)) {
+            cachePublicFirstDir(childDir, publicDir, true, now);
             return publicDir;
         }
 
@@ -689,7 +717,30 @@ final class NavigationLogStorage {
         }
         ensureDir(fallback);
         Log.w(TAG, "public storage unavailable; fallback=" + fallback.getAbsolutePath());
+        cachePublicFirstDir(childDir, fallback, false, now);
         return fallback;
+    }
+
+    //logs only cache misses or root changes so storage evidence does not spam frame logs.
+    private static void cachePublicFirstDir(
+            String childDir,
+            File dir,
+            boolean publicStorage,
+            long checkedMs) {
+        synchronized (PUBLIC_DIR_CACHE_LOCK) {
+            CachedDir previous = PUBLIC_DIR_CACHE.put(
+                    childDir,
+                    new CachedDir(dir, publicStorage, checkedMs));
+            String previousPath = previous == null || previous.dir == null
+                    ? ""
+                    : previous.dir.getAbsolutePath();
+            String nextPath = dir == null ? "" : dir.getAbsolutePath();
+            if (previous == null || !previousPath.equals(nextPath)) {
+                logInfo("storage_root_cache hit=false child=" + safePathSegment(childDir, "unknown")
+                        + " public=" + publicStorage
+                        + " root=" + nextPath);
+            }
+        }
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

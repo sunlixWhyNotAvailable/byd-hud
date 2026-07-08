@@ -785,19 +785,17 @@ final class NavHudLiveSender {
             sendCount = 0;
             log("hud started package=" + activePackage);
         }
-        boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(context);
-        HudState displayState = HudDisplayPolicy.apply(latestState, clampSmallDistance);
-        HudOutputPreferences.apply(context, displayState);
-        byte[] payload = HudRoadPayload.build(displayState);
-        sendCount++;
-        String detail = " sendCount=" + sendCount
-                + " payload=" + payload.length
-                + " latest=" + latestReason
-                + " rawDist=" + latestState.distanceToIntersection
-                + " displayDist=" + displayState.distanceToIntersection
-                + " clampSmallDist=" + clampSmallDistance
-                + " " + displayState.summary();
-        postHudSend(payload, reason, detail, startBeforeSend, true, sendGeneration);
+        HudState sourceState = latestState.copy();
+        String latestReasonSnapshot = latestReason;
+        int sendCountSnapshot = ++sendCount;
+        postHudBuildAndSend(
+                sourceState,
+                reason,
+                latestReasonSnapshot,
+                startBeforeSend,
+                true,
+                sendGeneration,
+                sendCountSnapshot);
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -1237,9 +1235,9 @@ final class NavHudLiveSender {
         handler.postDelayed(routeHealthLoop, ROUTE_HEALTH_INTERVAL_MS);
     }
 
-    //guard blocking binder sends so route parsing and UI callbacks stay on the main handler.
-    private void postHudSend(byte[] payload, String reason, String detail,
-            boolean startBeforeSend, boolean stopOnError, int sendGeneration) {
+    //builds and sends HUD payloads on the transport worker so UI state updates stay responsive.
+    private void postHudBuildAndSend(HudState sourceState, String reason, String latestReasonSnapshot,
+            boolean startBeforeSend, boolean stopOnError, int sendGeneration, int sendCountSnapshot) {
         sendHandler.post(() -> {
             if (!isTransportGenerationCurrent(sendGeneration)) {
                 handler.post(() -> log("live-send skipped stale generation=" + sendGeneration
@@ -1247,22 +1245,39 @@ final class NavHudLiveSender {
                 return;
             }
             try {
+                long buildStartMs = SystemClock.elapsedRealtime();
+                boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(context);
+                HudState displayState = HudDisplayPolicy.apply(sourceState, clampSmallDistance);
+                HudOutputPreferences.apply(context, displayState);
+                byte[] payload = HudRoadPayload.build(displayState);
+                long buildMs = SystemClock.elapsedRealtime() - buildStartMs;
+                long sendStartMs = SystemClock.elapsedRealtime();
                 if (startBeforeSend) {
                     hudClient.start();
                 }
                 int ret = hudClient.send(payload);
+                long sendMs = SystemClock.elapsedRealtime() - sendStartMs;
+                String detail = " buildMs=" + buildMs
+                        + " sendMs=" + sendMs
+                        + " sendCount=" + sendCountSnapshot
+                        + " payload=" + payload.length
+                        + " latest=" + latestReasonSnapshot
+                        + " rawDist=" + sourceState.distanceToIntersection
+                        + " displayDist=" + displayState.distanceToIntersection
+                        + " clampSmallDist=" + clampSmallDistance
+                        + " " + displayState.summary();
                 handler.post(() -> {
                     if (sendGeneration != transportGeneration) {
                         log("live-send result ignored stale generation=" + sendGeneration
                                 + " current=" + transportGeneration + " reason=" + reason);
                         return;
                     }
-                    log("live-send ret=" + ret + " reason=" + reason + detail);
+                    log("live-send worker ret=" + ret + " reason=" + reason + detail);
                 });
-            } catch (RemoteException e) {
+            } catch (RemoteException | RuntimeException e) {
                 handler.post(() -> {
                     log("send error reason=" + reason + ": " + e.getMessage());
-                    Log.e(TAG, "postHudSend failed", e);
+                    Log.e(TAG, "postHudBuildAndSend failed", e);
                     if (stopOnError && sendGeneration == transportGeneration) {
                         stopOnMain("send-error", false);
                     }

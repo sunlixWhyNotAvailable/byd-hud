@@ -257,6 +257,9 @@ final class HudLaneModel {
             if (left.is("S") && right.is("R")) {
                 return 4;
             }
+            if (left.is("L") && right.is("R")) {
+                return 6;
+            }
             if (left.is("S") && right.is("Ls")) {
                 return ICON_SMOOTH_LEFT;
             }
@@ -480,6 +483,8 @@ final class HudLaneModel {
             case "L+Rs":
             case "L+Rs*":
             case "L*+Rs":
+            case "L*+R":
+            case "L+R*":
             case "Ls+R":
             case "Ls+R*":
             case "Ls*+R":

@@ -742,7 +742,6 @@ public final class MainActivity extends ComponentActivity {
                 formatCapturePackages(logOnlyPackages),
                 formatCapturePackages(observedPackages),
                 displayController.activeDashboardPackage(),
-                HudPrefs.dashboardProjectionMode(this).id,
                 displayController.isMoveInProgress(),
                 LogcatRecorder.isRecording(),
                 LogcatRecorder.statusText(),
@@ -1082,28 +1081,6 @@ public final class MainActivity extends ComponentActivity {
         toggleIndependentDashboardDisplay(packageName, runtimeBacked);
     }
 
-    //forces old projection state down before the next dashboard test starts with a different surface owner.
-    public void composeSetDashboardProjectionMode(String modeId) {
-        DashboardProjectionMode next = DashboardProjectionMode.fromId(modeId);
-        DashboardProjectionMode previous = HudPrefs.dashboardProjectionMode(this);
-        if (next == previous) {
-            AppEventLogger.event(this, "projection_mode_select unchanged mode=" + next.id);
-            appendStatus("projection mode unchanged: " + next.id);
-            return;
-        }
-        AppEventLogger.event(this, "projection_mode_cleanup_start from=" + previous.id
-                + " to=" + next.id);
-        NavAppDisplayController.get(this)
-                .returnActiveDashboardToMain("projection-mode-switch " + previous.id + "-to-" + next.id);
-        ClusterProjectionService.returnToMain(this, "", "projection-mode-switch");
-        HudPrefs.setDashboardProjectionMode(this, next);
-        appendStatus("projection mode: " + next.id);
-        refreshAppsSoon();
-        refreshControls();
-        AppEventLogger.event(this, "projection_mode_cleanup_end from=" + previous.id
-                + " to=" + next.id);
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStartLogcat() {
         startLogcatRecording();
@@ -1225,7 +1202,6 @@ public final class MainActivity extends ComponentActivity {
         public final String logOnlyPackages;
         public final String observedPackages;
         public final String activeDashboardPackage;
-        public final String dashboardProjectionMode;
         public final boolean dashboardMoveInProgress;
         public final boolean logcatRecording;
         public final String logcatStatus;
@@ -1255,7 +1231,6 @@ public final class MainActivity extends ComponentActivity {
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
                 String hudStatus, String hudPackage, String logOnlyPackages,
                 String observedPackages, String activeDashboardPackage,
-                String dashboardProjectionMode,
                 boolean dashboardMoveInProgress, boolean logcatRecording, String logcatStatus,
                 String logPaths, String applicationState, boolean manualModeEnabled,
                 boolean arrowCuratedMode, int curatedIndex, int curatedCount,
@@ -1283,9 +1258,6 @@ public final class MainActivity extends ComponentActivity {
             this.logOnlyPackages = logOnlyPackages == null ? "" : logOnlyPackages;
             this.observedPackages = observedPackages == null ? "" : observedPackages;
             this.activeDashboardPackage = activeDashboardPackage == null ? "" : activeDashboardPackage;
-            this.dashboardProjectionMode = dashboardProjectionMode == null
-                    ? DashboardProjectionMode.TEXTURE_VIEW.id
-                    : dashboardProjectionMode;
             this.dashboardMoveInProgress = dashboardMoveInProgress;
             this.logcatRecording = logcatRecording;
             this.logcatStatus = logcatStatus == null ? "" : logcatStatus;

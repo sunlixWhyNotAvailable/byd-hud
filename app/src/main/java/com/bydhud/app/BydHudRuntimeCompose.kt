@@ -266,10 +266,6 @@ private data class Copy(
     val storageDeleteNo: String,
     val storageDeletingFolder: String,
     val storageDeleteStep: String,
-    val dashboardProjectionDiagnostics: String,
-    val dashboardProjectionDiagnosticsHint: String,
-    val textureViewMode: String,
-    val surfaceViewMode: String,
     val manualHint: String,
     val manualHudOutput: String,
     val supportedArrows: String,
@@ -1789,41 +1785,6 @@ private fun ManualTab(
     }
 
     PageSurface(copy.manual, copy.manualHint, palette) {
-        Section(copy.dashboardProjectionDiagnostics, palette) {
-            Column(Modifier.padding(14.dp)) {
-                Text(
-                    copy.dashboardProjectionDiagnosticsHint,
-                    color = palette.muted,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 14.sp
-                )
-                Spacer(Modifier.height(12.dp))
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(14.dp)
-                ) {
-                    ManualModeTile(
-                        copy.textureViewMode,
-                        "texture_view",
-                        snapshot.dashboardProjectionMode == "texture_view",
-                        palette,
-                        Modifier.weight(1f)
-                    ) {
-                        runAction { activity.composeSetDashboardProjectionMode("texture_view") }
-                    }
-                    ManualModeTile(
-                        copy.surfaceViewMode,
-                        "surface_view",
-                        snapshot.dashboardProjectionMode == "surface_view",
-                        palette,
-                        Modifier.weight(1f)
-                    ) {
-                        runAction { activity.composeSetDashboardProjectionMode("surface_view") }
-                    }
-                }
-            }
-        }
-        Spacer(Modifier.height(12.dp))
         Section(copy.manualHudOutput, palette) {
             Row(
                 modifier = Modifier
@@ -2913,10 +2874,6 @@ private fun enCopy() = Copy(
     storageDeleteNo = "No",
     storageDeletingFolder = "Deleting data folder",
     storageDeleteStep = "step %d/%d",
-    dashboardProjectionDiagnostics = "Dashboard projection diagnostics",
-    dashboardProjectionDiagnosticsHint = "Changing mode returns the projected app to the main screen. Send it to dashboard again to test the selected path.",
-    textureViewMode = "TextureView",
-    surfaceViewMode = "SurfaceView",
     manualHint = "Direct manual payload checks for HUD output.",
     manualHudOutput = "Manual HUD output",
     supportedArrows = "Supported arrows",
@@ -3050,10 +3007,6 @@ private fun uaCopy() = enCopy().copy(
     storageDeleteNo = "Ні",
     storageDeletingFolder = "Видаляємо теку з даними",
     storageDeleteStep = "крок %d/%d",
-    dashboardProjectionDiagnostics = "Діагностика виводу на приборку",
-    dashboardProjectionDiagnosticsHint = "Зміна режиму повертає застосунок на основний екран. Для тесту знову відправ його на приборку.",
-    textureViewMode = "TextureView",
-    surfaceViewMode = "SurfaceView",
     manualHint = "Пряма ручна перевірка HUD payload.",
     manualHudOutput = "Ручний HUD вивід",
     supportedArrows = "Підтримувані стрілки",

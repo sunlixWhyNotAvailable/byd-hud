@@ -10,7 +10,6 @@ import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.PixelFormat;
-import android.graphics.SurfaceTexture;
 import android.hardware.display.DisplayManager;
 import android.hardware.display.VirtualDisplay;
 import android.os.Build;
@@ -24,13 +23,12 @@ import android.view.Gravity;
 import android.view.Surface;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.view.TextureView;
 import android.view.View;
 import android.view.WindowManager;
 
 //anchors the ClusterProjectionService android entry point so lifecycle recovery stays separate from business logic.
 public final class ClusterProjectionService extends Service
-        implements TextureView.SurfaceTextureListener, SurfaceHolder.Callback {
+        implements SurfaceHolder.Callback {
     static final String VIRTUAL_DISPLAY_NAME = "bydhud_remote_dashboard";
 
     private static final String TAG = "BydHudClusterProjection";
@@ -52,12 +50,9 @@ public final class ClusterProjectionService extends Service
     private final Object lock = new Object();
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private WindowManager overlayWindowManager;
-    private TextureView overlayTexture;
     private SurfaceView overlaySurfaceView;
     private Surface projectionSurface;
-    private boolean projectionSurfaceOwned;
     private VirtualDisplay virtualDisplay;
-    private DashboardProjectionMode activeProjectionMode = DashboardProjectionMode.TEXTURE_VIEW;
     private String projectedPackage = "";
     private String pendingPackage = "";
     private boolean projectionRequested;
@@ -107,16 +102,24 @@ public final class ClusterProjectionService extends Service
         return service != null && service.hasCurrentProjection(packageName);
     }
 
+    //exposes the real virtual display id so callers confirm the physical move against the created target.
+    static int projectedDisplayIdForPackage(String packageName) {
+        ClusterProjectionService service = instance;
+        return service == null
+                ? NavAppDisplayState.DISPLAY_UNKNOWN
+                : service.currentProjectedDisplayId(packageName);
+    }
+
     //refreshes borrowed surface metadata after PixelCopy stalls without moving the app between displays.
-    static boolean softReattachProjection(Context context, String packageName, String reason) {
+    static boolean recoverProjectedSurface(Context context, String packageName, String reason) {
         ClusterProjectionService service = instance;
         if (service == null) {
             AppEventLogger.event(context,
-                    "cluster_projection soft_reattach_skipped reason=service-missing package="
+                    "cluster_projection surface_recover_skipped reason=service-missing package="
                             + safe(packageName));
             return false;
         }
-        return service.softReattachProjectedSurface(packageName, reason);
+        return service.recoverProjectedSurface(packageName, reason);
     }
 
     @Override
@@ -179,34 +182,9 @@ public final class ClusterProjectionService extends Service
     }
 
     @Override
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void onSurfaceTextureAvailable(SurfaceTexture surfaceTexture, int width, int height) {
-        acceptProjectionSurface(new Surface(surfaceTexture), "texture_view");
-    }
-
-    @Override
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void onSurfaceTextureSizeChanged(SurfaceTexture surfaceTexture, int width, int height) {
-        //keeps cluster projection fixed-size so this test build matches the car display contract.
-    }
-
-    @Override
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public boolean onSurfaceTextureDestroyed(SurfaceTexture surfaceTexture) {
-        releaseProjection("surface-destroyed");
-        return true;
-    }
-
-    @Override
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void onSurfaceTextureUpdated(SurfaceTexture surfaceTexture) {
-        //keeps frame parsing outside the overlay; dashboard Waze capture reads this surface through PixelCopy.
-    }
-
-    @Override
-    //keeps SurfaceView mode on the same VirtualDisplay path as TextureView for apples-to-apples testing.
+    //uses SurfaceView so projection buffers stay outside the Compose render path.
     public void surfaceCreated(SurfaceHolder holder) {
-        acceptProjectionSurface(holder == null ? null : holder.getSurface(), "surface_view");
+        acceptProjectionSurface(holder == null ? null : holder.getSurface());
     }
 
     @Override
@@ -221,19 +199,18 @@ public final class ClusterProjectionService extends Service
         releaseProjection("surfaceview-destroyed");
     }
 
-    //accepts owner surfaces from either TextureView or SurfaceView without duplicating display creation.
-    private void acceptProjectionSurface(Surface surface, String mode) {
+    //accepts the SurfaceView owner surface without duplicating display creation.
+    private void acceptProjectionSurface(Surface surface) {
         if (surface == null || !surface.isValid()) {
-            log("projection_surface_invalid mode=" + safe(mode));
+            log("projection_surface_invalid mode=surface_view");
             return;
         }
         String packageName;
         synchronized (lock) {
             projectionSurface = surface;
-            projectionSurfaceOwned = "texture_view".equals(mode);
             packageName = pendingPackage;
         }
-        log("projection_surface_ready mode=" + safe(mode));
+        log("projection_surface_ready mode=surface_view");
         createVirtualDisplayIfReady(packageName, "surface-ready");
     }
 
@@ -251,7 +228,7 @@ public final class ClusterProjectionService extends Service
         }
         updateNotification("Projecting " + packageName);
         log("projection requested package=" + packageName
-                + " mode=" + HudPrefs.dashboardProjectionMode(this).id
+                + " mode=surface_view"
                 + " reason=" + reason);
         ensureOverlay();
         VirtualDisplay existing;
@@ -305,12 +282,10 @@ public final class ClusterProjectionService extends Service
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void ensureOverlay() {
-        DashboardProjectionMode mode = HudPrefs.dashboardProjectionMode(this);
         synchronized (lock) {
-            if (overlayTexture != null || overlaySurfaceView != null) {
+            if (overlaySurfaceView != null) {
                 return;
             }
-            activeProjectionMode = mode;
         }
         if (!Settings.canDrawOverlays(this)) {
             log("overlay permission missing; trying addView anyway");
@@ -327,19 +302,9 @@ public final class ClusterProjectionService extends Service
             log("projection failed: no WindowManager for display=" + targetDisplay.getDisplayId());
             return;
         }
-        View overlayView;
-        TextureView textureView = null;
-        SurfaceView surfaceView = null;
-        if (mode == DashboardProjectionMode.SURFACE_VIEW) {
-            surfaceView = new SurfaceView(displayContext);
-            surfaceView.getHolder().addCallback(this);
-            overlayView = surfaceView;
-        } else {
-            textureView = new TextureView(displayContext);
-            textureView.setOpaque(true);
-            textureView.setSurfaceTextureListener(this);
-            overlayView = textureView;
-        }
+        SurfaceView surfaceView = new SurfaceView(displayContext);
+        surfaceView.getHolder().addCallback(this);
+        View overlayView = surfaceView;
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
                 VIRTUAL_WIDTH,
                 VIRTUAL_HEIGHT,
@@ -353,30 +318,27 @@ public final class ClusterProjectionService extends Service
             manager.addView(overlayView, params);
         } catch (RuntimeException e) {
             log("overlay add failed display=" + targetDisplay.getDisplayId()
-                    + " mode=" + mode.id
+                    + " mode=surface_view"
                     + " " + e.getClass().getSimpleName() + " " + safe(e.getMessage()));
             return;
         }
         synchronized (lock) {
             overlayWindowManager = manager;
-            overlayTexture = textureView;
             overlaySurfaceView = surfaceView;
         }
-        log("overlay added mode=" + mode.id + " display=" + targetDisplay.getDisplayId()
+        log("overlay added mode=surface_view display=" + targetDisplay.getDisplayId()
                 + " name=" + targetDisplay.getName());
     }
 
     //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createVirtualDisplayIfReady(String packageName, String reason) {
         Surface surface;
-        DashboardProjectionMode mode;
         synchronized (lock) {
             if (!projectionRequested || virtualDisplay != null || projectionSurface == null
                     || !projectionSurface.isValid()) {
                 return;
             }
             surface = projectionSurface;
-            mode = activeProjectionMode;
         }
         DisplayManager displayManager =
                 (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -399,7 +361,7 @@ public final class ClusterProjectionService extends Service
         synchronized (lock) {
             virtualDisplay = created;
         }
-        log("projection_virtual_display_created mode=" + mode.id
+        log("projection_virtual_display_created mode=surface_view"
                 + " id=" + displayId + " package=" + packageName);
         if (!safe(packageName).isEmpty()) {
             movePackageToDisplay(packageName, displayId, "project " + reason);
@@ -521,34 +483,22 @@ public final class ClusterProjectionService extends Service
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void releaseProjection(String reason) {
         VirtualDisplay display;
-        Surface surface;
-        boolean surfaceOwned;
         View overlayView;
         WindowManager manager;
-        DashboardProjectionMode mode;
         synchronized (lock) {
             display = virtualDisplay;
-            surface = projectionSurface;
-            surfaceOwned = projectionSurfaceOwned;
-            overlayView = overlayTexture != null ? overlayTexture : overlaySurfaceView;
+            overlayView = overlaySurfaceView;
             manager = overlayWindowManager;
-            mode = activeProjectionMode;
             virtualDisplay = null;
             projectionSurface = null;
-            projectionSurfaceOwned = false;
-            overlayTexture = null;
             overlaySurfaceView = null;
             overlayWindowManager = null;
             pendingPackage = "";
             projectionRequested = false;
             projectedPackage = "";
-            activeProjectionMode = DashboardProjectionMode.TEXTURE_VIEW;
         }
         if (display != null) {
             display.release();
-        }
-        if (surface != null && surfaceOwned) {
-            surface.release();
         }
         if (manager != null && overlayView != null) {
             try {
@@ -558,7 +508,7 @@ public final class ClusterProjectionService extends Service
                         + " " + safe(e.getMessage()));
             }
         }
-        log("projection_release mode=" + mode.id + " reason=" + reason);
+        log("projection_release mode=surface_view reason=" + reason);
     }
 
     //copies the current surface metadata without transferring ownership to the caller.
@@ -606,35 +556,45 @@ public final class ClusterProjectionService extends Service
         }
     }
 
-    //bumps generation so future PixelCopy borrows a fresh snapshot without issuing display move commands.
-    private boolean softReattachProjectedSurface(String packageName, String reason) {
-        Surface oldSurface;
-        Surface newSurface;
+    //reads the active virtual display id without letting callers mutate projection state.
+    private int currentProjectedDisplayId(String packageName) {
         synchronized (lock) {
             if (!projectionRequested
                     || virtualDisplay == null
                     || virtualDisplay.getDisplay() == null
-                    || projectionSurface == null
-                    || !projectionSurface.isValid()
-                    || activeProjectionMode != DashboardProjectionMode.TEXTURE_VIEW
-                    || overlayTexture == null
-                    || overlayTexture.getSurfaceTexture() == null
                     || !safe(projectedPackage).equals(safe(packageName))) {
-                log("soft_reattach_skipped reason=projection-not-current package="
+                return NavAppDisplayState.DISPLAY_UNKNOWN;
+            }
+            return virtualDisplay.getDisplay().getDisplayId();
+        }
+    }
+
+    //bumps generation so future PixelCopy borrows a fresh snapshot without issuing display move commands.
+    private boolean recoverProjectedSurface(String packageName, String reason) {
+        Surface surface;
+        synchronized (lock) {
+            if (!projectionRequested
+                    || virtualDisplay == null
+                    || virtualDisplay.getDisplay() == null
+                    || overlaySurfaceView == null
+                    || !safe(projectedPackage).equals(safe(packageName))) {
+                log("surface_recover_skipped reason=projection-not-current package="
                         + safe(packageName) + " requestReason=" + safe(reason));
                 return false;
             }
-            oldSurface = projectionSurface;
-            newSurface = new Surface(overlayTexture.getSurfaceTexture());
-            virtualDisplay.setSurface(newSurface);
-            projectionSurface = newSurface;
-            projectionSurfaceOwned = true;
+            surface = overlaySurfaceView.getHolder() == null
+                    ? null
+                    : overlaySurfaceView.getHolder().getSurface();
+            if (surface == null || !surface.isValid()) {
+                log("surface_recover_skipped reason=surface-invalid package="
+                        + safe(packageName) + " requestReason=" + safe(reason));
+                return false;
+            }
+            virtualDisplay.setSurface(surface);
+            projectionSurface = surface;
             projectionGeneration++;
         }
-        if (oldSurface != null) {
-            oldSurface.release();
-        }
-        log("soft_reattach surface_reset package=" + safe(packageName)
+        log("surface_recover ok package=" + safe(packageName)
                 + " reason=" + safe(reason));
         return true;
     }

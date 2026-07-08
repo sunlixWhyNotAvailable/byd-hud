@@ -24,6 +24,7 @@ final class NavAppDisplayController {
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
+    private static final long PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS = 10000L;
     private static final long DISPLAY_CONFIRM_INTERVAL_MS = 250L;
     private static final String PRIMARY_DASHBOARD_DISPLAY_NAME = "fission_bg_XDJAScreenProjection";
     private static final String SHARED_DASHBOARD_DISPLAY_PREFIX =
@@ -220,7 +221,7 @@ final class NavAppDisplayController {
         worker.start();
     }
 
-    //returns the current dashboard-owned app to main before diagnostic projection mode switches.
+    //returns the current dashboard-owned app to main before replacing or shutting down projection.
     void returnActiveDashboardToMain(String reason) {
         String active = activeDashboardPackage();
         if (active.isEmpty()) {
@@ -345,12 +346,6 @@ final class NavAppDisplayController {
                         context,
                         packageName,
                         "independent-dashboard return-main " + safe(reason));
-                synchronized (lock) {
-                    if (packageName.equals(activeDashboardPackage)) {
-                        activeDashboardPackage = "";
-                    }
-                }
-                clearDashboardProjection("independent-dashboard-return-request:" + safe(reason));
                 log(packageName, "dashboard_return_main_requested package=" + packageName
                         + " reason=" + safe(reason));
                 NavAppDisplayState confirmed = waitForMainDisplay(
@@ -364,7 +359,10 @@ final class NavAppDisplayController {
                 }
                 if (confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID) {
                     clearDashboardProjection("independent-dashboard-return:" + safe(reason));
-                    log(packageName, "dashboard_return_main_confirmed package=" + packageName);
+                    log(packageName, "dashboard_return_clear_after_confirm package=" + packageName);
+                } else {
+                    log(packageName, "dashboard_return_still_projected package=" + packageName
+                            + " display=" + confirmed.displayId);
                 }
                 remember(new NavAppDisplayState(
                         packageName,
@@ -398,10 +396,10 @@ final class NavAppDisplayController {
                 return;
             }
             ClusterProjectionService.startProjection(context, packageName, safe(reason));
-            NavAppDisplayState confirmed = waitForDashboardDisplay(
+            NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(
                     packageName,
                     "independent-dashboard-start");
-            if (!confirmed.isOnDashboardDisplay()) {
+            if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)) {
                 remember(new NavAppDisplayState(
                         packageName,
                         confirmed.taskId,
@@ -536,16 +534,45 @@ final class NavAppDisplayController {
         }
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private NavAppDisplayState waitForDashboardDisplay(String packageName, String reason) {
+    //waits for the app-owned virtual display, then moves the task there if Android created it late.
+    private NavAppDisplayState waitForProjectedDashboardDisplay(String packageName, String reason) {
         NavAppDisplayState last = checkDisplay(packageName, reason + "-initial");
-        long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
-        while (!last.isOnDashboardDisplay()
-                && android.os.SystemClock.elapsedRealtime() < deadline) {
+        long deadline = android.os.SystemClock.elapsedRealtime() + PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS;
+        while (android.os.SystemClock.elapsedRealtime() < deadline) {
+            int projectedDisplayId = ClusterProjectionService.projectedDisplayIdForPackage(packageName);
+            log(packageName, "dashboard_confirm_wait projectedDisplay=" + projectedDisplayId
+                    + " actualDisplay=" + last.displayId
+                    + " reason=" + safe(reason));
+            if (projectedDisplayId > MAIN_DISPLAY_ID) {
+                if (last.displayId == projectedDisplayId) {
+                    log(packageName, "dashboard_confirmed_late package=" + packageName
+                            + " display=" + last.displayId);
+                    return last;
+                }
+                NavAppDisplayState moved = moveTaskToDisplayBlocking(
+                        packageName,
+                        projectedDisplayId,
+                        reason + "-late-projected-display");
+                if (moved.displayId == projectedDisplayId) {
+                    log(packageName, "dashboard_confirmed_late package=" + packageName
+                            + " display=" + moved.displayId);
+                    return moved;
+                }
+                last = moved;
+            }
             sleepDisplayConfirmInterval();
             last = checkDisplay(packageName, reason);
         }
         return last;
+    }
+
+    //requires confirmation against the app-owned virtual display so unrelated dashboard displays do not win.
+    private boolean isConfirmedProjectedDashboardDisplay(String packageName, NavAppDisplayState state) {
+        if (state == null) {
+            return false;
+        }
+        int projectedDisplayId = ClusterProjectionService.projectedDisplayIdForPackage(packageName);
+        return projectedDisplayId > MAIN_DISPLAY_ID && state.displayId == projectedDisplayId;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

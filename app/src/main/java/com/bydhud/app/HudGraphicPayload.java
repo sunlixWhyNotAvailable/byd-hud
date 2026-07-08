@@ -80,7 +80,9 @@ final class HudGraphicPayload {
         HudLaneGeometry.Geometry geometry = HudLaneGeometry.calculate(state, lanes.length);
         String key = "oem|" + geometry.bitmapWidth + "x" + geometry.bitmapHeight
                 + "|" + geometry.iconWidth + "x" + geometry.iconHeight
-                + "|" + geometry.gapPx + "|" + signature;
+                + "|gap=" + geometry.gapPx
+                + "|edge=" + geometry.edgePaddingPx
+                + "|" + signature;
         if (key.equals(laneKey) && laneBytes.length > 0) {
             return laneBytes;
         }
@@ -310,7 +312,7 @@ final class HudGraphicPayload {
         Canvas canvas = new Canvas(bitmap);
         Rect dst = new Rect();
         for (int i = 0; i < icons.length; i++) {
-            int slotLeft = i * (geometry.slotWidth + geometry.gapPx);
+            int slotLeft = geometry.edgePaddingPx + i * (geometry.slotWidth + geometry.gapPx);
             int left = slotLeft + Math.round((geometry.slotWidth - geometry.iconWidth) / 2f);
             int top = Math.round((geometry.slotHeight - geometry.iconHeight) / 2f);
             dst.set(left, top, left + geometry.iconWidth, top + geometry.iconHeight);
