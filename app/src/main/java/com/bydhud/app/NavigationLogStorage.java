@@ -131,7 +131,8 @@ final class NavigationLogStorage {
                 "",
                 "",
                 retentionLimitBytes(context),
-                "general"));
+                "general",
+                null));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -154,7 +155,25 @@ final class NavigationLogStorage {
                 activeSessionName,
                 preserveScreenshotName,
                 retentionLimitBytes(context),
-                "active-session"));
+                "active-session",
+                null));
+    }
+
+    //runs an explicit user-requested retention pass without blocking the UI caller.
+    static void forceNavCaptureRetention(Context context, String reason, Runnable onComplete) {
+        if (context == null) {
+            return;
+        }
+        scheduleNavCaptureRetention(new RetentionRequest(
+                context.getApplicationContext(),
+                navCaptureDir(context),
+                activeNavCaptureDay(),
+                "",
+                "",
+                "",
+                retentionLimitBytes(context),
+                safePathSegment(reason, "manual"),
+                onComplete));
     }
 
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
@@ -192,6 +211,7 @@ final class NavigationLogStorage {
         final String preserveScreenshotName;
         final long maxBytes;
         final String reason;
+        final Runnable onComplete;
 
         RetentionRequest(
                 Context context,
@@ -201,7 +221,8 @@ final class NavigationLogStorage {
                 String activeSessionName,
                 String preserveScreenshotName,
                 long maxBytes,
-                String reason) {
+                String reason,
+                Runnable onComplete) {
             this.context = context;
             this.root = root;
             this.activeDay = activeDay;
@@ -210,6 +231,7 @@ final class NavigationLogStorage {
             this.preserveScreenshotName = preserveScreenshotName;
             this.maxBytes = maxBytes;
             this.reason = safePathSegment(reason, "unknown");
+            this.onComplete = onComplete;
         }
     }
 
@@ -288,11 +310,18 @@ final class NavigationLogStorage {
             return;
         }
         synchronized (RETENTION_WORKER_LOCK) {
-            pendingRetentionRequest = request;
             if (retentionWorkerRunning) {
+                if (pendingRetentionRequest != null
+                        && pendingRetentionRequest.onComplete != null
+                        && request.onComplete == null) {
+                    logRetention(request.context, "retention_deferred reason=force-request-pending");
+                    return;
+                }
+                pendingRetentionRequest = request;
                 logRetention(request.context, "retention_deferred reason=worker-running");
                 return;
             }
+            pendingRetentionRequest = request;
             retentionWorkerRunning = true;
         }
         Thread worker = new Thread(NavigationLogStorage::drainRetentionRequests,
@@ -313,7 +342,23 @@ final class NavigationLogStorage {
                     return;
                 }
             }
-            runScheduledRetention(request);
+            try {
+                runScheduledRetention(request);
+            } finally {
+                runRetentionCompletion(request);
+            }
+        }
+    }
+
+    //returns UI cache refresh to the caller after worker retention finishes or defers.
+    private static void runRetentionCompletion(RetentionRequest request) {
+        if (request == null || request.onComplete == null) {
+            return;
+        }
+        try {
+            request.onComplete.run();
+        } catch (RuntimeException e) {
+            logWarn("retention completion failed: " + e.getClass().getSimpleName());
         }
     }
 

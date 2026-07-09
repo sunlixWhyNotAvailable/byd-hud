@@ -814,6 +814,7 @@ final class NavHudLiveSender {
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopOnMain(String reason, boolean clearHud) {
         String packageName = activePackage;
+        clearRouteStoreForStop(packageName, reason);
         handler.removeCallbacks(bindRetryRunnable);
         handler.removeCallbacks(sendLoop);
         handler.removeCallbacks(routeHealthLoop);
@@ -846,6 +847,20 @@ final class NavHudLiveSender {
             WazeCropCapture.get(context).stop(reason);
         }
         log("stopped reason=" + reason);
+    }
+
+    //clears stale Waze route memory only after the real route-stale stop decision fires.
+    private void clearRouteStoreForStop(String packageName, String reason) {
+        String normalizedReason = normalizeString(reason);
+        if (!"route-stale".equals(NavTextNormalizer.lower(normalizedReason))) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        NavRouteStateStore.get(context).clearRoute(packageName, normalizedReason, now);
+        if (WAZE_PACKAGE.equals(packageName)) {
+            WazeRouteTracker.get(context).onRouteEnded(normalizedReason, now);
+        }
+        log("route_store_clear package=" + packageName + " reason=" + normalizedReason);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

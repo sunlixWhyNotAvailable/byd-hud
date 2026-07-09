@@ -1050,7 +1050,12 @@ public final class MainActivity extends ComponentActivity {
         }
         HudPrefs.setStorageLimitGb(this, next);
         appendStatus("Storage limit " + HudPrefs.storageLimitGb(this) + " GB");
+        storageCacheState = storageCacheState.withCalculating(true);
         refreshControls();
+        NavigationLogStorage.forceNavCaptureRetention(
+                this,
+                "storage-limit-changed",
+                () -> handler.post(() -> composeRequestStorageRefresh(true)));
     }
 
     //exposes one-folder deletion so Compose can show progress instead of blocking the UI.

@@ -108,14 +108,12 @@ final class NavRouteStateStore {
         if (normalized.isEmpty()) {
             return;
         }
-        long safeNow = nowElapsedMs > 0L ? nowElapsedMs : SystemClock.elapsedRealtime();
         synchronized (lock) {
-            RouteState current = states.get(normalized);
             states.put(normalized, new RouteState(
-                    current == null ? safeNow : current.lastEvidenceMs,
+                    0L,
                     "cleared",
                     safe(reason),
-                    current == null ? null : current.latestSnapshot,
+                    null,
                     true));
         }
     }
@@ -145,7 +143,7 @@ final class NavRouteStateStore {
     long evidenceAgeMs(String packageName, long nowElapsedMs) {
         synchronized (lock) {
             RouteState state = states.get(safe(packageName));
-            if (state == null || state.lastEvidenceMs <= 0L) {
+            if (state == null || state.removed || state.lastEvidenceMs <= 0L) {
                 return Long.MAX_VALUE;
             }
             return Math.max(0L, nowElapsedMs - state.lastEvidenceMs);
@@ -167,7 +165,7 @@ final class NavRouteStateStore {
     NavSnapshot latestSnapshot(String packageName) {
         synchronized (lock) {
             RouteState state = states.get(safe(packageName));
-            return state == null ? null : state.latestSnapshot;
+            return state == null || state.removed ? null : state.latestSnapshot;
         }
     }
 

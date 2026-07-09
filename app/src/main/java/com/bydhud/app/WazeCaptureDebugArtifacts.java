@@ -16,7 +16,8 @@ final class WazeCaptureDebugArtifacts {
 
     //persists the full frame that the parser actually consumed.
     String saveSourceFrame(File dir, int frameId, Bitmap frame) {
-        return saveBitmap(dir, frameName("source_frame_", frameId), frame);
+        String name = frameName("source_frame_", frameId);
+        return saveBitmap(dir, name, frame) ? name : "";
     }
 
     //records per-frame metadata alongside the PNG evidence.
@@ -42,18 +43,19 @@ final class WazeCaptureDebugArtifacts {
     }
 
     //writes a bitmap as PNG and returns the relative session file name.
-    private static String saveBitmap(File dir, String name, Bitmap bitmap) {
+    //writes a bitmap as PNG without forcing capture/parser callers to touch file APIs directly.
+    boolean saveBitmap(File dir, String name, Bitmap bitmap) {
         if (dir == null || bitmap == null || name == null || name.isEmpty()) {
-            return "";
+            return false;
         }
         if (!dir.exists() && !dir.mkdirs()) {
-            return "";
+            return false;
         }
         File file = new File(dir, name);
         try (FileOutputStream out = new FileOutputStream(file)) {
-            return bitmap.compress(Bitmap.CompressFormat.PNG, 100, out) ? name : "";
+            return bitmap.compress(Bitmap.CompressFormat.PNG, 100, out);
         } catch (IOException e) {
-            return "";
+            return false;
         }
     }
 
