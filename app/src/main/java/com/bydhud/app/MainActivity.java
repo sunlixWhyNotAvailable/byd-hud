@@ -58,7 +58,10 @@ public final class MainActivity extends ComponentActivity {
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
     private static final long APP_SCAN_REFRESH_INTERVAL_MS = 5000L;
+    private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
     private static final boolean BACKGROUND_MODE = true;
+    private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
+    private static final String GMAPS_REVANCED_PACKAGE = "app.revanced.android.apps.maps";
     private static final String PNG_HIDE_CANDIDATE_LINE = "PNG hide: OEM S72 blank";
     private static final String CLOSE_ACTION_LINE = "CloseAction: Back/Home keeps sender";
     private static final String BACKGROUND_MODE_LINE = "BackgroundMode: Boot controls runtime service";
@@ -70,6 +73,8 @@ public final class MainActivity extends ComponentActivity {
     private final HudState state = new HudState();
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
     private final AtomicBoolean appScanInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
+    private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
     private SomeIpHudClient hudClient;
 
     private TextView statusView;
@@ -661,6 +666,42 @@ public final class MainActivity extends ComponentActivity {
         return folderSizeBytes(NavigationLogStorage.navCaptureDir(this));
     }
 
+    //guards Storage tab responsiveness by moving recursive folder scans off the UI snapshot path.
+    public void composeRequestStorageRefresh(boolean force) {
+        StorageCacheState current = storageCacheState;
+        long now = SystemClock.elapsedRealtime();
+        boolean stale = current.scannedAtMs <= 0L
+                || now - current.scannedAtMs >= STORAGE_SCAN_CACHE_TTL_MS;
+        if (!force && !stale) {
+            return;
+        }
+        if (!storageScanInProgress.compareAndSet(false, true)) {
+            storageCacheState = current.withCalculating(true);
+            return;
+        }
+        storageCacheState = current.withCalculating(true);
+        Thread worker = new Thread(() -> {
+            StorageCacheState next;
+            try {
+                next = StorageCacheState.scanned(
+                        navCaptureFolderSizeBytes(),
+                        composeStorageDays(),
+                        SystemClock.elapsedRealtime());
+            } catch (RuntimeException e) {
+                next = storageCacheState.withCalculating(false);
+                AppEventLogger.event(this, "storage_scan failed "
+                        + e.getClass().getSimpleName() + " "
+                        + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
+            } finally {
+                storageScanInProgress.set(false);
+            }
+            storageCacheState = next;
+            handler.post(this::refreshControls);
+        }, "BydHudStorageScan");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        worker.start();
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int countSessionDirs(File dayDir) {
         int count = 0;
@@ -721,6 +762,7 @@ public final class MainActivity extends ComponentActivity {
                 allRows.add(composeRow(app, hudPackage, logOnlyPackages, observedPackages, false));
             }
         }
+        StorageCacheState storage = storageCacheState;
         return new ComposeSnapshot(
                 HudPrefs.isUaLanguage(this),
                 HudPrefs.isDarkTheme(this),
@@ -758,8 +800,11 @@ public final class MainActivity extends ComponentActivity {
                 state.laneString == null ? "" : state.laneString,
                 appScan.lastScanText,
                 HudPrefs.storageLimitGb(this),
-                navCaptureFolderSizeBytes(),
-                composeStorageDays(),
+                NavigationLogStorage.publicNavCapturePath(),
+                storage.calculating,
+                storage.totalSessions,
+                storage.navCaptureFolderBytes,
+                storage.storageDays,
                 supportedRows,
                 allRows);
     }
@@ -805,12 +850,12 @@ public final class MainActivity extends ComponentActivity {
         NavAppDisplayState displayState = controller.lastState(app.packageName);
         String activeDashboardPackage = controller.activeDashboardPackage();
         boolean runtimeBacked = app.isRuntimeBacked();
-        boolean observed = observedPackages.contains(app.packageName);
+        boolean observed = isObservedPackage(app.packageName, observedPackages);
         boolean onDashboard = DashboardProjectionPolicy.isManagedDashboardPackage(
                 app.packageName,
                 activeDashboardPackage);
         boolean supportedHud = isSupportedHudPackage(app.packageName);
-        boolean installed = isPackageInstalled(app.packageName);
+        boolean installed = isInstalledPackage(app.packageName);
         return new ComposeAppRow(
                 app.label,
                 app.packageName,
@@ -820,8 +865,8 @@ public final class MainActivity extends ComponentActivity {
                 observed,
                 supportedHud,
                 supportedSection,
-                app.packageName.equals(hudPackage),
-                logOnlyPackages.contains(app.packageName),
+                isSelectedPackage(app.packageName, hudPackage),
+                containsSelectedPackage(app.packageName, logOnlyPackages),
                 onDashboard,
                 controller.isMoveInProgress(),
                 app.processName,
@@ -836,6 +881,51 @@ public final class MainActivity extends ComponentActivity {
         } catch (PackageManager.NameNotFoundException ignored) {
             return false;
         }
+    }
+
+    //keeps Google Maps variants as one UI target while leaving parser package support unchanged.
+    private boolean isInstalledPackage(String packageName) {
+        if (!isGoogleMapsAlias(packageName)) {
+            return isPackageInstalled(packageName);
+        }
+        return isPackageInstalled(GMAPS_REVANCED_PACKAGE)
+                || isPackageInstalled(GMAPS_OFFICIAL_PACKAGE);
+    }
+
+    //keeps alias checks centralized so HUD/log row state cannot drift between Maps variants.
+    private static boolean isSelectedPackage(String rowPackage, String selectedPackage) {
+        String row = normalizePackage(rowPackage);
+        String selected = normalizePackage(selectedPackage);
+        if (isGoogleMapsAlias(row) && isGoogleMapsAlias(selected)) {
+            return true;
+        }
+        return row.equals(selected);
+    }
+
+    //keeps multi-package row state aligned with persisted log-only package sets.
+    private static boolean containsSelectedPackage(String rowPackage, Set<String> selectedPackages) {
+        String row = normalizePackage(rowPackage);
+        if (selectedPackages == null || selectedPackages.isEmpty()) {
+            return false;
+        }
+        if (!isGoogleMapsAlias(row)) {
+            return selectedPackages.contains(row);
+        }
+        return selectedPackages.contains(GMAPS_REVANCED_PACKAGE)
+                || selectedPackages.contains(GMAPS_OFFICIAL_PACKAGE);
+    }
+
+    //keeps observed package evidence alias-aware for the collapsed Google Maps row.
+    private static boolean isObservedPackage(String rowPackage, Set<String> observedPackages) {
+        String row = normalizePackage(rowPackage);
+        if (observedPackages == null || observedPackages.isEmpty()) {
+            return false;
+        }
+        if (!isGoogleMapsAlias(row)) {
+            return observedPackages.contains(row);
+        }
+        return observedPackages.contains(GMAPS_REVANCED_PACKAGE)
+                || observedPackages.contains(GMAPS_OFFICIAL_PACKAGE);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1218,6 +1308,9 @@ public final class MainActivity extends ComponentActivity {
         public final String laneBitmap;
         public final String lastScanText;
         public final int storageLimitGb;
+        public final String navCaptureFolderPath;
+        public final boolean storageCalculating;
+        public final int storageSessionCount;
         public final long navCaptureFolderBytes;
         public final List<ComposeStorageDay> storageDays;
         public final List<ComposeAppRow> supportedApps;
@@ -1236,7 +1329,8 @@ public final class MainActivity extends ComponentActivity {
                 boolean arrowCuratedMode, int curatedIndex, int curatedCount,
                 int pngSourceId, int nativeManeuverId, int distanceMeters, String streetText,
                 String laneBitmap, String lastScanText, int storageLimitGb,
-                long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
+                String navCaptureFolderPath, boolean storageCalculating,
+                int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
@@ -1274,6 +1368,9 @@ public final class MainActivity extends ComponentActivity {
             this.laneBitmap = laneBitmap == null ? "" : laneBitmap;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
             this.storageLimitGb = Math.max(1, Math.min(10, storageLimitGb));
+            this.navCaptureFolderPath = navCaptureFolderPath == null ? "" : navCaptureFolderPath;
+            this.storageCalculating = storageCalculating;
+            this.storageSessionCount = Math.max(0, storageSessionCount);
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
             this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
             this.supportedApps = supportedApps == null ? Collections.emptyList() : supportedApps;
@@ -1310,6 +1407,44 @@ public final class MainActivity extends ComponentActivity {
             this.sessions = Math.max(0, sessions);
             this.bytes = Math.max(0L, bytes);
             this.active = active;
+        }
+    }
+
+    //keeps recursive Storage tab scan output immutable so Compose can read it without blocking.
+    private static final class StorageCacheState {
+        final long navCaptureFolderBytes;
+        final List<ComposeStorageDay> storageDays;
+        final int totalSessions;
+        final long scannedAtMs;
+        final boolean calculating;
+
+        private StorageCacheState(long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
+                long scannedAtMs, boolean calculating) {
+            this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
+            this.storageDays = storageDays == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(storageDays));
+            int sessions = 0;
+            for (ComposeStorageDay day : this.storageDays) {
+                sessions += day == null ? 0 : day.sessions;
+            }
+            this.totalSessions = Math.max(0, sessions);
+            this.scannedAtMs = Math.max(0L, scannedAtMs);
+            this.calculating = calculating;
+        }
+
+        static StorageCacheState empty() {
+            return new StorageCacheState(0L, Collections.emptyList(), 0L, false);
+        }
+
+        static StorageCacheState scanned(long navCaptureFolderBytes,
+                List<ComposeStorageDay> storageDays, long scannedAtMs) {
+            return new StorageCacheState(navCaptureFolderBytes, storageDays, scannedAtMs, false);
+        }
+
+        StorageCacheState withCalculating(boolean nextCalculating) {
+            return new StorageCacheState(
+                    navCaptureFolderBytes, storageDays, scannedAtMs, nextCalculating);
         }
     }
 
@@ -1440,8 +1575,15 @@ public final class MainActivity extends ComponentActivity {
         candidates.addAll(capturePackages);
         candidates.addAll(observedPackages);
         List<ActiveAppRow> curated = new ArrayList<>();
+        ActiveAppRow googleMapsRow = googleMapsCuratedRow(rawRows, candidates, observedPackages);
+        if (googleMapsRow != null) {
+            curated.add(googleMapsRow);
+        }
         for (String packageName : candidates) {
             String normalized = normalizePackage(packageName);
+            if (isGoogleMapsAlias(normalized)) {
+                continue;
+            }
             if (!NavAppFilter.isCuratedNavigationPackage(normalized)
                     || NavAppFilter.shouldHideFromCaptureList(this, normalized)) {
                 continue;
@@ -1466,6 +1608,66 @@ public final class MainActivity extends ComponentActivity {
             }
         });
         return curated;
+    }
+
+    //collapses official and ReVanced Google Maps into one supported row with one action package.
+    private ActiveAppRow googleMapsCuratedRow(
+            Map<String, ActiveAppRow> rawRows,
+            Set<String> candidates,
+            Set<String> observedPackages) {
+        if (candidates == null
+                || (!candidates.contains(GMAPS_REVANCED_PACKAGE)
+                && !candidates.contains(GMAPS_OFFICIAL_PACKAGE))) {
+            return null;
+        }
+        ActiveAppRow row = firstRuntimeGoogleMapsRow(rawRows);
+        if (row != null) {
+            return googleMapsRowFrom(row);
+        }
+        String observed = observedPackages != null && observedPackages.contains(GMAPS_REVANCED_PACKAGE)
+                ? GMAPS_REVANCED_PACKAGE
+                : observedPackages != null && observedPackages.contains(GMAPS_OFFICIAL_PACKAGE)
+                ? GMAPS_OFFICIAL_PACKAGE
+                : "";
+        if (!observed.isEmpty()) {
+            return new ActiveAppRow("Google Maps", observed, "observed", Integer.MAX_VALUE);
+        }
+        String installed = isPackageInstalled(GMAPS_REVANCED_PACKAGE)
+                ? GMAPS_REVANCED_PACKAGE
+                : isPackageInstalled(GMAPS_OFFICIAL_PACKAGE)
+                ? GMAPS_OFFICIAL_PACKAGE
+                : GMAPS_REVANCED_PACKAGE;
+        return new ActiveAppRow("Google Maps", installed, "not running", Integer.MAX_VALUE);
+    }
+
+    //prefers the active ReVanced task when both Google Maps variants are present.
+    private static ActiveAppRow firstRuntimeGoogleMapsRow(Map<String, ActiveAppRow> rawRows) {
+        if (rawRows == null || rawRows.isEmpty()) {
+            return null;
+        }
+        ActiveAppRow revanced = rawRows.get(GMAPS_REVANCED_PACKAGE);
+        ActiveAppRow official = rawRows.get(GMAPS_OFFICIAL_PACKAGE);
+        if (revanced != null && revanced.isRuntimeBacked()) {
+            return revanced;
+        }
+        if (official != null && official.isRuntimeBacked()) {
+            return official;
+        }
+        return revanced != null ? revanced : official;
+    }
+
+    //keeps the displayed label stable while preserving the resolved action package/display state.
+    private static ActiveAppRow googleMapsRowFrom(ActiveAppRow source) {
+        return new ActiveAppRow(
+                "Google Maps",
+                source.packageName,
+                source.processName,
+                source.importance,
+                source.hasProcess,
+                source.hasTask,
+                source.taskId,
+                source.displayId,
+                source.visible);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1502,9 +1704,8 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String displayPackageLine(String packageName) {
         String normalized = normalizePackage(packageName);
-        if ("com.google.android.apps.maps".equals(normalized)
-                || "app.revanced.android.apps.maps".equals(normalized)) {
-            return "com.google.android.apps.maps / app.revanced.android.apps.maps";
+        if (isGoogleMapsAlias(normalized)) {
+            return GMAPS_REVANCED_PACKAGE + " / " + GMAPS_OFFICIAL_PACKAGE;
         }
         return packageName;
     }
@@ -1713,6 +1914,13 @@ public final class MainActivity extends ComponentActivity {
     //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    //keeps the two supported Google Maps package names behind one UI row.
+    private static boolean isGoogleMapsAlias(String packageName) {
+        String normalized = normalizePackage(packageName);
+        return GMAPS_REVANCED_PACKAGE.equals(normalized)
+                || GMAPS_OFFICIAL_PACKAGE.equals(normalized);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

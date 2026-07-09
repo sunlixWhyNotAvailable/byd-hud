@@ -190,6 +190,7 @@ public final class WazeMediaProjectionService extends Service {
         }
         AppEventLogger.event(this, "waze_frame_capture mediaprojection_ready "
                 + width + "x" + height + " dpi=" + densityDpi);
+        NavHudLiveSender.get(this).onWazeMediaProjectionReady(width + "x" + height);
     }
 
     //releases native mirrors in reverse ownership order.

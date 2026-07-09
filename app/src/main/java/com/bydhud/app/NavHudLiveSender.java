@@ -317,6 +317,19 @@ final class NavHudLiveSender {
         });
     }
 
+    //re-arms Waze crop after Android recreates MediaProjection so recovery does not wait for a user tap.
+    void onWazeMediaProjectionReady(String reason) {
+        final String safeReason = normalizeString(reason);
+        handler.post(() -> {
+            if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+                return;
+            }
+            ensureWazeCropRunning("mediaprojection-ready-" + safeReason);
+            scheduleSendLoop();
+            log("waze media projection ready crop rearm reason=" + safeReason);
+        });
+    }
+
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     void onDashboardProjectionConfirmed(String packageName, NavAppDisplayState state) {
         final String normalized = normalizePackage(packageName);

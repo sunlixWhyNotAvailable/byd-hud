@@ -383,8 +383,6 @@ final class WazeCropCapture {
                         + " reason=" + capture.reason
                         + " display=" + displayId
                         + " timeout_streak=" + capture.pixelCopyTimeoutStreak);
-                NavHudLiveSender.get(context).onWazeCropUnavailable(
-                        "frame-unavailable " + capture.reason);
                 return;
             }
             NavigationLogStorage.beginCaptureFrame();
@@ -500,8 +498,14 @@ final class WazeCropCapture {
                     }
                 } else if (!visualNavigationCandidate) {
                     if (commitEligible) {
-                        NavHudLiveSender.get(context).onWazeCropUnavailable(
-                                "main-visible-no-cue file=" + sourceFileName);
+                        if (displayId > 0) {
+                            log(dir, "projected_no_cue_drop display=" + displayId
+                                    + " file=" + sourceFileName
+                                    + " " + timingDetail);
+                        } else {
+                            NavHudLiveSender.get(context).onWazeCropUnavailable(
+                                    "main-visible-no-cue file=" + sourceFileName);
+                        }
                     } else {
                         log(dir, "crop unavailable skipped file=" + sourceFileName
                                 + " " + timingDetail);

@@ -258,6 +258,8 @@ private data class Copy(
     val folderSelected: String,
     val folderNotSelected: String,
     val storageNoDayFolders: String,
+    val storageCalculating: String,
+    val storageSessionsShort: String,
     val storageDeleteTitle: String,
     val storageDeleteSelected: String,
     val storageDeleteQuestion: String,
@@ -382,6 +384,7 @@ private fun RuntimeApp(activity: MainActivity) {
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteStep by rememberSaveable { mutableIntStateOf(0) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
+    var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
@@ -445,6 +448,11 @@ private fun RuntimeApp(activity: MainActivity) {
         if (selectedTab == RuntimeTab.Apps) {
             activity.composeRefreshApps()
         }
+        if (selectedTab == RuntimeTab.Storage) {
+            activity.composeRequestStorageRefresh(false)
+            lastStorageRefreshRequestMs = SystemClock.elapsedRealtime()
+            refresh()
+        }
     }
 
     DisposableEffect(activity) {
@@ -497,6 +505,13 @@ private fun RuntimeApp(activity: MainActivity) {
             if (selectedTab == RuntimeTab.Apps) {
                 activity.composeMaybeRefreshApps()
             }
+            if (selectedTab == RuntimeTab.Storage) {
+                val now = SystemClock.elapsedRealtime()
+                if (now - lastStorageRefreshRequestMs >= 5000L) {
+                    activity.composeRequestStorageRefresh(false)
+                    lastStorageRefreshRequestMs = now
+                }
+            }
             refresh()
         }
     }
@@ -524,6 +539,7 @@ private fun RuntimeApp(activity: MainActivity) {
             storageDeleteQueue = emptyList()
             storageDeleteStep = 0
             selectedStorageDays = emptyList()
+            activity.composeRequestStorageRefresh(true)
             refresh()
         } else {
             storageDeleteStep = nextStep
@@ -1427,8 +1443,10 @@ private fun AppRow(
             Text(row.packageLine.ifBlank { row.packageName }, color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StatusChip(if (row.installed) copy.installed else copy.notInstalled,
-                    if (row.installed) ChipKind.Green else ChipKind.Red, palette, width = 116.dp)
+                if (supported) {
+                    StatusChip(if (row.installed) copy.installed else copy.notInstalled,
+                        if (row.installed) ChipKind.Green else ChipKind.Red, palette, width = 116.dp)
+                }
                 StatusChip(if (runningForStatus) copy.running else copy.notRunning,
                     if (runningForStatus) ChipKind.Green else ChipKind.Yellow, palette, width = 174.dp)
                 StatusChip(
@@ -1542,8 +1560,8 @@ private fun StorageTab(
     onToggleDay: (String) -> Unit,
     onDeleteSelected: (List<String>) -> Unit
 ) {
-    var limitText by rememberSaveable(snapshot.storageLimitGb) {
-        mutableStateOf(snapshot.storageLimitGb.toString())
+    var draftLimit by rememberSaveable(snapshot.storageLimitGb) {
+        mutableIntStateOf(snapshot.storageLimitGb)
     }
     val days = if (sortOldestFirst) {
         snapshot.storageDays.sortedBy { it.name }
@@ -1560,34 +1578,51 @@ private fun StorageTab(
                 hint = copy.navLogsFolderLimitHint,
                 palette = palette,
                 action = {
-                    LabeledInput(
-                        copy.storageLimitGb,
-                        limitText,
-                        { value ->
-                            val sanitized = sanitizeStorageLimitInput(value)
-                            limitText = sanitized
-                            sanitized.toIntOrNull()?.let(onStorageLimitGb)
-                        },
-                        palette,
-                        Modifier.width(120.dp)
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
+                        ReadOnlyValueField(
+                            label = copy.storageLimitGb,
+                            value = "$draftLimit ${gbUnit(copy)}",
+                            palette = palette,
+                            modifier = Modifier.width(150.dp)
+                        )
+                        HudButton(
+                            "OK",
+                            palette,
+                            primary = true,
+                            enabled = draftLimit != snapshot.storageLimitGb,
+                            width = 190.dp
+                        ) {
+                            onStorageLimitGb(draftLimit)
+                        }
+                    }
                 }
             )
-            StorageLimitSlider(snapshot.storageLimitGb, palette) { next ->
-                limitText = next.toString()
-                onStorageLimitGb(next)
+            StorageLimitSlider(draftLimit, palette) { next ->
+                draftLimit = next
             }
             Divider(palette)
             SettingRow(
                 title = copy.currentNavLogsSize,
-                hint = "/sdcard/Documents/BYD-HUD/nav-capture",
+                hint = "",
                 palette = palette,
                 action = {
-                    Pill(
-                        "${formatBytes(snapshot.navCaptureFolderBytes)} / ${snapshot.storageLimitGb} GB",
-                        palette.green,
-                        palette.greenSoft
-                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                        if (snapshot.storageCalculating) {
+                            Pill(copy.storageCalculating, palette.muted, palette.disabled)
+                        }
+                        val usageColors = storageUsageColors(snapshot.navCaptureFolderBytes, snapshot.storageLimitGb, palette)
+                        Pill(
+                            formatStorageUsage(snapshot.navCaptureFolderBytes, snapshot.storageLimitGb, copy),
+                            usageColors.first,
+                            usageColors.second
+                        )
+                        Text(
+                            "(${snapshot.storageSessionCount} ${copy.storageSessionsShort})",
+                            color = palette.muted,
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
                 }
             )
         }
@@ -1602,12 +1637,17 @@ private fun StorageTab(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(copy.storageFolderHint, color = palette.muted, fontSize = 12.sp, modifier = Modifier.weight(1f))
+                ReadOnlyPathField(
+                    snapshot.navCaptureFolderPath,
+                    palette,
+                    modifier = Modifier.weight(1f)
+                )
+                Spacer(Modifier.weight(1f))
                 HudButton(
                     if (sortOldestFirst) copy.sortByName else copy.sortByDate,
                     palette,
-                    primary = true,
-                    width = 180.dp
+                    primary = false,
+                    width = 190.dp
                 ) {
                     onSortOldestFirst(!sortOldestFirst)
                 }
@@ -1642,11 +1682,67 @@ private fun StorageTab(
                     copy.deleteSelected,
                     palette,
                     enabled = deletableSelectedDays.isNotEmpty(),
+                    primary = true,
                     width = 190.dp,
                     onClick = { onDeleteSelected(deletableSelectedDays) }
                 )
             }
         }
+    }
+}
+
+@Composable
+//renders a disabled value field for values that must be committed through a separate action.
+private fun ReadOnlyValueField(
+    label: String,
+    value: String,
+    palette: Palette,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier) {
+        Text(
+            label,
+            color = palette.muted,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 13.sp,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
+        Spacer(Modifier.height(5.dp))
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                .background(palette.field),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(value, color = palette.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
+        }
+    }
+}
+
+@Composable
+//renders the public nav-capture path without implying it is editable.
+private fun ReadOnlyPathField(text: String, palette: Palette, modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier
+            .height(42.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(palette.field)
+            .padding(horizontal = 10.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Text(
+            text,
+            color = palette.muted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -1659,7 +1755,6 @@ private fun StorageLimitSlider(
 ) {
     val coerced = limit.coerceIn(1, 10)
     var sliderValue by remember(coerced) { mutableStateOf(coerced.toFloat()) }
-    val preview = storageLimitFromSliderValue(sliderValue)
     Slider(
         value = sliderValue,
         onValueChange = { raw ->
@@ -1680,12 +1775,6 @@ private fun StorageLimitSlider(
         modifier = Modifier
             .fillMaxWidth()
             .height(42.dp)
-    )
-    Text(
-        "$preview GB",
-        color = palette.muted,
-        fontSize = 12.sp,
-        modifier = Modifier.padding(start = 2.dp, top = 2.dp)
     )
 }
 
@@ -1732,17 +1821,18 @@ private fun StorageDayRow(
             )
         }
         Spacer(Modifier.width(12.dp))
-        Pill(formatBytes(day.bytes), palette.muted, palette.disabled)
+        Pill(formatBytes(day.bytes, copy), palette.muted, palette.disabled)
         if (day.active) {
             Spacer(Modifier.width(8.dp))
             Pill(copy.activeToday, palette.green, palette.greenSoft)
+        } else {
+            Spacer(Modifier.width(8.dp))
+            Pill(
+                if (selected) copy.folderSelected else copy.folderNotSelected,
+                if (selected) palette.accent else palette.muted,
+                if (selected) palette.active else palette.disabled
+            )
         }
-        Spacer(Modifier.width(8.dp))
-        Pill(
-            if (selected) copy.folderSelected else copy.folderNotSelected,
-            if (selected) palette.accent else palette.muted,
-            if (selected) palette.active else palette.disabled
-        )
     }
 }
 
@@ -2085,7 +2175,9 @@ private fun SettingRow(
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Text(hint, color = palette.muted, fontSize = 13.sp)
+            if (hint.isNotBlank()) {
+                Text(hint, color = palette.muted, fontSize = 13.sp)
+            }
         }
         action()
     }
@@ -2680,14 +2772,37 @@ private fun sanitizeStorageLimitInput(value: String): String {
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun formatBytes(bytes: Long): String {
+private fun formatBytes(bytes: Long, copy: Copy): String {
     val gb = bytes / 1_000_000_000.0
-    return if (gb >= 10.0) {
-        "${gb.toInt()} GB"
+    val mb = bytes / 1_000_000.0
+    return if (gb >= 1.0) {
+        "${String.format(Locale.US, "%.1f", gb)} ${gbUnit(copy)}"
     } else {
-        "${String.format(Locale.US, "%.1f", gb)} GB"
+        "${String.format(Locale.US, "%.1f", mb)} ${mbUnit(copy)}"
     }
 }
+
+//formats the storage quota compactly so the status pill remains stable on the car tablet.
+private fun formatStorageUsage(bytes: Long, limitGb: Int, copy: Copy): String {
+    val usedGb = bytes / 1_000_000_000.0
+    return "${String.format(Locale.US, "%.1f", usedGb)}/$limitGb ${gbUnit(copy)}"
+}
+
+//maps usage ratio to the approved green/yellow/red storage states.
+private fun storageUsageColors(bytes: Long, limitGb: Int, palette: Palette): Pair<Color, Color> {
+    val ratio = if (limitGb <= 0) 0.0 else bytes / (limitGb * 1_000_000_000.0)
+    return when {
+        ratio <= 0.5 -> palette.green to palette.greenSoft
+        ratio <= 0.9 -> palette.yellow to palette.yellowSoft
+        else -> palette.red to palette.redSoft
+    }
+}
+
+private fun gbUnit(copy: Copy): String =
+    if (copy.storageLimitGb.contains("ГБ")) "ГБ" else "GB"
+
+private fun mbUnit(copy: Copy): String =
+    if (copy.storageLimitGb.contains("ГБ")) "МБ" else "MB"
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun sessionLabel(count: Int, copy: Copy): String {
@@ -2866,6 +2981,8 @@ private fun enCopy() = Copy(
     folderSelected = "selected",
     folderNotSelected = "tap to select",
     storageNoDayFolders = "No day folders yet. New navigation logs will appear here after dated sessions are created.",
+    storageCalculating = "calculating...",
+    storageSessionsShort = "sess.",
     storageDeleteTitle = "Delete selected",
     storageDeleteSelected = "Selected %d folders for deletion",
     storageDeleteQuestion = "Run deletion?",
@@ -2999,6 +3116,8 @@ private fun uaCopy() = enCopy().copy(
     folderSelected = "вибрано",
     folderNotSelected = "натисни для вибору",
     storageNoDayFolders = "Денних тек ще немає. Нові навігаційні логи з'являться після створення сесій.",
+    storageCalculating = "обчислюємо...",
+    storageSessionsShort = "сес.",
     storageDeleteTitle = "Видалення вибраного",
     storageDeleteSelected = "Обрано %d тек для видалення",
     storageDeleteQuestion = "Виконати видалення?",
