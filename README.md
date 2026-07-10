@@ -34,26 +34,27 @@ After first launch:
 5. Choose supported navigation app from the list of supported apps and toogle `HUD`.
 6. If `Waze` is chosen then press `Start now` when `Casting with BYD HUD` prompt appears (need to do this every session).
 7. Optionally use `Send to dashboard`.
-8. If do not plan to debug - turn off `Save screenshots and detailed logs` option to prevent storage clogging.
+8. If you plan in helping debugging maneuvers/lanes parser - turn on `Save screenshots and detailed logs` option to start saving screenshots for analysis (be aware - it can clog internal storage).
    
 ## Known Limitations
 
+- Other apps utilising the same SOME/IP channel for HUD projection may cause HUD blinking and instability.
 - Navigation parsing depends on the UI and notification structure of navigator apps.
 - `Google Maps` accessibility mode doensn't provide lane guidance.
 - `Google Maps` notification mode may provide text route data but rarely or no maneuvers and no lane guidance.
-- `Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture and resolution
-- `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP`
+- `Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture and resolution.
+- `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP`.
 
 ## Tested
 
 Tested on *Chinese version* of `BYD Sea Lion 07 EV 2025`, `DiLink 5.0`
 If there are missing glyphs or inconsistency in glyph outputs, archive of relevant sessions for the day (paths are shown in the app) needs to be sent for analysis
 
-## Known bugs, troubleshooting and other info (v1.5.0)
+## Known bugs, troubleshooting and other info (v1.5.1)
 
 - There is up to couple seconds delay between new maneuver on `Waze` screen and HUD output. This is not a bug but a working process of maneuvers parser.
-- Waze maneuver/lanes parsing might break on different tablet resolution and depend on maneuvers position on the screen (meaning `No GPS` additional row at the top can break HUD parsing). This was partially addressed by introducing waze navigation bounds (black square in top right corner) parsing. Also should help in case of other resolution.
-- `Waze` roundabouts might be broken after recent general geometry improvement. Need additional testing.
+- Waze maneuver/lanes parsing might break on different tablet resolution and depend on maneuvers position on the screen (meaning `No GPS` additional row at the top can break HUD parsing). This was partially addressed by introducing waze navigation bounds (black square in top left corner) parsing. Also should help in case of other resolution.
+- `Waze` roundabouts might be broken. Needs additional testing.
 - If there are missing glyphs or incorrect HUD outputs, please open an `Issue` and attach the relevant session archive for that day. Session paths are shown inside the app.
 
 ## To Do
