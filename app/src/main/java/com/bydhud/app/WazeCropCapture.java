@@ -384,7 +384,6 @@ final class WazeCropCapture {
                 sourceFileName = detailedDebugArtifacts
                         ? WazeCaptureDebugArtifacts.frameName("source_frame_", index)
                         : "";
-                long artifactQueueStartMs = SystemClock.elapsedRealtime();
                 long artifactQueueMs = 0L;
                 long parseStartMs = SystemClock.elapsedRealtime();
                 long geometryStartMs = parseStartMs;
@@ -436,7 +435,7 @@ final class WazeCropCapture {
                         latestFrameId,
                         parseEndMs - capture.captureStartMs);
                 boolean commitEligible = commitSkipReason.isEmpty();
-                String timingDetail = timingDetail(
+                String parseTimingDetail = timingDetail(
                         index,
                         latestFrameId,
                         capture.captureStartMs,
@@ -459,7 +458,7 @@ final class WazeCropCapture {
                     log(dir, (commitEligible
                             ? "visual route evidence navigation cue file="
                             : "visual route liveness refreshed file=")
-                            + sourceFileName + " " + timingDetail);
+                            + sourceFileName + " " + parseTimingDetail);
                 }
                 if (visualResult != null) {
                     if (commitEligible) {
@@ -473,7 +472,7 @@ final class WazeCropCapture {
                                 + " maneuver=" + snapshotManeuver(visualSnapshot)
                                 + " lanes=" + (visualSnapshot == null
                                 ? "" : safe(visualSnapshot.laneString))
-                                + " " + timingDetail);
+                                + " " + parseTimingDetail);
                     }
                 } else if (blocksSingleFallback(laneAnalysis)) {
                     if (commitEligible) {
@@ -482,21 +481,21 @@ final class WazeCropCapture {
                     } else {
                         log(dir, "unknown lane row skipped file=" + sourceFileName
                                 + " reason=" + laneAnalysis.reason.name()
-                                + " " + timingDetail);
+                                + " " + parseTimingDetail);
                     }
                 } else if (!visualNavigationCandidate) {
                     if (commitEligible) {
                         if (displayId > 0) {
                             log(dir, "projected_no_cue_drop display=" + displayId
                                     + " file=" + sourceFileName
-                                    + " " + timingDetail);
+                                    + " " + parseTimingDetail);
                         } else {
                             NavHudLiveSender.get(context).onWazeCropUnavailable(
                                     "main-visible-no-cue file=" + sourceFileName);
                         }
                     } else {
                         log(dir, "crop unavailable skipped file=" + sourceFileName
-                                + " " + timingDetail);
+                                + " " + parseTimingDetail);
                     }
                 }
                 NavSnapshot effectiveSnapshot =
@@ -512,6 +511,7 @@ final class WazeCropCapture {
                 boolean frameArtifactsQueued = false;
                 WazeCaptureDebugWriter writer = WazeCaptureDebugWriter.get();
                 if (detailedDebugArtifacts && !sourceFileName.isEmpty()) {
+                    long artifactQueueStartMs = SystemClock.elapsedRealtime();
                     frameArtifactsQueued = writer.frameArtifacts(
                             dir,
                             sourceFileName,
@@ -525,6 +525,21 @@ final class WazeCropCapture {
                                 + " pendingBitmaps=" + writer.pendingBitmaps());
                     }
                 }
+                String finalTimingDetail = timingDetail(
+                        index,
+                        latestFrameId,
+                        capture.captureStartMs,
+                        capture.captureEndMs,
+                        parseStartMs,
+                        parseEndMs,
+                        geometryEndMs - geometryStartMs,
+                        laneAnalysisEndMs - laneAnalysisStartMs,
+                        visualParseEndMs - visualParseStartMs,
+                        panelEndMs - panelStartMs,
+                        candidateEndMs - candidateStartMs,
+                        artifactQueueMs,
+                        commitEligible,
+                        commitSkipReason);
                 String missingFile = frameArtifactsQueued && !missingBucket.isEmpty()
                         ? missingBucket + "/" + sourceFileName
                         : "";
@@ -534,7 +549,7 @@ final class WazeCropCapture {
                         sourceFileName,
                         "backend=" + capture.backend
                                 + backendUnavailableDetail(backendUnavailableReason)
-                                + " routeAgeMs=" + evidenceAgeMs + " " + timingDetail,
+                                + " routeAgeMs=" + evidenceAgeMs + " " + finalTimingDetail,
                         effectiveManeuver,
                         trustedLanes,
                         effectiveSnapshot == null ? 0 : effectiveSnapshot.confidence,
@@ -579,7 +594,7 @@ final class WazeCropCapture {
                         + " backend=" + capture.backend
                         + " laneSource=" + laneSource
                         + " maneuverSource=" + maneuverSource
-                        + " " + timingDetail);
+                        + " " + finalTimingDetail);
                 logSlowFrameIfNeeded(
                         dir,
                         index,
@@ -902,27 +917,33 @@ final class WazeCropCapture {
             long candidateMs) {
         String name = "capture";
         long value = Math.max(0L, captureMs);
-        if (artifactQueueMs > value) {
+        long candidateValue = Math.max(0L, artifactQueueMs);
+        if (candidateValue > value) {
             name = "artifactQueue";
-            value = artifactQueueMs;
+            value = candidateValue;
         }
-        if (geometryCtxMs > value) {
+        candidateValue = Math.max(0L, geometryCtxMs);
+        if (candidateValue > value) {
             name = "geometryCtx";
-            value = geometryCtxMs;
+            value = candidateValue;
         }
-        if (laneAnalysisMs > value) {
+        candidateValue = Math.max(0L, laneAnalysisMs);
+        if (candidateValue > value) {
             name = "laneAnalysis";
-            value = laneAnalysisMs;
+            value = candidateValue;
         }
-        if (visualParseMs > value) {
+        candidateValue = Math.max(0L, visualParseMs);
+        if (candidateValue > value) {
             name = "visualParse";
-            value = visualParseMs;
+            value = candidateValue;
         }
-        if (panelMs > value) {
+        candidateValue = Math.max(0L, panelMs);
+        if (candidateValue > value) {
             name = "panel";
-            value = panelMs;
+            value = candidateValue;
         }
-        if (candidateMs > value) {
+        candidateValue = Math.max(0L, candidateMs);
+        if (candidateValue > value) {
             name = "candidate";
         }
         return name;

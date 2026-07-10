@@ -41,6 +41,8 @@ final class LocalAdbBridge {
     private static final int CONNECT_TIMEOUT_MS = 3000;
     private static final int READ_TIMEOUT_MS = 5000;
     private static final int AUTH_PROMPT_TIMEOUT_MS = 60000;
+    private static final Object AUTHORIZATION_SOCKET_LOCK = new Object();
+    private static final Object PERMISSION_GRANT_LOCK = new Object();
     private static final Object RUNTIME_CONNECTION_LOCK = new Object();
     private static final long RUNTIME_IDLE_CLOSE_MS = 30000L;
     private static final long POST_SETTINGS_POLL_TIMEOUT_MS = 3000L;
@@ -75,6 +77,9 @@ final class LocalAdbBridge {
     };
     private static Connection runtimeConnection;
     private static long runtimeLastUsedMs;
+    private static Socket pendingAuthorizationSocket;
+    private static long authorizationCancellationGeneration;
+    private static boolean authorizationCancellationPending;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private LocalAdbBridge() {
@@ -85,6 +90,17 @@ final class LocalAdbBridge {
         AUTO_ONCE,
         FORCE,
         NEVER
+    }
+
+    //identifies one FORCE cancellation so stale callbacks cannot clear a newer request.
+    static final class AuthorizationCancellation {
+        final long generation;
+        final boolean socketClosed;
+
+        private AuthorizationCancellation(long generation, boolean socketClosed) {
+            this.generation = generation;
+            this.socketClosed = socketClosed;
+        }
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -103,6 +119,23 @@ final class LocalAdbBridge {
     //guards adb repair so auto and manual flows can authorize a fresh app key after reinstall.
     static boolean canShortCircuitReadyForCapture(AuthorizationPromptMode mode) {
         return mode == AuthorizationPromptMode.NEVER;
+    }
+
+    //closes only the socket waiting for RSA approval so a manual retry can prompt immediately.
+    static AuthorizationCancellation cancelPendingAuthorization() {
+        Socket socket;
+        long generation;
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            authorizationCancellationGeneration++;
+            generation = authorizationCancellationGeneration;
+            authorizationCancellationPending = true;
+            socket = pendingAuthorizationSocket;
+            pendingAuthorizationSocket = null;
+        }
+        if (socket != null) {
+            closeQuietly(socket);
+        }
+        return new AuthorizationCancellation(generation, socket != null);
     }
 
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
@@ -132,6 +165,23 @@ final class LocalAdbBridge {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Result grantNavCapturePermissions(
+            Context context,
+            AuthorizationPromptMode authorizationPromptMode) {
+        AuthorizationCancellation forceCancellation = null;
+        if (authorizationPromptMode == AuthorizationPromptMode.FORCE) {
+            forceCancellation = cancelPendingAuthorization();
+        }
+        synchronized (PERMISSION_GRANT_LOCK) {
+            if (forceCancellation != null
+                    && !clearPendingAuthorizationCancellation(forceCancellation.generation)) {
+                return Result.authorizationRequired("ADB authorization retry superseded.");
+            }
+            return grantNavCapturePermissionsLocked(context, authorizationPromptMode);
+        }
+    }
+
+    //serializes permission repair so service and UI authorization attempts cannot overlap.
+    private static Result grantNavCapturePermissionsLocked(
             Context context,
             AuthorizationPromptMode authorizationPromptMode) {
         Context appContext = context.getApplicationContext();
@@ -587,6 +637,7 @@ final class LocalAdbBridge {
                 AuthorizationPromptMode authorizationPromptMode) throws Exception {
             KeyPair keyPair = loadOrCreateKeyPair(context);
             String keyFingerprint = fingerprint(keyPair);
+            long cancellationGeneration = authorizationCancellationGeneration();
             Log.i(TAG, "ADB bridge opening key=" + keyFingerprint);
             AppEventLogger.event(context, "adb_bridge open key=" + keyFingerprint);
             String endpoint = endpointLabel(PORT);
@@ -602,7 +653,8 @@ final class LocalAdbBridge {
                         keyPair,
                         keyFingerprint,
                         socket,
-                        endpoint);
+                        endpoint,
+                        cancellationGeneration);
             } catch (IOException e) {
                 closeQuietly(socket);
                 AppEventLogger.event(context, "adb_bridge connect_failed endpoint="
@@ -618,7 +670,8 @@ final class LocalAdbBridge {
                 KeyPair keyPair,
                 String keyFingerprint,
                 Socket socket,
-                String endpoint) throws Exception {
+                String endpoint,
+                long cancellationGeneration) throws Exception {
             Connection connection = new Connection(socket, keyPair);
             byte[] banner = nulPayload("host::");
             AdbPacket.write(
@@ -644,6 +697,7 @@ final class LocalAdbBridge {
                     if (publicKeySent) {
                         markAuthorizationPromptSent(context, keyFingerprint);
                     }
+                    clearPendingAuthorization(socket);
                     return new OpenResult(connection, false, publicKeySent, endpoint);
                 }
                 if (packet.command != AdbPacket.A_AUTH
@@ -672,6 +726,10 @@ final class LocalAdbBridge {
                             (RSAPublicKey) keyPair.getPublic());
                     Log.i(TAG, "ADB public key sent key=" + keyFingerprint);
                     AppEventLogger.event(context, "adb_bridge public_key_sent key=" + keyFingerprint);
+                    if (!trackPendingAuthorization(socket, cancellationGeneration)) {
+                        connection.close();
+                        return new OpenResult(null, true, false, endpoint);
+                    }
                     AdbPacket.write(
                             connection.out,
                             AdbPacket.A_AUTH,
@@ -973,10 +1031,52 @@ final class LocalAdbBridge {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void closeQuietly(Socket socket) {
+        clearPendingAuthorization(socket);
         try {
             socket.close();
         } catch (IOException ignored) {
             //closes the diagnostic bridge defensively because this path runs during failure cleanup.
+        }
+    }
+
+    //tracks only the socket blocked on RSA consent so shell sessions remain untouched.
+    private static boolean trackPendingAuthorization(
+            Socket socket,
+            long cancellationGeneration) {
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            if (authorizationCancellationPending
+                    || cancellationGeneration != authorizationCancellationGeneration) {
+                return false;
+            }
+            pendingAuthorizationSocket = socket;
+            return true;
+        }
+    }
+
+    //captures the cancellation generation before connect so FORCE can invalidate that attempt.
+    private static long authorizationCancellationGeneration() {
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            return authorizationCancellationGeneration;
+        }
+    }
+
+    //clears the handoff marker only when the queued FORCE attempt owns the grant lock.
+    static boolean clearPendingAuthorizationCancellation(long generation) {
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            if (generation != authorizationCancellationGeneration) {
+                return false;
+            }
+            authorizationCancellationPending = false;
+            return true;
+        }
+    }
+
+    //prevents a completed or failed authorization attempt from cancelling a later retry.
+    private static void clearPendingAuthorization(Socket socket) {
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            if (pendingAuthorizationSocket == socket) {
+                pendingAuthorizationSocket = null;
+            }
         }
     }
 

@@ -637,25 +637,55 @@ final class WazeVisualCueParser {
         if (cueBoundsCue != null) {
             return cueBoundsCue;
         }
-        List<Component> mainComponents = components(bitmap, 20, 95, 190, 230);
-        if (!mainComponents.isEmpty()) {
-            Component largest = primaryCueComponent(mainComponents, scaleX(bitmap, 140));
-            String direction = classifyGlyph(bitmap, largest, true).finalToken;
-            NavSnapshot.Maneuver maneuver = maneuverFromSingleToken(direction);
-            if (isRoundaboutManeuver(maneuver)) {
-                return null;
-            }
-            if (uturnOnly
-                    && maneuver != NavSnapshot.Maneuver.UTURN_LEFT
-                    && maneuver != NavSnapshot.Maneuver.UTURN_RIGHT) {
-                return null;
-            }
-            if (maneuver != NavSnapshot.Maneuver.UNKNOWN) {
-                return Cue.maneuver(maneuver, sourceFromManeuver(maneuver))
-                        .withSource(VisualEvidenceSource.FIXED);
+        Cue fixedCue = parseFixedSingleCue(bitmap, uturnOnly, 1080);
+        if (fixedCue != null && bitmap != null && bitmap.getHeight() <= 800
+                && isWeakSingleTurn(fixedCue.maneuver)) {
+            Cue projectedCue = parseFixedSingleCue(bitmap, uturnOnly, 720);
+            if (projectedCue != null && isSharpSideTurn(projectedCue.maneuver)) {
+                return projectedCue;
             }
         }
-        return null;
+        return fixedCue;
+    }
+
+    //keeps legacy fixed crops primary while allowing projected crops to recover cropped sharp arrows.
+    private static Cue parseFixedSingleCue(Bitmap bitmap, boolean uturnOnly, int referenceHeight) {
+        if (bitmap == null) {
+            return null;
+        }
+        List<Component> mainComponents = components(bitmap, 20, 95, 190, 230, referenceHeight);
+        if (mainComponents.isEmpty()) {
+            return null;
+        }
+        Component largest = primaryCueComponent(mainComponents, scaleX(bitmap, 140));
+        String direction = classifyGlyph(bitmap, largest, true).finalToken;
+        NavSnapshot.Maneuver maneuver = maneuverFromSingleToken(direction);
+        if (isRoundaboutManeuver(maneuver)) {
+            return null;
+        }
+        if (uturnOnly
+                && maneuver != NavSnapshot.Maneuver.UTURN_LEFT
+                && maneuver != NavSnapshot.Maneuver.UTURN_RIGHT) {
+            return null;
+        }
+        if (maneuver == NavSnapshot.Maneuver.UNKNOWN) {
+            return null;
+        }
+        return Cue.maneuver(maneuver, sourceFromManeuver(maneuver))
+                .withSource(VisualEvidenceSource.FIXED);
+    }
+
+    //limits projected-crop correction to cases where the legacy crop only saw a weak side cue.
+    private static boolean isWeakSingleTurn(NavSnapshot.Maneuver maneuver) {
+        return maneuver == NavSnapshot.Maneuver.LEFT_45
+                || maneuver == NavSnapshot.Maneuver.RIGHT_45
+                || maneuver == NavSnapshot.Maneuver.STRAIGHT;
+    }
+
+    //keeps projected fixed-crop correction from overriding already-correct smooth/straight cues.
+    private static boolean isSharpSideTurn(NavSnapshot.Maneuver maneuver) {
+        return maneuver == NavSnapshot.Maneuver.LEFT_90
+                || maneuver == NavSnapshot.Maneuver.RIGHT_90;
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
@@ -676,6 +706,9 @@ final class WazeVisualCueParser {
             return null;
         }
         Component largest = primaryCueComponent(components, Integer.MAX_VALUE);
+        if (!looksLikeSingleCueGlyph(bitmap, largest)) {
+            return null;
+        }
         String direction = classifyGlyph(bitmap, largest, true).finalToken;
         NavSnapshot.Maneuver maneuver = maneuverFromSingleToken(direction);
         if (isRoundaboutManeuver(maneuver)) {
@@ -1211,9 +1244,6 @@ final class WazeVisualCueParser {
         }
         if (cellCount > 0) {
             return true;
-        }
-        if (directComponents.size() < 3 && dividerCount <= 0) {
-            return false;
         }
         int minY = Integer.MAX_VALUE;
         int maxY = 0;
@@ -2759,7 +2789,7 @@ final class WazeVisualCueParser {
         return geometry != null
                 && geometry.width > 42
                 && Math.abs(geometry.bottomDelta) < 14.0d
-                && geometry.midDelta > 8.0d;
+                && geometry.midDelta > 6.0d;
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
@@ -2875,6 +2905,17 @@ final class WazeVisualCueParser {
                 && geometry.component.height() >= 80
                 && Math.abs(geometry.midDelta) < 18.0d
                 && Math.abs(geometry.bottomDelta) >= 16.0d;
+    }
+
+    //rejects text fragments so cue bounds can fall back to real glyph crops.
+    private static boolean looksLikeSingleCueGlyph(Bitmap bitmap, Component component) {
+        if (component == null || component.count < 300) {
+            return false;
+        }
+        int minHeight = bitmap == null ? 55 : scaleY(bitmap, 55, bitmap.getHeight() <= 800 ? 720 : 1080);
+        int maxWidth = bitmap == null ? 140 : scaleX(bitmap, 140);
+        return component.height() >= minHeight
+                && component.width() <= maxWidth;
     }
 
     //uses per-side white mass so mixed compound lanes can mark only the chosen branch.

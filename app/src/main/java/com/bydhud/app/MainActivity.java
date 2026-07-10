@@ -155,6 +155,8 @@ public final class MainActivity extends ComponentActivity {
     private boolean destroyed;
     private boolean manualModeEnabled;
     private boolean adbGrantInProgress;
+    private boolean pendingManualAdbRetry;
+    private long pendingManualAdbRetryGeneration;
     private boolean autoAdbGrantAttemptedThisLaunch;
     private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean navPermissionSelfCheckPending;
@@ -2903,6 +2905,17 @@ public final class MainActivity extends ComponentActivity {
             LocalAdbBridge.AuthorizationPromptMode authorizationPromptMode,
             String autoGrantAttemptKey) {
         if (adbGrantInProgress) {
+            if (authorizationPromptMode == LocalAdbBridge.AuthorizationPromptMode.FORCE) {
+                if (!pendingManualAdbRetry) {
+                    pendingManualAdbRetry = true;
+                    LocalAdbBridge.AuthorizationCancellation cancellation =
+                            LocalAdbBridge.cancelPendingAuthorization();
+                    pendingManualAdbRetryGeneration = cancellation.generation;
+                    AppEventLogger.event(this, "adb_bridge auth_retry_queued"
+                            + " pending_auth_cancelled=" + cancellation.socketClosed);
+                }
+                return;
+            }
             appendStatus("adb bridge grant already running");
             return;
         }
@@ -2940,15 +2953,39 @@ public final class MainActivity extends ComponentActivity {
     //handles this branch here so source-specific edge cases stay out of the main flow.
     private void handleAdbGrantResult(LocalAdbBridge.Result result) {
         if (destroyed) {
+            if (pendingManualAdbRetry) {
+                pendingManualAdbRetry = false;
+                LocalAdbBridge.clearPendingAuthorizationCancellation(
+                        pendingManualAdbRetryGeneration);
+                pendingManualAdbRetryGeneration = 0L;
+            }
             AppEventLogger.event(getApplicationContext(), "adb_bridge_result_after_destroy "
                     + result.code + " " + result.message);
             return;
         }
         adbGrantInProgress = false;
+        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
+        boolean grantCompleted = status.readyForCapture()
+                && (result.code == LocalAdbBridge.Result.Code.GRANTED
+                || result.code == LocalAdbBridge.Result.Code.ALREADY_GRANTED);
+        if (pendingManualAdbRetry && !grantCompleted) {
+            pendingManualAdbRetry = false;
+            pendingManualAdbRetryGeneration = 0L;
+            AppEventLogger.event(this, "adb_bridge auth_retry_started");
+            requestAdbPermissionGrant(
+                    "manual-grant-retry",
+                    LocalAdbBridge.AuthorizationPromptMode.FORCE);
+            return;
+        }
+        if (pendingManualAdbRetry) {
+            LocalAdbBridge.clearPendingAuthorizationCancellation(
+                    pendingManualAdbRetryGeneration);
+        }
+        pendingManualAdbRetry = false;
+        pendingManualAdbRetryGeneration = 0L;
         appendStatus("adb bridge " + result.code + ": " + result.message);
         AppEventLogger.event(this, "adb_bridge_result "
                 + result.code + " " + result.message);
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         if (status.readyForCapture()) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
         }

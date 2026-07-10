@@ -978,7 +978,6 @@ private fun UpdateCheckOverlay(
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
-                            Spacer(Modifier.height(12.dp))
                             AvailableUpdateNotes(
                                 copy = copy,
                                 palette = palette,
