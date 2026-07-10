@@ -31,9 +31,10 @@ After first launch:
 2. Grant ADB access when Android shows the RSA authorization prompt.
 3. Set `Disable background Apps -> BYD HUD = OFF` in the BYD system settings.
 4. Optionally change prefered navigation settings.
-5. Choose supported navigation app from the list of supported apps and toogle `HUD`
-6. Optionally use `Send to dashboard`.
-7. If do not plan to debug - turn off `Save screenshots and detailed logs` option to prevent storage clogging 
+5. Choose supported navigation app from the list of supported apps and toogle `HUD`.
+6. If `Waze` is chosen then press `Start now` when `Casting with BYD HUD` prompt appears (need to do this every session).
+7. Optionally use `Send to dashboard`.
+8. If do not plan to debug - turn off `Save screenshots and detailed logs` option to prevent storage clogging.
    
 ## Known Limitations
 
