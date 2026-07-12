@@ -14,6 +14,7 @@ import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.net.HttpURLConnection
@@ -25,6 +26,7 @@ object AppUpdateManager {
     const val AUTO_CHECK_DELAY_MS = 30_000L
     private const val PREFS_NAME = "bydhud_update_prefs"
     private const val KEY_AUTO_CHECK = "auto_check_enabled"
+    private const val KEY_BETA_CHANNEL = "beta_channel_enabled"
     private const val KEY_LAST_CHECK_MS = "last_check_ms"
     private const val KEY_AUTO_CHECK_READY_AT_MS = "auto_check_ready_at_ms"
     private const val CHECK_THROTTLE_MS = 10 * 60 * 1000L
@@ -33,6 +35,30 @@ object AppUpdateManager {
     private const val RELEASE_API_HOST = "api.github.com"
     private const val APK_DOWNLOAD_HOST = "github.com"
     private const val RELEASE_PATH_MARKER = "/sunlixWhyNotAvailable/byd-hud/releases/download/"
+    private val GIT_TAG_PATTERN = Regex("""^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$""")
+    private val ANDROID_VERSION_PATTERN = Regex("""^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$""")
+
+    private data class SemanticVersion(
+        val major: Int,
+        val minor: Int,
+        val patch: Int,
+        val beta: Int?
+    ) : Comparable<SemanticVersion> {
+        override fun compareTo(other: SemanticVersion): Int {
+            compareValues(major, other.major).takeIf { it != 0 }?.let { return it }
+            compareValues(minor, other.minor).takeIf { it != 0 }?.let { return it }
+            compareValues(patch, other.patch).takeIf { it != 0 }?.let { return it }
+            return when {
+                beta == null && other.beta != null -> 1
+                beta != null && other.beta == null -> -1
+                else -> compareValues(beta ?: 0, other.beta ?: 0)
+            }
+        }
+
+        fun androidName(): String {
+            return "$major.$minor.$patch" + (beta?.let { "-beta.$it" } ?: "")
+        }
+    }
 
     //defines UpdateInfo UI/state support so Compose code can keep rendering intent explicit.
     data class UpdateInfo(
@@ -65,6 +91,23 @@ object AppUpdateManager {
                     editor.remove(KEY_AUTO_CHECK_READY_AT_MS)
                 }
             }
+            .apply()
+    }
+
+    fun isBetaChannelEnabled(context: Context): Boolean {
+        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            .getBoolean(KEY_BETA_CHANNEL, false)
+    }
+
+    //changing channels invalidates only the throttle; the caller decides when to check again.
+    fun setBetaChannelEnabled(context: Context, enabled: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        if (prefs.getBoolean(KEY_BETA_CHANNEL, false) == enabled) {
+            return
+        }
+        prefs.edit()
+            .putBoolean(KEY_BETA_CHANNEL, enabled)
+            .remove(KEY_LAST_CHECK_MS)
             .apply()
     }
 
@@ -137,20 +180,20 @@ object AppUpdateManager {
         }
         prefs.edit().putLong(KEY_LAST_CHECK_MS, now).apply()
 
-        //fetch latest GitHub release so the app can offer sideload update without a store.
-        val json = fetchLatestReleaseJson()
-        val remoteVersion = json.optString("tag_name", "").removePrefix("v").trim()
-        if (remoteVersion.isBlank()) {
-            throw IllegalStateException("GitHub release has no tag_name")
+        val release = if (isBetaChannelEnabled(context)) {
+            selectLatestRelease(fetchReleaseListJson())
+        } else {
+            selectStableRelease(fetchLatestReleaseJson())
         }
+        val remoteVersion = parseGitTag(release.optString("tag_name", "")).androidName()
         if (!isNewerVersion(remoteVersion, BuildConfig.VERSION_NAME)) {
             return@withContext CheckResult.UpToDate
         }
         CheckResult.Available(
             UpdateInfo(
                 version = remoteVersion,
-                downloadUrl = findApkAssetUrl(json),
-                releaseNotes = json.optString("body", "")
+                downloadUrl = findApkAssetUrl(release),
+                releaseNotes = release.optString("body", "")
             )
         )
     }
@@ -189,20 +232,20 @@ object AppUpdateManager {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     internal fun isNewerVersion(remote: String, local: String): Boolean {
-        val remoteParts = parseVersion(remote)
-        val localParts = parseVersion(local)
-        for (index in 0 until maxOf(remoteParts.size, localParts.size)) {
-            val remotePart = remoteParts.getOrElse(index) { 0 }
-            val localPart = localParts.getOrElse(index) { 0 }
-            if (remotePart > localPart) return true
-            if (remotePart < localPart) return false
-        }
-        return false
+        return parseAndroidVersion(remote) > parseAndroidVersion(local)
     }
 
     //keeps update I/O here so network, file, and installer failures are handled in one path.
     private fun fetchLatestReleaseJson(): JSONObject {
-        val releaseUrl = requireReleaseApiUrl(BuildConfig.UPDATE_RELEASE_API_URL)
+        return JSONObject(fetchReleaseJson(BuildConfig.UPDATE_RELEASE_API_URL))
+    }
+
+    private fun fetchReleaseListJson(): JSONArray {
+        return JSONArray(fetchReleaseJson(BuildConfig.UPDATE_RELEASES_API_URL))
+    }
+
+    private fun fetchReleaseJson(url: String): String {
+        val releaseUrl = requireReleaseApiUrl(url)
         val connection = (URL(releaseUrl).openConnection() as HttpURLConnection).apply {
             connectTimeout = 10_000
             readTimeout = 15_000
@@ -217,10 +260,35 @@ object AppUpdateManager {
             if (code !in 200..299) {
                 throw IllegalStateException("GitHub API HTTP $code")
             }
-            return JSONObject(body)
+            return body
         } finally {
             connection.disconnect()
         }
+    }
+
+    private fun selectStableRelease(release: JSONObject): JSONObject {
+        val version = parseGitTag(release.optString("tag_name", ""))
+        if (release.optBoolean("draft", false) || release.optBoolean("prerelease", false) || version.beta != null) {
+            throw IllegalStateException("GitHub latest release is not stable")
+        }
+        return release
+    }
+
+    private fun selectLatestRelease(releases: JSONArray): JSONObject {
+        var selected: JSONObject? = null
+        var selectedVersion: SemanticVersion? = null
+        for (index in 0 until releases.length()) {
+            val release = releases.optJSONObject(index) ?: continue
+            if (release.optBoolean("draft", false)) {
+                continue
+            }
+            val version = parseGitTagOrNull(release.optString("tag_name", "")) ?: continue
+            if (selectedVersion == null || version > selectedVersion) {
+                selected = release
+                selectedVersion = version
+            }
+        }
+        return selected ?: throw IllegalStateException("GitHub releases have no supported tags")
     }
 
     //guard release metadata fetches so app updates only trust the configured GitHub API host.
@@ -393,12 +461,28 @@ object AppUpdateManager {
             .toSet()
     }
 
-    //parses release tags here so prerelease labels work without allowing path-like suffixes.
-    private fun parseVersion(value: String): List<Int> {
-        val normalized = value.trim().removePrefix("v")
-        require(Regex("""\d+(\.\d+)*(?:-[0-9A-Za-z][0-9A-Za-z.-]*)?""").matches(normalized)) {
-            "Unsupported version tag: $value"
-        }
-        return normalized.substringBefore('-').split('.').map { part -> part.toInt() }
+    private fun parseGitTag(value: String): SemanticVersion {
+        return parseSemanticVersion(value.trim(), GIT_TAG_PATTERN)
+            ?: throw IllegalStateException("Unsupported GitHub release tag: $value")
+    }
+
+    private fun parseGitTagOrNull(value: String): SemanticVersion? {
+        return parseSemanticVersion(value.trim(), GIT_TAG_PATTERN)
+    }
+
+    private fun parseAndroidVersion(value: String): SemanticVersion {
+        return parseSemanticVersion(value.trim(), ANDROID_VERSION_PATTERN)
+            ?: throw IllegalArgumentException("Unsupported Android version name: $value")
+    }
+
+    private fun parseSemanticVersion(value: String, pattern: Regex): SemanticVersion? {
+        val match = pattern.matchEntire(value) ?: return null
+        val betaText = match.groupValues[4]
+        return SemanticVersion(
+            major = match.groupValues[1].toIntOrNull() ?: return null,
+            minor = match.groupValues[2].toIntOrNull() ?: return null,
+            patch = match.groupValues[3].toIntOrNull() ?: return null,
+            beta = if (betaText.isEmpty()) null else betaText.toIntOrNull() ?: return null
+        )
     }
 }

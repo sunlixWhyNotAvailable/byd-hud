@@ -15,6 +15,9 @@ import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 
+import java.util.HashSet;
+import java.util.Set;
+
 //anchors the NavNotificationListenerService android entry point so lifecycle recovery stays separate from business logic.
 public final class NavNotificationListenerService extends NotificationListenerService {
     private static final int FIELD_CHAR_LIMIT = 300;
@@ -90,6 +93,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
         lastDisconnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "disconnected elapsedMs=" + lastDisconnectedElapsedMs;
+        NavHudLiveSender.get(this).clearNavigationNotificationPresence("listener-disconnected");
         AppEventLogger.event(this, "notification_listener disconnected");
         super.onListenerDisconnected();
     }
@@ -101,6 +105,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             activeService = null;
         }
         lastRuntimeDetail = "destroyed";
+        NavHudLiveSender.get(this).clearNavigationNotificationPresence("listener-destroyed");
         AppEventLogger.event(this, "notification_listener destroyed");
         super.onDestroy();
     }
@@ -121,9 +126,16 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             if (notifications == null) {
                 return;
             }
+            Set<String> activeGMapsNavigationTokens = new HashSet<>();
             for (StatusBarNotification sbn : notifications) {
+                if (isOngoingGMapsNavigationNotification(sbn)) {
+                    activeGMapsNavigationTokens.add(NavHudLiveSender.notificationPresenceToken(
+                            sbn.getPackageName(), sbn.getKey()));
+                }
                 processPostedNotification(sbn, "active-" + safe(reason));
             }
+            NavHudLiveSender.get(this).reconcileNavigationNotificationPresence(
+                    activeGMapsNavigationTokens, "active-scan-" + safe(reason));
         } catch (RuntimeException e) {
             AppEventLogger.event(this, "notification_active_scan failed "
                     + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
@@ -144,6 +156,8 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             return;
         }
         NotificationFields fields = notificationFields(sbn);
+        NavHudLiveSender.get(this).updateNavigationNotificationPresence(
+                packageName, fields.key, fields.ongoing, fields.category);
         String payload = buildPostedPayload(fields, source);
         NavCaptureStore.rawEvent(this,
                 "posted".equals(source) ? "notification" : "notification_active",
@@ -209,6 +223,18 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 isOngoing(notification));
     }
 
+    private static boolean isOngoingGMapsNavigationNotification(StatusBarNotification sbn) {
+        if (sbn == null
+                || NavTextNormalizer.sourceApp(sbn.getPackageName())
+                != NavSnapshot.SourceApp.GOOGLE_MAPS) {
+            return false;
+        }
+        Notification notification = sbn.getNotification();
+        return isOngoing(notification)
+                && "navigation".equals(NavTextNormalizer.lower(
+                notification == null ? "" : notification.category));
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavManeuverEvidence largeIconEvidence(String packageName, Notification notification,
             long nowElapsedMs) {
@@ -256,6 +282,15 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             if (icon == null) {
                 return null;
             }
+            int iconType = icon.getType();
+            String iconDetail = "Notification.largeIcon Icon.getType=" + iconType;
+            if (iconType == Icon.TYPE_RESOURCE) {
+                iconDetail += " resourcePackage=" + safe(icon.getResPackage())
+                        + " resourceId=" + icon.getResId();
+            }
+            NavCaptureStore.rawEvent(this, "notification_large_icon", packageName, iconDetail);
+            AppEventLogger.event(this, "notification_large_icon package=" + packageName
+                    + " " + iconDetail);
             Drawable drawable = icon.loadDrawable(this);
             return drawableToBitmap(drawable);
         } catch (RuntimeException e) {

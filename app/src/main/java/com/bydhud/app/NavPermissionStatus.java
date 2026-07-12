@@ -3,8 +3,10 @@ package com.bydhud.app;
 //models install-time permission readiness so setup screens can show actionable status.
 
 import android.Manifest;
+import android.app.AppOpsManager;
 import android.content.Context;
 import android.content.pm.PackageManager;
+import android.os.Environment;
 import android.provider.Settings;
 
 //defines the NavPermissionStatus module boundary so related behavior stays readable inside one unit.
@@ -60,8 +62,10 @@ final class NavPermissionStatus {
                         accessibilityServices, plan.accessibilityService),
                 accessibilityEnabled == 1,
                 Settings.canDrawOverlays(context),
-                hasPermission(context, Manifest.permission.READ_EXTERNAL_STORAGE),
-                hasPermission(context, Manifest.permission.WRITE_EXTERNAL_STORAGE),
+                hasStorageAccess(context, Manifest.permission.READ_EXTERNAL_STORAGE,
+                        AppOpsManager.OPSTR_READ_EXTERNAL_STORAGE),
+                hasStorageAccess(context, Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        AppOpsManager.OPSTR_WRITE_EXTERNAL_STORAGE),
                 notificationListeners,
                 accessibilityServices);
     }
@@ -125,5 +129,18 @@ final class NavPermissionStatus {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasPermission(Context context, String permission) {
         return context.checkSelfPermission(permission) == PackageManager.PERMISSION_GRANTED;
+    }
+
+    private static boolean hasStorageAccess(Context context, String permission, String appOp) {
+        if (!hasPermission(context, permission) || !Environment.isExternalStorageLegacy()) {
+            return false;
+        }
+        AppOpsManager manager = context.getSystemService(AppOpsManager.class);
+        if (manager == null) {
+            return false;
+        }
+        int mode = manager.unsafeCheckOpNoThrow(
+                appOp, context.getApplicationInfo().uid, context.getPackageName());
+        return mode == AppOpsManager.MODE_ALLOWED || mode == AppOpsManager.MODE_DEFAULT;
     }
 }

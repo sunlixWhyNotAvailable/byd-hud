@@ -90,18 +90,23 @@ object BydHudRuntimeCompose {
     @JvmStatic
     //keeps update I/O here so network, file, and installer failures are handled in one path.
     fun install(activity: MainActivity) {
+        val initialTab = if (HudPrefs.takeOptionsIntroForCurrentVersion(activity)) {
+            RuntimeTab.Options
+        } else {
+            RuntimeTab.Apps
+        }
         activity.setContent {
-            RuntimeApp(activity)
+            RuntimeApp(activity, initialTab)
         }
     }
 }
 
 //defines class UI/state support so Compose code can keep rendering intent explicit.
 private enum class RuntimeTab {
-    Main,
+    Options,
     Apps,
-    Logs,
     Storage,
+    Logs,
     Manual
 }
 
@@ -188,6 +193,8 @@ private data class Copy(
     val checkForUpdates: String,
     val checkForUpdatesHint: String,
     val checkForUpdatesButton: String,
+    val betaTesting: String,
+    val betaTestingHint: String,
     val shutdown: String,
     val shutdownHint: String,
     val updateTitle: String,
@@ -375,9 +382,9 @@ private fun ModalInputBlocker() {
 
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun RuntimeApp(activity: MainActivity) {
+private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var snapshot by remember { mutableStateOf(activity.composeSnapshot()) }
-    var selectedTab by rememberSaveable { mutableStateOf(RuntimeTab.Main) }
+    var selectedTab by rememberSaveable { mutableStateOf(initialTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
@@ -387,6 +394,7 @@ private fun RuntimeApp(activity: MainActivity) {
     var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
+    var betaChannelEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isBetaChannelEnabled(activity)) }
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     var updateState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Checking) }
     var appInForeground by remember { mutableStateOf(false) }
@@ -577,7 +585,7 @@ private fun RuntimeApp(activity: MainActivity) {
                         .padding(bottom = 12.dp)
                 ) {
                     when (selectedTab) {
-                        RuntimeTab.Main -> MainTab(
+                        RuntimeTab.Options -> OptionsTab(
                             copy = copy,
                             palette = palette,
                             snapshot = snapshot,
@@ -587,6 +595,11 @@ private fun RuntimeApp(activity: MainActivity) {
                             onAutoUpdateCheckChange = { enabled ->
                                 autoUpdateCheckEnabled = enabled
                                 AppUpdateManager.setAutoCheckEnabled(activity, enabled)
+                            },
+                            betaChannelEnabled = betaChannelEnabled,
+                            onBetaChannelChange = { enabled ->
+                                betaChannelEnabled = enabled
+                                AppUpdateManager.setBetaChannelEnabled(activity, enabled)
                             },
                             onManualUpdateCheck = { beginUpdateCheck(force = true, showLatestResult = true) },
                             onDisableBgApps = { showSetupDialog = true },
@@ -740,7 +753,7 @@ private fun Header(
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun MainTab(
+private fun OptionsTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
@@ -748,6 +761,8 @@ private fun MainTab(
     runAction: (() -> Unit) -> Unit,
     autoUpdateCheckEnabled: Boolean,
     onAutoUpdateCheckChange: (Boolean) -> Unit,
+    betaChannelEnabled: Boolean,
+    onBetaChannelChange: (Boolean) -> Unit,
     onManualUpdateCheck: () -> Unit,
     onDisableBgApps: () -> Unit,
     onShutdownClick: () -> Unit
@@ -789,6 +804,14 @@ private fun MainTab(
                 onCheckedChange = onAutoUpdateCheckChange,
                 onCheckClick = onManualUpdateCheck,
                 palette = palette
+            )
+            Divider(palette)
+            SwitchRow(
+                copy.betaTesting,
+                copy.betaTestingHint,
+                betaChannelEnabled,
+                palette,
+                onBetaChannelChange
             )
             Divider(palette)
             SettingRow(
@@ -2655,10 +2678,10 @@ private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSel
             .padding(6.dp),
         horizontalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        TabButton(copy.main, RuntimeTab.Main, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.apps, RuntimeTab.Apps, selected, palette, Modifier.weight(1f), onSelect)
-        TabButton(copy.logs, RuntimeTab.Logs, selected, palette, Modifier.weight(1f), onSelect)
+        TabButton(copy.main, RuntimeTab.Options, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.storage, RuntimeTab.Storage, selected, palette, Modifier.weight(1f), onSelect)
+        TabButton(copy.logs, RuntimeTab.Logs, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.manual, RuntimeTab.Manual, selected, palette, Modifier.weight(1f), onSelect)
     }
 }
@@ -2711,7 +2734,7 @@ private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
 //keeps tab icon resources local so production does not pull the full material-icons-extended dex payload.
 @DrawableRes
 private fun iconFor(tab: RuntimeTab): Int = when (tab) {
-    RuntimeTab.Main -> R.drawable.ic_tab_home
+    RuntimeTab.Options -> R.drawable.ic_tab_options
     RuntimeTab.Apps -> R.drawable.ic_tab_apps
     RuntimeTab.Logs -> R.drawable.ic_tab_logs
     RuntimeTab.Storage -> R.drawable.ic_tab_storage
@@ -2875,7 +2898,7 @@ private fun lightPalette() = Palette(
 private fun enCopy() = Copy(
     title = "BYD HUD",
     subtitle = "HUD navigation output | v${BuildConfig.VERSION_NAME}",
-    main = "Main",
+    main = "Options",
     apps = "Apps",
     logs = "Logs",
     manual = "Manual",
@@ -2890,7 +2913,7 @@ private fun enCopy() = Copy(
     eng = "Англ",
     dark = "Dark",
     light = "Light",
-    mainHint = "Runtime controls and navigation output preferences.",
+    mainHint = "Runtime controls and quick navigation diagnostics",
     permissionsRuntime = "Permissions and Runtime",
     adbPermissions = "ADB permissions",
     adbHint = "Self-check grants required nav capture permissions automatically when ADB is authorized.",
@@ -2905,11 +2928,13 @@ private fun enCopy() = Copy(
     setupDialogDismiss = "Got it",
     bootRuntime = "Boot runtime service",
     bootRuntimeHint = "Start foreground HUD runtime after boot and watchdog events.",
-    saveScreenshotsLogs = "Save screenshots and detailed logs",
-    saveScreenshotsLogsHint = "Data for app debugging.",
+    saveScreenshotsLogs = "Save diagnostic screenshots and extended logs",
+    saveScreenshotsLogsHint = "Keep Waze frames, processing details, and full log history for diagnostics.",
     checkForUpdates = "Check for updates",
     checkForUpdatesHint = "Check for new version and offer updating",
     checkForUpdatesButton = "Check for updates",
+    betaTesting = "Take part in beta-testing",
+    betaTestingHint = "Check for experimental version. Usage may be unstable or broken",
     shutdown = "Shutdown",
     shutdownHint = "Stop the app until it is opened again",
     updateTitle = "Update",
@@ -3015,7 +3040,7 @@ private fun enCopy() = Copy(
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun uaCopy() = enCopy().copy(
     subtitle = "Виведення навігації на HUD | v${BuildConfig.VERSION_NAME}",
-    main = "Головна",
+    main = "Налаштування",
     apps = "Застосунки",
     logs = "Логи",
     manual = "Вручну",
@@ -3027,7 +3052,7 @@ private fun uaCopy() = enCopy().copy(
     permissionsMissing = "Права: немає",
     dark = "Темна",
     light = "Світла",
-    mainHint = "Керування runtime та налаштування виводу навігації.",
+    mainHint = "Runtime controls та швидка діагностика навігації",
     permissionsRuntime = "Дозволи та Runtime",
     adbPermissions = "ADB дозволи",
     adbHint = "Self-check автоматично видає потрібні дозволи, коли ADB авторизований.",
@@ -3042,11 +3067,13 @@ private fun uaCopy() = enCopy().copy(
     setupDialogDismiss = "Зрозуміло",
     bootRuntime = "Авто-запуск",
     bootRuntimeHint = "Запускати foreground HUD runtime після boot та watchdog подій.",
-    saveScreenshotsLogs = "Зберігати скріншоти та детальні логи",
-    saveScreenshotsLogsHint = "Дані для відладки роботи програми.",
+    saveScreenshotsLogs = "Зберігати діагностичні скріншоти та розширені логи",
+    saveScreenshotsLogsHint = "Зберігати кадри Waze, деталі обробки та повну історію логів для діагностики.",
     checkForUpdates = "Перевіряти оновлення",
     checkForUpdatesHint = "Перевіряти наявність нової версії та пропонувати оновитись",
     checkForUpdatesButton = "Перевірити оновлення",
+    betaTesting = "Участь у бета-тестуванні",
+    betaTestingHint = "Перевіряти наявність експериментальних версій. Може бути нестабільна або зламана робота",
     shutdown = "Виключити",
     shutdownHint = "Завершити роботу застосунку до наступного відкриття",
     updateTitle = "Оновлення",

@@ -13,12 +13,17 @@ android {
         minSdk = 29
         targetSdk = 29
         //keeps android upgrade ordering ahead of the previous 1.0.1 field build.
-        versionCode = 61
-        versionName = "1.5.2"
+        versionCode = 62
+        versionName = "1.6.0"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
             "\"https://api.github.com/repos/sunlixWhyNotAvailable/byd-hud/releases/latest\""
+        )
+        buildConfigField(
+            "String",
+            "UPDATE_RELEASES_API_URL",
+            "\"https://api.github.com/repos/sunlixWhyNotAvailable/byd-hud/releases\""
         )
         buildConfigField("String", "UPDATE_USER_AGENT", "\"BYD-HUD-UpdateCheck\"")
         buildConfigField("boolean", "WAZE_FRAME_CAPTURE_BETA", "true")

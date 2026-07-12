@@ -214,7 +214,9 @@ public final class MainActivity extends ComponentActivity {
             }
             if (startBindAttempts >= START_BIND_RETRY_LIMIT) {
                 startAfterBindPending = false;
+                HudDeliveryStatus.recordFailure();
                 appendStatus("start pending failed: SomeIP bind timeout");
+                refreshControls();
                 return;
             }
             startBindAttempts++;
@@ -932,10 +934,10 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String hudStatus(NavRuntimePermissionStatus permissionStatus) {
-        if (!permissionStatus.readyForCapture()) {
+        if (!permissionStatus.readyForCapture() || HudDeliveryStatus.hasTransportFailure()) {
             return "failed";
         }
-        if (NavHudLiveSender.get(this).isRunning() || sending) {
+        if (HudDeliveryStatus.isRunning()) {
             return "running";
         }
         return "idle";
@@ -1961,6 +1963,7 @@ public final class MainActivity extends ComponentActivity {
         }
         applyNavigationFields();
         try {
+            HudDeliveryStatus.reset();
             hudClient.start();
             arrowCuratedMode = true;
             curatedIndex = HudArrowComboCatalog.defaultIndex();
@@ -1975,6 +1978,7 @@ public final class MainActivity extends ComponentActivity {
                     + " backgroundMode=" + BACKGROUND_MODE);
             refreshControls();
         } catch (RemoteException e) {
+            HudDeliveryStatus.recordFailure();
             appendStatus("start error: " + e.getMessage());
             Log.e(TAG, "startSending failed", e);
             refreshControls();
@@ -1993,6 +1997,7 @@ public final class MainActivity extends ComponentActivity {
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopSending(boolean clearHud) {
         sending = false;
+        HudDeliveryStatus.reset();
         startAfterBindPending = false;
         clearSequenceActive = false;
         cancelPendingHudCallbacks();
@@ -2070,6 +2075,11 @@ public final class MainActivity extends ComponentActivity {
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopImmediately(String reason, boolean clearHud, boolean unbindClient) {
         sending = false;
+        if ("send-error".equals(reason)) {
+            HudDeliveryStatus.recordFailure();
+        } else {
+            HudDeliveryStatus.reset();
+        }
         clearSequenceActive = false;
         cancelPendingHudCallbacks();
         if (hudClient != null && hudClient.isBound()) {
@@ -2817,14 +2827,17 @@ public final class MainActivity extends ComponentActivity {
     private void runNavPermissionSelfCheck(boolean autoGrant) {
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         String adbKey = LocalAdbBridge.adbKeyFingerprint(this);
+        boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
         boolean autoAttempted = autoAdbGrantAttemptedThisLaunch;
         String uiSummary = status.uiSummary(autoAttempted, adbKey);
-        if (status.readyForCapture()) {
+        if (status.readyForCapture()
+                && LocalAdbBridge.canShortCircuitReadyForCapture(
+                this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
             updateAdbBridgeStatus(uiSummary);
             appendStatus("nav permission self-check: " + status.summary());
             AppEventLogger.event(this, "nav_permission_self_check "
-                    + status.summary());
+                    + status.summary() + " keyKnown=true");
             refreshControls();
             return;
         }
@@ -2833,6 +2846,7 @@ public final class MainActivity extends ComponentActivity {
         appendStatus("nav permission self-check: " + status.summary() + " adbKey=" + adbKey);
         AppEventLogger.event(this, "nav_permission_self_check "
                 + status.summary() + " adbKey=" + adbKey
+                + " keyKnown=" + keyKnown
                 + " autoGrant=" + autoGrant
                 + " attempted=" + autoAttempted);
         refreshControls();
@@ -2849,6 +2863,14 @@ public final class MainActivity extends ComponentActivity {
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         if (status.readyForCapture()) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
+            if (!LocalAdbBridge.canShortCircuitReadyForCapture(
+                    this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
+                NavRuntimePermissionRepair.checkAndRepairAsync(
+                        this,
+                        "start-key-check-" + (mode == null ? "capture" : mode),
+                        true,
+                        LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+            }
             return true;
         }
         String safeMode = mode == null ? "capture" : mode;
@@ -3069,6 +3091,7 @@ public final class MainActivity extends ComponentActivity {
         try {
             PayloadSnapshot payload = getPayloadSnapshot();
             int ret = hudClient.send(payload.bytes);
+            HudDeliveryStatus.recordNonClearResult(ret);
             sendCount++;
             if (!"loop".equals(reason) || sendCount % LOOP_LOG_EVERY_SENDS == 1) {
                 appendStatus("fireEvent ret=" + ret
@@ -3084,6 +3107,7 @@ public final class MainActivity extends ComponentActivity {
                         + " " + state.summary());
             }
         } catch (RemoteException e) {
+            HudDeliveryStatus.recordFailure();
             appendStatus("send error: " + e.getMessage());
             stopImmediately("send-error", false, true);
             Log.e(TAG, "sendCurrentState failed", e);

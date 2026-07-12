@@ -40,6 +40,10 @@ final class AppEventLogger {
     private static File file(Context context, String name) {
         File file = new File(logDir(context), name);
         if (file.exists() && file.length() > MAX_FILE_BYTES) {
+            if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
+                NavCaptureStore.rotate(file);
+                return file;
+            }
             File rotated = new File(logDir(context), name + ".1");
             if (rotated.exists() && !rotated.delete()) {
                 Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());

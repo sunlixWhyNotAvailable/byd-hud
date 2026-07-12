@@ -29,6 +29,7 @@ import java.security.interfaces.RSAPublicKey;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.security.spec.RSAPublicKeySpec;
 import java.security.spec.X509EncodedKeySpec;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
 import java.util.regex.Pattern;
@@ -55,6 +56,7 @@ final class LocalAdbBridge {
     private static final String LEGACY_PRIVATE_KEY_FILE = "bydhud_adb_private.pk8";
     private static final String PREFS_NAME = "byd_hud_adb_bridge_prefs";
     private static final String KEY_AUTO_PROMPT_FINGERPRINT = "auto_prompt_fingerprint";
+    private static final String KEY_AUTHORIZED_FINGERPRINT = "authorized_fingerprint";
     private static final String EXIT_MARKER = "__BYDHUD_EXIT__:";
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
@@ -80,6 +82,7 @@ final class LocalAdbBridge {
     private static Socket pendingAuthorizationSocket;
     private static long authorizationCancellationGeneration;
     private static boolean authorizationCancellationPending;
+    private static volatile String verifiedFingerprintThisProcess = "";
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private LocalAdbBridge() {
@@ -117,8 +120,27 @@ final class LocalAdbBridge {
     }
 
     //guards adb repair so auto and manual flows can authorize a fresh app key after reinstall.
-    static boolean canShortCircuitReadyForCapture(AuthorizationPromptMode mode) {
-        return mode == AuthorizationPromptMode.NEVER;
+    static boolean canShortCircuitReadyForCapture(
+            Context context, AuthorizationPromptMode mode) {
+        if (mode == AuthorizationPromptMode.NEVER) {
+            return true;
+        }
+        return mode == AuthorizationPromptMode.AUTO_ONCE
+                && isCurrentKeyVerifiedThisProcess(context);
+    }
+
+    //uses the last successful ADB handshake as evidence that AUTO_ONCE needs no new prompt.
+    static boolean isCurrentKeyKnownAuthorized(Context context) {
+        String fingerprint = adbKeyFingerprint(context);
+        return !"unavailable".equals(fingerprint)
+                && fingerprint.equals(prefs(context).getString(KEY_AUTHORIZED_FINGERPRINT, ""));
+    }
+
+    private static boolean isCurrentKeyVerifiedThisProcess(Context context) {
+        String fingerprint = adbKeyFingerprint(context);
+        return !"unavailable".equals(fingerprint)
+                && fingerprint.equals(verifiedFingerprintThisProcess)
+                && isCurrentKeyKnownAuthorized(context);
     }
 
     //closes only the socket waiting for RSA approval so a manual retry can prompt immediately.
@@ -189,14 +211,24 @@ final class LocalAdbBridge {
         NavPermissionStatus before = NavPermissionStatus.check(appContext);
         NavRuntimePermissionStatus runtimeBefore = NavRuntimePermissionStatus.check(appContext);
         if (runtimeBefore.readyForCapture()
-                && canShortCircuitReadyForCapture(authorizationPromptMode)) {
+                && canShortCircuitReadyForCapture(appContext, authorizationPromptMode)) {
             return Result.alreadyGranted(runtimeBefore.summary());
         }
-        boolean grantNotificationListener = !before.notificationListenerEnabled
-                || !runtimeBefore.notificationListenerConnected;
+        boolean grantNotificationListener = !before.notificationListenerEnabled;
         boolean grantAccessibilityService = !before.accessibilityServiceEnabled;
         boolean grantAccessibilityMaster = !before.accessibilityMasterEnabled;
         boolean grantDashboardOverlay = !before.dashboardOverlayEnabled;
+        boolean grantStorageRead = !before.storageReadEnabled;
+        boolean grantStorageWrite = !before.storageWriteEnabled;
+        AppEventLogger.event(appContext, "adb_bridge targets"
+                + " notification=" + grantNotificationListener
+                + " accessibility=" + grantAccessibilityService
+                + " accessibilityMaster=" + grantAccessibilityMaster
+                + " overlay=" + grantDashboardOverlay
+                + " storageRead=" + grantStorageRead
+                + " storageWrite=" + grantStorageWrite
+                + " forceStorageAppOps="
+                + (authorizationPromptMode == AuthorizationPromptMode.FORCE));
 
         Connection connection = null;
         try {
@@ -213,6 +245,12 @@ final class LocalAdbBridge {
             String endpointSuffix = openResult.endpointLabel.isEmpty()
                     ? ""
                     : " via " + openResult.endpointLabel;
+
+            //A healthy runtime with a new/forced key only needs the successful handshake above.
+            if (runtimeBefore.readyForCapture()
+                    && authorizationPromptMode != AuthorizationPromptMode.FORCE) {
+                return Result.alreadyGranted(runtimeBefore.summary() + endpointSuffix);
+            }
 
             ShellResult notification = connection.shellWithExit(
                     "settings get secure " + NavPermissionGrantPlan.NOTIFICATION_LISTENERS);
@@ -236,13 +274,20 @@ final class LocalAdbBridge {
                     grantAccessibilityMaster,
                     grantDashboardOverlay);
             for (String command : plan.shellCommands) {
+                AppEventLogger.event(appContext, "adb_bridge targeted_command " + command);
                 ShellResult result = connection.shellWithExit(command);
                 if (!result.success()) {
                     return Result.failed("ADB grant command failed: " + command
                             + " -> " + result.shortDetail());
                 }
             }
-            grantStoragePermissionsBestEffort(connection, appContext, normalizedPackage);
+            grantStoragePermissionsBestEffort(
+                    connection,
+                    appContext,
+                    normalizedPackage,
+                    grantStorageRead,
+                    grantStorageWrite,
+                    authorizationPromptMode == AuthorizationPromptMode.FORCE);
             if (grantNotificationListener) {
                 ShellResult notificationAllow = connection.shellWithExit(
                         notificationAllowListenerCommand(normalizedPackage));
@@ -256,7 +301,9 @@ final class LocalAdbBridge {
                 }
             }
 
-            NavNotificationListenerService.requestRuntimeRebind(appContext, "adb-grant");
+            if (grantNotificationListener || !runtimeBefore.notificationListenerConnected) {
+                NavNotificationListenerService.requestRuntimeRebind(appContext, "adb-grant");
+            }
             Result accessibilityRebindResult = rebindAccessibilityRuntimeIfNeeded(
                     connection,
                     appContext,
@@ -291,8 +338,12 @@ final class LocalAdbBridge {
     private static void grantStoragePermissionsBestEffort(
             Connection connection,
             Context appContext,
-            String normalizedPackage) throws IOException {
-        for (String command : storageGrantCommands(normalizedPackage)) {
+            String normalizedPackage,
+            boolean grantRead,
+            boolean grantWrite,
+            boolean forceAppOps) throws IOException {
+        for (String command : storageGrantCommands(
+                normalizedPackage, grantRead, grantWrite, forceAppOps)) {
             ShellResult result = connection.shellWithExit(command);
             if (result.success()) {
                 AppEventLogger.event(appContext,
@@ -306,13 +357,30 @@ final class LocalAdbBridge {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static List<String> storageGrantCommands(String normalizedPackage) {
-        return Arrays.asList(
-                "pm grant " + normalizedPackage + " android.permission.READ_EXTERNAL_STORAGE",
-                "pm grant " + normalizedPackage + " android.permission.WRITE_EXTERNAL_STORAGE",
-                "appops set " + normalizedPackage + " READ_EXTERNAL_STORAGE allow",
-                "appops set " + normalizedPackage + " WRITE_EXTERNAL_STORAGE allow",
-                "appops set " + normalizedPackage + " LEGACY_STORAGE allow");
+    private static List<String> storageGrantCommands(
+            String normalizedPackage,
+            boolean grantRead,
+            boolean grantWrite,
+            boolean forceAppOps) {
+        List<String> commands = new ArrayList<>();
+        if (grantRead) {
+            commands.add("pm grant " + normalizedPackage
+                    + " android.permission.READ_EXTERNAL_STORAGE");
+        }
+        if (grantRead || forceAppOps) {
+            commands.add("appops set " + normalizedPackage + " READ_EXTERNAL_STORAGE allow");
+        }
+        if (grantWrite) {
+            commands.add("pm grant " + normalizedPackage
+                    + " android.permission.WRITE_EXTERNAL_STORAGE");
+        }
+        if (grantWrite || forceAppOps) {
+            commands.add("appops set " + normalizedPackage + " WRITE_EXTERNAL_STORAGE allow");
+        }
+        if (grantRead || grantWrite || forceAppOps) {
+            commands.add("appops set " + normalizedPackage + " LEGACY_STORAGE allow");
+        }
+        return commands;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -694,9 +762,7 @@ final class LocalAdbBridge {
                     throw e;
                 }
                 if (packet.command == AdbPacket.A_CNXN) {
-                    if (publicKeySent) {
-                        markAuthorizationPromptSent(context, keyFingerprint);
-                    }
+                    markAuthorizedFingerprint(context, keyFingerprint);
                     clearPendingAuthorization(socket);
                     return new OpenResult(connection, false, publicKeySent, endpoint);
                 }
@@ -716,9 +782,20 @@ final class LocalAdbBridge {
                     continue;
                 }
                 if (!publicKeySent) {
+                    boolean autoPromptAlreadySent =
+                            autoPromptAlreadySentForKey(context, keyFingerprint);
+                    boolean persistedAuthorizationRejected = keyFingerprint.equals(
+                            prefs(context).getString(KEY_AUTHORIZED_FINGERPRINT, ""));
+                    if (persistedAuthorizationRejected) {
+                        clearAuthorizedFingerprint(context, keyFingerprint);
+                    }
+                    if (authorizationPromptMode == AuthorizationPromptMode.AUTO_ONCE
+                            && persistedAuthorizationRejected) {
+                        autoPromptAlreadySent = false;
+                    }
                     if (!shouldSendPublicKeyForMode(
                             authorizationPromptMode,
-                            autoPromptAlreadySentForKey(context, keyFingerprint))) {
+                            autoPromptAlreadySent)) {
                         connection.close();
                         return new OpenResult(null, true, false, endpoint);
                     }
@@ -736,6 +813,7 @@ final class LocalAdbBridge {
                             AdbPacket.AUTH_RSAPUBLICKEY,
                             0,
                             nulPayload(publicKey));
+                    markAuthorizationPromptSent(context, keyFingerprint);
                     publicKeySent = true;
                     socket.setSoTimeout(AUTH_PROMPT_TIMEOUT_MS);
                     continue;
@@ -1037,6 +1115,22 @@ final class LocalAdbBridge {
         } catch (IOException ignored) {
             //closes the diagnostic bridge defensively because this path runs during failure cleanup.
         }
+    }
+
+    //records only completed ADB handshakes, not merely displayed RSA prompts.
+    private static void markAuthorizedFingerprint(Context context, String keyFingerprint) {
+        verifiedFingerprintThisProcess = keyFingerprint == null ? "" : keyFingerprint.trim();
+        prefs(context).edit()
+                .putString(KEY_AUTHORIZED_FINGERPRINT,
+                        verifiedFingerprintThisProcess)
+                .apply();
+        AppEventLogger.event(context, "adb_bridge authorized key=" + keyFingerprint);
+    }
+
+    private static void clearAuthorizedFingerprint(Context context, String keyFingerprint) {
+        verifiedFingerprintThisProcess = "";
+        prefs(context).edit().remove(KEY_AUTHORIZED_FINGERPRINT).apply();
+        AppEventLogger.event(context, "adb_bridge authorization_revoked key=" + keyFingerprint);
     }
 
     //tracks only the socket blocked on RSA consent so shell sessions remain untouched.

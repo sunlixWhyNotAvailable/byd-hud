@@ -20,6 +20,7 @@ final class HudPrefs {
     private static final String KEY_UA_LANGUAGE = "ua_language";
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
+    private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
     private static final String KEY_BG_REMINDER_VERSION = "bg_reminder_version";
     private static final String KEY_BG_REMINDER_TOKEN = "bg_reminder_token";
     private static final String KEY_RUNTIME_SERVICE_RUNNING = "runtime_service_running";
@@ -149,6 +150,17 @@ final class HudPrefs {
     //keeps debug artifact volume user-controlled while preserving operational logs.
     static void setDetailedDebugArtifactsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, enabled).apply();
+    }
+
+    //opens Options once for each installed build, then defaults later launches to Apps.
+    static boolean takeOptionsIntroForCurrentVersion(Context context) {
+        SharedPreferences preferences = prefs(context);
+        long currentVersionCode = BuildConfig.VERSION_CODE;
+        if (preferences.getLong(KEY_OPTIONS_INTRO_VERSION_CODE, -1L) == currentVersionCode) {
+            return false;
+        }
+        preferences.edit().putLong(KEY_OPTIONS_INTRO_VERSION_CODE, currentVersionCode).apply();
+        return true;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

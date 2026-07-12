@@ -10,6 +10,9 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.util.HashSet;
+import java.util.Set;
+
 //defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
 final class NavHudLiveSender {
     private static final String TAG = "BydHudNavLive";
@@ -21,6 +24,7 @@ final class NavHudLiveSender {
     private static final long ARRIVAL_ROUTE_END_STOP_DELAY_MS = 3000L;
     private static final long ROUTE_HEALTH_INTERVAL_MS = 1000L;
     private static final long ACTIVE_ROUTE_STALE_CLEAR_MS = 15000L;
+    private static final long GMAPS_NOTIFICATION_RECONCILE_MS = 30_000L;
     private static final long WAZE_VISUAL_FRESH_MS = 2500L;
     private static final long WAZE_ROUTE_NODE_FRESH_MS = 3000L;
     private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
@@ -60,6 +64,9 @@ final class NavHudLiveSender {
     private NavSnapshot.Maneuver latestRouteManeuver = NavSnapshot.Maneuver.UNKNOWN;
     private String latestReason = "";
     private String activeNotificationKey = "";
+    private String ongoingGMapsNotificationPackage = "";
+    private String ongoingGMapsNotificationKey = "";
+    private long lastGMapsNotificationReconcileMs;
     private String pendingRemovalKey = "";
     private String pendingRemovalPackage = "";
     private String pendingRemovalActiveKey = "";
@@ -93,6 +100,7 @@ final class NavHudLiveSender {
             }
             if (bindAttempts >= START_BIND_RETRY_LIMIT) {
                 log("bind timeout activePackage=" + activePackage);
+                HudDeliveryStatus.recordFailure();
                 stopOnMain("bind-timeout", false);
                 return;
             }
@@ -130,6 +138,12 @@ final class NavHudLiveSender {
                     active, packageName, activePackage, key, activeKey)) {
                 return;
             }
+            if (hasOngoingGMapsNavigationNotification()) {
+                log("notification removed stop ignored: replacement GMaps notification active"
+                        + " package=" + activePackage + " key=" + ongoingGMapsNotificationKey);
+                scheduleRouteHealthLoop();
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             if (NavTextNormalizer.sourceApp(activePackage) == NavSnapshot.SourceApp.GOOGLE_MAPS
                     && (lastAccessibilityResultMs <= 0L
@@ -157,6 +171,17 @@ final class NavHudLiveSender {
             }
             long now = SystemClock.elapsedRealtime();
             NavRouteStateStore routeStore = NavRouteStateStore.get(context);
+            if (hasOngoingGMapsNavigationNotification()) {
+                if (now - lastGMapsNotificationReconcileMs >= GMAPS_NOTIFICATION_RECONCILE_MS) {
+                    lastGMapsNotificationReconcileMs = now;
+                    NavNotificationListenerService.requestActiveNotificationScan(
+                            context, "route-health");
+                }
+                log("route stale ignored: ongoing GMaps notification package="
+                        + activePackage + " key=" + ongoingGMapsNotificationKey);
+                scheduleRouteHealthLoop();
+                return;
+            }
             boolean routeActive = routeStore.isRouteActive(activePackage, now);
             long age = routeStore.evidenceAgeMs(activePackage, now);
             if (!routeActive
@@ -185,6 +210,12 @@ final class NavHudLiveSender {
             }
             long now = SystemClock.elapsedRealtime();
             if (NavTextNormalizer.sourceApp(activePackage) == NavSnapshot.SourceApp.GOOGLE_MAPS) {
+                if (hasOngoingGMapsNavigationNotification()) {
+                    log("accessibility no-route ignored: ongoing GMaps notification package="
+                            + activePackage + " key=" + ongoingGMapsNotificationKey);
+                    scheduleRouteHealthLoop();
+                    return;
+                }
                 forceClearNavigator(activePackage, "accessibility-route-ended", now);
                 return;
             }
@@ -317,6 +348,65 @@ final class NavHudLiveSender {
         });
     }
 
+    //tracks GMaps notification liveness even when its current payload cannot be parsed.
+    void updateNavigationNotificationPresence(
+            String packageName, String notificationKey, boolean ongoing, String category) {
+        final String normalizedPackage = normalizePackage(packageName);
+        final String normalizedKey = normalizeString(notificationKey);
+        final boolean activeNavigation = ongoing
+                && "navigation".equals(NavTextNormalizer.lower(category))
+                && NavTextNormalizer.sourceApp(normalizedPackage)
+                == NavSnapshot.SourceApp.GOOGLE_MAPS;
+        handler.post(() -> {
+            if (!activeNavigation) {
+                if (normalizedPackage.equals(ongoingGMapsNotificationPackage)
+                        && (normalizedKey.isEmpty()
+                        || normalizedKey.equals(ongoingGMapsNotificationKey))) {
+                    ongoingGMapsNotificationPackage = "";
+                    ongoingGMapsNotificationKey = "";
+                    lastGMapsNotificationReconcileMs = 0L;
+                }
+                return;
+            }
+            ongoingGMapsNotificationPackage = normalizedPackage;
+            ongoingGMapsNotificationKey = normalizedKey;
+            lastGMapsNotificationReconcileMs = SystemClock.elapsedRealtime();
+            log("GMaps navigation notification active package=" + normalizedPackage
+                    + " key=" + normalizedKey);
+            scheduleRouteHealthLoop();
+        });
+    }
+
+    //reconciles posted callbacks against NotificationListenerService's authoritative active set.
+    void reconcileNavigationNotificationPresence(Set<String> activeTokens, String reason) {
+        final Set<String> snapshot = activeTokens == null
+                ? new HashSet<>()
+                : new HashSet<>(activeTokens);
+        final String safeReason = normalizeString(reason);
+        handler.post(() -> {
+            if (ongoingGMapsNotificationKey.isEmpty()) {
+                return;
+            }
+            String token = notificationPresenceToken(
+                    ongoingGMapsNotificationPackage, ongoingGMapsNotificationKey);
+            if (snapshot.contains(token)) {
+                return;
+            }
+            log("GMaps navigation notification reconciled missing package="
+                    + ongoingGMapsNotificationPackage
+                    + " key=" + ongoingGMapsNotificationKey
+                    + " reason=" + safeReason);
+            ongoingGMapsNotificationPackage = "";
+            ongoingGMapsNotificationKey = "";
+            lastGMapsNotificationReconcileMs = 0L;
+            scheduleRouteHealthLoop();
+        });
+    }
+
+    void clearNavigationNotificationPresence(String reason) {
+        reconcileNavigationNotificationPresence(new HashSet<>(), reason);
+    }
+
     //re-arms Waze crop after Android recreates MediaProjection so recovery does not wait for a user tap.
     void onWazeMediaProjectionReady(String reason) {
         final String safeReason = normalizeString(reason);
@@ -443,6 +533,14 @@ final class NavHudLiveSender {
         final String normalized = normalizePackage(packageName);
         final String safeKey = normalizeString(notificationKey);
         handler.post(() -> {
+            if (normalized.equals(ongoingGMapsNotificationPackage)
+                    && (safeKey.isEmpty() || safeKey.equals(ongoingGMapsNotificationKey))) {
+                ongoingGMapsNotificationPackage = "";
+                ongoingGMapsNotificationKey = "";
+                lastGMapsNotificationReconcileMs = 0L;
+                log("GMaps navigation notification removed package=" + normalized
+                        + " key=" + safeKey);
+            }
             if (!active || normalized.isEmpty() || !normalized.equals(activePackage)) {
                 return;
             }
@@ -480,6 +578,7 @@ final class NavHudLiveSender {
         }
         if ("ui-start".equals(reason) || !packageName.equals(activePackage)) {
             resetLatestPayload();
+            HudDeliveryStatus.reset();
         }
         cancelPendingRouteEndStops();
         active = true;
@@ -836,6 +935,11 @@ final class NavHudLiveSender {
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
+        if ("send-error".equals(reason) || "bind-timeout".equals(reason)) {
+            HudDeliveryStatus.recordFailure();
+        } else {
+            HudDeliveryStatus.reset();
+        }
         resetLatestPayload();
         boolean stopHud = hudStarted || stopReinitHud;
         if (hudClient.hasBinding()) {
@@ -1092,6 +1196,16 @@ final class NavHudLiveSender {
         lastWazeRouteNodeScanHadRoute = false;
     }
 
+    private boolean hasOngoingGMapsNavigationNotification() {
+        return NavTextNormalizer.sourceApp(activePackage) == NavSnapshot.SourceApp.GOOGLE_MAPS
+                && activePackage.equals(ongoingGMapsNotificationPackage)
+                && !ongoingGMapsNotificationKey.isEmpty();
+    }
+
+    static String notificationPresenceToken(String packageName, String notificationKey) {
+        return normalizePackage(packageName) + "\n" + normalizeString(notificationKey);
+    }
+
     //resets stale post-update state before the first new navigation session binds SOME/IP again.
     private void resetRuntimeAfterPackageReplace(String packageName, String reason) {
         handler.removeCallbacks(bindRetryRunnable);
@@ -1300,10 +1414,17 @@ final class NavHudLiveSender {
                                 + " current=" + transportGeneration + " reason=" + reason);
                         return;
                     }
+                    HudDeliveryStatus.recordNonClearResult(ret);
                     log("live-send worker ret=" + ret + " reason=" + reason + detail);
                 });
             } catch (RemoteException | RuntimeException e) {
                 handler.post(() -> {
+                    if (sendGeneration != transportGeneration) {
+                        log("send error ignored stale generation=" + sendGeneration
+                                + " current=" + transportGeneration + " reason=" + reason);
+                        return;
+                    }
+                    HudDeliveryStatus.recordFailure();
                     log("send error reason=" + reason + ": " + e.getMessage());
                     Log.e(TAG, "postHudBuildAndSend failed", e);
                     if (stopOnError && sendGeneration == transportGeneration) {
