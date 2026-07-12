@@ -105,27 +105,78 @@ final class NavCaptureStore {
         if (!shouldRotate(file.length())) {
             return false;
         }
-        File rotated = new File(file.getParentFile(), file.getName() + ".1");
-        if (rotated.exists() && !rotated.delete()) {
-            Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());
-        }
-        if (file.renameTo(rotated)) {
-            try {
-                if (!file.createNewFile() && !file.exists()) {
-                    Log.w(TAG, "create active log failed: " + file.getAbsolutePath());
-                }
-            } catch (IOException e) {
-                Log.e(TAG, "create active log failed " + file.getAbsolutePath(), e);
-            }
-            return true;
-        }
-        try (FileWriter writer = new FileWriter(file, false)) {
-            writer.write("");
-        } catch (IOException e) {
-            Log.e(TAG, "truncate failed " + file.getAbsolutePath(), e);
+        return rotate(file);
+    }
+
+    //preserves every same-day shard; the dated parent directory resets the sequence naturally.
+    static boolean rotate(File file) {
+        if (file == null || !file.exists() || file.getParentFile() == null) {
             return false;
         }
+        int highestSuffix = highestRotatedSuffix(file);
+        if (highestSuffix == Integer.MAX_VALUE) {
+            Log.w(TAG, "rotate suffix exhausted: " + file.getAbsolutePath());
+            return false;
+        }
+        for (int suffix = highestSuffix; suffix >= 1; suffix--) {
+            File source = rotatedFile(file, suffix);
+            if (!source.isFile()) {
+                continue;
+            }
+            File target = rotatedFile(file, suffix + 1);
+            if (target.exists() || !source.renameTo(target)) {
+                Log.w(TAG, "rotate shard failed: " + source.getAbsolutePath()
+                        + " -> " + target.getAbsolutePath());
+                return false;
+            }
+        }
+
+        File rotated = rotatedFile(file, 1);
+        if (!file.renameTo(rotated)) {
+            Log.w(TAG, "rotate active failed: " + file.getAbsolutePath()
+                    + " -> " + rotated.getAbsolutePath());
+            return false;
+        }
+        try {
+            if (!file.createNewFile() && !file.exists()) {
+                Log.w(TAG, "create active log failed: " + file.getAbsolutePath());
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "create active log failed " + file.getAbsolutePath(), e);
+        }
         return true;
+    }
+
+    private static int highestRotatedSuffix(File file) {
+        String prefix = file.getName() + ".";
+        File[] siblings = file.getParentFile().listFiles();
+        int highest = 0;
+        if (siblings == null) {
+            return highest;
+        }
+        for (File sibling : siblings) {
+            if (sibling == null || !sibling.isFile()) {
+                continue;
+            }
+            String name = sibling.getName();
+            if (!name.startsWith(prefix)) {
+                continue;
+            }
+            String suffix = name.substring(prefix.length());
+            try {
+                int value = Integer.parseInt(suffix);
+                if (value > highest) {
+                    highest = value;
+                }
+            } catch (NumberFormatException ignored) {
+                // Ignore non-numeric artifacts such as manual backups.
+            }
+        }
+        return highest;
+    }
+
+    private static File rotatedFile(File file, int suffix) {
+        return new File(file.getParentFile(), file.getName() + "." + suffix);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

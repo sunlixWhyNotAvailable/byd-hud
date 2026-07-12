@@ -14,6 +14,20 @@ final class GMapsAccessibilityParser {
     private static final Pattern IN_DISTANCE =
             Pattern.compile("\\b(in|for)\\s+[0-9]+(?:[\\.,][0-9]+)?\\s*(km|m|\\u043a\\u043c|\\u043c)(?=$|\\s|[.,;:!?])",
                     Pattern.CASE_INSENSITIVE);
+    private static final Pattern UK_ROUNDABOUT_EXIT =
+            Pattern.compile("(10|[1-9])-(?:\\u0438\\u0439|\\u0439|\\u0456\\u0439)\\s+"
+                            + "\\u0437['\\u2019]\\u0457\\u0437\\u0434",
+                    Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+    private static final String UK_TURN_LEFT =
+            "\u043f\u043e\u0432\u0435\u0440\u043d\u0456\u0442\u044c "
+                    + "\u043b\u0456\u0432\u043e\u0440\u0443\u0447";
+    private static final String UK_TURN_RIGHT =
+            "\u043f\u043e\u0432\u0435\u0440\u043d\u0456\u0442\u044c "
+                    + "\u043f\u0440\u0430\u0432\u043e\u0440\u0443\u0447";
+    private static final String UK_AT_ROUNDABOUT =
+            "\u043d\u0430 \u043a\u0456\u043b\u044c\u0446\u0456";
+    private static final int NUMBERED_ROUNDABOUT_MIN_SOURCE = 50;
+    private static final int NUMBERED_ROUNDABOUT_MAX_SOURCE = 59;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private GMapsAccessibilityParser() {
@@ -93,9 +107,10 @@ final class GMapsAccessibilityParser {
         state.roadName = roadName.isEmpty() ? maneuverText : roadName;
         state.guidePoint = "";
         state.navigationRatio = baseline == null ? 0.0d : baseline.navigationRatio;
-        state.setSourceManeuver(GMapsNotificationParser.sourceManeuver(maneuverText));
+        int roundaboutExit = roundaboutExitNumber(maneuverText, baseline);
+        state.setSourceManeuver(sourceManeuver(maneuverText, roundaboutExit));
 
-        NavSnapshot.Maneuver maneuver = GMapsNotificationParser.maneuver(maneuverText);
+        NavSnapshot.Maneuver maneuver = maneuver(maneuverText);
         int confidence = Math.min(100, 70 + (best.hasDistance ? 20 : 0)
                 + (remainingMeters > 0 ? 5 : 0) + (timeSeconds > 0 ? 5 : 0));
         String reason = "gmaps accessibility instruction=\"" + best.text
@@ -107,7 +122,7 @@ final class GMapsAccessibilityParser {
                 maneuver,
                 state.distanceToIntersection,
                 state.roadName,
-                0,
+                roundaboutExit,
                 "",
                 confidence,
                 reason);
@@ -156,7 +171,7 @@ final class GMapsAccessibilityParser {
         }
         if (idLower.endsWith(":id/next_step_instruction_container")
                 || idLower.endsWith(":id/next_step_instruction")) {
-            return description ? 80 : 70;
+            return 0;
         }
         return description ? 60 : 0;
     }
@@ -170,7 +185,10 @@ final class GMapsAccessibilityParser {
                 || lower.contains("uturn")
                 || lower.contains("exit")
                 || lower.contains("ramp")
-                || lower.contains("roundabout");
+                || lower.contains("roundabout")
+                || lower.contains(UK_TURN_LEFT)
+                || lower.contains(UK_TURN_RIGHT)
+                || lower.contains(UK_AT_ROUNDABOUT);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -178,6 +196,57 @@ final class GMapsAccessibilityParser {
         return lower.startsWith("head ")
                 || lower.startsWith("continue")
                 || lower.contains("straight");
+    }
+
+    private static NavSnapshot.Maneuver maneuver(String text) {
+        String lower = NavTextNormalizer.lower(text);
+        if (lower.contains(UK_AT_ROUNDABOUT)) {
+            return NavSnapshot.Maneuver.ROUNDABOUT_RIGHT_EXIT;
+        }
+        if (lower.contains(UK_TURN_LEFT)) {
+            return NavSnapshot.Maneuver.LEFT_90;
+        }
+        if (lower.contains(UK_TURN_RIGHT)) {
+            return NavSnapshot.Maneuver.RIGHT_90;
+        }
+        return GMapsNotificationParser.maneuver(text);
+    }
+
+    private static int sourceManeuver(String text, int roundaboutExit) {
+        String lower = NavTextNormalizer.lower(text);
+        if (lower.contains(UK_AT_ROUNDABOUT)) {
+            if (roundaboutExit > 0) {
+                return NUMBERED_ROUNDABOUT_MIN_SOURCE + roundaboutExit - 1;
+            }
+            return 21;
+        }
+        if (lower.contains(UK_TURN_LEFT)) {
+            return 2;
+        }
+        if (lower.contains(UK_TURN_RIGHT)) {
+            return 3;
+        }
+        return GMapsNotificationParser.sourceManeuver(text);
+    }
+
+    private static int roundaboutExitNumber(String text, HudState baseline) {
+        if (!NavTextNormalizer.lower(text).contains(UK_AT_ROUNDABOUT)) {
+            return 0;
+        }
+        Matcher matcher = UK_ROUNDABOUT_EXIT.matcher(text);
+        if (!matcher.find()) {
+            if (baseline != null
+                    && baseline.turnBitmapId >= NUMBERED_ROUNDABOUT_MIN_SOURCE
+                    && baseline.turnBitmapId <= NUMBERED_ROUNDABOUT_MAX_SOURCE) {
+                return baseline.turnBitmapId - NUMBERED_ROUNDABOUT_MIN_SOURCE + 1;
+            }
+            return 0;
+        }
+        try {
+            return Integer.parseInt(matcher.group(1));
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 
     //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
