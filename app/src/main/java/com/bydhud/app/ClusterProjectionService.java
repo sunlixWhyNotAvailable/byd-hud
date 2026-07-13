@@ -252,32 +252,36 @@ public final class ClusterProjectionService extends Service
         synchronized (lock) {
             targetPackage = packageName.isEmpty() ? projectedPackage : packageName;
             returnGeneration = projectionGeneration;
-            projectionRequested = false;
-            pendingPackage = "";
         }
-        if (!targetPackage.isEmpty()) {
-            Thread worker = new Thread(() -> {
-                NavAppDisplayController.get(this).moveTaskToDisplayBlocking(
-                        targetPackage,
-                        MAIN_DISPLAY_ID,
-                        "cluster-projection return-main " + reason);
-                mainHandler.post(() -> {
-                    if (!shouldReleaseAfterReturn(targetPackage, returnGeneration)) {
-                        log("return-main stale ignored package=" + targetPackage
-                                + " reason=" + reason);
-                        return;
-                    }
-                    releaseProjection("return-main " + reason);
-                    stopForegroundCompat();
-                    stopSelf(startId);
-                });
-            }, "BydHudClusterProjectionReturn");
-            worker.start();
+        if (targetPackage.isEmpty()) {
+            log("return-main failed package=missing reason=" + reason);
             return;
         }
-        releaseProjection("return-main " + reason);
-        stopForegroundCompat();
-        stopSelf(startId);
+        Thread worker = new Thread(() -> {
+            NavAppDisplayState returned = NavAppDisplayController.get(this)
+                    .moveTaskToDisplayBlocking(
+                            targetPackage,
+                            MAIN_DISPLAY_ID,
+                            "cluster-projection return-main " + reason);
+            if (returned.taskId < 0 || returned.displayId != MAIN_DISPLAY_ID) {
+                log("return-main failed package=" + targetPackage
+                        + " task=" + returned.taskId
+                        + " display=" + returned.displayId
+                        + " reason=" + reason);
+                return;
+            }
+            mainHandler.post(() -> {
+                if (!shouldReleaseAfterReturn(targetPackage, returnGeneration)) {
+                    log("return-main failed stale package=" + targetPackage
+                            + " reason=" + reason);
+                    return;
+                }
+                releaseProjection("return-main " + reason);
+                stopForegroundCompat();
+                stopSelf(startId);
+            });
+        }, "BydHudClusterProjectionReturn");
+        worker.start();
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.

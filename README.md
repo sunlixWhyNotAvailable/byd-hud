@@ -60,9 +60,16 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 - If there are missing glyphs or incorrect HUD outputs, please open an `Issue` and attach the relevant session archive for that day. Session paths are shown inside the app.
 - `Google Maps` maneuver parsing depends on the language. English is supported and tested; Ukrainian support requires additional testing.
 
+## Navigators used in development
+
+- Standard `Waze` - used for image parsing (https://drive.google.com/drive/folders/1kVPVqM16AEy1XVtyCwerJ_7iKZmXGt0f?usp=drive_link)
+- Patched `Waze` - TBA
+- Standard `Google Maps` - used for text extraction (https://drive.google.com/drive/folders/18SuTko75jInBAPNxndgtkk4OPlxiJGHS?usp=drive_link)
+- Patched `Google Maps` - TBA
+
 ## To Do
 
-- `v1.6.0` is the last stable patch with current `Waze` parser, right now I'm working on another pipeline on beta branch
+- `v1.6.1` is the last stable patch with current `Waze` parser; further work continues on the beta branch
 - add dashboard window mode toggle support;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here.
 

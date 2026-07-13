@@ -282,15 +282,6 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             if (icon == null) {
                 return null;
             }
-            int iconType = icon.getType();
-            String iconDetail = "Notification.largeIcon Icon.getType=" + iconType;
-            if (iconType == Icon.TYPE_RESOURCE) {
-                iconDetail += " resourcePackage=" + safe(icon.getResPackage())
-                        + " resourceId=" + icon.getResId();
-            }
-            NavCaptureStore.rawEvent(this, "notification_large_icon", packageName, iconDetail);
-            AppEventLogger.event(this, "notification_large_icon package=" + packageName
-                    + " " + iconDetail);
             Drawable drawable = icon.loadDrawable(this);
             return drawableToBitmap(drawable);
         } catch (RuntimeException e) {

@@ -61,6 +61,9 @@ final class NavRouteEndPolicy {
         }
         NavSnapshot snapshot = result.snapshot;
         if (snapshot.maneuver == NavSnapshot.Maneuver.ARRIVE) {
+            if (snapshot.distanceMeters > 0) {
+                return false;
+            }
             if (snapshot.sourceApp == NavSnapshot.SourceApp.WAZE) {
                 return shouldEndWazeRouteOnArrival(
                         snapshot.rawReason,
@@ -105,9 +108,11 @@ final class NavRouteEndPolicy {
             return false;
         }
         NavSnapshot snapshot = result.snapshot;
-        if (snapshot.maneuver == NavSnapshot.Maneuver.ARRIVE
-                || snapshot.maneuver == NavSnapshot.Maneuver.HIDE) {
+        if (snapshot.maneuver == NavSnapshot.Maneuver.HIDE) {
             return false;
+        }
+        if (snapshot.maneuver == NavSnapshot.Maneuver.ARRIVE) {
+            return snapshot.distanceMeters > 0;
         }
         if (snapshot.distanceMeters > 0 || hasNonEmptyDistanceText(snapshot.rawReason)) {
             return true;

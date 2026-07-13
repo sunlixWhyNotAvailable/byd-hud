@@ -8,7 +8,7 @@ import java.util.regex.Pattern;
 //defines the GMapsNotificationParser parser boundary so raw app evidence is normalized before HUD decisions use it.
 final class GMapsNotificationParser {
     private static final int MAX_ROAD_NAME_CHARS = 64;
-    private static final int UNKNOWN_NEXT_DISTANCE_METERS = 1;
+    private static final int UNKNOWN_NEXT_DISTANCE_METERS = 0;
     private static final int ARRIVAL_SOURCE_MANEUVER = 10;
     private static final int ARRIVAL_FALLBACK_MAX_REMAINING_METERS = 100;
     private static final Pattern MINUTES =
@@ -128,11 +128,17 @@ final class GMapsNotificationParser {
 
     //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     static Result arrivalResult(String packageName, String destination, String reason, int confidence) {
+        return arrivalResult(packageName, destination, reason, confidence, 0);
+    }
+
+    static Result arrivalResult(String packageName, String destination, String reason, int confidence,
+            int distanceMeters) {
+        int safeDistanceMeters = Math.max(0, distanceMeters);
         HudState state = new HudState();
-        state.distanceToIntersection = 0;
+        state.distanceToIntersection = safeDistanceMeters;
         state.navigationStatus = 2;
         state.crossStatus = 2;
-        state.carToDestination = 0;
+        state.carToDestination = safeDistanceMeters;
         state.timeToDestination = 0;
         state.currentMaxSpeedLimit = 0;
         state.currentSpeed = 0;
@@ -141,7 +147,7 @@ final class GMapsNotificationParser {
         state.laneString = "";
         state.roadName = cap(NavTextNormalizer.cleanText(destination), MAX_ROAD_NAME_CHARS);
         state.guidePoint = "";
-        state.navigationRatio = 1.0d;
+        state.navigationRatio = safeDistanceMeters > 0 ? 0.0d : 1.0d;
         state.setSourceManeuver(ARRIVAL_SOURCE_MANEUVER);
 
         String detail = reason + " arrival=\"" + NavTextNormalizer.cleanText(destination) + "\"";
@@ -150,7 +156,7 @@ final class GMapsNotificationParser {
                 NavSnapshot.SourceApp.GOOGLE_MAPS,
                 packageName,
                 NavSnapshot.Maneuver.ARRIVE,
-                0,
+                safeDistanceMeters,
                 state.roadName,
                 0,
                 "",
@@ -222,6 +228,12 @@ final class GMapsNotificationParser {
         if (lower.contains("roundabout")) {
             return 21;
         }
+        if (lower.contains("slight left")) {
+            return 4;
+        }
+        if (lower.contains("slight right")) {
+            return 5;
+        }
         if (lower.contains("left")) {
             return 2;
         }
@@ -246,6 +258,12 @@ final class GMapsNotificationParser {
         }
         if (lower.contains("roundabout")) {
             return NavSnapshot.Maneuver.ROUNDABOUT_RIGHT_EXIT;
+        }
+        if (lower.contains("slight left")) {
+            return NavSnapshot.Maneuver.LEFT_45;
+        }
+        if (lower.contains("slight right")) {
+            return NavSnapshot.Maneuver.RIGHT_45;
         }
         if (lower.contains("left")) {
             return NavSnapshot.Maneuver.LEFT_90;

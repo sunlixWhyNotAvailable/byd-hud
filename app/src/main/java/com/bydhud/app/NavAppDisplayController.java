@@ -225,8 +225,7 @@ final class NavAppDisplayController {
     void returnActiveDashboardToMain(String reason) {
         String active = activeDashboardPackage();
         if (active.isEmpty()) {
-            clearDashboardProjection("return-active-empty:" + safe(reason));
-            notifyStatusChanged();
+            log("", "dashboard_return_main_failed package=missing reason=" + safe(reason));
             return;
         }
         moveIndependentDashboardApp(active, false, reason);
@@ -299,20 +298,34 @@ final class NavAppDisplayController {
                     context,
                     packageName,
                     safe(reason));
-            synchronized (lock) {
-                if (packageName.equals(activeDashboardPackage)) {
-                    activeDashboardPackage = "";
-                }
-            }
-            clearDashboardProjection(label + ":" + safe(reason));
             log(packageName, "dashboard_return_main_requested package=" + packageName
                     + " reason=" + safe(reason));
+            NavAppDisplayState confirmed = waitForMainDisplay(
+                    packageName,
+                    "return-main-confirm");
+            boolean onMain = confirmed.taskId >= 0
+                    && confirmed.displayId == MAIN_DISPLAY_ID;
+            if (onMain) {
+                synchronized (lock) {
+                    if (packageName.equals(activeDashboardPackage)) {
+                        activeDashboardPackage = "";
+                    }
+                }
+                clearDashboardProjection(label + ":" + safe(reason));
+            } else {
+                log(packageName, "dashboard_return_main_failed package=" + packageName
+                        + " task=" + confirmed.taskId
+                        + " display=" + confirmed.displayId
+                        + " reason=" + safe(reason));
+            }
             remember(new NavAppDisplayState(
                     packageName,
-                    current.taskId,
-                    current.displayId,
-                    current.visible,
-                    label + " return requested from=" + current.displayId));
+                    confirmed.taskId,
+                    confirmed.displayId,
+                    confirmed.visible,
+                    onMain
+                            ? label + " confirmed on main"
+                            : label + " return failed display=" + confirmed.displayId));
             return;
         } catch (SecurityException e) {
             remember(new NavAppDisplayState(
@@ -351,25 +364,29 @@ final class NavAppDisplayController {
                 NavAppDisplayState confirmed = waitForMainDisplay(
                         packageName,
                         "independent-return-confirm");
+                boolean onMain = confirmed.taskId >= 0
+                        && confirmed.displayId == MAIN_DISPLAY_ID;
                 synchronized (lock) {
-                    if ((confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID)
+                    if (onMain
                             && packageName.equals(activeDashboardPackage)) {
                         activeDashboardPackage = "";
                     }
                 }
-                if (confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID) {
+                if (onMain) {
                     clearDashboardProjection("independent-dashboard-return:" + safe(reason));
                     log(packageName, "dashboard_return_clear_after_confirm package=" + packageName);
                 } else {
-                    log(packageName, "dashboard_return_still_projected package=" + packageName
-                            + " display=" + confirmed.displayId);
+                    log(packageName, "dashboard_return_main_failed package=" + packageName
+                            + " task=" + confirmed.taskId
+                            + " display=" + confirmed.displayId
+                            + " reason=" + safe(reason));
                 }
                 remember(new NavAppDisplayState(
                         packageName,
                         confirmed.taskId,
                         confirmed.displayId,
                         confirmed.visible,
-                        confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID
+                        onMain
                                 ? "independent dashboard returned to main"
                                 : "independent dashboard return failed display="
                                         + confirmed.displayId));
@@ -449,7 +466,8 @@ final class NavAppDisplayController {
         NavAppDisplayState confirmed = returned.displayId == MAIN_DISPLAY_ID
                 ? returned
                 : waitForMainDisplay(previous, "return-previous-dashboard-confirm");
-        boolean onMain = confirmed.taskId < 0 || confirmed.displayId == MAIN_DISPLAY_ID;
+        boolean onMain = confirmed.taskId >= 0
+                && confirmed.displayId == MAIN_DISPLAY_ID;
         if (onMain) {
             synchronized (lock) {
                 if (previous.equals(activeDashboardPackage)) {
@@ -459,13 +477,15 @@ final class NavAppDisplayController {
             clearDashboardProjection("return-previous-dashboard:" + safe(reason));
             return true;
         }
-        log(previous, "return_previous_dashboard_app failed display=" + confirmed.displayId
+        log(previous, "return_previous_dashboard_app failed task=" + confirmed.taskId
+                + " display=" + confirmed.displayId
                 + " next=" + nextPackageName);
         return false;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    NavAppDisplayState moveTaskToDisplayBlocking(
+    // ponytail: one projection is active, so a global move lock is enough.
+    synchronized NavAppDisplayState moveTaskToDisplayBlocking(
             String packageName,
             int targetDisplay,
             String reason) {

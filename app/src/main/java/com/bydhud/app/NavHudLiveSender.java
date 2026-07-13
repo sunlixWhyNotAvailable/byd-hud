@@ -75,6 +75,7 @@ final class NavHudLiveSender {
     private String pendingReinitStartPackage = "";
     private String pendingReinitStartReason = "";
     private long pendingNoRouteScheduledAtMs;
+    private long pendingArrivalScheduledAtMs;
     private long lastAccessibilityResultMs;
     private long lastVisualResultMs;
     private long lastWazeRouteNodeResultMs;
@@ -243,6 +244,7 @@ final class NavHudLiveSender {
         public void run() {
             String packageName = pendingArrivalPackage;
             pendingArrivalPackage = "";
+            pendingArrivalScheduledAtMs = 0L;
             if (!active || packageName.isEmpty() || !packageName.equals(activePackage)) {
                 return;
             }
@@ -1189,6 +1191,7 @@ final class NavHudLiveSender {
         pendingNoRoutePackage = "";
         pendingArrivalPackage = "";
         pendingNoRouteScheduledAtMs = 0L;
+        pendingArrivalScheduledAtMs = 0L;
         lastAccessibilityResultMs = 0L;
         lastVisualResultMs = 0L;
         lastWazeRouteNodeResultMs = 0L;
@@ -1280,7 +1283,17 @@ final class NavHudLiveSender {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleArrivalRouteEndStop(String packageName, String reason) {
+        long now = SystemClock.elapsedRealtime();
+        if (packageName.equals(pendingArrivalPackage) && pendingArrivalScheduledAtMs > 0L) {
+            long remainingMs = Math.max(0L,
+                    ARRIVAL_ROUTE_END_STOP_DELAY_MS - (now - pendingArrivalScheduledAtMs));
+            log("arrival route-end pending already scheduled package=" + packageName
+                    + " reason=" + reason
+                    + " remainingMs=" + remainingMs);
+            return;
+        }
         pendingArrivalPackage = packageName;
+        pendingArrivalScheduledAtMs = now;
         handler.removeCallbacks(arrivalRouteEndStop);
         handler.postDelayed(arrivalRouteEndStop, ARRIVAL_ROUTE_END_STOP_DELAY_MS);
         log("arrival route-end pending stop package=" + packageName
@@ -1292,6 +1305,7 @@ final class NavHudLiveSender {
     private void cancelArrivalRouteEndStop() {
         handler.removeCallbacks(arrivalRouteEndStop);
         pendingArrivalPackage = "";
+        pendingArrivalScheduledAtMs = 0L;
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -1325,6 +1339,7 @@ final class NavHudLiveSender {
         pendingNoRoutePackage = "";
         pendingArrivalPackage = "";
         pendingNoRouteScheduledAtMs = 0L;
+        pendingArrivalScheduledAtMs = 0L;
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.

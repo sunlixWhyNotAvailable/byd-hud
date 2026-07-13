@@ -8,11 +8,16 @@ import java.util.regex.Pattern;
 //defines the GMapsAccessibilityParser parser boundary so raw app evidence is normalized before HUD decisions use it.
 final class GMapsAccessibilityParser {
     private static final int MAX_ROAD_NAME_CHARS = 64;
-    private static final int UNKNOWN_NEXT_DISTANCE_METERS = 1;
+    private static final int UNKNOWN_NEXT_DISTANCE_METERS = 0;
     private static final Pattern MINUTES =
             Pattern.compile("([0-9]+)\\s*min\\b", Pattern.CASE_INSENSITIVE);
     private static final Pattern IN_DISTANCE =
             Pattern.compile("\\b(in|for)\\s+[0-9]+(?:[\\.,][0-9]+)?\\s*(km|m|\\u043a\\u043c|\\u043c)(?=$|\\s|[.,;:!?])",
+                    Pattern.CASE_INSENSITIVE);
+    private static final Pattern DISTANCE_TOKEN =
+            Pattern.compile("[0-9]+(?:[\\.,][0-9]+)?\\s*"
+                            + "(?:km|meters?|metres?|m|\\u043a\\u043c|\\u043c)"
+                            + "(?=$|\\s|[.,;:!?])",
                     Pattern.CASE_INSENSITIVE);
     private static final Pattern UK_ROUNDABOUT_EXIT =
             Pattern.compile("(10|[1-9])-(?:\\u0438\\u0439|\\u0439|\\u0456\\u0439)\\s+"
@@ -43,7 +48,10 @@ final class GMapsAccessibilityParser {
             return null;
         }
 
-        Candidate best = null;
+        Candidate structuredBest = null;
+        Candidate fallbackBest = null;
+        DestinationApproach destinationApproach = null;
+        boolean hasStructuredInstruction = false;
         String topCue = "";
         int remainingMeters = baseline == null ? 0 : Math.max(0, baseline.carToDestination);
         int timeSeconds = baseline == null ? 0 : Math.max(0, baseline.timeToDestination);
@@ -60,6 +68,9 @@ final class GMapsAccessibilityParser {
             String desc = fieldValue(segment, " desc=");
             String idLower = NavTextNormalizer.lower(id);
             String descLower = NavTextNormalizer.lower(desc);
+            boolean currentInstruction = isCurrentInstructionId(idLower);
+            boolean nextInstruction = isNextInstructionId(idLower);
+            hasStructuredInstruction |= currentInstruction || nextInstruction;
             arrival.observe(text, desc);
 
             if (idLower.endsWith(":id/top_cue_text") && !text.isEmpty()) {
@@ -72,8 +83,30 @@ final class GMapsAccessibilityParser {
                 remainingMeters = NavTextNormalizer.distanceMeters(desc, remainingMeters);
             }
 
-            best = better(best, candidate(desc, scoreBaseForId(idLower, true)));
-            best = better(best, candidate(text, scoreBaseForId(idLower, false)));
+            if (isCurrentStepInstructionId(idLower)) {
+                destinationApproach = better(
+                        destinationApproach,
+                        destinationApproach(desc));
+                destinationApproach = better(
+                        destinationApproach,
+                        destinationApproach(text));
+            }
+
+            if (currentInstruction) {
+                structuredBest = better(
+                        structuredBest,
+                        candidate(desc, scoreBaseForId(idLower, true)));
+                structuredBest = better(
+                        structuredBest,
+                        candidate(text, scoreBaseForId(idLower, false)));
+            } else if (!nextInstruction) {
+                fallbackBest = better(
+                        fallbackBest,
+                        candidate(desc, scoreBaseForId(idLower, true)));
+                fallbackBest = better(
+                        fallbackBest,
+                        candidate(text, scoreBaseForId(idLower, false)));
+            }
         }
 
         if (arrival.isArrival()) {
@@ -85,8 +118,23 @@ final class GMapsAccessibilityParser {
                     95);
         }
 
+        if (destinationApproach != null && destinationApproach.matches(topCue)) {
+            String reason = "gmaps accessibility destination approach=\""
+                    + destinationApproach.text + "\" topCue=\"" + topCue + "\"";
+            return GMapsNotificationParser.arrivalResult(
+                    packageName,
+                    topCue,
+                    reason,
+                    95,
+                    destinationApproach.distanceMeters);
+        }
+
+        Candidate best = hasStructuredInstruction ? structuredBest : fallbackBest;
         if (best == null || !best.hasDistance) {
-            return null;
+            return hasStructuredInstruction
+                    ? blankCurrentResult(packageName, topCue, structuredBest,
+                            remainingMeters, timeSeconds, baseline)
+                    : null;
         }
 
         String maneuverText = stripManeuverDistance(best.text);
@@ -129,6 +177,47 @@ final class GMapsAccessibilityParser {
         return new GMapsNotificationParser.Result(state, snapshot, reason);
     }
 
+    private static GMapsNotificationParser.Result blankCurrentResult(
+            String packageName,
+            String topCue,
+            Candidate current,
+            int remainingMeters,
+            int timeSeconds,
+            HudState baseline) {
+        HudState state = new HudState();
+        state.distanceToIntersection = UNKNOWN_NEXT_DISTANCE_METERS;
+        state.navigationStatus = 2;
+        state.crossStatus = 2;
+        state.carToDestination = Math.max(0, remainingMeters);
+        state.timeToDestination = Math.max(0, timeSeconds);
+        state.currentMaxSpeedLimit = 0;
+        state.currentSpeed = 0;
+        state.numOfLanes = 0;
+        state.includeLaneBitmap = false;
+        state.laneString = "";
+        state.roadName = NavTextNormalizer.cleanText(topCue);
+        state.guidePoint = "";
+        state.navigationRatio = baseline == null ? 0.0d : baseline.navigationRatio;
+        state.hideNativeWithBlankId();
+        state.hideTurnBitmapWithBlankSource();
+
+        String instruction = current == null ? "" : current.text;
+        String reason = "gmaps accessibility blank current=\"" + instruction
+                + "\" topCue=\"" + state.roadName + "\"";
+        NavSnapshot snapshot = new NavSnapshot(
+                System.currentTimeMillis(),
+                NavSnapshot.SourceApp.GOOGLE_MAPS,
+                packageName,
+                NavSnapshot.Maneuver.UNKNOWN,
+                UNKNOWN_NEXT_DISTANCE_METERS,
+                state.roadName,
+                0,
+                "",
+                90,
+                reason);
+        return new GMapsNotificationParser.Result(state, snapshot, reason);
+    }
+
     //keeps this Google Maps step isolated so notification and accessibility evidence remain comparable.
     private static Candidate better(Candidate current, Candidate candidate) {
         if (candidate == null) {
@@ -138,6 +227,11 @@ final class GMapsAccessibilityParser {
             return candidate;
         }
         return current;
+    }
+
+    private static DestinationApproach better(
+            DestinationApproach current, DestinationApproach candidate) {
+        return current == null ? candidate : current;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -174,6 +268,41 @@ final class GMapsAccessibilityParser {
             return 0;
         }
         return description ? 60 : 0;
+    }
+
+    private static boolean isCurrentInstructionId(String idLower) {
+        return idLower.endsWith(":id/navigation_instruction_panel")
+                || isCurrentStepInstructionId(idLower);
+    }
+
+    private static boolean isCurrentStepInstructionId(String idLower) {
+        return idLower.endsWith(":id/step_instruction_container");
+    }
+
+    private static boolean isNextInstructionId(String idLower) {
+        return idLower.endsWith(":id/next_step_instruction_container")
+                || idLower.endsWith(":id/next_step_instruction");
+    }
+
+    private static DestinationApproach destinationApproach(String value) {
+        String clean = NavTextNormalizer.cleanText(value);
+        String lower = NavTextNormalizer.lower(clean);
+        if (clean.isEmpty() || isTurnLike(lower) || isStraightLike(lower)) {
+            return null;
+        }
+        int distanceMeters = NavTextNormalizer.distanceMeters(clean, -1);
+        if (distanceMeters <= 0) {
+            return null;
+        }
+        Matcher matcher = DISTANCE_TOKEN.matcher(clean);
+        if (!matcher.find()) {
+            return null;
+        }
+        String remainder = NavTextNormalizer.cleanText(
+                clean.substring(matcher.end()).replaceFirst("^[\\s\\p{P}\\p{S}]+", ""));
+        return remainder.isEmpty()
+                ? null
+                : new DestinationApproach(clean, distanceMeters, remainder);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -331,6 +460,25 @@ final class GMapsAccessibilityParser {
             this.distanceMeters = distanceMeters;
             this.hasDistance = hasDistance;
             this.score = score;
+        }
+    }
+
+    private static final class DestinationApproach {
+        final String text;
+        final int distanceMeters;
+        final String remainder;
+
+        DestinationApproach(String text, int distanceMeters, String remainder) {
+            this.text = text;
+            this.distanceMeters = distanceMeters;
+            this.remainder = remainder;
+        }
+
+        boolean matches(String topCue) {
+            String cleanTopCue = NavTextNormalizer.cleanText(topCue);
+            return !cleanTopCue.isEmpty()
+                    && NavTextNormalizer.lower(remainder)
+                    .equals(NavTextNormalizer.lower(cleanTopCue));
         }
     }
 
