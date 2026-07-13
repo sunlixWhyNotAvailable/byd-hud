@@ -77,8 +77,6 @@ final class NavHudLiveSender {
     private boolean wazeDirectHandshakeAvailable;
     private boolean wazeDirectNavigating;
     private boolean wazeFallbackActive;
-    private long wazeDirectNavigationStartedMs;
-    private long lastWazeDirectFrameMs;
 
     private final Runnable wazeDirectProbeTimeout = () -> {
         if (!active || !WAZE_PACKAGE.equals(activePackage)
@@ -86,24 +84,6 @@ final class NavHudLiveSender {
             return;
         }
         activateWazeLegacyFallback("direct-handshake-timeout");
-    };
-
-    private final Runnable wazeDirectFreshnessWatchdog = new Runnable() {
-        @Override
-        public void run() {
-            if (!active || !WAZE_PACKAGE.equals(activePackage) || !wazeDirectNavigating) {
-                return;
-            }
-            long now = SystemClock.elapsedRealtime();
-            long evidenceAt = lastWazeDirectFrameMs > 0L
-                    ? lastWazeDirectFrameMs : wazeDirectNavigationStartedMs;
-            long ageMs = evidenceAt <= 0L ? Long.MAX_VALUE : now - evidenceAt;
-            if (ageMs >= WAZE_DIRECT_TIMEOUT_MS) {
-                activateWazeLegacyFallback("direct-frame-stale ageMs=" + ageMs);
-                return;
-            }
-            handler.postDelayed(this, WAZE_DIRECT_TIMEOUT_MS - ageMs);
-        }
     };
 
     private final Runnable sendLoop = new Runnable() {
@@ -340,9 +320,6 @@ final class NavHudLiveSender {
             return;
         }
         wazeDirectNavigating = true;
-        wazeDirectNavigationStartedMs = SystemClock.elapsedRealtime();
-        lastWazeDirectFrameMs = 0L;
-        scheduleWazeDirectFreshnessWatchdog();
         log("waze direct navigation started reason=" + safeReason(reason));
     }
 
@@ -355,16 +332,14 @@ final class NavHudLiveSender {
             return;
         }
         long now = SystemClock.elapsedRealtime();
-        lastWazeDirectFrameMs = now;
         wazeDirectHandshakeAvailable = true;
         handler.removeCallbacks(wazeDirectProbeTimeout);
-        scheduleWazeDirectFreshnessWatchdog();
         NavRouteStateStore.get(context).updateFromVisualRouteEvidence(
                 WAZE_PACKAGE, "waze_direct", safeReason(reason), now);
         WazeRouteTracker.get(context).onDirectRouteEvidence(
                 "direct:" + safeReason(reason), now);
         logWazeDirectFrame(frame, reason);
-        hudOutput.publishDirect(frame, reason);
+        hudOutput.publishDirect(frame, reason, now);
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.DIRECT,
                 "waze-direct-frame:" + safeReason(reason));
@@ -389,9 +364,12 @@ final class NavHudLiveSender {
                 && lanesEnabled
                 && (lanes.length > 0 || !frame.getLanes().isEmpty())
                 && maneuver.length == 0;
+        boolean blankDestinationManeuver = !alert.isActive()
+                && frame.getAmapManeuver() == 15
+                && maneuver.length == 0;
         String hudManeuverMode = !pngEnabled ? "disabled"
                 : alert.isActive() ? "alert"
-                : blankLaneManeuver ? "blank_s72"
+                : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
                 : maneuver.length > 0 ? "current" : "empty";
         int hudNative = !nativeEnabled ? 0
                 : alert.isActive() ? 0
@@ -442,16 +420,11 @@ final class NavHudLiveSender {
         }
         if (!wazeDirectHandshakeAvailable && wazeFallbackActive) {
             wazeDirectNavigating = false;
-            wazeDirectNavigationStartedMs = 0L;
-            lastWazeDirectFrameMs = 0L;
             log("waze direct session ended during channel loss; legacy remains reason="
                     + safeReason(reason));
             return;
         }
-        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
         wazeDirectNavigating = false;
-        wazeDirectNavigationStartedMs = 0L;
-        lastWazeDirectFrameMs = 0L;
         wazeFallbackActive = false;
         WazeCropCapture.get(context).stop("direct-navigation-ended");
         resetLatestPayload();
@@ -470,7 +443,6 @@ final class NavHudLiveSender {
             return;
         }
         handler.removeCallbacks(wazeDirectProbeTimeout);
-        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
         wazeFallbackActive = true;
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.LEGACY,
@@ -482,19 +454,11 @@ final class NavHudLiveSender {
         log("waze source=legacy reason=" + safeReason(reason));
     }
 
-    private void scheduleWazeDirectFreshnessWatchdog() {
-        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
-        handler.postDelayed(wazeDirectFreshnessWatchdog, WAZE_DIRECT_TIMEOUT_MS);
-    }
-
     private void resetWazeDirectSessionState() {
         handler.removeCallbacks(wazeDirectProbeTimeout);
-        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
         wazeDirectHandshakeAvailable = false;
         wazeDirectNavigating = false;
         wazeFallbackActive = false;
-        wazeDirectNavigationStartedMs = 0L;
-        lastWazeDirectFrameMs = 0L;
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -702,6 +666,11 @@ final class NavHudLiveSender {
             lastWazeRouteNodeScanHadRoute = false;
             log("waze route-node missing reason=" + safeReason);
             if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+                return;
+            }
+            if (!wazeFallbackActive) {
+                log("waze route-node missing ignored: direct Waze owns route lifecycle"
+                        + " reason=" + safeReason);
                 return;
             }
             if (shouldKeepWazeVisualOnly(now)) {

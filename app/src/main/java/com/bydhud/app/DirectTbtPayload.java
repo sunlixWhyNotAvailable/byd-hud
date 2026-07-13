@@ -36,13 +36,19 @@ public final class DirectTbtPayload {
         boolean blankLaneManeuver = !alert.isActive()
                 && (lanePng.length > 0 || !lanes.isEmpty())
                 && navManeuverPng.length == 0;
+        boolean destinationManeuver = !alert.isActive()
+                && safeFrame.getAmapManeuver() == 15;
+        boolean blankDestinationManeuver = destinationManeuver
+                && navManeuverPng.length == 0;
 
         byte[] maneuverPng = alert.isActive()
                 ? alert.getManeuverPng()
-                : (blankLaneManeuver ? safeOptions.blankS72Png.clone() : navManeuverPng);
+                : (blankLaneManeuver || blankDestinationManeuver
+                ? safeOptions.blankS72Png.clone() : navManeuverPng);
         int nativeManeuver = alert.isActive()
                 ? 0
-                : (blankLaneManeuver ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
+                : (blankLaneManeuver || destinationManeuver
+                ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
         int distanceMeters = alert.isActive()
                 ? alert.getDistanceMeters() : safeFrame.getDistanceMeters();
         String displayText = alert.isActive()

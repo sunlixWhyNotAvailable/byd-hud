@@ -428,7 +428,7 @@ public final class WazeDirectChannel {
         Maneuver maneuver = step.getManeuver();
         int rawType = maneuver == null ? -1 : maneuver.getType();
         int amap = maneuver == null ? 0 : mapWazeToAmap(rawType);
-        int byd = mapAmapToByd(amap);
+        int byd = amap == 15 ? 99 : mapAmapToByd(amap);
         String road = text(step.getRoad());
         String cue = text(step.getCue());
         byte[] lanePng = renderIcon(step.getLanesImage(), "lanes");

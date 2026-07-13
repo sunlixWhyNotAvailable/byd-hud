@@ -64,6 +64,8 @@ final class HudOutputCoordinator {
     private DirectTbtFrame preparedDirectFrame;
     private DirectTbtPayload.Prepared preparedDirectPayload;
     private int preparedDirectOptionsRevision = -1;
+    private long pendingDirectReceivedAtMs;
+    private String pendingDirectReason = "";
 
     private final Runnable sendLoop = new Runnable() {
         @Override
@@ -167,11 +169,13 @@ final class HudOutputCoordinator {
         });
     }
 
-    void publishDirect(DirectTbtFrame frame, String reason) {
+    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs) {
         worker.post(() -> {
             directFrame = frame;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            pendingDirectReceivedAtMs = receivedAtMs;
+            pendingDirectReason = safe(reason);
             if (activeSource == Source.DIRECT && !sendScheduled) {
                 scheduleSend(0L);
             }
@@ -428,6 +432,13 @@ final class HudOutputCoordinator {
             }
             maybeLogStats(source, payload.length, duration);
             if (source == Source.DIRECT) {
+                if (pendingDirectReceivedAtMs > 0L) {
+                    log("direct first_send reason=" + pendingDirectReason
+                            + " elapsedMs=" + Math.max(0L,
+                            SystemClock.elapsedRealtime() - pendingDirectReceivedAtMs));
+                    pendingDirectReceivedAtMs = 0L;
+                    pendingDirectReason = "";
+                }
                 directCounter = (directCounter + 1) & 0xff;
             }
             scheduleSend(source == Source.DIRECT ? DIRECT_INTERVAL_MS : DEFAULT_INTERVAL_MS);
