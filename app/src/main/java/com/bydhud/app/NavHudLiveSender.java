@@ -4,9 +4,7 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.os.Handler;
-import android.os.HandlerThread;
 import android.os.Looper;
-import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -18,7 +16,6 @@ final class NavHudLiveSender {
     private static final String TAG = "BydHudNavLive";
     private static final String WAZE_PACKAGE = "com.waze";
     private static final long SEND_INTERVAL_MS = 1000L;
-    private static final long START_BIND_RETRY_MS = 200L;
     private static final long NOTIFICATION_REMOVED_STOP_DELAY_MS = 2000L;
     private static final long ACCESSIBILITY_NO_ROUTE_STOP_DELAY_MS = 10000L;
     private static final long ARRIVAL_ROUTE_END_STOP_DELAY_MS = 3000L;
@@ -29,8 +26,7 @@ final class NavHudLiveSender {
     private static final long WAZE_ROUTE_NODE_FRESH_MS = 3000L;
     private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
     private static final long DASHBOARD_WATCHDOG_INTERVAL_MS = 5000L;
-    private static final int START_BIND_RETRY_LIMIT = 30;
-    private static final int CLEAR_FRAME_COUNT = 5;
+    private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
 
     private static NavHudLiveSender instance;
 
@@ -44,19 +40,13 @@ final class NavHudLiveSender {
 
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
-    private final HandlerThread sendThread = new HandlerThread("BydHudSomeIpSend");
-    private final Handler sendHandler;
-    private final SomeIpHudClient hudClient;
+    private final HudOutputCoordinator hudOutput;
+    private final WazeDirectChannel wazeDirectChannel;
     private String activePackage = "";
     private boolean active;
-    private boolean hudStarted;
     private boolean sendLoopScheduled;
     private boolean routeHealthScheduled;
     private boolean runtimeReinitInProgress;
-    private boolean runtimeReinitPreviousHudStarted;
-    private int bindAttempts;
-    private int sendCount;
-    private volatile int transportGeneration;
     private HudState latestState;
     private HudState latestRouteState;
     private HudState latestVisualState;
@@ -84,30 +74,35 @@ final class NavHudLiveSender {
     private boolean lastWazeRouteNodeScanHadRoute;
     private boolean firstNavAfterPackageReplaceAwaitingSomeIp;
     private long firstNavAfterPackageReplaceConnectStartMs;
+    private boolean wazeDirectHandshakeAvailable;
+    private boolean wazeDirectNavigating;
+    private boolean wazeFallbackActive;
+    private long wazeDirectNavigationStartedMs;
+    private long lastWazeDirectFrameMs;
 
-    private final Runnable bindRetryRunnable = new Runnable() {
+    private final Runnable wazeDirectProbeTimeout = () -> {
+        if (!active || !WAZE_PACKAGE.equals(activePackage)
+                || wazeDirectHandshakeAvailable) {
+            return;
+        }
+        activateWazeLegacyFallback("direct-handshake-timeout");
+    };
+
+    private final Runnable wazeDirectFreshnessWatchdog = new Runnable() {
         @Override
-        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void run() {
-            if (!active) {
+            if (!active || !WAZE_PACKAGE.equals(activePackage) || !wazeDirectNavigating) {
                 return;
             }
-            if (hudClient.isBound()) {
-                bindAttempts = 0;
-                log("connected activePackage=" + activePackage
-                        + " hasPayload=" + (latestState != null));
-                sendLatestIfReady("bind-ready");
+            long now = SystemClock.elapsedRealtime();
+            long evidenceAt = lastWazeDirectFrameMs > 0L
+                    ? lastWazeDirectFrameMs : wazeDirectNavigationStartedMs;
+            long ageMs = evidenceAt <= 0L ? Long.MAX_VALUE : now - evidenceAt;
+            if (ageMs >= WAZE_DIRECT_TIMEOUT_MS) {
+                activateWazeLegacyFallback("direct-frame-stale ageMs=" + ageMs);
                 return;
             }
-            if (bindAttempts >= START_BIND_RETRY_LIMIT) {
-                log("bind timeout activePackage=" + activePackage);
-                HudDeliveryStatus.recordFailure();
-                stopOnMain("bind-timeout", false);
-                return;
-            }
-            bindAttempts++;
-            hudClient.bind();
-            scheduleBindRetry();
+            handler.postDelayed(this, WAZE_DIRECT_TIMEOUT_MS - ageMs);
         }
     };
 
@@ -137,6 +132,10 @@ final class NavHudLiveSender {
             pendingRemovalActiveKey = "";
             if (!NavRouteEndPolicy.shouldStopForRemovedNotification(
                     active, packageName, activePackage, key, activeKey)) {
+                return;
+            }
+            if (WAZE_PACKAGE.equals(activePackage) && !wazeFallbackActive) {
+                log("notification removed ignored: direct Waze owns route lifecycle");
                 return;
             }
             if (hasOngoingGMapsNavigationNotification()) {
@@ -171,6 +170,10 @@ final class NavHudLiveSender {
                 return;
             }
             long now = SystemClock.elapsedRealtime();
+            if (WAZE_PACKAGE.equals(activePackage) && !wazeFallbackActive) {
+                scheduleRouteHealthLoop();
+                return;
+            }
             NavRouteStateStore routeStore = NavRouteStateStore.get(context);
             if (hasOngoingGMapsNavigationNotification()) {
                 if (now - lastGMapsNotificationReconcileMs >= GMAPS_NOTIFICATION_RECONCILE_MS) {
@@ -221,6 +224,10 @@ final class NavHudLiveSender {
                 return;
             }
             if (WAZE_PACKAGE.equals(activePackage)) {
+                if (!wazeFallbackActive) {
+                    log("accessibility no-route ignored: direct Waze owns route lifecycle");
+                    return;
+                }
                 handleWazeNoRouteOrVisualUnavailable(
                         "accessibility-route-ended",
                         "accessibility-no-route",
@@ -248,6 +255,10 @@ final class NavHudLiveSender {
             if (!active || packageName.isEmpty() || !packageName.equals(activePackage)) {
                 return;
             }
+            if (WAZE_PACKAGE.equals(packageName) && !wazeFallbackActive) {
+                log("arrival ignored: direct Waze owns route lifecycle");
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             NavRouteStateStore.get(context).clearRoute(packageName, "arrival-route-ended", now);
             if ("com.waze".equals(packageName)) {
@@ -260,9 +271,230 @@ final class NavHudLiveSender {
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavHudLiveSender(Context context) {
         this.context = context;
-        this.hudClient = new SomeIpHudClient(context, line -> log("someip " + line));
-        sendThread.start();
-        sendHandler = new Handler(sendThread.getLooper());
+        this.hudOutput = HudOutputCoordinator.get(context);
+        this.wazeDirectChannel = new WazeDirectChannel(context,
+                new WazeDirectChannel.Listener() {
+                    @Override
+                    public void onHandshakeAvailable(String reason) {
+                        onWazeDirectHandshakeAvailable(reason);
+                    }
+
+                    @Override
+                    public void onHandshakeUnavailable(String reason) {
+                        onWazeDirectHandshakeUnavailable(reason);
+                    }
+
+                    @Override
+                    public void onNavigationStarted(String reason) {
+                        onWazeDirectNavigationStarted(reason);
+                    }
+
+                    @Override
+                    public void onFrame(DirectTbtFrame frame, String reason) {
+                        onWazeDirectFrame(frame, reason);
+                    }
+
+                    @Override
+                    public void onNavigationEnded(String reason) {
+                        onWazeDirectNavigationEnded(reason);
+                    }
+
+                    @Override
+                    public void onLog(String message) {
+                        log("waze_direct " + message);
+                    }
+                });
+    }
+
+    private void startWazeDirectProbe(String reason) {
+        resetWazeDirectSessionState();
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                "waze-direct-probe:" + safeReason(reason));
+        handler.removeCallbacks(wazeDirectProbeTimeout);
+        handler.postDelayed(wazeDirectProbeTimeout, WAZE_DIRECT_TIMEOUT_MS);
+        wazeDirectChannel.start(reason);
+        log("waze source=waiting_direct timeoutMs=" + WAZE_DIRECT_TIMEOUT_MS
+                + " reason=" + safeReason(reason));
+    }
+
+    private void onWazeDirectHandshakeAvailable(String reason) {
+        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+            return;
+        }
+        wazeDirectHandshakeAvailable = true;
+        handler.removeCallbacks(wazeDirectProbeTimeout);
+        log("waze direct handshake available reason=" + safeReason(reason));
+    }
+
+    private void onWazeDirectHandshakeUnavailable(String reason) {
+        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+            return;
+        }
+        wazeDirectHandshakeAvailable = false;
+        activateWazeLegacyFallback("direct-unavailable:" + safeReason(reason));
+    }
+
+    private void onWazeDirectNavigationStarted(String reason) {
+        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+            return;
+        }
+        wazeDirectNavigating = true;
+        wazeDirectNavigationStartedMs = SystemClock.elapsedRealtime();
+        lastWazeDirectFrameMs = 0L;
+        scheduleWazeDirectFreshnessWatchdog();
+        log("waze direct navigation started reason=" + safeReason(reason));
+    }
+
+    private void onWazeDirectFrame(DirectTbtFrame frame, String reason) {
+        if (!active || !WAZE_PACKAGE.equals(activePackage) || !wazeDirectNavigating
+                || frame == null) {
+            log("waze direct frame ignored active=" + active
+                    + " navigating=" + wazeDirectNavigating
+                    + " reason=" + safeReason(reason));
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        lastWazeDirectFrameMs = now;
+        wazeDirectHandshakeAvailable = true;
+        handler.removeCallbacks(wazeDirectProbeTimeout);
+        scheduleWazeDirectFreshnessWatchdog();
+        NavRouteStateStore.get(context).updateFromVisualRouteEvidence(
+                WAZE_PACKAGE, "waze_direct", safeReason(reason), now);
+        WazeRouteTracker.get(context).onDirectRouteEvidence(
+                "direct:" + safeReason(reason), now);
+        logWazeDirectFrame(frame, reason);
+        hudOutput.publishDirect(frame, reason);
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.DIRECT,
+                "waze-direct-frame:" + safeReason(reason));
+        if (wazeFallbackActive) {
+            WazeCropCapture.get(context).stop("direct-recovered");
+            resetLatestPayload();
+        }
+        wazeFallbackActive = false;
+        log("waze source=direct reason=" + safeReason(reason));
+    }
+
+    private void logWazeDirectFrame(DirectTbtFrame frame, String reason) {
+        byte[] maneuver = frame.getManeuverPng();
+        byte[] lanes = frame.getLanePng();
+        DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
+        boolean pngEnabled = HudPrefs.isPngOutputEnabled(context);
+        boolean nativeEnabled = HudPrefs.isNativeOutputEnabled(context);
+        boolean lanesEnabled = HudPrefs.isLaneOutputEnabled(context);
+        boolean distanceEnabled = HudPrefs.isDistanceOutputEnabled(context);
+        boolean streetEnabled = HudPrefs.isStreetOutputEnabled(context);
+        boolean blankLaneManeuver = !alert.isActive()
+                && lanesEnabled
+                && (lanes.length > 0 || !frame.getLanes().isEmpty())
+                && maneuver.length == 0;
+        String hudManeuverMode = !pngEnabled ? "disabled"
+                : alert.isActive() ? "alert"
+                : blankLaneManeuver ? "blank_s72"
+                : maneuver.length > 0 ? "current" : "empty";
+        int hudNative = !nativeEnabled ? 0
+                : alert.isActive() ? 0
+                : blankLaneManeuver ? 99 : frame.getBydManeuver();
+        int hudDistance = !distanceEnabled ? 0
+                : alert.isActive() ? alert.getDistanceMeters() : frame.getDistanceMeters();
+        String hudText = !streetEnabled ? ""
+                : alert.isActive() ? alert.getDisplayText() : frame.getDisplayText();
+        String maneuverArtifact = "";
+        String laneArtifact = "";
+        String alertArtifact = "";
+        if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
+            maneuverArtifact = NavCaptureStore.saveDirectArtifact(
+                    context, "maneuver", maneuver);
+            laneArtifact = NavCaptureStore.saveDirectArtifact(context, "lanes", lanes);
+            if (alert.isActive()) {
+                alertArtifact = NavCaptureStore.saveDirectArtifact(
+                        context, "alert", alert.getManeuverPng());
+            }
+        }
+        NavCaptureStore.rawEvent(context, "waze_direct", WAZE_PACKAGE,
+                "reason=" + safeReason(reason)
+                        + " rawType=" + frame.getRawManeuverType()
+                        + " amap=" + frame.getAmapManeuver()
+                        + " byd=" + frame.getBydManeuver()
+                        + " distanceM=" + frame.getDistanceMeters()
+                        + " road=\"" + normalizeString(frame.getRoadText()) + "\""
+                        + " cue=\"" + normalizeString(frame.getCueText()) + "\""
+                        + " maneuverBytes=" + maneuver.length
+                        + " laneCount=" + frame.getLanes().size()
+                        + " laneBytes=" + lanes.length
+                        + " alert=" + alert.isActive()
+                        + " alertId=" + (alert.isActive() ? alert.getId() : -1)
+                        + " hudManeuver=" + hudManeuverMode
+                        + " hudNative=" + hudNative
+                        + " hudDistanceM=" + hudDistance
+                        + " hudText=\"" + normalizeString(hudText) + "\""
+                        + " hudLaneCount=" + (lanesEnabled ? frame.getLanes().size() : 0)
+                        + " hudLaneBytes=" + (lanesEnabled ? lanes.length : 0)
+                        + " maneuverArtifact=" + maneuverArtifact
+                        + " laneArtifact=" + laneArtifact
+                        + " alertArtifact=" + alertArtifact);
+    }
+
+    private void onWazeDirectNavigationEnded(String reason) {
+        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+            return;
+        }
+        if (!wazeDirectHandshakeAvailable && wazeFallbackActive) {
+            wazeDirectNavigating = false;
+            wazeDirectNavigationStartedMs = 0L;
+            lastWazeDirectFrameMs = 0L;
+            log("waze direct session ended during channel loss; legacy remains reason="
+                    + safeReason(reason));
+            return;
+        }
+        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
+        wazeDirectNavigating = false;
+        wazeDirectNavigationStartedMs = 0L;
+        lastWazeDirectFrameMs = 0L;
+        wazeFallbackActive = false;
+        WazeCropCapture.get(context).stop("direct-navigation-ended");
+        resetLatestPayload();
+        long now = SystemClock.elapsedRealtime();
+        NavRouteStateStore.get(context).markRouteEnded(
+                WAZE_PACKAGE, "direct-navigation-ended", now);
+        WazeRouteTracker.get(context).onRouteEnded("direct-navigation-ended", now);
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                "waze-direct-ended:" + safeReason(reason));
+        log("waze source=waiting_direct routeEnded=true reason=" + safeReason(reason));
+    }
+
+    private void activateWazeLegacyFallback(String reason) {
+        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+            return;
+        }
+        handler.removeCallbacks(wazeDirectProbeTimeout);
+        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
+        wazeFallbackActive = true;
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.LEGACY,
+                "waze-fallback:" + safeReason(reason));
+        ensureWazeCropRunning(reason);
+        requestActiveInputState(WAZE_PACKAGE, reason);
+        sendLatestIfReady("waze-fallback");
+        scheduleSendLoop();
+        log("waze source=legacy reason=" + safeReason(reason));
+    }
+
+    private void scheduleWazeDirectFreshnessWatchdog() {
+        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
+        handler.postDelayed(wazeDirectFreshnessWatchdog, WAZE_DIRECT_TIMEOUT_MS);
+    }
+
+    private void resetWazeDirectSessionState() {
+        handler.removeCallbacks(wazeDirectProbeTimeout);
+        handler.removeCallbacks(wazeDirectFreshnessWatchdog);
+        wazeDirectHandshakeAvailable = false;
+        wazeDirectNavigating = false;
+        wazeFallbackActive = false;
+        wazeDirectNavigationStartedMs = 0L;
+        lastWazeDirectFrameMs = 0L;
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -578,27 +810,36 @@ final class NavHudLiveSender {
             resetRuntimeAfterPackageReplace(packageName, reason);
             return;
         }
-        if ("ui-start".equals(reason) || !packageName.equals(activePackage)) {
+        if (active && packageName.equals(activePackage)) {
+            log("start ignored; already active package=" + packageName
+                    + " reason=" + safeReason(reason));
+            requestActiveInputState(packageName, reason);
+            return;
+        }
+        String previousPackage = activePackage;
+        if ("ui-start".equals(reason) || !packageName.equals(previousPackage)) {
             resetLatestPayload();
             HudDeliveryStatus.reset();
+        }
+        if (WAZE_PACKAGE.equals(previousPackage) && !WAZE_PACKAGE.equals(packageName)) {
+            resetWazeDirectSessionState();
+            wazeDirectChannel.stop("source-switch:" + packageName);
+            WazeCropCapture.get(context).stop("source-switch:" + packageName);
         }
         cancelPendingRouteEndStops();
         active = true;
         activePackage = packageName;
-        bindAttempts = 0;
         lastDashboardWatchdogMs = 0L;
-        transportGeneration++;
         log("start package=" + packageName + " reason=" + reason);
         if (WAZE_PACKAGE.equals(packageName)) {
-            WazeMediaProjectionController.ensureReadyOrPrompt(
-                    context, "start-" + safeReason(reason));
-        }
-        ensureWazeCropRunning("start-" + reason);
-        requestActiveInputState(packageName, reason);
-        if (!hudClient.isBound()) {
-            hudClient.bind();
-            scheduleBindRetry();
+            startWazeDirectProbe(reason);
+            requestActiveInputState(packageName, reason);
         } else {
+            hudOutput.selectNavigationSource(
+                    HudOutputCoordinator.Source.LEGACY,
+                    "nav-start:" + packageName);
+            hudOutput.ensureBound("nav-start:" + packageName);
+            requestActiveInputState(packageName, reason);
             sendLatestIfReady("start");
         }
         scheduleSendLoop();
@@ -887,68 +1128,35 @@ final class NavHudLiveSender {
             return;
         }
         clearExpiredWazeRouteFieldsForSend(SystemClock.elapsedRealtime());
-        if (!hudClient.isBound()) {
-            hudClient.bind();
-            scheduleBindRetry();
-            return;
-        }
-        boolean startBeforeSend = !hudStarted;
-        int sendGeneration = transportGeneration;
-        if (startBeforeSend) {
-            hudStarted = true;
-            sendCount = 0;
-            log("hud started package=" + activePackage);
-        }
-        HudState sourceState = latestState.copy();
-        String latestReasonSnapshot = latestReason;
-        int sendCountSnapshot = ++sendCount;
-        postHudBuildAndSend(
-                sourceState,
-                reason,
-                latestReasonSnapshot,
-                startBeforeSend,
-                true,
-                sendGeneration,
-                sendCountSnapshot);
+        hudOutput.publishLegacy(latestState, reason + ":" + latestReason);
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopOnMain(String reason, boolean clearHud) {
         String packageName = activePackage;
         clearRouteStoreForStop(packageName, reason);
-        handler.removeCallbacks(bindRetryRunnable);
         handler.removeCallbacks(sendLoop);
         handler.removeCallbacks(routeHealthLoop);
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
         handler.removeCallbacks(arrivalRouteEndStop);
-        sendHandler.removeCallbacksAndMessages(null);
-        boolean stopReinitHud = false;
         if (runtimeReinitInProgress) {
-            stopReinitHud = runtimeReinitPreviousHudStarted;
             runtimeReinitInProgress = false;
-            runtimeReinitPreviousHudStarted = false;
             pendingReinitStartPackage = "";
             pendingReinitStartReason = "";
             log("package reinit cancelled reason=" + reason);
         }
-        transportGeneration++;
-        int stopGeneration = transportGeneration;
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
-        if ("send-error".equals(reason) || "bind-timeout".equals(reason)) {
-            HudDeliveryStatus.recordFailure();
-        } else {
-            HudDeliveryStatus.reset();
+        if (WAZE_PACKAGE.equals(packageName)) {
+            resetWazeDirectSessionState();
+            wazeDirectChannel.stop(reason);
         }
         resetLatestPayload();
-        boolean stopHud = hudStarted || stopReinitHud;
-        if (hudClient.hasBinding()) {
-            postHudClearStopAndUnbind(clearHud && stopHud, stopHud, reason, stopGeneration);
-        }
-        hudStarted = false;
-        sendCount = 0;
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                reason + (clearHud ? ":clear" : ""));
         if (WAZE_PACKAGE.equals(packageName) && shouldStopWazeCrop(reason)) {
             WazeCropCapture.get(context).stop(reason);
         }
@@ -1150,6 +1358,9 @@ final class NavHudLiveSender {
         if (!WAZE_PACKAGE.equals(activePackage)) {
             return;
         }
+        if (!wazeFallbackActive) {
+            return;
+        }
         if (!NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE)) {
             return;
         }
@@ -1211,30 +1422,23 @@ final class NavHudLiveSender {
 
     //resets stale post-update state before the first new navigation session binds SOME/IP again.
     private void resetRuntimeAfterPackageReplace(String packageName, String reason) {
-        handler.removeCallbacks(bindRetryRunnable);
         handler.removeCallbacks(sendLoop);
         handler.removeCallbacks(routeHealthLoop);
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
         handler.removeCallbacks(arrivalRouteEndStop);
-        sendHandler.removeCallbacksAndMessages(null);
-        transportGeneration++;
-        int resetGeneration = transportGeneration;
         runtimeReinitInProgress = true;
         pendingReinitStartPackage = packageName;
         pendingReinitStartReason = reason;
-        boolean stopPreviousHud = hudStarted;
-        runtimeReinitPreviousHudStarted = stopPreviousHud;
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
         activePackage = "";
+        resetWazeDirectSessionState();
+        wazeDirectChannel.stop("package-replaced-reinit");
         WazeCropCapture.get(context).stop("package-replaced-reinit");
         WazeMediaProjectionController.resetForRuntimeReinit(
                 context, "nav-start:" + packageName + ":" + safeReason(reason));
-        hudStarted = false;
-        bindAttempts = 0;
-        sendCount = 0;
         resetLatestPayload();
         firstNavAfterPackageReplaceAwaitingSomeIp = true;
         firstNavAfterPackageReplaceConnectStartMs = SystemClock.elapsedRealtime();
@@ -1246,12 +1450,11 @@ final class NavHudLiveSender {
                 "first-nav-after-package-replace",
                 true,
                 LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
-        if (hudClient.hasBinding()) {
-            postPackageReinitTransportReset(stopPreviousHud, "package-replaced-reinit",
-                    resetGeneration);
-        } else {
-            finishPackageReinitAndRestart(resetGeneration);
-        }
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                "package-replaced-reinit");
+        hudOutput.resetTransport("package-replaced-reinit");
+        finishPackageReinitAndRestart();
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
@@ -1369,12 +1572,6 @@ final class NavHudLiveSender {
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void scheduleBindRetry() {
-        handler.removeCallbacks(bindRetryRunnable);
-        handler.postDelayed(bindRetryRunnable, START_BIND_RETRY_MS);
-    }
-
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleSendLoop() {
         if (sendLoopScheduled) {
             return;
@@ -1392,179 +1589,19 @@ final class NavHudLiveSender {
         handler.postDelayed(routeHealthLoop, ROUTE_HEALTH_INTERVAL_MS);
     }
 
-    //builds and sends HUD payloads on the transport worker so UI state updates stay responsive.
-    private void postHudBuildAndSend(HudState sourceState, String reason, String latestReasonSnapshot,
-            boolean startBeforeSend, boolean stopOnError, int sendGeneration, int sendCountSnapshot) {
-        sendHandler.post(() -> {
-            if (!isTransportGenerationCurrent(sendGeneration)) {
-                handler.post(() -> log("live-send skipped stale generation=" + sendGeneration
-                        + " current=" + transportGeneration + " reason=" + reason));
-                return;
-            }
-            try {
-                long buildStartMs = SystemClock.elapsedRealtime();
-                boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(context);
-                HudState displayState = HudDisplayPolicy.apply(sourceState, clampSmallDistance);
-                HudOutputPreferences.apply(context, displayState);
-                byte[] payload = HudRoadPayload.build(displayState);
-                long buildMs = SystemClock.elapsedRealtime() - buildStartMs;
-                long sendStartMs = SystemClock.elapsedRealtime();
-                if (startBeforeSend) {
-                    hudClient.start();
-                }
-                int ret = hudClient.send(payload);
-                long sendMs = SystemClock.elapsedRealtime() - sendStartMs;
-                String detail = " buildMs=" + buildMs
-                        + " sendMs=" + sendMs
-                        + " sendCount=" + sendCountSnapshot
-                        + " payload=" + payload.length
-                        + " latest=" + latestReasonSnapshot
-                        + " rawDist=" + sourceState.distanceToIntersection
-                        + " displayDist=" + displayState.distanceToIntersection
-                        + " clampSmallDist=" + clampSmallDistance
-                        + " " + displayState.summary();
-                handler.post(() -> {
-                    if (sendGeneration != transportGeneration) {
-                        log("live-send result ignored stale generation=" + sendGeneration
-                                + " current=" + transportGeneration + " reason=" + reason);
-                        return;
-                    }
-                    HudDeliveryStatus.recordNonClearResult(ret);
-                    log("live-send worker ret=" + ret + " reason=" + reason + detail);
-                });
-            } catch (RemoteException | RuntimeException e) {
-                handler.post(() -> {
-                    if (sendGeneration != transportGeneration) {
-                        log("send error ignored stale generation=" + sendGeneration
-                                + " current=" + transportGeneration + " reason=" + reason);
-                        return;
-                    }
-                    HudDeliveryStatus.recordFailure();
-                    log("send error reason=" + reason + ": " + e.getMessage());
-                    Log.e(TAG, "postHudBuildAndSend failed", e);
-                    if (stopOnError && sendGeneration == transportGeneration) {
-                        stopOnMain("send-error", false);
-                    }
-                });
-            }
-        });
-    }
-
-    //guard shutdown transport work so clear frames keep order without blocking the main handler.
-    private void postHudClearStopAndUnbind(boolean clearHud, boolean stopHud, String reason,
-            int stopGeneration) {
-        sendHandler.post(() -> {
-            if (!isTransportGenerationCurrent(stopGeneration)) {
-                handler.post(() -> log("teardown skipped stale generation=" + stopGeneration
-                        + " current=" + transportGeneration + " reason=" + reason));
-                return;
-            }
-            if (clearHud) {
-                HudState clearState = new HudState().copyForClear();
-                for (int i = 1; i <= CLEAR_FRAME_COUNT; i++) {
-                    if (!isTransportGenerationCurrent(stopGeneration)) {
-                        handler.post(() -> log("clear stopped stale generation=" + stopGeneration
-                                + " current=" + transportGeneration + " reason=" + reason));
-                        return;
-                    }
-                    try {
-                        int ret = hudClient.send(HudRoadPayload.build(clearState));
-                        int frame = i;
-                        handler.post(() -> log("clear frame=" + frame + "/"
-                                + CLEAR_FRAME_COUNT + " ret=" + ret
-                                + " reason=" + reason));
-                    } catch (RemoteException e) {
-                        handler.post(() -> log("clear error: " + e.getMessage()));
-                        break;
-                    }
-                }
-            }
-            if (!isTransportGenerationCurrent(stopGeneration)) {
-                return;
-            }
-            if (stopHud) {
-                try {
-                    hudClient.stop();
-                } catch (RemoteException e) {
-                    handler.post(() -> log("stop error: " + e.getMessage()));
-                }
-            }
-            handler.post(() -> {
-                if (!active && stopGeneration == transportGeneration) {
-                    hudClient.unbind();
-                    log("someip unbound generation=" + stopGeneration + " reason=" + reason);
-                } else {
-                    log("someip unbind skipped generation=" + stopGeneration
-                            + " current=" + transportGeneration
-                            + " active=" + active
-                            + " reason=" + reason);
-                }
-            });
-        });
-    }
-
-    //resets update-stale SOME/IP state before a deferred first post-update start can bind again.
-    private void postPackageReinitTransportReset(boolean stopHud, String reason,
-            int resetGeneration) {
-        sendHandler.post(() -> {
-            if (!isTransportGenerationCurrent(resetGeneration)) {
-                handler.post(() -> {
-                    log("package reinit transport reset skipped stale generation="
-                            + resetGeneration + " current=" + transportGeneration
-                            + " reason=" + reason);
-                    if (runtimeReinitInProgress) {
-                        runtimeReinitInProgress = false;
-                        runtimeReinitPreviousHudStarted = false;
-                        pendingReinitStartPackage = "";
-                        pendingReinitStartReason = "";
-                    }
-                });
-                return;
-            }
-            if (stopHud) {
-                try {
-                    hudClient.stop();
-                } catch (RemoteException e) {
-                    handler.post(() -> log("package reinit stop error: " + e.getMessage()));
-                }
-            }
-            handler.post(() -> {
-                if (runtimeReinitInProgress && resetGeneration == transportGeneration) {
-                    hudClient.unbind();
-                    log("package reinit someip unbound generation=" + resetGeneration
-                            + " reason=" + reason);
-                    finishPackageReinitAndRestart(resetGeneration);
-                } else {
-                    log("package reinit unbind skipped generation=" + resetGeneration
-                            + " current=" + transportGeneration
-                            + " active=" + active
-                            + " reinit=" + runtimeReinitInProgress
-                            + " reason=" + reason);
-                }
-            });
-        });
-    }
-
     //restarts only after the package-replace transport reset has released stale bindings.
-    private void finishPackageReinitAndRestart(int resetGeneration) {
-        if (!runtimeReinitInProgress || resetGeneration != transportGeneration) {
+    private void finishPackageReinitAndRestart() {
+        if (!runtimeReinitInProgress) {
             return;
         }
         String restartPackage = pendingReinitStartPackage;
         String restartReason = pendingReinitStartReason;
         runtimeReinitInProgress = false;
-        runtimeReinitPreviousHudStarted = false;
         pendingReinitStartPackage = "";
         pendingReinitStartReason = "";
-        log("package reinit complete generation=" + resetGeneration
-                + " restartPackage=" + restartPackage
+        log("package reinit complete restartPackage=" + restartPackage
                 + " reason=" + safeReason(restartReason));
         startOnMain(restartPackage, restartReason);
-    }
-
-    //guard transport worker tasks so old stop/send callbacks cannot affect a newer route session.
-    private boolean isTransportGenerationCurrent(int generation) {
-        return generation == transportGeneration;
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

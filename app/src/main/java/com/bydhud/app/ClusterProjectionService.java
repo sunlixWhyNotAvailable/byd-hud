@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 //keeps the legacy projection service entry point available for systems that bind to it directly.
 
+import android.annotation.SuppressLint;
 import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
@@ -335,6 +336,7 @@ public final class ClusterProjectionService extends Service
     }
 
     //builds this artifact here so callers do not duplicate protocol or UI construction details.
+    @SuppressLint("WrongConstant")
     private void createVirtualDisplayIfReady(String packageName, String reason) {
         Surface surface;
         synchronized (lock) {

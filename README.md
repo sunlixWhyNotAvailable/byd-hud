@@ -15,10 +15,10 @@
 
 ## Features
 
-- HUD output for navigation maneuver, distance, road name, ETA, and remaining distance
+- HUD output for navigation maneuver, distance, road name, and lane guidance
 - `Google Maps` foreground and notification-based route detection
-- `Waze` accessibility and visual crop maneuvers parsing
-- `Waze` lanes crop parsing
+- patched `Waze` direct structured maneuver, distance, road, lane, and alert channel
+- stock or incompatible `Waze` accessibility/visual crop fallback
 - background runtime service with watchdog recovery
 - storage management
 - built-in stable and opt-in beta update channels
@@ -33,7 +33,7 @@ After first launch:
 3. Set `Disable background Apps -> BYD HUD = OFF` in the BYD system settings.
 4. Optionally change prefered navigation settings.
 5. Choose supported navigation app from the list of supported apps and toogle `HUD`.
-6. If `Waze` is chosen then press `Start now` when `Casting with BYD HUD` prompt appears (need to do this every session).
+6. Patched `Waze` uses the direct channel without a casting prompt. For stock or incompatible `Waze`, press `Start now` when the crop fallback requests `Casting with BYD HUD`.
 7. Optionally use `Send to dashboard`.
 8. If you plan in helping debugging maneuvers/lanes parser - turn on `Save diagnostic screenshots and extended logs` to start saving screenshots for analysis (be aware - it can clog internal storage).
 9. Optionally take part in beta-testing (warning: broken builds are to be expected).
@@ -45,6 +45,7 @@ After first launch:
 - `Google Maps` accessibility mode doensn't provide lane guidance.
 - `Google Maps` notification mode may provide text route data but rarely or no maneuvers and no lane guidance.
 - `Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture and resolution.
+- The direct Waze channel requires a compatible patched Waze build. BYD HUD waits up to five seconds for it before starting the visual fallback.
 - `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP`.
 
 ## Tested
@@ -54,7 +55,7 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 
 ## Known bugs, troubleshooting and other info
 
-- There is up to couple seconds delay between new maneuver on `Waze` screen and HUD output. This is not a bug but a working process of maneuvers parser.
+- The stock-Waze fallback can have a short delay because it captures and classifies screen content. The patched direct channel does not use this parser.
 - Waze maneuver/lanes parsing might break on different tablet resolution and depend on maneuvers position on the screen (meaning `No GPS` additional row at the top can break HUD parsing). This was partially addressed by introducing waze navigation bounds (black square in top left corner) parsing. Also should help in case of other resolution.
 - `Waze` roundabouts might be broken. Needs additional testing.
 - If there are missing glyphs or incorrect HUD outputs, please open an `Issue` and attach the relevant session archive for that day. Session paths are shown inside the app.
@@ -63,13 +64,14 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 ## Navigators used in development
 
 - Standard `Waze` - used for image parsing (https://drive.google.com/drive/folders/1kVPVqM16AEy1XVtyCwerJ_7iKZmXGt0f?usp=drive_link)
-- Patched `Waze` - TBA
+- Patched `Waze` - used for the direct structured navigation channel; distribution is handled separately
 - Standard `Google Maps` - used for text extraction (https://drive.google.com/drive/folders/18SuTko75jInBAPNxndgtkk4OPlxiJGHS?usp=drive_link)
 - Patched `Google Maps` - TBA
 
 ## To Do
 
-- `v1.6.1` is the last stable patch with current `Waze` parser; further work continues on the beta branch
+- validate `v2.0.0-beta.1` direct/fallback switching, alerts, route end, roundabouts, and 20 Hz performance on the physical HUD;
+- probe the deferred SOME/IP bus topics only after the beta.1 navigation patch;
 - add dashboard window mode toggle support;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here.
 

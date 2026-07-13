@@ -1,5 +1,6 @@
 package com.bydhud.app;
 
+import android.annotation.SuppressLint;
 //hosts the Compose UI so diagnostics, permissions, logs, and update controls share one app surface.
 
 import android.content.Context;
@@ -10,7 +11,6 @@ import android.graphics.Typeface;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.RemoteException;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.util.Log;
@@ -47,12 +47,8 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public final class MainActivity extends ComponentActivity {
     private static final String TAG = "BydHudTest";
     private static final long SEND_INTERVAL_MS = 1000L;
-    private static final int LOOP_LOG_EVERY_SENDS = 30;
     private static final int START_BIND_RETRY_LIMIT = 30;
     private static final long START_BIND_RETRY_MS = 200L;
-    private static final int CLEAR_FRAME_COUNT = 5;
-    private static final long CLEAR_FRAME_INTERVAL_MS = 120L;
-    private static final long CLEAR_STOP_DELAY_MS = 300L;
     private static final int STATUS_LOG_MAX_LINES = 35;
     private static final int NAV_RUNTIME_RECONNECT_RETRY_LIMIT = 2;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
@@ -75,7 +71,7 @@ public final class MainActivity extends ComponentActivity {
     private final AtomicBoolean appScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
     private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
-    private SomeIpHudClient hudClient;
+    private HudOutputCoordinator hudOutput;
 
     private TextView statusView;
     private TextView currentStateView;
@@ -160,7 +156,6 @@ public final class MainActivity extends ComponentActivity {
     private boolean autoAdbGrantAttemptedThisLaunch;
     private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean navPermissionSelfCheckPending;
-    private boolean clearSequenceActive;
     private boolean exitRequested;
     private boolean arrowCuratedMode = true;
     private boolean pngVisible = true;
@@ -180,23 +175,9 @@ public final class MainActivity extends ComponentActivity {
     private String cachedTurnFieldDescriptor = "";
     private String cachedTurnResource = "";
     private int cachedDisplayDistance;
-    private Runnable pendingClearFrameRunnable;
-    private Runnable pendingClearStopRunnable;
     private Runnable pendingStartAfterBindRunnable;
     private Runnable pendingNavPermissionSelfCheckRunnable;
     private final Random random = new Random();
-
-    private final Runnable sendLoop = new Runnable() {
-        @Override
-        //keeps this step explicit so callers can rely on one documented behavior boundary.
-        public void run() {
-            if (!sending) {
-                return;
-            }
-            sendCurrentState("loop");
-            handler.postDelayed(this, SEND_INTERVAL_MS);
-        }
-    };
 
     private final Runnable startAfterBindRunnable = new Runnable() {
         @Override
@@ -206,7 +187,7 @@ public final class MainActivity extends ComponentActivity {
             if (!startAfterBindPending) {
                 return;
             }
-            if (hudClient.isBound()) {
+            if (hudOutput.isBound()) {
                 startAfterBindPending = false;
                 appendStatus("start pending: SomeIP connected");
                 startSending();
@@ -220,7 +201,7 @@ public final class MainActivity extends ComponentActivity {
                 return;
             }
             startBindAttempts++;
-            hudClient.bind();
+            hudOutput.ensureBound("manual-start-retry");
             scheduleStartAfterBind();
         }
     };
@@ -241,10 +222,7 @@ public final class MainActivity extends ComponentActivity {
         } else {
             HudRuntimeWatchdog.cancel(this);
         }
-        hudClient = new SomeIpHudClient(this, line -> {
-            appendStatus(line);
-            refreshControls();
-        });
+        hudOutput = HudOutputCoordinator.get(this);
         NavAppDisplayController.get(this).setListener(() -> runOnUiThread(() -> {
             refreshControls();
             refreshActiveAppsList();
@@ -311,6 +289,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     @Override
+    @SuppressLint("MissingSuperCall")
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onBackPressed() {
         appendStatus("back pressed: moving task to background");
@@ -934,11 +913,14 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String hudStatus(NavRuntimePermissionStatus permissionStatus) {
-        if (!permissionStatus.readyForCapture() || HudDeliveryStatus.hasTransportFailure()) {
+        if (HudDeliveryStatus.hasTransportFailure()) {
             return "failed";
         }
         if (HudDeliveryStatus.isRunning()) {
             return "running";
+        }
+        if (!permissionStatus.readyForCapture()) {
+            return "failed";
         }
         return "idle";
     }
@@ -1200,11 +1182,11 @@ public final class MainActivity extends ComponentActivity {
         setManualMode(enabled);
         if (enabled) {
             arrowCuratedMode = true;
-            if (!hudClient.isBound()) {
+            if (!hudOutput.isBound()) {
                 appendStatus("manual mode: connect/start requested");
                 startAfterBindPending = true;
                 startBindAttempts = 0;
-                hudClient.bind();
+                hudOutput.ensureBound("manual-mode");
                 scheduleStartAfterBind();
             } else if (!sending) {
                 startSending();
@@ -1793,7 +1775,8 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("nav capture ignored: system package " + normalized);
             return;
         }
-        if (enabled && !ensureNavCaptureRuntimeReadyForStart("hud", normalized)) {
+        if (enabled && !"com.waze".equals(normalized)
+                && !ensureNavCaptureRuntimeReadyForStart("hud", normalized)) {
             return;
         }
         if (enabled && !isSupportedHudPackage(normalized)) {
@@ -1814,7 +1797,7 @@ public final class MainActivity extends ComponentActivity {
             NavHudLiveSender.get(this).stop(previousHudPackage, "ui-switch", true);
             appendStatus("nav live HUD switched off: " + previousHudPackage);
         }
-        if (enabled && hudClient.isBound()) {
+        if (enabled && hudOutput.isBound()) {
             stopImmediately("nav-hud-ui-start", false, true);
         }
         NavCapturePrefs.setHudEnabled(this, normalized, enabled);
@@ -1939,19 +1922,19 @@ public final class MainActivity extends ComponentActivity {
 
     //opens the external boundary here so connection setup remains observable and retryable.
     private void connectSomeIp() {
-        if (hudClient.isBound()) {
+        if (hudOutput.isBound()) {
             appendStatus("connect skipped: already connected");
             refreshControls();
             return;
         }
         appendStatus("connect requested");
-        hudClient.bind();
+        hudOutput.ensureBound("manual-connect");
         refreshControls();
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startSending() {
-        if (!hudClient.isBound()) {
+        if (!hudOutput.isBound()) {
             appendStatus("start blocked: Connect first");
             refreshControls();
             return;
@@ -1962,27 +1945,19 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         applyNavigationFields();
-        try {
-            HudDeliveryStatus.reset();
-            hudClient.start();
-            arrowCuratedMode = true;
-            curatedIndex = HudArrowComboCatalog.defaultIndex();
-            applyCuratedCombo(false);
-            sending = true;
-            clearSequenceActive = false;
-            exitRequested = false;
-            sendCount = 0;
-            cancelPendingHudCallbacks();
-            handler.post(sendLoop);
-            appendStatus("sending=true intervalMs=" + SEND_INTERVAL_MS
-                    + " backgroundMode=" + BACKGROUND_MODE);
-            refreshControls();
-        } catch (RemoteException e) {
-            HudDeliveryStatus.recordFailure();
-            appendStatus("start error: " + e.getMessage());
-            Log.e(TAG, "startSending failed", e);
-            refreshControls();
-        }
+        HudDeliveryStatus.reset();
+        arrowCuratedMode = true;
+        curatedIndex = HudArrowComboCatalog.defaultIndex();
+        applyCuratedCombo(false);
+        sending = true;
+        exitRequested = false;
+        sendCount = 0;
+        cancelPendingHudCallbacks();
+        hudOutput.publishManual(state, "manual-start");
+        hudOutput.setManualEnabled(true, "manual-start");
+        appendStatus("sending=true intervalMs=" + SEND_INTERVAL_MS
+                + " backgroundMode=" + BACKGROUND_MODE);
+        refreshControls();
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -1999,77 +1974,10 @@ public final class MainActivity extends ComponentActivity {
         sending = false;
         HudDeliveryStatus.reset();
         startAfterBindPending = false;
-        clearSequenceActive = false;
         cancelPendingHudCallbacks();
-        if (clearHud && hudClient.isBound()) {
-            clearSequenceActive = true;
-            sendClearFrame(1);
-            refreshControls();
-            return;
-        }
-        clearSequenceActive = false;
-        stopHudService("stop", false);
+        hudOutput.setManualEnabled(false, clearHud ? "manual-stop-clear" : "manual-stop");
+        appendStatus("sending=false reason=stop");
         refreshControls();
-    }
-
-    //sends encoded data here so transport side effects stay behind a single boundary.
-    private void sendClearFrame(int index) {
-        if (!clearSequenceActive) {
-            return;
-        }
-        if (!hudClient.isBound()) {
-            appendStatus("clear blocked: service not connected");
-            clearSequenceActive = false;
-            stopHudService("clear-disconnected", true);
-            return;
-        }
-        HudState clearState = state.copyForClear();
-        try {
-            int ret = hudClient.send(HudRoadPayload.build(clearState));
-            appendStatus("clear frame=" + index
-                    + "/" + CLEAR_FRAME_COUNT
-                    + " ret=" + ret
-                    + " field8Tag=" + HudGraphicPayload.turnFieldStatus(clearState)
-                    + " field8Magic=" + HudGraphicPayload.turnFieldMagic(clearState)
-                    + " field8Desc=" + HudGraphicPayload.turnFieldDescriptor(clearState));
-        } catch (RemoteException e) {
-            appendStatus("clear error: " + e.getMessage());
-            Log.e(TAG, "sendClearFrame failed", e);
-        }
-        if (index < CLEAR_FRAME_COUNT) {
-            pendingClearFrameRunnable = () -> {
-                pendingClearFrameRunnable = null;
-                sendClearFrame(index + 1);
-            };
-            handler.postDelayed(pendingClearFrameRunnable, CLEAR_FRAME_INTERVAL_MS);
-        } else {
-            clearSequenceActive = false;
-            pendingClearStopRunnable = () -> {
-                pendingClearStopRunnable = null;
-                stopHudService("clear", false);
-            };
-            handler.postDelayed(pendingClearStopRunnable, CLEAR_STOP_DELAY_MS);
-        }
-    }
-
-    //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void stopHudService(String reason, boolean unbindClient) {
-        try {
-            if (hudClient.isBound()) {
-                hudClient.stop();
-            }
-        } catch (RemoteException e) {
-            appendStatus(reason + " stop error: " + e.getMessage());
-            Log.e(TAG, "stopHudService failed", e);
-        }
-        if (unbindClient) {
-            hudClient.unbind();
-        }
-        appendStatus("sending=false reason=" + reason);
-        refreshControls();
-        if (exitRequested) {
-            finishAfterStop();
-        }
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -2080,31 +1988,10 @@ public final class MainActivity extends ComponentActivity {
         } else {
             HudDeliveryStatus.reset();
         }
-        clearSequenceActive = false;
         cancelPendingHudCallbacks();
-        if (hudClient != null && hudClient.isBound()) {
-            if (clearHud) {
-                HudState clearState = state.copyForClear();
-                try {
-                    int ret = hudClient.send(HudRoadPayload.build(clearState));
-                    appendStatus(reason + " immediate clear ret=" + ret
-                            + " field8Tag=" + HudGraphicPayload.turnFieldStatus(clearState)
-                            + " field8Magic=" + HudGraphicPayload.turnFieldMagic(clearState)
-                            + " field8Desc=" + HudGraphicPayload.turnFieldDescriptor(clearState));
-                } catch (RemoteException e) {
-                    appendStatus(reason + " immediate clear error: " + e.getMessage());
-                    Log.e(TAG, "stopImmediately clear failed", e);
-                }
-            }
-            try {
-                hudClient.stop();
-            } catch (RemoteException e) {
-                appendStatus(reason + " immediate stop error: " + e.getMessage());
-                Log.e(TAG, "stopImmediately stop failed", e);
-            }
-        }
-        if (unbindClient && hudClient != null) {
-            hudClient.unbind();
+        hudOutput.setManualEnabled(false, reason + (clearHud ? "-clear" : ""));
+        if (unbindClient && !NavHudLiveSender.get(this).isRunning()) {
+            hudOutput.shutdown(reason);
         }
         appendStatus("sending=false reason=" + reason);
         refreshControls();
@@ -2112,14 +1999,9 @@ public final class MainActivity extends ComponentActivity {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelPendingHudCallbacks() {
-        handler.removeCallbacks(sendLoop);
         startAfterBindPending = false;
         cancelRunnable(pendingStartAfterBindRunnable);
         pendingStartAfterBindRunnable = null;
-        cancelRunnable(pendingClearFrameRunnable);
-        pendingClearFrameRunnable = null;
-        cancelRunnable(pendingClearStopRunnable);
-        pendingClearStopRunnable = null;
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -3084,34 +2966,23 @@ public final class MainActivity extends ComponentActivity {
             applyNavigationFields();
         }
         refreshStateView();
-        if (!hudClient.isBound()) {
+        if (!hudOutput.isBound()) {
             appendStatus("send blocked: service not connected; tap Connect first");
             return;
         }
-        try {
-            PayloadSnapshot payload = getPayloadSnapshot();
-            int ret = hudClient.send(payload.bytes);
-            HudDeliveryStatus.recordNonClearResult(ret);
-            sendCount++;
-            if (!"loop".equals(reason) || sendCount % LOOP_LOG_EVERY_SENDS == 1) {
-                appendStatus("fireEvent ret=" + ret
-                        + " payload=" + payload.bytes.length
-                        + " reason=" + reason
-                        + " field7=" + payload.laneBytes
-                        + " field8=" + payload.turnBytes
-                        + " field8Tag=" + payload.turnFieldStatus
-                        + " field8Magic=" + payload.turnFieldMagic
-                        + " field8Desc=" + payload.turnFieldDescriptor
-                        + " turnRes=" + payload.turnResource
-                        + " displayDist=" + payload.displayDistance
-                        + " " + state.summary());
-            }
-        } catch (RemoteException e) {
-            HudDeliveryStatus.recordFailure();
-            appendStatus("send error: " + e.getMessage());
-            stopImmediately("send-error", false, true);
-            Log.e(TAG, "sendCurrentState failed", e);
-        }
+        PayloadSnapshot payload = getPayloadSnapshot();
+        hudOutput.publishManual(state, reason);
+        sendCount++;
+        appendStatus("manual payload=" + payload.bytes.length
+                + " reason=" + reason
+                + " field7=" + payload.laneBytes
+                + " field8=" + payload.turnBytes
+                + " field8Tag=" + payload.turnFieldStatus
+                + " field8Magic=" + payload.turnFieldMagic
+                + " field8Desc=" + payload.turnFieldDescriptor
+                + " turnRes=" + payload.turnResource
+                + " displayDist=" + payload.displayDistance
+                + " " + state.summary());
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -3507,8 +3378,8 @@ public final class MainActivity extends ComponentActivity {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean canUseManualHud() {
         return manualModeEnabled
-                && hudClient != null
-                && hudClient.isBound()
+                && hudOutput != null
+                && hudOutput.isBound()
                 && sending;
     }
 
@@ -3559,7 +3430,7 @@ public final class MainActivity extends ComponentActivity {
         }
         currentStateView.setText(
                 "sending=" + sending
-                        + " | connected=" + (hudClient != null && hudClient.isBound())
+                        + " | connected=" + (hudOutput != null && hudOutput.isBound())
                         + " | runtimeService=" + HudPrefs.isRuntimeServiceRunning(this)
                         + " | boot=" + HudPrefs.isBootEnabled(this)
                         + " | navHud=" + NavCapturePrefs.getHudPackage(this)
@@ -3648,7 +3519,7 @@ public final class MainActivity extends ComponentActivity {
         }
         refreshLogcatControls();
 
-        boolean connected = hudClient != null && hudClient.isBound();
+        boolean connected = hudOutput != null && hudOutput.isBound();
         if (connectButton != null) {
             connectButton.setEnabled(!connected
                     && !sending);

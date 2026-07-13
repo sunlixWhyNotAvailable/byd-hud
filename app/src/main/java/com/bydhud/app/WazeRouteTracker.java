@@ -94,6 +94,14 @@ final class WazeRouteTracker {
                 nowElapsedMs);
     }
 
+    void onDirectRouteEvidence(String reason, long nowElapsedMs) {
+        routeStore.updateFromVisualRouteEvidence(
+                WAZE_PACKAGE,
+                "waze_direct",
+                reason,
+                nowElapsedMs);
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isRouteActive(long nowElapsedMs) {
         return routeStore.isRouteActive(WAZE_PACKAGE, nowElapsedMs);

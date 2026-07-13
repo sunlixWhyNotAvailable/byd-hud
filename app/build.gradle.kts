@@ -13,8 +13,8 @@ android {
         minSdk = 29
         targetSdk = 29
         //keeps android upgrade ordering ahead of the previous 1.0.1 field build.
-        versionCode = 63
-        versionName = "1.6.1"
+        versionCode = 64
+        versionName = "2.0.0-beta.1"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
@@ -55,6 +55,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
+    implementation("androidx.car.app:app:1.9.0-alpha01")
     implementation("androidx.core:core:1.13.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
 }

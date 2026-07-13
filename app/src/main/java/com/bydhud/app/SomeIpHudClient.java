@@ -57,7 +57,18 @@ final class SomeIpHudClient {
         public void onServiceDisconnected(ComponentName name) {
             log("disconnected: " + name.flattenToShortString());
             binder = null;
-            bound = false;
+        }
+
+        @Override
+        public void onBindingDied(ComponentName name) {
+            log("binding died: " + name.flattenToShortString());
+            resetBinding();
+        }
+
+        @Override
+        public void onNullBinding(ComponentName name) {
+            log("null binding: " + name.flattenToShortString());
+            resetBinding();
         }
     };
 
@@ -141,6 +152,18 @@ final class SomeIpHudClient {
             context.unbindService(connection);
         } catch (IllegalArgumentException ignored) {
             //returns early because the service connection has already been unbound.
+        }
+        binder = null;
+        bound = false;
+    }
+
+    private void resetBinding() {
+        if (bound) {
+            try {
+                context.unbindService(connection);
+            } catch (IllegalArgumentException ignored) {
+                // The platform may have already removed a dead binding.
+            }
         }
         binder = null;
         bound = false;

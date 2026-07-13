@@ -7,6 +7,7 @@ import android.content.SharedPreferences;
 
 //defines the HudPrefs module boundary so related behavior stays readable inside one unit.
 final class HudPrefs {
+    private static volatile int outputOptionsRevision;
     private static final String PREFS_NAME = "byd_hud_prefs";
     private static final String KEY_BOOT_ENABLED = "boot_enabled";
     private static final String KEY_SMALL_DISTANCE_CLAMP = "small_distance_clamp";
@@ -68,6 +69,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setPngOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_PNG, enabled).apply();
+        outputOptionsRevision++;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -78,6 +80,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setNativeOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_NATIVE, enabled).apply();
+        outputOptionsRevision++;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -88,6 +91,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setLaneOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_LANES, enabled).apply();
+        outputOptionsRevision++;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -98,6 +102,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setDistanceOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_DISTANCE, enabled).apply();
+        outputOptionsRevision++;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -108,6 +113,11 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setStreetOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_STREET, enabled).apply();
+        outputOptionsRevision++;
+    }
+
+    static int outputOptionsRevision() {
+        return outputOptionsRevision;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

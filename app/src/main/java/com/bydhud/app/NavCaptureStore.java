@@ -7,8 +7,11 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -106,6 +109,47 @@ final class NavCaptureStore {
             return false;
         }
         return rotate(file);
+    }
+
+    static synchronized String saveDirectArtifact(
+            Context context, String kind, byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
+        String hash = sha256(bytes);
+        if (hash.isEmpty()) {
+            return "";
+        }
+        File dir = new File(logDir(context), "waze-direct");
+        if (!dir.exists() && !dir.mkdirs()) {
+            return "";
+        }
+        String safeKind = kind == null ? "artifact"
+                : kind.replaceAll("[^A-Za-z0-9_-]", "_");
+        File file = new File(dir, safeKind + "-" + hash + ".png");
+        if (file.isFile()) {
+            return "waze-direct/" + file.getName();
+        }
+        try (FileOutputStream out = new FileOutputStream(file)) {
+            out.write(bytes);
+            return "waze-direct/" + file.getName();
+        } catch (IOException e) {
+            Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
+            return "";
+        }
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+            StringBuilder out = new StringBuilder(digest.length * 2);
+            for (byte value : digest) {
+                out.append(String.format(Locale.US, "%02x", value & 0xff));
+            }
+            return out.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return "";
+        }
     }
 
     //preserves every same-day shard; the dated parent directory resets the sequence naturally.

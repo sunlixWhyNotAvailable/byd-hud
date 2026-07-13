@@ -117,6 +117,11 @@ public final class HudRuntimeService extends Service {
         scheduleHeartbeat();
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         updateNotification(activeWork ? "Runtime active" : "Runtime idle");
+        String hudPackage = NavCapturePrefs.getHudPackage(this);
+        if (activeWork && !hudPackage.isEmpty()
+                && NavCapturePrefs.isHudEnabled(this, hudPackage)) {
+            NavHudLiveSender.get(this).start(hudPackage, "runtime-service:" + reason);
+        }
         if (activeWork) {
             HudRuntimeWatchdog.schedule(this, "service-start");
         } else {
