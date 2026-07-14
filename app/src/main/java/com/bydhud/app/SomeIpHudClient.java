@@ -14,8 +14,11 @@ import android.os.RemoteException;
 final class SomeIpHudClient {
     //defines the Listener module boundary so related behavior stays readable inside one unit.
     interface Listener {
-        //keeps this HUD step isolated so cluster payload behavior stays predictable.
         void onClientLog(String line);
+
+        void onTransportConnected();
+
+        void onTransportUnavailable(String reason);
     }
 
     private static final String SOMEIP_DESCRIPTOR = "ts.car.someip.sdk.ISomeIpServerInterface";
@@ -44,6 +47,7 @@ final class SomeIpHudClient {
         //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void onServiceConnected(ComponentName name, IBinder service) {
             binder = service;
+            listener.onTransportConnected();
             log("connected: " + name.flattenToShortString());
             try {
                 log("ready=" + isReady());
@@ -55,20 +59,23 @@ final class SomeIpHudClient {
         @Override
         //keeps this HUD step isolated so cluster payload behavior stays predictable.
         public void onServiceDisconnected(ComponentName name) {
-            log("disconnected: " + name.flattenToShortString());
             binder = null;
+            listener.onTransportUnavailable("service_disconnected");
+            log("disconnected: " + name.flattenToShortString());
         }
 
         @Override
         public void onBindingDied(ComponentName name) {
-            log("binding died: " + name.flattenToShortString());
             resetBinding();
+            listener.onTransportUnavailable("binding_died");
+            log("binding died: " + name.flattenToShortString());
         }
 
         @Override
         public void onNullBinding(ComponentName name) {
-            log("null binding: " + name.flattenToShortString());
             resetBinding();
+            listener.onTransportUnavailable("null_binding");
+            log("null binding: " + name.flattenToShortString());
         }
     };
 

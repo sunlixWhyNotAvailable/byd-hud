@@ -119,17 +119,23 @@ final class HudOutputCoordinator {
         this.context = context;
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
-        client = new SomeIpHudClient(context, line -> {
-            log("someip " + line);
-            if (line.startsWith("connected:")) {
+        client = new SomeIpHudClient(context, new SomeIpHudClient.Listener() {
+            @Override
+            public void onClientLog(String line) {
+                log("someip " + line);
+            }
+
+            @Override
+            public void onTransportConnected() {
                 worker.post(() -> {
                     bindAttempts = 0;
                     resumeActivation("connected");
                 });
-            } else if (line.startsWith("disconnected:")
-                    || line.startsWith("binding died:")
-                    || line.startsWith("null binding:")) {
-                worker.post(() -> handleTransportFailure("disconnected", null));
+            }
+
+            @Override
+            public void onTransportUnavailable(String reason) {
+                worker.post(() -> handleTransportFailure(reason, null));
             }
         });
     }
@@ -433,7 +439,7 @@ final class HudOutputCoordinator {
             maybeLogStats(source, payload.length, duration);
             if (source == Source.DIRECT) {
                 if (pendingDirectReceivedAtMs > 0L) {
-                    log("direct first_send reason=" + pendingDirectReason
+                    log("direct emitted_frame_first_send reason=" + pendingDirectReason
                             + " elapsedMs=" + Math.max(0L,
                             SystemClock.elapsedRealtime() - pendingDirectReceivedAtMs));
                     pendingDirectReceivedAtMs = 0L;

@@ -58,6 +58,10 @@ public final class DirectTbtPayload {
         if (!safeOptions.nativeManeuver) nativeManeuver = 0;
         if (!safeOptions.distance) distanceMeters = 0;
         if (!safeOptions.street) displayText = "";
+        String maneuverMode = !safeOptions.png ? "disabled"
+                : alert.isActive() ? "alert"
+                : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
+                : navManeuverPng.length > 0 ? "current" : "empty";
 
         ByteArrayOutputStream fields = new ByteArrayOutputStream();
         if (!lanes.isEmpty()) writeVarintField(fields, 5, lanes.size());
@@ -70,7 +74,9 @@ public final class DirectTbtPayload {
         writeStringField(fields, 26, "");
         writeVarintField(fields, 28, Math.max(0, nativeManeuver));
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
-        return new Prepared(fields.toByteArray());
+        return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
+                distanceMeters, displayText, lanes.size(), lanePng.length,
+                maneuverPng.length);
     }
 
     public static byte[] buildClear() {
@@ -167,9 +173,53 @@ public final class DirectTbtPayload {
     /** Static frame body reused by the 20 Hz sender; each tick allocates only its final payload. */
     public static final class Prepared {
         private final byte[] fields;
+        private final String maneuverMode;
+        private final int nativeManeuver;
+        private final int distanceMeters;
+        private final String displayText;
+        private final int laneCount;
+        private final int lanePngBytes;
+        private final int maneuverPngBytes;
 
-        private Prepared(byte[] fields) {
+        private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
+                         int distanceMeters, String displayText, int laneCount,
+                         int lanePngBytes, int maneuverPngBytes) {
             this.fields = fields == null ? new byte[0] : fields;
+            this.maneuverMode = maneuverMode == null ? "empty" : maneuverMode;
+            this.nativeManeuver = nativeManeuver;
+            this.distanceMeters = distanceMeters;
+            this.displayText = displayText == null ? "" : displayText;
+            this.laneCount = laneCount;
+            this.lanePngBytes = lanePngBytes;
+            this.maneuverPngBytes = maneuverPngBytes;
+        }
+
+        public String maneuverMode() {
+            return maneuverMode;
+        }
+
+        public int nativeManeuver() {
+            return nativeManeuver;
+        }
+
+        public int distanceMeters() {
+            return distanceMeters;
+        }
+
+        public String displayText() {
+            return displayText;
+        }
+
+        public int laneCount() {
+            return laneCount;
+        }
+
+        public int lanePngBytes() {
+            return lanePngBytes;
+        }
+
+        public int maneuverPngBytes() {
+            return maneuverPngBytes;
         }
 
         public byte[] build(int counter) {

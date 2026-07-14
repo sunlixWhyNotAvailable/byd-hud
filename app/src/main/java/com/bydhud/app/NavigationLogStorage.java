@@ -23,8 +23,10 @@ import java.util.Set;
 //defines the NavigationLogStorage module boundary so related behavior stays readable inside one unit.
 final class NavigationLogStorage {
     static final String ROOT_DIR = "BYD-HUD";
+    static final String LOGS_DIR = "logs";
     static final String LOGCAT_DIR = "logcat";
-    static final String NAV_CAPTURE_DIR = "nav-capture";
+    static final String WAZE_CROP_DIR = "waze-crop";
+    static final String WAZE_DIRECT_DIR = "waze-direct";
 
     private static final String TAG = "BydHudLogStorage";
     private static final String PUBLIC_ROOT = "/sdcard/Documents/" + ROOT_DIR;
@@ -81,28 +83,68 @@ final class NavigationLogStorage {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    static File logcatDir(Context context) {
-        return publicFirstDir(context, LOGCAT_DIR);
+    static File storageRootDir(Context context) {
+        return publicFirstDir(context, "");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File navCaptureDir(Context context) {
-        return publicFirstDir(context, NAV_CAPTURE_DIR);
+        return storageRootDir(context);
+    }
+
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    static File dayDir(Context context, String day) {
+        String safeDay = day != null && day.matches("\\d{8}") ? day : activeNavCaptureDay();
+        File dir = new File(storageRootDir(context), safeDay);
+        ensureDir(dir);
+        return dir;
+    }
+
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    static File logsDir(Context context) {
+        File dir = new File(dayDir(context, activeNavCaptureDay()), LOGS_DIR);
+        ensureDir(dir);
+        return dir;
+    }
+
+    //creates the logcat child only when LogcatRecorder explicitly starts recording.
+    static File logcatDir(Context context, String startDay) {
+        File dir = new File(dayDir(context, startDay), LOGS_DIR + "/" + LOGCAT_DIR);
+        ensureDir(dir);
+        return dir;
+    }
+
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    static File directCaptureDir(Context context) {
+        File dir = new File(dayDir(context, activeNavCaptureDay()), WAZE_DIRECT_DIR);
+        ensureDir(dir);
+        return dir;
+    }
+
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    static String publicRootPath() {
+        return PUBLIC_ROOT;
+    }
+
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    static String publicLogsPath() {
+        return PUBLIC_ROOT + "/<yyyymmdd>/" + LOGS_DIR;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String publicLogcatPath() {
-        return PUBLIC_ROOT + "/" + LOGCAT_DIR;
+        return publicLogsPath() + "/" + LOGCAT_DIR;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String publicNavCapturePath() {
-        return PUBLIC_ROOT + "/" + NAV_CAPTURE_DIR;
+        return publicLogsPath();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String publicWazeCropPath() {
-        return publicNavCapturePath() + "/<yyyymmdd>/waze-crop/<session>/screen_*.png";
+        return PUBLIC_ROOT + "/<yyyymmdd>/" + WAZE_CROP_DIR
+                + "/<session>/screen_*.png";
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -112,7 +154,8 @@ final class NavigationLogStorage {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isActiveNavCaptureDay(String day) {
-        return day != null && activeNavCaptureDay().equals(day);
+        return day != null && (activeNavCaptureDay().equals(day)
+                || LogcatRecorder.activeStartDay().equals(day));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -127,6 +170,7 @@ final class NavigationLogStorage {
                 context.getApplicationContext(),
                 navCaptureDir(context),
                 activeNavCaptureDay(),
+                LogcatRecorder.activeStartDay(),
                 "",
                 "",
                 "",
@@ -151,6 +195,7 @@ final class NavigationLogStorage {
                 context.getApplicationContext(),
                 navCaptureDir(context),
                 activeNavCaptureDay(),
+                LogcatRecorder.activeStartDay(),
                 activeSessionDir,
                 activeSessionName,
                 preserveScreenshotName,
@@ -168,6 +213,7 @@ final class NavigationLogStorage {
                 context.getApplicationContext(),
                 navCaptureDir(context),
                 activeNavCaptureDay(),
+                LogcatRecorder.activeStartDay(),
                 "",
                 "",
                 "",
@@ -187,6 +233,27 @@ final class NavigationLogStorage {
         runNavCaptureRetention(
                 root,
                 activeDay,
+                "",
+                activeSessionDir,
+                activeSessionName,
+                preserveScreenshotName,
+                maxBytes,
+                null);
+    }
+
+    //exposes active-logcat protection to host-side retention probes.
+    static void enforceNavCaptureRetentionForTest(
+            File root,
+            String activeDay,
+            String activeLogcatDay,
+            String activeSessionDir,
+            String activeSessionName,
+            String preserveScreenshotName,
+            long maxBytes) {
+        runNavCaptureRetention(
+                root,
+                activeDay,
+                activeLogcatDay,
                 activeSessionDir,
                 activeSessionName,
                 preserveScreenshotName,
@@ -206,6 +273,7 @@ final class NavigationLogStorage {
         final Context context;
         final File root;
         final String activeDay;
+        final String activeLogcatDay;
         final String activeSessionDir;
         final String activeSessionName;
         final String preserveScreenshotName;
@@ -217,6 +285,7 @@ final class NavigationLogStorage {
                 Context context,
                 File root,
                 String activeDay,
+                String activeLogcatDay,
                 String activeSessionDir,
                 String activeSessionName,
                 String preserveScreenshotName,
@@ -226,6 +295,7 @@ final class NavigationLogStorage {
             this.context = context;
             this.root = root;
             this.activeDay = activeDay;
+            this.activeLogcatDay = activeLogcatDay;
             this.activeSessionDir = activeSessionDir;
             this.activeSessionName = activeSessionName;
             this.preserveScreenshotName = preserveScreenshotName;
@@ -294,7 +364,7 @@ final class NavigationLogStorage {
             ensureDir(publicDir);
             return new SessionPath(
                     publicDir,
-                    publicNavCapturePath() + "/" + dayDir + "/" + safeSessionDir + "/" + safeSessionName,
+                    publicRootPath() + "/" + dayDir + "/" + safeSessionDir + "/" + safeSessionName,
                     true);
         }
 
@@ -370,7 +440,7 @@ final class NavigationLogStorage {
                 || !request.root.isDirectory()) {
             return;
         }
-        long beforeBytes = folderSizeBytes(request.root);
+        long beforeBytes = datedFolderSizeBytes(request.root);
         if (beforeBytes <= request.maxBytes) {
             return;
         }
@@ -394,12 +464,13 @@ final class NavigationLogStorage {
         runNavCaptureRetention(
                 request.root,
                 request.activeDay,
+                request.activeLogcatDay,
                 request.activeSessionDir,
                 request.activeSessionName,
                 request.preserveScreenshotName,
                 request.maxBytes,
                 stats);
-        long afterBytes = folderSizeBytes(request.root);
+        long afterBytes = datedFolderSizeBytes(request.root);
         logRetention(request.context, "retention_end reason=" + request.reason
                 + " files=" + stats.deletedFiles
                 + " bytesDeleted=" + stats.deletedBytes
@@ -412,6 +483,7 @@ final class NavigationLogStorage {
     private static void runNavCaptureRetention(
             File root,
             String activeDay,
+            String activeLogcatDay,
             String activeSessionDir,
             String activeSessionName,
             String preserveScreenshotName,
@@ -424,18 +496,21 @@ final class NavigationLogStorage {
             return;
         }
         String safeActiveDay = safePathSegment(activeDay, "");
+        String safeActiveLogcatDay = safePathSegment(activeLogcatDay, "");
         String safeSessionDir = safePathSegment(activeSessionDir, "");
         String safeSessionName = safePathSegment(activeSessionName, "");
-        deleteOldNavCaptureDays(root, safeActiveDay, maxBytes, stats);
+        deleteOldNavCaptureDays(root, safeActiveDay, safeActiveLogcatDay, maxBytes, stats);
         if (!isOverLimit(root, maxBytes) || safeActiveDay.isEmpty()
-                || safeSessionDir.isEmpty() || safeSessionName.isEmpty()) {
+                || !WAZE_CROP_DIR.equals(safeSessionDir) || safeSessionName.isEmpty()) {
             return;
         }
-        deleteOldNavCaptureSessions(root, safeActiveDay, safeSessionDir, safeSessionName, maxBytes, stats);
+        deleteOldNavCaptureSessions(root, safeActiveDay, safeSessionName, maxBytes, stats);
         if (!isOverLimit(root, maxBytes)) {
             return;
         }
-        File activeSession = new File(new File(new File(root, safeActiveDay), safeSessionDir), safeSessionName);
+        File activeSession = new File(
+                new File(new File(root, safeActiveDay), WAZE_CROP_DIR),
+                safeSessionName);
         deleteOldSessionScreenshots(activeSession, safePathSegment(preserveScreenshotName, ""), root, maxBytes, stats);
     }
 
@@ -443,6 +518,7 @@ final class NavigationLogStorage {
     private static void deleteOldNavCaptureDays(
             File root,
             String activeDay,
+            String activeLogcatDay,
             long maxBytes,
             RetentionStats stats) {
         List<File> days = new ArrayList<>();
@@ -454,7 +530,8 @@ final class NavigationLogStorage {
             if (child != null
                     && child.isDirectory()
                     && isDayFolder(child)
-                    && !child.getName().equals(activeDay)) {
+                    && !child.getName().equals(activeDay)
+                    && !child.getName().equals(activeLogcatDay)) {
                 days.add(child);
             }
         }
@@ -473,33 +550,21 @@ final class NavigationLogStorage {
     private static void deleteOldNavCaptureSessions(
             File root,
             String activeDay,
-            String activeSessionDir,
             String activeSessionName,
             long maxBytes,
             RetentionStats stats) {
-        File dayDir = new File(root, activeDay);
-        File[] sessionParents = dayDir.listFiles();
-        if (sessionParents == null) {
+        File sessionParent = new File(new File(root, activeDay), WAZE_CROP_DIR);
+        File[] children = sessionParent.listFiles();
+        if (children == null) {
             return;
         }
         List<File> sessions = new ArrayList<>();
-        for (File sessionParent : sessionParents) {
-            if (sessionParent == null || !sessionParent.isDirectory()) {
+        for (File session : children) {
+            if (session == null || !session.isDirectory()) {
                 continue;
             }
-            File[] children = sessionParent.listFiles();
-            if (children == null) {
-                continue;
-            }
-            for (File session : children) {
-                if (session == null || !session.isDirectory()) {
-                    continue;
-                }
-                boolean activeSession = sessionParent.getName().equals(activeSessionDir)
-                        && session.getName().equals(activeSessionName);
-                if (!activeSession) {
-                    sessions.add(session);
-                }
+            if (!session.getName().equals(activeSessionName)) {
+                sessions.add(session);
             }
         }
         sortOldestFirst(sessions);
@@ -602,7 +667,7 @@ final class NavigationLogStorage {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isOverLimit(File root, long maxBytes) {
-        return folderSizeBytes(root) > maxBytes;
+        return datedFolderSizeBytes(root) > maxBytes;
     }
 
     private static long lastRetentionElapsedMs;
@@ -637,6 +702,27 @@ final class NavigationLogStorage {
             total += folderSizeBytes(child);
             if (total < 0L) {
                 return Long.MAX_VALUE;
+            }
+        }
+        return total;
+    }
+
+    //excludes untouched legacy siblings from both retention accounting and deletion.
+    private static long datedFolderSizeBytes(File root) {
+        if (root == null || !root.isDirectory()) {
+            return 0L;
+        }
+        long total = 0L;
+        File[] children = root.listFiles();
+        if (children == null) {
+            return 0L;
+        }
+        for (File child : children) {
+            if (child != null && child.isDirectory() && isDayFolder(child)) {
+                total += folderSizeBytes(child);
+                if (total < 0L) {
+                    return Long.MAX_VALUE;
+                }
             }
         }
         return total;
@@ -747,19 +833,19 @@ final class NavigationLogStorage {
                 return cached.dir;
             }
         }
-        File publicDir = new File(
-                new File(Environment.getExternalStoragePublicDirectory(
-                        Environment.DIRECTORY_DOCUMENTS), ROOT_DIR),
-                childDir);
+        File publicRoot = new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOCUMENTS), ROOT_DIR);
+        File publicDir = childDir.isEmpty() ? publicRoot : new File(publicRoot, childDir);
         if (ensureWritable(publicDir)) {
             cachePublicFirstDir(childDir, publicDir, true, now);
             return publicDir;
         }
 
-        File fallback = context.getExternalFilesDir(childDir);
-        if (fallback == null) {
-            fallback = new File(context.getFilesDir(), childDir);
+        File fallbackRoot = context.getExternalFilesDir(ROOT_DIR);
+        if (fallbackRoot == null) {
+            fallbackRoot = new File(context.getFilesDir(), ROOT_DIR);
         }
+        File fallback = childDir.isEmpty() ? fallbackRoot : new File(fallbackRoot, childDir);
         ensureDir(fallback);
         Log.w(TAG, "public storage unavailable; fallback=" + fallback.getAbsolutePath());
         cachePublicFirstDir(childDir, fallback, false, now);

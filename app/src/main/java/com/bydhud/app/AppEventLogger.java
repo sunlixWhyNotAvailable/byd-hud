@@ -29,11 +29,12 @@ final class AppEventLogger {
     static void event(Context context, String line) {
         Log.i(TAG, line);
         append(context, EVENTS_FILE, timestamp() + " " + line + "\n", false);
+        NavigationLogStorage.enforceNavCaptureRetention(context);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logDir(Context context) {
-        return NavigationLogStorage.logcatDir(context);
+        return NavigationLogStorage.logsDir(context);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -44,7 +45,7 @@ final class AppEventLogger {
                 NavCaptureStore.rotate(file);
                 return file;
             }
-            File rotated = new File(logDir(context), name + ".1");
+            File rotated = new File(file.getParentFile(), name + ".1");
             if (rotated.exists() && !rotated.delete()) {
                 Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());
             }

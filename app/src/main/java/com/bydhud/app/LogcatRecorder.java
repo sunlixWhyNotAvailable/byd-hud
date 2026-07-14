@@ -28,6 +28,7 @@ final class LogcatRecorder {
 
     private static Process process;
     private static File activeFile;
+    private static String activeStartDay = "";
     private static File lastSavedFile;
     private static String lastStatus = STATUS_WAITING;
     private static String lastDetail = "";
@@ -46,10 +47,16 @@ final class LogcatRecorder {
         }
         process = null;
         activeFile = null;
+        activeStartDay = "";
         if (!STATUS_SAVED.equals(lastStatus)) {
             lastStatus = STATUS_WAITING;
         }
         return false;
+    }
+
+    //protects the recording's original day if logcat remains active across midnight.
+    static synchronized String activeStartDay() {
+        return isRecording() ? activeStartDay : "";
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -74,10 +81,12 @@ final class LogcatRecorder {
             return Result.recording(activeFile, "already recording");
         }
 
-        File file = new File(AppEventLogger.logDir(appContext),
+        String startDay = NavCaptureStore.todayDir();
+        File file = new File(NavigationLogStorage.logcatDir(appContext, startDay),
                 "logcat_" + timestampForFile() + ".txt");
         lastSavedFile = null;
         activeFile = file;
+        activeStartDay = startDay;
         lastStatus = STATUS_RECORDING;
         lastDetail = "";
 
@@ -103,6 +112,7 @@ final class LogcatRecorder {
                     + " error=" + e.getMessage());
             process = null;
             activeFile = null;
+            activeStartDay = "";
             lastSavedFile = file;
             lastStatus = STATUS_WAITING;
             lastDetail = "start failed: " + e.getMessage();
@@ -143,6 +153,7 @@ final class LogcatRecorder {
         append(file, "=== BYD HUD logcat saved " + timestampForLine() + " ===\n");
         process = null;
         activeFile = null;
+        activeStartDay = "";
         lastSavedFile = file;
         lastStatus = STATUS_SAVED;
         lastDetail = "bytes=" + (file == null ? 0L : file.length());

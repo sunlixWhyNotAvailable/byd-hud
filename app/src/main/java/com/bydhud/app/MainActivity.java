@@ -611,10 +611,10 @@ public final class MainActivity extends ComponentActivity {
     private String logPathsText() {
         return "Logcat:\n"
                 + NavigationLogStorage.publicLogcatPath()
-                + "\nFiles: logcat_*.txt, events.log"
-                + "\n\nNav capture:\n"
-                + NavigationLogStorage.publicNavCapturePath() + "/<yyyymmdd>"
-                + "\nFiles: raw_nav_events.jsonl, nav_snapshots.jsonl"
+                + "\nFiles: logcat_*.txt"
+                + "\n\nDaily logs:\n"
+                + NavigationLogStorage.publicLogsPath()
+                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl"
                 + "\n\nWaze crop:\n"
                 + NavigationLogStorage.publicWazeCropPath()
                 + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";
@@ -646,7 +646,17 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private long navCaptureFolderSizeBytes() {
-        return folderSizeBytes(NavigationLogStorage.navCaptureDir(this));
+        long total = 0L;
+        File[] days = NavigationLogStorage.storageRootDir(this).listFiles();
+        if (days == null) {
+            return 0L;
+        }
+        for (File day : days) {
+            if (day != null && day.isDirectory() && day.getName().matches("\\d{8}")) {
+                total += folderSizeBytes(day);
+            }
+        }
+        return total;
     }
 
     //guards Storage tab responsiveness by moving recursive folder scans off the UI snapshot path.
@@ -688,20 +698,13 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private int countSessionDirs(File dayDir) {
         int count = 0;
-        File[] children = dayDir.listFiles();
-        if (children == null) {
+        File[] sessions = new File(dayDir, NavigationLogStorage.WAZE_CROP_DIR).listFiles();
+        if (sessions == null) {
             return 0;
         }
-        for (File child : children) {
-            if (child != null && child.isDirectory()) {
-                File[] sessions = child.listFiles();
-                if (sessions != null) {
-                    for (File session : sessions) {
-                        if (session != null && session.isDirectory()) {
-                            count++;
-                        }
-                    }
-                }
+        for (File session : sessions) {
+            if (session != null && session.isDirectory()) {
+                count++;
             }
         }
         return count;
@@ -783,7 +786,7 @@ public final class MainActivity extends ComponentActivity {
                 state.laneString == null ? "" : state.laneString,
                 appScan.lastScanText,
                 HudPrefs.storageLimitGb(this),
-                NavigationLogStorage.publicNavCapturePath(),
+                NavigationLogStorage.publicRootPath(),
                 storage.calculating,
                 storage.totalSessions,
                 storage.navCaptureFolderBytes,

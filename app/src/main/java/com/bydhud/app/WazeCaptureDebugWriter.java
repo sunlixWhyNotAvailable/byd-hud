@@ -80,6 +80,16 @@ final class WazeCaptureDebugWriter {
         return post("raw_nav_event", () -> NavCaptureStore.rawEvent(app, channel, packageName, payload));
     }
 
+    boolean directEvent(Runnable work) {
+        return work != null && post("direct_event", work);
+    }
+
+    boolean appEvent(Context context, String line) {
+        Context app = context == null ? null : context.getApplicationContext();
+        if (app == null || line == null) return false;
+        return post("app_event", () -> AppEventLogger.event(app, line));
+    }
+
     boolean frameArtifacts(
             File dir,
             String sourceFrameName,

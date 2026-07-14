@@ -9,8 +9,10 @@ import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.IBinder;
-import android.os.Looper;
+import android.os.Process;
+import android.os.SystemClock;
 
 import androidx.car.app.AppInfo;
 import androidx.car.app.FailureResponse;
@@ -59,14 +61,19 @@ public final class WazeDirectChannel {
     private static final ComponentName WAZE_SERVICE = new ComponentName(
             "com.waze", "com.waze.car_lib.WazeCarAppService");
     private static final long REBIND_DELAY_MS = 1000L;
+    private static final long FRAME_SILENCE_MS = 5000L;
+    private static final long HEALTH_PROBE_TIMEOUT_MS = 5000L;
     private static final long ALERT_ZERO_WATCHDOG_MS = 15_000L;
+    private static final int MAX_ICON_DIMENSION_PX = 256;
     private static final Pattern ALERT_DISTANCE = Pattern.compile(
-            "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)",
+            "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)\\b",
             Pattern.CASE_INSENSITIVE);
 
     private final Context context;
     private final Listener listener;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private final HandlerThread channelThread = new HandlerThread(
+            "WazeDirectChannel", Process.THREAD_PRIORITY_BACKGROUND);
+    private final Handler channelHandler;
     private final Map<Integer, byte[]> maneuverIcons = new HashMap<>();
 
     private volatile int generation;
@@ -89,25 +96,33 @@ public final class WazeDirectChannel {
     private DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.inactive();
     private Runnable rebindRunnable;
     private Runnable alertWatchdog;
+    private Runnable frameSilenceCheck;
+    private Runnable healthProbeTimeout;
+    private long lastDirectActivityMs;
+    private boolean healthProbeInFlight;
+    private int healthProbeSequence;
 
     public WazeDirectChannel(Context context, Listener listener) {
         this.context = Objects.requireNonNull(context, "context").getApplicationContext();
         this.listener = Objects.requireNonNull(listener, "listener");
+        channelThread.start();
+        channelHandler = new Handler(channelThread.getLooper());
     }
 
     public void start(String reason) {
-        runOnMain(() -> startOnMain(reason));
+        runOnChannel(() -> startOnChannel(reason));
     }
 
     public void stop(String reason) {
-        runOnMain(() -> stopOnMain(reason));
+        runOnChannel(() -> stopOnChannel(reason));
     }
 
     public void shutdown(String reason) {
-        runOnMain(() -> {
+        runOnChannel(() -> {
             if (shutdown) return;
             shutdown = true;
-            stopOnMain(reason);
+            stopOnChannel(reason);
+            channelThread.quitSafely();
         });
     }
 
@@ -115,7 +130,7 @@ public final class WazeDirectChannel {
         return handshakeAvailable;
     }
 
-    private void startOnMain(String reason) {
+    private void startOnChannel(String reason) {
         if (shutdown) {
             log("start ignored after shutdown: " + safeText(reason));
             return;
@@ -135,7 +150,7 @@ public final class WazeDirectChannel {
         connectWaze(generation);
     }
 
-    private void stopOnMain(String reason) {
+    private void stopOnChannel(String reason) {
         String stopReason = safeText(reason);
         if (!active) {
             setHandshakeUnavailable("stopped:" + stopReason, false);
@@ -147,6 +162,7 @@ public final class WazeDirectChannel {
         generation++;
         cancelRebind();
         cancelAlertWatchdog();
+        cancelDirectHealth();
         setHandshakeUnavailable("stopped:" + stopReason, false);
         endNavigation("stopped:" + stopReason);
 
@@ -181,16 +197,13 @@ public final class WazeDirectChannel {
             binding = bound;
             log("bind result=" + bound + " component=" + WAZE_SERVICE.flattenToShortString());
             if (!bound) {
-                binding = false;
-                connection = null;
+                releaseBinding(nextConnection);
                 carHost = null;
                 setHandshakeUnavailable("bind_failed", true);
                 scheduleRebind(expectedGeneration);
             }
         } catch (Throwable t) {
-            binding = false;
-            bound = false;
-            connection = null;
+            releaseBinding(nextConnection);
             carHost = null;
             log("bind failed: " + t);
             setHandshakeUnavailable("bind_exception", true);
@@ -278,7 +291,10 @@ public final class WazeDirectChannel {
         try {
             appManager.getTemplate(new DoneCallback(
                     expectedGeneration, "getTemplate",
-                    response -> onTemplate(expectedGeneration, response)));
+                    response -> {
+                        onTemplate(expectedGeneration, response);
+                        recordTemplateResponse("getTemplate");
+                    }));
         } catch (Throwable t) {
             sessionFailure(expectedGeneration, "get_template_exception", t);
         }
@@ -319,7 +335,7 @@ public final class WazeDirectChannel {
         log("binding lost: " + reason);
         releaseBinding(source);
         setHandshakeUnavailable(reason, false);
-        endNavigation(reason);
+        endNavigation(reason, false);
         clearSessionState();
         generation++;
         scheduleRebind(generation);
@@ -343,17 +359,17 @@ public final class WazeDirectChannel {
             rebindRunnable = null;
             connectWaze(expectedGeneration);
         };
-        mainHandler.postDelayed(rebindRunnable, REBIND_DELAY_MS);
+        channelHandler.postDelayed(rebindRunnable, REBIND_DELAY_MS);
     }
 
     private void cancelRebind() {
         if (rebindRunnable == null) return;
-        mainHandler.removeCallbacks(rebindRunnable);
+        channelHandler.removeCallbacks(rebindRunnable);
         rebindRunnable = null;
     }
 
     private void releaseBinding(Connection source) {
-        if (source != null && (bound || binding || source != connection)) {
+        if (source != null) {
             try {
                 context.unbindService(source);
             } catch (IllegalArgumentException ignored) {
@@ -377,6 +393,7 @@ public final class WazeDirectChannel {
         navigationFrame = DirectTbtFrame.empty();
         alert = DirectTbtFrame.AlertOverlay.inactive();
         cancelAlertWatchdog();
+        cancelDirectHealth();
     }
 
     private ICarApp requireCarApp() {
@@ -400,17 +417,27 @@ public final class WazeDirectChannel {
         if (navigationActive) return;
         navigationActive = true;
         maneuverIcons.clear();
+        recordDirectActivity("navigation_started");
         callback(() -> listener.onNavigationStarted(reason));
     }
 
     private void endNavigation(String reason) {
+        endNavigation(reason, true);
+    }
+
+    private void endNavigation(String reason, boolean notifyListener) {
         cancelAlertWatchdog();
+        cancelDirectHealth();
         alert = DirectTbtFrame.AlertOverlay.inactive();
         navigationFrame = DirectTbtFrame.empty();
         maneuverIcons.clear();
         if (!navigationActive) return;
         navigationActive = false;
-        callback(() -> listener.onNavigationEnded(reason));
+        if (notifyListener) {
+            callback(() -> listener.onNavigationEnded(reason));
+        } else {
+            log("navigation session cleared without route end reason=" + reason);
+        }
     }
 
     private void publishCurrentStep(Step step, Distance distance, String reason) {
@@ -421,6 +448,7 @@ public final class WazeDirectChannel {
             clearAlert(false, "guidance_changed");
         }
         navigationFrame = next;
+        recordDirectActivity("frame:" + reason);
         emitFrame(reason);
     }
 
@@ -504,14 +532,92 @@ public final class WazeDirectChannel {
                     || alert.getDistanceMeters() != 0) return;
             clearAlert(true, "alert_zero_watchdog");
         };
-        mainHandler.postDelayed(alertWatchdog, ALERT_ZERO_WATCHDOG_MS);
+        channelHandler.postDelayed(alertWatchdog, ALERT_ZERO_WATCHDOG_MS);
         log("alert zero watchdog armed id=" + alertId);
     }
 
     private void cancelAlertWatchdog() {
         if (alertWatchdog == null) return;
-        mainHandler.removeCallbacks(alertWatchdog);
+        channelHandler.removeCallbacks(alertWatchdog);
         alertWatchdog = null;
+    }
+
+    private void recordDirectActivity(String reason) {
+        if (!navigationActive) return;
+        boolean completedProbe = healthProbeInFlight;
+        lastDirectActivityMs = SystemClock.elapsedRealtime();
+        healthProbeInFlight = false;
+        if (healthProbeTimeout != null) {
+            channelHandler.removeCallbacks(healthProbeTimeout);
+            healthProbeTimeout = null;
+        }
+        if (completedProbe) {
+            log("health probe recovered reason=" + reason);
+        }
+        scheduleFrameSilenceCheck();
+    }
+
+    private void recordTemplateResponse(String reason) {
+        if (navigationActive) recordDirectActivity("template_response:" + reason);
+    }
+
+    private void scheduleFrameSilenceCheck() {
+        if (!navigationActive || !active || shutdown) return;
+        if (frameSilenceCheck != null) {
+            channelHandler.removeCallbacks(frameSilenceCheck);
+        }
+        int expectedGeneration = generation;
+        frameSilenceCheck = () -> {
+            frameSilenceCheck = null;
+            if (!isCurrent(expectedGeneration) || !navigationActive) return;
+            long ageMs = SystemClock.elapsedRealtime() - lastDirectActivityMs;
+            if (ageMs < FRAME_SILENCE_MS) {
+                scheduleFrameSilenceCheck();
+                return;
+            }
+            startHealthProbe(expectedGeneration, ageMs);
+        };
+        long delayMs = Math.max(1L,
+                FRAME_SILENCE_MS - (SystemClock.elapsedRealtime() - lastDirectActivityMs));
+        channelHandler.postDelayed(frameSilenceCheck, delayMs);
+    }
+
+    private void startHealthProbe(int expectedGeneration, long silenceMs) {
+        if (!isCurrent(expectedGeneration) || !navigationActive || healthProbeInFlight) return;
+        if (appManager == null) {
+            sessionFailure(expectedGeneration, "health_probe_manager_missing",
+                    new IllegalStateException("Waze app manager unavailable"));
+            return;
+        }
+        healthProbeInFlight = true;
+        int expectedProbe = ++healthProbeSequence;
+        log("health probe start silenceMs=" + silenceMs + " sequence=" + expectedProbe);
+        healthProbeTimeout = () -> {
+            healthProbeTimeout = null;
+            if (!isCurrent(expectedGeneration)
+                    || !navigationActive
+                    || !healthProbeInFlight
+                    || healthProbeSequence != expectedProbe) return;
+            sessionFailure(expectedGeneration, "health_probe_timeout",
+                    new IllegalStateException("No getTemplate response in "
+                            + HEALTH_PROBE_TIMEOUT_MS + "ms"));
+        };
+        channelHandler.postDelayed(healthProbeTimeout, HEALTH_PROBE_TIMEOUT_MS);
+        fetchTemplate(expectedGeneration);
+    }
+
+    private void cancelDirectHealth() {
+        if (frameSilenceCheck != null) {
+            channelHandler.removeCallbacks(frameSilenceCheck);
+            frameSilenceCheck = null;
+        }
+        if (healthProbeTimeout != null) {
+            channelHandler.removeCallbacks(healthProbeTimeout);
+            healthProbeTimeout = null;
+        }
+        lastDirectActivityMs = 0L;
+        healthProbeInFlight = false;
+        healthProbeSequence++;
     }
 
     private List<DirectTbtFrame.Lane> mapLanes(List<Lane> lanes) {
@@ -556,8 +662,14 @@ public final class WazeDirectChannel {
             IconCompat compat = icon.getIcon();
             Drawable drawable = compat == null ? null : compat.loadDrawable(context);
             if (drawable == null) return new byte[0];
-            int width = drawable.getIntrinsicWidth() > 0 ? drawable.getIntrinsicWidth() : 80;
-            int height = drawable.getIntrinsicHeight() > 0 ? drawable.getIntrinsicHeight() : 80;
+            int sourceWidth = drawable.getIntrinsicWidth() > 0
+                    ? drawable.getIntrinsicWidth() : 80;
+            int sourceHeight = drawable.getIntrinsicHeight() > 0
+                    ? drawable.getIntrinsicHeight() : 80;
+            float scale = Math.min(1f, MAX_ICON_DIMENSION_PX
+                    / (float) Math.max(sourceWidth, sourceHeight));
+            int width = Math.max(1, Math.round(sourceWidth * scale));
+            int height = Math.max(1, Math.round(sourceHeight * scale));
             bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
             Canvas canvas = new Canvas(bitmap);
             drawable.setBounds(0, 0, width, height);
@@ -592,13 +704,13 @@ public final class WazeDirectChannel {
         }
     }
 
-    private void runOnMain(Runnable action) {
-        if (Looper.myLooper() == Looper.getMainLooper()) action.run();
-        else mainHandler.post(action);
+    private void runOnChannel(Runnable action) {
+        if (Thread.currentThread() == channelThread) action.run();
+        else channelHandler.post(action);
     }
 
     private void postBinder(int expectedGeneration, Runnable action) {
-        mainHandler.post(() -> {
+        channelHandler.post(() -> {
             if (isCurrent(expectedGeneration)) action.run();
         });
     }
@@ -760,23 +872,23 @@ public final class WazeDirectChannel {
 
         @Override
         public void onServiceConnected(ComponentName name, IBinder service) {
-            runOnMain(() -> onConnected(expectedGeneration, this, name, service));
+            runOnChannel(() -> onConnected(expectedGeneration, this, name, service));
         }
 
         @Override
         public void onServiceDisconnected(ComponentName name) {
-            runOnMain(() -> onBindingLost(
+            runOnChannel(() -> onBindingLost(
                     expectedGeneration, this, "service_disconnected"));
         }
 
         @Override
         public void onBindingDied(ComponentName name) {
-            runOnMain(() -> onBindingLost(expectedGeneration, this, "binding_died"));
+            runOnChannel(() -> onBindingLost(expectedGeneration, this, "binding_died"));
         }
 
         @Override
         public void onNullBinding(ComponentName name) {
-            runOnMain(() -> onBindingLost(expectedGeneration, this, "null_binding"));
+            runOnChannel(() -> onBindingLost(expectedGeneration, this, "null_binding"));
         }
     }
 

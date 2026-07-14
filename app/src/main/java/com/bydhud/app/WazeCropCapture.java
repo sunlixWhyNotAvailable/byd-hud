@@ -284,7 +284,7 @@ final class WazeCropCapture {
     }
 
     //keeps projected Waze crop alive even when BYD HUD itself is no longer the foreground Activity.
-    private static boolean isUsableWazeCropState(
+    static boolean isUsableWazeCropState(
             NavAppDisplayState state,
             String activeDashboardPackage,
             boolean projectedSurface) {

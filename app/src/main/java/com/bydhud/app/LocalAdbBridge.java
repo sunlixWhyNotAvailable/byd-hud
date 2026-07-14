@@ -61,10 +61,10 @@ final class LocalAdbBridge {
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
     private static final String CAPTURE_SHELL_ROOT =
-            "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD/nav-capture"
-                    + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/nav-capture)";
+            "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD"
+                    + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/BYD-HUD)";
     private static final String CAPTURE_SESSION_PATH =
-            "(/[0-9]{8})?/(waze-virtual-display|waze-crop)/[A-Za-z0-9_.-]{1,80}/screen_[0-9]{4}\\.png";
+            "/[0-9]{8}/waze-crop/[A-Za-z0-9_.-]{1,80}/screen_[0-9]{4}\\.png";
     private static final Pattern WAZE_SCREENSHOT_COMMAND = Pattern.compile(
             "screencap -d [0-9]{1,3} -p "
                     + CAPTURE_SHELL_ROOT

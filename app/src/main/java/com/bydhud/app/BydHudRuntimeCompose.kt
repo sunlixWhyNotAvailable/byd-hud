@@ -1746,7 +1746,7 @@ private fun ReadOnlyValueField(
 }
 
 @Composable
-//renders the public nav-capture path without implying it is editable.
+//renders the public storage path without implying it is editable.
 private fun ReadOnlyPathField(text: String, palette: Palette, modifier: Modifier = Modifier) {
     Box(
         modifier = modifier
@@ -2995,7 +2995,7 @@ private fun enCopy() = Copy(
     storageLimitGb = "Limit, GB",
     currentNavLogsSize = "Current navigation logs folder size",
     navigationLogsFolder = "Navigation logs folder",
-    storageFolderHint = "Day folders under /sdcard/Documents/BYD-HUD/nav-capture.",
+    storageFolderHint = "Day folders under /sdcard/Documents/BYD-HUD.",
     sortByDate = "Newest first",
     sortByName = "Oldest first",
     deleteSelected = "Delete selected",
@@ -3132,7 +3132,7 @@ private fun uaCopy() = enCopy().copy(
     storageLimitGb = "Ліміт, ГБ",
     currentNavLogsSize = "Поточний розмір теки з журналом навігації",
     navigationLogsFolder = "Тека журналу навігації",
-    storageFolderHint = "Денні теки у /sdcard/Documents/BYD-HUD/nav-capture.",
+    storageFolderHint = "Денні теки у /sdcard/Documents/BYD-HUD.",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
     deleteSelected = "Видалити вибране",

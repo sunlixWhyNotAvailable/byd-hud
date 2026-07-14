@@ -19,7 +19,6 @@ import java.util.Locale;
 //defines the NavCaptureStore module boundary so related behavior stays readable inside one unit.
 final class NavCaptureStore {
     private static final String TAG = "BydHudNavCapture";
-    private static final String DIR = "nav-capture";
     private static final String RAW_EVENTS_FILE = "raw_nav_events.jsonl";
     private static final String SNAPSHOTS_FILE = "nav_snapshots.jsonl";
     private static final SimpleDateFormat LOCAL_TS_FORMAT =
@@ -32,11 +31,7 @@ final class NavCaptureStore {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logDir(Context context) {
-        File dir = new File(NavigationLogStorage.navCaptureDir(context), todayDir());
-        if (!dir.exists() && !dir.mkdirs()) {
-            Log.w(TAG, "mkdir failed: " + dir.getAbsolutePath());
-        }
-        return dir;
+        return NavigationLogStorage.logsDir(context);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -120,10 +115,7 @@ final class NavCaptureStore {
         if (hash.isEmpty()) {
             return "";
         }
-        File dir = new File(logDir(context), "waze-direct");
-        if (!dir.exists() && !dir.mkdirs()) {
-            return "";
-        }
+        File dir = NavigationLogStorage.directCaptureDir(context);
         String safeKind = kind == null ? "artifact"
                 : kind.replaceAll("[^A-Za-z0-9_-]", "_");
         File file = new File(dir, safeKind + "-" + hash + ".png");
