@@ -41,12 +41,12 @@ After first launch:
 ## Known Limitations
 
 - Other apps utilising the same SOME/IP channel for HUD projection may cause HUD blinking and instability.
-- Navigation parsing depends on the UI and notification structure of navigator apps.
-- `Google Maps` accessibility mode doensn't provide lane guidance.
+- Navigation parsing in the crop mode depends on the UI and notification structure of navigator apps.
+- `Google Maps` accessibility mode doesn't provide lane guidance.
 - `Google Maps` notification mode may provide text route data but rarely or no maneuvers and no lane guidance.
 - `Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture and resolution.
 - The direct Waze channel requires a compatible patched Waze build. BYD HUD waits up to five seconds for it before starting the visual fallback.
-- `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP`.
+- `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP` (for crop mode).
 
 ## Tested
 
@@ -69,7 +69,9 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 ## To Do
 
 - add dashboard window mode toggle support;
-- add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here.
+- add patch feat directly to the app;
+- gmaps direct nav support instead of text parsing;
+- add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again).
 
 ## DISCLAIMER
 

@@ -302,7 +302,19 @@ final class NavHudLiveSender {
                     @Override
                     public void onNavigationEnded(String reason) {
                         invalidatePendingWazeDirectFrames();
-                        handler.post(() -> onWazeDirectNavigationEnded(reason));
+                        long detectedAtMs = SystemClock.elapsedRealtime();
+                        String safeEndReason = safeReason(reason);
+                        if (normalizeString(reason).startsWith("stopped:")) {
+                            return;
+                        }
+                        Log.i(TAG, "waze direct navigation ended detected reason="
+                                + safeEndReason + " elapsedMs=" + detectedAtMs);
+                        WazeCaptureDebugWriter.get().appEvent(context,
+                                "nav_live waze_direct navigation_ended_detected reason="
+                                        + safeEndReason + " elapsedMs=" + detectedAtMs);
+                        hudOutput.endDirectOutput(
+                                "waze-direct-ended:" + safeEndReason, detectedAtMs);
+                        handler.post(() -> onWazeDirectNavigationEnded(reason, detectedAtMs));
                     }
 
                     @Override
@@ -456,7 +468,9 @@ final class NavHudLiveSender {
             resetLatestPayload();
         }
         wazeFallbackActive = false;
-        log("waze source=direct reason=" + safeReason(reason));
+        String sourceLine = "waze source=direct reason=" + safeReason(reason);
+        Log.i(TAG, sourceLine);
+        WazeCaptureDebugWriter.get().appEvent(context, "nav_live " + sourceLine);
     }
 
     private void logWazeDirectFrame(DirectTbtFrame frame, String reason,
@@ -466,11 +480,6 @@ final class NavHudLiveSender {
         byte[] lanes = frame.getLanePng();
         DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(frame, options);
-        String alertArtifact = "";
-        if (alert.isActive() && HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
-            alertArtifact = NavCaptureStore.saveDirectArtifact(
-                    context, "alert", alert.getManeuverPng());
-        }
         NavCaptureStore.rawEvent(context, "waze_direct", WAZE_PACKAGE,
                 "reason=" + safeReason(reason)
                         + " receivedAtElapsedMs=" + receivedAtMs
@@ -491,14 +500,16 @@ final class NavHudLiveSender {
                         + " hudDistanceM=" + prepared.distanceMeters()
                         + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
                         + " hudLaneCount=" + prepared.laneCount()
-                        + " hudLaneBytes=" + prepared.lanePngBytes()
-                        + " alertArtifact=" + alertArtifact);
+                        + " hudLaneBytes=" + prepared.lanePngBytes());
     }
 
-    private void onWazeDirectNavigationEnded(String reason) {
+    private void onWazeDirectNavigationEnded(String reason, long detectedAtMs) {
         if (!active || !WAZE_PACKAGE.equals(activePackage)) {
             return;
         }
+        log("waze direct navigation ended main_handoff_ms="
+                + Math.max(0L, SystemClock.elapsedRealtime() - detectedAtMs)
+                + " reason=" + safeReason(reason));
         cancelWazeDirectColdTimeout();
         cancelWazeFallbackReadiness();
         wazeDirectNavigating = false;
@@ -512,9 +523,6 @@ final class NavHudLiveSender {
         NavRouteStateStore.get(context).markRouteEnded(
                 WAZE_PACKAGE, "direct-navigation-ended", now);
         WazeRouteTracker.get(context).onRouteEnded("direct-navigation-ended", now);
-        hudOutput.selectNavigationSource(
-                HudOutputCoordinator.Source.NONE,
-                "waze-direct-ended:" + safeReason(reason));
         log("waze source=waiting_direct routeEnded=true reason=" + safeReason(reason));
     }
 

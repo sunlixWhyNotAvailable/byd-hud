@@ -63,10 +63,10 @@ public final class WazeDirectChannel {
     private static final long REBIND_DELAY_MS = 1000L;
     private static final long FRAME_SILENCE_MS = 5000L;
     private static final long HEALTH_PROBE_TIMEOUT_MS = 5000L;
-    private static final long ALERT_TTL_MS = 10_000L;
+    private static final long ALERT_TTL_MS = 5000L;
     private static final int MAX_ICON_DIMENSION_PX = 256;
     private static final Pattern ALERT_DISTANCE = Pattern.compile(
-            "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)\\b",
+            "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)(?=$|\\s|[.,;:!?])",
             Pattern.CASE_INSENSITIVE);
 
     private final Context context;

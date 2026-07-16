@@ -110,6 +110,11 @@ private enum class RuntimeTab {
     Manual
 }
 
+private enum class Language {
+    Ua,
+    En
+}
+
 //defines class UI/state support so Compose code can keep rendering intent explicit.
 private enum class ManualMode {
     Supported,
@@ -156,6 +161,7 @@ private data class Palette(
 
 //defines Copy UI/state support so Compose code can keep rendering intent explicit.
 private data class Copy(
+    val language: Language,
     val title: String,
     val subtitle: String,
     val main: String,
@@ -2495,7 +2501,9 @@ private fun HudSwitch(
 ) {
     val width = if (compact) 42.dp else 56.dp
     val height = if (compact) 27.dp else 32.dp
-    val knob = if (compact) 20.dp else 25.dp
+    val knobOff = if (compact) 16.dp else 19.dp
+    val knobPending = if (compact) 18.dp else 22.dp
+    val knobOn = if (compact) 20.dp else 25.dp
     val pendingHolder = remember { mutableStateOf<SwitchPendingState?>(null) }
     val pendingState = pendingHolder.value
     val isPending = pendingState != null
@@ -2529,12 +2537,20 @@ private fun HudSwitch(
             }
         }
     }
-    val travel = width - knob - 6.dp
     val trackChecked = pendingState?.from ?: checked
+    val knobSize by animateDpAsState(
+        targetValue = when {
+            isPending -> knobPending
+            checked -> knobOn
+            else -> knobOff
+        },
+        animationSpec = tween(durationMillis = 140),
+        label = "switchKnobSize"
+    )
     val knobOffset by animateDpAsState(
         targetValue = when {
-            isPending -> 3.dp + travel / 2f
-            checked -> 3.dp + travel
+            isPending -> (width - knobPending) / 2f
+            checked -> width - knobOn - 3.dp
             else -> 3.dp
         },
         animationSpec = tween(durationMillis = 140),
@@ -2559,7 +2575,7 @@ private fun HudSwitch(
     ) {
         Box(
             modifier = Modifier
-                .size(knob)
+                .size(knobSize)
                 .offset(x = knobOffset, y = 0.dp)
                 .clip(RoundedCornerShape(100.dp))
                 .background(if (trackChecked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
@@ -2821,14 +2837,14 @@ private fun storageUsageColors(bytes: Long, limitGb: Int, palette: Palette): Pai
 }
 
 private fun gbUnit(copy: Copy): String =
-    if (copy.storageLimitGb.contains("ГБ")) "ГБ" else "GB"
+    if (copy.language == Language.Ua) "ГБ" else "GB"
 
 private fun mbUnit(copy: Copy): String =
-    if (copy.storageLimitGb.contains("ГБ")) "МБ" else "MB"
+    if (copy.language == Language.Ua) "МБ" else "MB"
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun sessionLabel(count: Int, copy: Copy): String {
-    if (copy.sessions == "sessions") {
+    if (copy.language == Language.En) {
         return if (count == 1) "session" else "sessions"
     }
     val mod100 = count % 100
@@ -2843,10 +2859,10 @@ private fun sessionLabel(count: Int, copy: Copy): String {
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun previousPlural(copy: Copy): String =
-    if (copy.previous == "Попередній") "Попередні" else copy.previous
+    if (copy.language == Language.Ua) "Попередні" else copy.previous
 
 private fun nextPlural(copy: Copy): String =
-    if (copy.next == "Наступний") "Наступні" else copy.next
+    if (copy.language == Language.Ua) "Наступні" else copy.next
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun darkPalette() = Palette(
@@ -2896,6 +2912,7 @@ private fun lightPalette() = Palette(
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun enCopy() = Copy(
+    language = Language.En,
     title = "BYD HUD",
     subtitle = "HUD navigation output | v${BuildConfig.VERSION_NAME}",
     main = "Options",
@@ -3039,11 +3056,12 @@ private fun enCopy() = Copy(
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun uaCopy() = enCopy().copy(
+    language = Language.Ua,
     subtitle = "Виведення навігації на HUD | v${BuildConfig.VERSION_NAME}",
     main = "Налаштування",
     apps = "Застосунки",
     logs = "Логи",
-    manual = "Вручну",
+    manual = "Ручний",
     hudRunning = "HUD: працює",
     hudIdle = "HUD: очікує",
     hudFailed = "HUD: помилка",
@@ -3052,29 +3070,29 @@ private fun uaCopy() = enCopy().copy(
     permissionsMissing = "Права: немає",
     dark = "Темна",
     light = "Світла",
-    mainHint = "Runtime controls та швидка діагностика навігації",
-    permissionsRuntime = "Дозволи та Runtime",
-    adbPermissions = "ADB дозволи",
-    adbHint = "Self-check автоматично видає потрібні дозволи, коли ADB авторизований.",
+    mainHint = "Керування службою та швидка діагностика навігації",
+    permissionsRuntime = "Дозволи та служба",
+    adbPermissions = "Дозволи ADB",
+    adbHint = "Самоперевірка автоматично видає потрібні дозволи, коли ADB авторизований.",
     grantAdb = "Видати ADB",
     backgroundApps = "Робота у фоні",
     backgroundHint = "Відкрити екран керування фоновою роботою.",
     disableBgApps = "Робота у фоні",
     setupDialogTitle = "Робота у фоні",
     setupDialogText = "Це потрібно перевірити після кожного встановлення або оновлення, інакше DiLink може зупинити HUD у фоні.",
-    setupDialogInstruction = "Set Disable background Apps -> BYD HUD = OFF",
+    setupDialogInstruction = "Установіть Disable background Apps -> BYD HUD = OFF",
     setupDialogPrimary = "Відкрити",
     setupDialogDismiss = "Зрозуміло",
     bootRuntime = "Авто-запуск",
-    bootRuntimeHint = "Запускати foreground HUD runtime після boot та watchdog подій.",
+    bootRuntimeHint = "Запускати фонову службу HUD після завантаження системи, розблокування, оновлення пакета та перевірки стану.",
     saveScreenshotsLogs = "Зберігати діагностичні скріншоти та розширені логи",
     saveScreenshotsLogsHint = "Зберігати кадри Waze, деталі обробки та повну історію логів для діагностики.",
     checkForUpdates = "Перевіряти оновлення",
-    checkForUpdatesHint = "Перевіряти наявність нової версії та пропонувати оновитись",
+    checkForUpdatesHint = "Перевіряти наявність нової версії та пропонувати оновитися",
     checkForUpdatesButton = "Перевірити оновлення",
     betaTesting = "Участь у бета-тестуванні",
     betaTestingHint = "Перевіряти наявність експериментальних версій. Може бути нестабільна або зламана робота",
-    shutdown = "Виключити",
+    shutdown = "Вимкнути",
     shutdownHint = "Завершити роботу застосунку до наступного відкриття",
     updateTitle = "Оновлення",
     updateCurrentVersion = "Поточна версія:",
@@ -3085,24 +3103,25 @@ private fun uaCopy() = enCopy().copy(
     updateClose = "Закрити",
     updateAction = "Оновити",
     navigationOutput = "Вивід навігації",
-    pngOutput = "PNG вивід",
+    pngOutput = "Вивід PNG",
     pngHint = "Надсилати зображення маневру.",
-    nativeOutput = "Native вивід",
+    nativeOutput = "Вивід штатного маневру",
     nativeHint = "Надсилати штатне динамічне зображення маневру.",
     laneOutput = "Вивід смуг",
-    laneHint = "Надсилати bitmap смуг для multi-lane guidance.",
+    laneHint = "Надсилати зображення смуг, коли аналізатор виявляє багатосмугові підказки.",
     distanceOutput = "Вивід дистанції",
-    distanceHint = "Надсилати поле дистанції до маневру у live navigation payload.",
+    distanceHint = "Надсилати дистанцію до маневру в даних активної навігації.",
     streetOutput = "Вивід вулиці",
-    streetHint = "Надсилати наступну дорогу або Waze street text.",
+    streetHint = "Надсилати наступну дорогу або назву вулиці з Waze, коли вона доступна.",
     smallDistanceClamp = "Обрізка малої дистанції",
-    smallDistanceHint = "Обрізати дистанції нижче 20 м замість OEM close marker.",
+    smallDistanceHint = "Обмежувати дистанції менше 20 м, щоб штатний HUD не показував власний маркер близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",
+    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG.",
     appsHint = "Підтримувані застосунки можна активувати до запуску. Для приборки застосунок має бути у фоні.",
-    lastScan = "Останній scan",
+    lastScan = "Останнє сканування",
     refreshApps = "Оновити застосунки",
     supportedApps = "Підтримувані навігатори",
-    allApps = "Всі фонові застосунки",
+    allApps = "Усі фонові застосунки",
     installed = "встановлено",
     notInstalled = "не встановлено",
     running = "працює у фоні",
@@ -3115,12 +3134,12 @@ private fun uaCopy() = enCopy().copy(
     sendMain = "На основний екран",
     startAppFirst = "Спочатку запусти",
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
-    logsHint = "Збір логів і шляхів до артефактів для тестерів.",
+    logsHint = "Збір логів і шляхів до навігаційних логів для тестерів.",
     logcatRecorder = "Запис logcat",
     recorderStatus = "Стан запису",
     waiting = "очікування",
-    startLogcat = "Старт logcat",
-    stopLogcat = "Стоп logcat",
+    startLogcat = "Почати запис logcat",
+    stopLogcat = "Зупинити запис logcat",
     applicationState = "Стан застосунку",
     navigationLogs = "Навігаційні логи",
     pathHint = "Шлях до навігаційних логів на планшеті.",
@@ -3132,7 +3151,7 @@ private fun uaCopy() = enCopy().copy(
     storageLimitGb = "Ліміт, ГБ",
     currentNavLogsSize = "Поточний розмір теки з журналом навігації",
     navigationLogsFolder = "Тека журналу навігації",
-    storageFolderHint = "Денні теки у /sdcard/Documents/BYD-HUD.",
+    storageFolderHint = "/sdcard/Documents/BYD-HUD",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
     deleteSelected = "Видалити вибране",
@@ -3144,7 +3163,7 @@ private fun uaCopy() = enCopy().copy(
     storageNoDayFolders = "Денних тек ще немає. Нові навігаційні логи з'являться після створення сесій.",
     storageCalculating = "обчислюємо...",
     storageSessionsShort = "сес.",
-    storageDeleteTitle = "Видалення вибраного",
+    storageDeleteTitle = "Видалення даних",
     storageDeleteSelected = "Обрано %d тек для видалення",
     storageDeleteQuestion = "Виконати видалення?",
     storageDeleteCannotStop = "Після початку зупинити операцію із застосунку неможливо.",
@@ -3152,24 +3171,24 @@ private fun uaCopy() = enCopy().copy(
     storageDeleteNo = "Ні",
     storageDeletingFolder = "Видаляємо теку з даними",
     storageDeleteStep = "крок %d/%d",
-    manualHint = "Пряма ручна перевірка HUD payload.",
-    manualHudOutput = "Ручний HUD вивід",
+    manualHint = "Пряма ручна перевірка даних для HUD.",
+    manualHudOutput = "Ручний вивід на HUD",
     supportedArrows = "Підтримувані стрілки",
-    supportedArrowsHint = "Попередній / Наступний одразу надсилає PNG+Native combo",
+    supportedArrowsHint = "Попередній / Наступний одразу надсилає пару PNG і штатного маневру",
     manualLanes = "Ручні смуги",
-    manualLanesHint = "Попередні / Наступні одразу надсилає lane bitmap",
+    manualLanesHint = "Попередні / Наступні одразу надсилають зображення смуг",
     rawManeuverIds = "Сирі ID маневрів",
-    rawManeuverHint = "Числові поля одразу формують Sxx / Nxx payload ID",
+    rawManeuverHint = "Числові поля одразу формують ідентифікатори Sxx / Nxx",
     manualMode = "Ручний режим",
-    manualModeHint = "Коли увімкнено, ручні перемикачі одразу надсилають HUD payload. Вимкнення очищає ручний вивід і повертає live-навігацію.",
+    manualModeHint = "Коли увімкнено, ручні елементи одразу надсилають дані на HUD. Вимкнення очищає ручний вивід і повертає активну навігацію.",
     pngNumber = "PNG номер",
-    nativeNumber = "Native номер",
+    nativeNumber = "Номер штатного маневру",
     distance = "Дистанція, м",
     street = "Текст вулиці",
-    laneBitmap = "Bitmap смуг",
+    laneBitmap = "Зображення смуг",
     previous = "Попередній",
     next = "Наступний",
     randomize = "Випадково",
     currentSelection = "Поточний вибір",
-    manualPreview = "preview ручного виводу"
+    manualPreview = "попередній перегляд ручного виводу"
 )

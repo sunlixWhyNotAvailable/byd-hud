@@ -203,6 +203,30 @@ final class HudOutputCoordinator {
         });
     }
 
+    void endDirectOutput(String reason, long detectedAtMs) {
+        worker.post(() -> {
+            boolean directSelected = directEnabled
+                    || activeSource == Source.DIRECT
+                    || pendingSource == Source.DIRECT;
+            if (!directSelected) {
+                logAsync("direct end ignored reason=" + safe(reason)
+                        + " detectedAtElapsedMs=" + detectedAtMs);
+                return;
+            }
+            long now = SystemClock.elapsedRealtime();
+            logAsync("direct end accepted reason=" + safe(reason)
+                    + " detectedAtElapsedMs=" + detectedAtMs
+                    + " workerHandoffMs=" + Math.max(0L, now - detectedAtMs));
+            directEnabled = false;
+            directFrame = null;
+            preparedDirectFrame = null;
+            preparedDirectPayload = null;
+            pendingDirectReceivedAtMs = 0L;
+            pendingDirectReason = "";
+            reconcile(reason, detectedAtMs);
+        });
+    }
+
     void resetTransport(String reason) {
         worker.post(() -> {
             generation++;
@@ -232,6 +256,10 @@ final class HudOutputCoordinator {
     }
 
     private void reconcile(String reason) {
+        reconcile(reason, 0L);
+    }
+
+    private void reconcile(String reason, long endDetectedAtMs) {
         Source target = desiredSource();
         if (pendingSource == Source.NONE && target == activeSource) {
             if (target == Source.NONE && client.hasBinding()) {
@@ -255,7 +283,7 @@ final class HudOutputCoordinator {
         pendingActivationNotBeforeMs = 0L;
         HudDeliveryStatus.reset();
         if (target == Source.NONE) {
-            beginFinalStop(previous, reason, transitionGeneration, 1);
+            beginFinalStop(previous, reason, transitionGeneration, 1, endDetectedAtMs);
             return;
         }
         pendingSource = target;
@@ -475,7 +503,8 @@ final class HudOutputCoordinator {
         return HudRoadPayload.build(state);
     }
 
-    private void beginFinalStop(Source previous, String reason, int stopGeneration, int frame) {
+    private void beginFinalStop(Source previous, String reason, int stopGeneration, int frame,
+                                long endDetectedAtMs) {
         if (stopGeneration != generation) {
             return;
         }
@@ -484,10 +513,20 @@ final class HudOutputCoordinator {
             HudDeliveryStatus.reset();
             return;
         }
-        sendClearBestEffort("final " + previous + " frame=" + frame + " reason=" + reason);
+        long clearedAtMs = sendClearBestEffort(
+                "final " + previous + " frame=" + frame + " reason=" + reason);
+        long remainingEndDetectedAtMs = endDetectedAtMs;
+        if (clearedAtMs >= 0L && endDetectedAtMs > 0L) {
+            logAsync("direct end first_clear detectedAtElapsedMs=" + endDetectedAtMs
+                    + " endToClearMs=" + Math.max(0L,
+                    clearedAtMs - endDetectedAtMs));
+            remainingEndDetectedAtMs = 0L;
+        }
         if (frame < FINAL_CLEAR_COUNT) {
+            long nextEndDetectedAtMs = remainingEndDetectedAtMs;
             worker.postDelayed(
-                    () -> beginFinalStop(previous, reason, stopGeneration, frame + 1),
+                    () -> beginFinalStop(previous, reason, stopGeneration, frame + 1,
+                            nextEndDetectedAtMs),
                     FINAL_CLEAR_INTERVAL_MS);
             return;
         }
@@ -525,15 +564,18 @@ final class HudOutputCoordinator {
         }
     }
 
-    private void sendClearBestEffort(String reason) {
+    private long sendClearBestEffort(String reason) {
         if (!client.isBound()) {
-            return;
+            return -1L;
         }
         try {
             int result = client.send(DirectTbtPayload.buildClear());
-            log("clear result=" + result + " reason=" + reason);
+            long completedAtMs = SystemClock.elapsedRealtime();
+            logAsync("clear result=" + result + " reason=" + reason);
+            return result == 0 ? completedAtMs : -1L;
         } catch (RemoteException | RuntimeException e) {
-            log("clear failed reason=" + reason + " error=" + safe(e.getMessage()));
+            logAsync("clear failed reason=" + reason + " error=" + safe(e.getMessage()));
+            return -1L;
         }
     }
 
@@ -594,6 +636,11 @@ final class HudOutputCoordinator {
     private void log(String line) {
         Log.i(TAG, line);
         AppEventLogger.event(context, "hud_output " + line);
+    }
+
+    private void logAsync(String line) {
+        Log.i(TAG, line);
+        WazeCaptureDebugWriter.get().appEvent(context, "hud_output " + line);
     }
 
     private static String safe(String value) {
