@@ -63,7 +63,7 @@ public final class WazeDirectChannel {
     private static final long REBIND_DELAY_MS = 1000L;
     private static final long FRAME_SILENCE_MS = 5000L;
     private static final long HEALTH_PROBE_TIMEOUT_MS = 5000L;
-    private static final long ALERT_ZERO_WATCHDOG_MS = 15_000L;
+    private static final long ALERT_TTL_MS = 10_000L;
     private static final int MAX_ICON_DIMENSION_PX = 256;
     private static final Pattern ALERT_DISTANCE = Pattern.compile(
             "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)\\b",
@@ -96,6 +96,8 @@ public final class WazeDirectChannel {
     private DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.inactive();
     private Runnable rebindRunnable;
     private Runnable alertWatchdog;
+    private int alertRevision;
+    private int lastKnownRawManeuverType = -1;
     private Runnable frameSilenceCheck;
     private Runnable healthProbeTimeout;
     private long lastDirectActivityMs;
@@ -144,6 +146,7 @@ public final class WazeDirectChannel {
         startReason = safeText(reason);
         routingSequence = 0;
         navigationFrame = DirectTbtFrame.empty();
+        lastKnownRawManeuverType = -1;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         maneuverIcons.clear();
         log("start generation=" + generation + " reason=" + startReason);
@@ -325,7 +328,7 @@ public final class WazeDirectChannel {
                 + " next=" + (routing.getNextStep() != null));
         if (current != null) {
             publishCurrentStep(current, routing.getCurrentDistance(),
-                    "routing_info:" + sequence);
+                    true, "routing_info:" + sequence);
         }
         logNextStep(routing.getNextStep(), "routing_next:" + sequence);
     }
@@ -391,7 +394,9 @@ public final class WazeDirectChannel {
         routingSequence = 0;
         maneuverIcons.clear();
         navigationFrame = DirectTbtFrame.empty();
+        lastKnownRawManeuverType = -1;
         alert = DirectTbtFrame.AlertOverlay.inactive();
+        alertRevision++;
         cancelAlertWatchdog();
         cancelDirectHealth();
     }
@@ -429,7 +434,9 @@ public final class WazeDirectChannel {
         cancelAlertWatchdog();
         cancelDirectHealth();
         alert = DirectTbtFrame.AlertOverlay.inactive();
+        alertRevision++;
         navigationFrame = DirectTbtFrame.empty();
+        lastKnownRawManeuverType = -1;
         maneuverIcons.clear();
         if (!navigationActive) return;
         navigationActive = false;
@@ -440,12 +447,28 @@ public final class WazeDirectChannel {
         }
     }
 
-    private void publishCurrentStep(Step step, Distance distance, String reason) {
+    private void publishCurrentStep(Step step, Distance distance,
+                                    boolean authoritativeLanes, String reason) {
         if (!navigationActive) beginNavigation("frame_received:" + reason);
         DirectTbtFrame next = frameFromStep(step, distance);
-        if (alert.isActive() && !navigationFrame.hasSameGuidance(next)) {
-            log("alert cleared by changed guidance id=" + alert.getId());
-            clearAlert(false, "guidance_changed");
+        int previousKnownRaw = lastKnownRawManeuverType;
+        int nextRaw = next.getRawManeuverType();
+        boolean maneuverChanged = previousKnownRaw >= 0
+                && nextRaw >= 0 && previousKnownRaw != nextRaw;
+        if (nextRaw >= 0) lastKnownRawManeuverType = nextRaw;
+        if (alert.isActive() && maneuverChanged) {
+            log("alert superseded id=" + alert.getId()
+                    + " oldRaw=" + previousKnownRaw + " newRaw=" + nextRaw);
+            clearAlert(false, "maneuver_changed");
+        }
+        if (!authoritativeLanes && !maneuverChanged
+                && !next.hasLaneGuidance() && navigationFrame.hasLaneGuidance()) {
+            next = next.withLanesFrom(navigationFrame);
+            log("lanes preserved source=trip raw=" + next.getRawManeuverType());
+        } else if ((authoritativeLanes || maneuverChanged)
+                && navigationFrame.hasLaneGuidance() && !next.hasLaneGuidance()) {
+            log("lanes cleared source=" + (authoritativeLanes ? "routing_info" : "trip")
+                    + " maneuverChanged=" + maneuverChanged);
         }
         navigationFrame = next;
         recordDirectActivity("frame:" + reason);
@@ -486,21 +509,16 @@ public final class WazeDirectChannel {
         int distanceMeters = parseDistance(title + " " + subtitle);
         String displayText = subtitle.isEmpty() ? title : subtitle;
         byte[] icon = renderIcon(value.getIcon(), "alert");
-        boolean sameAlert = alert.isActive() && alert.getId() == value.getId();
-        boolean positiveToZero = sameAlert
-                && alert.getDistanceMeters() > 0
-                && distanceMeters == 0;
-
-        if (!sameAlert || distanceMeters > 0) cancelAlertWatchdog();
-        if (alert.isActive() && !sameAlert) {
+        if (alert.isActive() && alert.getId() != value.getId()) {
             log("alert replaced oldId=" + alert.getId() + " newId=" + value.getId());
         }
+        int revision = ++alertRevision;
         alert = DirectTbtFrame.AlertOverlay.active(
                 value.getId(), distanceMeters, displayText, icon);
-        log("alert id=" + value.getId() + " distanceM=" + distanceMeters
-                + " iconBytes=" + icon.length);
+        log("alert show revision=" + revision + " id=" + value.getId()
+                + " distanceM=" + distanceMeters + " iconBytes=" + icon.length);
         emitFrame("alert_show");
-        if (positiveToZero) armAlertWatchdog(value.getId());
+        armAlertWatchdog(revision);
     }
 
     private void dismissAlert(int alertId) {
@@ -516,24 +534,24 @@ public final class WazeDirectChannel {
         if (!alert.isActive()) return;
         int oldId = alert.getId();
         cancelAlertWatchdog();
+        alertRevision++;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         log("alert cleared id=" + oldId + " reason=" + reason);
         if (emit) emitFrame(reason);
     }
 
-    private void armAlertWatchdog(int alertId) {
+    private void armAlertWatchdog(int revision) {
         cancelAlertWatchdog();
         int expectedGeneration = generation;
         alertWatchdog = () -> {
             alertWatchdog = null;
             if (!isCurrent(expectedGeneration)
                     || !alert.isActive()
-                    || alert.getId() != alertId
-                    || alert.getDistanceMeters() != 0) return;
-            clearAlert(true, "alert_zero_watchdog");
+                    || alertRevision != revision) return;
+            clearAlert(true, "alert_ttl_expired");
         };
-        channelHandler.postDelayed(alertWatchdog, ALERT_ZERO_WATCHDOG_MS);
-        log("alert zero watchdog armed id=" + alertId);
+        channelHandler.postDelayed(alertWatchdog, ALERT_TTL_MS);
+        log("alert ttl refreshed revision=" + revision + " timeoutMs=" + ALERT_TTL_MS);
     }
 
     private void cancelAlertWatchdog() {
@@ -1042,7 +1060,7 @@ public final class WazeDirectChannel {
                     if (estimates != null && !estimates.isEmpty()) {
                         distance = estimates.get(0).getRemainingDistance();
                     }
-                    publishCurrentStep(steps.get(0), distance, "trip_current");
+                    publishCurrentStep(steps.get(0), distance, false, "trip_current");
                     logNextStep(steps.size() > 1 ? steps.get(1) : null, "trip_next");
                 } catch (Throwable t) {
                     log("trip parse failed: " + t);

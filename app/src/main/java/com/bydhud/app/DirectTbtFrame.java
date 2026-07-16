@@ -103,11 +103,15 @@ public final class DirectTbtFrame {
                 lanes, overlay);
     }
 
-    boolean hasSameGuidance(DirectTbtFrame other) {
-        return other != null
-                && rawManeuverType == other.rawManeuverType
-                && roadText.equals(other.roadText)
-                && cueText.equals(other.cueText);
+    boolean hasLaneGuidance() {
+        return lanePng.length > 0 || !lanes.isEmpty();
+    }
+
+    DirectTbtFrame withLanesFrom(DirectTbtFrame other) {
+        if (other == null || !other.hasLaneGuidance()) return this;
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, maneuverPng,
+                other.lanePng, other.lanes, alertOverlay);
     }
 
     private static byte[] cloneBytes(byte[] value) {

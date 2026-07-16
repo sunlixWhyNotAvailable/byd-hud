@@ -63,15 +63,13 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 
 ## Navigators used in development
 
-- Standard `Waze` - used for image parsing (https://drive.google.com/drive/folders/1kVPVqM16AEy1XVtyCwerJ_7iKZmXGt0f?usp=drive_link)
-- Patched `Waze` - used for the direct structured navigation channel; distribution is handled separately
-- Standard `Google Maps` - used for text extraction (https://drive.google.com/drive/folders/18SuTko75jInBAPNxndgtkk4OPlxiJGHS?usp=drive_link)
-- Patched `Google Maps` - TBA
+- `Waze` - used for image parsing (https://drive.google.com/drive/folders/1kVPVqM16AEy1XVtyCwerJ_7iKZmXGt0f?usp=drive_link)
+- `Google Maps` - used for text extraction (https://drive.google.com/drive/folders/18SuTko75jInBAPNxndgtkk4OPlxiJGHS?usp=drive_link)
 
 ## To Do
 
-- validate `v2.0.0-beta.1` direct/fallback switching, alerts, route end, roundabouts, and 20 Hz performance on the physical HUD;
-- probe the deferred SOME/IP bus topics only after the beta.1 navigation patch;
+- validate `v2.0.0-beta.4` direct/fallback switching, patched Waze cluster alerts, route end, roundabouts, lane persistence, and 20 Hz performance on the physical HUD;
+- probe the deferred SOME/IP bus topics only after the beta navigation patch is validated;
 - add dashboard window mode toggle support;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here.
 
