@@ -42,6 +42,14 @@ final class NavHudLiveSender {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HudOutputCoordinator hudOutput;
     private final WazeDirectChannel wazeDirectChannel;
+    private final Object wazeDirectFrameLock = new Object();
+    private DirectTbtFrame pendingWazeDirectFrame;
+    private String pendingWazeDirectFrameReason = "";
+    private int pendingWazeDirectFrameGeneration;
+    private int wazeDirectFrameGeneration;
+    private int coalescedWazeDirectFrames;
+    private boolean wazeDirectFrameDispatchScheduled;
+    private final Runnable wazeDirectFrameDispatch = this::dispatchLatestWazeDirectFrame;
     private String activePackage = "";
     private boolean active;
     private boolean sendLoopScheduled;
@@ -276,21 +284,24 @@ final class NavHudLiveSender {
 
                     @Override
                     public void onHandshakeUnavailable(String reason) {
+                        invalidatePendingWazeDirectFrames();
                         handler.post(() -> onWazeDirectHandshakeUnavailable(reason));
                     }
 
                     @Override
                     public void onNavigationStarted(String reason) {
+                        invalidatePendingWazeDirectFrames();
                         handler.post(() -> onWazeDirectNavigationStarted(reason));
                     }
 
                     @Override
                     public void onFrame(DirectTbtFrame frame, String reason) {
-                        handler.post(() -> onWazeDirectFrame(frame, reason));
+                        enqueueLatestWazeDirectFrame(frame, reason);
                     }
 
                     @Override
                     public void onNavigationEnded(String reason) {
+                        invalidatePendingWazeDirectFrames();
                         handler.post(() -> onWazeDirectNavigationEnded(reason));
                     }
 
@@ -302,6 +313,61 @@ final class NavHudLiveSender {
                                 context, "nav_live " + line);
                     }
                 });
+    }
+
+    //coalesces complete direct snapshots so a busy main looper never replays stale guidance.
+    private void enqueueLatestWazeDirectFrame(DirectTbtFrame frame, String reason) {
+        if (frame == null) {
+            return;
+        }
+        synchronized (wazeDirectFrameLock) {
+            if (pendingWazeDirectFrame != null) {
+                coalescedWazeDirectFrames++;
+            }
+            pendingWazeDirectFrame = frame;
+            pendingWazeDirectFrameReason = safeReason(reason);
+            pendingWazeDirectFrameGeneration = wazeDirectFrameGeneration;
+            if (!wazeDirectFrameDispatchScheduled) {
+                wazeDirectFrameDispatchScheduled = true;
+                handler.post(wazeDirectFrameDispatch);
+            }
+        }
+    }
+
+    private void dispatchLatestWazeDirectFrame() {
+        synchronized (wazeDirectFrameLock) {
+            if (!wazeDirectFrameDispatchScheduled) {
+                return;
+            }
+            wazeDirectFrameDispatchScheduled = false;
+            DirectTbtFrame frame = pendingWazeDirectFrame;
+            String reason = pendingWazeDirectFrameReason;
+            int generation = pendingWazeDirectFrameGeneration;
+            int coalesced = coalescedWazeDirectFrames;
+            pendingWazeDirectFrame = null;
+            pendingWazeDirectFrameReason = "";
+            coalescedWazeDirectFrames = 0;
+            if (frame == null || generation != wazeDirectFrameGeneration) {
+                return;
+            }
+            if (coalesced > 0) {
+                WazeCaptureDebugWriter.get().appEvent(context,
+                        "nav_live waze_direct frames_coalesced=" + coalesced);
+            }
+            onWazeDirectFrame(frame, reason);
+        }
+    }
+
+    //drops queued snapshots before lifecycle callbacks can switch or end the direct session.
+    private void invalidatePendingWazeDirectFrames() {
+        synchronized (wazeDirectFrameLock) {
+            wazeDirectFrameGeneration++;
+            pendingWazeDirectFrame = null;
+            pendingWazeDirectFrameReason = "";
+            coalescedWazeDirectFrames = 0;
+            wazeDirectFrameDispatchScheduled = false;
+            handler.removeCallbacks(wazeDirectFrameDispatch);
+        }
     }
 
     private void startWazeDirectProbe(String reason) {
@@ -479,6 +545,7 @@ final class NavHudLiveSender {
     }
 
     private void resetWazeDirectSessionState() {
+        invalidatePendingWazeDirectFrames();
         cancelWazeDirectColdTimeout();
         cancelWazeFallbackReadiness();
         wazeDirectHandshakeAvailable = false;

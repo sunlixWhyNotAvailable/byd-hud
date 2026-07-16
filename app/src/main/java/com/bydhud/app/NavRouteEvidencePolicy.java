@@ -59,21 +59,18 @@ final class NavRouteEvidencePolicy {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean hasWazeRouteEvidence(String payload) {
+        return hasWazeRouteNodeEvidence(payload);
+    }
+
+    //requires current-step distance plus route context so onboarding and settings text stay idle.
+    static boolean hasWazeRouteNodeEvidence(String payload) {
         String lower = NavTextNormalizer.lower(payload);
-        boolean hasDistance = NavTextNormalizer.distanceMeters(payload, -1) >= 0
-                || lower.contains("navbardistance")
-                || lower.contains("distance")
-                || lower.contains("km")
-                || lower.contains(" m");
-        boolean hasRoad = lower.contains("navbarstreetline")
-                || lower.contains("street")
-                || lower.contains("road")
-                || lower.contains("title=")
-                || lower.contains("text=");
-        boolean hasEta = lower.contains("eta")
-                || lower.contains("arrival")
-                || lower.contains("min");
-        return hasDistance && (hasRoad || hasEta);
+        boolean hasCurrentDistance = lower.contains(":id/navbardistance");
+        boolean hasRouteContext = lower.contains(":id/navbarstreetline")
+                || lower.contains(":id/lbldistancetodestination")
+                || lower.contains(":id/lbltimetodestination")
+                || lower.contains(":id/lblarrivaltime");
+        return hasCurrentDistance && hasRouteContext;
     }
 
     //classifies raw evidence here so later decisions can use stable route state labels.

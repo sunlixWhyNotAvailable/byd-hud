@@ -232,9 +232,8 @@ public final class NavAccessibilityService extends AccessibilityService {
             }
         }
 
-        boolean hasRouteEvidence = builder.indexOf(":id/navBarDistance") >= 0
-                || builder.indexOf(":id/navBarStreetLine") >= 0
-                || builder.indexOf(":id/lblDistanceToDestination") >= 0;
+        boolean hasRouteEvidence =
+                NavRouteEvidencePolicy.hasWazeRouteNodeEvidence(builder.toString());
         builder.append(hasRouteEvidence ? "; waze_nodes ok" : "; waze_nodes missing");
         String payload = capPayload(builder
                 .append("; nodes=").append(nodeIndex[0])

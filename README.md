@@ -68,8 +68,6 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 
 ## To Do
 
-- validate `v2.0.0-beta.4` direct/fallback switching, patched Waze cluster alerts, route end, roundabouts, lane persistence, and 20 Hz performance on the physical HUD;
-- probe the deferred SOME/IP bus topics only after the beta navigation patch is validated;
 - add dashboard window mode toggle support;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again). Potentially explore SDK maybe something usefull here.
 
