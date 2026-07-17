@@ -17,6 +17,8 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_LANES = "output_lanes";
     private static final String KEY_OUTPUT_DISTANCE = "output_distance";
     private static final String KEY_OUTPUT_STREET = "output_street";
+    private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
+    private static final String KEY_WAZE_ALERTS = "waze_alerts";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
@@ -114,6 +116,23 @@ final class HudPrefs {
     static void setStreetOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_STREET, enabled).apply();
         outputOptionsRevision++;
+    }
+
+    static boolean isTextDirectionOutputEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_OUTPUT_TEXT_DIRECTION, true);
+    }
+
+    static void setTextDirectionOutputEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_OUTPUT_TEXT_DIRECTION, enabled).apply();
+        outputOptionsRevision++;
+    }
+
+    static boolean isWazeAlertsEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_WAZE_ALERTS, true);
+    }
+
+    static void setWazeAlertsEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_WAZE_ALERTS, enabled).apply();
     }
 
     static int outputOptionsRevision() {

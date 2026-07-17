@@ -80,6 +80,7 @@ public final class WazeDirectChannel {
     private volatile boolean active;
     private volatile boolean shutdown;
     private volatile boolean handshakeAvailable;
+    private volatile boolean wazeAlertsEnabled;
 
     private String startReason = "";
     private boolean binding;
@@ -107,6 +108,7 @@ public final class WazeDirectChannel {
     public WazeDirectChannel(Context context, Listener listener) {
         this.context = Objects.requireNonNull(context, "context").getApplicationContext();
         this.listener = Objects.requireNonNull(listener, "listener");
+        wazeAlertsEnabled = HudPrefs.isWazeAlertsEnabled(this.context);
         channelThread.start();
         channelHandler = new Handler(channelThread.getLooper());
     }
@@ -130,6 +132,16 @@ public final class WazeDirectChannel {
 
     public boolean isHandshakeAvailable() {
         return handshakeAvailable;
+    }
+
+    public void onWazeAlertsPreferenceChanged(boolean enabled) {
+        wazeAlertsEnabled = enabled;
+        runOnChannel(() -> {
+            if (enabled || !alert.isActive()) return;
+            clearAlert(false, "alerts_disabled");
+            DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
+            callback(() -> listener.onAlertCleared(frame, "alerts_disabled"));
+        });
     }
 
     private void startOnChannel(String reason) {
@@ -876,6 +888,8 @@ public final class WazeDirectChannel {
 
         void onFrame(DirectTbtFrame frame, String reason);
 
+        void onAlertCleared(DirectTbtFrame frame, String reason);
+
         void onNavigationEnded(String reason);
 
         void onLog(String message);
@@ -984,7 +998,9 @@ public final class WazeDirectChannel {
 
         @Override
         public void showAlert(Bundleable bundle) {
+            if (!wazeAlertsEnabled) return;
             postBinder(expectedGeneration, () -> {
+                if (!wazeAlertsEnabled) return;
                 try {
                     Object value = bundle == null ? null : bundle.get();
                     if (value instanceof Alert) WazeDirectChannel.this.showAlert((Alert) value);

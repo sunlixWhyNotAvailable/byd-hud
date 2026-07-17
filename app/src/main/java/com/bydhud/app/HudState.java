@@ -40,6 +40,7 @@ final class HudState {
     int laneCanvasScalePercent = 50;
     int laneGapPx = 10;
     String roadName = "N11 S09";
+    String directionText = "";
     String laneString = "L|S*|R";
     String guidePoint = "30.5240,50.4505,0";
     double navigationRatio = 0.250d;
@@ -68,6 +69,7 @@ final class HudState {
         state.laneCanvasScalePercent = laneCanvasScalePercent;
         state.laneGapPx = laneGapPx;
         state.roadName = roadName;
+        state.directionText = directionText;
         state.laneString = laneString;
         state.guidePoint = guidePoint;
         state.navigationRatio = navigationRatio;
@@ -100,6 +102,7 @@ final class HudState {
         state.laneCanvasScalePercent = laneCanvasScalePercent;
         state.laneGapPx = laneGapPx;
         state.roadName = "";
+        state.directionText = "";
         state.laneString = "";
         state.guidePoint = "";
         state.navigationRatio = 0.0d;

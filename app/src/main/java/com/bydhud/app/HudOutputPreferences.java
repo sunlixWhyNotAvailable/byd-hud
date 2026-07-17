@@ -39,8 +39,16 @@ final class HudOutputPreferences {
         if (!HudPrefs.isDistanceOutputEnabled(context)) {
             payloadState.distanceToIntersection = 0;
         }
-        if (!HudPrefs.isStreetOutputEnabled(context)) {
-            payloadState.roadName = "";
-        }
+        String street = payloadState.roadName;
+        String direction = payloadState.directionText;
+        payloadState.roadName = HudPrefs.isStreetOutputEnabled(context) && nonBlank(street)
+                ? street
+                : HudPrefs.isTextDirectionOutputEnabled(context) && nonBlank(direction)
+                ? direction
+                : "";
+    }
+
+    private static boolean nonBlank(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 }

@@ -73,6 +73,10 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 - gmaps direct nav support instead of text parsing;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again).
 
+## Contribution
+
+Thanks to MaxTitan from Telegram for giving idea and source files for direct channel implementation.
+
 ## DISCLAIMER
 
 License: Apache License 2.0

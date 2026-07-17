@@ -14,7 +14,7 @@ import java.util.Objects;
 public final class DirectTbtPayload {
     private static final int NATIVE_BLANK_ID = 99;
     private static final Object OPTIONS_LOCK = new Object();
-    private static final Options[] OPTIONS_CACHE = new Options[32];
+    private static final Options[] OPTIONS_CACHE = new Options[64];
     private static byte[] cachedBlankS72Png;
 
     private DirectTbtPayload() {
@@ -51,13 +51,20 @@ public final class DirectTbtPayload {
                 ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
         int distanceMeters = alert.isActive()
                 ? alert.getDistanceMeters() : safeFrame.getDistanceMeters();
-        String displayText = alert.isActive()
-                ? alert.getDisplayText() : safeFrame.getDisplayText();
+        String displayText;
+        if (alert.isActive()) {
+            displayText = safeOptions.street ? alert.getDisplayText() : "";
+        } else if (safeOptions.street && nonBlank(safeFrame.getRoadText())) {
+            displayText = safeFrame.getRoadText();
+        } else if (safeOptions.textDirection && nonBlank(safeFrame.getCueText())) {
+            displayText = safeFrame.getCueText();
+        } else {
+            displayText = "";
+        }
 
         if (!safeOptions.png) maneuverPng = new byte[0];
         if (!safeOptions.nativeManeuver) nativeManeuver = 0;
         if (!safeOptions.distance) distanceMeters = 0;
-        if (!safeOptions.street) displayText = "";
         String maneuverMode = !safeOptions.png ? "disabled"
                 : alert.isActive() ? "alert"
                 : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
@@ -112,6 +119,10 @@ public final class DirectTbtPayload {
                     .append('|');
         }
         return out.toString();
+    }
+
+    private static boolean nonBlank(String value) {
+        return value != null && !value.trim().isEmpty();
     }
 
     private static byte[] wrap(byte[] inner) {
@@ -239,27 +250,34 @@ public final class DirectTbtPayload {
 
     /** Independent switches for each optional cluster output. */
     public static final class Options {
-        public static final Options ALL = new Options(true, true, true, true, true);
+        public static final Options ALL = new Options(true, true, true, true, true, true);
 
         public final boolean png;
         public final boolean nativeManeuver;
         public final boolean lanes;
         public final boolean distance;
         public final boolean street;
+        public final boolean textDirection;
         private final byte[] blankS72Png;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
                        boolean distance, boolean street) {
-            this(png, nativeManeuver, lanes, distance, street, null);
+            this(png, nativeManeuver, lanes, distance, street, street, null);
+        }
+
+        public Options(boolean png, boolean nativeManeuver, boolean lanes,
+                       boolean distance, boolean street, boolean textDirection) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection, null);
         }
 
         Options(boolean png, boolean nativeManeuver, boolean lanes,
-                boolean distance, boolean street, byte[] blankS72Png) {
+                boolean distance, boolean street, boolean textDirection, byte[] blankS72Png) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
             this.distance = distance;
             this.street = street;
+            this.textDirection = textDirection;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
         }
 
@@ -270,16 +288,18 @@ public final class DirectTbtPayload {
             boolean lanes = HudPrefs.isLaneOutputEnabled(safeContext);
             boolean distance = HudPrefs.isDistanceOutputEnabled(safeContext);
             boolean street = HudPrefs.isStreetOutputEnabled(safeContext);
+            boolean textDirection = HudPrefs.isTextDirectionOutputEnabled(safeContext);
             int key = (png ? 1 : 0)
                     | (nativeManeuver ? 2 : 0)
                     | (lanes ? 4 : 0)
                     | (distance ? 8 : 0)
-                    | (street ? 16 : 0);
+                    | (street ? 16 : 0)
+                    | (textDirection ? 32 : 0);
             synchronized (OPTIONS_LOCK) {
                 Options cached = OPTIONS_CACHE[key];
                 if (cached != null) return cached;
                 if (cachedBlankS72Png == null) cachedBlankS72Png = loadBlankS72(safeContext);
-                cached = new Options(png, nativeManeuver, lanes, distance, street,
+                cached = new Options(png, nativeManeuver, lanes, distance, street, textDirection,
                         cachedBlankS72Png);
                 OPTIONS_CACHE[key] = cached;
                 return cached;

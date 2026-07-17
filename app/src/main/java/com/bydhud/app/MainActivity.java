@@ -5,6 +5,7 @@ import android.annotation.SuppressLint;
 
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
@@ -58,6 +59,7 @@ public final class MainActivity extends ComponentActivity {
     private static final boolean BACKGROUND_MODE = true;
     private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
     private static final String GMAPS_REVANCED_PACKAGE = "app.revanced.android.apps.maps";
+    private static final String WAZE_PACKAGE = "com.waze";
     private static final String PNG_HIDE_CANDIDATE_LINE = "PNG hide: OEM S72 blank";
     private static final String CLOSE_ACTION_LINE = "CloseAction: Back/Home keeps sender";
     private static final String BACKGROUND_MODE_LINE = "BackgroundMode: Boot controls runtime service";
@@ -742,6 +744,7 @@ public final class MainActivity extends ComponentActivity {
         List<ActiveAppRow> supportedApps = loadCuratedApps(rawApps, capturePackages, observedPackages);
         List<ComposeAppRow> supportedRows = composeRows(
                 supportedApps, hudPackage, logOnlyPackages, observedPackages, true);
+        ComposeWazePatchRow wazePatchRow = composeWazePatchRow();
         List<ComposeAppRow> allRows = new ArrayList<>();
         for (ActiveAppRow app : rawApps) {
             if (!NavAppFilter.isCuratedNavigationPackage(app.packageName)) {
@@ -759,6 +762,8 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isLaneOutputEnabled(this),
                 HudPrefs.isDistanceOutputEnabled(this),
                 HudPrefs.isStreetOutputEnabled(this),
+                HudPrefs.isTextDirectionOutputEnabled(this),
+                HudPrefs.isWazeAlertsEnabled(this),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 HudPrefs.isRoundaboutLeftHandTraffic(this),
                 permissionStatus.settingsGranted(),
@@ -792,7 +797,8 @@ public final class MainActivity extends ComponentActivity {
                 storage.navCaptureFolderBytes,
                 storage.storageDays,
                 supportedRows,
-                allRows);
+                allRows,
+                wazePatchRow);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -866,6 +872,24 @@ public final class MainActivity extends ComponentActivity {
             return true;
         } catch (PackageManager.NameNotFoundException ignored) {
             return false;
+        }
+    }
+
+    private ComposeWazePatchRow composeWazePatchRow() {
+        PackageManager packageManager = getPackageManager();
+        try {
+            PackageInfo packageInfo = packageManager.getPackageInfo(WAZE_PACKAGE, 0);
+            ApplicationInfo applicationInfo = packageInfo.applicationInfo;
+            CharSequence systemLabel = applicationInfo == null
+                    ? null
+                    : packageManager.getApplicationLabel(applicationInfo);
+            return new ComposeWazePatchRow(
+                    systemLabel == null ? WAZE_PACKAGE : systemLabel.toString(),
+                    WAZE_PACKAGE,
+                    packageInfo.versionName,
+                    true);
+        } catch (PackageManager.NameNotFoundException ignored) {
+            return new ComposeWazePatchRow("Waze", WAZE_PACKAGE, "", false);
         }
     }
 
@@ -1008,6 +1032,14 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetStreetOutputEnabled(boolean enabled) {
         setStreetOutputEnabled(enabled);
+    }
+
+    public void composeSetTextDirectionOutputEnabled(boolean enabled) {
+        setTextDirectionOutputEnabled(enabled);
+    }
+
+    public void composeSetWazeAlertsEnabled(boolean enabled) {
+        setWazeAlertsEnabled(enabled);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1275,6 +1307,8 @@ public final class MainActivity extends ComponentActivity {
         public final boolean laneOutputEnabled;
         public final boolean distanceOutputEnabled;
         public final boolean streetOutputEnabled;
+        public final boolean textDirectionOutputEnabled;
+        public final boolean wazeAlertsEnabled;
         public final boolean smallDistanceClampEnabled;
         public final boolean roundaboutLeftHandTraffic;
         public final boolean settingsPermissionsGranted;
@@ -1309,11 +1343,14 @@ public final class MainActivity extends ComponentActivity {
         public final List<ComposeStorageDay> storageDays;
         public final List<ComposeAppRow> supportedApps;
         public final List<ComposeAppRow> allApps;
+        public final ComposeWazePatchRow patchWaze;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
-                boolean distanceOutputEnabled, boolean streetOutputEnabled, boolean smallDistanceClampEnabled,
+                boolean distanceOutputEnabled, boolean streetOutputEnabled,
+                boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
+                boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
                 String hudStatus, String hudPackage, String logOnlyPackages,
@@ -1325,7 +1362,8 @@ public final class MainActivity extends ComponentActivity {
                 String laneBitmap, String lastScanText, int storageLimitGb,
                 String navCaptureFolderPath, boolean storageCalculating,
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
-                List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps) {
+                List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
+                ComposeWazePatchRow wazePatchRow) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
@@ -1335,6 +1373,8 @@ public final class MainActivity extends ComponentActivity {
             this.laneOutputEnabled = laneOutputEnabled;
             this.distanceOutputEnabled = distanceOutputEnabled;
             this.streetOutputEnabled = streetOutputEnabled;
+            this.textDirectionOutputEnabled = textDirectionOutputEnabled;
+            this.wazeAlertsEnabled = wazeAlertsEnabled;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
@@ -1369,6 +1409,9 @@ public final class MainActivity extends ComponentActivity {
             this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
             this.supportedApps = supportedApps == null ? Collections.emptyList() : supportedApps;
             this.allApps = allApps == null ? Collections.emptyList() : allApps;
+            this.patchWaze = wazePatchRow == null
+                    ? new ComposeWazePatchRow("Waze", WAZE_PACKAGE, "", false)
+                    : wazePatchRow;
         }
     }
 
@@ -1439,6 +1482,21 @@ public final class MainActivity extends ComponentActivity {
         StorageCacheState withCalculating(boolean nextCalculating) {
             return new StorageCacheState(
                     navCaptureFolderBytes, storageDays, scannedAtMs, nextCalculating);
+        }
+    }
+
+    public static final class ComposeWazePatchRow {
+        public final String label;
+        public final String packageName;
+        public final String versionName;
+        public final boolean installed;
+
+        ComposeWazePatchRow(String label, String packageName, String versionName,
+                boolean installed) {
+            this.label = label == null ? "" : label;
+            this.packageName = packageName == null ? "" : packageName;
+            this.versionName = versionName == null ? "" : versionName;
+            this.installed = installed;
         }
     }
 
@@ -2175,6 +2233,22 @@ public final class MainActivity extends ComponentActivity {
         cachedPayloadKey = "";
         appendStatus("Street output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_street=" + enabled);
+        refreshControls();
+    }
+
+    private void setTextDirectionOutputEnabled(boolean enabled) {
+        HudPrefs.setTextDirectionOutputEnabled(this, enabled);
+        cachedPayloadKey = "";
+        appendStatus("Text direction output " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui output_text_direction=" + enabled);
+        refreshControls();
+    }
+
+    private void setWazeAlertsEnabled(boolean enabled) {
+        HudPrefs.setWazeAlertsEnabled(this, enabled);
+        NavHudLiveSender.get(this).onWazeAlertsPreferenceChanged(enabled);
+        appendStatus("Waze alerts " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui waze_alerts=" + enabled);
         refreshControls();
     }
 
@@ -3034,6 +3108,7 @@ public final class MainActivity extends ComponentActivity {
                 + "|" + state.includeNativeArrow
                 + "|" + state.includeLaneBitmap
                 + "|" + state.roadName
+                + "|" + state.directionText
                 + "|" + state.laneString
                 + "|" + state.guidePoint
                 + "|" + state.navigationRatio
@@ -3042,7 +3117,8 @@ public final class MainActivity extends ComponentActivity {
                 + "|" + HudPrefs.isNativeOutputEnabled(this)
                 + "|" + HudPrefs.isLaneOutputEnabled(this)
                 + "|" + HudPrefs.isDistanceOutputEnabled(this)
-                + "|" + HudPrefs.isStreetOutputEnabled(this);
+                + "|" + HudPrefs.isStreetOutputEnabled(this)
+                + "|" + HudPrefs.isTextDirectionOutputEnabled(this);
     }
 
     //models PayloadSnapshot data here so transport and parser layers share a stable contract.

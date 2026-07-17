@@ -63,6 +63,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -106,6 +107,7 @@ private enum class RuntimeTab {
     Options,
     Apps,
     Storage,
+    Patch,
     Logs,
     Manual
 }
@@ -222,6 +224,10 @@ private data class Copy(
     val distanceHint: String,
     val streetOutput: String,
     val streetHint: String,
+    val textDirectionOutput: String,
+    val textDirectionOutputHint: String,
+    val showWazeAlerts: String,
+    val showWazeAlertsHint: String,
     val smallDistanceClamp: String,
     val smallDistanceHint: String,
     val roundaboutLeft: String,
@@ -281,6 +287,22 @@ private data class Copy(
     val storageDeleteNo: String,
     val storageDeletingFolder: String,
     val storageDeleteStep: String,
+    val patch: String,
+    val patchTab: String,
+    val patchHint: String,
+    val patchWarning: String,
+    val patchWarningText: String,
+    val patchRiskWarning: String,
+    val availableNavigators: String,
+    val noSupportedNavigators: String,
+    val appVersion: String,
+    val patchNotChecked: String,
+    val checkPatch: String,
+    val applyPatch: String,
+    val patchConfirmTitle: String,
+    val patchConfirmText: String,
+    val patchConfirmOk: String,
+    val patchConfirmCancel: String,
     val manualHint: String,
     val manualHudOutput: String,
     val supportedArrows: String,
@@ -318,6 +340,8 @@ private const val SWITCH_CENTER_BEFORE_ACTION_MS = 120L
 
 //guards stalled switch actions so controls never stay blocked indefinitely.
 private const val SWITCH_PENDING_TIMEOUT_MS = 2_000L
+
+private const val PROJECT_REPOSITORY_URL = "https://github.com/sunlixWhyNotAvailable/byd-hud"
 
 //tracks switch transition intent so success can complete and failure can roll back.
 private data class SwitchPendingState(
@@ -632,6 +656,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                                 pendingStorageDeleteDays = deletableSelectedDays
                             }
                         )
+                        RuntimeTab.Patch -> PatchTab(copy, palette, snapshot)
                         RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
                     }
                 }
@@ -857,6 +882,19 @@ private fun OptionsTab(
             Divider(palette)
             SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
                 runAction { activity.composeSetStreetOutputEnabled(it) }
+            }
+            Divider(palette)
+            SwitchRow(
+                copy.textDirectionOutput,
+                copy.textDirectionOutputHint,
+                snapshot.textDirectionOutputEnabled,
+                palette
+            ) {
+                runAction { activity.composeSetTextDirectionOutputEnabled(it) }
+            }
+            Divider(palette)
+            SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
+                runAction { activity.composeSetWazeAlertsEnabled(it) }
             }
             Divider(palette)
             SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
@@ -1714,6 +1752,127 @@ private fun StorageTab(
                     width = 190.dp,
                     onClick = { onDeleteSelected(deletableSelectedDays) }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PatchTab(
+    copy: Copy,
+    palette: Palette,
+    snapshot: MainActivity.ComposeSnapshot
+) {
+    val waze = snapshot.patchWaze?.takeIf { it.installed }
+    PageSurface(copy.patchTab, copy.patchHint, palette) {
+        Section(copy.patchWarning, palette) {
+            Column(modifier = Modifier.padding(14.dp)) {
+                Text(copy.patchWarningText, color = palette.text, fontSize = 14.sp, lineHeight = 20.sp)
+                Spacer(Modifier.height(8.dp))
+                Text(copy.patchRiskWarning, color = palette.yellow, fontSize = 14.sp, lineHeight = 20.sp)
+                Spacer(Modifier.height(8.dp))
+                RepositoryLink(palette)
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Section(copy.availableNavigators, palette) {
+            if (waze == null) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                        .padding(18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(copy.noSupportedNavigators, color = palette.muted, fontSize = 14.sp)
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp)
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                        .background(palette.field)
+                        .padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(waze.label, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                        Text(waze.packageName, color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                        Text("${copy.appVersion}: ${waze.versionName}", color = palette.muted, fontSize = 12.sp)
+                        Spacer(Modifier.height(8.dp))
+                        StatusChip(copy.patchNotChecked, ChipKind.Neutral, palette, width = 150.dp)
+                    }
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        HudButton(copy.checkPatch, palette, enabled = false, width = 170.dp, onClick = {})
+                        HudButton(copy.applyPatch, palette, enabled = false, width = 170.dp, onClick = {})
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RepositoryLink(palette: Palette) {
+    val uriHandler = LocalUriHandler.current
+    Text(
+        text = PROJECT_REPOSITORY_URL,
+        color = palette.accent,
+        fontFamily = FontFamily.Monospace,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier.clickable { uriHandler.openUri(PROJECT_REPOSITORY_URL) }
+    )
+}
+
+@Composable
+private fun PatchConfirmOverlay(
+    copy: Copy,
+    palette: Palette,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(620.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(copy.patchConfirmTitle, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(copy.patchConfirmText, color = palette.text, fontSize = 15.sp, lineHeight = 21.sp)
+                Text(copy.patchRiskWarning, color = palette.yellow, fontSize = 15.sp, lineHeight = 21.sp)
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+            ) {
+                HudButton(copy.patchConfirmOk, palette, primary = true, width = 138.dp, onClick = onConfirm)
+                HudButton(copy.patchConfirmCancel, palette, width = 138.dp, onClick = onDismiss)
             }
         }
     }
@@ -2697,6 +2856,7 @@ private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSel
         TabButton(copy.apps, RuntimeTab.Apps, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.main, RuntimeTab.Options, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.storage, RuntimeTab.Storage, selected, palette, Modifier.weight(1f), onSelect)
+        TabButton(copy.patch, RuntimeTab.Patch, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.logs, RuntimeTab.Logs, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.manual, RuntimeTab.Manual, selected, palette, Modifier.weight(1f), onSelect)
     }
@@ -2754,6 +2914,7 @@ private fun iconFor(tab: RuntimeTab): Int = when (tab) {
     RuntimeTab.Apps -> R.drawable.ic_tab_apps
     RuntimeTab.Logs -> R.drawable.ic_tab_logs
     RuntimeTab.Storage -> R.drawable.ic_tab_storage
+    RuntimeTab.Patch -> R.drawable.ic_tab_patch
     RuntimeTab.Manual -> R.drawable.ic_tab_manual
 }
 
@@ -2918,6 +3079,7 @@ private fun enCopy() = Copy(
     main = "Options",
     apps = "Apps",
     logs = "Logs",
+    patch = "Patch",
     manual = "Manual",
     hudRunning = "HUD: running",
     hudIdle = "HUD: idle",
@@ -2973,6 +3135,10 @@ private fun enCopy() = Copy(
     distanceHint = "Send distance-to-maneuver field in live navigation payload.",
     streetOutput = "Street output",
     streetHint = "Send next road or Waze street text when available.",
+    textDirectionOutput = "Text direction output",
+    textDirectionOutputHint = "Send text direction in street output (\"Continue straight\") if no street text available. Street output has priority.",
+    showWazeAlerts = "Show Waze alerts",
+    showWazeAlertsHint = "Display Waze alerts on the HUD.",
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Clamp distances below 20 m instead of OEM close marker.",
     roundaboutLeft = "Roundabout left-hand traffic",
@@ -3032,6 +3198,21 @@ private fun enCopy() = Copy(
     storageDeleteNo = "No",
     storageDeletingFolder = "Deleting data folder",
     storageDeleteStep = "step %d/%d",
+    patchTab = "APPLICATION PATCH",
+    patchHint = "Patch navigation apps to enable direct HUD output.",
+    patchWarning = "Warning",
+    patchWarningText = "A supported navigation app can be patched to enable the direct HUD channel. The installed original app and its data will be removed, then a modified version will be installed in its place. If your Waze version is unsupported, report it to the author for analysis:",
+    patchRiskWarning = "Proceed at your own risk. App developer is not responsible for any data loss or errors.",
+    availableNavigators = "Available navigation apps",
+    noSupportedNavigators = "No supported navigation apps",
+    appVersion = "Version",
+    patchNotChecked = "not checked",
+    checkPatch = "Check",
+    applyPatch = "Patch",
+    patchConfirmTitle = "Patch Waze?",
+    patchConfirmText = "Waze will be checked again before patching. The installed original app and its data will be removed, then the modified version will be installed in its place.",
+    patchConfirmOk = "OK",
+    patchConfirmCancel = "Cancel",
     manualHint = "Direct manual payload checks for HUD output.",
     manualHudOutput = "Manual HUD output",
     supportedArrows = "Supported arrows",
@@ -3061,6 +3242,7 @@ private fun uaCopy() = enCopy().copy(
     main = "Налаштування",
     apps = "Застосунки",
     logs = "Логи",
+    patch = "Патч",
     manual = "Ручний",
     hudRunning = "HUD: працює",
     hudIdle = "HUD: очікує",
@@ -3113,6 +3295,10 @@ private fun uaCopy() = enCopy().copy(
     distanceHint = "Надсилати дистанцію до маневру в даних активної навігації.",
     streetOutput = "Вивід вулиці",
     streetHint = "Надсилати наступну дорогу або назву вулиці з Waze, коли вона доступна.",
+    textDirectionOutput = "Вивід напрямків текстом",
+    textDirectionOutputHint = "Виводити у поле для вулиці текстові напрямки (\"Прямуйте далі\"), якщо відсутній текст вулиці. Вивід вулиці має пріоритет.",
+    showWazeAlerts = "Показувати попередження Waze",
+    showWazeAlertsHint = "Відображати попередження Waze на HUD.",
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Обмежувати дистанції менше 20 м, щоб штатний HUD не показував власний маркер близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",
@@ -3171,6 +3357,21 @@ private fun uaCopy() = enCopy().copy(
     storageDeleteNo = "Ні",
     storageDeletingFolder = "Видаляємо теку з даними",
     storageDeleteStep = "крок %d/%d",
+    patchTab = "ПАТЧ ЗАСТОСУНКУ",
+    patchHint = "Патч навігатора для підтримки прямого каналу виводу на HUD.",
+    patchWarning = "Попередження",
+    patchWarningText = "Для підтримуваного навігатора можна застосувати патч, який вмикає прямий канал HUD. Установлений оригінальний застосунок буде видалено разом із його даними, а замість нього встановлено модифіковану версію. Якщо ваша версія Waze не підтримується, повідомте автору для аналізу:",
+    patchRiskWarning = "Дійте на власний ризик. Розробник застосунку не несе відповідальності за втрату даних та помилки.",
+    availableNavigators = "Доступні навігатори",
+    noSupportedNavigators = "Немає підтримуваних навігаторів",
+    appVersion = "Версія",
+    patchNotChecked = "не перевірено",
+    checkPatch = "Перевірити",
+    applyPatch = "Пропатчити",
+    patchConfirmTitle = "Пропатчити Waze?",
+    patchConfirmText = "Перед застосуванням патчу Waze буде перевірено ще раз. Установлений оригінальний застосунок буде видалено разом із його даними, а замість нього встановлено модифіковану версію.",
+    patchConfirmOk = "Ок",
+    patchConfirmCancel = "Скасувати",
     manualHint = "Пряма ручна перевірка даних для HUD.",
     manualHudOutput = "Ручний вивід на HUD",
     supportedArrows = "Підтримувані стрілки",

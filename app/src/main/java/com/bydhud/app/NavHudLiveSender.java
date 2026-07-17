@@ -38,6 +38,10 @@ final class NavHudLiveSender {
         return instance;
     }
 
+    void onWazeAlertsPreferenceChanged(boolean enabled) {
+        wazeDirectChannel.onWazeAlertsPreferenceChanged(enabled);
+    }
+
     private final Context context;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HudOutputCoordinator hudOutput;
@@ -297,6 +301,13 @@ final class NavHudLiveSender {
                     @Override
                     public void onFrame(DirectTbtFrame frame, String reason) {
                         enqueueLatestWazeDirectFrame(frame, reason);
+                    }
+
+                    @Override
+                    public void onAlertCleared(DirectTbtFrame frame, String reason) {
+                        invalidatePendingWazeDirectFrames();
+                        hudOutput.clearDirectAlertAndRepublish(
+                                frame, reason, SystemClock.elapsedRealtime());
                     }
 
                     @Override

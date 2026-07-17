@@ -64,6 +64,7 @@ final class HudOutputCoordinator {
     private DirectTbtFrame preparedDirectFrame;
     private DirectTbtPayload.Prepared preparedDirectPayload;
     private int preparedDirectOptionsRevision = -1;
+    private boolean directAlertClearPending;
     private long pendingDirectReceivedAtMs;
     private String pendingDirectReason = "";
 
@@ -188,6 +189,27 @@ final class HudOutputCoordinator {
         });
     }
 
+    void clearDirectAlertAndRepublish(DirectTbtFrame frame, String reason, long receivedAtMs) {
+        worker.post(() -> {
+            if (frame == null || (!directEnabled
+                    && activeSource != Source.DIRECT
+                    && pendingSource != Source.DIRECT)) {
+                return;
+            }
+            directFrame = frame;
+            preparedDirectFrame = null;
+            preparedDirectPayload = null;
+            pendingDirectReceivedAtMs = receivedAtMs;
+            pendingDirectReason = safe(reason);
+            directAlertClearPending = true;
+            if (activeSource == Source.DIRECT) {
+                worker.removeCallbacks(sendLoop);
+                sendScheduled = false;
+                scheduleImmediate(reason);
+            }
+        });
+    }
+
     void selectNavigationSource(Source source, String reason) {
         if (source != Source.DIRECT && source != Source.LEGACY && source != Source.NONE) {
             throw new IllegalArgumentException("navigation source=" + source);
@@ -195,6 +217,9 @@ final class HudOutputCoordinator {
         worker.post(() -> {
             directEnabled = source == Source.DIRECT;
             legacyEnabled = source == Source.LEGACY;
+            if (source != Source.DIRECT) {
+                directAlertClearPending = false;
+            }
             if (source == Source.NONE) {
                 directFrame = null;
                 legacyState = null;
@@ -221,6 +246,7 @@ final class HudOutputCoordinator {
             directFrame = null;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            directAlertClearPending = false;
             pendingDirectReceivedAtMs = 0L;
             pendingDirectReason = "";
             reconcile(reason, detectedAtMs);
@@ -238,6 +264,7 @@ final class HudOutputCoordinator {
             pendingNeedsClear = false;
             pendingActivationNotBeforeMs = 0L;
             serviceStarted = false;
+            directAlertClearPending = false;
             HudDeliveryStatus.reset();
             reconcile("reset:" + reason);
         });
@@ -250,6 +277,7 @@ final class HudOutputCoordinator {
             legacyEnabled = false;
             manualState = null;
             directFrame = null;
+            directAlertClearPending = false;
             legacyState = null;
             reconcile(reason);
         });
@@ -454,6 +482,13 @@ final class HudOutputCoordinator {
                 }
                 serviceStarted = true;
                 log("service started source=" + source);
+            }
+            if (source == Source.DIRECT && directAlertClearPending) {
+                long clearedAtMs = sendClearBestEffort("direct alert preference disabled");
+                if (clearedAtMs < 0L) {
+                    throw new RemoteException("direct alert clear failed");
+                }
+                directAlertClearPending = false;
             }
             byte[] payload = buildPayload(source);
             int result = client.send(payload);

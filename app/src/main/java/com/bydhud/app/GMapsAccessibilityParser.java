@@ -138,7 +138,7 @@ final class GMapsAccessibilityParser {
         }
 
         String maneuverText = stripManeuverDistance(best.text);
-        String roadName = roadName(topCue, maneuverText);
+        String streetText = roadName(topCue, "");
         HudState state = new HudState();
         state.distanceToIntersection = best.distanceMeters >= 0
                 ? Math.max(0, best.distanceMeters)
@@ -152,7 +152,8 @@ final class GMapsAccessibilityParser {
         state.numOfLanes = 0;
         state.includeLaneBitmap = false;
         state.laneString = "";
-        state.roadName = roadName.isEmpty() ? maneuverText : roadName;
+        state.roadName = streetText;
+        state.directionText = maneuverText;
         state.guidePoint = "";
         state.navigationRatio = baseline == null ? 0.0d : baseline.navigationRatio;
         int roundaboutExit = roundaboutExitNumber(maneuverText, baseline);
@@ -196,6 +197,7 @@ final class GMapsAccessibilityParser {
         state.includeLaneBitmap = false;
         state.laneString = "";
         state.roadName = NavTextNormalizer.cleanText(topCue);
+        state.directionText = "";
         state.guidePoint = "";
         state.navigationRatio = baseline == null ? 0.0d : baseline.navigationRatio;
         state.hideNativeWithBlankId();
