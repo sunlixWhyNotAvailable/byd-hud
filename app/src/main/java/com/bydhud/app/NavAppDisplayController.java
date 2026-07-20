@@ -114,16 +114,56 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     String activeDashboardPackage() {
+        String current = confirmedDashboardPackage();
+        return observedDisplay(current) == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD
+                ? current
+                : "";
+    }
+
+    //exposes live service ownership without treating persisted recovery intent as proof.
+    String confirmedDashboardPackage() {
         String current;
         synchronized (lock) {
             current = activeDashboardPackage;
         }
-        return current.isEmpty() ? persistedDashboardPackage() : current;
+        return !current.isEmpty() && ClusterProjectionService.isProjectedPackageCurrent(current)
+                ? current
+                : "";
+    }
+
+    //exposes the exact live display id used to classify observed task state.
+    int confirmedDashboardDisplayId() {
+        String current = confirmedDashboardPackage();
+        return current.isEmpty()
+                ? NavAppDisplayState.DISPLAY_UNKNOWN
+                : ClusterProjectionService.projectedDisplayIdForPackage(current);
+    }
+
+    //classifies the last real task observation without treating persisted recovery intent as proof.
+    DashboardProjectionPolicy.ObservedDisplay observedDisplay(String packageName) {
+        String normalized = normalizePackage(packageName);
+        String owner = confirmedDashboardPackage();
+        int ownedDisplayId = owner.isEmpty()
+                ? NavAppDisplayState.DISPLAY_UNKNOWN
+                : ClusterProjectionService.projectedDisplayIdForPackage(owner);
+        return DashboardProjectionPolicy.classifyObservedDisplay(
+                normalized,
+                lastState(normalized),
+                owner,
+                ownedDisplayId);
     }
 
     //persists dashboard ownership so sticky service restarts do not lose the target app.
     String persistedDashboardPackage() {
         return normalizePackage(dashboardPrefs().getString(KEY_ACTIVE_PACKAGE, ""));
+    }
+
+    //a real boot invalidates the old virtual display; update and process recovery do not.
+    void clearStaleProjectionIntentForBoot(String reason) {
+        synchronized (lock) {
+            activeDashboardPackage = "";
+        }
+        clearDashboardProjection("boot:" + safe(reason));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -176,12 +216,14 @@ final class NavAppDisplayController {
                         false,
                         "task missing"));
             }
-            return remember(new NavAppDisplayState(
+            NavAppDisplayState observed = new NavAppDisplayState(
                     normalized,
                     parsed.taskId,
                     parsed.displayId,
                     parsed.visible,
-                    "display=" + parsed.displayId + " task=" + parsed.taskId));
+                    "display=" + parsed.displayId + " task=" + parsed.taskId);
+            reconcileConfirmedDashboardOwnership(normalized, observed, "display-check");
+            return remember(observed);
         } catch (IOException | SecurityException e) {
             return remember(new NavAppDisplayState(
                     normalized,
@@ -194,21 +236,37 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveToDashboard(String packageName, String reason) {
-        move(packageName, true, reason);
+        moveToDashboard(
+                packageName,
+                HudPrefs.isFullscreenDashboardEnabled(context),
+                reason);
+    }
+
+    //moves to an explicit dashboard layout; the worker rechecks task state before dispatching it.
+    void moveToDashboard(String packageName, boolean fullscreen, String reason) {
+        moveIndependentDashboardApp(packageName, true, fullscreen, reason);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveToMain(String packageName, String reason) {
-        move(packageName, false, reason);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    void toggleDisplay(String packageName, String reason) {
-        move(packageName, null, reason);
+        moveIndependentDashboardApp(packageName, false, reason);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     void moveIndependentDashboardApp(String packageName, boolean toDashboard, String reason) {
+        moveIndependentDashboardApp(
+                packageName,
+                toDashboard,
+                HudPrefs.isFullscreenDashboardEnabled(context),
+                reason);
+    }
+
+    //accepts an explicit physical target and dashboard layout instead of deriving either by toggling.
+    void moveIndependentDashboardApp(
+            String packageName,
+            boolean toDashboard,
+            boolean fullscreen,
+            String reason) {
         String normalized = normalizePackage(packageName);
         String label = toDashboard ? "independent_dashboard_on" : "independent_dashboard_off";
         if (!beginMove(normalized, label + " reason=" + safe(reason))) {
@@ -216,7 +274,11 @@ final class NavAppDisplayController {
             return;
         }
         Thread worker = new Thread(
-                () -> moveIndependentDashboardAppBlocking(normalized, toDashboard, reason),
+                () -> moveIndependentDashboardAppBlocking(
+                        normalized,
+                        toDashboard,
+                        fullscreen,
+                        reason),
                 "BydHudIndependentDashboardDisplay");
         worker.start();
     }
@@ -225,6 +287,9 @@ final class NavAppDisplayController {
     void returnActiveDashboardToMain(String reason) {
         String active = activeDashboardPackage();
         if (active.isEmpty()) {
+            active = persistedDashboardPackage();
+        }
+        if (active.isEmpty()) {
             log("", "dashboard_return_main_failed package=missing reason=" + safe(reason));
             return;
         }
@@ -232,117 +297,10 @@ final class NavAppDisplayController {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void move(String packageName, Boolean toDashboard, String reason) {
-        String normalized = normalizePackage(packageName);
-        String label = toDashboard == null
-                ? "toggle_display"
-                : (toDashboard ? "move_to_dashboard" : "move_to_main");
-        if (!beginMove(normalized, label + " reason=" + safe(reason))) {
-            log(normalized, label + " skipped already_running reason=" + safe(reason));
-            return;
-        }
-        Thread worker = new Thread(
-                () -> moveTask(normalized, toDashboard, reason),
-                toDashboard == null
-                        ? "BydHudNavAppDisplayToggle"
-                        : (toDashboard
-                                ? "BydHudNavAppDisplayDashboard"
-                                : "BydHudNavAppDisplayMain"));
-        worker.start();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void moveTask(String packageName, Boolean toDashboard, String reason) {
-        String label = toDashboard == null
-                ? "toggle_display"
-                : (toDashboard ? "move_to_dashboard" : "move_to_main");
-        try {
-            if (packageName.isEmpty()) {
-                remember(new NavAppDisplayState(
-                        packageName,
-                        -1,
-                        NavAppDisplayState.DISPLAY_UNKNOWN,
-                        false,
-                        label + " failed: empty package"));
-                return;
-            }
-            NavAppDisplayState current = checkDisplay(packageName, reason);
-            if (current.taskId < 0) {
-                remember(new NavAppDisplayState(
-                        packageName,
-                        -1,
-                        NavAppDisplayState.DISPLAY_UNKNOWN,
-                        false,
-                        label + " failed: task missing"));
-                return;
-            }
-            boolean targetDashboard = toDashboard == null
-                    ? !current.isOnDashboardDisplay()
-                    : toDashboard;
-            label = targetDashboard ? "move_to_dashboard" : "move_to_main";
-            if (targetDashboard) {
-                persistDashboardProjection(packageName, label + ":" + safe(reason));
-                ClusterProjectionService.startProjection(
-                        context,
-                        packageName,
-                        safe(reason));
-                remember(new NavAppDisplayState(
-                        packageName,
-                        current.taskId,
-                        current.displayId,
-                        current.visible,
-                        label + " projection requested from=" + current.displayId));
-                return;
-            }
-            ClusterProjectionService.returnToMain(
-                    context,
-                    packageName,
-                    safe(reason));
-            log(packageName, "dashboard_return_main_requested package=" + packageName
-                    + " reason=" + safe(reason));
-            NavAppDisplayState confirmed = waitForMainDisplay(
-                    packageName,
-                    "return-main-confirm");
-            boolean onMain = confirmed.taskId >= 0
-                    && confirmed.displayId == MAIN_DISPLAY_ID;
-            if (onMain) {
-                synchronized (lock) {
-                    if (packageName.equals(activeDashboardPackage)) {
-                        activeDashboardPackage = "";
-                    }
-                }
-                clearDashboardProjection(label + ":" + safe(reason));
-            } else {
-                log(packageName, "dashboard_return_main_failed package=" + packageName
-                        + " task=" + confirmed.taskId
-                        + " display=" + confirmed.displayId
-                        + " reason=" + safe(reason));
-            }
-            remember(new NavAppDisplayState(
-                    packageName,
-                    confirmed.taskId,
-                    confirmed.displayId,
-                    confirmed.visible,
-                    onMain
-                            ? label + " confirmed on main"
-                            : label + " return failed display=" + confirmed.displayId));
-            return;
-        } catch (SecurityException e) {
-            remember(new NavAppDisplayState(
-                    packageName,
-                    -1,
-                    NavAppDisplayState.DISPLAY_UNKNOWN,
-                    false,
-                    label + " failed: " + safe(e.getMessage())));
-        } finally {
-            endMove(packageName);
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void moveIndependentDashboardAppBlocking(
             String packageName,
             boolean toDashboard,
+            boolean fullscreen,
             String reason) {
         try {
             if (packageName.isEmpty()) {
@@ -354,7 +312,37 @@ final class NavAppDisplayController {
                         "independent dashboard failed: empty package"));
                 return;
             }
+            NavAppDisplayState current = checkDisplay(
+                    packageName,
+                    toDashboard
+                            ? "independent-dashboard-precheck"
+                            : "independent-return-precheck");
+            if (current.taskId < 0) {
+                remember(new NavAppDisplayState(
+                        packageName,
+                        -1,
+                        NavAppDisplayState.DISPLAY_UNKNOWN,
+                        false,
+                        "independent dashboard failed: task missing"));
+                return;
+            }
             if (!toDashboard) {
+                if (current.displayId == MAIN_DISPLAY_ID
+                        && !ClusterProjectionService.isProjectedPackageCurrent(packageName)) {
+                    synchronized (lock) {
+                        if (packageName.equals(activeDashboardPackage)) {
+                            activeDashboardPackage = "";
+                        }
+                    }
+                    clearDashboardProjection("independent-dashboard-already-main:" + safe(reason));
+                    remember(new NavAppDisplayState(
+                            packageName,
+                            current.taskId,
+                            current.displayId,
+                            current.visible,
+                            "independent dashboard already on main"));
+                    return;
+                }
                 ClusterProjectionService.returnToMain(
                         context,
                         packageName,
@@ -392,18 +380,8 @@ final class NavAppDisplayController {
                                         + confirmed.displayId));
                 return;
             }
-
-            NavAppDisplayState current = checkDisplay(packageName, "independent-dashboard-precheck");
-            if (current.taskId < 0) {
-                remember(new NavAppDisplayState(
-                        packageName,
-                        -1,
-                        NavAppDisplayState.DISPLAY_UNKNOWN,
-                        false,
-                        "independent dashboard failed: task missing"));
-                return;
-            }
-            if (!returnPreviousDashboardApp(packageName, reason)) {
+            boolean alreadyProjected = isConfirmedProjectedDashboardDisplay(packageName, current);
+            if (!alreadyProjected && !returnPreviousDashboardApp(packageName, reason)) {
                 remember(new NavAppDisplayState(
                         packageName,
                         current.taskId,
@@ -412,11 +390,51 @@ final class NavAppDisplayController {
                         "independent dashboard blocked: previous app not on main"));
                 return;
             }
+            int operation = fullscreen ? 4 : 3;
+            String protocolFailure = StockMapProtocol30011.dispatch(context, fullscreen);
+            if (protocolFailure.isEmpty()) {
+                log(packageName, "dashboard_protocol_30011_sent actionType=1 operation="
+                        + operation);
+            } else {
+                log(packageName, "dashboard_protocol_30011_failed actionType=1 operation="
+                        + operation + " detail=" + safe(protocolFailure));
+                if (packageName.equals(persistedDashboardPackage())
+                        && confirmedDashboardPackage().isEmpty()) {
+                    clearDashboardProjection(
+                            "dashboard-layout-failed:" + safe(reason));
+                }
+                remember(new NavAppDisplayState(
+                        packageName,
+                        current.taskId,
+                        current.displayId,
+                        current.visible,
+                        "independent dashboard layout failed: " + safe(protocolFailure)));
+                return;
+            }
+            if (alreadyProjected) {
+                reconcileConfirmedDashboardOwnership(
+                        packageName,
+                        current,
+                        "independent-dashboard-already-projected:" + safe(reason));
+                remember(new NavAppDisplayState(
+                        packageName,
+                        current.taskId,
+                        current.displayId,
+                        current.visible,
+                        "independent dashboard layout updated on existing projection"));
+                return;
+            }
             ClusterProjectionService.startProjection(context, packageName, safe(reason));
             NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(
                     packageName,
                     "independent-dashboard-start");
             if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)) {
+                ClusterProjectionService.returnToMain(
+                        context,
+                        packageName,
+                        "dashboard-confirmation-failed:" + safe(reason));
+                clearDashboardProjection(
+                        "dashboard-confirmation-failed:" + safe(reason));
                 remember(new NavAppDisplayState(
                         packageName,
                         confirmed.taskId,
@@ -425,11 +443,10 @@ final class NavAppDisplayController {
                         "independent dashboard projection not confirmed"));
                 return;
             }
-            synchronized (lock) {
-                activeDashboardPackage = packageName;
-            }
-            persistDashboardProjection(packageName, "independent-dashboard-confirmed:" + safe(reason));
-            NavHudLiveSender.get(context).onDashboardProjectionConfirmed(packageName, confirmed);
+            reconcileConfirmedDashboardOwnership(
+                    packageName,
+                    confirmed,
+                    "independent-dashboard-confirmed:" + safe(reason));
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
@@ -450,9 +467,13 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean returnPreviousDashboardApp(String nextPackageName, String reason) {
-        String previous;
-        synchronized (lock) {
-            previous = activeDashboardPackage;
+        String previous = confirmedDashboardPackage();
+        if (previous.isEmpty()) {
+            String recoveryCandidate = persistedDashboardPackage();
+            if (!recoveryCandidate.isEmpty() && !recoveryCandidate.equals(nextPackageName)) {
+                checkDisplay(recoveryCandidate, "previous-dashboard-recovery-check");
+                previous = confirmedDashboardPackage();
+            }
         }
         if (previous.isEmpty() || previous.equals(nextPackageName)) {
             return true;
@@ -593,6 +614,31 @@ final class NavAppDisplayController {
         }
         int projectedDisplayId = ClusterProjectionService.projectedDisplayIdForPackage(packageName);
         return projectedDisplayId > MAIN_DISPLAY_ID && state.displayId == projectedDisplayId;
+    }
+
+    //promotes recovery intent to live ownership only after observing the exact app-owned display.
+    private boolean reconcileConfirmedDashboardOwnership(
+            String packageName,
+            NavAppDisplayState state,
+            String reason) {
+        if (!isConfirmedProjectedDashboardDisplay(packageName, state)) {
+            return false;
+        }
+        boolean ownershipChanged;
+        synchronized (lock) {
+            ownershipChanged = !packageName.equals(activeDashboardPackage);
+            activeDashboardPackage = packageName;
+        }
+        if (!packageName.equals(persistedDashboardPackage())) {
+            persistDashboardProjection(packageName, reason);
+        }
+        if (ownershipChanged) {
+            log(packageName, "dashboard_live_owner_confirmed package=" + packageName
+                    + " display=" + state.displayId
+                    + " reason=" + safe(reason));
+            NavHudLiveSender.get(context).onDashboardProjectionConfirmed(packageName, state);
+        }
+        return true;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

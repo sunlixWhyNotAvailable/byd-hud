@@ -31,7 +31,27 @@ final class WazeCropCapture {
     private static final SimpleDateFormat SESSION_FORMAT =
             new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US);
 
-    private static WazeCropCapture instance;
+    private static volatile WazeCropCapture instance;
+
+    static final class RetentionState {
+        static final RetentionState INACTIVE = new RetentionState(false, "", "", "");
+
+        final boolean active;
+        final String day;
+        final String sessionName;
+        final String preserveScreenshotName;
+
+        RetentionState(
+                boolean active,
+                String day,
+                String sessionName,
+                String preserveScreenshotName) {
+            this.active = active;
+            this.day = safe(day);
+            this.sessionName = safe(sessionName);
+            this.preserveScreenshotName = safe(preserveScreenshotName);
+        }
+    }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static synchronized WazeCropCapture get(Context context) {
@@ -39,6 +59,12 @@ final class WazeCropCapture {
             instance = new WazeCropCapture(context.getApplicationContext());
         }
         return instance;
+    }
+
+    //Returns one lock-free immutable snapshot for retention while it owns the topology write lock.
+    static RetentionState currentRetentionState() {
+        WazeCropCapture current = instance;
+        return current == null ? RetentionState.INACTIVE : current.retentionState;
     }
 
     private final Context context;
@@ -50,6 +76,7 @@ final class WazeCropCapture {
     private boolean sessionShellWritable;
     private String sessionName = "";
     private int screenshotIndex;
+    private volatile RetentionState retentionState = RetentionState.INACTIVE;
     private NavAppDisplayState lastDisplayState = new NavAppDisplayState(
             WAZE_PACKAGE, -1, NavAppDisplayState.DISPLAY_UNKNOWN, false, "not checked");
     private long lastDisplayCheckMs;
@@ -167,6 +194,11 @@ final class WazeCropCapture {
                 Log.w(TAG, "mkdir failed " + sessionDir.getAbsolutePath());
             }
             screenshotIndex = 0;
+            retentionState = new RetentionState(
+                    true,
+                    sessionName.length() >= 8 ? sessionName.substring(0, 8) : "",
+                    sessionName,
+                    "");
             lastDisplayState = new NavAppDisplayState(
                     WAZE_PACKAGE, -1, NavAppDisplayState.DISPLAY_UNKNOWN, false, "not checked");
             lastDisplayCheckMs = 0L;
@@ -193,6 +225,7 @@ final class WazeCropCapture {
             }
             active = false;
             generation++;
+            retentionState = RetentionState.INACTIVE;
             dir = sessionDir;
             lastDisplayState = new NavAppDisplayState(
                     WAZE_PACKAGE, -1, NavAppDisplayState.DISPLAY_UNKNOWN, false, "not checked");
@@ -384,6 +417,13 @@ final class WazeCropCapture {
                 sourceFileName = detailedDebugArtifacts
                         ? WazeCaptureDebugArtifacts.frameName("source_frame_", index)
                         : "";
+                retentionState = new RetentionState(
+                        true,
+                        workerSessionName.length() >= 8
+                                ? workerSessionName.substring(0, 8)
+                                : "",
+                        workerSessionName,
+                        sourceFileName);
                 long artifactQueueMs = 0L;
                 long parseStartMs = SystemClock.elapsedRealtime();
                 long geometryStartMs = parseStartMs;

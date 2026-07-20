@@ -80,6 +80,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -213,7 +214,9 @@ private data class Copy(
     val updateDownloading: String,
     val updateClose: String,
     val updateAction: String,
-    val navigationOutput: String,
+    val basicNavigationOutput: String,
+    val extraNavigationOptions: String,
+    val dashboardControl: String,
     val pngOutput: String,
     val pngHint: String,
     val nativeOutput: String,
@@ -228,6 +231,8 @@ private data class Copy(
     val textDirectionOutputHint: String,
     val showWazeAlerts: String,
     val showWazeAlertsHint: String,
+    val fullscreenDashboard: String,
+    val fullscreenDashboardHint: String,
     val smallDistanceClamp: String,
     val smallDistanceHint: String,
     val roundaboutLeft: String,
@@ -267,7 +272,10 @@ private data class Copy(
     val storageLimitGb: String,
     val currentNavLogsSize: String,
     val navigationLogsFolder: String,
-    val storageFolderHint: String,
+    val privateStorageLocation: String,
+    val publicStorageLocation: String,
+    val bothStorageLocations: String,
+    val shareSelected: String,
     val sortByDate: String,
     val sortByName: String,
     val deleteSelected: String,
@@ -419,8 +427,9 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
-    var storageDeleteStep by rememberSaveable { mutableIntStateOf(0) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
+    var storageShareDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var storageShareBusy by remember { mutableStateOf(false) }
     var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
@@ -473,13 +482,20 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
 
     //runs storage deletion as folder steps so the UI can stay responsive without a pre-scan.
     fun beginStorageDelete(days: List<String>) {
-        if (days.isEmpty() || storageDeleteBusy) {
+        if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
             return
         }
         pendingStorageDeleteDays = emptyList()
         storageDeleteQueue = days
-        storageDeleteStep = 0
         storageDeleteBusy = true
+    }
+
+    fun beginStorageShare(days: List<String>) {
+        if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
+            return
+        }
+        storageShareDays = days
+        storageShareBusy = true
     }
 
     LaunchedEffect(selectedTab) {
@@ -554,34 +570,41 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
-    LaunchedEffect(storageDeleteBusy, storageDeleteStep, storageDeleteQueue) {
+    LaunchedEffect(storageDeleteBusy, storageDeleteQueue) {
         if (!storageDeleteBusy) {
             return@LaunchedEffect
         }
-        val day = storageDeleteQueue.getOrNull(storageDeleteStep)
-        if (day == null) {
+        if (storageDeleteQueue.isEmpty()) {
             storageDeleteBusy = false
             storageDeleteQueue = emptyList()
-            storageDeleteStep = 0
             selectedStorageDays = emptyList()
             refresh()
             return@LaunchedEffect
         }
-        val result = withContext(Dispatchers.IO) {
-            activity.composeDeleteStorageDay(day)
+        val results = withContext(Dispatchers.IO + NonCancellable) {
+            activity.composeDeleteStorageDays(storageDeleteQueue)
         }
-        activity.composeAppendStatus("Storage delete ${result.day}: ${result.message}")
-        val nextStep = storageDeleteStep + 1
-        if (nextStep >= storageDeleteQueue.size) {
-            storageDeleteBusy = false
-            storageDeleteQueue = emptyList()
-            storageDeleteStep = 0
-            selectedStorageDays = emptyList()
-            activity.composeRequestStorageRefresh(true)
-            refresh()
-        } else {
-            storageDeleteStep = nextStep
+        results.forEach { result ->
+            activity.composeAppendStatus("Storage delete ${result.day}: ${result.message}")
         }
+        storageDeleteBusy = false
+        storageDeleteQueue = emptyList()
+        selectedStorageDays = emptyList()
+        activity.composeRequestStorageRefresh(true)
+        refresh()
+    }
+
+    LaunchedEffect(storageShareBusy, storageShareDays) {
+        if (!storageShareBusy) {
+            return@LaunchedEffect
+        }
+        val detail = withContext(Dispatchers.IO + NonCancellable) {
+            activity.composeShareStorageDays(storageShareDays)
+        }
+        activity.composeAppendStatus("Storage share: $detail")
+        storageShareBusy = false
+        storageShareDays = emptyList()
+        refresh()
     }
 
     Box(
@@ -643,6 +666,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             snapshot = snapshot,
                             sortOldestFirst = storageSortOldestFirst,
                             selectedDays = selectedStorageDays,
+                            storageBusy = storageDeleteBusy || storageShareBusy,
                             onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },
                             onSortOldestFirst = { storageSortOldestFirst = it },
                             onToggleDay = { day ->
@@ -654,7 +678,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             },
                             onDeleteSelected = { deletableSelectedDays ->
                                 pendingStorageDeleteDays = deletableSelectedDays
-                            }
+                            },
+                            onShareSelected = ::beginStorageShare
                         )
                         RuntimeTab.Patch -> PatchTab(copy, palette, snapshot)
                         RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
@@ -718,8 +743,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             StorageDeleteOverlay(
                 copy = copy,
                 palette = palette,
-                folderName = storageDeleteQueue.getOrNull(storageDeleteStep).orEmpty(),
-                step = storageDeleteStep + 1,
+                folderName = storageDeleteQueue.firstOrNull().orEmpty(),
+                step = 1,
                 total = storageDeleteQueue.size.coerceAtLeast(1)
             )
         }
@@ -863,7 +888,7 @@ private fun OptionsTab(
 
         Spacer(Modifier.height(10.dp))
 
-        Section(copy.navigationOutput, palette) {
+        Section(copy.basicNavigationOutput, palette) {
             SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
                 runAction { activity.composeSetPngOutputEnabled(it) }
             }
@@ -876,14 +901,18 @@ private fun OptionsTab(
                 runAction { activity.composeSetLaneOutputEnabled(it) }
             }
             Divider(palette)
-            SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
-                runAction { activity.composeSetDistanceOutputEnabled(it) }
-            }
-            Divider(palette)
             SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
                 runAction { activity.composeSetStreetOutputEnabled(it) }
             }
             Divider(palette)
+            SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
+                runAction { activity.composeSetDistanceOutputEnabled(it) }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Section(copy.extraNavigationOptions, palette) {
             SwitchRow(
                 copy.textDirectionOutput,
                 copy.textDirectionOutputHint,
@@ -903,6 +932,19 @@ private fun OptionsTab(
             Divider(palette)
             SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
                 runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
+            }
+        }
+
+        Spacer(Modifier.height(10.dp))
+
+        Section(copy.dashboardControl, palette) {
+            SwitchRow(
+                copy.fullscreenDashboard,
+                copy.fullscreenDashboardHint,
+                snapshot.fullscreenDashboardEnabled,
+                palette
+            ) {
+                runAction { activity.composeSetFullscreenDashboardEnabled(it) }
             }
         }
     }
@@ -1491,7 +1533,7 @@ private fun AppRow(
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
 ) {
-    val dashboardEnabled = row.runtimeBacked && !row.dashboardMoveInProgress
+    val dashboardEnabled = row.runtimeBacked && row.dashboardStateKnown && !row.dashboardMoveInProgress
     val runningForStatus = row.runtimeBacked || row.observed
     val dashboardText = when {
         !row.runtimeBacked -> copy.startAppFirst
@@ -1543,7 +1585,7 @@ private fun AppRow(
                 enabled = dashboardEnabled,
                 width = 220.dp
             ) {
-                runAction { activity.composeToggleDashboard(row.packageName, row.runtimeBacked) }
+                runAction { activity.composeMoveDashboard(row.packageName, !row.onDashboard) }
             }
         }
     }
@@ -1621,10 +1663,12 @@ private fun StorageTab(
     snapshot: MainActivity.ComposeSnapshot,
     sortOldestFirst: Boolean,
     selectedDays: List<String>,
+    storageBusy: Boolean,
     onStorageLimitGb: (Int) -> Unit,
     onSortOldestFirst: (Boolean) -> Unit,
     onToggleDay: (String) -> Unit,
-    onDeleteSelected: (List<String>) -> Unit
+    onDeleteSelected: (List<String>) -> Unit,
+    onShareSelected: (List<String>) -> Unit
 ) {
     var draftLimit by rememberSaveable(snapshot.storageLimitGb) {
         mutableIntStateOf(snapshot.storageLimitGb)
@@ -1634,8 +1678,8 @@ private fun StorageTab(
     } else {
         snapshot.storageDays.sortedByDescending { it.name }
     }
-    val deletableSelectedDays = selectedDays.filter { selected ->
-        days.any { it.name == selected && !it.active }
+    val selectedDayNames = selectedDays.filter { selected ->
+        days.any { it.name == selected }
     }
     PageSurface(copy.storage, copy.storageHint, palette) {
         Section(copy.storageSettings, palette) {
@@ -1703,16 +1747,26 @@ private fun StorageTab(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                ReadOnlyPathField(
-                    snapshot.navCaptureFolderPath,
-                    palette,
-                    modifier = Modifier.weight(1f)
-                )
+                Column(modifier = Modifier.weight(1f)) {
+                    snapshot.navCaptureFolderPaths.forEachIndexed { index, path ->
+                        if (index > 0) Spacer(Modifier.height(6.dp))
+                        ReadOnlyPathField(path, palette, modifier = Modifier.fillMaxWidth())
+                    }
+                }
                 Spacer(Modifier.weight(1f))
+                HudIconButton(
+                    icon = R.drawable.ic_share,
+                    contentDescription = copy.shareSelected,
+                    palette = palette,
+                    tint = palette.accent,
+                    enabled = selectedDayNames.isNotEmpty() && !storageBusy,
+                    onClick = { onShareSelected(selectedDayNames) }
+                )
                 HudButton(
                     if (sortOldestFirst) copy.sortByName else copy.sortByDate,
                     palette,
                     primary = false,
+                    enabled = !storageBusy,
                     width = 190.dp
                 ) {
                     onSortOldestFirst(!sortOldestFirst)
@@ -1733,7 +1787,8 @@ private fun StorageTab(
                         day = day,
                         copy = copy,
                         palette = palette,
-                        selected = !day.active && selectedDays.contains(day.name),
+                        selected = selectedDays.contains(day.name),
+                        enabled = !storageBusy,
                         onToggle = { onToggleDay(day.name) }
                     )
                 }
@@ -1747,10 +1802,10 @@ private fun StorageTab(
                 HudButton(
                     copy.deleteSelected,
                     palette,
-                    enabled = deletableSelectedDays.isNotEmpty(),
+                    enabled = selectedDayNames.isNotEmpty() && !storageBusy,
                     primary = true,
                     width = 190.dp,
-                    onClick = { onDeleteSelected(deletableSelectedDays) }
+                    onClick = { onDeleteSelected(selectedDayNames) }
                 )
             }
         }
@@ -1976,10 +2031,10 @@ private fun StorageDayRow(
     copy: Copy,
     palette: Palette,
     selected: Boolean,
+    enabled: Boolean,
     onToggle: () -> Unit
 ) {
-    val canSelect = !day.active
-    val press = rememberPressFeedback(canSelect)
+    val press = rememberPressFeedback(enabled)
     val visualClick = rememberVisualFirstClick(onToggle)
     val baseBackground = if (selected) palette.active else palette.panelAlt
     Row(
@@ -1990,7 +2045,7 @@ private fun StorageDayRow(
             .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
-                enabled = canSelect,
+                enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
                 onClick = visualClick
@@ -2001,7 +2056,7 @@ private fun StorageDayRow(
         Column(modifier = Modifier.weight(1f)) {
             Text(day.name, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
             Text(
-                "${copy.created}: ${day.createdLabel}  •  ${day.sessions} ${sessionLabel(day.sessions, copy)}",
+                "${copy.created}: ${day.createdLabel}  •  ${day.sessions} ${sessionLabel(day.sessions, copy)}  •  ${storageLocationLabel(day, copy)}",
                 color = palette.muted,
                 fontFamily = FontFamily.Monospace,
                 fontSize = 12.sp
@@ -2012,15 +2067,20 @@ private fun StorageDayRow(
         if (day.active) {
             Spacer(Modifier.width(8.dp))
             Pill(copy.activeToday, palette.green, palette.greenSoft)
-        } else {
-            Spacer(Modifier.width(8.dp))
-            Pill(
-                if (selected) copy.folderSelected else copy.folderNotSelected,
-                if (selected) palette.accent else palette.muted,
-                if (selected) palette.active else palette.disabled
-            )
         }
+        Spacer(Modifier.width(8.dp))
+        Pill(
+            if (selected) copy.folderSelected else copy.folderNotSelected,
+            if (selected) palette.accent else palette.muted,
+            if (selected) palette.active else palette.disabled
+        )
     }
+}
+
+private fun storageLocationLabel(day: MainActivity.ComposeStorageDay, copy: Copy): String = when {
+    day.hasPublicStorage && day.hasPrivateStorage -> copy.bothStorageLocations
+    day.hasPublicStorage -> copy.publicStorageLocation
+    else -> copy.privateStorageLocation
 }
 
 @Composable
@@ -2582,10 +2642,11 @@ private fun HudIconButton(
     contentDescription: String,
     palette: Palette,
     tint: Color,
+    enabled: Boolean = true,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback()
+    val press = rememberPressFeedback(enabled)
     val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = tint.copy(alpha = if (palette.dark) 0.20f else 0.12f)
     val pressedBackground = tint.copy(alpha = if (palette.dark) 0.88f else 0.72f)
@@ -2597,6 +2658,7 @@ private fun HudIconButton(
             .background(if (press.pressed) pressedBackground else baseBackground)
             .then(press.modifier)
             .clickable(
+                enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
                 onClick = visualClick
@@ -2607,7 +2669,11 @@ private fun HudIconButton(
         Icon(
             painter = painterResource(id = icon),
             contentDescription = contentDescription,
-            tint = if (press.pressed) Color.White else tint,
+            tint = when {
+                !enabled -> palette.muted.copy(alpha = 0.55f)
+                press.pressed -> Color.White
+                else -> tint
+            },
             modifier = Modifier.size(28.dp)
         )
     }
@@ -3124,7 +3190,9 @@ private fun enCopy() = Copy(
     updateDownloading = "Downloading update...",
     updateClose = "Close",
     updateAction = "Update",
-    navigationOutput = "Navigation output",
+    basicNavigationOutput = "Basic navigation output",
+    extraNavigationOptions = "Extra navigation options",
+    dashboardControl = "Dashboard control",
     pngOutput = "PNG output",
     pngHint = "Send maneuver source image payload.",
     nativeOutput = "Native output",
@@ -3139,10 +3207,12 @@ private fun enCopy() = Copy(
     textDirectionOutputHint = "Send text direction in street output (\"Continue straight\") if no street text available. Street output has priority.",
     showWazeAlerts = "Show Waze alerts",
     showWazeAlertsHint = "Display Waze alerts on the HUD.",
+    fullscreenDashboard = "Fullscreen dashboard",
+    fullscreenDashboardHint = "Use fullscreen dashboard mode.",
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Clamp distances below 20 m instead of OEM close marker.",
     roundaboutLeft = "Roundabout left-hand traffic",
-    roundaboutHint = "Changes roundabout assets for PNG output.",
+    roundaboutHint = "Changes roundabout assets for PNG output. Legacy with crop channel.",
     appsHint = "Supported apps can be armed before launch. Dashboard actions require a running background app.",
     lastScan = "Last scan",
     refreshApps = "Refresh apps",
@@ -3178,7 +3248,10 @@ private fun enCopy() = Copy(
     storageLimitGb = "Limit, GB",
     currentNavLogsSize = "Current navigation logs folder size",
     navigationLogsFolder = "Navigation logs folder",
-    storageFolderHint = "Day folders under /sdcard/Documents/BYD-HUD.",
+    privateStorageLocation = "private folder",
+    publicStorageLocation = "public folder",
+    bothStorageLocations = "public and private folders",
+    shareSelected = "Share selected",
     sortByDate = "Newest first",
     sortByName = "Oldest first",
     deleteSelected = "Delete selected",
@@ -3284,7 +3357,9 @@ private fun uaCopy() = enCopy().copy(
     updateDownloading = "Завантажуємо оновлення...",
     updateClose = "Закрити",
     updateAction = "Оновити",
-    navigationOutput = "Вивід навігації",
+    basicNavigationOutput = "Базовий вивід навігації",
+    extraNavigationOptions = "Додаткові функції навігації",
+    dashboardControl = "Керування дашбордом",
     pngOutput = "Вивід PNG",
     pngHint = "Надсилати зображення маневру.",
     nativeOutput = "Вивід штатного маневру",
@@ -3299,10 +3374,12 @@ private fun uaCopy() = enCopy().copy(
     textDirectionOutputHint = "Виводити у поле для вулиці текстові напрямки (\"Прямуйте далі\"), якщо відсутній текст вулиці. Вивід вулиці має пріоритет.",
     showWazeAlerts = "Показувати попередження Waze",
     showWazeAlertsHint = "Відображати попередження Waze на HUD.",
+    fullscreenDashboard = "Повний екран приборки",
+    fullscreenDashboardHint = "Використовувати повноекранний режим приборки.",
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Обмежувати дистанції менше 20 м, щоб штатний HUD не показував власний маркер близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",
-    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG.",
+    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG. Сумісність з crop каналом.",
     appsHint = "Підтримувані застосунки можна активувати до запуску. Для приборки застосунок має бути у фоні.",
     lastScan = "Останнє сканування",
     refreshApps = "Оновити застосунки",
@@ -3337,7 +3414,10 @@ private fun uaCopy() = enCopy().copy(
     storageLimitGb = "Ліміт, ГБ",
     currentNavLogsSize = "Поточний розмір теки з журналом навігації",
     navigationLogsFolder = "Тека журналу навігації",
-    storageFolderHint = "/sdcard/Documents/BYD-HUD",
+    privateStorageLocation = "приватна тека",
+    publicStorageLocation = "публічна тека",
+    bothStorageLocations = "публічна та приватна теки",
+    shareSelected = "Поділитися вибраним",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
     deleteSelected = "Видалити вибране",

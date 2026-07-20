@@ -28,7 +28,7 @@ final class LogcatRecorder {
 
     private static Process process;
     private static File activeFile;
-    private static String activeStartDay = "";
+    private static volatile String activeStartDay = "";
     private static File lastSavedFile;
     private static String lastStatus = STATUS_WAITING;
     private static String lastDetail = "";
@@ -59,6 +59,11 @@ final class LogcatRecorder {
         return isRecording() ? activeStartDay : "";
     }
 
+    //Lock-free conservative snapshot for retention while it owns the storage topology lock.
+    static String retentionActiveStartDay() {
+        return activeStartDay;
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static synchronized String statusText() {
         isRecording();
@@ -75,6 +80,15 @@ final class LogcatRecorder {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static synchronized Result start(Context context) {
+        return startInternal(context, true);
+    }
+
+    //Starts a new live file after day retirement without clearing the device log buffer.
+    static synchronized Result restartAfterRebase(Context context) {
+        return startInternal(context, false);
+    }
+
+    private static Result startInternal(Context context, boolean clearBeforeStart) {
         Context appContext = context.getApplicationContext();
         if (isRecording()) {
             lastStatus = STATUS_RECORDING;
@@ -93,10 +107,20 @@ final class LogcatRecorder {
         append(file, "=== BYD HUD logcat start " + timestampForLine() + " ===\n");
         append(file, "version=" + BuildConfig.VERSION_NAME + "/" + BuildConfig.VERSION_CODE + "\n");
 
-        ClearResult clear = clearLogcat(file);
-        append(file, "logcat -c exit=" + clear.exitCode + " " + clear.detail + "\n");
-        AppEventLogger.event(appContext, "logcat_start file=" + file.getAbsolutePath()
-                + " clearExit=" + clear.exitCode + " detail=" + clear.detail);
+        int clearExit = Integer.MIN_VALUE;
+        String clearDetail = "skipped-rebase";
+        if (clearBeforeStart) {
+            ClearResult clear = clearLogcat(file);
+            clearExit = clear.exitCode;
+            clearDetail = clear.detail;
+            append(file, "logcat -c exit=" + clearExit + " " + clearDetail + "\n");
+        } else {
+            append(file, "logcat rebase: buffer clear skipped\n");
+        }
+        AppEventLogger.event(appContext,
+                (clearBeforeStart ? "logcat_start file=" : "logcat_rebase_start file=")
+                        + file.getAbsolutePath()
+                        + " clearExit=" + clearExit + " detail=" + clearDetail);
 
         try {
             ProcessBuilder builder = new ProcessBuilder("logcat", "-v", "threadtime");
@@ -104,7 +128,9 @@ final class LogcatRecorder {
             builder.redirectOutput(ProcessBuilder.Redirect.appendTo(file));
             process = builder.start();
             lastDetail = "file=" + file.getName();
-            return Result.recording(file, "clearExit=" + clear.exitCode);
+            return Result.recording(file, clearBeforeStart
+                    ? "clearExit=" + clearExit
+                    : "rebase clear skipped");
         } catch (IOException e) {
             Log.e(TAG, "logcat start failed", e);
             append(file, "logcat start failed: " + e.getMessage() + "\n");
@@ -186,12 +212,14 @@ final class LogcatRecorder {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void append(File file, String text) {
-        try (FileWriter writer = new FileWriter(file, true)) {
-            writer.write(text);
-            writer.flush();
-        } catch (IOException e) {
-            Log.e(TAG, "write failed: " + file.getAbsolutePath(), e);
-        }
+        NavigationLogStorage.withReadLock(() -> {
+            try (FileWriter writer = new FileWriter(file, true)) {
+                writer.write(text);
+                writer.flush();
+            } catch (IOException e) {
+                Log.e(TAG, "write failed: " + file.getAbsolutePath(), e);
+            }
+        });
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

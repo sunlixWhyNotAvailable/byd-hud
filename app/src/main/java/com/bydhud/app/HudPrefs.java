@@ -19,6 +19,7 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_STREET = "output_street";
     private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
+    private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
@@ -35,7 +36,7 @@ final class HudPrefs {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isBootEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_BOOT_ENABLED, false);
+        return prefs(context).getBoolean(KEY_BOOT_ENABLED, true);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -133,6 +134,14 @@ final class HudPrefs {
 
     static void setWazeAlertsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_WAZE_ALERTS, enabled).apply();
+    }
+
+    static boolean isFullscreenDashboardEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_FULLSCREEN_DASHBOARD, true);
+    }
+
+    static void setFullscreenDashboardEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_FULLSCREEN_DASHBOARD, enabled).apply();
     }
 
     static int outputOptionsRevision() {

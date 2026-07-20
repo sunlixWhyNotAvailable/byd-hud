@@ -39,32 +39,44 @@ final class AppEventLogger {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File file(Context context, String name) {
-        File file = new File(logDir(context), name);
-        if (file.exists() && file.length() > MAX_FILE_BYTES) {
-            if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
-                NavCaptureStore.rotate(file);
-                return file;
-            }
-            File rotated = new File(file.getParentFile(), name + ".1");
-            if (rotated.exists() && !rotated.delete()) {
-                Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());
-            }
-            if (!file.renameTo(rotated)) {
-                Log.w(TAG, "rotate failed: " + file.getAbsolutePath());
-            }
-        }
-        return file;
+        return new File(logDir(context), name);
     }
 
     //guard event log rotation and append because runtime callbacks write from multiple threads.
     private static void append(Context context, String name, String text, boolean ignored) {
         synchronized (WRITE_LOCK) {
-            File file = file(context, name);
-            try (FileWriter writer = new FileWriter(file, true)) {
-                writer.write(text);
-            } catch (IOException e) {
-                Log.e(TAG, "write failed: " + file.getAbsolutePath(), e);
+            File file = NavigationLogStorage.withReadLock(() -> {
+                File target = file(context, name);
+                try (FileWriter writer = new FileWriter(target, true)) {
+                    writer.write(text);
+                    return target;
+                } catch (IOException e) {
+                    Log.e(TAG, "write failed: " + target.getAbsolutePath(), e);
+                    return null;
+                }
+            });
+            if (file != null
+                    && file.length() > MAX_FILE_BYTES
+                    && !NavigationLogStorage.holdsTopologyRead()) {
+                if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
+                    NavCaptureStore.rotate(file);
+                } else {
+                    NavigationLogStorage.withWriteLock(() -> rotate(file, name));
+                }
             }
+        }
+    }
+
+    private static void rotate(File file, String name) {
+        if (!file.exists() || file.length() <= MAX_FILE_BYTES) {
+            return;
+        }
+        File rotated = new File(file.getParentFile(), name + ".1");
+        if (rotated.exists() && !rotated.delete()) {
+            Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());
+        }
+        if (!file.renameTo(rotated)) {
+            Log.w(TAG, "rotate failed: " + file.getAbsolutePath());
         }
     }
 

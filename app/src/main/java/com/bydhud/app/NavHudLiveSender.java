@@ -491,6 +491,18 @@ final class NavHudLiveSender {
         byte[] lanes = frame.getLanePng();
         DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(frame, options);
+        String maneuverArtifact = "";
+        String laneArtifact = "";
+        String alertArtifact = "";
+        if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
+            maneuverArtifact = NavCaptureStore.saveDirectArtifact(
+                    context, "maneuver", maneuver);
+            laneArtifact = NavCaptureStore.saveDirectArtifact(context, "lanes", lanes);
+            if (alert.isActive()) {
+                alertArtifact = NavCaptureStore.saveDirectArtifact(
+                        context, "alert", alert.getManeuverPng());
+            }
+        }
         NavCaptureStore.rawEvent(context, "waze_direct", WAZE_PACKAGE,
                 "reason=" + safeReason(reason)
                         + " receivedAtElapsedMs=" + receivedAtMs
@@ -511,7 +523,10 @@ final class NavHudLiveSender {
                         + " hudDistanceM=" + prepared.distanceMeters()
                         + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
                         + " hudLaneCount=" + prepared.laneCount()
-                        + " hudLaneBytes=" + prepared.lanePngBytes());
+                        + " hudLaneBytes=" + prepared.lanePngBytes()
+                        + " maneuverArtifact=" + maneuverArtifact
+                        + " laneArtifact=" + laneArtifact
+                        + " alertArtifact=" + alertArtifact);
     }
 
     private void onWazeDirectNavigationEnded(String reason, long detectedAtMs) {

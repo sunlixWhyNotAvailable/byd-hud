@@ -12,6 +12,7 @@
     <queries>
         <package android:name="com.ts.car.someip.service" />
         <package android:name="com.byd.appstartmanagement" />
+        <package android:name="com.byd.launchermap" />
         <package android:name="com.waze" />
     </queries>
 

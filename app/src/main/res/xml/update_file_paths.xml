@@ -3,4 +3,10 @@
     <files-path
         name="bydhud-update-staging"
         path="updates/" />
+    <external-cache-path
+        name="bydhud-log-shares-external"
+        path="log-shares/" />
+    <cache-path
+        name="bydhud-log-shares-internal"
+        path="log-shares/" />
 </paths>

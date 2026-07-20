@@ -17,6 +17,7 @@ import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.Locale;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class WazeCaptureDebugWriter {
@@ -62,14 +63,16 @@ final class WazeCaptureDebugWriter {
         if (dir == null || line == null) {
             return false;
         }
-        return post("session_jsonl", () -> appendLine(dir, SESSION_LOG, line));
+        return post("session_jsonl", () -> NavigationLogStorage.withReadLock(
+                () -> appendLine(dir, SESSION_LOG, line)));
     }
 
     boolean appendCaptureEvent(File dir, String line) {
         if (dir == null || line == null) {
             return false;
         }
-        return post("capture_events", () -> artifacts.appendEvent(dir, line));
+        return post("capture_events", () -> NavigationLogStorage.withReadLock(
+                () -> artifacts.appendEvent(dir, line)));
     }
 
     boolean rawEvent(Context context, String channel, String packageName, String payload) {
@@ -113,7 +116,8 @@ final class WazeCaptureDebugWriter {
         }
         boolean posted = post("frame_artifacts", () -> {
             try {
-                writeFrameArtifacts(dir, sourceFrameName, copy, missingBucket, laneAnalysis);
+                NavigationLogStorage.withReadLock(() -> writeFrameArtifacts(
+                        dir, sourceFrameName, copy, missingBucket, laneAnalysis));
             } finally {
                 copy.recycle();
                 pendingBitmaps.decrementAndGet();
@@ -124,6 +128,24 @@ final class WazeCaptureDebugWriter {
             pendingBitmaps.decrementAndGet();
         }
         return posted;
+    }
+
+    //Waits for work queued before this call; share/retirement invoke it from background threads.
+    boolean awaitIdle() {
+        if (android.os.Looper.myLooper() == thread.getLooper()) {
+            return true;
+        }
+        CountDownLatch idle = new CountDownLatch(1);
+        if (!handler.post(idle::countDown)) {
+            return false;
+        }
+        try {
+            idle.await();
+            return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
     }
 
     private boolean tryReserveBitmap() {

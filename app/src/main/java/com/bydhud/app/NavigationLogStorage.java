@@ -2,7 +2,10 @@ package com.bydhud.app;
 
 //rotates navigation logs so long trips and idle runtime do not exhaust device storage.
 
+import android.Manifest;
+import android.app.AppOpsManager;
 import android.content.Context;
+import android.content.pm.PackageManager;
 import android.os.Environment;
 import android.os.SystemClock;
 import android.util.Log;
@@ -12,13 +15,14 @@ import java.io.FileInputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
-import java.util.Set;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 //defines the NavigationLogStorage module boundary so related behavior stays readable inside one unit.
 final class NavigationLogStorage {
@@ -32,14 +36,14 @@ final class NavigationLogStorage {
     private static final String PUBLIC_ROOT = "/sdcard/Documents/" + ROOT_DIR;
     private static final String WRITE_PROBE = ".write_probe";
     private static final Object PUBLIC_DIR_CACHE_LOCK = new Object();
-    private static final Object WRITABLE_DIR_LOCK = new Object();
     private static final Map<String, CachedDir> PUBLIC_DIR_CACHE = new HashMap<>();
-    private static final Set<String> WRITABLE_DIR_CACHE = new HashSet<>();
     private static final Object RETENTION_THROTTLE_LOCK = new Object();
     private static final Object RETENTION_WORKER_LOCK = new Object();
+    private static final Object TOMBSTONE_CLEANUP_LOCK = new Object();
+    private static final ReentrantReadWriteLock TOPOLOGY_GATE =
+            new ReentrantReadWriteLock(true);
     private static final long BYTES_PER_GB = 1024L * 1024L * 1024L;
     private static final long RETENTION_MIN_INTERVAL_MS = 30000L;
-    private static final long RETENTION_CRITICAL_OVERAGE_BYTES = 256L * 1024L * 1024L;
     private static final long RETENTION_BATCH_FILE_LIMIT = 64L;
     private static final long RETENTION_BATCH_TIME_MS = 150L;
     private static final long RETENTION_BATCH_PAUSE_MS = 20L;
@@ -48,25 +52,188 @@ final class NavigationLogStorage {
     private static final String PNG_SUFFIX = ".png";
     private static final String MISSING_MANEUVERS_DIR = "missing-maneuvers";
     private static final String MISSING_LANES_DIR = "missing-lanes";
-    private static int activeCaptureFrames;
     private static boolean retentionWorkerRunning;
     private static RetentionRequest pendingRetentionRequest;
+    private static boolean tombstoneCleanupRunning;
 
     //stores resolved public/fallback roots briefly so hot paths avoid repeated storage probing.
     private static final class CachedDir {
         final File dir;
         final boolean publicStorage;
+        final boolean publicPermission;
         final long checkedMs;
 
-        CachedDir(File dir, boolean publicStorage, long checkedMs) {
+        CachedDir(
+                File dir,
+                boolean publicStorage,
+                boolean publicPermission,
+                long checkedMs) {
             this.dir = dir;
             this.publicStorage = publicStorage;
+            this.publicPermission = publicPermission;
             this.checkedMs = checkedMs;
         }
     }
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavigationLogStorage() {
+    }
+
+    interface LockedSupplier<T> {
+        T get();
+    }
+
+    static <T> T withReadLock(LockedSupplier<T> work) {
+        TOPOLOGY_GATE.readLock().lock();
+        try {
+            return work.get();
+        } finally {
+            TOPOLOGY_GATE.readLock().unlock();
+        }
+    }
+
+    static void withReadLock(Runnable work) {
+        withReadLock(() -> {
+            work.run();
+            return null;
+        });
+    }
+
+    static <T> T withWriteLock(LockedSupplier<T> work) {
+        TOPOLOGY_GATE.writeLock().lock();
+        try {
+            return work.get();
+        } finally {
+            TOPOLOGY_GATE.writeLock().unlock();
+        }
+    }
+
+    static void withWriteLock(Runnable work) {
+        withWriteLock(() -> {
+            work.run();
+            return null;
+        });
+    }
+
+    static void lockTopologyRead() {
+        TOPOLOGY_GATE.readLock().lock();
+    }
+
+    static void unlockTopologyRead() {
+        TOPOLOGY_GATE.readLock().unlock();
+    }
+
+    static void lockTopologyWrite() {
+        TOPOLOGY_GATE.writeLock().lock();
+    }
+
+    static void unlockTopologyWrite() {
+        TOPOLOGY_GATE.writeLock().unlock();
+    }
+
+    static boolean holdsTopologyRead() {
+        return TOPOLOGY_GATE.getReadHoldCount() > 0;
+    }
+
+    static final class StorageRoot {
+        final File dir;
+        final boolean publicStorage;
+        final String archivePrefix;
+
+        StorageRoot(File dir, boolean publicStorage, String archivePrefix) {
+            this.dir = dir;
+            this.publicStorage = publicStorage;
+            this.archivePrefix = archivePrefix;
+        }
+    }
+
+    static final class StorageDay {
+        final String name;
+        final long lastModified;
+        final int cropSessions;
+        final long bytes;
+        final boolean active;
+        final boolean hasPublicStorage;
+        final boolean hasPrivateStorage;
+
+        StorageDay(
+                String name,
+                long lastModified,
+                int cropSessions,
+                long bytes,
+                boolean active,
+                boolean hasPublicStorage,
+                boolean hasPrivateStorage) {
+            this.name = name;
+            this.lastModified = lastModified;
+            this.cropSessions = cropSessions;
+            this.bytes = bytes;
+            this.active = active;
+            this.hasPublicStorage = hasPublicStorage;
+            this.hasPrivateStorage = hasPrivateStorage;
+        }
+    }
+
+    static final class StorageSnapshot {
+        final List<StorageRoot> roots;
+        final List<StorageDay> days;
+        final long totalBytes;
+        final int totalSessions;
+
+        StorageSnapshot(
+                List<StorageRoot> roots,
+                List<StorageDay> days,
+                long totalBytes,
+                int totalSessions) {
+            this.roots = roots;
+            this.days = days;
+            this.totalBytes = totalBytes;
+            this.totalSessions = totalSessions;
+        }
+    }
+
+    static final class DayRetirement {
+        final boolean ok;
+        final String day;
+        final boolean active;
+        final List<File> tombstones;
+        final String detail;
+
+        DayRetirement(
+                boolean ok,
+                String day,
+                boolean active,
+                List<File> tombstones,
+                String detail) {
+            this.ok = ok;
+            this.day = day == null ? "" : day;
+            this.active = active;
+            this.tombstones = Collections.unmodifiableList(new ArrayList<>(tombstones));
+            this.detail = detail == null ? "" : detail;
+        }
+    }
+
+    private static final class MutableStorageDay {
+        final String name;
+        long lastModified;
+        int cropSessions;
+        long bytes;
+        boolean hasPublicStorage;
+        boolean hasPrivateStorage;
+
+        MutableStorageDay(String name) {
+            this.name = name;
+        }
+    }
+
+    private static final class RenamedFragment {
+        final File source;
+        final File tombstone;
+
+        RenamedFragment(File source, File tombstone) {
+            this.source = source;
+            this.tombstone = tombstone;
+        }
     }
 
     //defines the SessionPath module boundary so related behavior stays readable inside one unit.
@@ -84,7 +251,7 @@ final class NavigationLogStorage {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File storageRootDir(Context context) {
-        return publicFirstDir(context, "");
+        return withReadLock(() -> publicFirstDir(context, ""));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -94,31 +261,145 @@ final class NavigationLogStorage {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File dayDir(Context context, String day) {
-        String safeDay = day != null && day.matches("\\d{8}") ? day : activeNavCaptureDay();
-        File dir = new File(storageRootDir(context), safeDay);
-        ensureDir(dir);
-        return dir;
+        return withReadLock(() -> {
+            String safeDay = day != null && day.matches("\\d{8}") ? day : activeNavCaptureDay();
+            File dir = new File(publicFirstDir(context, ""), safeDay);
+            ensureDir(dir);
+            return dir;
+        });
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logsDir(Context context) {
-        File dir = new File(dayDir(context, activeNavCaptureDay()), LOGS_DIR);
-        ensureDir(dir);
-        return dir;
+        return withReadLock(() -> {
+            File day = new File(publicFirstDir(context, ""), activeNavCaptureDay());
+            File dir = new File(day, LOGS_DIR);
+            ensureDir(dir);
+            return dir;
+        });
+    }
+
+    static File directCaptureDir(Context context) {
+        return withReadLock(() -> {
+            File day = new File(publicFirstDir(context, ""), activeNavCaptureDay());
+            File dir = new File(day, WAZE_DIRECT_DIR);
+            ensureDir(dir);
+            return dir;
+        });
     }
 
     //creates the logcat child only when LogcatRecorder explicitly starts recording.
     static File logcatDir(Context context, String startDay) {
-        File dir = new File(dayDir(context, startDay), LOGS_DIR + "/" + LOGCAT_DIR);
-        ensureDir(dir);
-        return dir;
+        return withReadLock(() -> {
+            String safeDay = startDay != null && startDay.matches("\\d{8}")
+                    ? startDay
+                    : activeNavCaptureDay();
+            File dir = new File(publicFirstDir(context, ""),
+                    safeDay + "/" + LOGS_DIR + "/" + LOGCAT_DIR);
+            ensureDir(dir);
+            return dir;
+        });
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    static File directCaptureDir(Context context) {
-        File dir = new File(dayDir(context, activeNavCaptureDay()), WAZE_DIRECT_DIR);
-        ensureDir(dir);
-        return dir;
+    //Returns roots visible to storage UI/share without creating either root or dated folders.
+    static List<StorageRoot> accessibleRoots(Context context) {
+        if (context == null) {
+            return Collections.emptyList();
+        }
+        return withWriteLock(() -> Collections.unmodifiableList(
+                new ArrayList<>(accessibleRootsLocked(context.getApplicationContext()))));
+    }
+
+    //Enumerates one consistent logical-day view; same-name fragments are merged across roots.
+    static StorageSnapshot snapshotAccessibleStorage(Context context) {
+        if (context == null) {
+            return new StorageSnapshot(
+                    Collections.emptyList(), Collections.emptyList(), 0L, 0);
+        }
+        String activeDay = activeNavCaptureDay();
+        String activeLogcatDay = LogcatRecorder.activeStartDay();
+        return withWriteLock(() -> snapshotAccessibleStorageLocked(
+                context.getApplicationContext(), activeDay, activeLogcatDay));
+    }
+
+    //Caller stops active Waze/logcat first; Waze restart must replace its cached sessionDir.
+    //Atomically disconnects every accessible fragment before any recursive deletion begins.
+    static DayRetirement retireStorageDay(Context context, String day) {
+        String safeDay = day == null ? "" : day.trim();
+        if (context == null || !safeDay.matches("\\d{8}")) {
+            return new DayRetirement(false, safeDay, false,
+                    Collections.emptyList(), "invalid day");
+        }
+        Context app = context.getApplicationContext();
+        boolean active = isActiveNavCaptureDay(safeDay);
+        withWriteLock(() -> { });
+        if (!WazeCaptureDebugWriter.get().awaitIdle()) {
+            return new DayRetirement(false, safeDay, active,
+                    Collections.emptyList(), "capture writer interrupted");
+        }
+        return withWriteLock(() -> retireStorageDayLocked(app, safeDay, active));
+    }
+
+    //Deletes only hidden tombstones produced by a successful retirement.
+    static boolean deleteRetiredStorageDayAsync(
+            DayRetirement retirement,
+            Runnable onComplete) {
+        if (retirement == null || !retirement.ok || retirement.tombstones.isEmpty()) {
+            return false;
+        }
+        Thread worker = new Thread(() -> {
+            try {
+                for (File tombstone : retirement.tombstones) {
+                    if (isSafeTombstone(tombstone)) {
+                        deleteRecursively(tombstone, tombstone.getParentFile(), null);
+                    }
+                }
+            } finally {
+                if (onComplete != null) {
+                    onComplete.run();
+                }
+            }
+        }, "BydHudDayDelete");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        worker.start();
+        return true;
+    }
+
+    //Resumes deletions that were atomically retired before a previous process was killed.
+    static void cleanupRetiredStorageDaysAsync(Context context) {
+        if (context == null) {
+            return;
+        }
+        synchronized (TOMBSTONE_CLEANUP_LOCK) {
+            if (tombstoneCleanupRunning) {
+                return;
+            }
+            tombstoneCleanupRunning = true;
+        }
+        Context app = context.getApplicationContext();
+        Thread worker = new Thread(() -> {
+            try {
+                withWriteLock(() -> {
+                    for (File root : rootFiles(accessibleRootsLocked(app))) {
+                        File[] children = root == null ? null : root.listFiles();
+                        if (children == null) {
+                            continue;
+                        }
+                        for (File child : children) {
+                            if (isSafeTombstone(child)) {
+                                deleteRecursively(child, root, null);
+                            }
+                        }
+                    }
+                });
+            } finally {
+                synchronized (TOMBSTONE_CLEANUP_LOCK) {
+                    tombstoneCleanupRunning = false;
+                }
+            }
+        }, "BydHudTombstoneCleanup");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        worker.start();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -168,7 +449,6 @@ final class NavigationLogStorage {
         }
         scheduleNavCaptureRetention(new RetentionRequest(
                 context.getApplicationContext(),
-                navCaptureDir(context),
                 activeNavCaptureDay(),
                 LogcatRecorder.activeStartDay(),
                 "",
@@ -193,7 +473,6 @@ final class NavigationLogStorage {
         }
         scheduleNavCaptureRetention(new RetentionRequest(
                 context.getApplicationContext(),
-                navCaptureDir(context),
                 activeNavCaptureDay(),
                 LogcatRecorder.activeStartDay(),
                 activeSessionDir,
@@ -211,7 +490,6 @@ final class NavigationLogStorage {
         }
         scheduleNavCaptureRetention(new RetentionRequest(
                 context.getApplicationContext(),
-                navCaptureDir(context),
                 activeNavCaptureDay(),
                 LogcatRecorder.activeStartDay(),
                 "",
@@ -263,15 +541,12 @@ final class NavigationLogStorage {
 
     //marks active frame work so retention can avoid deleting during parser-critical sections.
     static void beginCaptureFrame() {
-        synchronized (RETENTION_WORKER_LOCK) {
-            activeCaptureFrames++;
-        }
+        lockTopologyRead();
     }
 
     //captures one coalesced retention request so worker threads do not touch UI or capture state.
     private static final class RetentionRequest {
         final Context context;
-        final File root;
         final String activeDay;
         final String activeLogcatDay;
         final String activeSessionDir;
@@ -283,7 +558,6 @@ final class NavigationLogStorage {
 
         RetentionRequest(
                 Context context,
-                File root,
                 String activeDay,
                 String activeLogcatDay,
                 String activeSessionDir,
@@ -293,7 +567,6 @@ final class NavigationLogStorage {
                 String reason,
                 Runnable onComplete) {
             this.context = context;
-            this.root = root;
             this.activeDay = activeDay;
             this.activeLogcatDay = activeLogcatDay;
             this.activeSessionDir = activeSessionDir;
@@ -329,7 +602,7 @@ final class NavigationLogStorage {
             long now = SystemClock.elapsedRealtime();
             if (batchFiles >= RETENTION_BATCH_FILE_LIMIT
                     || now - batchStartMs >= RETENTION_BATCH_TIME_MS) {
-                logRetention(context, "retention_progress files=" + deletedFiles
+                logInfo("retention_progress files=" + deletedFiles
                         + " bytesDeleted=" + deletedBytes
                         + " beforeBytes=" + beforeBytes
                         + " maxBytes=" + maxBytes
@@ -345,33 +618,42 @@ final class NavigationLogStorage {
         }
     }
 
+    private static final class RetentionOutcome {
+        final long beforeBytes;
+        final long afterBytes;
+        final RetentionStats stats;
+
+        RetentionOutcome(long beforeBytes, long afterBytes, RetentionStats stats) {
+            this.beforeBytes = beforeBytes;
+            this.afterBytes = afterBytes;
+            this.stats = stats;
+        }
+    }
+
     //marks frame completion so deferred retention can run during quieter periods.
     static void endCaptureFrame() {
-        synchronized (RETENTION_WORKER_LOCK) {
-            if (activeCaptureFrames > 0) {
-                activeCaptureFrames--;
-            }
-        }
+        unlockTopologyRead();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static SessionPath navCaptureSessionDir(Context context, String sessionDir, String sessionName) {
-        String dayDir = activeNavCaptureDay();
-        String safeSessionDir = safePathSegment(sessionDir, "session");
-        String safeSessionName = safePathSegment(sessionName, "unknown");
-        File publicDir = new File(navCaptureDir(context), dayDir + "/" + safeSessionDir + "/" + safeSessionName);
-        if (isUnderPublicRoot(publicDir)) {
-            ensureDir(publicDir);
-            return new SessionPath(
-                    publicDir,
-                    publicRootPath() + "/" + dayDir + "/" + safeSessionDir + "/" + safeSessionName,
-                    true);
-        }
-
-        File fallback = new File(publicDir, "");
-        ensureDir(fallback);
-        String shellPath = shellPathForFallback(context, fallback);
-        return new SessionPath(fallback, shellPath, !shellPath.isEmpty());
+        return withReadLock(() -> {
+            String dayDir = activeNavCaptureDay();
+            String safeSessionDir = safePathSegment(sessionDir, "session");
+            String safeSessionName = safePathSegment(sessionName, "unknown");
+            File dir = new File(publicFirstDir(context, ""),
+                    dayDir + "/" + safeSessionDir + "/" + safeSessionName);
+            ensureDir(dir);
+            if (isUnderPublicRoot(dir)) {
+                return new SessionPath(
+                        dir,
+                        publicRootPath() + "/" + dayDir + "/"
+                                + safeSessionDir + "/" + safeSessionName,
+                        true);
+            }
+            String shellPath = shellPathForFallback(context, dir);
+            return new SessionPath(dir, shellPath, !shellPath.isEmpty());
+        });
     }
 
     //schedules retention off the capture path so parser timing is not blocked by recursive deletion.
@@ -434,49 +716,58 @@ final class NavigationLogStorage {
 
     //runs one retention pass only when storage is over limit and parser-critical work is quiet.
     private static void runScheduledRetention(RetentionRequest request) {
-        if (request.root == null
-                || request.maxBytes <= 0L
-                || !request.root.exists()
-                || !request.root.isDirectory()) {
+        if (request.context == null || request.maxBytes <= 0L) {
             return;
         }
-        long beforeBytes = datedFolderSizeBytes(request.root);
-        if (beforeBytes <= request.maxBytes) {
+        RetentionOutcome outcome = withWriteLock(() -> {
+            List<File> roots = rootFiles(accessibleRootsLocked(request.context));
+            long beforeBytes = datedFolderSizeBytes(roots);
+            if (beforeBytes <= request.maxBytes) {
+                return null;
+            }
+            RetentionStats stats = new RetentionStats(
+                    request.context, beforeBytes, request.maxBytes);
+            WazeCropCapture.RetentionState liveCrop =
+                    WazeCropCapture.currentRetentionState();
+            String activeDay = activeNavCaptureDay();
+            String activeLogcatDay = LogcatRecorder.retentionActiveStartDay();
+            String activeSessionDay = liveCrop.active
+                    ? liveCrop.day
+                    : request.activeDay;
+            String activeSessionDir = liveCrop.active
+                    ? WAZE_CROP_DIR
+                    : request.activeSessionDir;
+            String activeSessionName = liveCrop.active
+                    ? liveCrop.sessionName
+                    : request.activeSessionName;
+            String preserveScreenshotName = liveCrop.active
+                    ? liveCrop.preserveScreenshotName
+                    : request.preserveScreenshotName;
+            runNavCaptureRetention(
+                    roots,
+                    activeDay,
+                    activeLogcatDay,
+                    activeSessionDay,
+                    activeSessionDir,
+                    activeSessionName,
+                    preserveScreenshotName,
+                    request.maxBytes,
+                    stats);
+            return new RetentionOutcome(
+                    beforeBytes, datedFolderSizeBytes(roots), stats);
+        });
+        if (outcome == null) {
             return;
         }
-        int activeFrames;
-        synchronized (RETENTION_WORKER_LOCK) {
-            activeFrames = activeCaptureFrames;
-        }
-        boolean criticalOverLimit = beforeBytes - request.maxBytes >= RETENTION_CRITICAL_OVERAGE_BYTES;
-        if (activeFrames > 0 && !criticalOverLimit) {
-            logRetention(request.context, "retention_deferred reason=active_capture"
-                    + " activeFrames=" + activeFrames
-                    + " bytes=" + beforeBytes
-                    + " maxBytes=" + request.maxBytes);
-            return;
-        }
-        RetentionStats stats = new RetentionStats(request.context, beforeBytes, request.maxBytes);
         logRetention(request.context, "retention_start reason=" + request.reason
-                + " bytes=" + beforeBytes
-                + " maxBytes=" + request.maxBytes
-                + " activeFrames=" + activeFrames);
-        runNavCaptureRetention(
-                request.root,
-                request.activeDay,
-                request.activeLogcatDay,
-                request.activeSessionDir,
-                request.activeSessionName,
-                request.preserveScreenshotName,
-                request.maxBytes,
-                stats);
-        long afterBytes = datedFolderSizeBytes(request.root);
+                + " bytes=" + outcome.beforeBytes
+                + " maxBytes=" + request.maxBytes);
         logRetention(request.context, "retention_end reason=" + request.reason
-                + " files=" + stats.deletedFiles
-                + " bytesDeleted=" + stats.deletedBytes
-                + " beforeBytes=" + beforeBytes
-                + " afterBytes=" + afterBytes
-                + " elapsedMs=" + stats.elapsedMs());
+                + " files=" + outcome.stats.deletedFiles
+                + " bytesDeleted=" + outcome.stats.deletedBytes
+                + " beforeBytes=" + outcome.beforeBytes
+                + " afterBytes=" + outcome.afterBytes
+                + " elapsedMs=" + outcome.stats.elapsedMs());
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -489,58 +780,101 @@ final class NavigationLogStorage {
             String preserveScreenshotName,
             long maxBytes,
             RetentionStats stats) {
-        if (root == null || maxBytes <= 0L || !root.exists() || !root.isDirectory()) {
+        if (root == null) {
             return;
         }
-        if (!isOverLimit(root, maxBytes)) {
+        List<File> roots = new ArrayList<>();
+        roots.add(root);
+        runNavCaptureRetention(
+                roots,
+                activeDay,
+                activeLogcatDay,
+                activeDay,
+                activeSessionDir,
+                activeSessionName,
+                preserveScreenshotName,
+                maxBytes,
+                stats);
+    }
+
+    private static void runNavCaptureRetention(
+            List<File> roots,
+            String activeDay,
+            String activeLogcatDay,
+            String activeSessionDay,
+            String activeSessionDir,
+            String activeSessionName,
+            String preserveScreenshotName,
+            long maxBytes,
+            RetentionStats stats) {
+        if (roots == null || roots.isEmpty() || maxBytes <= 0L) {
+            return;
+        }
+        if (!isOverLimit(roots, maxBytes)) {
             return;
         }
         String safeActiveDay = safePathSegment(activeDay, "");
         String safeActiveLogcatDay = safePathSegment(activeLogcatDay, "");
+        String safeActiveSessionDay = safePathSegment(activeSessionDay, "");
         String safeSessionDir = safePathSegment(activeSessionDir, "");
         String safeSessionName = safePathSegment(activeSessionName, "");
-        deleteOldNavCaptureDays(root, safeActiveDay, safeActiveLogcatDay, maxBytes, stats);
-        if (!isOverLimit(root, maxBytes) || safeActiveDay.isEmpty()
+        deleteOldNavCaptureDays(
+                roots,
+                safeActiveDay,
+                safeActiveLogcatDay,
+                safeActiveSessionDay,
+                maxBytes,
+                stats);
+        if (!isOverLimit(roots, maxBytes) || safeActiveSessionDay.isEmpty()
                 || !WAZE_CROP_DIR.equals(safeSessionDir) || safeSessionName.isEmpty()) {
             return;
         }
-        deleteOldNavCaptureSessions(root, safeActiveDay, safeSessionName, maxBytes, stats);
-        if (!isOverLimit(root, maxBytes)) {
+        deleteOldNavCaptureSessions(
+                roots, safeActiveSessionDay, safeSessionName, maxBytes, stats);
+        if (!isOverLimit(roots, maxBytes)) {
             return;
         }
-        File activeSession = new File(
-                new File(new File(root, safeActiveDay), WAZE_CROP_DIR),
-                safeSessionName);
-        deleteOldSessionScreenshots(activeSession, safePathSegment(preserveScreenshotName, ""), root, maxBytes, stats);
+        deleteOldSessionScreenshots(
+                roots,
+                safeActiveSessionDay,
+                safeSessionName,
+                safePathSegment(preserveScreenshotName, ""),
+                maxBytes,
+                stats);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void deleteOldNavCaptureDays(
-            File root,
+            List<File> roots,
             String activeDay,
             String activeLogcatDay,
+            String activeSessionDay,
             long maxBytes,
             RetentionStats stats) {
         List<File> days = new ArrayList<>();
-        File[] children = root.listFiles();
-        if (children == null) {
-            return;
-        }
-        for (File child : children) {
-            if (child != null
-                    && child.isDirectory()
-                    && isDayFolder(child)
-                    && !child.getName().equals(activeDay)
-                    && !child.getName().equals(activeLogcatDay)) {
-                days.add(child);
+        for (File root : roots) {
+            File[] children = root == null ? null : root.listFiles();
+            if (children == null) {
+                continue;
+            }
+            for (File child : children) {
+                if (child != null
+                        && child.isDirectory()
+                        && isDayFolder(child)
+                        && !child.getName().equals(activeDay)
+                        && !child.getName().equals(activeLogcatDay)
+                        && !child.getName().equals(activeSessionDay)
+                        && isCanonicalDescendant(root, child, true)) {
+                    days.add(child);
+                }
             }
         }
         sortOldestFirst(days);
         for (File day : days) {
-            if (!isOverLimit(root, maxBytes)) {
+            if (!isOverLimit(roots, maxBytes)) {
                 return;
             }
-            if (deleteRecursively(day, stats)) {
+            if (deleteRecursively(day, day.getParentFile(), stats)) {
                 logInfo("retention deleted day=" + day.getName());
             }
         }
@@ -548,31 +882,33 @@ final class NavigationLogStorage {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void deleteOldNavCaptureSessions(
-            File root,
+            List<File> roots,
             String activeDay,
             String activeSessionName,
             long maxBytes,
             RetentionStats stats) {
-        File sessionParent = new File(new File(root, activeDay), WAZE_CROP_DIR);
-        File[] children = sessionParent.listFiles();
-        if (children == null) {
-            return;
-        }
         List<File> sessions = new ArrayList<>();
-        for (File session : children) {
-            if (session == null || !session.isDirectory()) {
+        for (File root : roots) {
+            File sessionParent = new File(new File(root, activeDay), WAZE_CROP_DIR);
+            File[] children = sessionParent.listFiles();
+            if (children == null) {
                 continue;
             }
-            if (!session.getName().equals(activeSessionName)) {
-                sessions.add(session);
+            for (File session : children) {
+                if (session != null
+                        && session.isDirectory()
+                        && !session.getName().equals(activeSessionName)
+                        && isCanonicalDescendant(sessionParent, session, true)) {
+                    sessions.add(session);
+                }
             }
         }
         sortOldestFirst(sessions);
         for (File session : sessions) {
-            if (!isOverLimit(root, maxBytes)) {
+            if (!isOverLimit(roots, maxBytes)) {
                 return;
             }
-            if (deleteRecursively(session, stats)) {
+            if (deleteRecursively(session, session.getParentFile(), stats)) {
                 logInfo("retention deleted session=" + session.getAbsolutePath());
             }
         }
@@ -580,32 +916,37 @@ final class NavigationLogStorage {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static void deleteOldSessionScreenshots(
-            File activeSession,
+            List<File> roots,
+            String activeDay,
+            String activeSessionName,
             String preserveScreenshotName,
-            File root,
             long maxBytes,
             RetentionStats stats) {
-        if (activeSession == null || !activeSession.isDirectory()) {
-            return;
-        }
-        File[] files = activeSession.listFiles();
-        if (files == null) {
-            return;
-        }
         List<File> screenshots = new ArrayList<>();
-        for (File file : files) {
-            if (file != null
-                    && file.isFile()
-                    && isCaptureFramePng(file.getName())
-                    && !file.getName().equals(preserveScreenshotName)) {
-                screenshots.add(file);
+        for (File root : roots) {
+            File activeSession = new File(
+                    new File(new File(root, activeDay), WAZE_CROP_DIR),
+                    activeSessionName);
+            File[] files = activeSession.listFiles();
+            if (files == null) {
+                continue;
+            }
+            for (File file : files) {
+                if (file != null
+                        && file.isFile()
+                        && isCaptureFramePng(file.getName())
+                        && !file.getName().equals(preserveScreenshotName)
+                        && isCanonicalDescendant(activeSession, file, true)) {
+                    screenshots.add(file);
+                }
             }
         }
         sortOldestFirst(screenshots);
         for (File screenshot : screenshots) {
-            if (!isOverLimit(root, maxBytes)) {
+            if (!isOverLimit(roots, maxBytes)) {
                 return;
             }
+            File activeSession = screenshot.getParentFile();
             String screenshotName = screenshot.getName();
             removeScreenshotArtifacts(activeSession, screenshotName, stats);
             long length = Math.max(0L, screenshot.length());
@@ -666,8 +1007,8 @@ final class NavigationLogStorage {
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean isOverLimit(File root, long maxBytes) {
-        return datedFolderSizeBytes(root) > maxBytes;
+    private static boolean isOverLimit(List<File> roots, long maxBytes) {
+        return datedFolderSizeBytes(roots) > maxBytes;
     }
 
     private static long lastRetentionElapsedMs;
@@ -685,9 +1026,11 @@ final class NavigationLogStorage {
         }
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static long folderSizeBytes(File file) {
+    private static long folderSizeBytes(File file, File allowedRoot) {
         if (file == null || !file.exists()) {
+            return 0L;
+        }
+        if (!isCanonicalDescendant(allowedRoot, file, false)) {
             return 0L;
         }
         if (file.isFile()) {
@@ -699,7 +1042,7 @@ final class NavigationLogStorage {
             return 0L;
         }
         for (File child : children) {
-            total += folderSizeBytes(child);
+            total += folderSizeBytes(child, allowedRoot);
             if (total < 0L) {
                 return Long.MAX_VALUE;
             }
@@ -718,8 +1061,11 @@ final class NavigationLogStorage {
             return 0L;
         }
         for (File child : children) {
-            if (child != null && child.isDirectory() && isDayFolder(child)) {
-                total += folderSizeBytes(child);
+            if (child != null
+                    && child.isDirectory()
+                    && (isDayFolder(child) || isSafeTombstone(child))
+                    && isCanonicalDescendant(root, child, true)) {
+                total += folderSizeBytes(child, root);
                 if (total < 0L) {
                     return Long.MAX_VALUE;
                 }
@@ -728,9 +1074,27 @@ final class NavigationLogStorage {
         return total;
     }
 
+    private static long datedFolderSizeBytes(List<File> roots) {
+        long total = 0L;
+        for (File root : roots) {
+            total += datedFolderSizeBytes(root);
+            if (total < 0L) {
+                return Long.MAX_VALUE;
+            }
+        }
+        return total;
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static boolean deleteRecursively(File file, RetentionStats stats) {
+    private static boolean deleteRecursively(
+            File file,
+            File allowedRoot,
+            RetentionStats stats) {
         if (file == null || !file.exists()) {
+            return false;
+        }
+        if (!isCanonicalDescendant(allowedRoot, file, false)) {
+            logWarn("refusing recursive delete outside root: " + file.getAbsolutePath());
             return false;
         }
         boolean wasFile = file.isFile();
@@ -739,7 +1103,7 @@ final class NavigationLogStorage {
             File[] children = file.listFiles();
             if (children != null) {
                 for (File child : children) {
-                    deleteRecursively(child, stats);
+                    deleteRecursively(child, allowedRoot, stats);
                 }
             }
         }
@@ -775,6 +1139,254 @@ final class NavigationLogStorage {
             return fileName.substring(0, fileName.length() - PNG_SUFFIX.length());
         }
         return fileName == null ? "" : fileName;
+    }
+
+    private static List<StorageRoot> accessibleRootsLocked(Context context) {
+        File publicRoot = publicRootDir();
+        File privateRoot = privateRootDir(context);
+        List<StorageRoot> roots = new ArrayList<>();
+        if (!hasPublicWritePermission(context) || !probeExistingWritable(publicRoot)) {
+            invalidatePublicRootCache();
+            roots.add(new StorageRoot(privateRoot, false, "private"));
+            return roots;
+        }
+        cachePublicFirstDir("", publicRoot, true, true, SystemClock.elapsedRealtime());
+        roots.add(new StorageRoot(publicRoot, true, "public"));
+        if (hasDatedSessions(privateRoot)) {
+            roots.add(new StorageRoot(privateRoot, false, "private"));
+        }
+        return roots;
+    }
+
+    private static StorageSnapshot snapshotAccessibleStorageLocked(
+            Context context,
+            String activeDay,
+            String activeLogcatDay) {
+        List<StorageRoot> roots = accessibleRootsLocked(context);
+        Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
+        long totalBytes = 0L;
+        int totalSessions = 0;
+        for (StorageRoot root : roots) {
+            File[] children = root.dir == null ? null : root.dir.listFiles();
+            if (children == null) {
+                continue;
+            }
+            for (File child : children) {
+                if (child == null
+                        || !child.isDirectory()
+                        || !isDayFolder(child)
+                        || !isCanonicalDescendant(root.dir, child, true)) {
+                    continue;
+                }
+                long bytes = folderSizeBytes(child, root.dir);
+                int sessions = countCropSessions(child);
+                MutableStorageDay day = merged.get(child.getName());
+                if (day == null) {
+                    day = new MutableStorageDay(child.getName());
+                    merged.put(child.getName(), day);
+                }
+                day.lastModified = Math.max(day.lastModified, child.lastModified());
+                day.cropSessions += sessions;
+                day.bytes = saturatedAdd(day.bytes, bytes);
+                day.hasPublicStorage |= root.publicStorage;
+                day.hasPrivateStorage |= !root.publicStorage;
+                totalBytes = saturatedAdd(totalBytes, bytes);
+                totalSessions += sessions;
+            }
+        }
+        List<StorageDay> days = new ArrayList<>();
+        for (MutableStorageDay day : merged.values()) {
+            days.add(new StorageDay(
+                    day.name,
+                    day.lastModified,
+                    day.cropSessions,
+                    day.bytes,
+                    day.name.equals(activeDay) || day.name.equals(activeLogcatDay),
+                    day.hasPublicStorage,
+                    day.hasPrivateStorage));
+        }
+        days.sort((left, right) -> right.name.compareTo(left.name));
+        return new StorageSnapshot(
+                Collections.unmodifiableList(new ArrayList<>(roots)),
+                Collections.unmodifiableList(days),
+                totalBytes,
+                totalSessions);
+    }
+
+    private static int countCropSessions(File day) {
+        File parent = new File(day, WAZE_CROP_DIR);
+        File[] sessions = parent.listFiles();
+        if (sessions == null) {
+            return 0;
+        }
+        int count = 0;
+        for (File session : sessions) {
+            if (session != null
+                    && session.isDirectory()
+                    && isCanonicalDescendant(parent, session, true)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    private static DayRetirement retireStorageDayLocked(
+            Context context,
+            String day,
+            boolean active) {
+        List<File> sources = new ArrayList<>();
+        for (StorageRoot root : accessibleRootsLocked(context)) {
+            File source = new File(root.dir, day);
+            if (!source.exists()) {
+                continue;
+            }
+            if (!source.isDirectory() || !isCanonicalDescendant(root.dir, source, true)) {
+                return new DayRetirement(false, day, active,
+                        Collections.emptyList(), "unsafe day fragment");
+            }
+            sources.add(source);
+        }
+        if (sources.isEmpty()) {
+            return new DayRetirement(false, day, active,
+                    Collections.emptyList(), "day not found");
+        }
+
+        List<RenamedFragment> renamed = new ArrayList<>();
+        long stamp = System.currentTimeMillis();
+        for (int i = 0; i < sources.size(); i++) {
+            File source = sources.get(i);
+            File tombstone = uniqueTombstone(source.getParentFile(), day, stamp, i);
+            if (!source.renameTo(tombstone)) {
+                boolean rolledBack = rollbackRenamedFragments(renamed);
+                return new DayRetirement(false, day, active,
+                        Collections.emptyList(), rolledBack ? "rename failed" : "rollback failed");
+            }
+            renamed.add(new RenamedFragment(source, tombstone));
+        }
+
+        File writeRoot = publicFirstDir(context, "");
+        String liveDayName = activeNavCaptureDay();
+        File liveDay = new File(writeRoot, liveDayName);
+        File liveLogs = new File(liveDay, LOGS_DIR);
+        boolean dayExisted = liveDay.exists();
+        boolean logsExisted = liveLogs.exists();
+        if (!ensureDir(liveLogs)) {
+            if (!logsExisted) {
+                liveLogs.delete();
+            }
+            if (!dayExisted) {
+                liveDay.delete();
+            }
+            boolean rolledBack = rollbackRenamedFragments(renamed);
+            return new DayRetirement(false, day, active,
+                    Collections.emptyList(), rolledBack
+                            ? "live logs recreate failed"
+                            : "live logs recreate and rollback failed");
+        }
+
+        List<File> tombstones = new ArrayList<>();
+        for (RenamedFragment fragment : renamed) {
+            tombstones.add(fragment.tombstone);
+        }
+        return new DayRetirement(true, day, active, tombstones,
+                "retired fragments=" + tombstones.size());
+    }
+
+    private static File uniqueTombstone(File root, String day, long stamp, int index) {
+        String base = ".delete-" + day + "-" + stamp + "-" + index;
+        File tombstone = new File(root, base);
+        int suffix = 1;
+        while (tombstone.exists()) {
+            tombstone = new File(root, base + "-" + suffix++);
+        }
+        return tombstone;
+    }
+
+    private static boolean rollbackRenamedFragments(List<RenamedFragment> renamed) {
+        boolean ok = true;
+        for (int i = renamed.size() - 1; i >= 0; i--) {
+            RenamedFragment fragment = renamed.get(i);
+            if (fragment.tombstone.exists()
+                    && (fragment.source.exists()
+                    || !fragment.tombstone.renameTo(fragment.source))) {
+                ok = false;
+            }
+        }
+        return ok;
+    }
+
+    private static boolean isSafeTombstone(File file) {
+        return file != null
+                && file.isDirectory()
+                && file.getName().matches("\\.delete-\\d{8}-\\d+-\\d+(?:-\\d+)?")
+                && file.getParentFile() != null
+                && isCanonicalDescendant(file.getParentFile(), file, true);
+    }
+
+    private static List<File> rootFiles(List<StorageRoot> roots) {
+        List<File> files = new ArrayList<>();
+        for (StorageRoot root : roots) {
+            if (root != null && root.dir != null) {
+                files.add(root.dir);
+            }
+        }
+        return files;
+    }
+
+    private static boolean hasDatedSessions(File root) {
+        File[] children = root == null ? null : root.listFiles();
+        if (children == null) {
+            return false;
+        }
+        for (File child : children) {
+            if (child != null
+                    && child.isDirectory()
+                    && isDayFolder(child)
+                    && isCanonicalDescendant(root, child, true)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static long saturatedAdd(long left, long right) {
+        if (right > 0L && left > Long.MAX_VALUE - right) {
+            return Long.MAX_VALUE;
+        }
+        return left + right;
+    }
+
+    private static boolean isCanonicalDescendant(File root, File candidate, boolean direct) {
+        if (root == null || candidate == null) {
+            return false;
+        }
+        try {
+            File absoluteRoot = root.getAbsoluteFile();
+            File absoluteCandidate = candidate.getAbsoluteFile();
+            String rootPath = absoluteRoot.getPath();
+            String candidatePath = absoluteCandidate.getPath();
+            String prefix = rootPath.endsWith(File.separator)
+                    ? rootPath
+                    : rootPath + File.separator;
+            String relative;
+            if (candidatePath.equals(rootPath)) {
+                relative = "";
+            } else if (candidatePath.startsWith(prefix)) {
+                relative = candidatePath.substring(prefix.length());
+            } else {
+                return false;
+            }
+            if (direct && (relative.isEmpty() || relative.contains(File.separator))) {
+                return false;
+            }
+            File canonicalRoot = absoluteRoot.getCanonicalFile();
+            File expected = relative.isEmpty()
+                    ? canonicalRoot
+                    : new File(canonicalRoot, relative).getAbsoluteFile();
+            return absoluteCandidate.getCanonicalFile().equals(expected);
+        } catch (IOException e) {
+            return false;
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -825,30 +1437,30 @@ final class NavigationLogStorage {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static File publicFirstDir(Context context, String childDir) {
         long now = SystemClock.elapsedRealtime();
+        boolean publicPermission = hasPublicWritePermission(context);
         synchronized (PUBLIC_DIR_CACHE_LOCK) {
             CachedDir cached = PUBLIC_DIR_CACHE.get(childDir);
             if (cached != null
                     && cached.dir != null
+                    && cached.dir.isDirectory()
+                    && cached.publicPermission == publicPermission
+                    && (!cached.publicStorage || cached.dir.canWrite())
                     && now - cached.checkedMs < PUBLIC_DIR_CACHE_TTL_MS) {
                 return cached.dir;
             }
         }
-        File publicRoot = new File(Environment.getExternalStoragePublicDirectory(
-                Environment.DIRECTORY_DOCUMENTS), ROOT_DIR);
+        File publicRoot = publicRootDir();
         File publicDir = childDir.isEmpty() ? publicRoot : new File(publicRoot, childDir);
-        if (ensureWritable(publicDir)) {
-            cachePublicFirstDir(childDir, publicDir, true, now);
+        if (publicPermission && ensureWritable(publicDir)) {
+            cachePublicFirstDir(childDir, publicDir, true, publicPermission, now);
             return publicDir;
         }
 
-        File fallbackRoot = context.getExternalFilesDir(ROOT_DIR);
-        if (fallbackRoot == null) {
-            fallbackRoot = new File(context.getFilesDir(), ROOT_DIR);
-        }
+        File fallbackRoot = privateRootDir(context);
         File fallback = childDir.isEmpty() ? fallbackRoot : new File(fallbackRoot, childDir);
         ensureDir(fallback);
         Log.w(TAG, "public storage unavailable; fallback=" + fallback.getAbsolutePath());
-        cachePublicFirstDir(childDir, fallback, false, now);
+        cachePublicFirstDir(childDir, fallback, false, publicPermission, now);
         return fallback;
     }
 
@@ -857,11 +1469,12 @@ final class NavigationLogStorage {
             String childDir,
             File dir,
             boolean publicStorage,
+            boolean publicPermission,
             long checkedMs) {
         synchronized (PUBLIC_DIR_CACHE_LOCK) {
             CachedDir previous = PUBLIC_DIR_CACHE.put(
                     childDir,
-                    new CachedDir(dir, publicStorage, checkedMs));
+                    new CachedDir(dir, publicStorage, publicPermission, checkedMs));
             String previousPath = previous == null || previous.dir == null
                     ? ""
                     : previous.dir.getAbsolutePath();
@@ -874,14 +1487,49 @@ final class NavigationLogStorage {
         }
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean isUnderPublicRoot(File dir) {
-        if (dir == null) {
+    private static File publicRootDir() {
+        return new File(Environment.getExternalStoragePublicDirectory(
+                Environment.DIRECTORY_DOCUMENTS), ROOT_DIR);
+    }
+
+    private static File privateRootDir(Context context) {
+        File externalFiles = context.getExternalFilesDir(null);
+        if (externalFiles != null) {
+            return new File(externalFiles, ROOT_DIR);
+        }
+        return new File(context.getFilesDir(), ROOT_DIR);
+    }
+
+    private static boolean hasPublicWritePermission(Context context) {
+        try {
+            if (context.checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    != PackageManager.PERMISSION_GRANTED
+                    || !Environment.isExternalStorageLegacy()) {
+                return false;
+            }
+            AppOpsManager manager = context.getSystemService(AppOpsManager.class);
+            if (manager == null) {
+                return false;
+            }
+            int mode = manager.unsafeCheckOpNoThrow(
+                    AppOpsManager.OPSTR_WRITE_EXTERNAL_STORAGE,
+                    context.getApplicationInfo().uid,
+                    context.getPackageName());
+            return mode == AppOpsManager.MODE_ALLOWED || mode == AppOpsManager.MODE_DEFAULT;
+        } catch (RuntimeException e) {
             return false;
         }
-        String path = dir.getAbsolutePath().replace('\\', '/');
-        return path.startsWith("/storage/emulated/0/Documents/" + ROOT_DIR + "/")
-                || path.startsWith("/sdcard/Documents/" + ROOT_DIR + "/");
+    }
+
+    private static void invalidatePublicRootCache() {
+        synchronized (PUBLIC_DIR_CACHE_LOCK) {
+            PUBLIC_DIR_CACHE.clear();
+        }
+    }
+
+    //keeps this predicate explicit so safety checks can be audited without tracing callers.
+    private static boolean isUnderPublicRoot(File dir) {
+        return isCanonicalDescendant(publicRootDir(), dir, false);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -916,39 +1564,28 @@ final class NavigationLogStorage {
         if (!ensureDir(dir)) {
             return false;
         }
-        String cacheKey = writableDirCacheKey(dir);
-        synchronized (WRITABLE_DIR_LOCK) {
-            if (WRITABLE_DIR_CACHE.contains(cacheKey)) {
-                return true;
-            }
-        }
-        File probe = new File(dir, WRITE_PROBE);
-        try (FileWriter writer = new FileWriter(probe, false)) {
-            writer.write("ok");
-        } catch (IOException e) {
-            Log.w(TAG, "public storage write probe failed: " + dir.getAbsolutePath(), e);
-            return false;
-        }
-        if (!readProbe(probe)) {
-            Log.w(TAG, "public storage read probe failed: " + dir.getAbsolutePath());
-            cleanupProbe(probe);
-            return false;
-        }
-        if (!cleanupProbe(probe)) {
-            return false;
-        }
-        synchronized (WRITABLE_DIR_LOCK) {
-            WRITABLE_DIR_CACHE.add(cacheKey);
-        }
-        return true;
+        return probeWritable(dir);
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static String writableDirCacheKey(File dir) {
-        try {
-            return dir.getCanonicalPath();
-        } catch (IOException e) {
-            return dir.getAbsolutePath();
+    private static boolean probeExistingWritable(File dir) {
+        return dir != null && dir.isDirectory() && probeWritable(dir);
+    }
+
+    private static boolean probeWritable(File dir) {
+        synchronized (PUBLIC_DIR_CACHE_LOCK) {
+            File probe = new File(dir, WRITE_PROBE);
+            try (FileWriter writer = new FileWriter(probe, false)) {
+                writer.write("ok");
+            } catch (IOException e) {
+                Log.w(TAG, "storage write probe failed: " + dir.getAbsolutePath(), e);
+                return false;
+            }
+            if (!readProbe(probe)) {
+                Log.w(TAG, "storage read probe failed: " + dir.getAbsolutePath());
+                cleanupProbe(probe);
+                return false;
+            }
+            return cleanupProbe(probe);
         }
     }
 

@@ -58,6 +58,7 @@ dependencies {
     implementation("androidx.car.app:app:1.9.0-alpha01")
     implementation("androidx.core:core:1.13.1")
     debugImplementation("androidx.compose.ui:ui-tooling")
+    testImplementation("junit:junit:4.13.2")
 }
 
 //keeps a stable local release-candidate APK outside app/build so Gradle clean does not remove it.

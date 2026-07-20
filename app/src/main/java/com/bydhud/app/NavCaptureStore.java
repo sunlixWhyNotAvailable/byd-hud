@@ -7,8 +7,11 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
 import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
@@ -82,12 +85,18 @@ final class NavCaptureStore {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static synchronized void append(Context context, String fileName, String line) {
-        File file = new File(logDir(context), fileName);
-        try (FileWriter writer = new FileWriter(file, true)) {
-            writer.write(line);
-            writer.write('\n');
-        } catch (IOException e) {
-            Log.e(TAG, "append failed " + file.getAbsolutePath(), e);
+        File file = NavigationLogStorage.withReadLock(() -> {
+            File target = new File(logDir(context), fileName);
+            try (FileWriter writer = new FileWriter(target, true)) {
+                writer.write(line);
+                writer.write('\n');
+                return target;
+            } catch (IOException e) {
+                Log.e(TAG, "append failed " + target.getAbsolutePath(), e);
+                return null;
+            }
+        });
+        if (file == null) {
             return;
         }
         if (rotateIfNeeded(file)) {
@@ -97,14 +106,66 @@ final class NavCaptureStore {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static boolean rotateIfNeeded(File file) {
-        if (!shouldRotate(file.length())) {
+        if (!shouldRotate(file.length()) || NavigationLogStorage.holdsTopologyRead()) {
             return false;
         }
         return rotate(file);
     }
 
+    static synchronized String saveDirectArtifact(
+            Context context, String kind, byte[] bytes) {
+        String fileName = directArtifactFileName(kind, bytes);
+        if (fileName.isEmpty()) {
+            return "";
+        }
+        return NavigationLogStorage.withReadLock(() -> {
+            File dir = NavigationLogStorage.directCaptureDir(context);
+            File file = new File(dir, fileName);
+            if (file.isFile()) {
+                return NavigationLogStorage.WAZE_DIRECT_DIR + "/" + fileName;
+            }
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(bytes);
+                return NavigationLogStorage.WAZE_DIRECT_DIR + "/" + fileName;
+            } catch (IOException e) {
+                Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
+                return "";
+            }
+        });
+    }
+
+    static String directArtifactFileName(String kind, byte[] bytes) {
+        if (bytes == null || bytes.length == 0) {
+            return "";
+        }
+        String hash = sha256(bytes);
+        if (hash.isEmpty()) {
+            return "";
+        }
+        String safeKind = kind == null ? "artifact"
+                : kind.replaceAll("[^A-Za-z0-9_-]", "_");
+        return safeKind + "-" + hash + ".png";
+    }
+
+    private static String sha256(byte[] bytes) {
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+            StringBuilder out = new StringBuilder(digest.length * 2);
+            for (byte value : digest) {
+                out.append(String.format(Locale.US, "%02x", value & 0xff));
+            }
+            return out.toString();
+        } catch (NoSuchAlgorithmException e) {
+            return "";
+        }
+    }
+
     //preserves every same-day shard; the dated parent directory resets the sequence naturally.
     static boolean rotate(File file) {
+        return NavigationLogStorage.withWriteLock(() -> rotateLocked(file));
+    }
+
+    private static boolean rotateLocked(File file) {
         if (file == null || !file.exists() || file.getParentFile() == null) {
             return false;
         }

@@ -3,7 +3,9 @@ package com.bydhud.app;
 import android.annotation.SuppressLint;
 //hosts the Compose UI so diagnostics, permissions, logs, and update controls share one app surface.
 
+import android.content.ClipData;
 import android.content.Context;
+import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -27,6 +29,7 @@ import android.widget.Switch;
 import android.widget.TextView;
 
 import androidx.activity.ComponentActivity;
+import androidx.core.content.FileProvider;
 
 import java.io.File;
 import java.text.SimpleDateFormat;
@@ -42,7 +45,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 //anchors MainActivity UI orchestration so controls and diagnostics are wired from one place.
 public final class MainActivity extends ComponentActivity {
@@ -67,6 +72,10 @@ public final class MainActivity extends ComponentActivity {
     private static final String BG_SETTINGS_LINE =
             "BG settings: Settings-DiLink-Apps-Disable background apps";
     private static final String THEME_WARNING_TAG = "theme_warning";
+    private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
+    private static final AtomicBoolean STORAGE_SHARE_OPERATION = new AtomicBoolean(false);
+    private static final AtomicReference<File> PENDING_SHARE_FILE = new AtomicReference<>();
+    private static final AtomicReference<MainActivity> RESUMED_ACTIVITY = new AtomicReference<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HudState state = new HudState();
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
@@ -219,6 +228,11 @@ public final class MainActivity extends ComponentActivity {
             AppEventLogger.event(this, "shutdown cleared reason=activity-create");
         }
         HudGraphicPayload.setContext(this);
+        int staleShareArtifacts = LogShareZip.cleanupStaleArtifacts(this);
+        if (staleShareArtifacts > 0) {
+            AppEventLogger.event(this, "storage_share_cleanup files=" + staleShareArtifacts);
+        }
+        NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-create");
         } else {
@@ -227,7 +241,7 @@ public final class MainActivity extends ComponentActivity {
         hudOutput = HudOutputCoordinator.get(this);
         NavAppDisplayController.get(this).setListener(() -> runOnUiThread(() -> {
             refreshControls();
-            refreshActiveAppsList();
+            scheduleAppScan(true);
         }));
         BydHudRuntimeCompose.install(this);
         appendStatus(buildSafetyBanner());
@@ -257,8 +271,16 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
+        RESUMED_ACTIVITY.set(this);
         maybeRunPendingNavPermissionSelfCheck();
         refreshControls();
+        notifyPendingShare();
+    }
+
+    @Override
+    protected void onPause() {
+        RESUMED_ACTIVITY.compareAndSet(this, null);
+        super.onPause();
     }
 
     @Override
@@ -623,42 +645,32 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private List<ComposeStorageDay> composeStorageDays() {
+    private StorageCacheState scanStorageState() {
+        NavigationLogStorage.StorageSnapshot snapshot =
+                NavigationLogStorage.snapshotAccessibleStorage(this);
         List<ComposeStorageDay> days = new ArrayList<>();
-        File root = NavigationLogStorage.navCaptureDir(this);
-        File[] files = root.listFiles();
-        if (files == null) {
-            return days;
-        }
+        List<String> paths = new ArrayList<>();
         SimpleDateFormat labelFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
-        for (File file : files) {
-            if (file == null || !file.isDirectory() || !file.getName().matches("\\d{8}")) {
-                continue;
-            }
+        for (NavigationLogStorage.StorageRoot root : snapshot.roots) {
+            paths.add(root.dir.getAbsolutePath());
+        }
+        for (NavigationLogStorage.StorageDay day : snapshot.days) {
             days.add(new ComposeStorageDay(
-                    file.getName(),
-                    labelFormat.format(new Date(file.lastModified())),
-                    countSessionDirs(file),
-                    folderSizeBytes(file),
-                    NavigationLogStorage.isActiveNavCaptureDay(file.getName())));
+                    day.name,
+                    labelFormat.format(new Date(day.lastModified)),
+                    day.cropSessions,
+                    day.bytes,
+                    day.active,
+                    day.hasPublicStorage,
+                    day.hasPrivateStorage));
         }
         Collections.sort(days, (a, b) -> b.name.compareTo(a.name));
-        return days;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private long navCaptureFolderSizeBytes() {
-        long total = 0L;
-        File[] days = NavigationLogStorage.storageRootDir(this).listFiles();
-        if (days == null) {
-            return 0L;
-        }
-        for (File day : days) {
-            if (day != null && day.isDirectory() && day.getName().matches("\\d{8}")) {
-                total += folderSizeBytes(day);
-            }
-        }
-        return total;
+        return StorageCacheState.scanned(
+                snapshot.totalBytes,
+                snapshot.totalSessions,
+                paths,
+                days,
+                SystemClock.elapsedRealtime());
     }
 
     //guards Storage tab responsiveness by moving recursive folder scans off the UI snapshot path.
@@ -678,10 +690,7 @@ public final class MainActivity extends ComponentActivity {
         Thread worker = new Thread(() -> {
             StorageCacheState next;
             try {
-                next = StorageCacheState.scanned(
-                        navCaptureFolderSizeBytes(),
-                        composeStorageDays(),
-                        SystemClock.elapsedRealtime());
+                next = scanStorageState();
             } catch (RuntimeException e) {
                 next = storageCacheState.withCalculating(false);
                 AppEventLogger.event(this, "storage_scan failed "
@@ -695,40 +704,6 @@ public final class MainActivity extends ComponentActivity {
         }, "BydHudStorageScan");
         worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int countSessionDirs(File dayDir) {
-        int count = 0;
-        File[] sessions = new File(dayDir, NavigationLogStorage.WAZE_CROP_DIR).listFiles();
-        if (sessions == null) {
-            return 0;
-        }
-        for (File session : sessions) {
-            if (session != null && session.isDirectory()) {
-                count++;
-            }
-        }
-        return count;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private long folderSizeBytes(File file) {
-        if (file == null || !file.exists()) {
-            return 0L;
-        }
-        if (file.isFile()) {
-            return file.length();
-        }
-        long total = 0L;
-        File[] children = file.listFiles();
-        if (children == null) {
-            return 0L;
-        }
-        for (File child : children) {
-            total += folderSizeBytes(child);
-        }
-        return total;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -764,6 +739,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isStreetOutputEnabled(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
+                HudPrefs.isFullscreenDashboardEnabled(this),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 HudPrefs.isRoundaboutLeftHandTraffic(this),
                 permissionStatus.settingsGranted(),
@@ -774,7 +750,7 @@ public final class MainActivity extends ComponentActivity {
                 hudPackage,
                 formatCapturePackages(logOnlyPackages),
                 formatCapturePackages(observedPackages),
-                displayController.activeDashboardPackage(),
+                displayController.confirmedDashboardPackage(),
                 displayController.isMoveInProgress(),
                 LogcatRecorder.isRecording(),
                 LogcatRecorder.statusText(),
@@ -791,7 +767,7 @@ public final class MainActivity extends ComponentActivity {
                 state.laneString == null ? "" : state.laneString,
                 appScan.lastScanText,
                 HudPrefs.storageLimitGb(this),
-                NavigationLogStorage.publicRootPath(),
+                storage.rootPaths,
                 storage.calculating,
                 storage.totalSessions,
                 storage.navCaptureFolderBytes,
@@ -839,13 +815,19 @@ public final class MainActivity extends ComponentActivity {
     private ComposeAppRow composeRow(ActiveAppRow app, String hudPackage,
             Set<String> logOnlyPackages, Set<String> observedPackages, boolean supportedSection) {
         NavAppDisplayController controller = NavAppDisplayController.get(this);
-        NavAppDisplayState displayState = controller.lastState(app.packageName);
-        String activeDashboardPackage = controller.activeDashboardPackage();
+        NavAppDisplayState displayState = new NavAppDisplayState(
+                app.packageName, app.taskId, app.displayId, app.visible, "task-scan");
+        DashboardProjectionPolicy.ObservedDisplay observedDisplay =
+                DashboardProjectionPolicy.classifyObservedDisplay(
+                        app.packageName,
+                        displayState,
+                        controller.confirmedDashboardPackage(),
+                        controller.confirmedDashboardDisplayId());
         boolean runtimeBacked = app.isRuntimeBacked();
         boolean observed = isObservedPackage(app.packageName, observedPackages);
-        boolean onDashboard = DashboardProjectionPolicy.isManagedDashboardPackage(
-                app.packageName,
-                activeDashboardPackage);
+        boolean onDashboard = observedDisplay == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD;
+        boolean dashboardStateKnown = observedDisplay
+                != DashboardProjectionPolicy.ObservedDisplay.UNKNOWN;
         boolean supportedHud = isSupportedHudPackage(app.packageName);
         boolean installed = isInstalledPackage(app.packageName);
         return new ComposeAppRow(
@@ -860,6 +842,7 @@ public final class MainActivity extends ComponentActivity {
                 isSelectedPackage(app.packageName, hudPackage),
                 containsSelectedPackage(app.packageName, logOnlyPackages),
                 onDashboard,
+                dashboardStateKnown,
                 controller.isMoveInProgress(),
                 app.processName,
                 app.importance);
@@ -1042,6 +1025,12 @@ public final class MainActivity extends ComponentActivity {
         setWazeAlertsEnabled(enabled);
     }
 
+    public void composeSetFullscreenDashboardEnabled(boolean enabled) {
+        HudPrefs.setFullscreenDashboardEnabled(this, enabled);
+        appendStatus("Fullscreen dashboard " + (enabled ? "enabled" : "disabled"));
+        refreshControls();
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetSmallDistanceClamp(boolean enabled) {
         setSmallDistanceClamp(enabled);
@@ -1081,67 +1070,95 @@ public final class MainActivity extends ComponentActivity {
 
     //exposes one-folder deletion so Compose can show progress instead of blocking the UI.
     public ComposeDeleteDayResult composeDeleteStorageDay(String day) {
-        File root = NavigationLogStorage.navCaptureDir(this);
         if (day == null || !day.matches("\\d{8}")) {
             return new ComposeDeleteDayResult(day, false, false, "invalid day");
         }
-        if (NavigationLogStorage.isActiveNavCaptureDay(day)) {
-            return new ComposeDeleteDayResult(day, false, true, "active day skipped");
-        }
-        File dir = new File(root, day);
-        boolean deleted = isDirectChild(root, dir) && deleteRecursively(dir);
-        return new ComposeDeleteDayResult(day, deleted, false,
-                deleted ? "deleted" : "delete failed");
-    }
 
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    public void composeDeleteStorageDays(List<String> days) {
-        if (days == null || days.isEmpty()) {
-            return;
+        boolean active = NavigationLogStorage.isActiveNavCaptureDay(day);
+        WazeCropCapture crop = WazeCropCapture.get(this);
+        boolean restartCrop = active && crop.isRunning();
+        boolean restartLogcat = active
+                && LogcatRecorder.isRecording()
+                && day.equals(LogcatRecorder.activeStartDay());
+        if (restartCrop) {
+            crop.stop("storage-day-rebase");
         }
-        int deleted = 0;
-        int skippedActiveDays = 0;
-        for (String day : days) {
-            ComposeDeleteDayResult result = composeDeleteStorageDay(day);
-            if (result.skippedActive) {
-                skippedActiveDays++;
-            } else if (result.deleted) {
-                deleted++;
+        if (restartLogcat) {
+            LogcatRecorder.stop(this);
+        }
+
+        NavigationLogStorage.DayRetirement retirement;
+        LogcatRecorder.Result logcatRestart = null;
+        try {
+            retirement = NavigationLogStorage.retireStorageDay(this, day);
+        } finally {
+            if (restartCrop) {
+                crop.start("storage-day-rebase");
+            }
+            if (restartLogcat) {
+                logcatRestart = LogcatRecorder.restartAfterRebase(this);
             }
         }
-        appendStatus("Storage deleted day folders=" + deleted
-                + (skippedActiveDays > 0 ? " skipped active=" + skippedActiveDays : ""));
-        refreshControls();
+        if (!retirement.ok) {
+            return new ComposeDeleteDayResult(
+                    day,
+                    false,
+                    false,
+                    appendLogcatRestartFailure(retirement.detail, logcatRestart));
+        }
+
+        CountDownLatch complete = new CountDownLatch(1);
+        if (!NavigationLogStorage.deleteRetiredStorageDayAsync(retirement, complete::countDown)) {
+            return new ComposeDeleteDayResult(day, false, false, "delete was not queued");
+        }
+        try {
+            complete.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return new ComposeDeleteDayResult(day, false, false, "delete wait interrupted");
+        }
+        boolean deleted = true;
+        for (File tombstone : retirement.tombstones) {
+            deleted &= tombstone != null && !tombstone.exists();
+        }
+        return new ComposeDeleteDayResult(day, deleted, false,
+                appendLogcatRestartFailure(deleted
+                        ? (active ? "deleted and live writers rebased" : "deleted")
+                        : "delete incomplete", logcatRestart));
+    }
+
+    //Runs one retained batch so Activity recreation cannot abandon the remaining selected days.
+    public List<ComposeDeleteDayResult> composeDeleteStorageDays(List<String> days) {
+        if (days == null || days.isEmpty()) {
+            return Collections.emptyList();
+        }
+        if (!STORAGE_DELETE_OPERATION.compareAndSet(false, true)) {
+            return Collections.singletonList(new ComposeDeleteDayResult(
+                    "", false, false, "delete already running"));
+        }
+        try {
+            List<ComposeDeleteDayResult> results = new ArrayList<>();
+            for (String day : days) {
+                results.add(composeDeleteStorageDay(day));
+            }
+            return results;
+        } finally {
+            STORAGE_DELETE_OPERATION.set(false);
+        }
+    }
+
+    private static String appendLogcatRestartFailure(
+            String detail,
+            LogcatRecorder.Result restart) {
+        String base = detail == null ? "" : detail;
+        return restart == null || restart.ok
+                ? base
+                : base + "; logcat restart failed: " + restart.detail;
     }
 
     //keeps long-running Compose workflows from reaching into legacy TextView internals directly.
     public void composeAppendStatus(String text) {
         appendStatus(text);
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private boolean isDirectChild(File parent, File child) {
-        try {
-            return parent.getCanonicalFile().equals(child.getParentFile().getCanonicalFile());
-        } catch (Exception e) {
-            return false;
-        }
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private boolean deleteRecursively(File file) {
-        if (file == null || !file.exists()) {
-            return false;
-        }
-        if (file.isDirectory()) {
-            File[] children = file.listFiles();
-            if (children != null) {
-                for (File child : children) {
-                    deleteRecursively(child);
-                }
-            }
-        }
-        return file.delete();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1193,8 +1210,70 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeToggleDashboard(String packageName, boolean runtimeBacked) {
-        toggleIndependentDashboardDisplay(packageName, runtimeBacked);
+    public void composeMoveDashboard(String packageName, boolean toDashboard) {
+        moveIndependentDashboardDisplay(packageName, toDashboard);
+    }
+
+    //Creates one bounded ZIP off the UI thread, then posts a read-only Android share chooser.
+    public String composeShareStorageDays(List<String> days) {
+        if (!STORAGE_SHARE_OPERATION.compareAndSet(false, true)) {
+            return "failed: share already running";
+        }
+        try {
+            LogShareZip.Result result = LogShareZip.create(this, days);
+            if (!result.ok || result.file == null) {
+                return "failed: " + result.detail;
+            }
+            PENDING_SHARE_FILE.set(result.file);
+            notifyPendingShare();
+            return "ready " + result.file.getName() + " " + result.detail;
+        } finally {
+            STORAGE_SHARE_OPERATION.set(false);
+        }
+    }
+
+    //Delivers a completed archive to the current Activity after recreation or foreground return.
+    private void deliverPendingShare() {
+        File file = PENDING_SHARE_FILE.get();
+        if (file == null) {
+            return;
+        }
+        MainActivity current = RESUMED_ACTIVITY.get();
+        if (destroyed || current != this) {
+            if (current != null && current != this) {
+                current.handler.post(current::deliverPendingShare);
+            }
+            return;
+        }
+        if (!file.isFile()) {
+            PENDING_SHARE_FILE.compareAndSet(file, null);
+            return;
+        }
+        try {
+            android.net.Uri uri = FileProvider.getUriForFile(
+                    this,
+                    getPackageName() + ".fileprovider",
+                    file);
+            Intent send = new Intent(Intent.ACTION_SEND)
+                    .setType("application/zip")
+                    .putExtra(Intent.EXTRA_STREAM, uri)
+                    .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            send.setClipData(ClipData.newRawUri(file.getName(), uri));
+            startActivity(Intent.createChooser(send, null));
+            PENDING_SHARE_FILE.compareAndSet(file, null);
+        } catch (RuntimeException e) {
+            PENDING_SHARE_FILE.compareAndSet(file, null);
+            AppEventLogger.event(this, "storage_share_chooser_failed error="
+                    + e.getClass().getSimpleName() + " "
+                    + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
+        }
+    }
+
+    private static void notifyPendingShare() {
+        MainActivity current = RESUMED_ACTIVITY.get();
+        if (current != null) {
+            current.handler.post(current::deliverPendingShare);
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1309,6 +1388,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean streetOutputEnabled;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
+        public final boolean fullscreenDashboardEnabled;
         public final boolean smallDistanceClampEnabled;
         public final boolean roundaboutLeftHandTraffic;
         public final boolean settingsPermissionsGranted;
@@ -1336,7 +1416,7 @@ public final class MainActivity extends ComponentActivity {
         public final String laneBitmap;
         public final String lastScanText;
         public final int storageLimitGb;
-        public final String navCaptureFolderPath;
+        public final List<String> navCaptureFolderPaths;
         public final boolean storageCalculating;
         public final int storageSessionCount;
         public final long navCaptureFolderBytes;
@@ -1350,6 +1430,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
+                boolean fullscreenDashboardEnabled,
                 boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
@@ -1360,7 +1441,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean arrowCuratedMode, int curatedIndex, int curatedCount,
                 int pngSourceId, int nativeManeuverId, int distanceMeters, String streetText,
                 String laneBitmap, String lastScanText, int storageLimitGb,
-                String navCaptureFolderPath, boolean storageCalculating,
+                List<String> navCaptureFolderPaths, boolean storageCalculating,
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
                 ComposeWazePatchRow wazePatchRow) {
@@ -1375,6 +1456,7 @@ public final class MainActivity extends ComponentActivity {
             this.streetOutputEnabled = streetOutputEnabled;
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
+            this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
@@ -1402,7 +1484,9 @@ public final class MainActivity extends ComponentActivity {
             this.laneBitmap = laneBitmap == null ? "" : laneBitmap;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
             this.storageLimitGb = Math.max(1, Math.min(10, storageLimitGb));
-            this.navCaptureFolderPath = navCaptureFolderPath == null ? "" : navCaptureFolderPath;
+            this.navCaptureFolderPaths = navCaptureFolderPaths == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(navCaptureFolderPaths));
             this.storageCalculating = storageCalculating;
             this.storageSessionCount = Math.max(0, storageSessionCount);
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
@@ -1437,13 +1521,18 @@ public final class MainActivity extends ComponentActivity {
         public final int sessions;
         public final long bytes;
         public final boolean active;
+        public final boolean hasPublicStorage;
+        public final boolean hasPrivateStorage;
 
-        ComposeStorageDay(String name, String createdLabel, int sessions, long bytes, boolean active) {
+        ComposeStorageDay(String name, String createdLabel, int sessions, long bytes,
+                boolean active, boolean hasPublicStorage, boolean hasPrivateStorage) {
             this.name = name == null ? "" : name;
             this.createdLabel = createdLabel == null ? "" : createdLabel;
             this.sessions = Math.max(0, sessions);
             this.bytes = Math.max(0L, bytes);
             this.active = active;
+            this.hasPublicStorage = hasPublicStorage;
+            this.hasPrivateStorage = hasPrivateStorage;
         }
     }
 
@@ -1451,37 +1540,41 @@ public final class MainActivity extends ComponentActivity {
     private static final class StorageCacheState {
         final long navCaptureFolderBytes;
         final List<ComposeStorageDay> storageDays;
+        final List<String> rootPaths;
         final int totalSessions;
         final long scannedAtMs;
         final boolean calculating;
 
-        private StorageCacheState(long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
+        private StorageCacheState(long navCaptureFolderBytes, int totalSessions,
+                List<String> rootPaths, List<ComposeStorageDay> storageDays,
                 long scannedAtMs, boolean calculating) {
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
             this.storageDays = storageDays == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(storageDays));
-            int sessions = 0;
-            for (ComposeStorageDay day : this.storageDays) {
-                sessions += day == null ? 0 : day.sessions;
-            }
-            this.totalSessions = Math.max(0, sessions);
+            this.rootPaths = rootPaths == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(rootPaths));
+            this.totalSessions = Math.max(0, totalSessions);
             this.scannedAtMs = Math.max(0L, scannedAtMs);
             this.calculating = calculating;
         }
 
         static StorageCacheState empty() {
-            return new StorageCacheState(0L, Collections.emptyList(), 0L, false);
+            return new StorageCacheState(
+                    0L, 0, Collections.emptyList(), Collections.emptyList(), 0L, false);
         }
 
-        static StorageCacheState scanned(long navCaptureFolderBytes,
-                List<ComposeStorageDay> storageDays, long scannedAtMs) {
-            return new StorageCacheState(navCaptureFolderBytes, storageDays, scannedAtMs, false);
+        static StorageCacheState scanned(long navCaptureFolderBytes, int totalSessions,
+                List<String> rootPaths, List<ComposeStorageDay> storageDays, long scannedAtMs) {
+            return new StorageCacheState(navCaptureFolderBytes, totalSessions,
+                    rootPaths, storageDays, scannedAtMs, false);
         }
 
         StorageCacheState withCalculating(boolean nextCalculating) {
             return new StorageCacheState(
-                    navCaptureFolderBytes, storageDays, scannedAtMs, nextCalculating);
+                    navCaptureFolderBytes, totalSessions,
+                    rootPaths, storageDays, scannedAtMs, nextCalculating);
         }
     }
 
@@ -1513,13 +1606,15 @@ public final class MainActivity extends ComponentActivity {
         public final boolean hudEnabled;
         public final boolean logOnlyEnabled;
         public final boolean onDashboard;
+        public final boolean dashboardStateKnown;
         public final boolean dashboardMoveInProgress;
         public final String processName;
         public final int importance;
 
         ComposeAppRow(String label, String packageName, String packageLine, boolean installed,
                 boolean runtimeBacked, boolean observed, boolean supportedHud,
-                boolean supportedSection, boolean hudEnabled, boolean logOnlyEnabled, boolean onDashboard,
+                boolean supportedSection, boolean hudEnabled, boolean logOnlyEnabled,
+                boolean onDashboard, boolean dashboardStateKnown,
                 boolean dashboardMoveInProgress, String processName, int importance) {
             this.label = label == null ? "" : label;
             this.packageName = packageName == null ? "" : packageName;
@@ -1532,6 +1627,7 @@ public final class MainActivity extends ComponentActivity {
             this.hudEnabled = hudEnabled;
             this.logOnlyEnabled = logOnlyEnabled;
             this.onDashboard = onDashboard;
+            this.dashboardStateKnown = dashboardStateKnown;
             this.dashboardMoveInProgress = dashboardMoveInProgress;
             this.processName = processName == null ? "" : processName;
             this.importance = importance;
@@ -1770,20 +1866,25 @@ public final class MainActivity extends ComponentActivity {
             return null;
         }
         NavAppDisplayController controller = NavAppDisplayController.get(this);
-        NavAppDisplayState state = controller.lastState(normalized);
-        String activeDashboardPackage = controller.activeDashboardPackage();
-        boolean onDashboard = DashboardProjectionPolicy.isManagedDashboardPackage(
+        NavAppDisplayState state = new NavAppDisplayState(
+                normalized, app.taskId, app.displayId, app.visible, "task-scan");
+        DashboardProjectionPolicy.ObservedDisplay observedDisplay =
+                DashboardProjectionPolicy.classifyObservedDisplay(
                 normalized,
-                activeDashboardPackage);
+                state,
+                controller.confirmedDashboardPackage(),
+                controller.confirmedDashboardDisplayId());
+        boolean onDashboard = observedDisplay == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD;
         String label = onDashboard ? "Send to main" : "Send to dashboard";
         Button button = button(label,
-                v -> toggleIndependentDashboardDisplay(normalized, app.isRuntimeBacked()));
-        button.setEnabled(!controller.isMoveInProgress());
+                v -> moveIndependentDashboardDisplay(normalized, !onDashboard));
+        button.setEnabled(observedDisplay != DashboardProjectionPolicy.ObservedDisplay.UNKNOWN
+                && !controller.isMoveInProgress());
         return button;
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void toggleIndependentDashboardDisplay(String packageName, boolean runtimeBacked) {
+    //moves to an explicit target so a stale label cannot invert the requested physical action.
+    private void moveIndependentDashboardDisplay(String packageName, boolean toDashboard) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
             appendStatus("display move ignored: empty package");
@@ -1794,24 +1895,20 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("display move already running");
             return;
         }
-        NavAppDisplayState state = controller.lastState(normalized);
-        String activeDashboardPackage = controller.activeDashboardPackage();
-        boolean currentlyProjected = DashboardProjectionPolicy.isManagedDashboardPackage(
-                normalized,
-                activeDashboardPackage);
         controller.moveIndependentDashboardApp(
                 normalized,
-                !currentlyProjected,
-                "ui-independent-dashboard-toggle");
-        appendStatus((currentlyProjected ? "returning " : "sending ")
+                toDashboard,
+                HudPrefs.isFullscreenDashboardEnabled(this),
+                "ui-independent-dashboard-explicit");
+        appendStatus((toDashboard ? "sending " : "returning ")
                 + normalized
-                + (currentlyProjected ? " to main" : " to dashboard"));
+                + (toDashboard ? " to dashboard" : " to main"));
         refreshAppsSoon();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshAppsSoon() {
-        handler.postDelayed(this::refreshActiveAppsList, 500L);
+        handler.postDelayed(this::refreshControls, 250L);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2104,11 +2201,7 @@ public final class MainActivity extends ComponentActivity {
         WazeCropCapture.get(this).stop(safeReason);
         WazeMediaProjectionController.resetForRuntimeReinit(this, safeReason);
 
-        String dashboardPackage = NavAppDisplayController.get(this).activeDashboardPackage();
-        if (!dashboardPackage.isEmpty()) {
-            NavAppDisplayController.get(this)
-                    .moveIndependentDashboardApp(dashboardPackage, false, safeReason);
-        }
+        NavAppDisplayController.get(this).returnActiveDashboardToMain(safeReason);
 
         if (LogcatRecorder.isRecording()) {
             LogcatRecorder.Result result = LogcatRecorder.stop(this);

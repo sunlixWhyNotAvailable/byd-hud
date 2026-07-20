@@ -68,7 +68,7 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 
 ## To Do
 
-- add dashboard window mode toggle support;
+- add dashboard window mode resize support;
 - add patch feat directly to the app;
 - gmaps direct nav support instead of text parsing;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again).

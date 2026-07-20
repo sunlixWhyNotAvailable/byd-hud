@@ -88,6 +88,8 @@ public final class WazeDirectChannel {
     private boolean appStarted;
     private boolean resumed;
     private boolean navigationActive;
+    private boolean acceptedRouteFrame;
+    private boolean terminalRouteLatched;
     private int routingSequence;
     private Connection connection;
     private ICarApp carApp;
@@ -161,6 +163,7 @@ public final class WazeDirectChannel {
         lastKnownRawManeuverType = -1;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         maneuverIcons.clear();
+        rearmRouteTerminal("channel_start");
         log("start generation=" + generation + " reason=" + startReason);
         connectWaze(generation);
     }
@@ -330,7 +333,14 @@ public final class WazeDirectChannel {
                 ((NavigationTemplate) template).getNavigationInfo();
         if (!(info instanceof RoutingInfo)) {
             log("navigation info=" + typeName(info));
-            if (info == null) endNavigation("navigation_info_null");
+            if (info == null) {
+                if (acceptedRouteFrame) {
+                    latchRouteTerminal("navigation_info_null");
+                    endNavigation("navigation_info_null");
+                } else {
+                    log("navigation info null ignored before first route frame");
+                }
+            }
             return;
         }
         RoutingInfo routing = (RoutingInfo) info;
@@ -438,6 +448,24 @@ public final class WazeDirectChannel {
         callback(() -> listener.onNavigationStarted(reason));
     }
 
+    private void explicitNavigationStarted() {
+        rearmRouteTerminal("waze_navigation_started");
+        beginNavigation("waze_navigation_started");
+    }
+
+    private void rearmRouteTerminal(String reason) {
+        acceptedRouteFrame = false;
+        if (!terminalRouteLatched) return;
+        terminalRouteLatched = false;
+        log("route terminal latch cleared reason=" + reason);
+    }
+
+    private void latchRouteTerminal(String reason) {
+        if (terminalRouteLatched) return;
+        terminalRouteLatched = true;
+        log("route terminal latch set reason=" + reason);
+    }
+
     private void endNavigation(String reason) {
         endNavigation(reason, true);
     }
@@ -461,8 +489,13 @@ public final class WazeDirectChannel {
 
     private void publishCurrentStep(Step step, Distance distance,
                                     boolean authoritativeLanes, String reason) {
+        if (terminalRouteLatched) {
+            log("late route frame rejected source=" + reason);
+            return;
+        }
         if (!navigationActive) beginNavigation("frame_received:" + reason);
         DirectTbtFrame next = frameFromStep(step, distance);
+        acceptedRouteFrame = true;
         int previousKnownRaw = lastKnownRawManeuverType;
         int nextRaw = next.getRawManeuverType();
         boolean maneuverChanged = previousKnownRaw >= 0
@@ -956,7 +989,10 @@ public final class WazeDirectChannel {
 
         @Override
         public void finish() {
-            postBinder(expectedGeneration, () -> endNavigation("car_host_finish"));
+            postBinder(expectedGeneration, () -> {
+                latchRouteTerminal("car_host_finish");
+                endNavigation("car_host_finish");
+            });
         }
     }
 
@@ -1048,12 +1084,15 @@ public final class WazeDirectChannel {
 
         @Override
         public void navigationStarted() {
-            postBinder(expectedGeneration, () -> beginNavigation("waze_navigation_started"));
+            postBinder(expectedGeneration, WazeDirectChannel.this::explicitNavigationStarted);
         }
 
         @Override
         public void navigationEnded() {
-            postBinder(expectedGeneration, () -> endNavigation("waze_navigation_ended"));
+            postBinder(expectedGeneration, () -> {
+                latchRouteTerminal("waze_navigation_ended");
+                endNavigation("waze_navigation_ended");
+            });
         }
 
         @Override

@@ -15,6 +15,9 @@ public final class BootReceiver extends BroadcastReceiver {
     //handles broadcast recovery here so the app can restart required services without user interaction.
     public void onReceive(Context context, Intent intent) {
         String action = intent == null ? "" : intent.getAction();
+        if (isColdBootAction(action)) {
+            NavAppDisplayController.get(context).clearStaleProjectionIntentForBoot(action);
+        }
         AppEventLogger.event(context, "boot_receiver action=" + action
                 + " boot=" + HudPrefs.isBootEnabled(context)
                 + " runtimeRunning=" + HudPrefs.isRuntimeServiceRunning(context)
@@ -60,5 +63,11 @@ public final class BootReceiver extends BroadcastReceiver {
                 || ACTION_QUICKBOOT_POWERON.equals(action)
                 || Intent.ACTION_USER_PRESENT.equals(action)
                 || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action);
+    }
+
+    //only a real boot makes the persisted virtual-display target inherently stale.
+    private static boolean isColdBootAction(String action) {
+        return Intent.ACTION_BOOT_COMPLETED.equals(action)
+                || ACTION_QUICKBOOT_POWERON.equals(action);
     }
 }
