@@ -4,7 +4,7 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.os.Handler;
-import android.os.Looper;
+import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -43,7 +43,8 @@ final class NavHudLiveSender {
     }
 
     private final Context context;
-    private final Handler handler = new Handler(Looper.getMainLooper());
+    private final HandlerThread stateThread;
+    private final Handler handler;
     private final HudOutputCoordinator hudOutput;
     private final WazeDirectChannel wazeDirectChannel;
     private final Object wazeDirectFrameLock = new Object();
@@ -55,7 +56,7 @@ final class NavHudLiveSender {
     private boolean wazeDirectFrameDispatchScheduled;
     private final Runnable wazeDirectFrameDispatch = this::dispatchLatestWazeDirectFrame;
     private String activePackage = "";
-    private boolean active;
+    private volatile boolean active;
     private boolean sendLoopScheduled;
     private boolean routeHealthScheduled;
     private boolean runtimeReinitInProgress;
@@ -278,6 +279,9 @@ final class NavHudLiveSender {
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavHudLiveSender(Context context) {
         this.context = context;
+        this.stateThread = new HandlerThread("BydHudNavState");
+        this.stateThread.start();
+        this.handler = new Handler(stateThread.getLooper());
         this.hudOutput = HudOutputCoordinator.get(context);
         this.wazeDirectChannel = new WazeDirectChannel(context,
                 new WazeDirectChannel.Listener() {
@@ -338,7 +342,7 @@ final class NavHudLiveSender {
                 });
     }
 
-    //coalesces complete direct snapshots so a busy main looper never replays stale guidance.
+    //coalesces complete direct snapshots so a busy state worker never replays stale guidance.
     private void enqueueLatestWazeDirectFrame(DirectTbtFrame frame, String reason) {
         if (frame == null) {
             return;
@@ -467,8 +471,10 @@ final class NavHudLiveSender {
                 WAZE_PACKAGE, "waze_direct", safeReason(reason), now);
         WazeRouteTracker.get(context).onDirectRouteEvidence(
                 "direct:" + safeReason(reason), now);
+        long receivedWallClockMs = System.currentTimeMillis();
+        String targetDay = NavCaptureStore.todayDir(receivedWallClockMs);
         WazeCaptureDebugWriter.get().directEvent(() ->
-                logWazeDirectFrame(frame, reason, now,
+                logWazeDirectFrame(frame, reason, now, receivedWallClockMs, targetDay,
                         DirectTbtPayload.Options.from(context)));
         hudOutput.publishDirect(frame, reason, now);
         hudOutput.selectNavigationSource(
@@ -486,6 +492,8 @@ final class NavHudLiveSender {
 
     private void logWazeDirectFrame(DirectTbtFrame frame, String reason,
                                     long receivedAtMs,
+                                    long receivedWallClockMs,
+                                    String targetDay,
                                     DirectTbtPayload.Options options) {
         byte[] maneuver = frame.getManeuverPng();
         byte[] lanes = frame.getLanePng();
@@ -496,14 +504,15 @@ final class NavHudLiveSender {
         String alertArtifact = "";
         if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
             maneuverArtifact = NavCaptureStore.saveDirectArtifact(
-                    context, "maneuver", maneuver);
-            laneArtifact = NavCaptureStore.saveDirectArtifact(context, "lanes", lanes);
+                    context, targetDay, "maneuver", maneuver);
+            laneArtifact = NavCaptureStore.saveDirectArtifact(
+                    context, targetDay, "lanes", lanes);
             if (alert.isActive()) {
                 alertArtifact = NavCaptureStore.saveDirectArtifact(
-                        context, "alert", alert.getManeuverPng());
+                        context, targetDay, "alert", alert.getManeuverPng());
             }
         }
-        NavCaptureStore.rawEvent(context, "waze_direct", WAZE_PACKAGE,
+        NavCaptureStore.writeRawEvent(context, "waze_direct", WAZE_PACKAGE,
                 "reason=" + safeReason(reason)
                         + " receivedAtElapsedMs=" + receivedAtMs
                         + " rawType=" + frame.getRawManeuverType()
@@ -526,7 +535,10 @@ final class NavHudLiveSender {
                         + " hudLaneBytes=" + prepared.lanePngBytes()
                         + " maneuverArtifact=" + maneuverArtifact
                         + " laneArtifact=" + laneArtifact
-                        + " alertArtifact=" + alertArtifact);
+                        + " alertArtifact=" + alertArtifact,
+                receivedAtMs,
+                receivedWallClockMs,
+                targetDay);
     }
 
     private void onWazeDirectNavigationEnded(String reason, long detectedAtMs) {
@@ -1678,7 +1690,7 @@ final class NavHudLiveSender {
                 context,
                 "first-nav-after-package-replace",
                 true,
-                LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+                LocalAdbBridge.AuthorizationPromptMode.NEVER);
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.NONE,
                 "package-replaced-reinit");

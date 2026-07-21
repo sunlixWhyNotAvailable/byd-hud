@@ -3,7 +3,6 @@ package com.bydhud.app;
 //writes navigation evidence to dated folders so parser regressions can be reproduced from field data.
 
 import android.content.Context;
-import android.os.SystemClock;
 import android.util.Log;
 
 import java.io.File;
@@ -36,13 +35,22 @@ final class NavCaptureStore {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String todayDir() {
-        return new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date());
+        return todayDir(System.currentTimeMillis());
+    }
+
+    static String todayDir(long wallClockMs) {
+        return new SimpleDateFormat("yyyyMMdd", Locale.US).format(new Date(wallClockMs));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void rawEvent(Context context, String channel, String packageName, String payload) {
-        append(context, RAW_EVENTS_FILE, "{"
-                + timeFields(SystemClock.elapsedRealtime())
+        WazeCaptureDebugWriter.get().rawEvent(context, channel, packageName, payload);
+    }
+
+    static void writeRawEvent(Context context, String channel, String packageName, String payload,
+            long eventElapsedMs, long eventWallClockMs, String targetDay) {
+        append(context, targetDay, RAW_EVENTS_FILE, "{"
+                + timeFields(eventElapsedMs, eventWallClockMs)
                 + ",\"channel\":\"" + esc(channel) + "\""
                 + ",\"package\":\"" + esc(packageName) + "\""
                 + ",\"payload\":\"" + esc(payload) + "\""
@@ -54,8 +62,17 @@ final class NavCaptureStore {
         if (snapshot == null) {
             return;
         }
-        append(context, SNAPSHOTS_FILE, "{"
-                + timeFields(snapshot.elapsedRealtimeMs)
+        WazeCaptureDebugWriter.get().snapshot(context, snapshot);
+    }
+
+    static void writeSnapshot(
+            Context context,
+            NavSnapshot snapshot,
+            long eventElapsedMs,
+            long eventWallClockMs,
+            String targetDay) {
+        append(context, targetDay, SNAPSHOTS_FILE, "{"
+                + timeFields(eventElapsedMs, eventWallClockMs)
                 + ",\"source\":\"" + snapshot.sourceApp + "\""
                 + ",\"package\":\"" + esc(snapshot.packageName) + "\""
                 + ",\"maneuver\":\"" + snapshot.maneuver + "\""
@@ -69,8 +86,7 @@ final class NavCaptureStore {
     }
 
     //keeps elapsed and wall-clock times together so pulled raw logs can be correlated without anchor math.
-    private static String timeFields(long elapsedRealtimeMs) {
-        long wallMs = System.currentTimeMillis();
+    private static String timeFields(long elapsedRealtimeMs, long wallMs) {
         return "\"t\":" + Math.max(0L, elapsedRealtimeMs)
                 + ",\"ts\":" + wallMs
                 + ",\"localTs\":\"" + esc(localTimestamp(wallMs)) + "\"";
@@ -84,9 +100,13 @@ final class NavCaptureStore {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static synchronized void append(Context context, String fileName, String line) {
+    private static synchronized void append(
+            Context context,
+            String targetDay,
+            String fileName,
+            String line) {
         File file = NavigationLogStorage.withReadLock(() -> {
-            File target = new File(logDir(context), fileName);
+            File target = new File(NavigationLogStorage.logsDir(context, targetDay), fileName);
             try (FileWriter writer = new FileWriter(target, true)) {
                 writer.write(line);
                 writer.write('\n');
@@ -114,12 +134,18 @@ final class NavCaptureStore {
 
     static synchronized String saveDirectArtifact(
             Context context, String kind, byte[] bytes) {
+        long wallClockMs = System.currentTimeMillis();
+        return saveDirectArtifact(context, todayDir(wallClockMs), kind, bytes);
+    }
+
+    static synchronized String saveDirectArtifact(
+            Context context, String targetDay, String kind, byte[] bytes) {
         String fileName = directArtifactFileName(kind, bytes);
         if (fileName.isEmpty()) {
             return "";
         }
         return NavigationLogStorage.withReadLock(() -> {
-            File dir = NavigationLogStorage.directCaptureDir(context);
+            File dir = NavigationLogStorage.directCaptureDir(context, targetDay);
             File file = new File(dir, fileName);
             if (file.isFile()) {
                 return NavigationLogStorage.WAZE_DIRECT_DIR + "/" + fileName;

@@ -81,6 +81,7 @@ public final class MainActivity extends ComponentActivity {
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
     private final AtomicBoolean appScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
+    private final AtomicBoolean storageForceRefreshPending = new AtomicBoolean(false);
     private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
     private HudOutputCoordinator hudOutput;
 
@@ -162,11 +163,18 @@ public final class MainActivity extends ComponentActivity {
     private boolean destroyed;
     private boolean manualModeEnabled;
     private boolean adbGrantInProgress;
+    private long adbGrantGeneration;
     private boolean pendingManualAdbRetry;
     private long pendingManualAdbRetryGeneration;
-    private boolean autoAdbGrantAttemptedThisLaunch;
+    private long pendingAdbCancellationClearGeneration;
+    private Runnable pendingAdbCancellationClearRunnable;
+    private AdbAuthorizationUiPolicy.AutoState autoAdbAuthorizationState =
+            AdbAuthorizationUiPolicy.AutoState.IDLE;
+    private boolean mainUiReady;
+    private boolean activityResumed;
+    private boolean activityWindowFocused;
+    private String composeBlockingUiFlow = "compose-starting";
     private int navRuntimeReconnectAttemptsThisLaunch;
-    private boolean navPermissionSelfCheckPending;
     private boolean exitRequested;
     private boolean arrowCuratedMode = true;
     private boolean pngVisible = true;
@@ -188,6 +196,7 @@ public final class MainActivity extends ComponentActivity {
     private int cachedDisplayDistance;
     private Runnable pendingStartAfterBindRunnable;
     private Runnable pendingNavPermissionSelfCheckRunnable;
+    private Runnable pendingAutoAdbStartRunnable;
     private final Random random = new Random();
 
     private final Runnable startAfterBindRunnable = new Runnable() {
@@ -249,11 +258,8 @@ public final class MainActivity extends ComponentActivity {
         refreshStateView();
         refreshControls();
         refreshLogcatControls();
-        if (showBackgroundReminderIfNeeded()) {
-            navPermissionSelfCheckPending = true;
-        } else {
-            scheduleNavPermissionSelfCheck(true);
-        }
+        showBackgroundReminderIfNeeded();
+        requestAutomaticAdbAuthorization("activity-create");
     }
 
     @Override
@@ -263,7 +269,7 @@ public final class MainActivity extends ComponentActivity {
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-start");
         }
-        maybeRunPendingNavPermissionSelfCheck();
+        maybeStartPendingAdbAuthorization();
         refreshControls();
     }
 
@@ -271,16 +277,31 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
+        activityResumed = true;
         RESUMED_ACTIVITY.set(this);
-        maybeRunPendingNavPermissionSelfCheck();
+        maybeStartPendingAdbAuthorization();
         refreshControls();
         notifyPendingShare();
     }
 
     @Override
     protected void onPause() {
+        activityResumed = false;
+        activityWindowFocused = false;
+        cancelPendingAutoAdbStart();
         RESUMED_ACTIVITY.compareAndSet(this, null);
         super.onPause();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        activityWindowFocused = hasFocus;
+        if (hasFocus) {
+            maybeStartPendingAdbAuthorization();
+        } else {
+            cancelPendingAutoAdbStart();
+        }
     }
 
     @Override
@@ -303,6 +324,7 @@ public final class MainActivity extends ComponentActivity {
             handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);
             pendingNavPermissionSelfCheckRunnable = null;
         }
+        cancelPendingAutoAdbStart();
         NavAppDisplayController.get(this).setListener(null);
         if (isFinishing()) {
             stopImmediately("destroy", false, true);
@@ -683,6 +705,9 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         if (!storageScanInProgress.compareAndSet(false, true)) {
+            if (force) {
+                storageForceRefreshPending.set(true);
+            }
             storageCacheState = current.withCalculating(true);
             return;
         }
@@ -700,7 +725,12 @@ public final class MainActivity extends ComponentActivity {
                 storageScanInProgress.set(false);
             }
             storageCacheState = next;
-            handler.post(this::refreshControls);
+            handler.post(() -> {
+                refreshControls();
+                if (storageForceRefreshPending.getAndSet(false)) {
+                    composeRequestStorageRefresh(true);
+                }
+            });
         }, "BydHudStorageScan");
         worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
@@ -967,17 +997,57 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeDismissBackgroundReminder() {
         HudPrefs.markBackgroundReminderSeen(this);
-        navPermissionSelfCheckPending = false;
-        scheduleNavPermissionSelfCheck(true);
+        maybeStartPendingAdbAuthorization();
         refreshControls();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeOpenBackgroundSettingsFromReminder() {
         HudPrefs.markBackgroundReminderSeen(this);
-        navPermissionSelfCheckPending = true;
         BgSettingsLauncher.open(this);
         refreshControls();
+    }
+
+    public void composeReportMainUiState(String blockingFlow) {
+        mainUiReady = true;
+        String normalizedFlow = normalizeBlockingUiFlow(blockingFlow);
+        if (!normalizedFlow.equals(composeBlockingUiFlow)) {
+            AppEventLogger.event(this, "adb_auto ui_blocker="
+                    + (normalizedFlow.isEmpty() ? "none" : normalizedFlow)
+                    + " state=" + autoAdbAuthorizationState);
+        }
+        composeBlockingUiFlow = normalizedFlow;
+        if (composeBlockingUiFlow.isEmpty()) {
+            maybeStartPendingAdbAuthorization();
+        } else {
+            cancelPendingAutoAdbStart();
+        }
+    }
+
+    public boolean composeTryStartBlockingUiFlow(String flow) {
+        String nextFlow = normalizeBlockingUiFlow(flow);
+        if (nextFlow.isEmpty()) {
+            return false;
+        }
+        if (!activityResumed || !activityWindowFocused) {
+            return false;
+        }
+        if (AdbAuthorizationUiPolicy.shouldCancelAuthorizationForFlow(
+                autoAdbAuthorizationState,
+                adbGrantInProgress
+                        || LocalAdbBridge.isPermissionGrantInProgress()
+                        || NavRuntimePermissionRepair.isRunning(),
+                nextFlow)) {
+            cancelActiveAdbAuthorization("hard-system-flow-" + nextFlow, true);
+        }
+        if (!composeBlockingUiFlow.isEmpty()
+                && !"compose-starting".equals(composeBlockingUiFlow)
+                && !nextFlow.equals(composeBlockingUiFlow)) {
+            return false;
+        }
+        composeBlockingUiFlow = nextFlow;
+        cancelPendingAutoAdbStart();
+        return true;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1080,8 +1150,15 @@ public final class MainActivity extends ComponentActivity {
         boolean restartLogcat = active
                 && LogcatRecorder.isRecording()
                 && day.equals(LogcatRecorder.activeStartDay());
-        if (restartCrop) {
-            crop.stop("storage-day-rebase");
+        boolean cropRebaseStarted = false;
+        if (active) {
+            cropRebaseStarted = crop.beginStorageDayRebase("storage-day-rebase");
+            if (!cropRebaseStarted) {
+                crop.finishStorageDayRebase(
+                        restartCrop, "storage-day-rebase-after-timeout");
+                return new ComposeDeleteDayResult(
+                        day, false, false, "crop worker did not stop; deletion aborted");
+            }
         }
         if (restartLogcat) {
             LogcatRecorder.stop(this);
@@ -1092,8 +1169,8 @@ public final class MainActivity extends ComponentActivity {
         try {
             retirement = NavigationLogStorage.retireStorageDay(this, day);
         } finally {
-            if (restartCrop) {
-                crop.start("storage-day-rebase");
+            if (cropRebaseStarted) {
+                crop.finishStorageDayRebase(restartCrop, "storage-day-rebase");
             }
             if (restartLogcat) {
                 logcatRestart = LogcatRecorder.restartAfterRebase(this);
@@ -1129,6 +1206,12 @@ public final class MainActivity extends ComponentActivity {
 
     //Runs one retained batch so Activity recreation cannot abandon the remaining selected days.
     public List<ComposeDeleteDayResult> composeDeleteStorageDays(List<String> days) {
+        return composeDeleteStorageDays(days, null);
+    }
+
+    public List<ComposeDeleteDayResult> composeDeleteStorageDays(
+            List<String> days,
+            ComposeDeleteProgressListener progressListener) {
         if (days == null || days.isEmpty()) {
             return Collections.emptyList();
         }
@@ -1138,7 +1221,12 @@ public final class MainActivity extends ComponentActivity {
         }
         try {
             List<ComposeDeleteDayResult> results = new ArrayList<>();
+            int step = 0;
             for (String day : days) {
+                step++;
+                if (progressListener != null) {
+                    progressListener.onDay(day, step, days.size());
+                }
                 results.add(composeDeleteStorageDay(day));
             }
             return results;
@@ -1162,13 +1250,19 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeMaybeRefreshApps() {
-        scheduleAppScan(false);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeRefreshApps() {
         scheduleAppScan(true);
+    }
+
+    public long composeAppsScanRevision() {
+        return NavAppTaskScanner.get(this).currentSnapshot().scannedAtMs;
+    }
+
+    public String composeHudDeliveryStatus() {
+        if (HudDeliveryStatus.hasTransportFailure()) {
+            return "failed";
+        }
+        return HudDeliveryStatus.isRunning() ? "running" : "idle";
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -1534,6 +1628,10 @@ public final class MainActivity extends ComponentActivity {
             this.hasPublicStorage = hasPublicStorage;
             this.hasPrivateStorage = hasPrivateStorage;
         }
+    }
+
+    public interface ComposeDeleteProgressListener {
+        void onDay(String day, int step, int total);
     }
 
     //keeps recursive Storage tab scan output immutable so Compose can read it without blocking.
@@ -2173,6 +2271,7 @@ public final class MainActivity extends ComponentActivity {
     private void exitAndFinish() {
         appendStatus("exit requested");
         exitRequested = true;
+        cancelActiveAdbAuthorization("exit", false);
         if (LogcatRecorder.isRecording()) {
             LogcatRecorder.Result result = LogcatRecorder.stop(this);
             appendStatus("logcat saved on exit " + result.detail
@@ -2194,7 +2293,9 @@ public final class MainActivity extends ComponentActivity {
             handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);
             pendingNavPermissionSelfCheckRunnable = null;
         }
-        navPermissionSelfCheckPending = false;
+        cancelPendingAutoAdbStart();
+        cancelActiveAdbAuthorization("shutdown-" + safeReason, false);
+        autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.IDLE;
 
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         NavHudLiveSender.get(this).stop(hudPackage, safeReason, true);
@@ -2866,13 +2967,126 @@ public final class MainActivity extends ComponentActivity {
         handler.postDelayed(pendingNavPermissionSelfCheckRunnable, delayMs);
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void maybeRunPendingNavPermissionSelfCheck() {
-        if (!navPermissionSelfCheckPending || HudPrefs.shouldShowBackgroundReminder(this)) {
+    private void requestAutomaticAdbAuthorization(String reason) {
+        if (autoAdbAuthorizationState != AdbAuthorizationUiPolicy.AutoState.IDLE) {
             return;
         }
-        navPermissionSelfCheckPending = false;
-        scheduleNavPermissionSelfCheck(true);
+        autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.PENDING_UI;
+        AppEventLogger.event(this, "adb_auto pending reason=" + reason);
+        maybeStartPendingAdbAuthorization();
+    }
+
+    private void maybeStartPendingAdbAuthorization() {
+        boolean grantInProgress = adbGrantInProgress
+                || LocalAdbBridge.isPermissionGrantInProgress()
+                || NavRuntimePermissionRepair.isRunning();
+        if (!AdbAuthorizationUiPolicy.canStart(
+                autoAdbAuthorizationState,
+                mainUiReady,
+                activityResumed,
+                activityWindowFocused,
+                composeBlockingUiFlow,
+                false)) {
+            cancelPendingAutoAdbStart();
+            return;
+        }
+        if (pendingAutoAdbStartRunnable != null) {
+            return;
+        }
+        long startDelayMs = grantInProgress
+                ? NAV_RUNTIME_RECHECK_DELAY_MS
+                : NAV_PERMISSION_SELF_CHECK_DELAY_MS;
+        pendingAutoAdbStartRunnable = () -> {
+            pendingAutoAdbStartRunnable = null;
+            boolean stillBusy = adbGrantInProgress
+                    || LocalAdbBridge.isPermissionGrantInProgress()
+                    || NavRuntimePermissionRepair.isRunning();
+            if (stillBusy) {
+                maybeStartPendingAdbAuthorization();
+                return;
+            }
+            if (!AdbAuthorizationUiPolicy.canStart(
+                    autoAdbAuthorizationState,
+                    mainUiReady,
+                    activityResumed,
+                    activityWindowFocused,
+                    composeBlockingUiFlow,
+                    stillBusy)) {
+                return;
+            }
+            runNavPermissionSelfCheck(true);
+        };
+        AppEventLogger.event(this, "adb_auto scheduled delay_ms="
+                + startDelayMs
+                + " waiting_for_grant=" + grantInProgress);
+        handler.postDelayed(pendingAutoAdbStartRunnable, startDelayMs);
+    }
+
+    private void cancelPendingAutoAdbStart() {
+        if (pendingAutoAdbStartRunnable == null) {
+            return;
+        }
+        handler.removeCallbacks(pendingAutoAdbStartRunnable);
+        pendingAutoAdbStartRunnable = null;
+    }
+
+    private static String normalizeBlockingUiFlow(String flow) {
+        return flow == null ? "" : flow.trim();
+    }
+
+    private void cancelActiveAdbAuthorization(String reason, boolean retryAfterFlow) {
+        boolean wasRunning = adbGrantInProgress
+                || LocalAdbBridge.isPermissionGrantInProgress()
+                || NavRuntimePermissionRepair.isRunning()
+                || autoAdbAuthorizationState == AdbAuthorizationUiPolicy.AutoState.RUNNING;
+        if (!wasRunning) {
+            return;
+        }
+        adbGrantGeneration++;
+        LocalAdbBridge.AuthorizationCancellation cancellation =
+                LocalAdbBridge.cancelPendingAuthorization();
+        scheduleAdbCancellationClear(cancellation.generation);
+        pendingManualAdbRetry = false;
+        pendingManualAdbRetryGeneration = 0L;
+        cancelPendingAutoAdbStart();
+        autoAdbAuthorizationState = retryAfterFlow
+                ? AdbAuthorizationUiPolicy.AutoState.PENDING_UI
+                : AdbAuthorizationUiPolicy.AutoState.IDLE;
+        AppEventLogger.event(this, "adb_bridge cancelled reason=" + reason
+                + " socket_closed=" + cancellation.socketClosed
+                + " retry=" + retryAfterFlow);
+    }
+
+    private void scheduleAdbCancellationClear(long generation) {
+        if (pendingAdbCancellationClearRunnable != null) {
+            handler.removeCallbacks(pendingAdbCancellationClearRunnable);
+        }
+        pendingAdbCancellationClearGeneration = generation;
+        pendingAdbCancellationClearRunnable = () -> {
+            if (generation != pendingAdbCancellationClearGeneration) {
+                return;
+            }
+            boolean busy = adbGrantInProgress
+                    || LocalAdbBridge.isPermissionGrantInProgress()
+                    || NavRuntimePermissionRepair.isRunning();
+            if (busy) {
+                handler.postDelayed(
+                        pendingAdbCancellationClearRunnable,
+                        NAV_RUNTIME_RECHECK_DELAY_MS);
+                return;
+            }
+            LocalAdbBridge.clearPendingAuthorizationCancellation(generation);
+            pendingAdbCancellationClearGeneration = 0L;
+            pendingAdbCancellationClearRunnable = null;
+            if (!destroyed && !exitRequested
+                    && autoAdbAuthorizationState
+                    == AdbAuthorizationUiPolicy.AutoState.PENDING_UI) {
+                maybeStartPendingAdbAuthorization();
+            }
+        };
+        handler.postDelayed(
+                pendingAdbCancellationClearRunnable,
+                NAV_RUNTIME_RECHECK_DELAY_MS);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2880,12 +3094,15 @@ public final class MainActivity extends ComponentActivity {
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         String adbKey = LocalAdbBridge.adbKeyFingerprint(this);
         boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
-        boolean autoAttempted = autoAdbGrantAttemptedThisLaunch;
-        String uiSummary = status.uiSummary(autoAttempted, adbKey);
+        boolean autoAttemptFinished = autoAdbAuthorizationState
+                == AdbAuthorizationUiPolicy.AutoState.AUTHORIZED
+                || autoAdbAuthorizationState == AdbAuthorizationUiPolicy.AutoState.FAILED;
+        String uiSummary = status.uiSummary(autoAttemptFinished, adbKey);
         if (status.readyForCapture()
                 && LocalAdbBridge.canShortCircuitReadyForCapture(
                 this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
+            autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.AUTHORIZED;
             updateAdbBridgeStatus(uiSummary);
             appendStatus("nav permission self-check: " + status.summary());
             AppEventLogger.event(this, "nav_permission_self_check "
@@ -2900,13 +3117,14 @@ public final class MainActivity extends ComponentActivity {
                 + status.summary() + " adbKey=" + adbKey
                 + " keyKnown=" + keyKnown
                 + " autoGrant=" + autoGrant
-                + " attempted=" + autoAttempted);
+                + " state=" + autoAdbAuthorizationState);
         refreshControls();
-        if (autoGrant && !autoAdbGrantAttemptedThisLaunch) {
-            autoAdbGrantAttemptedThisLaunch = true;
+        if (autoGrant
+                && autoAdbAuthorizationState == AdbAuthorizationUiPolicy.AutoState.PENDING_UI) {
             requestAdbPermissionGrant(
                     "launch-self-check",
-                    LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+                    LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE,
+                    true);
         }
     }
 
@@ -2917,10 +3135,8 @@ public final class MainActivity extends ComponentActivity {
             navRuntimeReconnectAttemptsThisLaunch = 0;
             if (!LocalAdbBridge.canShortCircuitReadyForCapture(
                     this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
-                NavRuntimePermissionRepair.checkAndRepairAsync(
-                        this,
+                requestAdbPermissionGrant(
                         "start-key-check-" + (mode == null ? "capture" : mode),
-                        true,
                         LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
             }
             return true;
@@ -2970,14 +3186,26 @@ public final class MainActivity extends ComponentActivity {
     private void requestAdbPermissionGrant(
             String reason,
             LocalAdbBridge.AuthorizationPromptMode authorizationPromptMode) {
-        requestAdbPermissionGrant(reason, authorizationPromptMode, null);
+        requestAdbPermissionGrant(reason, authorizationPromptMode, false);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestAdbPermissionGrant(
             String reason,
             LocalAdbBridge.AuthorizationPromptMode authorizationPromptMode,
-            String autoGrantAttemptKey) {
+            boolean automatic) {
+        if (automatic && !AdbAuthorizationUiPolicy.canStart(
+                autoAdbAuthorizationState,
+                mainUiReady,
+                activityResumed,
+                activityWindowFocused,
+                composeBlockingUiFlow,
+                adbGrantInProgress
+                        || LocalAdbBridge.isPermissionGrantInProgress()
+                        || NavRuntimePermissionRepair.isRunning())) {
+            maybeStartPendingAdbAuthorization();
+            return;
+        }
         if (adbGrantInProgress) {
             if (authorizationPromptMode == LocalAdbBridge.AuthorizationPromptMode.FORCE) {
                 if (!pendingManualAdbRetry) {
@@ -2994,6 +3222,11 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         adbGrantInProgress = true;
+        long grantGeneration = ++adbGrantGeneration;
+        cancelPendingAutoAdbStart();
+        if (authorizationPromptMode != LocalAdbBridge.AuthorizationPromptMode.NEVER) {
+            autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.RUNNING;
+        }
         NavRuntimePermissionStatus runningStatus = NavRuntimePermissionStatus.check(this);
         if (runningStatus.needsAdbGrant()) {
             updateAdbBridgeStatus(
@@ -3003,6 +3236,9 @@ public final class MainActivity extends ComponentActivity {
             updateAdbBridgeStatus("Permissions: checking\nADB: grant running");
         }
         appendStatus("adb bridge grant start: " + reason);
+        AppEventLogger.event(this, "adb_bridge_start reason=" + reason
+                + " mode=" + authorizationPromptMode
+                + " autoState=" + autoAdbAuthorizationState);
         refreshControls();
         Context appContext = getApplicationContext();
         Handler mainHandler = handler;
@@ -3019,29 +3255,57 @@ public final class MainActivity extends ComponentActivity {
                         e.getClass().getSimpleName() + ": " + e.getMessage());
             }
             LocalAdbBridge.Result finalResult = result;
-            mainHandler.post(() -> handleAdbGrantResult(finalResult));
+            mainHandler.post(() -> handleAdbGrantResult(
+                    finalResult,
+                    grantGeneration,
+                    automatic));
         }, "BydHudAdbGrant");
         thread.start();
     }
 
     //handles this branch here so source-specific edge cases stay out of the main flow.
-    private void handleAdbGrantResult(LocalAdbBridge.Result result) {
-        if (destroyed) {
+    private void handleAdbGrantResult(
+            LocalAdbBridge.Result result,
+            long grantGeneration,
+            boolean automatic) {
+        boolean stale = grantGeneration != adbGrantGeneration;
+        if (stale || destroyed || exitRequested) {
+            adbGrantInProgress = false;
             if (pendingManualAdbRetry) {
                 pendingManualAdbRetry = false;
                 LocalAdbBridge.clearPendingAuthorizationCancellation(
                         pendingManualAdbRetryGeneration);
                 pendingManualAdbRetryGeneration = 0L;
             }
-            AppEventLogger.event(getApplicationContext(), "adb_bridge_result_after_destroy "
-                    + result.code + " " + result.message);
+            AppEventLogger.event(getApplicationContext(), "adb_bridge_result_ignored"
+                    + " stale=" + stale
+                    + " destroyed=" + destroyed
+                    + " exit=" + exitRequested
+                    + " code=" + result.code
+                    + " message=" + result.message);
+            if (!destroyed && !exitRequested
+                    && autoAdbAuthorizationState
+                    == AdbAuthorizationUiPolicy.AutoState.PENDING_UI) {
+                maybeStartPendingAdbAuthorization();
+            }
             return;
         }
         adbGrantInProgress = false;
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
-        boolean grantCompleted = status.readyForCapture()
+        boolean keyVerified = LocalAdbBridge.isCurrentKeyVerifiedThisProcess(this);
+        boolean repairCollision = automatic
+                && result.code == LocalAdbBridge.Result.Code.PARTIAL
+                && NavRuntimePermissionRepair.RESULT_ALREADY_RUNNING.equals(result.message);
+        if (keyVerified) {
+            autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.AUTHORIZED;
+        } else if (repairCollision) {
+            autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.PENDING_UI;
+        } else if (autoAdbAuthorizationState == AdbAuthorizationUiPolicy.AutoState.RUNNING) {
+            autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.FAILED;
+        }
+        boolean grantCompleted = keyVerified || (status.readyForCapture()
                 && (result.code == LocalAdbBridge.Result.Code.GRANTED
-                || result.code == LocalAdbBridge.Result.Code.ALREADY_GRANTED);
+                || result.code == LocalAdbBridge.Result.Code.ALREADY_GRANTED));
         if (pendingManualAdbRetry && !grantCompleted) {
             pendingManualAdbRetry = false;
             pendingManualAdbRetryGeneration = 0L;
@@ -3059,7 +3323,10 @@ public final class MainActivity extends ComponentActivity {
         pendingManualAdbRetryGeneration = 0L;
         appendStatus("adb bridge " + result.code + ": " + result.message);
         AppEventLogger.event(this, "adb_bridge_result "
-                + result.code + " " + result.message);
+                + result.code + " " + result.message
+                + " keyVerified=" + keyVerified
+                + " repairCollision=" + repairCollision
+                + " autoState=" + autoAdbAuthorizationState);
         if (status.readyForCapture()) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
         }
@@ -3106,6 +3373,7 @@ public final class MainActivity extends ComponentActivity {
             NavNotificationListenerService.requestRuntimeRebind(this, "adb-result-recheck");
             scheduleNavPermissionSelfCheck(false, NAV_RUNTIME_RECHECK_DELAY_MS);
         }
+        maybeStartPendingAdbAuthorization();
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.

@@ -62,6 +62,14 @@ public final class NavigationLogStorageRetentionTest {
         assertFalse(oldDay.getParentFile().getParentFile().exists());
     }
 
+    @Test
+    public void cropSessionDayRemainsActiveAcrossMidnight() {
+        assertTrue(NavigationLogStorage.isActiveNavCaptureDayForTest(
+                "20260720", "20260721", "", "20260720"));
+        assertFalse(NavigationLogStorage.isActiveNavCaptureDayForTest(
+                "20260719", "20260721", "", "20260720"));
+    }
+
     private static File write(File root, String relative, int bytes) throws IOException {
         File file = new File(root, relative.replace('/', File.separatorChar));
         Files.createDirectories(file.getParentFile().toPath());

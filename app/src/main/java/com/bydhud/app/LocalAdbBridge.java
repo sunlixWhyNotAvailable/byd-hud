@@ -45,17 +45,18 @@ final class LocalAdbBridge {
     private static final Object AUTHORIZATION_SOCKET_LOCK = new Object();
     private static final Object PERMISSION_GRANT_LOCK = new Object();
     private static final Object RUNTIME_CONNECTION_LOCK = new Object();
+    private static final Object KEY_PAIR_LOCK = new Object();
     private static final long RUNTIME_IDLE_CLOSE_MS = 30000L;
     private static final long POST_SETTINGS_POLL_TIMEOUT_MS = 3000L;
     private static final long POST_GRANT_POLL_TIMEOUT_MS = 30000L;
     private static final long POST_GRANT_POLL_INTERVAL_MS = 250L;
     private static final long ACCESSIBILITY_REBIND_STEP_DELAY_MS = 300L;
     private static final String KEY_DIR = "adb_keys";
+    private static volatile boolean permissionGrantInProgress;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
     private static final String PUBLIC_KEY_FILE = "adb_key.pub";
     private static final String LEGACY_PRIVATE_KEY_FILE = "bydhud_adb_private.pk8";
     private static final String PREFS_NAME = "byd_hud_adb_bridge_prefs";
-    private static final String KEY_AUTO_PROMPT_FINGERPRINT = "auto_prompt_fingerprint";
     private static final String KEY_AUTHORIZED_FINGERPRINT = "authorized_fingerprint";
     private static final String EXIT_MARKER = "__BYDHUD_EXIT__:";
     private static final Pattern MOVE_STACK_COMMAND =
@@ -83,6 +84,8 @@ final class LocalAdbBridge {
     private static long authorizationCancellationGeneration;
     private static boolean authorizationCancellationPending;
     private static volatile String verifiedFingerprintThisProcess = "";
+    private static volatile KeyPair cachedKeyPair;
+    private static volatile String cachedKeyFingerprint = "";
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private LocalAdbBridge() {
@@ -107,16 +110,8 @@ final class LocalAdbBridge {
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean shouldSendPublicKeyForMode(
-            AuthorizationPromptMode mode,
-            boolean autoPromptAlreadySentForKey) {
-        if (mode == AuthorizationPromptMode.NEVER) {
-            return false;
-        }
-        if (mode == AuthorizationPromptMode.AUTO_ONCE) {
-            return !autoPromptAlreadySentForKey;
-        }
-        return true;
+    static boolean shouldSendPublicKeyForMode(AuthorizationPromptMode mode) {
+        return mode != AuthorizationPromptMode.NEVER;
     }
 
     //guards adb repair so auto and manual flows can authorize a fresh app key after reinstall.
@@ -136,11 +131,15 @@ final class LocalAdbBridge {
                 && fingerprint.equals(prefs(context).getString(KEY_AUTHORIZED_FINGERPRINT, ""));
     }
 
-    private static boolean isCurrentKeyVerifiedThisProcess(Context context) {
+    static boolean isCurrentKeyVerifiedThisProcess(Context context) {
         String fingerprint = adbKeyFingerprint(context);
         return !"unavailable".equals(fingerprint)
                 && fingerprint.equals(verifiedFingerprintThisProcess)
                 && isCurrentKeyKnownAuthorized(context);
+    }
+
+    static boolean isPermissionGrantInProgress() {
+        return permissionGrantInProgress;
     }
 
     //closes only the socket waiting for RSA approval so a manual retry can prompt immediately.
@@ -173,7 +172,9 @@ final class LocalAdbBridge {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static String adbKeyFingerprint(Context context) {
         try {
-            return fingerprint(loadOrCreateKeyPair(context.getApplicationContext()));
+            KeyPair keyPair = loadOrCreateKeyPair(context.getApplicationContext());
+            String cached = cachedKeyFingerprint;
+            return cached.isEmpty() ? fingerprint(keyPair) : cached;
         } catch (Exception e) {
             Log.w(TAG, "ADB key fingerprint unavailable", e);
             return "unavailable";
@@ -194,11 +195,16 @@ final class LocalAdbBridge {
             forceCancellation = cancelPendingAuthorization();
         }
         synchronized (PERMISSION_GRANT_LOCK) {
-            if (forceCancellation != null
-                    && !clearPendingAuthorizationCancellation(forceCancellation.generation)) {
-                return Result.authorizationRequired("ADB authorization retry superseded.");
+            permissionGrantInProgress = true;
+            try {
+                if (forceCancellation != null
+                        && !clearPendingAuthorizationCancellation(forceCancellation.generation)) {
+                    return Result.authorizationRequired("ADB authorization retry superseded.");
+                }
+                return grantNavCapturePermissionsLocked(context, authorizationPromptMode);
+            } finally {
+                permissionGrantInProgress = false;
             }
-            return grantNavCapturePermissionsLocked(context, authorizationPromptMode);
         }
     }
 
@@ -782,20 +788,12 @@ final class LocalAdbBridge {
                     continue;
                 }
                 if (!publicKeySent) {
-                    boolean autoPromptAlreadySent =
-                            autoPromptAlreadySentForKey(context, keyFingerprint);
                     boolean persistedAuthorizationRejected = keyFingerprint.equals(
                             prefs(context).getString(KEY_AUTHORIZED_FINGERPRINT, ""));
                     if (persistedAuthorizationRejected) {
                         clearAuthorizedFingerprint(context, keyFingerprint);
                     }
-                    if (authorizationPromptMode == AuthorizationPromptMode.AUTO_ONCE
-                            && persistedAuthorizationRejected) {
-                        autoPromptAlreadySent = false;
-                    }
-                    if (!shouldSendPublicKeyForMode(
-                            authorizationPromptMode,
-                            autoPromptAlreadySent)) {
+                    if (!shouldSendPublicKeyForMode(authorizationPromptMode)) {
                         connection.close();
                         return new OpenResult(null, true, false, endpoint);
                     }
@@ -813,7 +811,6 @@ final class LocalAdbBridge {
                             AdbPacket.AUTH_RSAPUBLICKEY,
                             0,
                             nulPayload(publicKey));
-                    markAuthorizationPromptSent(context, keyFingerprint);
                     publicKeySent = true;
                     socket.setSoTimeout(AUTH_PROMPT_TIMEOUT_MS);
                     continue;
@@ -939,6 +936,23 @@ final class LocalAdbBridge {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static KeyPair loadOrCreateKeyPair(Context context) throws Exception {
+        KeyPair cached = cachedKeyPair;
+        if (cached != null) {
+            return cached;
+        }
+        synchronized (KEY_PAIR_LOCK) {
+            cached = cachedKeyPair;
+            if (cached != null) {
+                return cached;
+            }
+            KeyPair loaded = loadOrCreateKeyPairUncached(context);
+            cachedKeyPair = loaded;
+            cachedKeyFingerprint = fingerprint(loaded);
+            return loaded;
+        }
+    }
+
+    private static KeyPair loadOrCreateKeyPairUncached(Context context) throws Exception {
         File keyDir = new File(context.getFilesDir(), KEY_DIR);
         File privateFile = new File(keyDir, PRIVATE_KEY_FILE);
         File publicFile = new File(keyDir, PUBLIC_KEY_FILE);
@@ -1070,27 +1084,6 @@ final class LocalAdbBridge {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static boolean autoPromptAlreadySentForKey(Context context, String keyFingerprint) {
-        return autoPromptKey(keyFingerprint).equals(
-                prefs(context).getString(KEY_AUTO_PROMPT_FINGERPRINT, ""));
-    }
-
-    //updates shared state here so freshness and lifecycle checks use the same evidence.
-    private static void markAuthorizationPromptSent(Context context, String keyFingerprint) {
-        prefs(context).edit()
-                .putString(KEY_AUTO_PROMPT_FINGERPRINT, autoPromptKey(keyFingerprint))
-                .apply();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static String autoPromptKey(String keyFingerprint) {
-        String safeFingerprint = keyFingerprint == null ? "unknown" : keyFingerprint.trim();
-        if (safeFingerprint.isEmpty()) {
-            safeFingerprint = "unknown";
-        }
-        return BuildConfig.VERSION_CODE + ":" + safeFingerprint;
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()

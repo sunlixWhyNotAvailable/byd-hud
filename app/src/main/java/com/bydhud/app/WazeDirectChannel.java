@@ -61,6 +61,7 @@ public final class WazeDirectChannel {
     private static final ComponentName WAZE_SERVICE = new ComponentName(
             "com.waze", "com.waze.car_lib.WazeCarAppService");
     private static final long REBIND_DELAY_MS = 1000L;
+    private static final long BIND_CALLBACK_TIMEOUT_MS = 10000L;
     private static final long FRAME_SILENCE_MS = 5000L;
     private static final long HEALTH_PROBE_TIMEOUT_MS = 5000L;
     private static final long ALERT_TTL_MS = 5000L;
@@ -90,6 +91,7 @@ public final class WazeDirectChannel {
     private boolean navigationActive;
     private boolean acceptedRouteFrame;
     private boolean terminalRouteLatched;
+    private boolean unavailableBindFailureReported;
     private int routingSequence;
     private Connection connection;
     private ICarApp carApp;
@@ -98,6 +100,7 @@ public final class WazeDirectChannel {
     private DirectTbtFrame navigationFrame = DirectTbtFrame.empty();
     private DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.inactive();
     private Runnable rebindRunnable;
+    private Runnable bindCallbackTimeout;
     private Runnable alertWatchdog;
     private int alertRevision;
     private int lastKnownRawManeuverType = -1;
@@ -158,6 +161,7 @@ public final class WazeDirectChannel {
         active = true;
         generation++;
         startReason = safeText(reason);
+        unavailableBindFailureReported = false;
         routingSequence = 0;
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
@@ -213,18 +217,21 @@ public final class WazeDirectChannel {
         try {
             bound = context.bindService(intent, nextConnection, Context.BIND_AUTO_CREATE);
             binding = bound;
-            log("bind result=" + bound + " component=" + WAZE_SERVICE.flattenToShortString());
-            if (!bound) {
+            if (bound) {
+                log("bind result=true component=" + WAZE_SERVICE.flattenToShortString());
+                scheduleBindCallbackTimeout(expectedGeneration, nextConnection);
+            } else {
                 releaseBinding(nextConnection);
                 carHost = null;
-                setHandshakeUnavailable("bind_failed", true);
+                reportBindUnavailable(
+                        "bind result=false component=" + WAZE_SERVICE.flattenToShortString(),
+                        "bind_failed");
                 scheduleRebind(expectedGeneration);
             }
         } catch (Throwable t) {
             releaseBinding(nextConnection);
             carHost = null;
-            log("bind failed: " + t);
-            setHandshakeUnavailable("bind_exception", true);
+            reportBindUnavailable("bind failed: " + t, "bind_exception");
             scheduleRebind(expectedGeneration);
         }
     }
@@ -237,6 +244,8 @@ public final class WazeDirectChannel {
         }
         binding = false;
         bound = true;
+        cancelBindCallbackTimeout(source);
+        unavailableBindFailureReported = false;
         carApp = ICarApp.Stub.asInterface(binder);
         log("connected component=" + name.flattenToShortString());
         try {
@@ -300,6 +309,7 @@ public final class WazeDirectChannel {
         } else {
             throw new IllegalStateException("Unexpected app manager " + value);
         }
+        rearmRouteTerminal("car_app_session_connected");
         setHandshakeAvailable("session_ready:" + startReason);
         fetchTemplate(expectedGeneration);
     }
@@ -360,6 +370,7 @@ public final class WazeDirectChannel {
         log("binding lost: " + reason);
         releaseBinding(source);
         setHandshakeUnavailable(reason, false);
+        unavailableBindFailureReported = true;
         endNavigation(reason, false);
         clearSessionState();
         generation++;
@@ -373,6 +384,7 @@ public final class WazeDirectChannel {
         if (source != null) {
             onBindingLost(expectedGeneration, source, reason);
         } else {
+            unavailableBindFailureReported = true;
             setHandshakeUnavailable(reason, true);
             scheduleRebind(expectedGeneration);
         }
@@ -385,6 +397,37 @@ public final class WazeDirectChannel {
             connectWaze(expectedGeneration);
         };
         channelHandler.postDelayed(rebindRunnable, REBIND_DELAY_MS);
+    }
+
+    private void scheduleBindCallbackTimeout(
+            int expectedGeneration,
+            Connection source) {
+        cancelBindCallbackTimeout(null);
+        bindCallbackTimeout = () -> {
+            bindCallbackTimeout = null;
+            if (!isCurrent(expectedGeneration)
+                    || source != connection
+                    || !binding
+                    || !bound) {
+                return;
+            }
+            onBindingLost(expectedGeneration, source, "bind_callback_timeout");
+        };
+        channelHandler.postDelayed(bindCallbackTimeout, BIND_CALLBACK_TIMEOUT_MS);
+    }
+
+    private void cancelBindCallbackTimeout(Connection source) {
+        if (source != null && source != connection) return;
+        if (bindCallbackTimeout == null) return;
+        channelHandler.removeCallbacks(bindCallbackTimeout);
+        bindCallbackTimeout = null;
+    }
+
+    private void reportBindUnavailable(String message, String reason) {
+        if (unavailableBindFailureReported) return;
+        unavailableBindFailureReported = true;
+        log(message);
+        setHandshakeUnavailable(reason, true);
     }
 
     private void cancelRebind() {
@@ -401,6 +444,7 @@ public final class WazeDirectChannel {
             }
         }
         if (source == connection) {
+            cancelBindCallbackTimeout(source);
             connection = null;
             binding = false;
             bound = false;

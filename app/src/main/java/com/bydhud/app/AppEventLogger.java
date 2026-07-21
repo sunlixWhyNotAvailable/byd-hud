@@ -28,7 +28,16 @@ final class AppEventLogger {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void event(Context context, String line) {
         Log.i(TAG, line);
-        append(context, EVENTS_FILE, timestamp() + " " + line + "\n", false);
+        WazeCaptureDebugWriter.get().appEvent(context, line);
+    }
+
+    static void writeEvent(
+            Context context,
+            String line,
+            long wallClockMs,
+            String targetDay) {
+        append(context, targetDay, EVENTS_FILE,
+                timestamp(wallClockMs) + " " + line + "\n", false);
         NavigationLogStorage.enforceNavCaptureRetention(context);
     }
 
@@ -38,15 +47,20 @@ final class AppEventLogger {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static File file(Context context, String name) {
-        return new File(logDir(context), name);
+    private static File file(Context context, String targetDay, String name) {
+        return new File(NavigationLogStorage.logsDir(context, targetDay), name);
     }
 
     //guard event log rotation and append because runtime callbacks write from multiple threads.
-    private static void append(Context context, String name, String text, boolean ignored) {
+    private static void append(
+            Context context,
+            String targetDay,
+            String name,
+            String text,
+            boolean ignored) {
         synchronized (WRITE_LOCK) {
             File file = NavigationLogStorage.withReadLock(() -> {
-                File target = file(context, name);
+                File target = file(context, targetDay, name);
                 try (FileWriter writer = new FileWriter(target, true)) {
                     writer.write(text);
                     return target;
@@ -81,9 +95,9 @@ final class AppEventLogger {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static String timestamp() {
+    private static String timestamp(long wallClockMs) {
         synchronized (FORMAT) {
-            return FORMAT.format(new Date());
+            return FORMAT.format(new Date(wallClockMs));
         }
     }
 

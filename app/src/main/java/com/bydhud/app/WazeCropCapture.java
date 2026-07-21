@@ -27,6 +27,7 @@ final class WazeCropCapture {
     private static final long INACTIVE_ROUTE_PROBE_INTERVAL_MS = 5000L;
     private static final long DISPLAY_REFRESH_INTERVAL_MS = 5000L;
     private static final long ACCESSIBILITY_GEOMETRY_TTL_MS = 7000L;
+    private static final long STORAGE_REBASE_STOP_TIMEOUT_MS = 10000L;
     static final long MAX_VISUAL_COMMIT_AGE_MS = 3000L;
     private static final SimpleDateFormat SESSION_FORMAT =
             new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US);
@@ -71,6 +72,11 @@ final class WazeCropCapture {
     private final Object lock = new Object();
     private int generation;
     private boolean active;
+    private Thread workerThread;
+    private boolean storageRebaseInProgress;
+    private boolean storageRebaseTimedOut;
+    private boolean startRequestedDuringStorageRebase;
+    private boolean stopRequestedDuringStorageRebase;
     private File sessionDir;
     private String sessionShellDir = "";
     private boolean sessionShellWritable;
@@ -178,6 +184,10 @@ final class WazeCropCapture {
         File dir;
         String name;
         synchronized (lock) {
+            if (storageRebaseInProgress) {
+                startRequestedDuringStorageRebase = true;
+                return;
+            }
             if (active) {
                 return;
             }
@@ -211,29 +221,137 @@ final class WazeCropCapture {
                 + " localDir=" + dir.getAbsolutePath()
                 + " shellDir=" + safe(sessionShellDir)
                 + " shellWritable=" + sessionShellWritable);
-        Thread worker = new Thread(() -> runLoop(workerGeneration, dir, name),
+        Thread worker = new Thread(() -> {
+            try {
+                runLoop(workerGeneration, dir, name);
+            } finally {
+                onWorkerExit(Thread.currentThread());
+            }
+        },
                 "BydHudWazeCrop");
+        synchronized (lock) {
+            if (!active || generation != workerGeneration || storageRebaseInProgress) {
+                return;
+            }
+            workerThread = worker;
+        }
         worker.start();
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stop(String reason) {
         File dir;
+        Thread worker;
         synchronized (lock) {
-            if (!active) {
+            if (storageRebaseInProgress) {
+                stopRequestedDuringStorageRebase = true;
+                startRequestedDuringStorageRebase = false;
+            }
+            if (!active && workerThread == null) {
                 return;
             }
-            active = false;
-            generation++;
-            retentionState = RetentionState.INACTIVE;
+            deactivateLocked();
             dir = sessionDir;
-            lastDisplayState = new NavAppDisplayState(
-                    WAZE_PACKAGE, -1, NavAppDisplayState.DISPLAY_UNKNOWN, false, "not checked");
-            lastDisplayCheckMs = 0L;
-            latestAccessibilityGeometry = WazeAccessibilityGeometry.EMPTY;
-            latestAccessibilityGeometryMs = 0L;
+            worker = workerThread;
+        }
+        if (worker != null && worker != Thread.currentThread()) {
+            worker.interrupt();
         }
         log(dir, "stop reason=" + safe(reason));
+    }
+
+    boolean beginStorageDayRebase(String reason) {
+        Thread worker;
+        File dir;
+        synchronized (lock) {
+            if (storageRebaseInProgress) {
+                return false;
+            }
+            storageRebaseInProgress = true;
+            storageRebaseTimedOut = false;
+            startRequestedDuringStorageRebase = false;
+            stopRequestedDuringStorageRebase = false;
+            deactivateLocked();
+            worker = workerThread;
+            dir = sessionDir;
+        }
+        if (worker == null || worker == Thread.currentThread()) {
+            return true;
+        }
+        worker.interrupt();
+        try {
+            worker.join(STORAGE_REBASE_STOP_TIMEOUT_MS);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+        boolean stillAlive;
+        synchronized (lock) {
+            stillAlive = worker == workerThread && worker.isAlive();
+            if (stillAlive) {
+                storageRebaseTimedOut = true;
+            }
+        }
+        if (!stillAlive) {
+            return true;
+        }
+        log(dir, "storage rebase aborted: crop worker still alive reason=" + safe(reason));
+        return false;
+    }
+
+    void finishStorageDayRebase(boolean restart, String reason) {
+        boolean shouldRestart;
+        synchronized (lock) {
+            if (!storageRebaseInProgress) {
+                return;
+            }
+            if (storageRebaseTimedOut) {
+                if (!stopRequestedDuringStorageRebase) {
+                    startRequestedDuringStorageRebase |= restart;
+                }
+                return;
+            }
+            shouldRestart = !stopRequestedDuringStorageRebase
+                    && (restart || startRequestedDuringStorageRebase);
+            storageRebaseInProgress = false;
+            startRequestedDuringStorageRebase = false;
+            stopRequestedDuringStorageRebase = false;
+        }
+        if (shouldRestart) {
+            start(reason);
+        }
+    }
+
+    private void deactivateLocked() {
+        if (active) {
+            active = false;
+            generation++;
+        }
+        retentionState = RetentionState.INACTIVE;
+        lastDisplayState = new NavAppDisplayState(
+                WAZE_PACKAGE, -1, NavAppDisplayState.DISPLAY_UNKNOWN, false, "not checked");
+        lastDisplayCheckMs = 0L;
+        latestAccessibilityGeometry = WazeAccessibilityGeometry.EMPTY;
+        latestAccessibilityGeometryMs = 0L;
+    }
+
+    private void onWorkerExit(Thread worker) {
+        boolean shouldRestart = false;
+        synchronized (lock) {
+            if (worker == workerThread) {
+                workerThread = null;
+            }
+            if (storageRebaseTimedOut) {
+                shouldRestart = !stopRequestedDuringStorageRebase
+                        && startRequestedDuringStorageRebase;
+                storageRebaseTimedOut = false;
+                storageRebaseInProgress = false;
+                startRequestedDuringStorageRebase = false;
+                stopRequestedDuringStorageRebase = false;
+            }
+        }
+        if (shouldRestart) {
+            start("storage-day-rebase-after-timeout");
+        }
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

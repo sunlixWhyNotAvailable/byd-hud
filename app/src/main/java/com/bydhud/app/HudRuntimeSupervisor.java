@@ -57,7 +57,7 @@ final class HudRuntimeSupervisor {
                     appContext,
                     "supervisor:" + safeReason,
                     true,
-                    LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+                    LocalAdbBridge.AuthorizationPromptMode.NEVER);
         } else {
             HudRuntimeWatchdog.cancel(appContext);
             AppEventLogger.event(appContext,

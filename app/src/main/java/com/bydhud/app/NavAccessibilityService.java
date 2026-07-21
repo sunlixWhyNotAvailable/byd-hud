@@ -5,7 +5,7 @@ package com.bydhud.app;
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
 import android.os.Handler;
-import android.os.Looper;
+import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
@@ -28,8 +28,20 @@ public final class NavAccessibilityService extends AccessibilityService {
     private static volatile boolean runtimeCrashed;
     private static volatile String lastRuntimeDetail = "never connected";
 
-    private final Handler captureHandler = new Handler(Looper.getMainLooper());
+    private final Object captureQueueLock = new Object();
+    private final HandlerThread captureThread = new HandlerThread("BydHudAccessibilityCapture");
+    private Handler captureHandler;
+    private String pendingPackageName;
+    private String pendingSource;
+    private boolean captureScheduled;
     private long lastCaptureElapsedMs;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        captureThread.start();
+        captureHandler = new Handler(captureThread.getLooper());
+    }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isConnectedForRuntimeCheck() {
@@ -98,7 +110,16 @@ public final class NavAccessibilityService extends AccessibilityService {
         if (activeService == this) {
             activeService = null;
         }
-        captureHandler.removeCallbacksAndMessages(null);
+        Handler handler = captureHandler;
+        if (handler != null) {
+            handler.removeCallbacksAndMessages(null);
+        }
+        synchronized (captureQueueLock) {
+            pendingPackageName = null;
+            pendingSource = null;
+            captureScheduled = false;
+        }
+        captureThread.quitSafely();
         lastRuntimeDetail = "destroyed";
         AppEventLogger.event(this, "accessibility_service destroyed");
         super.onDestroy();
@@ -112,7 +133,44 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //guard active-window traversal so accessibility node trees are captured by one serialized path.
     private void postCaptureActiveWindow(String packageName, String source) {
-        captureHandler.post(() -> captureActiveWindow(packageName, source));
+        Handler handler = captureHandler;
+        if (handler == null) {
+            return;
+        }
+        synchronized (captureQueueLock) {
+            pendingPackageName = packageName;
+            pendingSource = source;
+            if (captureScheduled) {
+                return;
+            }
+            captureScheduled = true;
+        }
+        if (!handler.post(this::drainLatestCapture)) {
+            synchronized (captureQueueLock) {
+                captureScheduled = false;
+            }
+        }
+    }
+
+    private void drainLatestCapture() {
+        while (activeService == this) {
+            String packageName;
+            String source;
+            synchronized (captureQueueLock) {
+                packageName = pendingPackageName;
+                source = pendingSource;
+                pendingPackageName = null;
+                pendingSource = null;
+                if (packageName == null) {
+                    captureScheduled = false;
+                    return;
+                }
+            }
+            captureActiveWindow(packageName, source);
+        }
+        synchronized (captureQueueLock) {
+            captureScheduled = false;
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

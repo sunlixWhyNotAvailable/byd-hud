@@ -398,18 +398,6 @@ final class NavAppDisplayController {
             } else {
                 log(packageName, "dashboard_protocol_30011_failed actionType=1 operation="
                         + operation + " detail=" + safe(protocolFailure));
-                if (packageName.equals(persistedDashboardPackage())
-                        && confirmedDashboardPackage().isEmpty()) {
-                    clearDashboardProjection(
-                            "dashboard-layout-failed:" + safe(reason));
-                }
-                remember(new NavAppDisplayState(
-                        packageName,
-                        current.taskId,
-                        current.displayId,
-                        current.visible,
-                        "independent dashboard layout failed: " + safe(protocolFailure)));
-                return;
             }
             if (alreadyProjected) {
                 reconcileConfirmedDashboardOwnership(
@@ -421,7 +409,10 @@ final class NavAppDisplayController {
                         current.taskId,
                         current.displayId,
                         current.visible,
-                        "independent dashboard layout updated on existing projection"));
+                        protocolFailure.isEmpty()
+                                ? "independent dashboard layout updated on existing projection"
+                                : "independent dashboard projection retained; layout command failed: "
+                                        + safe(protocolFailure)));
                 return;
             }
             ClusterProjectionService.startProjection(context, packageName, safe(reason));
@@ -452,7 +443,10 @@ final class NavAppDisplayController {
                     confirmed.taskId,
                     confirmed.displayId,
                     confirmed.visible,
-                    "independent dashboard projection confirmed"));
+                    protocolFailure.isEmpty()
+                            ? "independent dashboard projection confirmed"
+                            : "independent dashboard projection confirmed; layout command failed: "
+                                    + safe(protocolFailure)));
         } catch (SecurityException e) {
             remember(new NavAppDisplayState(
                     packageName,

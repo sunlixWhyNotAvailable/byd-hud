@@ -11,6 +11,8 @@ import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.Icon;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
@@ -30,6 +32,16 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     private static volatile long lastConnectedElapsedMs;
     private static volatile long lastDisconnectedElapsedMs;
     private static volatile String lastRuntimeDetail = "never connected";
+    private final HandlerThread notificationThread =
+            new HandlerThread("BydHudNotificationCapture");
+    private Handler notificationHandler;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        notificationThread.start();
+        notificationHandler = new Handler(notificationThread.getLooper());
+    }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveNotificationScan(Context context, String reason) {
@@ -39,10 +51,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                     + safe(reason));
             return;
         }
-        Thread worker = new Thread(
-                () -> service.processActiveNotifications(reason),
-                "BydHudNotificationActiveScan");
-        worker.start();
+        service.postNotificationWork(() -> service.processActiveNotifications(reason));
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -81,8 +90,10 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         activeService = this;
         lastConnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "connected";
-        AppEventLogger.event(this, "notification_listener connected");
-        processActiveNotifications("listener-connected");
+        postNotificationWork(() -> {
+            AppEventLogger.event(this, "notification_listener connected");
+            processActiveNotifications("listener-connected");
+        });
     }
 
     @Override
@@ -91,10 +102,13 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         if (activeService == this) {
             activeService = null;
         }
+        Handler handler = notificationHandler;
+        if (handler != null) {
+            handler.removeCallbacksAndMessages(null);
+        }
         lastDisconnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "disconnected elapsedMs=" + lastDisconnectedElapsedMs;
-        NavHudLiveSender.get(this).clearNavigationNotificationPresence("listener-disconnected");
-        AppEventLogger.event(this, "notification_listener disconnected");
+        postNotificationTeardown("listener-disconnected");
         super.onListenerDisconnected();
     }
 
@@ -104,16 +118,20 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         if (activeService == this) {
             activeService = null;
         }
+        Handler handler = notificationHandler;
+        if (handler != null) {
+            handler.removeCallbacksAndMessages(null);
+        }
         lastRuntimeDetail = "destroyed";
-        NavHudLiveSender.get(this).clearNavigationNotificationPresence("listener-destroyed");
-        AppEventLogger.event(this, "notification_listener destroyed");
+        postNotificationTeardown("listener-destroyed");
+        notificationThread.quitSafely();
         super.onDestroy();
     }
 
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationPosted(StatusBarNotification sbn) {
-        processPostedNotification(sbn, "posted");
+        postNotificationWork(() -> processPostedNotification(sbn, "posted"));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -188,6 +206,10 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationRemoved(StatusBarNotification sbn) {
+        postNotificationWork(() -> processRemovedNotification(sbn));
+    }
+
+    private void processRemovedNotification(StatusBarNotification sbn) {
         if (sbn == null) {
             return;
         }
@@ -205,6 +227,27 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         if (NavParserDispatcher.isSupportedPackage(packageName)) {
             NavHudLiveSender.get(this).stopForRemovedNavigationNotification(
                     packageName, sbn.getKey(), "notification-removed", true);
+        }
+    }
+
+    private boolean postNotificationWork(Runnable work) {
+        Handler handler = notificationHandler;
+        return handler != null && work != null && handler.post(() -> {
+            if (activeService == this) {
+                work.run();
+            }
+        });
+    }
+
+    private void postNotificationTeardown(String reason) {
+        Runnable cleanup = () -> {
+            NavHudLiveSender.get(this).clearNavigationNotificationPresence(reason);
+            WazeCaptureDebugWriter.get().appEvent(
+                    this, "notification_listener " + reason);
+        };
+        Handler handler = notificationHandler;
+        if (handler == null || !handler.post(cleanup)) {
+            cleanup.run();
         }
     }
 

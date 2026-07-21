@@ -271,8 +271,15 @@ final class NavigationLogStorage {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File logsDir(Context context) {
+        return logsDir(context, activeNavCaptureDay());
+    }
+
+    static File logsDir(Context context, String targetDay) {
         return withReadLock(() -> {
-            File day = new File(publicFirstDir(context, ""), activeNavCaptureDay());
+            String safeDay = targetDay != null && targetDay.matches("\\d{8}")
+                    ? targetDay
+                    : activeNavCaptureDay();
+            File day = new File(publicFirstDir(context, ""), safeDay);
             File dir = new File(day, LOGS_DIR);
             ensureDir(dir);
             return dir;
@@ -280,8 +287,15 @@ final class NavigationLogStorage {
     }
 
     static File directCaptureDir(Context context) {
+        return directCaptureDir(context, activeNavCaptureDay());
+    }
+
+    static File directCaptureDir(Context context, String targetDay) {
         return withReadLock(() -> {
-            File day = new File(publicFirstDir(context, ""), activeNavCaptureDay());
+            String safeDay = targetDay != null && targetDay.matches("\\d{8}")
+                    ? targetDay
+                    : activeNavCaptureDay();
+            File day = new File(publicFirstDir(context, ""), safeDay);
             File dir = new File(day, WAZE_DIRECT_DIR);
             ensureDir(dir);
             return dir;
@@ -318,8 +332,10 @@ final class NavigationLogStorage {
         }
         String activeDay = activeNavCaptureDay();
         String activeLogcatDay = LogcatRecorder.activeStartDay();
+        WazeCropCapture.RetentionState crop = WazeCropCapture.currentRetentionState();
+        String activeCropDay = crop.active ? crop.day : "";
         return withWriteLock(() -> snapshotAccessibleStorageLocked(
-                context.getApplicationContext(), activeDay, activeLogcatDay));
+                context.getApplicationContext(), activeDay, activeLogcatDay, activeCropDay));
     }
 
     //Caller stops active Waze/logcat first; Waze restart must replace its cached sessionDir.
@@ -435,8 +451,22 @@ final class NavigationLogStorage {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isActiveNavCaptureDay(String day) {
-        return day != null && (activeNavCaptureDay().equals(day)
-                || LogcatRecorder.activeStartDay().equals(day));
+        WazeCropCapture.RetentionState crop = WazeCropCapture.currentRetentionState();
+        return isActiveNavCaptureDayForTest(
+                day,
+                activeNavCaptureDay(),
+                LogcatRecorder.activeStartDay(),
+                crop.active ? crop.day : "");
+    }
+
+    static boolean isActiveNavCaptureDayForTest(
+            String day,
+            String currentDay,
+            String activeLogcatDay,
+            String activeCropDay) {
+        return day != null && (day.equals(currentDay)
+                || day.equals(activeLogcatDay)
+                || day.equals(activeCropDay));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1161,7 +1191,8 @@ final class NavigationLogStorage {
     private static StorageSnapshot snapshotAccessibleStorageLocked(
             Context context,
             String activeDay,
-            String activeLogcatDay) {
+            String activeLogcatDay,
+            String activeCropDay) {
         List<StorageRoot> roots = accessibleRootsLocked(context);
         Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
         long totalBytes = 0L;
@@ -1201,7 +1232,9 @@ final class NavigationLogStorage {
                     day.lastModified,
                     day.cropSessions,
                     day.bytes,
-                    day.name.equals(activeDay) || day.name.equals(activeLogcatDay),
+                    day.name.equals(activeDay)
+                            || day.name.equals(activeLogcatDay)
+                            || day.name.equals(activeCropDay),
                     day.hasPublicStorage,
                     day.hasPrivateStorage));
         }

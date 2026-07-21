@@ -22,6 +22,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -33,6 +34,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -428,13 +431,19 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
+    var storageDeleteCurrentDay by remember { mutableStateOf("") }
+    var storageDeleteStep by remember { mutableStateOf(0) }
+    var storageDeleteTotal by remember { mutableStateOf(0) }
     var storageShareDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageShareBusy by remember { mutableStateOf(false) }
+    var lastAppsScanRevision by remember { mutableStateOf(activity.composeAppsScanRevision()) }
+    var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
     var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var betaChannelEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isBetaChannelEnabled(activity)) }
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
+    var pendingUpdateDialog by remember { mutableStateOf(false) }
     var updateState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Checking) }
     var appInForeground by remember { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
@@ -444,10 +453,19 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     val latestShowUpdateDialog by rememberUpdatedState(showUpdateDialog)
     val palette = if (snapshot.darkTheme) darkPalette() else lightPalette()
     val copy = if (snapshot.uaLanguage) uaCopy() else enCopy()
+    val blockingUiFlow = when {
+        showSetupDialog -> "setup"
+        showUpdateDialog -> "update"
+        pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
+        storageShareBusy -> "storage-share"
+        else -> ""
+    }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun refresh() {
-        snapshot = activity.composeSnapshot()
+        val refreshed = activity.composeSnapshot()
+        snapshot = refreshed
+        liveHudStatus = refreshed.hudStatus
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -461,7 +479,12 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         //guard update checks behind explicit UI state so repeated taps cannot leave stale results visible.
         updateState = UpdateCheckState.Checking
         if (showLatestResult) {
-            showUpdateDialog = true
+            if (activity.composeTryStartBlockingUiFlow("update")) {
+                showUpdateDialog = true
+                pendingUpdateDialog = false
+            } else {
+                pendingUpdateDialog = true
+            }
         }
         updateScope.launch {
             val nextState = try {
@@ -476,7 +499,12 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 return@launch
             }
             updateState = nextState
-            showUpdateDialog = true
+            if (activity.composeTryStartBlockingUiFlow("update")) {
+                showUpdateDialog = true
+                pendingUpdateDialog = false
+            } else {
+                pendingUpdateDialog = true
+            }
         }
     }
 
@@ -485,8 +513,14 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
             return
         }
+        if (!activity.composeTryStartBlockingUiFlow("storage-delete")) {
+            return
+        }
         pendingStorageDeleteDays = emptyList()
         storageDeleteQueue = days
+        storageDeleteCurrentDay = days.first()
+        storageDeleteStep = 1
+        storageDeleteTotal = days.size
         storageDeleteBusy = true
     }
 
@@ -494,12 +528,31 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
             return
         }
+        if (!activity.composeTryStartBlockingUiFlow("storage-share")) {
+            return
+        }
         storageShareDays = days
         storageShareBusy = true
     }
 
+    LaunchedEffect(blockingUiFlow) {
+        activity.composeReportMainUiState(blockingUiFlow)
+    }
+
+    LaunchedEffect(pendingUpdateDialog) {
+        while (pendingUpdateDialog) {
+            delay(250L)
+            if (latestAppInForeground
+                && activity.composeTryStartBlockingUiFlow("update")) {
+                pendingUpdateDialog = false
+                showUpdateDialog = true
+            }
+        }
+    }
+
     LaunchedEffect(selectedTab) {
         if (selectedTab == RuntimeTab.Apps) {
+            lastAppsScanRevision = activity.composeAppsScanRevision()
             activity.composeRefreshApps()
         }
         if (selectedTab == RuntimeTab.Storage) {
@@ -556,17 +609,31 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     LaunchedEffect(Unit) {
         while (true) {
             delay(1000L)
+            val now = SystemClock.elapsedRealtime()
             if (selectedTab == RuntimeTab.Apps) {
-                activity.composeMaybeRefreshApps()
+                val scanRevision = activity.composeAppsScanRevision()
+                if (scanRevision != lastAppsScanRevision) {
+                    lastAppsScanRevision = scanRevision
+                    refresh()
+                }
+                val deliveryStatus = activity.composeHudDeliveryStatus()
+                val nextHudStatus = if (deliveryStatus == "idle" && !snapshot.captureReady) {
+                    "failed"
+                } else {
+                    deliveryStatus
+                }
+                if (liveHudStatus != nextHudStatus) {
+                    liveHudStatus = nextHudStatus
+                }
+            } else {
+                refresh()
             }
-            if (selectedTab == RuntimeTab.Storage) {
-                val now = SystemClock.elapsedRealtime()
+            if (selectedTab == RuntimeTab.Storage && !storageDeleteBusy) {
                 if (now - lastStorageRefreshRequestMs >= 5000L) {
                     activity.composeRequestStorageRefresh(false)
                     lastStorageRefreshRequestMs = now
                 }
             }
-            refresh()
         }
     }
 
@@ -577,18 +644,30 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (storageDeleteQueue.isEmpty()) {
             storageDeleteBusy = false
             storageDeleteQueue = emptyList()
+            storageDeleteCurrentDay = ""
+            storageDeleteStep = 0
+            storageDeleteTotal = 0
             selectedStorageDays = emptyList()
             refresh()
             return@LaunchedEffect
         }
         val results = withContext(Dispatchers.IO + NonCancellable) {
-            activity.composeDeleteStorageDays(storageDeleteQueue)
+            activity.composeDeleteStorageDays(storageDeleteQueue) { day, step, total ->
+                activity.runOnUiThread {
+                    storageDeleteCurrentDay = day
+                    storageDeleteStep = step
+                    storageDeleteTotal = total
+                }
+            }
         }
         results.forEach { result ->
             activity.composeAppendStatus("Storage delete ${result.day}: ${result.message}")
         }
         storageDeleteBusy = false
         storageDeleteQueue = emptyList()
+        storageDeleteCurrentDay = ""
+        storageDeleteStep = 0
+        storageDeleteTotal = 0
         selectedStorageDays = emptyList()
         activity.composeRequestStorageRefresh(true)
         refresh()
@@ -621,6 +700,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 copy = copy,
                 palette = palette,
                 snapshot = snapshot,
+                hudStatus = liveHudStatus,
                 onLanguage = { ua -> runAction { activity.composeSetUaLanguage(ua) } },
                 onTheme = { dark -> runAction { activity.composeSetDarkTheme(dark) } }
             )
@@ -631,59 +711,58 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     .weight(1f)
                     .padding(top = 10.dp)
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(bottom = 12.dp)
-                ) {
-                    when (selectedTab) {
-                        RuntimeTab.Options -> OptionsTab(
-                            copy = copy,
-                            palette = palette,
-                            snapshot = snapshot,
-                            activity = activity,
-                            runAction = ::runAction,
-                            autoUpdateCheckEnabled = autoUpdateCheckEnabled,
-                            onAutoUpdateCheckChange = { enabled ->
-                                autoUpdateCheckEnabled = enabled
-                                AppUpdateManager.setAutoCheckEnabled(activity, enabled)
-                            },
-                            betaChannelEnabled = betaChannelEnabled,
-                            onBetaChannelChange = { enabled ->
-                                betaChannelEnabled = enabled
-                                AppUpdateManager.setBetaChannelEnabled(activity, enabled)
-                            },
-                            onManualUpdateCheck = { beginUpdateCheck(force = true, showLatestResult = true) },
-                            onDisableBgApps = { showSetupDialog = true },
-                            onShutdownClick = { runAction { activity.composeShutdownAndExit() } }
-                        )
-                        RuntimeTab.Apps -> AppsTab(copy, palette, snapshot, activity, ::runAction)
-                        RuntimeTab.Logs -> LogsTab(copy, palette, snapshot, activity, ::runAction)
-                        RuntimeTab.Storage -> StorageTab(
-                            copy = copy,
-                            palette = palette,
-                            snapshot = snapshot,
-                            sortOldestFirst = storageSortOldestFirst,
-                            selectedDays = selectedStorageDays,
-                            storageBusy = storageDeleteBusy || storageShareBusy,
-                            onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },
-                            onSortOldestFirst = { storageSortOldestFirst = it },
-                            onToggleDay = { day ->
-                                selectedStorageDays = if (selectedStorageDays.contains(day)) {
-                                    selectedStorageDays - day
-                                } else {
-                                    selectedStorageDays + day
-                                }
-                            },
-                            onDeleteSelected = { deletableSelectedDays ->
+                when (selectedTab) {
+                    RuntimeTab.Options -> OptionsTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        activity = activity,
+                        runAction = ::runAction,
+                        autoUpdateCheckEnabled = autoUpdateCheckEnabled,
+                        onAutoUpdateCheckChange = { enabled ->
+                            autoUpdateCheckEnabled = enabled
+                            AppUpdateManager.setAutoCheckEnabled(activity, enabled)
+                        },
+                        betaChannelEnabled = betaChannelEnabled,
+                        onBetaChannelChange = { enabled ->
+                            betaChannelEnabled = enabled
+                            AppUpdateManager.setBetaChannelEnabled(activity, enabled)
+                        },
+                        onManualUpdateCheck = { beginUpdateCheck(force = true, showLatestResult = true) },
+                        onDisableBgApps = {
+                            if (activity.composeTryStartBlockingUiFlow("setup")) {
+                                showSetupDialog = true
+                            }
+                        },
+                        onShutdownClick = { runAction { activity.composeShutdownAndExit() } }
+                    )
+                    RuntimeTab.Apps -> AppsTab(copy, palette, snapshot, activity, ::runAction)
+                    RuntimeTab.Storage -> StorageTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        sortOldestFirst = storageSortOldestFirst,
+                        selectedDays = selectedStorageDays,
+                        storageBusy = storageDeleteBusy || storageShareBusy,
+                        onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },
+                        onSortOldestFirst = { storageSortOldestFirst = it },
+                        onToggleDay = { day ->
+                            selectedStorageDays = if (selectedStorageDays.contains(day)) {
+                                selectedStorageDays - day
+                            } else {
+                                selectedStorageDays + day
+                            }
+                        },
+                        onDeleteSelected = { deletableSelectedDays ->
+                            if (activity.composeTryStartBlockingUiFlow("storage-delete")) {
                                 pendingStorageDeleteDays = deletableSelectedDays
-                            },
-                            onShareSelected = ::beginStorageShare
-                        )
-                        RuntimeTab.Patch -> PatchTab(copy, palette, snapshot)
-                        RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
-                    }
+                            }
+                        },
+                        onShareSelected = ::beginStorageShare
+                    )
+                    RuntimeTab.Logs -> LogsTab(copy, palette, snapshot, activity, ::runAction)
+                    RuntimeTab.Patch -> PatchTab(copy, palette, snapshot)
+                    RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
                 }
             }
 
@@ -743,9 +822,9 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             StorageDeleteOverlay(
                 copy = copy,
                 palette = palette,
-                folderName = storageDeleteQueue.firstOrNull().orEmpty(),
-                step = 1,
-                total = storageDeleteQueue.size.coerceAtLeast(1)
+                folderName = storageDeleteCurrentDay,
+                step = storageDeleteStep.coerceAtLeast(1),
+                total = storageDeleteTotal.coerceAtLeast(1)
             )
         }
     }
@@ -757,6 +836,7 @@ private fun Header(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
+    hudStatus: String,
     onLanguage: (Boolean) -> Unit,
     onTheme: (Boolean) -> Unit
 ) {
@@ -789,7 +869,7 @@ private fun Header(
             )
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            HudStatusPill(snapshot.hudStatus, copy, palette)
+            HudStatusPill(hudStatus, copy, palette)
             //guard top-bar adb status so OK means grant-backed capture permissions are already present.
             Pill(if (snapshot.settingsPermissionsGranted) copy.adbOk else copy.adbNotGranted,
                 if (snapshot.settingsPermissionsGranted) palette.green else palette.red,
@@ -823,36 +903,37 @@ private fun OptionsTab(
     onDisableBgApps: () -> Unit,
     onShutdownClick: () -> Unit
 ) {
-    PageSurface(copy.main, copy.mainHint, palette) {
-        Section(copy.permissionsRuntime, palette) {
-            SettingRow(
+    LazyPageSurface(copy.main, copy.mainHint, palette) {
+        item(key = "runtime-permissions") {
+            Section(copy.permissionsRuntime, palette) {
+                SettingRow(
                 title = copy.adbPermissions,
                 hint = copy.adbHint,
                 palette = palette,
                 action = { HudButton(copy.grantAdb, palette, primary = true, width = 190.dp) { runAction { activity.composeGrantAdb() } } }
-            )
-            Divider(palette)
-            SettingRow(
+                )
+                Divider(palette)
+                SettingRow(
                 title = copy.backgroundApps,
                 hint = copy.backgroundHint,
                 palette = palette,
                 action = { HudButton(copy.disableBgApps, palette, width = 190.dp, onClick = onDisableBgApps) }
-            )
-            Divider(palette)
-            SwitchRow(copy.bootRuntime, copy.bootRuntimeHint, snapshot.bootEnabled, palette) {
-                runAction { activity.composeSetBootEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(
+                )
+                Divider(palette)
+                SwitchRow(copy.bootRuntime, copy.bootRuntimeHint, snapshot.bootEnabled, palette) {
+                    runAction { activity.composeSetBootEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
                 copy.saveScreenshotsLogs,
                 copy.saveScreenshotsLogsHint,
                 snapshot.detailedDebugArtifactsEnabled,
                 palette
-            ) {
-                runAction { activity.composeSetDetailedDebugArtifactsEnabled(it) }
-            }
-            Divider(palette)
-            UpdateCheckLine(
+                ) {
+                    runAction { activity.composeSetDetailedDebugArtifactsEnabled(it) }
+                }
+                Divider(palette)
+                UpdateCheckLine(
                 title = copy.checkForUpdates,
                 hint = copy.checkForUpdatesHint,
                 buttonText = copy.checkForUpdatesButton,
@@ -860,17 +941,17 @@ private fun OptionsTab(
                 onCheckedChange = onAutoUpdateCheckChange,
                 onCheckClick = onManualUpdateCheck,
                 palette = palette
-            )
-            Divider(palette)
-            SwitchRow(
+                )
+                Divider(palette)
+                SwitchRow(
                 copy.betaTesting,
                 copy.betaTestingHint,
                 betaChannelEnabled,
                 palette,
                 onBetaChannelChange
-            )
-            Divider(palette)
-            SettingRow(
+                )
+                Divider(palette)
+                SettingRow(
                 title = copy.shutdown,
                 hint = copy.shutdownHint,
                 palette = palette,
@@ -882,69 +963,70 @@ private fun OptionsTab(
                         tint = palette.red,
                         onClick = onShutdownClick
                     )
+                    }
+                )
+            }
+        }
+
+        item(key = "basic-navigation") {
+            Section(copy.basicNavigationOutput, palette) {
+                SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
+                    runAction { activity.composeSetPngOutputEnabled(it) }
                 }
-            )
-        }
-
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.basicNavigationOutput, palette) {
-            SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
-                runAction { activity.composeSetPngOutputEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.nativeOutput, copy.nativeHint, snapshot.nativeOutputEnabled, palette) {
-                runAction { activity.composeSetNativeOutputEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette) {
-                runAction { activity.composeSetLaneOutputEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
-                runAction { activity.composeSetStreetOutputEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
-                runAction { activity.composeSetDistanceOutputEnabled(it) }
+                Divider(palette)
+                SwitchRow(copy.nativeOutput, copy.nativeHint, snapshot.nativeOutputEnabled, palette) {
+                    runAction { activity.composeSetNativeOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette) {
+                    runAction { activity.composeSetLaneOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
+                    runAction { activity.composeSetStreetOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
+                    runAction { activity.composeSetDistanceOutputEnabled(it) }
+                }
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.extraNavigationOptions, palette) {
-            SwitchRow(
+        item(key = "extra-navigation") {
+            Section(copy.extraNavigationOptions, palette) {
+                SwitchRow(
                 copy.textDirectionOutput,
                 copy.textDirectionOutputHint,
                 snapshot.textDirectionOutputEnabled,
                 palette
-            ) {
-                runAction { activity.composeSetTextDirectionOutputEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
-                runAction { activity.composeSetWazeAlertsEnabled(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
-                runAction { activity.composeSetSmallDistanceClamp(it) }
-            }
-            Divider(palette)
-            SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
-                runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
+                ) {
+                    runAction { activity.composeSetTextDirectionOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
+                    runAction { activity.composeSetWazeAlertsEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
+                    runAction { activity.composeSetSmallDistanceClamp(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
+                    runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
+                }
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.dashboardControl, palette) {
-            SwitchRow(
-                copy.fullscreenDashboard,
-                copy.fullscreenDashboardHint,
-                snapshot.fullscreenDashboardEnabled,
-                palette
-            ) {
-                runAction { activity.composeSetFullscreenDashboardEnabled(it) }
+        item(key = "dashboard-control") {
+            Section(copy.dashboardControl, palette) {
+                SwitchRow(
+                    copy.fullscreenDashboard,
+                    copy.fullscreenDashboardHint,
+                    snapshot.fullscreenDashboardEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetFullscreenDashboardEnabled(it) }
+                }
             }
         }
     }
@@ -1493,7 +1575,7 @@ private fun AppsTab(
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
 ) {
-    PageSurface(copy.apps, copy.appsHint, palette, headerAction = {
+    LazyPageSurface(copy.apps, copy.appsHint, palette, headerAction = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Pill("${copy.lastScan}: ${snapshot.lastScanText}", palette.muted, palette.disabled)
             HudButton(copy.refreshApps, palette, primary = true, width = 178.dp) {
@@ -1501,22 +1583,24 @@ private fun AppsTab(
             }
         }
     }) {
-        Section(copy.supportedApps, palette) {
-            snapshot.supportedApps.forEachIndexed { index, row ->
-                if (index > 0) Divider(palette)
-                AppRow(row, copy, palette, supported = true, activity = activity, runAction = runAction)
+        item(key = "supported-apps") {
+            Section(copy.supportedApps, palette) {
+                snapshot.supportedApps.forEachIndexed { index, row ->
+                    if (index > 0) Divider(palette)
+                    AppRow(row, copy, palette, supported = true, activity = activity, runAction = runAction)
+                }
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.allApps, palette) {
-            if (snapshot.allApps.isEmpty()) {
-                Text(copy.noBackgroundApps, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
-            } else {
-                snapshot.allApps.forEachIndexed { index, row ->
-                    if (index > 0) Divider(palette)
-                    AppRow(row, copy, palette, supported = false, activity = activity, runAction = runAction)
+        item(key = "all-apps") {
+            Section(copy.allApps, palette) {
+                if (snapshot.allApps.isEmpty()) {
+                    Text(copy.noBackgroundApps, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
+                } else {
+                    snapshot.allApps.forEachIndexed { index, row ->
+                        if (index > 0) Divider(palette)
+                        AppRow(row, copy, palette, supported = false, activity = activity, runAction = runAction)
+                    }
                 }
             }
         }
@@ -1600,9 +1684,10 @@ private fun LogsTab(
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
 ) {
-    PageSurface(copy.logs, copy.logsHint, palette) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            Section(copy.logcatRecorder, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
+    LazyPageSurface(copy.logs, copy.logsHint, palette) {
+        item(key = "log-status") {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Section(copy.logcatRecorder, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -1641,16 +1726,17 @@ private fun LogsTab(
                         runAction { activity.composeStopLogcat() }
                     }
                 }
-            }
-            Section(copy.applicationState, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
-                CodeBlock(snapshot.applicationState, palette, compact = true, modifier = Modifier.padding(14.dp))
+                }
+                Section(copy.applicationState, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
+                    CodeBlock(snapshot.applicationState, palette, compact = true, modifier = Modifier.padding(14.dp))
+                }
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.navigationLogs, palette) {
-            CodeBlock(snapshot.logPaths + "\n\n" + copy.pathHint, palette, compact = true, modifier = Modifier.padding(14.dp))
+        item(key = "navigation-log-paths") {
+            Section(copy.navigationLogs, palette) {
+                CodeBlock(snapshot.logPaths + "\n\n" + copy.pathHint, palette, compact = true, modifier = Modifier.padding(14.dp))
+            }
         }
     }
 }
@@ -1681,9 +1767,10 @@ private fun StorageTab(
     val selectedDayNames = selectedDays.filter { selected ->
         days.any { it.name == selected }
     }
-    PageSurface(copy.storage, copy.storageHint, palette) {
-        Section(copy.storageSettings, palette) {
-            SettingRow(
+    LazyPageSurface(copy.storage, copy.storageHint, palette) {
+        item(key = "storage-settings") {
+            Section(copy.storageSettings, palette) {
+                SettingRow(
                 title = copy.navLogsFolderLimit,
                 hint = copy.navLogsFolderLimitHint,
                 palette = palette,
@@ -1706,12 +1793,12 @@ private fun StorageTab(
                         }
                     }
                 }
-            )
-            StorageLimitSlider(draftLimit, palette) { next ->
-                draftLimit = next
-            }
-            Divider(palette)
-            SettingRow(
+                )
+                StorageLimitSlider(draftLimit, palette) { next ->
+                    draftLimit = next
+                }
+                Divider(palette)
+                SettingRow(
                 title = copy.currentNavLogsSize,
                 hint = "",
                 palette = palette,
@@ -1733,14 +1820,14 @@ private fun StorageTab(
                             fontWeight = FontWeight.SemiBold
                         )
                     }
-                }
-            )
+                    }
+                )
+            }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.navigationLogsFolder, palette) {
-            Row(
+        item(key = "navigation-log-controls") {
+            Section(copy.navigationLogsFolder, palette) {
+                Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(horizontal = 14.dp, vertical = 12.dp),
@@ -1753,7 +1840,6 @@ private fun StorageTab(
                         ReadOnlyPathField(path, palette, modifier = Modifier.fillMaxWidth())
                     }
                 }
-                Spacer(Modifier.weight(1f))
                 HudIconButton(
                     icon = R.drawable.ic_share,
                     contentDescription = copy.shareSelected,
@@ -1771,28 +1857,35 @@ private fun StorageTab(
                 ) {
                     onSortOldestFirst(!sortOldestFirst)
                 }
-            }
-            Divider(palette)
-            if (days.isEmpty()) {
-                Text(
-                    copy.storageNoDayFolders,
-                    color = palette.muted,
-                    fontSize = 14.sp,
-                    modifier = Modifier.padding(14.dp)
-                )
-            } else {
-                days.forEachIndexed { index, day ->
-                    if (index > 0) Divider(palette)
-                    StorageDayRow(
-                        day = day,
-                        copy = copy,
-                        palette = palette,
-                        selected = selectedDays.contains(day.name),
-                        enabled = !storageBusy,
-                        onToggle = { onToggleDay(day.name) }
+                }
+                if (days.isEmpty()) {
+                    Divider(palette)
+                    Text(
+                        copy.storageNoDayFolders,
+                        color = palette.muted,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(14.dp)
                     )
                 }
             }
+        }
+
+        items(
+            count = days.size,
+            key = { index -> "storage-day-${days[index].name}" }
+        ) { index ->
+            val day = days[index]
+            StorageDayRow(
+                day = day,
+                copy = copy,
+                palette = palette,
+                selected = selectedDays.contains(day.name),
+                enabled = !storageBusy,
+                onToggle = { onToggleDay(day.name) }
+            )
+        }
+
+        item(key = "storage-delete-action") {
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -1819,22 +1912,23 @@ private fun PatchTab(
     snapshot: MainActivity.ComposeSnapshot
 ) {
     val waze = snapshot.patchWaze?.takeIf { it.installed }
-    PageSurface(copy.patchTab, copy.patchHint, palette) {
-        Section(copy.patchWarning, palette) {
-            Column(modifier = Modifier.padding(14.dp)) {
-                Text(copy.patchWarningText, color = palette.text, fontSize = 14.sp, lineHeight = 20.sp)
-                Spacer(Modifier.height(8.dp))
-                Text(copy.patchRiskWarning, color = palette.yellow, fontSize = 14.sp, lineHeight = 20.sp)
-                Spacer(Modifier.height(8.dp))
-                RepositoryLink(palette)
+    LazyPageSurface(copy.patchTab, copy.patchHint, palette) {
+        item(key = "patch-warning") {
+            Section(copy.patchWarning, palette) {
+                Column(modifier = Modifier.padding(14.dp)) {
+                    Text(copy.patchWarningText, color = palette.text, fontSize = 14.sp, lineHeight = 20.sp)
+                    Spacer(Modifier.height(8.dp))
+                    Text(copy.patchRiskWarning, color = palette.yellow, fontSize = 14.sp, lineHeight = 20.sp)
+                    Spacer(Modifier.height(8.dp))
+                    RepositoryLink(palette)
+                }
             }
         }
 
-        Spacer(Modifier.height(10.dp))
-
-        Section(copy.availableNavigators, palette) {
-            if (waze == null) {
-                Box(
+        item(key = "available-navigators") {
+            Section(copy.availableNavigators, palette) {
+                if (waze == null) {
+                    Box(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(10.dp)
@@ -1842,11 +1936,11 @@ private fun PatchTab(
                         .border(1.dp, palette.border, RoundedCornerShape(8.dp))
                         .padding(18.dp),
                     contentAlignment = Alignment.Center
-                ) {
-                    Text(copy.noSupportedNavigators, color = palette.muted, fontSize = 14.sp)
-                }
-            } else {
-                Row(
+                    ) {
+                        Text(copy.noSupportedNavigators, color = palette.muted, fontSize = 14.sp)
+                    }
+                } else {
+                    Row(
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(10.dp)
@@ -1855,17 +1949,18 @@ private fun PatchTab(
                         .background(palette.field)
                         .padding(14.dp),
                     verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(waze.label, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                        Text(waze.packageName, color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                        Text("${copy.appVersion}: ${waze.versionName}", color = palette.muted, fontSize = 12.sp)
-                        Spacer(Modifier.height(8.dp))
-                        StatusChip(copy.patchNotChecked, ChipKind.Neutral, palette, width = 150.dp)
-                    }
-                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        HudButton(copy.checkPatch, palette, enabled = false, width = 170.dp, onClick = {})
-                        HudButton(copy.applyPatch, palette, enabled = false, width = 170.dp, onClick = {})
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(waze.label, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
+                            Text(waze.packageName, color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
+                            Text("${copy.appVersion}: ${waze.versionName}", color = palette.muted, fontSize = 12.sp)
+                            Spacer(Modifier.height(8.dp))
+                            StatusChip(copy.patchNotChecked, ChipKind.Neutral, palette, width = 150.dp)
+                        }
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            HudButton(copy.checkPatch, palette, enabled = false, width = 170.dp, onClick = {})
+                            HudButton(copy.applyPatch, palette, enabled = false, width = 170.dp, onClick = {})
+                        }
                     }
                 }
             }
@@ -2121,9 +2216,10 @@ private fun ManualTab(
         }
     }
 
-    PageSurface(copy.manual, copy.manualHint, palette) {
-        Section(copy.manualHudOutput, palette) {
-            Row(
+    LazyPageSurface(copy.manual, copy.manualHint, palette) {
+        item(key = "manual-hud-output") {
+            Section(copy.manualHudOutput, palette) {
+                Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(14.dp),
@@ -2138,13 +2234,13 @@ private fun ManualTab(
                 ManualModeTile(copy.rawManeuverIds, copy.rawManeuverHint, mode == ManualMode.Raw, palette, Modifier.weight(1f)) {
                     mode = ManualMode.Raw
                 }
-            }
-            SwitchRow(copy.manualMode, copy.manualModeHint, snapshot.manualModeEnabled, palette) {
-                runAction { activity.composeSetManualMode(it) }
-            }
-            Divider(palette)
+                }
+                SwitchRow(copy.manualMode, copy.manualModeHint, snapshot.manualModeEnabled, palette) {
+                    runAction { activity.composeSetManualMode(it) }
+                }
+                Divider(palette)
 
-            when (mode) {
+                when (mode) {
                 ManualMode.Supported -> ActionRow(
                     copy.supportedArrows,
                     copy.supportedArrowsHint,
@@ -2249,14 +2345,15 @@ private fun ManualTab(
                         }
                     )
                 }
-            }
+                }
 
-            Divider(palette)
-            CurrentSelection(copy, palette, when (mode) {
-                ManualMode.Supported -> "#${snapshot.curatedIndex + 1}/${snapshot.curatedCount}: S${snapshot.pngSourceId.toString().padStart(2, '0')} / N${snapshot.nativeManeuverId.toString().padStart(2, '0')}"
-                ManualMode.Lanes -> manualLane
-                ManualMode.Raw -> "Raw ${manualId("S", pngNumber, 5)} / ${manualId("N", nativeNumber, 5)} / ${distance}m / $street"
-            })
+                Divider(palette)
+                CurrentSelection(copy, palette, when (mode) {
+                    ManualMode.Supported -> "#${snapshot.curatedIndex + 1}/${snapshot.curatedCount}: S${snapshot.pngSourceId.toString().padStart(2, '0')} / N${snapshot.nativeManeuverId.toString().padStart(2, '0')}"
+                    ManualMode.Lanes -> manualLane
+                    ManualMode.Raw -> "Raw ${manualId("S", pngNumber, 5)} / ${manualId("N", nativeNumber, 5)} / ${distance}m / $street"
+                })
+            }
         }
     }
 }
@@ -2351,31 +2448,43 @@ private fun CurrentSelection(copy: Copy, palette: Palette, value: String) {
 }
 
 @Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun PageSurface(
+private fun LazyPageSurface(
     title: String,
     hint: String,
     palette: Palette,
     headerAction: (@Composable () -> Unit)? = null,
-    content: @Composable () -> Unit
+    content: LazyListScope.() -> Unit
 ) {
-    Column(
+    LazyColumn(
         modifier = Modifier
-            .fillMaxWidth()
+            .fillMaxSize()
             .clip(RoundedCornerShape(8.dp))
             .border(1.dp, palette.border, RoundedCornerShape(8.dp))
-            .background(palette.panel)
-            .padding(14.dp)
+            .background(palette.panel),
+        contentPadding = PaddingValues(14.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Column(Modifier.weight(1f)) {
-                Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
-                Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-            }
-            headerAction?.invoke()
+        item(key = "page-header") {
+            PageSurfaceHeader(title, hint, palette, headerAction)
+            Spacer(Modifier.height(4.dp))
         }
-        Spacer(Modifier.height(14.dp))
         content()
+    }
+}
+
+@Composable
+private fun PageSurfaceHeader(
+    title: String,
+    hint: String,
+    palette: Palette,
+    headerAction: (@Composable () -> Unit)?
+) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Column(Modifier.weight(1f)) {
+            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
+            Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+        headerAction?.invoke()
     }
 }
 
@@ -2940,7 +3049,6 @@ private fun TabButton(
 ) {
     val active = tab == selected
     val press = rememberPressFeedback()
-    val visualClick = rememberVisualFirstClick { onSelect(tab) }
     val baseBackground = if (active) palette.active else Color.Transparent
     Row(
         modifier = modifier
@@ -2952,7 +3060,7 @@ private fun TabButton(
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null
-            ) { visualClick() },
+            ) { onSelect(tab) },
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center
     ) {

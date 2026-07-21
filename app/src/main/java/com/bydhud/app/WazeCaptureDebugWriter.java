@@ -22,7 +22,6 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 final class WazeCaptureDebugWriter {
     private static final String TAG = "BydHudWazeDebugWriter";
-    private static final int MAX_PENDING_TASKS = 128;
     private static final int MAX_PENDING_BITMAPS = 4;
     private static final String SESSION_LOG = "session.jsonl";
     private static final String BUCKET_MISSING_LANES = "missing-lanes";
@@ -80,17 +79,52 @@ final class WazeCaptureDebugWriter {
         if (app == null) {
             return false;
         }
-        return post("raw_nav_event", () -> NavCaptureStore.rawEvent(app, channel, packageName, payload));
+        long eventElapsedMs = android.os.SystemClock.elapsedRealtime();
+        long eventWallClockMs = System.currentTimeMillis();
+        String targetDay = NavCaptureStore.todayDir(eventWallClockMs);
+        return runOrPost("raw_nav_event",
+                () -> NavCaptureStore.writeRawEvent(
+                        app, channel, packageName, payload,
+                        eventElapsedMs, eventWallClockMs, targetDay));
+    }
+
+    boolean snapshot(Context context, NavSnapshot snapshot) {
+        Context app = context == null ? null : context.getApplicationContext();
+        if (app == null || snapshot == null) {
+            return false;
+        }
+        long eventElapsedMs = android.os.SystemClock.elapsedRealtime();
+        long eventWallClockMs = System.currentTimeMillis();
+        String targetDay = NavCaptureStore.todayDir(eventWallClockMs);
+        return runOrPost("nav_snapshot", () -> NavCaptureStore.writeSnapshot(
+                app, snapshot, eventElapsedMs, eventWallClockMs, targetDay));
     }
 
     boolean directEvent(Runnable work) {
-        return work != null && post("direct_event", work);
+        if (work == null || !tryReserveBitmap()) {
+            Log.w(TAG, "debug_writer_drop type=direct_event reason=bitmap_queue_full");
+            return false;
+        }
+        boolean posted = post("direct_event", () -> {
+            try {
+                work.run();
+            } finally {
+                pendingBitmaps.decrementAndGet();
+            }
+        });
+        if (!posted) {
+            pendingBitmaps.decrementAndGet();
+        }
+        return posted;
     }
 
     boolean appEvent(Context context, String line) {
         Context app = context == null ? null : context.getApplicationContext();
         if (app == null || line == null) return false;
-        return post("app_event", () -> AppEventLogger.event(app, line));
+        long eventWallClockMs = System.currentTimeMillis();
+        String targetDay = NavCaptureStore.todayDir(eventWallClockMs);
+        return runOrPost("app_event",
+                () -> AppEventLogger.writeEvent(app, line, eventWallClockMs, targetDay));
     }
 
     boolean frameArtifacts(
@@ -161,17 +195,8 @@ final class WazeCaptureDebugWriter {
     }
 
     private boolean post(String type, Runnable work) {
-        while (true) {
-            int current = pendingTasks.get();
-            if (current >= MAX_PENDING_TASKS) {
-                Log.w(TAG, "debug_writer_drop type=" + type + " reason=task_queue_full");
-                return false;
-            }
-            if (pendingTasks.compareAndSet(current, current + 1)) {
-                break;
-            }
-        }
-        handler.post(() -> {
+        pendingTasks.incrementAndGet();
+        boolean posted = handler.post(() -> {
             try {
                 work.run();
             } catch (RuntimeException e) {
@@ -180,7 +205,19 @@ final class WazeCaptureDebugWriter {
                 pendingTasks.decrementAndGet();
             }
         });
-        return true;
+        if (!posted) {
+            pendingTasks.decrementAndGet();
+            Log.w(TAG, "debug_writer_drop type=" + type + " reason=handler_stopped");
+        }
+        return posted;
+    }
+
+    private boolean runOrPost(String type, Runnable work) {
+        if (android.os.Looper.myLooper() == thread.getLooper()) {
+            work.run();
+            return true;
+        }
+        return post(type, work);
     }
 
     private void writeFrameArtifacts(

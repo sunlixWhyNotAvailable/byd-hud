@@ -132,7 +132,7 @@ public final class HudRuntimeService extends Service {
                     this,
                     "service-start-after-package-replace",
                     true,
-                    LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE);
+                    LocalAdbBridge.AuthorizationPromptMode.NEVER);
         }
         return START_STICKY;
     }

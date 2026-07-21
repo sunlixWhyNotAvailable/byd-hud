@@ -6,6 +6,7 @@ import android.content.Context;
 
 //defines the NavRuntimePermissionRepair module boundary so related behavior stays readable inside one unit.
 final class NavRuntimePermissionRepair {
+    static final String RESULT_ALREADY_RUNNING = "Permission repair already running";
     private static final Object LOCK = new Object();
     private static final long MIN_REPAIR_INTERVAL_MS = 60_000L;
     private static final long REBIND_SETTLE_MS = 1_000L;
@@ -15,6 +16,12 @@ final class NavRuntimePermissionRepair {
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavRuntimePermissionRepair() {
+    }
+
+    static boolean isRunning() {
+        synchronized (LOCK) {
+            return running;
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -91,7 +98,7 @@ final class NavRuntimePermissionRepair {
             if (running) {
                 AppEventLogger.event(appContext, "nav_permission_repair skipped reason="
                         + safe(reason) + " running=true");
-                return LocalAdbBridge.Result.partial("Permission repair already running");
+                return LocalAdbBridge.Result.partial(RESULT_ALREADY_RUNNING);
             }
             running = true;
             lastStartedMs = android.os.SystemClock.elapsedRealtime();
