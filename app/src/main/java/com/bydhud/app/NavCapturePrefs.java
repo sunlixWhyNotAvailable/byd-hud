@@ -66,7 +66,7 @@ final class NavCapturePrefs {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> getObservedPackages(Context context) {
         Set<String> stored = prefs(context).getStringSet(KEY_OBSERVED_PACKAGES, Collections.emptySet());
-        Set<String> visible = NavAppFilter.visibleCapturePackages(context, stored);
+        Set<String> visible = NavAppFilter.installedVisibleCapturePackages(context, stored);
         pruneHiddenPackages(context, KEY_OBSERVED_PACKAGES, stored, visible);
         return visible;
     }

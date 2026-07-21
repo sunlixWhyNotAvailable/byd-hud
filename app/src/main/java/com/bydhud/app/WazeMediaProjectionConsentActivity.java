@@ -20,6 +20,12 @@ public final class WazeMediaProjectionConsentActivity extends Activity {
             return;
         }
         launched = true;
+        if (!HudPrefs.isWazeScreenCaptureEnabled(this)) {
+            AppEventLogger.event(this,
+                    "waze_frame_capture consent_cancelled screen_capture_disabled=true");
+            finish();
+            return;
+        }
         MediaProjectionManager manager =
                 (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         if (manager == null) {
@@ -35,8 +41,9 @@ public final class WazeMediaProjectionConsentActivity extends Activity {
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_CAPTURE && resultCode == RESULT_OK && data != null) {
-            WazeMediaProjectionController.onConsentResult(this, resultCode, data);
-            AppEventLogger.event(this, "waze_frame_capture consent_ok");
+            if (WazeMediaProjectionController.onConsentResult(this, resultCode, data)) {
+                AppEventLogger.event(this, "waze_frame_capture consent_ok");
+            }
         } else {
             AppEventLogger.event(this, "waze_frame_capture consent_denied result=" + resultCode);
         }

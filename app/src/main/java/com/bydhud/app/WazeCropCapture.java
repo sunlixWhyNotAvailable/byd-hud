@@ -180,6 +180,9 @@ final class WazeCropCapture {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     void start(String reason) {
+        if (!HudPrefs.isWazeScreenCaptureEnabled(context)) {
+            return;
+        }
         int workerGeneration;
         File dir;
         String name;
@@ -378,6 +381,10 @@ final class WazeCropCapture {
         while (isActiveGeneration(workerGeneration)) {
             long now = SystemClock.elapsedRealtime();
             String shellDir = currentSessionShellDir();
+            if (!HudPrefs.isWazeScreenCaptureEnabled(context)) {
+                stop("screen-capture-disabled");
+                return;
+            }
             if (!NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE)) {
                 log(dir, "crop stopped: Waze not active HUD");
                 stop("not-active-hud");
@@ -415,7 +422,8 @@ final class WazeCropCapture {
                 log(dir, "crop idle: waze background display=" + state.displayId
                         + " status=" + state.status);
                 NavHudLiveSender.get(context).onWazeCropUnavailable(
-                        "background display=" + state.displayId + " status=" + state.status);
+                        "background display=" + state.displayId + " status=" + state.status,
+                        workerGeneration);
                 sleepQuietly(CAPTURE_INTERVAL_MS);
                 continue;
             }
@@ -612,7 +620,8 @@ final class WazeCropCapture {
                     String livenessReason = commitEligible
                             ? "visual navigation cue"
                             : "visual navigation cue liveness-only " + commitSkipReason;
-                    NavHudLiveSender.get(context).onWazeVisualRouteEvidence(livenessReason);
+                    NavHudLiveSender.get(context).onWazeVisualRouteEvidence(
+                            livenessReason, workerGeneration);
                     log(dir, (commitEligible
                             ? "visual route evidence navigation cue file="
                             : "visual route liveness refreshed file=")
@@ -623,7 +632,8 @@ final class WazeCropCapture {
                         NavHudLiveSender.get(context)
                                 .updateFromWazeVisualCue(
                                         WAZE_PACKAGE,
-                                        visualResult.withSourceDisplayId(displayId));
+                                        visualResult.withSourceDisplayId(displayId),
+                                        workerGeneration);
                     } else {
                         NavSnapshot visualSnapshot = visualResult.snapshot;
                         log(dir, "visual commit skipped file=" + sourceFileName
@@ -635,7 +645,8 @@ final class WazeCropCapture {
                 } else if (blocksSingleFallback(laneAnalysis)) {
                     if (commitEligible) {
                         NavHudLiveSender.get(context).onWazeUnknownLaneRow(
-                                "file=" + sourceFileName + " reason=" + laneAnalysis.reason.name());
+                                "file=" + sourceFileName + " reason=" + laneAnalysis.reason.name(),
+                                workerGeneration);
                     } else {
                         log(dir, "unknown lane row skipped file=" + sourceFileName
                                 + " reason=" + laneAnalysis.reason.name()
@@ -649,7 +660,8 @@ final class WazeCropCapture {
                                     + " " + parseTimingDetail);
                         } else {
                             NavHudLiveSender.get(context).onWazeCropUnavailable(
-                                    "main-visible-no-cue file=" + sourceFileName);
+                                    "main-visible-no-cue file=" + sourceFileName,
+                                    workerGeneration);
                         }
                     } else {
                         log(dir, "crop unavailable skipped file=" + sourceFileName
@@ -778,7 +790,8 @@ final class WazeCropCapture {
             log(dir, "frame parse fatal " + e.getClass().getSimpleName()
                     + " " + safe(e.getMessage()));
             NavHudLiveSender.get(context).onWazeCropUnavailable(
-                    "frame-parse-fatal " + e.getClass().getSimpleName());
+                    "frame-parse-fatal " + e.getClass().getSimpleName(),
+                    workerGeneration);
         }
     }
 
@@ -961,6 +974,11 @@ final class WazeCropCapture {
         synchronized (lock) {
             return active && generation == workerGeneration;
         }
+    }
+
+    boolean isCurrentGeneration(int workerGeneration) {
+        return HudPrefs.isWazeScreenCaptureEnabled(context)
+                && isActiveGeneration(workerGeneration);
     }
 
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.

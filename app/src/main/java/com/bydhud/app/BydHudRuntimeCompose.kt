@@ -209,6 +209,8 @@ private data class Copy(
     val betaTestingHint: String,
     val shutdown: String,
     val shutdownHint: String,
+    val screenCaptureChannel: String,
+    val screenCaptureChannelHint: String,
     val updateTitle: String,
     val updateCurrentVersion: String,
     val updateAvailableVersion: String,
@@ -965,6 +967,15 @@ private fun OptionsTab(
                     )
                     }
                 )
+                Divider(palette)
+                SwitchRow(
+                    copy.screenCaptureChannel,
+                    copy.screenCaptureChannelHint,
+                    snapshot.wazeScreenCaptureEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetWazeScreenCaptureEnabled(it) }
+                }
             }
         }
 
@@ -1618,7 +1629,7 @@ private fun AppRow(
     runAction: (() -> Unit) -> Unit
 ) {
     val dashboardEnabled = row.runtimeBacked && row.dashboardStateKnown && !row.dashboardMoveInProgress
-    val runningForStatus = row.runtimeBacked || row.observed
+    val runningForStatus = row.runtimeBacked
     val dashboardText = when {
         !row.runtimeBacked -> copy.startAppFirst
         row.onDashboard -> copy.sendMain
@@ -3290,6 +3301,8 @@ private fun enCopy() = Copy(
     betaTestingHint = "Check for experimental version. Usage may be unstable or broken",
     shutdown = "Shutdown",
     shutdownHint = "Stop the app until it is opened again",
+    screenCaptureChannel = "Screen capture channel (legacy)",
+    screenCaptureChannelHint = "Allows screen capture for maneuver output. No longer supported",
     updateTitle = "Update",
     updateCurrentVersion = "Current version:",
     updateAvailableVersion = "Available version:",
@@ -3320,7 +3333,7 @@ private fun enCopy() = Copy(
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Clamp distances below 20 m instead of OEM close marker.",
     roundaboutLeft = "Roundabout left-hand traffic",
-    roundaboutHint = "Changes roundabout assets for PNG output. Legacy with crop channel.",
+    roundaboutHint = "Changes roundabout assets for PNG output. (Legacy with screen capture channel)",
     appsHint = "Supported apps can be armed before launch. Dashboard actions require a running background app.",
     lastScan = "Last scan",
     refreshApps = "Refresh apps",
@@ -3457,6 +3470,8 @@ private fun uaCopy() = enCopy().copy(
     betaTestingHint = "Перевіряти наявність експериментальних версій. Може бути нестабільна або зламана робота",
     shutdown = "Вимкнути",
     shutdownHint = "Завершити роботу застосунку до наступного відкриття",
+    screenCaptureChannel = "Канал захоплення екрану (сумісність)",
+    screenCaptureChannelHint = "Дозволяє використання захоплення екрану для виводу маневрів. Більше не підтримується",
     updateTitle = "Оновлення",
     updateCurrentVersion = "Поточна версія:",
     updateAvailableVersion = "Доступна версія:",
@@ -3487,7 +3502,7 @@ private fun uaCopy() = enCopy().copy(
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Обмежувати дистанції менше 20 м, щоб штатний HUD не показував власний маркер близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",
-    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG. Сумісність з crop каналом.",
+    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG. (Сумісність з каналом захоплення екрану)",
     appsHint = "Підтримувані застосунки можна активувати до запуску. Для приборки застосунок має бути у фоні.",
     lastScan = "Останнє сканування",
     refreshApps = "Оновити застосунки",

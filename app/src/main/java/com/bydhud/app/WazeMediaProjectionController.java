@@ -24,7 +24,9 @@ final class WazeMediaProjectionController {
 
     //starts Android consent only when there is no usable mirrored frame source.
     static void ensureReadyOrPrompt(Context context, String reason) {
-        if (context == null || isFrameSourceReady()) {
+        if (context == null
+                || !HudPrefs.isWazeScreenCaptureEnabled(context)
+                || isFrameSourceReady()) {
             return;
         }
         long now = SystemClock.elapsedRealtime();
@@ -38,12 +40,21 @@ final class WazeMediaProjectionController {
                 WazeMediaProjectionConsentActivity.class);
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_NO_ANIMATION);
         intent.putExtra("reason", safe(reason));
-        context.getApplicationContext().startActivity(intent);
+        if (!HudPrefs.isWazeScreenCaptureEnabled(context)) {
+            return;
+        }
         AppEventLogger.event(context, "waze_frame_capture consent_prompt reason=" + safe(reason));
+        context.getApplicationContext().startActivity(intent);
     }
 
     //stores the one-use consent payload long enough to start the foreground projection service.
-    static void onConsentResult(Context context, int code, Intent data) {
+    static boolean onConsentResult(Context context, int code, Intent data) {
+        if (!HudPrefs.isWazeScreenCaptureEnabled(context)) {
+            clearConsent();
+            AppEventLogger.event(context,
+                    "waze_frame_capture consent_ignored screen_capture_disabled=true");
+            return false;
+        }
         synchronized (LOCK) {
             resultCode = code;
             resultData = data;
@@ -58,6 +69,7 @@ final class WazeMediaProjectionController {
             context.getApplicationContext().startService(serviceIntent);
         }
         clearConsent();
+        return true;
     }
 
     //registers the service so WazeCropCapture can synchronously request the latest frame.
@@ -92,6 +104,9 @@ final class WazeMediaProjectionController {
 
     //restarts from cached consent only if Android still accepts the in-process token.
     static void restartFromCachedConsent(Context context, String reason) {
+        if (context == null || !HudPrefs.isWazeScreenCaptureEnabled(context)) {
+            return;
+        }
         Intent data;
         int code;
         synchronized (LOCK) {
@@ -115,6 +130,14 @@ final class WazeMediaProjectionController {
 
     //clears capture ownership after package replacement so stale ImageReader frames cannot feed Waze parsing.
     static void resetForRuntimeReinit(Context context, String reason) {
+        stopProjection(context, "reset_for_runtime_reinit", reason);
+    }
+
+    static void stop(Context context, String reason) {
+        stopProjection(context, "stop", reason);
+    }
+
+    private static void stopProjection(Context context, String event, String reason) {
         Context appContext = context == null ? null : context.getApplicationContext();
         synchronized (LOCK) {
             resultCode = 0;
@@ -123,8 +146,8 @@ final class WazeMediaProjectionController {
         }
         if (appContext != null) {
             appContext.stopService(new Intent(appContext, WazeMediaProjectionService.class));
-            AppEventLogger.event(appContext, "waze_frame_capture reset_for_runtime_reinit reason="
-                    + safe(reason));
+            AppEventLogger.event(appContext, "waze_frame_capture " + event
+                    + " reason=" + safe(reason));
         }
     }
 

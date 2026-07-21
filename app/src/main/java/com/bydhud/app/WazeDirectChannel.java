@@ -4,6 +4,9 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.PackageManager;
+import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.drawable.Drawable;
@@ -92,6 +95,7 @@ public final class WazeDirectChannel {
     private boolean acceptedRouteFrame;
     private boolean terminalRouteLatched;
     private boolean unavailableBindFailureReported;
+    private String bindDeferredReason = "";
     private int routingSequence;
     private Connection connection;
     private ICarApp carApp;
@@ -162,6 +166,7 @@ public final class WazeDirectChannel {
         generation++;
         startReason = safeText(reason);
         unavailableBindFailureReported = false;
+        bindDeferredReason = "";
         routingSequence = 0;
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
@@ -199,11 +204,14 @@ public final class WazeDirectChannel {
         }
         releaseBinding(connection);
         clearSessionState();
+        bindDeferredReason = "";
         log("stopped reason=" + stopReason);
     }
 
     private void connectWaze(int expectedGeneration) {
         if (!isCurrent(expectedGeneration) || binding || bound) return;
+
+        if (deferBindIfNeeded(expectedGeneration)) return;
 
         CarHost nextHost = new CarHost(expectedGeneration);
         Connection nextConnection = new Connection(expectedGeneration);
@@ -223,6 +231,7 @@ public final class WazeDirectChannel {
             } else {
                 releaseBinding(nextConnection);
                 carHost = null;
+                if (deferBindIfNeeded(expectedGeneration)) return;
                 reportBindUnavailable(
                         "bind result=false component=" + WAZE_SERVICE.flattenToShortString(),
                         "bind_failed");
@@ -231,9 +240,62 @@ public final class WazeDirectChannel {
         } catch (Throwable t) {
             releaseBinding(nextConnection);
             carHost = null;
+            if (deferBindIfNeeded(expectedGeneration)) return;
             reportBindUnavailable("bind failed: " + t, "bind_exception");
             scheduleRebind(expectedGeneration);
         }
+    }
+
+    private boolean deferBindIfNeeded(int expectedGeneration) {
+        String deferredReason = wazeBindDeferralReason();
+        if (deferredReason.isEmpty()) {
+            if (!bindDeferredReason.isEmpty()) {
+                log("direct_bind_released previous_reason=" + bindDeferredReason);
+                bindDeferredReason = "";
+            }
+            return false;
+        }
+        if (!deferredReason.equals(bindDeferredReason)) {
+            bindDeferredReason = deferredReason;
+            log("direct_bind_deferred reason=" + deferredReason
+                    + " package_stopped=" + "package_stopped".equals(deferredReason));
+        }
+        scheduleRebind(expectedGeneration);
+        return true;
+    }
+
+    private String wazeBindDeferralReason() {
+        PackageManager packageManager = context.getPackageManager();
+        if (packageManager == null) return "package_manager_missing";
+        ApplicationInfo applicationInfo;
+        try {
+            applicationInfo = packageManager.getApplicationInfo(WAZE_SERVICE.getPackageName(), 0);
+        } catch (PackageManager.NameNotFoundException e) {
+            return "package_missing";
+        }
+        ServiceInfo serviceInfo;
+        try {
+            serviceInfo = packageManager.getServiceInfo(WAZE_SERVICE, 0);
+        } catch (PackageManager.NameNotFoundException e) {
+            return "service_missing";
+        }
+        return bindDeferralReason(
+                true,
+                applicationInfo.enabled,
+                true,
+                serviceInfo.enabled,
+                (applicationInfo.flags & ApplicationInfo.FLAG_STOPPED) != 0);
+    }
+
+    static String bindDeferralReason(boolean packagePresent, boolean packageEnabled,
+                                     boolean servicePresent, boolean serviceEnabled,
+                                     boolean packageStopped) {
+        if (!packagePresent) return "package_missing";
+        if (!packageEnabled) return "package_disabled";
+        if (!servicePresent) return "service_missing";
+        if (!serviceEnabled) return "service_disabled";
+        if (packageStopped) return "package_stopped";
+        return "";
     }
 
     private void onConnected(int expectedGeneration, Connection source,

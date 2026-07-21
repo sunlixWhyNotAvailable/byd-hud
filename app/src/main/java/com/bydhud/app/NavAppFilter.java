@@ -82,6 +82,13 @@ final class NavAppFilter {
         return visible;
     }
 
+    static Set<String> installedVisibleCapturePackages(
+            Context context, Collection<String> packages) {
+        Set<String> visible = visibleCapturePackages(context, packages);
+        visible.removeIf(packageName -> !isInstalledPackage(context, packageName));
+        return visible;
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static Set<String> curatedNavigationPackages() {
         Set<String> packages = new TreeSet<>();
@@ -143,6 +150,16 @@ final class NavAppFilter {
             ApplicationInfo info = packageManager.getApplicationInfo(packageName, 0);
             int systemFlags = ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP;
             return (info.flags & systemFlags) != 0;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private static boolean isInstalledPackage(Context context, String packageName) {
+        if (context == null || packageName.isEmpty()) return false;
+        try {
+            context.getPackageManager().getApplicationInfo(packageName, 0);
+            return true;
         } catch (Exception ignored) {
             return false;
         }

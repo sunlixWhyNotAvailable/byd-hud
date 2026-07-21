@@ -769,6 +769,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isStreetOutputEnabled(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
+                HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isFullscreenDashboardEnabled(this),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 HudPrefs.isRoundaboutLeftHandTraffic(this),
@@ -1093,6 +1094,10 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetWazeAlertsEnabled(boolean enabled) {
         setWazeAlertsEnabled(enabled);
+    }
+
+    public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
+        setWazeScreenCaptureEnabled(enabled);
     }
 
     public void composeSetFullscreenDashboardEnabled(boolean enabled) {
@@ -1482,6 +1487,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean streetOutputEnabled;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
+        public final boolean wazeScreenCaptureEnabled;
         public final boolean fullscreenDashboardEnabled;
         public final boolean smallDistanceClampEnabled;
         public final boolean roundaboutLeftHandTraffic;
@@ -1524,6 +1530,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
+                boolean wazeScreenCaptureEnabled,
                 boolean fullscreenDashboardEnabled,
                 boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
@@ -1550,6 +1557,7 @@ public final class MainActivity extends ComponentActivity {
             this.streetOutputEnabled = streetOutputEnabled;
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
+            this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
@@ -2443,6 +2451,14 @@ public final class MainActivity extends ComponentActivity {
         NavHudLiveSender.get(this).onWazeAlertsPreferenceChanged(enabled);
         appendStatus("Waze alerts " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui waze_alerts=" + enabled);
+        refreshControls();
+    }
+
+    private void setWazeScreenCaptureEnabled(boolean enabled) {
+        HudPrefs.setWazeScreenCaptureEnabled(this, enabled);
+        NavHudLiveSender.get(this).onWazeScreenCapturePreferenceChanged(enabled);
+        appendStatus("Waze screen capture " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui waze_screen_capture=" + enabled);
         refreshControls();
     }
 

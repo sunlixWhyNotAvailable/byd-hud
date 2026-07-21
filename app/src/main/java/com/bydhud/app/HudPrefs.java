@@ -19,6 +19,7 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_STREET = "output_street";
     private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
+    private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
@@ -134,6 +135,14 @@ final class HudPrefs {
 
     static void setWazeAlertsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_WAZE_ALERTS, enabled).apply();
+    }
+
+    static boolean isWazeScreenCaptureEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_WAZE_SCREEN_CAPTURE, false);
+    }
+
+    static void setWazeScreenCaptureEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_WAZE_SCREEN_CAPTURE, enabled).apply();
     }
 
     static boolean isFullscreenDashboardEnabled(Context context) {
