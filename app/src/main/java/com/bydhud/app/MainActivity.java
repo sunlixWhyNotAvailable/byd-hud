@@ -83,6 +83,8 @@ public final class MainActivity extends ComponentActivity {
     private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageForceRefreshPending = new AtomicBoolean(false);
     private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
+    private volatile Map<String, String> appVersionNames = Collections.emptyMap();
+    private volatile long appScanRevision;
     private HudOutputCoordinator hudOutput;
 
     private TextView statusView;
@@ -864,7 +866,7 @@ public final class MainActivity extends ComponentActivity {
         return new ComposeAppRow(
                 app.label,
                 app.packageName,
-                displayPackageLine(app.packageName),
+                composePackageVersions(app.packageName, appVersionNames),
                 installed,
                 runtimeBacked,
                 observed,
@@ -1260,7 +1262,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public long composeAppsScanRevision() {
-        return NavAppTaskScanner.get(this).currentSnapshot().scannedAtMs;
+        return appScanRevision;
     }
 
     public String composeHudDeliveryStatus() {
@@ -1287,6 +1289,8 @@ public final class MainActivity extends ComponentActivity {
         new Thread(() -> {
             try {
                 NavAppTaskScanner.Snapshot scan = NavAppTaskScanner.get(appContext).forceScan();
+                appVersionNames = scanInstalledAppVersions(scan);
+                appScanRevision = scan.scannedAtMs;
                 AppEventLogger.event(appContext, "apps_refresh force=" + force
                         + " source=" + scan.source
                         + " rows=" + scan.rows.size()
@@ -1296,6 +1300,26 @@ public final class MainActivity extends ComponentActivity {
                 handler.post(this::refreshActiveAppsList);
             }
         }, "bydhud-app-scan").start();
+    }
+
+    private Map<String, String> scanInstalledAppVersions(NavAppTaskScanner.Snapshot scan) {
+        Set<String> packages = new HashSet<>(NavAppFilter.curatedNavigationPackages());
+        if (scan != null) {
+            for (NavAppTaskScanner.Row row : scan.rows) {
+                packages.add(row.packageName);
+            }
+        }
+        Map<String, String> versions = new HashMap<>();
+        PackageManager packageManager = getPackageManager();
+        for (String packageName : packages) {
+            try {
+                PackageInfo packageInfo = packageManager.getPackageInfo(packageName, 0);
+                versions.put(packageName, packageInfo.versionName == null ? "" : packageInfo.versionName);
+            } catch (PackageManager.NameNotFoundException ignored) {
+                // Packages can disappear between the task scan and metadata lookup.
+            }
+        }
+        return Collections.unmodifiableMap(versions);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1703,7 +1727,7 @@ public final class MainActivity extends ComponentActivity {
     public static final class ComposeAppRow {
         public final String label;
         public final String packageName;
-        public final String packageLine;
+        public final List<ComposePackageVersion> packageVersions;
         public final boolean installed;
         public final boolean runtimeBacked;
         public final boolean observed;
@@ -1717,14 +1741,17 @@ public final class MainActivity extends ComponentActivity {
         public final String processName;
         public final int importance;
 
-        ComposeAppRow(String label, String packageName, String packageLine, boolean installed,
+        ComposeAppRow(String label, String packageName, List<ComposePackageVersion> packageVersions,
+                boolean installed,
                 boolean runtimeBacked, boolean observed, boolean supportedHud,
                 boolean supportedSection, boolean hudEnabled, boolean logOnlyEnabled,
                 boolean onDashboard, boolean dashboardStateKnown,
                 boolean dashboardMoveInProgress, String processName, int importance) {
             this.label = label == null ? "" : label;
             this.packageName = packageName == null ? "" : packageName;
-            this.packageLine = packageLine == null ? "" : packageLine;
+            this.packageVersions = packageVersions == null
+                    ? Collections.<ComposePackageVersion>emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(packageVersions));
             this.installed = installed;
             this.runtimeBacked = runtimeBacked;
             this.observed = observed;
@@ -1737,6 +1764,16 @@ public final class MainActivity extends ComponentActivity {
             this.dashboardMoveInProgress = dashboardMoveInProgress;
             this.processName = processName == null ? "" : processName;
             this.importance = importance;
+        }
+    }
+
+    public static final class ComposePackageVersion {
+        public final String packageName;
+        public final String versionName;
+
+        ComposePackageVersion(String packageName, String versionName) {
+            this.packageName = packageName == null ? "" : packageName;
+            this.versionName = versionName == null ? "" : versionName;
         }
     }
 
@@ -1962,6 +1999,35 @@ public final class MainActivity extends ComponentActivity {
             return GMAPS_REVANCED_PACKAGE + " / " + GMAPS_OFFICIAL_PACKAGE;
         }
         return packageName;
+    }
+
+    static List<ComposePackageVersion> composePackageVersions(
+            String packageName,
+            Map<String, String> versions) {
+        String normalized = normalizePackage(packageName);
+        Map<String, String> safeVersions = versions == null
+                ? Collections.<String, String>emptyMap()
+                : versions;
+        List<ComposePackageVersion> result = new ArrayList<>();
+        if (!isGoogleMapsAlias(normalized)) {
+            result.add(new ComposePackageVersion(normalized, safeVersions.get(normalized)));
+            return result;
+        }
+        if (safeVersions.containsKey(GMAPS_OFFICIAL_PACKAGE)) {
+            result.add(new ComposePackageVersion(
+                    GMAPS_OFFICIAL_PACKAGE,
+                    safeVersions.get(GMAPS_OFFICIAL_PACKAGE)));
+        }
+        if (safeVersions.containsKey(GMAPS_REVANCED_PACKAGE)) {
+            result.add(new ComposePackageVersion(
+                    GMAPS_REVANCED_PACKAGE,
+                    safeVersions.get(GMAPS_REVANCED_PACKAGE)));
+        }
+        if (result.isEmpty()) {
+            result.add(new ComposePackageVersion(GMAPS_OFFICIAL_PACKAGE, ""));
+            result.add(new ComposePackageVersion(GMAPS_REVANCED_PACKAGE, ""));
+        }
+        return result;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

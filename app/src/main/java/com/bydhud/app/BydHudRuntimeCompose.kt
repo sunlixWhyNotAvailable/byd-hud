@@ -222,6 +222,10 @@ private data class Copy(
     val basicNavigationOutput: String,
     val extraNavigationOptions: String,
     val dashboardControl: String,
+    val notice: String,
+    val wazeDirectNotice: String,
+    val wazeSupportedVersions: String,
+    val screenCaptureUnsupportedNotice: String,
     val pngOutput: String,
     val pngHint: String,
     val nativeOutput: String,
@@ -906,6 +910,30 @@ private fun OptionsTab(
     onShutdownClick: () -> Unit
 ) {
     LazyPageSurface(copy.main, copy.mainHint, palette) {
+        item(key = "notice") {
+            Section(copy.notice, palette) {
+                Text(
+                    text = buildAnnotatedString {
+                        append(copy.wazeDirectNotice)
+                        append(" ")
+                        withStyle(SpanStyle(color = palette.yellow, fontWeight = FontWeight.SemiBold)) {
+                            append(copy.wazeSupportedVersions)
+                        }
+                    },
+                    color = palette.text,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(14.dp)
+                )
+                Text(
+                    text = copy.screenCaptureUnsupportedNotice,
+                    color = palette.muted,
+                    fontSize = 14.sp,
+                    lineHeight = 20.sp,
+                    modifier = Modifier.padding(horizontal = 14.dp).padding(bottom = 14.dp)
+                )
+            }
+        }
         item(key = "runtime-permissions") {
             Section(copy.permissionsRuntime, palette) {
                 SettingRow(
@@ -1643,7 +1671,18 @@ private fun AppRow(
     ) {
         Column(modifier = Modifier.weight(1f)) {
             Text(appLabel(row), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-            Text(row.packageLine.ifBlank { row.packageName }, color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+            row.packageVersions.forEach { packageVersion ->
+                val versionSuffix = packageVersion.versionName
+                    .takeIf { it.isNotBlank() }
+                    ?.let { "  •  ${copy.appVersion} $it" }
+                    .orEmpty()
+                Text(
+                    "${packageVersion.packageName}$versionSuffix",
+                    color = palette.muted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 13.sp
+                )
+            }
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 if (supported) {
@@ -3314,6 +3353,10 @@ private fun enCopy() = Copy(
     basicNavigationOutput = "Basic navigation output",
     extraNavigationOptions = "Extra navigation options",
     dashboardControl = "Dashboard control",
+    notice = "Notice",
+    wazeDirectNotice = "Waze HUD output works best through the direct channel. Supported versions:",
+    wazeSupportedVersions = "stock 4.95.0.3 / patched 5.20.0.1",
+    screenCaptureUnsupportedNotice = "The screen capture channel is no longer supported by the developer.",
     pngOutput = "PNG output",
     pngHint = "Send maneuver source image payload.",
     nativeOutput = "Native output",
@@ -3483,6 +3526,10 @@ private fun uaCopy() = enCopy().copy(
     basicNavigationOutput = "Базовий вивід навігації",
     extraNavigationOptions = "Додаткові функції навігації",
     dashboardControl = "Керування дашбордом",
+    notice = "Примітка",
+    wazeDirectNotice = "Вивід Waze на HUD найкраще працює через прямий канал. Підтримувані версії:",
+    wazeSupportedVersions = "стокова 4.95.0.3 / патчена 5.20.0.1",
+    screenCaptureUnsupportedNotice = "Канал захоплення екрану більше не підтримується розробником.",
     pngOutput = "Вивід PNG",
     pngHint = "Надсилати зображення маневру.",
     nativeOutput = "Вивід штатного маневру",
