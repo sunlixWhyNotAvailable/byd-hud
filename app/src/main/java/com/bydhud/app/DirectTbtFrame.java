@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/** Immutable Waze turn-by-turn state, independent of the vehicle transport. */
+/** Immutable direct turn-by-turn state, independent of the navigator and vehicle transport. */
 public final class DirectTbtFrame {
     private final int rawManeuverType;
     private final int amapManeuver;
@@ -101,6 +101,12 @@ public final class DirectTbtFrame {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
                 lanes, overlay);
+    }
+
+    DirectTbtFrame withManeuverPng(byte[] png) {
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, png, lanePng,
+                lanes, alertOverlay);
     }
 
     boolean hasLaneGuidance() {

@@ -607,11 +607,6 @@ public final class WazeDirectChannel {
         boolean maneuverChanged = previousKnownRaw >= 0
                 && nextRaw >= 0 && previousKnownRaw != nextRaw;
         if (nextRaw >= 0) lastKnownRawManeuverType = nextRaw;
-        if (alert.isActive() && maneuverChanged) {
-            log("alert superseded id=" + alert.getId()
-                    + " oldRaw=" + previousKnownRaw + " newRaw=" + nextRaw);
-            clearAlert(false, "maneuver_changed");
-        }
         if (!authoritativeLanes && !maneuverChanged
                 && !next.hasLaneGuidance() && navigationFrame.hasLaneGuidance()) {
             next = next.withLanesFrom(navigationFrame);
@@ -947,6 +942,10 @@ public final class WazeDirectChannel {
         }
     }
 
+    // Intermediate maneuver codes: 0 unknown; 2/3 normal left/right;
+    // 4/5 slight or keep left/right; 6/7 sharp left/right; 8/19 U-turn left/right;
+    // 9 straight/depart/name-change/unspecified-merge/ferry; 15 destination;
+    // 22/25 clockwise/counter-clockwise roundabout.
     private static int mapWazeToAmap(int type) {
         switch (type) {
             case Maneuver.TYPE_TURN_NORMAL_LEFT:
@@ -1002,7 +1001,12 @@ public final class WazeDirectChannel {
             case Maneuver.TYPE_ROUNDABOUT_ENTER_CCW:
             case Maneuver.TYPE_ROUNDABOUT_EXIT_CCW:
                 return 25;
+            case Maneuver.TYPE_DEPART:
+            case Maneuver.TYPE_NAME_CHANGE:
+            case Maneuver.TYPE_MERGE_SIDE_UNSPECIFIED:
             case Maneuver.TYPE_STRAIGHT:
+            case Maneuver.TYPE_FERRY_BOAT:
+            case Maneuver.TYPE_FERRY_TRAIN:
                 return 9;
             default:
                 return 0;
@@ -1010,12 +1014,30 @@ public final class WazeDirectChannel {
     }
 
     private static int mapAmapToByd(int amap) {
-        final int[] mapping = {
-                0, 0, 1, 2, 3, 5, 7, 8, 9, 11,
-                45, 13, 24, 46, 47, 48, 49, 14, 23, 10,
-                12, 15, 18, 20, 22, 16, 17, 19, 21
-        };
-        return amap >= 0 && amap < mapping.length ? mapping[amap] : 0;
+        switch (amap) {
+            case 2:
+            case 6:
+                return 1;
+            case 3:
+            case 7:
+                return 2;
+            case 4:
+                return 3;
+            case 5:
+                return 5;
+            case 8:
+                return 7;
+            case 19:
+                return 8;
+            case 9:
+                return 11;
+            case 15:
+            case 22:
+            case 25:
+                return 99;
+            default:
+                return 0;
+        }
     }
 
     public interface Listener {

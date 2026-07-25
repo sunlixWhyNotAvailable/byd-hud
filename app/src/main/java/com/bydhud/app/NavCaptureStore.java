@@ -6,7 +6,6 @@ import android.content.Context;
 import android.util.Log;
 
 import java.io.File;
-import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.security.MessageDigest;
@@ -130,34 +129,6 @@ final class NavCaptureStore {
             return false;
         }
         return rotate(file);
-    }
-
-    static synchronized String saveDirectArtifact(
-            Context context, String kind, byte[] bytes) {
-        long wallClockMs = System.currentTimeMillis();
-        return saveDirectArtifact(context, todayDir(wallClockMs), kind, bytes);
-    }
-
-    static synchronized String saveDirectArtifact(
-            Context context, String targetDay, String kind, byte[] bytes) {
-        String fileName = directArtifactFileName(kind, bytes);
-        if (fileName.isEmpty()) {
-            return "";
-        }
-        return NavigationLogStorage.withReadLock(() -> {
-            File dir = NavigationLogStorage.directCaptureDir(context, targetDay);
-            File file = new File(dir, fileName);
-            if (file.isFile()) {
-                return NavigationLogStorage.WAZE_DIRECT_DIR + "/" + fileName;
-            }
-            try (FileOutputStream out = new FileOutputStream(file)) {
-                out.write(bytes);
-                return NavigationLogStorage.WAZE_DIRECT_DIR + "/" + fileName;
-            } catch (IOException e) {
-                Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
-                return "";
-            }
-        });
     }
 
     static String directArtifactFileName(String kind, byte[] bytes) {

@@ -27,6 +27,7 @@ final class NavHudLiveSender {
     private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
     private static final long DASHBOARD_WATCHDOG_INTERVAL_MS = 5000L;
     private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
+    private static final long GMAPS_DIRECT_TIMEOUT_MS = 5000L;
 
     private static NavHudLiveSender instance;
 
@@ -73,6 +74,7 @@ final class NavHudLiveSender {
     private final Handler handler;
     private final HudOutputCoordinator hudOutput;
     private final WazeDirectChannel wazeDirectChannel;
+    private final GMapsDirectChannel gmapsDirectChannel;
     private final Object wazeDirectFrameLock = new Object();
     private DirectTbtFrame pendingWazeDirectFrame;
     private String pendingWazeDirectFrameReason = "";
@@ -123,6 +125,11 @@ final class NavHudLiveSender {
     private boolean wazeFallbackReadinessCheckInFlight;
     private int wazeFallbackReadinessGeneration;
     private long lastWazeFallbackReadinessCheckMs;
+    private boolean gmapsDirectFrameReceived;
+    private boolean gmapsDirectFallbackActive;
+    private boolean gmapsDirectRouteEnded;
+    private boolean gmapsDirectTimeoutScheduled;
+    private long lastGMapsDirectRegistrationProbeMs;
 
     private final Runnable wazeDirectProbeTimeout = () -> {
         wazeDirectProbeScheduled = false;
@@ -136,6 +143,25 @@ final class NavHudLiveSender {
         }
         activateWazeLegacyFallback("direct-frame-timeout");
     };
+
+    private final Runnable gmapsDirectTimeout = this::onGMapsDirectTimeout;
+
+    private void onGMapsDirectTimeout() {
+        gmapsDirectTimeoutScheduled = false;
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                || gmapsDirectRouteEnded) {
+            return;
+        }
+        gmapsDirectFrameReceived = false;
+        gmapsDirectFallbackActive = true;
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.LEGACY, "gmaps-direct-timeout");
+        hudOutput.ensureBound("gmaps-direct-timeout");
+        lastGMapsDirectRegistrationProbeMs = SystemClock.elapsedRealtime();
+        gmapsDirectChannel.ensureRegistered("frame-timeout");
+        sendLatestIfReady("gmaps-direct-timeout");
+        log("gmaps source=legacy reason=direct-frame-timeout");
+    }
 
     private final Runnable sendLoop = new Runnable() {
         @Override
@@ -167,6 +193,11 @@ final class NavHudLiveSender {
             }
             if (WAZE_PACKAGE.equals(activePackage) && !wazeFallbackActive) {
                 log("notification removed ignored: direct Waze owns route lifecycle");
+                return;
+            }
+            if (GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                    && !gmapsDirectFallbackActive) {
+                log("notification removed ignored: direct GMaps owns route lifecycle");
                 return;
             }
             if (hasOngoingGMapsNavigationNotification()) {
@@ -201,6 +232,26 @@ final class NavHudLiveSender {
                 return;
             }
             long now = SystemClock.elapsedRealtime();
+            if (GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) {
+                if (gmapsDirectRouteEnded) {
+                    if (now - lastGMapsDirectRegistrationProbeMs
+                            >= GMAPS_DIRECT_TIMEOUT_MS) {
+                        lastGMapsDirectRegistrationProbeMs = now;
+                        gmapsDirectChannel.ensureRegistered("route-ended-health");
+                    }
+                    scheduleRouteHealthLoop();
+                    return;
+                }
+                if (gmapsDirectFrameReceived || !gmapsDirectFallbackActive) {
+                    if (!gmapsDirectTimeoutScheduled) scheduleGMapsDirectTimeout();
+                    scheduleRouteHealthLoop();
+                    return;
+                }
+                if (now - lastGMapsDirectRegistrationProbeMs >= GMAPS_DIRECT_TIMEOUT_MS) {
+                    lastGMapsDirectRegistrationProbeMs = now;
+                    gmapsDirectChannel.ensureRegistered("fallback-health");
+                }
+            }
             if (WAZE_PACKAGE.equals(activePackage) && !wazeFallbackActive) {
                 scheduleWazeDirectColdTimeout("route-health");
                 scheduleRouteHealthLoop();
@@ -249,6 +300,11 @@ final class NavHudLiveSender {
             }
             long now = SystemClock.elapsedRealtime();
             if (NavTextNormalizer.sourceApp(activePackage) == NavSnapshot.SourceApp.GOOGLE_MAPS) {
+                if (GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                        && !gmapsDirectFallbackActive) {
+                    log("accessibility no-route ignored: direct GMaps owns route lifecycle");
+                    return;
+                }
                 if (hasOngoingGMapsNavigationNotification()) {
                     log("accessibility no-route ignored: ongoing GMaps notification package="
                             + activePackage + " key=" + ongoingGMapsNotificationKey);
@@ -292,6 +348,11 @@ final class NavHudLiveSender {
             }
             if (WAZE_PACKAGE.equals(packageName) && !wazeFallbackActive) {
                 log("arrival ignored: direct Waze owns route lifecycle");
+                return;
+            }
+            if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)
+                    && !gmapsDirectFallbackActive) {
+                log("arrival ignored: direct GMaps owns route lifecycle");
                 return;
             }
             long now = SystemClock.elapsedRealtime();
@@ -365,6 +426,43 @@ final class NavHudLiveSender {
                         Log.i(TAG, line);
                         WazeCaptureDebugWriter.get().appEvent(
                                 context, "nav_live " + line);
+                    }
+                });
+        this.gmapsDirectChannel = new GMapsDirectChannel(context,
+                new GMapsDirectChannel.Listener() {
+                    @Override
+                    public void onHandshakeAvailable(String reason) {
+                        handler.post(() -> onGMapsDirectHandshakeAvailable(reason));
+                    }
+
+                    @Override
+                    public void onHandshakeUnavailable(String reason) {
+                        handler.post(() -> onGMapsDirectHandshakeUnavailable(reason));
+                    }
+
+                    @Override
+                    public void onNavigationStarted(String reason) {
+                        handler.post(() -> onGMapsDirectNavigationStarted(reason));
+                    }
+
+                    @Override
+                    public void onFrame(DirectTbtFrame frame, String reason) {
+                        handler.post(() -> onGMapsDirectFrame(frame, reason));
+                    }
+
+                    @Override
+                    public void onNavigationEnded(String reason) {
+                        long detectedAtMs = SystemClock.elapsedRealtime();
+                        hudOutput.endDirectOutput(
+                                "gmaps-direct-ended:" + safeReason(reason), detectedAtMs);
+                        handler.post(() -> onGMapsDirectNavigationEnded(reason, detectedAtMs));
+                    }
+
+                    @Override
+                    public void onLog(String message) {
+                        String line = "gmaps_direct " + normalizeString(message);
+                        Log.i(TAG, line);
+                        AppEventLogger.event(context, "nav_live " + line);
                     }
                 });
     }
@@ -530,19 +628,6 @@ final class NavHudLiveSender {
         byte[] lanes = frame.getLanePng();
         DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(frame, options);
-        String maneuverArtifact = "";
-        String laneArtifact = "";
-        String alertArtifact = "";
-        if (HudPrefs.isDetailedDebugArtifactsEnabled(context)) {
-            maneuverArtifact = NavCaptureStore.saveDirectArtifact(
-                    context, targetDay, "maneuver", maneuver);
-            laneArtifact = NavCaptureStore.saveDirectArtifact(
-                    context, targetDay, "lanes", lanes);
-            if (alert.isActive()) {
-                alertArtifact = NavCaptureStore.saveDirectArtifact(
-                        context, targetDay, "alert", alert.getManeuverPng());
-            }
-        }
         NavCaptureStore.writeRawEvent(context, "waze_direct", WAZE_PACKAGE,
                 "reason=" + safeReason(reason)
                         + " receivedAtElapsedMs=" + receivedAtMs
@@ -563,13 +648,114 @@ final class NavHudLiveSender {
                         + " hudDistanceM=" + prepared.distanceMeters()
                         + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
                         + " hudLaneCount=" + prepared.laneCount()
-                        + " hudLaneBytes=" + prepared.lanePngBytes()
-                        + " maneuverArtifact=" + maneuverArtifact
-                        + " laneArtifact=" + laneArtifact
-                        + " alertArtifact=" + alertArtifact,
+                        + " hudLaneBytes=" + prepared.lanePngBytes(),
                 receivedAtMs,
                 receivedWallClockMs,
                 targetDay);
+    }
+
+    private void startGMapsDirectProbe(String reason) {
+        resetGMapsDirectSessionState();
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                "gmaps-direct-probe:" + safeReason(reason));
+        gmapsDirectChannel.start(reason);
+        scheduleGMapsDirectTimeout();
+        log("gmaps source=waiting_direct timeoutMs=" + GMAPS_DIRECT_TIMEOUT_MS
+                + " reason=" + safeReason(reason));
+    }
+
+    private void onGMapsDirectHandshakeAvailable(String reason) {
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+        log("gmaps direct handshake available reason=" + safeReason(reason));
+    }
+
+    private void onGMapsDirectHandshakeUnavailable(String reason) {
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                || gmapsDirectRouteEnded) return;
+        gmapsDirectFrameReceived = false;
+        if (!gmapsDirectTimeoutScheduled) scheduleGMapsDirectTimeout();
+        log("gmaps direct handshake unavailable reason=" + safeReason(reason));
+    }
+
+    private void onGMapsDirectNavigationStarted(String reason) {
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+        gmapsDirectRouteEnded = false;
+        gmapsDirectFrameReceived = false;
+        gmapsDirectFallbackActive = false;
+        lastGMapsDirectRegistrationProbeMs = 0L;
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                "gmaps-direct-start:" + safeReason(reason));
+        scheduleGMapsDirectTimeout();
+        log("gmaps direct navigation started reason=" + safeReason(reason));
+    }
+
+    private void onGMapsDirectFrame(DirectTbtFrame frame, String reason) {
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                || gmapsDirectRouteEnded || frame == null) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        gmapsDirectFrameReceived = true;
+        gmapsDirectFallbackActive = false;
+        lastGMapsDirectRegistrationProbeMs = 0L;
+        cancelGMapsDirectTimeout();
+        NavRouteStateStore.get(context).updateFromVisualRouteEvidence(
+                GMapsDirectChannel.PACKAGE_NAME, "gmaps_direct", safeReason(reason), now);
+        hudOutput.publishDirect(frame, reason, now);
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.DIRECT,
+                "gmaps-direct-frame:" + safeReason(reason));
+        scheduleGMapsDirectTimeout();
+        log("gmaps source=direct reason=" + safeReason(reason));
+    }
+
+    private void onGMapsDirectNavigationEnded(String reason, long detectedAtMs) {
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+        boolean fallbackWasActive = gmapsDirectFallbackActive;
+        cancelGMapsDirectTimeout();
+        gmapsDirectFrameReceived = false;
+        gmapsDirectFallbackActive = false;
+        gmapsDirectRouteEnded = true;
+        lastGMapsDirectRegistrationProbeMs = 0L;
+        resetLatestPayload();
+        NavRouteStateStore.get(context).markRouteEnded(
+                GMapsDirectChannel.PACKAGE_NAME,
+                "gmaps-direct-ended:" + safeReason(reason),
+                detectedAtMs);
+        if (fallbackWasActive) {
+            hudOutput.selectNavigationSource(
+                    HudOutputCoordinator.Source.NONE,
+                    "gmaps-direct-ended-from-fallback:" + safeReason(reason));
+        }
+        log("gmaps direct navigation ended main_handoff_ms="
+                + Math.max(0L, SystemClock.elapsedRealtime() - detectedAtMs)
+                + " reason=" + safeReason(reason));
+    }
+
+    private void scheduleGMapsDirectTimeout() {
+        handler.removeCallbacks(gmapsDirectTimeout);
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                || gmapsDirectRouteEnded) {
+            gmapsDirectTimeoutScheduled = false;
+            return;
+        }
+        gmapsDirectTimeoutScheduled = true;
+        handler.postDelayed(gmapsDirectTimeout, GMAPS_DIRECT_TIMEOUT_MS);
+    }
+
+    private void cancelGMapsDirectTimeout() {
+        handler.removeCallbacks(gmapsDirectTimeout);
+        gmapsDirectTimeoutScheduled = false;
+    }
+
+    private void resetGMapsDirectSessionState() {
+        cancelGMapsDirectTimeout();
+        gmapsDirectFrameReceived = false;
+        gmapsDirectFallbackActive = false;
+        gmapsDirectRouteEnded = false;
+        lastGMapsDirectRegistrationProbeMs = 0L;
     }
 
     private void onWazeDirectNavigationEnded(String reason, long detectedAtMs) {
@@ -1054,6 +1240,11 @@ final class NavHudLiveSender {
             wazeDirectChannel.stop("source-switch:" + packageName);
             WazeCropCapture.get(context).stop("source-switch:" + packageName);
         }
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(previousPackage)
+                && !GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
+            resetGMapsDirectSessionState();
+            gmapsDirectChannel.stop("source-switch:" + packageName);
+        }
         cancelPendingRouteEndStops();
         active = true;
         activePackage = packageName;
@@ -1061,6 +1252,9 @@ final class NavHudLiveSender {
         log("start package=" + packageName + " reason=" + reason);
         if (WAZE_PACKAGE.equals(packageName)) {
             startWazeDirectProbe(reason);
+            requestActiveInputState(packageName, reason);
+        } else if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
+            startGMapsDirectProbe(reason);
             requestActiveInputState(packageName, reason);
         } else {
             hudOutput.selectNavigationSource(
@@ -1398,6 +1592,10 @@ final class NavHudLiveSender {
         if (WAZE_PACKAGE.equals(packageName)) {
             resetWazeDirectSessionState();
             wazeDirectChannel.stop(reason);
+        }
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
+            resetGMapsDirectSessionState();
+            gmapsDirectChannel.stop(reason);
         }
         resetLatestPayload();
         hudOutput.selectNavigationSource(
@@ -1747,6 +1945,8 @@ final class NavHudLiveSender {
         activePackage = "";
         resetWazeDirectSessionState();
         wazeDirectChannel.stop("package-replaced-reinit");
+        resetGMapsDirectSessionState();
+        gmapsDirectChannel.stop("package-replaced-reinit");
         WazeCropCapture.get(context).stop("package-replaced-reinit");
         WazeMediaProjectionController.resetForRuntimeReinit(
                 context, "nav-start:" + packageName + ":" + safeReason(reason));
