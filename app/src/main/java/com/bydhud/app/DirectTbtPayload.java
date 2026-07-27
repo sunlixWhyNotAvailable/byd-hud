@@ -14,7 +14,7 @@ import java.util.Objects;
 public final class DirectTbtPayload {
     private static final int NATIVE_BLANK_ID = 99;
     private static final Object OPTIONS_LOCK = new Object();
-    private static final Options[] OPTIONS_CACHE = new Options[64];
+    private static final Options[] OPTIONS_CACHE = new Options[128];
     private static byte[] cachedBlankS72Png;
 
     private DirectTbtPayload() {
@@ -46,12 +46,13 @@ public final class DirectTbtPayload {
                 : (blankLaneManeuver || blankDestinationManeuver
                 ? safeOptions.blankS72Png.clone() : navManeuverPng);
         int nativeManeuver = alert.isActive()
-                ? (safeFrame.getRawManeuverType() >= 0
-                ? safeFrame.getBydManeuver() : NATIVE_BLANK_ID)
+                ? NATIVE_BLANK_ID
                 : (blankLaneManeuver || destinationManeuver
                 ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
         int distanceMeters = alert.isActive()
                 ? alert.getDistanceMeters() : safeFrame.getDistanceMeters();
+        distanceMeters = HudDisplayPolicy.displayDistanceMeters(
+                distanceMeters, safeOptions.clampSmallDistance);
         String displayText;
         if (alert.isActive()) {
             displayText = safeOptions.street ? alert.getDisplayText() : "";
@@ -251,7 +252,7 @@ public final class DirectTbtPayload {
 
     /** Independent switches for each optional cluster output. */
     public static final class Options {
-        public static final Options ALL = new Options(true, true, true, true, true, true);
+        public static final Options ALL = new Options(true, true, true, true, true, true, false);
 
         public final boolean png;
         public final boolean nativeManeuver;
@@ -259,26 +260,36 @@ public final class DirectTbtPayload {
         public final boolean distance;
         public final boolean street;
         public final boolean textDirection;
+        public final boolean clampSmallDistance;
         private final byte[] blankS72Png;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
                        boolean distance, boolean street) {
-            this(png, nativeManeuver, lanes, distance, street, street, null);
+            this(png, nativeManeuver, lanes, distance, street, street, false, null);
         }
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
                        boolean distance, boolean street, boolean textDirection) {
-            this(png, nativeManeuver, lanes, distance, street, textDirection, null);
+            this(png, nativeManeuver, lanes, distance, street, textDirection, false, null);
         }
 
         Options(boolean png, boolean nativeManeuver, boolean lanes,
-                boolean distance, boolean street, boolean textDirection, byte[] blankS72Png) {
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, null);
+        }
+
+        Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, byte[] blankS72Png) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
             this.distance = distance;
             this.street = street;
             this.textDirection = textDirection;
+            this.clampSmallDistance = clampSmallDistance;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
         }
 
@@ -290,18 +301,20 @@ public final class DirectTbtPayload {
             boolean distance = HudPrefs.isDistanceOutputEnabled(safeContext);
             boolean street = HudPrefs.isStreetOutputEnabled(safeContext);
             boolean textDirection = HudPrefs.isTextDirectionOutputEnabled(safeContext);
+            boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(safeContext);
             int key = (png ? 1 : 0)
                     | (nativeManeuver ? 2 : 0)
                     | (lanes ? 4 : 0)
                     | (distance ? 8 : 0)
                     | (street ? 16 : 0)
-                    | (textDirection ? 32 : 0);
+                    | (textDirection ? 32 : 0)
+                    | (clampSmallDistance ? 64 : 0);
             synchronized (OPTIONS_LOCK) {
                 Options cached = OPTIONS_CACHE[key];
                 if (cached != null) return cached;
                 if (cachedBlankS72Png == null) cachedBlankS72Png = loadBlankS72(safeContext);
                 cached = new Options(png, nativeManeuver, lanes, distance, street, textDirection,
-                        cachedBlankS72Png);
+                        clampSmallDistance, cachedBlankS72Png);
                 OPTIONS_CACHE[key] = cached;
                 return cached;
             }

@@ -18,10 +18,12 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 //defines the NavigationLogStorage module boundary so related behavior stays readable inside one unit.
@@ -31,6 +33,7 @@ final class NavigationLogStorage {
     static final String LOGCAT_DIR = "logcat";
     static final String WAZE_CROP_DIR = "waze-crop";
     static final String WAZE_DIRECT_DIR = "waze-direct";
+    static final String GMAPS_DIRECT_DIR = "gmaps-direct";
 
     private static final String TAG = "BydHudLogStorage";
     private static final String PUBLIC_ROOT = "/sdcard/Documents/" + ROOT_DIR;
@@ -40,6 +43,8 @@ final class NavigationLogStorage {
     private static final Object RETENTION_THROTTLE_LOCK = new Object();
     private static final Object RETENTION_WORKER_LOCK = new Object();
     private static final Object TOMBSTONE_CLEANUP_LOCK = new Object();
+    private static final Object ACTIVE_DIRECT_SESSION_LOCK = new Object();
+    private static final Set<String> ACTIVE_DIRECT_SESSIONS = new HashSet<>();
     private static final ReentrantReadWriteLock TOPOLOGY_GATE =
             new ReentrantReadWriteLock(true);
     private static final long BYTES_PER_GB = 1024L * 1024L * 1024L;
@@ -466,7 +471,8 @@ final class NavigationLogStorage {
             String activeCropDay) {
         return day != null && (day.equals(currentDay)
                 || day.equals(activeLogcatDay)
-                || day.equals(activeCropDay));
+                || day.equals(activeCropDay)
+                || hasActiveDirectSessionForDay(day, activeDirectSessionsSnapshot()));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -686,6 +692,48 @@ final class NavigationLogStorage {
         });
     }
 
+    static SessionPath openDirectSession(Context context, String sessionDir, String sessionName) {
+        return withReadLock(() -> {
+            SessionPath path = navCaptureSessionDir(context, sessionDir, sessionName);
+            String key = directSessionKey(path.localDir);
+            if (!key.isEmpty()) {
+                synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
+                    ACTIVE_DIRECT_SESSIONS.add(key);
+                }
+            }
+            return path;
+        });
+    }
+
+    static void closeDirectSession(File sessionDir) {
+        withReadLock(() -> {
+            String key = directSessionKey(sessionDir);
+            if (!key.isEmpty()) {
+                synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
+                    ACTIVE_DIRECT_SESSIONS.remove(key);
+                }
+            }
+        });
+    }
+
+    static void registerDirectSession(String day, String sessionDir, String sessionName) {
+        String key = directSessionKey(day, sessionDir, sessionName);
+        if (!key.isEmpty()) {
+            synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
+                ACTIVE_DIRECT_SESSIONS.add(key);
+            }
+        }
+    }
+
+    static void unregisterDirectSession(String day, String sessionDir, String sessionName) {
+        String key = directSessionKey(day, sessionDir, sessionName);
+        if (!key.isEmpty()) {
+            synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
+                ACTIVE_DIRECT_SESSIONS.remove(key);
+            }
+        }
+    }
+
     //schedules retention off the capture path so parser timing is not blocked by recursive deletion.
     private static void scheduleNavCaptureRetention(RetentionRequest request) {
         if (request == null) {
@@ -781,6 +829,7 @@ final class NavigationLogStorage {
                     activeSessionDir,
                     activeSessionName,
                     preserveScreenshotName,
+                    activeDirectSessionsSnapshot(),
                     request.maxBytes,
                     stats);
             return new RetentionOutcome(
@@ -823,6 +872,7 @@ final class NavigationLogStorage {
                 activeSessionDir,
                 activeSessionName,
                 preserveScreenshotName,
+                activeDirectSessionsSnapshot(),
                 maxBytes,
                 stats);
     }
@@ -835,6 +885,7 @@ final class NavigationLogStorage {
             String activeSessionDir,
             String activeSessionName,
             String preserveScreenshotName,
+            Set<String> activeDirectSessions,
             long maxBytes,
             RetentionStats stats) {
         if (roots == null || roots.isEmpty() || maxBytes <= 0L) {
@@ -853,8 +904,12 @@ final class NavigationLogStorage {
                 safeActiveDay,
                 safeActiveLogcatDay,
                 safeActiveSessionDay,
+                activeDirectSessions,
                 maxBytes,
                 stats);
+        if (isOverLimit(roots, maxBytes)) {
+            deleteOldDirectSessions(roots, activeDirectSessions, maxBytes, stats);
+        }
         if (!isOverLimit(roots, maxBytes) || safeActiveSessionDay.isEmpty()
                 || !WAZE_CROP_DIR.equals(safeSessionDir) || safeSessionName.isEmpty()) {
             return;
@@ -879,6 +934,7 @@ final class NavigationLogStorage {
             String activeDay,
             String activeLogcatDay,
             String activeSessionDay,
+            Set<String> activeDirectSessions,
             long maxBytes,
             RetentionStats stats) {
         List<File> days = new ArrayList<>();
@@ -894,6 +950,8 @@ final class NavigationLogStorage {
                         && !child.getName().equals(activeDay)
                         && !child.getName().equals(activeLogcatDay)
                         && !child.getName().equals(activeSessionDay)
+                        && !hasActiveDirectSessionForDay(
+                                child.getName(), activeDirectSessions)
                         && isCanonicalDescendant(root, child, true)) {
                     days.add(child);
                 }
@@ -906,6 +964,60 @@ final class NavigationLogStorage {
             }
             if (deleteRecursively(day, day.getParentFile(), stats)) {
                 logInfo("retention deleted day=" + day.getName());
+            }
+        }
+    }
+
+    private static void deleteOldDirectSessions(
+            List<File> roots,
+            Set<String> activeDirectSessions,
+            long maxBytes,
+            RetentionStats stats) {
+        List<File> sessions = new ArrayList<>();
+        for (File root : roots) {
+            File[] days = root == null ? null : root.listFiles();
+            if (days == null) {
+                continue;
+            }
+            for (File day : days) {
+                if (day == null || !day.isDirectory() || !isDayFolder(day)
+                        || !isCanonicalDescendant(root, day, true)) {
+                    continue;
+                }
+                collectInactiveDirectSessions(
+                        day, WAZE_DIRECT_DIR, activeDirectSessions, sessions);
+                collectInactiveDirectSessions(
+                        day, GMAPS_DIRECT_DIR, activeDirectSessions, sessions);
+            }
+        }
+        sortOldestFirst(sessions);
+        for (File session : sessions) {
+            if (!isOverLimit(roots, maxBytes)) {
+                return;
+            }
+            if (deleteRecursively(session, session.getParentFile(), stats)) {
+                logInfo("retention deleted direct session=" + session.getAbsolutePath());
+            }
+        }
+    }
+
+    private static void collectInactiveDirectSessions(
+            File day,
+            String directDir,
+            Set<String> activeDirectSessions,
+            List<File> sessions) {
+        File parent = new File(day, directDir);
+        File[] children = parent.listFiles();
+        if (children == null || !isCanonicalDescendant(day, parent, true)) {
+            return;
+        }
+        for (File session : children) {
+            if (session != null
+                    && session.isDirectory()
+                    && !activeDirectSessions.contains(directSessionKey(
+                            day.getName(), directDir, session.getName()))
+                    && isCanonicalDescendant(parent, session, true)) {
+                sessions.add(session);
             }
         }
     }
@@ -1156,6 +1268,48 @@ final class NavigationLogStorage {
         return file != null && file.getName().matches("\\d{8}");
     }
 
+    private static Set<String> activeDirectSessionsSnapshot() {
+        synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
+            return new HashSet<>(ACTIVE_DIRECT_SESSIONS);
+        }
+    }
+
+    private static boolean hasActiveDirectSessionForDay(
+            String day, Set<String> activeDirectSessions) {
+        if (day == null || activeDirectSessions == null) {
+            return false;
+        }
+        String prefix = day + "/";
+        for (String session : activeDirectSessions) {
+            if (session != null && session.startsWith(prefix)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static String directSessionKey(File session) {
+        File parent = session == null ? null : session.getParentFile();
+        File day = parent == null ? null : parent.getParentFile();
+        return directSessionKey(
+                day == null ? "" : day.getName(),
+                parent == null ? "" : parent.getName(),
+                session == null ? "" : session.getName());
+    }
+
+    private static String directSessionKey(
+            String day, String sessionDir, String sessionName) {
+        if (day == null || !day.matches("\\d{8}")
+                || (!WAZE_DIRECT_DIR.equals(sessionDir)
+                && !GMAPS_DIRECT_DIR.equals(sessionDir))) {
+            return "";
+        }
+        String safeSessionName = safePathSegment(sessionName, "");
+        return safeSessionName.isEmpty()
+                ? ""
+                : day + "/" + sessionDir + "/" + safeSessionName;
+    }
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isCaptureFramePng(String name) {
         String lower = name == null ? "" : name.toLowerCase(Locale.US);
@@ -1194,6 +1348,7 @@ final class NavigationLogStorage {
             String activeLogcatDay,
             String activeCropDay) {
         List<StorageRoot> roots = accessibleRootsLocked(context);
+        Set<String> activeDirectSessions = activeDirectSessionsSnapshot();
         Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
         long totalBytes = 0L;
         int totalSessions = 0;
@@ -1210,7 +1365,7 @@ final class NavigationLogStorage {
                     continue;
                 }
                 long bytes = folderSizeBytes(child, root.dir);
-                int sessions = countCropSessions(child);
+                int sessions = countSessions(child);
                 MutableStorageDay day = merged.get(child.getName());
                 if (day == null) {
                     day = new MutableStorageDay(child.getName());
@@ -1234,7 +1389,9 @@ final class NavigationLogStorage {
                     day.bytes,
                     day.name.equals(activeDay)
                             || day.name.equals(activeLogcatDay)
-                            || day.name.equals(activeCropDay),
+                            || day.name.equals(activeCropDay)
+                            || hasActiveDirectSessionForDay(
+                                    day.name, activeDirectSessions),
                     day.hasPublicStorage,
                     day.hasPrivateStorage));
         }
@@ -1246,8 +1403,14 @@ final class NavigationLogStorage {
                 totalSessions);
     }
 
-    private static int countCropSessions(File day) {
-        File parent = new File(day, WAZE_CROP_DIR);
+    static int countSessions(File day) {
+        return countSessions(day, WAZE_CROP_DIR)
+                + countSessions(day, WAZE_DIRECT_DIR)
+                + countSessions(day, GMAPS_DIRECT_DIR);
+    }
+
+    private static int countSessions(File day, String sessionDir) {
+        File parent = new File(day, sessionDir);
         File[] sessions = parent.listFiles();
         if (sessions == null) {
             return 0;

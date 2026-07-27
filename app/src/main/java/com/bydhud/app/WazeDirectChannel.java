@@ -130,6 +130,10 @@ public final class WazeDirectChannel {
         runOnChannel(() -> stopOnChannel(reason));
     }
 
+    boolean isActive() {
+        return active;
+    }
+
     public void shutdown(String reason) {
         runOnChannel(() -> {
             if (shutdown) return;

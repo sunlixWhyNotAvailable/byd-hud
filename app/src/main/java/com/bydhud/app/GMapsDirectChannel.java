@@ -52,6 +52,7 @@ final class GMapsDirectChannel {
     private final Messenger inbound;
     private final GMapsDirectManeuverMap maneuverMap = new GMapsDirectManeuverMap();
     private final Map<String, byte[]> maneuverBitmaps = new HashMap<>();
+    private final Map<String, Long> maneuverBitmapReceivedAtMs = new HashMap<>();
     private final Runnable registrationRetry = this::retryRegistration;
 
     private boolean running;
@@ -61,6 +62,7 @@ final class GMapsDirectChannel {
     private long lastSequence = -1L;
     private String currentManeuver = "";
     private boolean currentBitmapAllowed;
+    private String lastBitmapDiagnosticKey = "";
     private DirectTbtFrame currentFrame;
 
     GMapsDirectChannel(Context context, Listener listener) {
@@ -185,11 +187,18 @@ final class GMapsDirectChannel {
             String road = joinedLines(summary.get("cueLines"));
             if (road.isEmpty()) road = joinedLines(summary.get("longCueLines"));
             currentBitmapAllowed = !(wireValue == 1 && distance == 0);
-            byte[] maneuverPng = currentBitmapAllowed
+            byte[] googleManeuverPng = currentBitmapAllowed
                     ? maneuverBitmaps.get(mapping.maneuverName) : null;
-            if (maneuverPng == null || maneuverPng.length == 0) {
+            boolean googleBitmapSelected = googleManeuverPng != null
+                    && googleManeuverPng.length > 0;
+            byte[] maneuverPng = googleBitmapSelected ? googleManeuverPng : null;
+            if (!googleBitmapSelected) {
                 maneuverPng = HudGraphicPayload.buildOemTurnPng(mapping.fallbackSource);
             }
+            long now = SystemClock.elapsedRealtime();
+            long bitmapAgeMs = googleBitmapSelected
+                    ? Math.max(0L, now - maneuverBitmapReceivedAtMs.getOrDefault(
+                    mapping.maneuverName, now)) : -1L;
             currentManeuver = mapping.maneuverName;
             currentFrame = new DirectTbtFrame(
                     wireValue,
@@ -218,8 +227,13 @@ final class GMapsDirectChannel {
                     + " native=" + mapping.nativeManeuver
                     + " distanceM=" + distance
                     + " lanesParsed=" + laneCount
-                    + " bitmap=" + (maneuverBitmaps.containsKey(mapping.maneuverName)
-                    ? "google" : "fallback"));
+                    + " bitmap=" + (googleBitmapSelected ? "google" : "fallback"));
+            logBitmapSelection(sequence, mapping.maneuverName,
+                    googleBitmapSelected ? "google" : "fallback",
+                    googleBitmapSelected ? "matched"
+                            : currentBitmapAllowed ? "missing" : "not-allowed",
+                    googleManeuverPng, maneuverPng, mapping.nativeManeuver,
+                    distance, bitmapAgeMs);
             listener.onFrame(currentFrame, "frame-" + sequence);
         } catch (Exception error) {
             listener.onLog("frame rejected reason=parse sequence=" + sequence
@@ -244,11 +258,17 @@ final class GMapsDirectChannel {
         byte[] previous = maneuverBitmaps.get(maneuver);
         if (Arrays.equals(previous, png)) return;
         maneuverBitmaps.put(maneuver, png.clone());
-        listener.onLog("maneuver bitmap maneuver=" + maneuver
+        long receivedAtMs = SystemClock.elapsedRealtime();
+        maneuverBitmapReceivedAtMs.put(maneuver, receivedAtMs);
+        listener.onLog("bitmap_rx maneuver=" + maneuver
                 + " width=" + width + " height=" + height
-                + " bytes=" + png.length + " sha256=" + sha256(png));
+                + " bytes=" + png.length + " sha=" + shortSha256(png)
+                + " receivedAtElapsedMs=" + receivedAtMs);
         if (currentFrame != null && currentBitmapAllowed && maneuver.equals(currentManeuver)) {
             currentFrame = currentFrame.withManeuverPng(png);
+            logBitmapSelection(lastSequence, maneuver, "google", "late-match",
+                    png, png, currentFrame.getBydManeuver(),
+                    currentFrame.getDistanceMeters(), 0L);
             listener.onFrame(currentFrame, "maneuver-bitmap");
         }
     }
@@ -265,8 +285,10 @@ final class GMapsDirectChannel {
         lastSequence = -1L;
         currentManeuver = "";
         currentBitmapAllowed = false;
+        lastBitmapDiagnosticKey = "";
         currentFrame = null;
         maneuverBitmaps.clear();
+        maneuverBitmapReceivedAtMs.clear();
         maneuverMap.reset();
     }
 
@@ -370,6 +392,35 @@ final class GMapsDirectChannel {
         } catch (Exception ignored) {
             return "unavailable";
         }
+    }
+
+    private static String shortSha256(byte[] bytes) {
+        String hash = sha256(bytes);
+        return hash.length() <= 12 ? hash : hash.substring(0, 12);
+    }
+
+    private void logBitmapSelection(long sequence, String maneuver, String selected,
+            String reason, byte[] candidatePng, byte[] transmittedPng,
+            int nativeManeuver, int distanceMeters, long rxToTxMs) {
+        String candidateSha = candidatePng == null ? "" : shortSha256(candidatePng);
+        String transmittedSha = shortSha256(transmittedPng);
+        String key = maneuver + '|' + selected + '|' + reason + '|'
+                + candidateSha + '|' + transmittedSha + '|' + nativeManeuver;
+        if (key.equals(lastBitmapDiagnosticKey)) return;
+        lastBitmapDiagnosticKey = key;
+        listener.onLog("bitmap_selection sequence=" + sequence
+                + " maneuver=" + maneuver
+                + " selected=" + selected
+                + " reason=" + reason
+                + " candidateSha=" + candidateSha
+                + " candidateAgeMs=" + rxToTxMs);
+        listener.onLog("bitmap_tx sequence=" + sequence
+                + " maneuver=" + maneuver
+                + " pngBytes=" + transmittedPng.length
+                + " pngSha=" + transmittedSha
+                + " native=" + nativeManeuver
+                + " distanceM=" + distanceMeters
+                + " rxToTxMs=" + rxToTxMs);
     }
 
     interface Listener {

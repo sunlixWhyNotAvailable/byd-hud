@@ -750,6 +750,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         sortOldestFirst = storageSortOldestFirst,
                         selectedDays = selectedStorageDays,
                         storageBusy = storageDeleteBusy || storageShareBusy,
+                        storageSortBusy = storageDeleteBusy,
                         onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },
                         onSortOldestFirst = { storageSortOldestFirst = it },
                         onToggleDay = { day ->
@@ -1800,6 +1801,7 @@ private fun StorageTab(
     sortOldestFirst: Boolean,
     selectedDays: List<String>,
     storageBusy: Boolean,
+    storageSortBusy: Boolean,
     onStorageLimitGb: (Int) -> Unit,
     onSortOldestFirst: (Boolean) -> Unit,
     onToggleDay: (String) -> Unit,
@@ -1902,7 +1904,7 @@ private fun StorageTab(
                     if (sortOldestFirst) copy.sortByName else copy.sortByDate,
                     palette,
                     primary = false,
-                    enabled = !storageBusy,
+                    enabled = !storageSortBusy,
                     width = 190.dp
                 ) {
                     onSortOldestFirst(!sortOldestFirst)
@@ -3374,7 +3376,7 @@ private fun enCopy() = Copy(
     fullscreenDashboard = "Fullscreen dashboard",
     fullscreenDashboardHint = "Use fullscreen dashboard mode.",
     smallDistanceClamp = "Small distance clamp",
-    smallDistanceHint = "Clamp distances below 20 m instead of OEM close marker.",
+    smallDistanceHint = "Send 11 m for distances from 0 to 10 m instead of the OEM close marker.",
     roundaboutLeft = "Roundabout left-hand traffic",
     roundaboutHint = "Changes roundabout assets for PNG output. (Legacy with screen capture channel)",
     appsHint = "Supported apps can be armed before launch. Dashboard actions require a running background app.",
@@ -3547,7 +3549,7 @@ private fun uaCopy() = enCopy().copy(
     fullscreenDashboard = "Повний екран приборки",
     fullscreenDashboardHint = "Використовувати повноекранний режим приборки.",
     smallDistanceClamp = "Обрізка малої дистанції",
-    smallDistanceHint = "Обмежувати дистанції менше 20 м, щоб штатний HUD не показував власний маркер близької відстані.",
+    smallDistanceHint = "Передавати 11 м для дистанцій від 0 до 10 м замість штатного маркера близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",
     roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG. (Сумісність з каналом захоплення екрану)",
     appsHint = "Підтримувані застосунки можна активувати до запуску. Для приборки застосунок має бути у фоні.",

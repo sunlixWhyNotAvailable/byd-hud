@@ -1,5 +1,6 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -47,6 +48,31 @@ public final class NavigationLogStorageRetentionTest {
     }
 
     @Test
+    public void sameDayDirectRetentionPreservesRegisteredSession() throws IOException {
+        File root = temporaryFolder.newFolder("direct-sessions");
+        File active = write(root,
+                "20260720/gmaps-direct/current/raw.jsonl", 10);
+        File oldGMaps = write(root,
+                "20260720/gmaps-direct/old/raw.jsonl", 10);
+        File oldWaze = write(root,
+                "20260720/waze-direct/old/raw.jsonl", 10);
+
+        NavigationLogStorage.registerDirectSession(
+                "20260720", NavigationLogStorage.GMAPS_DIRECT_DIR, "current");
+        try {
+            NavigationLogStorage.enforceNavCaptureRetentionForTest(
+                    root, "20260720", "", "", "", 15L);
+        } finally {
+            NavigationLogStorage.unregisterDirectSession(
+                    "20260720", NavigationLogStorage.GMAPS_DIRECT_DIR, "current");
+        }
+
+        assertTrue(active.exists());
+        assertFalse(oldGMaps.getParentFile().exists());
+        assertFalse(oldWaze.getParentFile().exists());
+    }
+
+    @Test
     public void retiredTombstoneCountsTowardRetentionLimit() throws IOException {
         File root = temporaryFolder.newFolder("tombstones");
         File active = write(root, "20260720/logs/events.log", 1);
@@ -68,6 +94,54 @@ public final class NavigationLogStorageRetentionTest {
                 "20260720", "20260721", "", "20260720"));
         assertFalse(NavigationLogStorage.isActiveNavCaptureDayForTest(
                 "20260719", "20260721", "", "20260720"));
+    }
+
+    @Test
+    public void directSessionDayRemainsActiveAcrossMidnight() {
+        NavigationLogStorage.registerDirectSession(
+                "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
+        try {
+            assertTrue(NavigationLogStorage.isActiveNavCaptureDayForTest(
+                    "20260720", "20260721", "", ""));
+        } finally {
+            NavigationLogStorage.unregisterDirectSession(
+                    "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
+        }
+    }
+
+    @Test
+    public void retentionPreservesActiveDirectSessionDayAcrossMidnight() throws IOException {
+        File root = temporaryFolder.newFolder("direct-across-midnight");
+        File current = write(root, "20260721/logs/events.log", 1);
+        File activeDirect = write(root,
+                "20260720/waze-direct/current/events.jsonl", 10);
+        File oldDay = write(root, "20260719/logs/events.log", 10);
+
+        NavigationLogStorage.registerDirectSession(
+                "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
+        try {
+            NavigationLogStorage.enforceNavCaptureRetentionForTest(
+                    root, "20260721", "", "", "", 12L);
+        } finally {
+            NavigationLogStorage.unregisterDirectSession(
+                    "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
+        }
+
+        assertTrue(current.exists());
+        assertTrue(activeDirect.exists());
+        assertFalse(oldDay.getParentFile().getParentFile().exists());
+    }
+
+    @Test
+    public void sessionCountIncludesCropAndBothDirectSources() throws IOException {
+        File root = temporaryFolder.newFolder("session-count");
+        File day = new File(root, "20260720");
+        write(root, "20260720/waze-crop/crop/session.jsonl", 1);
+        write(root, "20260720/waze-direct/waze/events.jsonl", 1);
+        write(root, "20260720/gmaps-direct/gmaps/events.jsonl", 1);
+        write(root, "20260720/logs/events.log", 1);
+
+        assertEquals(3, NavigationLogStorage.countSessions(day));
     }
 
     private static File write(File root, String relative, int bytes) throws IOException {

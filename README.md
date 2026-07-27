@@ -2,7 +2,7 @@
 
 > This is personal side project for own purposes
 >
-> HUD navigation app for Chinise BYD cars on DiLink: captures navigation data and projects maneuver, distance, street, and lane guidance to the vehicle HUD
+> HUD navigation app for Chinese BYD cars on DiLink: captures navigation data and projects maneuver, distance, street, and lane guidance to the vehicle HUD
 >
 > Most of the lanes and maneuvers which were not originally supported by by base nav app but used in Waze app were manually created for this project
 >

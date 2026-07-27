@@ -74,6 +74,44 @@ final class WazeCaptureDebugWriter {
                 () -> artifacts.appendEvent(dir, line)));
     }
 
+    boolean appendDirectLine(File dir, String fileName, String line) {
+        if (dir == null || fileName == null || line == null) {
+            return false;
+        }
+        return post("direct_session_event", () -> NavigationLogStorage.withReadLock(
+                () -> appendLine(dir, fileName, line)));
+    }
+
+    boolean appendDirectRaw(File dir, String fileName, String line) {
+        if (dir == null || fileName == null || line == null) {
+            return false;
+        }
+        return post("direct_session_raw", () -> NavigationLogStorage.withReadLock(
+                () -> appendLine(dir, fileName, line)));
+    }
+
+    boolean saveDirectArtifact(File dir, String fileName, byte[] bytes) {
+        if (dir == null
+                || fileName == null || fileName.isEmpty()
+                || bytes == null || bytes.length == 0) {
+            return false;
+        }
+        byte[] copy = bytes.clone();
+        return directEvent(() -> NavigationLogStorage.withReadLock(
+                () -> NavCaptureStore.writeDirectArtifactFileIfAbsent(
+                        dir, fileName, copy)));
+    }
+
+    boolean endDirectSession(File dir, String fileName, String line) {
+        if (dir == null || fileName == null || line == null) {
+            return false;
+        }
+        return post("direct_session_end", () -> NavigationLogStorage.withReadLock(() -> {
+            appendLine(dir, fileName, line);
+            NavigationLogStorage.closeDirectSession(dir);
+        }));
+    }
+
     boolean rawEvent(Context context, String channel, String packageName, String payload) {
         Context app = context == null ? null : context.getApplicationContext();
         if (app == null) {

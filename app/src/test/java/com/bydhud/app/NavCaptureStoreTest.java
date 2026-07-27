@@ -1,14 +1,23 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotEquals;
 
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
 import java.util.Calendar;
 import java.util.TimeZone;
 
 public final class NavCaptureStoreTest {
+    @Rule
+    public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
     @Test
     public void directArtifactNameIsStableAndContentAddressed() {
         byte[] png = new byte[]{1, 2, 3};
@@ -32,6 +41,20 @@ public final class NavCaptureStoreTest {
                 "maneuver_raw-039058c6f2c0cb492c533b0a4d14ef77cc0f78abccced5287d84a1a2011cfb81.png",
                 NavCaptureStore.directArtifactFileName(
                         "maneuver/raw", new byte[]{1, 2, 3}));
+    }
+
+    @Test
+    public void directArtifactWriteDoesNotReplaceExistingFile() throws IOException {
+        File dir = temporaryFolder.newFolder("direct-artifacts");
+        byte[] png = new byte[]{1, 2, 3};
+        String fileName = NavCaptureStore.writeDirectArtifactIfAbsent(dir, "lanes", png);
+        File artifact = new File(dir, fileName);
+        byte[] existing = new byte[]{9, 8, 7};
+        Files.write(artifact.toPath(), existing);
+
+        assertEquals(fileName,
+                NavCaptureStore.writeDirectArtifactIfAbsent(dir, "lanes", png));
+        assertArrayEquals(existing, Files.readAllBytes(artifact.toPath()));
     }
 
     @Test

@@ -20,9 +20,7 @@ final class GMapsDirectManeuverMap {
         switch (name) {
             case "DEPART":
                 clearRoundaboutSequence();
-                return usableDistance
-                        ? result(wireValue, name, 9, 9)
-                        : result(wireValue, name, 0, SOURCE_BLANK);
+                return result(wireValue, name, 0, SOURCE_BLANK);
             case "NAME_CHANGE":
             case "STRAIGHT":
             case "FERRY_BOAT":

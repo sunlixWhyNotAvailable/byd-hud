@@ -3,7 +3,8 @@ package com.bydhud.app;
 //chooses what the HUD should show so stale navigation data is cleared before it misleads the driver.
 
 final class HudDisplayPolicy {
-    static final int SMALL_DISTANCE_MIN_METERS = 20;
+    static final int SMALL_DISTANCE_MAX_METERS = 10;
+    static final int SMALL_DISTANCE_OUTPUT_METERS = 11;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudDisplayPolicy() {
@@ -14,8 +15,8 @@ final class HudDisplayPolicy {
         if (!clampSmallDistance) {
             return rawDistanceMeters;
         }
-        if (rawDistanceMeters >= 0 && rawDistanceMeters < SMALL_DISTANCE_MIN_METERS) {
-            return SMALL_DISTANCE_MIN_METERS;
+        if (rawDistanceMeters >= 0 && rawDistanceMeters <= SMALL_DISTANCE_MAX_METERS) {
+            return SMALL_DISTANCE_OUTPUT_METERS;
         }
         return rawDistanceMeters;
     }
@@ -26,9 +27,8 @@ final class HudDisplayPolicy {
             return null;
         }
         HudState displayState = rawState.copy();
-        //preserves explicit zero so stale-distance clearing is not shown as a fake 20 m.
-        if (displayState.navigationStatus != 1
-                && displayState.distanceToIntersection != 0) {
+        //Clear payloads use navigationStatus=1 and must keep their explicit zero.
+        if (displayState.navigationStatus != 1) {
             displayState.distanceToIntersection =
                     displayDistanceMeters(displayState.distanceToIntersection, clampSmallDistance);
         }

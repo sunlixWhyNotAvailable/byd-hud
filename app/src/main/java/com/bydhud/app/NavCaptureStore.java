@@ -6,6 +6,7 @@ import android.content.Context;
 import android.util.Log;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.security.MessageDigest;
@@ -85,7 +86,7 @@ final class NavCaptureStore {
     }
 
     //keeps elapsed and wall-clock times together so pulled raw logs can be correlated without anchor math.
-    private static String timeFields(long elapsedRealtimeMs, long wallMs) {
+    static String timeFields(long elapsedRealtimeMs, long wallMs) {
         return "\"t\":" + Math.max(0L, elapsedRealtimeMs)
                 + ",\"ts\":" + wallMs
                 + ",\"localTs\":\"" + esc(localTimestamp(wallMs)) + "\"";
@@ -142,6 +143,39 @@ final class NavCaptureStore {
         String safeKind = kind == null ? "artifact"
                 : kind.replaceAll("[^A-Za-z0-9_-]", "_");
         return safeKind + "-" + hash + ".png";
+    }
+
+    static synchronized String writeDirectArtifactIfAbsent(
+            File dir, String kind, byte[] bytes) {
+        String fileName = directArtifactFileName(kind, bytes);
+        return writeDirectArtifactFileIfAbsent(dir, fileName, bytes);
+    }
+
+    static synchronized String writeDirectArtifactFileIfAbsent(
+            File dir, String fileName, byte[] bytes) {
+        if (dir == null || fileName == null
+                || !fileName.matches("[A-Za-z0-9_-]+-[0-9a-f]{64}\\.png")
+                || bytes == null || bytes.length == 0
+                || (!dir.isDirectory() && !dir.mkdirs())) {
+            return "";
+        }
+        File file = new File(dir, fileName);
+        if (file.isFile()) {
+            return fileName;
+        }
+        try {
+            if (!file.createNewFile()) {
+                return file.isFile() ? fileName : "";
+            }
+            try (FileOutputStream out = new FileOutputStream(file)) {
+                out.write(bytes);
+            }
+            return fileName;
+        } catch (IOException e) {
+            file.delete();
+            Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
+            return "";
+        }
     }
 
     private static String sha256(byte[] bytes) {
