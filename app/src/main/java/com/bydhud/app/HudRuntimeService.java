@@ -112,6 +112,10 @@ public final class HudRuntimeService extends Service {
             stopSelf(startId);
             return START_NOT_STICKY;
         }
+        if (HudRuntimeUpgradeGuard.hasPendingHardReset(this)) {
+            HudRuntimeSupervisor.hardResetAfterPackageReplace(this, "service-start:" + reason);
+            return START_NOT_STICKY;
+        }
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
         scheduleHeartbeat();

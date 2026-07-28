@@ -85,6 +85,7 @@ final class HudRuntimeSupervisor {
         }
         AppEventLogger.event(appContext, "runtime_supervisor package_replace_hard_reset_start reason="
                 + safeReason);
+        boolean killProcess = false;
         try {
             NavHudLiveSender.get(appContext).stop("", "package-replace-hard-reset", true);
             WazeCropCapture.get(appContext).stop("package-replace-hard-reset");
@@ -92,15 +93,38 @@ final class HudRuntimeSupervisor {
                     appContext, "package-replace-hard-reset:" + safeReason);
             appContext.stopService(new android.content.Intent(appContext, HudRuntimeService.class));
             HudPrefs.setRuntimeServiceRunning(appContext, false);
-            HudRuntimeState.markPackageReplaceReset(appContext, safeReason);
+            if (!HudRuntimeState.markPackageReplaceReset(appContext, safeReason)) {
+                HudRuntimeUpgradeGuard.rearmPendingHardReset(
+                        appContext, "state-persist-failed:" + safeReason);
+                HudRuntimeWatchdog.scheduleSoon(
+                        appContext, "package-replace-state-persist-failed",
+                        PACKAGE_REPLACE_RESTART_DELAY_MS);
+                AppEventLogger.event(appContext,
+                        "runtime_supervisor package_replace_hard_reset_deferred state_persist_failed reason="
+                                + safeReason);
+                return;
+            }
             HudRuntimeWatchdog.scheduleSoon(
                     appContext, "package-replace-hard-reset", PACKAGE_REPLACE_RESTART_DELAY_MS);
+            if (!HudRuntimeUpgradeGuard.completePendingHardReset(
+                    appContext, "hard-reset:" + safeReason)) {
+                HudRuntimeWatchdog.scheduleSoon(
+                        appContext, "package-replace-complete-failed",
+                        PACKAGE_REPLACE_RESTART_DELAY_MS);
+                AppEventLogger.event(appContext,
+                        "runtime_supervisor package_replace_hard_reset_deferred completion_persist_failed reason="
+                                + safeReason);
+                return;
+            }
             AppEventLogger.event(appContext, "runtime_supervisor package_replace_force_start_scheduled reason="
                     + safeReason + " restartDelayMs=" + PACKAGE_REPLACE_RESTART_DELAY_MS);
             AppEventLogger.event(appContext, "runtime_supervisor package_replace_hard_reset_exit reason="
                     + safeReason + " restartDelayMs=" + PACKAGE_REPLACE_RESTART_DELAY_MS);
+            killProcess = true;
         } finally {
-            android.os.Process.killProcess(android.os.Process.myPid());
+            if (killProcess) {
+                android.os.Process.killProcess(android.os.Process.myPid());
+            }
         }
     }
 

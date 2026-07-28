@@ -17,6 +17,7 @@ public final class BootReceiver extends BroadcastReceiver {
         String action = intent == null ? "" : intent.getAction();
         if (isColdBootAction(action)) {
             NavAppDisplayController.get(context).clearStaleProjectionIntentForBoot(action);
+            WazeRouteLifecycleStore.clearForBoot(context, action);
         }
         AppEventLogger.event(context, "boot_receiver action=" + action
                 + " boot=" + HudPrefs.isBootEnabled(context)
@@ -36,7 +37,7 @@ public final class BootReceiver extends BroadcastReceiver {
                 HudRuntimeWatchdog.cancel(context);
                 return;
             }
-            HudRuntimeSupervisor.hardResetAfterPackageReplace(context, "receiver");
+            HudRuntimeService.startPersistent(context, "package-replaced");
             return;
         } else {
             HudRuntimeUpgradeGuard.recordVersionStart(context, "receiver:" + action);

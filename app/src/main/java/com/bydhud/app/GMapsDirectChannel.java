@@ -51,8 +51,7 @@ final class GMapsDirectChannel {
     private final Handler handler;
     private final Messenger inbound;
     private final GMapsDirectManeuverMap maneuverMap = new GMapsDirectManeuverMap();
-    private final Map<String, byte[]> maneuverBitmaps = new HashMap<>();
-    private final Map<String, Long> maneuverBitmapReceivedAtMs = new HashMap<>();
+    private final Map<String, ManeuverBitmap> maneuverBitmaps = new HashMap<>();
     private final Runnable registrationRetry = this::retryRegistration;
 
     private boolean running;
@@ -60,8 +59,9 @@ final class GMapsDirectChannel {
     private boolean navigating;
     private boolean terminalLatched;
     private long lastSequence = -1L;
+    private long currentStructuredFrameAtMs;
     private String currentManeuver = "";
-    private boolean currentBitmapAllowed;
+    private byte[] currentFallbackPng = new byte[0];
     private String lastBitmapDiagnosticKey = "";
     private DirectTbtFrame currentFrame;
 
@@ -186,20 +186,20 @@ final class GMapsDirectChannel {
             GMapsDirectManeuverMap.Result mapping = maneuverMap.map(wireValue, distance > 0);
             String road = joinedLines(summary.get("cueLines"));
             if (road.isEmpty()) road = joinedLines(summary.get("longCueLines"));
-            currentBitmapAllowed = !(wireValue == 1 && distance == 0);
-            byte[] googleManeuverPng = currentBitmapAllowed
-                    ? maneuverBitmaps.get(mapping.maneuverName) : null;
-            boolean googleBitmapSelected = googleManeuverPng != null
-                    && googleManeuverPng.length > 0;
-            byte[] maneuverPng = googleBitmapSelected ? googleManeuverPng : null;
-            if (!googleBitmapSelected) {
-                maneuverPng = HudGraphicPayload.buildOemTurnPng(mapping.fallbackSource);
-            }
-            long now = SystemClock.elapsedRealtime();
-            long bitmapAgeMs = googleBitmapSelected
-                    ? Math.max(0L, now - maneuverBitmapReceivedAtMs.getOrDefault(
-                    mapping.maneuverName, now)) : -1L;
+            long frameAtMs = data.getLong(
+                    "sourceElapsedMs", SystemClock.elapsedRealtime());
+            byte[] fallbackPng = HudGraphicPayload.buildOemTurnPng(mapping.fallbackSource);
+            BitmapSelection bitmapSelection = BitmapSelection.select(
+                    sequence,
+                    mapping.maneuverName,
+                    maneuverBitmaps.get(mapping.maneuverName),
+                    fallbackPng,
+                    frameAtMs,
+                    "matched");
+            byte[] maneuverPng = bitmapSelection.selectedPng;
             currentManeuver = mapping.maneuverName;
+            currentStructuredFrameAtMs = frameAtMs;
+            currentFallbackPng = fallbackPng;
             currentFrame = new DirectTbtFrame(
                     wireValue,
                     mapping.intermediate,
@@ -227,14 +227,9 @@ final class GMapsDirectChannel {
                     + " native=" + mapping.nativeManeuver
                     + " distanceM=" + distance
                     + " lanesParsed=" + laneCount
-                    + " bitmap=" + (googleBitmapSelected ? "google" : "fallback"));
-            logBitmapSelection(sequence, mapping.maneuverName,
-                    googleBitmapSelected ? "google" : "fallback",
-                    googleBitmapSelected ? "matched"
-                            : currentBitmapAllowed ? "missing" : "not-allowed",
-                    googleManeuverPng, maneuverPng, mapping.nativeManeuver,
-                    distance, bitmapAgeMs);
-            listener.onFrame(currentFrame, "frame-" + sequence);
+                    + " bitmap=" + bitmapSelection.selected);
+            logBitmapSelection(bitmapSelection);
+            listener.onFrame(currentFrame, "frame-" + sequence, bitmapSelection);
         } catch (Exception error) {
             listener.onLog("frame rejected reason=parse sequence=" + sequence
                     + " error=" + error.getClass().getSimpleName());
@@ -243,6 +238,7 @@ final class GMapsDirectChannel {
 
     private void handleManeuverBitmap(Bundle data) {
         String maneuver = safe(data.getString("maneuver"));
+        String viewId = safe(data.getString("viewId"));
         byte[] png = data.getByteArray("png");
         int width = data.getInt("width", 0);
         int height = data.getInt("height", 0);
@@ -255,21 +251,42 @@ final class GMapsDirectChannel {
                     + " bytes=" + (png == null ? 0 : png.length));
             return;
         }
-        byte[] previous = maneuverBitmaps.get(maneuver);
-        if (Arrays.equals(previous, png)) return;
-        maneuverBitmaps.put(maneuver, png.clone());
         long receivedAtMs = SystemClock.elapsedRealtime();
-        maneuverBitmapReceivedAtMs.put(maneuver, receivedAtMs);
-        listener.onLog("bitmap_rx maneuver=" + maneuver
-                + " width=" + width + " height=" + height
-                + " bytes=" + png.length + " sha=" + shortSha256(png)
-                + " receivedAtElapsedMs=" + receivedAtMs);
-        if (currentFrame != null && currentBitmapAllowed && maneuver.equals(currentManeuver)) {
-            currentFrame = currentFrame.withManeuverPng(png);
-            logBitmapSelection(lastSequence, maneuver, "google", "late-match",
-                    png, png, currentFrame.getBydManeuver(),
-                    currentFrame.getDistanceMeters(), 0L);
-            listener.onFrame(currentFrame, "maneuver-bitmap");
+        long sourceAtMs = data.getLong("bridgeElapsedMs", receivedAtMs);
+        ManeuverBitmap previous = maneuverBitmaps.get(maneuver);
+        ManeuverBitmap candidate = new ManeuverBitmap(
+                maneuver, viewId, png, width, height, sourceAtMs);
+        if (!candidate.isNewerThan(previous)) {
+            if (!Arrays.equals(previous.png, png)) {
+                listener.onLog("maneuver bitmap ignored reason=stale maneuver=" + maneuver
+                        + " sourceElapsedMs=" + sourceAtMs
+                        + " previousElapsedMs=" + previous.sourceAtMs);
+            }
+            return;
+        }
+        maneuverBitmaps.put(maneuver, candidate);
+        boolean currentMatch = candidate.matches(currentManeuver) && currentFrame != null;
+        long frameDelayMs = currentStructuredFrameAtMs <= 0L
+                ? -1L : sourceAtMs - currentStructuredFrameAtMs;
+        listener.onLog("bitmap_rx sequence=" + lastSequence
+                + " maneuver=" + maneuver
+                + " viewId=" + viewId
+                + " sha=" + candidate.sha
+                + " bytes=" + candidate.png.length
+                + " width=" + width
+                + " height=" + height
+                + " currentMatch=" + currentMatch
+                + " frameDelayMs=" + frameDelayMs);
+        if (currentMatch) {
+            currentFrame = currentFrame.withManeuverPng(candidate.png);
+            BitmapSelection bitmapSelection = BitmapSelection.google(
+                    lastSequence,
+                    candidate,
+                    currentFallbackPng,
+                    currentStructuredFrameAtMs,
+                    "late-match");
+            logBitmapSelection(bitmapSelection);
+            listener.onFrame(currentFrame, "maneuver-bitmap", bitmapSelection);
         }
     }
 
@@ -283,12 +300,12 @@ final class GMapsDirectChannel {
 
     private void resetSession() {
         lastSequence = -1L;
+        currentStructuredFrameAtMs = 0L;
         currentManeuver = "";
-        currentBitmapAllowed = false;
+        currentFallbackPng = new byte[0];
         lastBitmapDiagnosticKey = "";
         currentFrame = null;
         maneuverBitmaps.clear();
-        maneuverBitmapReceivedAtMs.clear();
         maneuverMap.reset();
     }
 
@@ -394,40 +411,173 @@ final class GMapsDirectChannel {
         }
     }
 
-    private static String shortSha256(byte[] bytes) {
-        String hash = sha256(bytes);
-        return hash.length() <= 12 ? hash : hash.substring(0, 12);
-    }
-
-    private void logBitmapSelection(long sequence, String maneuver, String selected,
-            String reason, byte[] candidatePng, byte[] transmittedPng,
-            int nativeManeuver, int distanceMeters, long rxToTxMs) {
-        String candidateSha = candidatePng == null ? "" : shortSha256(candidatePng);
-        String transmittedSha = shortSha256(transmittedPng);
-        String key = maneuver + '|' + selected + '|' + reason + '|'
-                + candidateSha + '|' + transmittedSha + '|' + nativeManeuver;
+    private void logBitmapSelection(BitmapSelection selection) {
+        String key = selection.diagnosticKey();
         if (key.equals(lastBitmapDiagnosticKey)) return;
         lastBitmapDiagnosticKey = key;
-        listener.onLog("bitmap_selection sequence=" + sequence
-                + " maneuver=" + maneuver
-                + " selected=" + selected
-                + " reason=" + reason
-                + " candidateSha=" + candidateSha
-                + " candidateAgeMs=" + rxToTxMs);
-        listener.onLog("bitmap_tx sequence=" + sequence
-                + " maneuver=" + maneuver
-                + " pngBytes=" + transmittedPng.length
-                + " pngSha=" + transmittedSha
-                + " native=" + nativeManeuver
-                + " distanceM=" + distanceMeters
-                + " rxToTxMs=" + rxToTxMs);
+        listener.onLog(selection.message());
+    }
+
+    static final class ManeuverBitmap {
+        final String maneuver;
+        final String viewId;
+        final byte[] png;
+        final int width;
+        final int height;
+        final long sourceAtMs;
+        final String sha;
+
+        ManeuverBitmap(String maneuver, String viewId, byte[] png,
+                int width, int height, long sourceAtMs) {
+            this.maneuver = safe(maneuver);
+            this.viewId = safe(viewId);
+            this.png = png == null ? new byte[0] : png.clone();
+            this.width = Math.max(0, width);
+            this.height = Math.max(0, height);
+            this.sourceAtMs = sourceAtMs;
+            this.sha = DirectTbtPayload.shortSha256(this.png);
+        }
+
+        boolean matches(String currentManeuver) {
+            return !maneuver.isEmpty() && maneuver.equals(safe(currentManeuver));
+        }
+
+        boolean isNewerThan(ManeuverBitmap previous) {
+            return previous == null || sourceAtMs > previous.sourceAtMs;
+        }
+    }
+
+    static final class BitmapSelection {
+        final long sequence;
+        final String maneuver;
+        final String selected;
+        final String reason;
+        final String viewId;
+        final byte[] selectedPng;
+        final String sha;
+        final int width;
+        final int height;
+        final boolean currentMatch;
+        final long frameDelayMs;
+        final long structuredFrameAtMs;
+        final String fallbackSha;
+
+        private BitmapSelection(long sequence, String maneuver, String selected,
+                String reason, String viewId, byte[] selectedPng, int width, int height,
+                boolean currentMatch, long frameDelayMs, long structuredFrameAtMs,
+                String fallbackSha) {
+            this.sequence = sequence;
+            this.maneuver = safe(maneuver);
+            this.selected = safe(selected);
+            this.reason = safe(reason);
+            this.viewId = safe(viewId);
+            this.selectedPng = selectedPng == null ? new byte[0] : selectedPng.clone();
+            this.sha = DirectTbtPayload.shortSha256(this.selectedPng);
+            this.width = Math.max(0, width);
+            this.height = Math.max(0, height);
+            this.currentMatch = currentMatch;
+            this.frameDelayMs = frameDelayMs;
+            this.structuredFrameAtMs = structuredFrameAtMs;
+            this.fallbackSha = safe(fallbackSha);
+        }
+
+        static BitmapSelection select(long sequence, String maneuver,
+                ManeuverBitmap candidate, byte[] fallbackPng,
+                long structuredFrameAtMs, String googleReason) {
+            if (candidate != null && candidate.matches(maneuver)) {
+                return google(sequence, candidate, fallbackPng,
+                        structuredFrameAtMs, googleReason);
+            }
+            return fallback(sequence, maneuver, fallbackPng, structuredFrameAtMs);
+        }
+
+        static BitmapSelection google(long sequence, ManeuverBitmap candidate,
+                byte[] fallbackPng, long structuredFrameAtMs, String reason) {
+            return new BitmapSelection(
+                    sequence,
+                    candidate.maneuver,
+                    "google",
+                    reason,
+                    candidate.viewId,
+                    candidate.png,
+                    candidate.width,
+                    candidate.height,
+                    true,
+                    structuredFrameAtMs <= 0L
+                            ? -1L : candidate.sourceAtMs - structuredFrameAtMs,
+                    structuredFrameAtMs,
+                    DirectTbtPayload.shortSha256(fallbackPng));
+        }
+
+        private static BitmapSelection fallback(long sequence, String maneuver,
+                byte[] fallbackPng, long structuredFrameAtMs) {
+            return new BitmapSelection(
+                    sequence,
+                    maneuver,
+                    "fallback",
+                    "missing",
+                    "",
+                    fallbackPng,
+                    DirectTbtPayload.pngWidth(fallbackPng),
+                    DirectTbtPayload.pngHeight(fallbackPng),
+                    false,
+                    0L,
+                    structuredFrameAtMs,
+                    DirectTbtPayload.shortSha256(fallbackPng));
+        }
+
+        String diagnosticKey() {
+            return maneuver + '|' + selected + '|' + viewId + '|' + sha + '|'
+                    + currentMatch + '|' + fallbackSha;
+        }
+
+        String txKey(DirectTbtPayload.Prepared prepared) {
+            if (prepared == null || prepared.maneuverPngBytes() == 0) return "";
+            return diagnosticKey() + '|' + prepared.maneuverMode() + '|'
+                    + prepared.maneuverPngSha() + '|' + prepared.nativeManeuver();
+        }
+
+        String message() {
+            return "bitmap_selection sequence=" + sequence
+                    + " maneuver=" + maneuver
+                    + " selected=" + selected
+                    + " reason=" + reason
+                    + " viewId=" + viewId
+                    + " sha=" + sha
+                    + " bytes=" + selectedPng.length
+                    + " width=" + width
+                    + " height=" + height
+                    + " currentMatch=" + currentMatch
+                    + " frameDelayMs=" + frameDelayMs
+                    + " fallbackSha=" + fallbackSha;
+        }
+
+        String txMessage(DirectTbtPayload.Prepared prepared, long sentAtMs) {
+            long frameToTxMs = structuredFrameAtMs <= 0L
+                    ? -1L : Math.max(0L, sentAtMs - structuredFrameAtMs);
+            return "bitmap_tx sequence=" + sequence
+                    + " maneuver=" + maneuver
+                    + " selected=" + selected
+                    + " viewId=" + viewId
+                    + " pngSha=" + prepared.maneuverPngSha()
+                    + " pngBytes=" + prepared.maneuverPngBytes()
+                    + " width=" + prepared.maneuverPngWidth()
+                    + " height=" + prepared.maneuverPngHeight()
+                    + " mode=" + prepared.maneuverMode()
+                    + " native=" + prepared.nativeManeuver()
+                    + " distanceM=" + prepared.distanceMeters()
+                    + " currentMatch=" + currentMatch
+                    + " frameDelayMs=" + frameDelayMs
+                    + " frameToTxMs=" + frameToTxMs
+                    + " fallbackSha=" + fallbackSha;
+        }
     }
 
     interface Listener {
         void onHandshakeAvailable(String reason);
         void onHandshakeUnavailable(String reason);
         void onNavigationStarted(String reason);
-        void onFrame(DirectTbtFrame frame, String reason);
+        void onFrame(DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection);
         void onNavigationEnded(String reason);
         void onLog(String message);
     }

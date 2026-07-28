@@ -39,6 +39,28 @@ public final class DashboardProjectionPolicyTest {
                         "com.waze", 8));
     }
 
+    @Test
+    public void heightGeometryIsClampedAndVerticallyCentered() {
+        DashboardProjectionPolicy.Geometry minimum =
+                DashboardProjectionPolicy.geometryForHeightPercent(10);
+        assertEquals(20, minimum.heightPercent);
+        assertEquals(1920, minimum.width);
+        assertEquals(144, minimum.height);
+        assertEquals(320, minimum.density);
+        assertEquals(288, minimum.top);
+
+        DashboardProjectionPolicy.Geometry roundedDown =
+                DashboardProjectionPolicy.geometryForHeightPercent(99);
+        assertEquals(712, roundedDown.height);
+        assertEquals(4, roundedDown.top);
+
+        DashboardProjectionPolicy.Geometry maximum =
+                DashboardProjectionPolicy.geometryForHeightPercent(120);
+        assertEquals(100, maximum.heightPercent);
+        assertEquals(720, maximum.height);
+        assertEquals(0, maximum.top);
+    }
+
     private static DashboardProjectionPolicy.ObservedDisplay classify(
             NavAppDisplayState state,
             String activePackage,

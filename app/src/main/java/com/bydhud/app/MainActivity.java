@@ -773,6 +773,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isWazeAlertsEnabled(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isFullscreenDashboardEnabled(this),
+                HudPrefs.dashboardHeightPercent(this),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 HudPrefs.isRoundaboutLeftHandTraffic(this),
                 permissionStatus.settingsGranted(),
@@ -1106,6 +1107,14 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setFullscreenDashboardEnabled(this, enabled);
         appendStatus("Fullscreen dashboard " + (enabled ? "enabled" : "disabled"));
         refreshControls();
+    }
+
+    public void composeSetDashboardHeightPercent(int percent) {
+        HudPrefs.setDashboardHeightPercent(this, percent);
+        int persistedPercent = HudPrefs.dashboardHeightPercent(this);
+        ClusterProjectionService.applyDashboardHeight(
+                this, persistedPercent, "options-height-release");
+        appendStatus("Dashboard height " + persistedPercent + "%");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1513,6 +1522,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean wazeAlertsEnabled;
         public final boolean wazeScreenCaptureEnabled;
         public final boolean fullscreenDashboardEnabled;
+        public final int dashboardHeightPercent;
         public final boolean smallDistanceClampEnabled;
         public final boolean roundaboutLeftHandTraffic;
         public final boolean settingsPermissionsGranted;
@@ -1556,6 +1566,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
                 boolean wazeScreenCaptureEnabled,
                 boolean fullscreenDashboardEnabled,
+                int dashboardHeightPercent,
                 boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
@@ -1583,6 +1594,8 @@ public final class MainActivity extends ComponentActivity {
             this.wazeAlertsEnabled = wazeAlertsEnabled;
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
+            this.dashboardHeightPercent = DashboardProjectionPolicy.clampHeightPercent(
+                    dashboardHeightPercent);
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
             this.settingsPermissionsGranted = settingsPermissionsGranted;

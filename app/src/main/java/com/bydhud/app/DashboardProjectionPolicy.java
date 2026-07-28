@@ -5,6 +5,12 @@ package com.bydhud.app;
 //defines the DashboardProjectionPolicy module boundary so related behavior stays readable inside one unit.
 final class DashboardProjectionPolicy {
     private static final String WAZE_PACKAGE = "com.waze";
+    static final int MIN_HEIGHT_PERCENT = 20;
+    static final int MAX_HEIGHT_PERCENT = 100;
+    static final int DEFAULT_HEIGHT_PERCENT = 100;
+    static final int VIRTUAL_WIDTH = 1920;
+    static final int VIRTUAL_BASE_HEIGHT = 720;
+    static final int VIRTUAL_DENSITY = 320;
 
     enum ObservedDisplay {
         UNKNOWN,
@@ -14,6 +20,16 @@ final class DashboardProjectionPolicy {
     }
 
     private DashboardProjectionPolicy() {
+    }
+
+    static int clampHeightPercent(int percent) {
+        return Math.max(MIN_HEIGHT_PERCENT, Math.min(MAX_HEIGHT_PERCENT, percent));
+    }
+
+    static Geometry geometryForHeightPercent(int percent) {
+        int clampedPercent = clampHeightPercent(percent);
+        int height = (VIRTUAL_BASE_HEIGHT * clampedPercent) / 100;
+        return new Geometry(clampedPercent, height, (VIRTUAL_BASE_HEIGHT - height) / 2);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -74,5 +90,21 @@ final class DashboardProjectionPolicy {
     //normalizes values here so malformed app text cannot leak into dashboard decisions.
     private static String normalizePackage(String packageName) {
         return NavTextNormalizer.lower(packageName);
+    }
+
+    static final class Geometry {
+        final int heightPercent;
+        final int width;
+        final int height;
+        final int density;
+        final int top;
+
+        Geometry(int heightPercent, int height, int top) {
+            this.heightPercent = heightPercent;
+            this.width = VIRTUAL_WIDTH;
+            this.height = height;
+            this.density = VIRTUAL_DENSITY;
+            this.top = top;
+        }
     }
 }

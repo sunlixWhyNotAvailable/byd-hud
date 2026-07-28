@@ -21,6 +21,7 @@ final class HudPrefs {
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
     private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
+    private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
@@ -151,6 +152,18 @@ final class HudPrefs {
 
     static void setFullscreenDashboardEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_FULLSCREEN_DASHBOARD, enabled).apply();
+    }
+
+    static int dashboardHeightPercent(Context context) {
+        return DashboardProjectionPolicy.clampHeightPercent(prefs(context).getInt(
+                KEY_DASHBOARD_HEIGHT_PERCENT,
+                DashboardProjectionPolicy.DEFAULT_HEIGHT_PERCENT));
+    }
+
+    static void setDashboardHeightPercent(Context context, int percent) {
+        prefs(context).edit().putInt(
+                KEY_DASHBOARD_HEIGHT_PERCENT,
+                DashboardProjectionPolicy.clampHeightPercent(percent)).apply();
     }
 
     static int outputOptionsRevision() {

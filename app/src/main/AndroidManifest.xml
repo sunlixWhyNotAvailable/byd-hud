@@ -1,5 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
+    <permission
+        android:name="com.bydhud.app.permission.WAZE_NAVIGATION_STATE"
+        android:protectionLevel="signature" />
+
+    <uses-permission android:name="com.bydhud.app.permission.WAZE_NAVIGATION_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.INTERNET" />
@@ -110,6 +115,16 @@
             android:exported="false">
             <intent-filter>
                 <action android:name="com.bydhud.app.action.RUNTIME_WATCHDOG" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".WazeRouteLifecycleReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:permission="com.bydhud.app.permission.WAZE_NAVIGATION_STATE">
+            <intent-filter>
+                <action android:name="com.bydhud.app.action.WAZE_NAVIGATION_STATE" />
             </intent-filter>
         </receiver>
 

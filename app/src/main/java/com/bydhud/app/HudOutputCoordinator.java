@@ -7,6 +7,8 @@ import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.util.function.Consumer;
+
 // Serializes every HUD producer through one SOME/IP owner.
 final class HudOutputCoordinator {
     enum Source {
@@ -63,6 +65,11 @@ final class HudOutputCoordinator {
     private long lastStatsLogMs;
     private DirectTbtFrame preparedDirectFrame;
     private DirectTbtPayload.Prepared preparedDirectPayload;
+    private GMapsDirectChannel.BitmapSelection directBitmapSelection;
+    private GMapsDirectChannel.BitmapSelection preparedDirectBitmapSelection;
+    private Consumer<String> directBitmapTxLogger;
+    private Consumer<String> preparedDirectBitmapTxLogger;
+    private String lastBitmapTxDiagnosticKey = "";
     private int preparedDirectOptionsRevision = -1;
     private boolean directAlertClearPending;
     private long pendingDirectReceivedAtMs;
@@ -177,10 +184,19 @@ final class HudOutputCoordinator {
     }
 
     void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs) {
+        publishDirect(frame, reason, receivedAtMs, null, null);
+    }
+
+    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
+            GMapsDirectChannel.BitmapSelection bitmapSelection,
+            Consumer<String> bitmapTxLogger) {
         worker.post(() -> {
             directFrame = frame;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            directBitmapSelection = bitmapSelection;
+            directBitmapTxLogger = bitmapTxLogger;
+            if (bitmapSelection == null) lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
             if (activeSource == Source.DIRECT && !sendScheduled) {
@@ -199,6 +215,9 @@ final class HudOutputCoordinator {
             directFrame = frame;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            directBitmapSelection = null;
+            directBitmapTxLogger = null;
+            lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
             directAlertClearPending = true;
@@ -219,9 +238,12 @@ final class HudOutputCoordinator {
             legacyEnabled = source == Source.LEGACY;
             if (source != Source.DIRECT) {
                 directAlertClearPending = false;
+                lastBitmapTxDiagnosticKey = "";
             }
             if (source == Source.NONE) {
                 directFrame = null;
+                directBitmapSelection = null;
+                directBitmapTxLogger = null;
                 legacyState = null;
             }
             reconcile(reason);
@@ -246,6 +268,11 @@ final class HudOutputCoordinator {
             directFrame = null;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            directBitmapSelection = null;
+            preparedDirectBitmapSelection = null;
+            directBitmapTxLogger = null;
+            preparedDirectBitmapTxLogger = null;
+            lastBitmapTxDiagnosticKey = "";
             directAlertClearPending = false;
             pendingDirectReceivedAtMs = 0L;
             pendingDirectReason = "";
@@ -265,6 +292,7 @@ final class HudOutputCoordinator {
             pendingActivationNotBeforeMs = 0L;
             serviceStarted = false;
             directAlertClearPending = false;
+            lastBitmapTxDiagnosticKey = "";
             HudDeliveryStatus.reset();
             reconcile("reset:" + reason);
         });
@@ -277,6 +305,9 @@ final class HudOutputCoordinator {
             legacyEnabled = false;
             manualState = null;
             directFrame = null;
+            directBitmapSelection = null;
+            directBitmapTxLogger = null;
+            lastBitmapTxDiagnosticKey = "";
             directAlertClearPending = false;
             legacyState = null;
             reconcile(reason);
@@ -499,6 +530,9 @@ final class HudOutputCoordinator {
             if (result != 0) {
                 throw new RemoteException("send returned " + result);
             }
+            if (source == Source.DIRECT) {
+                emitBitmapTxAfterSuccess(SystemClock.elapsedRealtime());
+            }
             maybeLogStats(source, payload.length, duration);
             if (source == Source.DIRECT) {
                 if (pendingDirectReceivedAtMs > 0L) {
@@ -527,6 +561,8 @@ final class HudOutputCoordinator {
                 preparedDirectOptionsRevision = optionsRevision;
                 preparedDirectPayload = DirectTbtPayload.prepare(
                         directFrame, DirectTbtPayload.Options.from(context));
+                preparedDirectBitmapSelection = directBitmapSelection;
+                preparedDirectBitmapTxLogger = directBitmapTxLogger;
             }
             return preparedDirectPayload.build(directCounter);
         }
@@ -536,6 +572,42 @@ final class HudOutputCoordinator {
                 HudPrefs.isSmallDistanceClampEnabled(context));
         HudOutputPreferences.apply(context, state);
         return HudRoadPayload.build(state);
+    }
+
+    private void emitBitmapTxAfterSuccess(long sentAtMs) {
+        String key = bitmapTxDiagnosticKey(
+                0, preparedDirectBitmapSelection, preparedDirectPayload);
+        if (key.isEmpty()) {
+            if (preparedDirectPayload != null
+                    && preparedDirectPayload.maneuverPngBytes() == 0) {
+                lastBitmapTxDiagnosticKey = "";
+            }
+            return;
+        }
+        if (!shouldEmitBitmapTx(lastBitmapTxDiagnosticKey, key)) return;
+        lastBitmapTxDiagnosticKey = key;
+        String message = preparedDirectBitmapSelection.txMessage(
+                preparedDirectPayload, sentAtMs);
+        try {
+            if (preparedDirectBitmapTxLogger != null) {
+                preparedDirectBitmapTxLogger.accept(message);
+            } else {
+                log(message);
+            }
+        } catch (RuntimeException error) {
+            log("bitmap_tx log failed error=" + error.getClass().getSimpleName());
+        }
+    }
+
+    static String bitmapTxDiagnosticKey(int sendResult,
+            GMapsDirectChannel.BitmapSelection selection,
+            DirectTbtPayload.Prepared prepared) {
+        if (sendResult != 0 || selection == null || prepared == null) return "";
+        return selection.txKey(prepared);
+    }
+
+    static boolean shouldEmitBitmapTx(String lastKey, String nextKey) {
+        return nextKey != null && !nextKey.isEmpty() && !nextKey.equals(lastKey);
     }
 
     private void beginFinalStop(Source previous, String reason, int stopGeneration, int frame,

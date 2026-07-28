@@ -6,8 +6,10 @@ import android.graphics.BitmapFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.Collections;
 import java.util.List;
+import java.util.Locale;
 import java.util.Objects;
 
 /** Builds complete 0x8001 road-info payloads without owning a transport. */
@@ -85,7 +87,7 @@ public final class DirectTbtPayload {
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
         return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
-                maneuverPng.length);
+                maneuverPng);
     }
 
     public static byte[] buildClear() {
@@ -125,6 +127,43 @@ public final class DirectTbtPayload {
 
     private static boolean nonBlank(String value) {
         return value != null && !value.trim().isEmpty();
+    }
+
+    static String shortSha256(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return "";
+        try {
+            byte[] digest = MessageDigest.getInstance("SHA-256").digest(bytes);
+            StringBuilder output = new StringBuilder(12);
+            for (int index = 0; index < 6; index++) {
+                output.append(String.format(Locale.US, "%02X", digest[index] & 0xff));
+            }
+            return output.toString();
+        } catch (Exception ignored) {
+            return "unavailable";
+        }
+    }
+
+    static int pngWidth(byte[] png) {
+        return pngDimension(png, 16);
+    }
+
+    static int pngHeight(byte[] png) {
+        return pngDimension(png, 20);
+    }
+
+    private static int pngDimension(byte[] png, int offset) {
+        if (png == null || png.length < 24
+                || png[0] != (byte) 0x89 || png[1] != 0x50
+                || png[2] != 0x4e || png[3] != 0x47
+                || png[12] != 0x49 || png[13] != 0x48
+                || png[14] != 0x44 || png[15] != 0x52) {
+            return 0;
+        }
+        long value = ((long) (png[offset] & 0xff) << 24)
+                | ((long) (png[offset + 1] & 0xff) << 16)
+                | ((long) (png[offset + 2] & 0xff) << 8)
+                | (png[offset + 3] & 0xffL);
+        return value > Integer.MAX_VALUE ? 0 : (int) value;
     }
 
     private static byte[] wrap(byte[] inner) {
@@ -193,10 +232,13 @@ public final class DirectTbtPayload {
         private final int laneCount;
         private final int lanePngBytes;
         private final int maneuverPngBytes;
+        private final String maneuverPngSha;
+        private final int maneuverPngWidth;
+        private final int maneuverPngHeight;
 
         private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
                          int distanceMeters, String displayText, int laneCount,
-                         int lanePngBytes, int maneuverPngBytes) {
+                         int lanePngBytes, byte[] maneuverPng) {
             this.fields = fields == null ? new byte[0] : fields;
             this.maneuverMode = maneuverMode == null ? "empty" : maneuverMode;
             this.nativeManeuver = nativeManeuver;
@@ -204,7 +246,10 @@ public final class DirectTbtPayload {
             this.displayText = displayText == null ? "" : displayText;
             this.laneCount = laneCount;
             this.lanePngBytes = lanePngBytes;
-            this.maneuverPngBytes = maneuverPngBytes;
+            this.maneuverPngBytes = maneuverPng == null ? 0 : maneuverPng.length;
+            this.maneuverPngSha = shortSha256(maneuverPng);
+            this.maneuverPngWidth = pngWidth(maneuverPng);
+            this.maneuverPngHeight = pngHeight(maneuverPng);
         }
 
         public String maneuverMode() {
@@ -233,6 +278,18 @@ public final class DirectTbtPayload {
 
         public int maneuverPngBytes() {
             return maneuverPngBytes;
+        }
+
+        public String maneuverPngSha() {
+            return maneuverPngSha;
+        }
+
+        public int maneuverPngWidth() {
+            return maneuverPngWidth;
+        }
+
+        public int maneuverPngHeight() {
+            return maneuverPngHeight;
         }
 
         public byte[] build(int counter) {

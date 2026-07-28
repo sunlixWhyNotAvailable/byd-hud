@@ -242,6 +242,8 @@ private data class Copy(
     val showWazeAlertsHint: String,
     val fullscreenDashboard: String,
     val fullscreenDashboardHint: String,
+    val dashboardHeight: String,
+    val dashboardHeightHint: String,
     val smallDistanceClamp: String,
     val smallDistanceHint: String,
     val roundaboutLeft: String,
@@ -1066,6 +1068,15 @@ private fun OptionsTab(
                     palette
                 ) {
                     runAction { activity.composeSetFullscreenDashboardEnabled(it) }
+                }
+                Divider(palette)
+                DashboardHeightRow(
+                    copy.dashboardHeight,
+                    copy.dashboardHeightHint,
+                    snapshot.dashboardHeightPercent,
+                    palette
+                ) {
+                    runAction { activity.composeSetDashboardHeightPercent(it) }
                 }
             }
         }
@@ -2170,6 +2181,63 @@ private fun StorageLimitSlider(
 //guards persisted storage limit from drag/tap float noise before it reaches prefs.
 private fun storageLimitFromSliderValue(value: Float): Int =
     value.roundToInt().coerceIn(1, 10)
+
+@Composable
+private fun DashboardHeightRow(
+    title: String,
+    hint: String,
+    percent: Int,
+    palette: Palette,
+    onPercent: (Int) -> Unit
+) {
+    val coerced = percent.coerceIn(20, 100)
+    var sliderValue by remember(coerced) { mutableStateOf(coerced.toFloat()) }
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 12.dp)
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                title,
+                color = palette.text,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                modifier = Modifier.weight(1f)
+            )
+            Text(
+                "${sliderValue.roundToInt()}%",
+                color = palette.text,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 15.sp
+            )
+        }
+        Text(hint, color = palette.muted, fontSize = 13.sp)
+        Slider(
+            value = sliderValue,
+            onValueChange = { sliderValue = it.coerceIn(20f, 100f) },
+            onValueChangeFinished = {
+                val next = sliderValue.roundToInt().coerceIn(20, 100)
+                sliderValue = next.toFloat()
+                onPercent(next)
+            },
+            valueRange = 20f..100f,
+            steps = 79,
+            colors = SliderDefaults.colors(
+                thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
+                activeTrackColor = palette.accent,
+                inactiveTrackColor = palette.disabled
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(42.dp)
+        )
+    }
+}
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
@@ -3375,6 +3443,8 @@ private fun enCopy() = Copy(
     showWazeAlertsHint = "Display Waze alerts on the HUD.",
     fullscreenDashboard = "Fullscreen dashboard",
     fullscreenDashboardHint = "Use fullscreen dashboard mode.",
+    dashboardHeight = "Height",
+    dashboardHeightHint = "Window height as a percentage of the dashboard height.",
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Send 11 m for distances from 0 to 10 m instead of the OEM close marker.",
     roundaboutLeft = "Roundabout left-hand traffic",
@@ -3548,6 +3618,8 @@ private fun uaCopy() = enCopy().copy(
     showWazeAlertsHint = "Відображати попередження Waze на HUD.",
     fullscreenDashboard = "Повний екран приборки",
     fullscreenDashboardHint = "Використовувати повноекранний режим приборки.",
+    dashboardHeight = "Висота",
+    dashboardHeightHint = "Висота вікна у відсотках від висоти приборки.",
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Передавати 11 м для дистанцій від 0 до 10 м замість штатного маркера близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",
