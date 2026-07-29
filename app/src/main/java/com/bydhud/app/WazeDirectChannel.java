@@ -68,6 +68,7 @@ public final class WazeDirectChannel {
     private static final long FRAME_SILENCE_MS = 5000L;
     private static final long HEALTH_PROBE_TIMEOUT_MS = 5000L;
     private static final long ALERT_TTL_MS = 5000L;
+    private static final int ALERT_ROUTE_NATIVE_NEAR_METERS = 100;
     private static final int MAX_ICON_DIMENSION_PX = 256;
     private static final Pattern ALERT_DISTANCE = Pattern.compile(
             "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)(?=$|\\s|[.,;:!?])",
@@ -82,6 +83,7 @@ public final class WazeDirectChannel {
 
     private volatile int generation;
     private volatile boolean active;
+    private volatile boolean suspended;
     private volatile boolean shutdown;
     private volatile boolean handshakeAvailable;
     private volatile boolean wazeAlertsEnabled;
@@ -108,6 +110,7 @@ public final class WazeDirectChannel {
     private Runnable alertWatchdog;
     private int alertRevision;
     private int lastKnownRawManeuverType = -1;
+    private boolean navigationDistanceKnown;
     private Runnable frameSilenceCheck;
     private Runnable healthProbeTimeout;
     private long lastDirectActivityMs;
@@ -127,18 +130,22 @@ public final class WazeDirectChannel {
     }
 
     public void stop(String reason) {
-        runOnChannel(() -> stopOnChannel(reason));
+        runOnChannel(() -> suspendOnChannel(reason));
+    }
+
+    public void hardStop(String reason) {
+        runOnChannel(() -> hardStopOnChannel(reason));
     }
 
     boolean isActive() {
-        return active;
+        return active && !suspended;
     }
 
     public void shutdown(String reason) {
         runOnChannel(() -> {
             if (shutdown) return;
             shutdown = true;
-            stopOnChannel(reason);
+            hardStopOnChannel(reason);
             channelThread.quitSafely();
         });
     }
@@ -163,53 +170,105 @@ public final class WazeDirectChannel {
             return;
         }
         if (active) {
+            if (suspended) {
+                resumeOnChannel(reason);
+                return;
+            }
             log("start ignored while active: " + safeText(reason));
             return;
         }
         active = true;
+        suspended = false;
         generation++;
+        prepareRouteStart(reason);
+        log("start generation=" + generation + " reason=" + startReason);
+        connectWaze(generation);
+    }
+
+    private void resumeOnChannel(String reason) {
+        suspended = false;
+        prepareRouteStart(reason);
+        log("resume generation=" + generation + " reason=" + startReason);
+        if (carApp != null && bound) {
+            try {
+                startSession(generation);
+            } catch (Throwable t) {
+                sessionFailure(generation, "resume_session_exception", t);
+            }
+        } else if (!binding && !bound) {
+            connectWaze(generation);
+        }
+    }
+
+    private void prepareRouteStart(String reason) {
         startReason = safeText(reason);
         unavailableBindFailureReported = false;
         bindDeferredReason = "";
         routingSequence = 0;
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
+        navigationDistanceKnown = false;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         maneuverIcons.clear();
         rearmRouteTerminal("channel_start");
-        log("start generation=" + generation + " reason=" + startReason);
-        connectWaze(generation);
     }
 
-    private void stopOnChannel(String reason) {
+    private void suspendOnChannel(String reason) {
+        String stopReason = safeText(reason);
+        if (!active || suspended) {
+            setHandshakeUnavailable("suspended:" + stopReason, false);
+            return;
+        }
+
+        suspended = true;
+        cancelRebind();
+        cancelAlertWatchdog();
+        cancelDirectHealth();
+        setHandshakeUnavailable("suspended:" + stopReason, false);
+        endNavigation("suspended:" + stopReason, false);
+        pauseAndStopSession(generation, stopReason);
+        bindDeferredReason = "";
+        log("suspended reason=" + stopReason + " bindingRetained=" + bound);
+    }
+
+    private void hardStopOnChannel(String reason) {
         String stopReason = safeText(reason);
         if (!active) {
-            setHandshakeUnavailable("stopped:" + stopReason, false);
+            setHandshakeUnavailable("hard-stopped:" + stopReason, false);
             return;
         }
 
         int oldGeneration = generation;
         active = false;
+        suspended = false;
         generation++;
         cancelRebind();
         cancelAlertWatchdog();
         cancelDirectHealth();
-        setHandshakeUnavailable("stopped:" + stopReason, false);
-        endNavigation("stopped:" + stopReason);
-
-        ICarApp app = carApp;
-        if (app != null) {
-            try {
-                if (resumed) app.onAppPause(new DoneCallback(oldGeneration, "onAppPause", null));
-                if (appStarted) app.onAppStop(new DoneCallback(oldGeneration, "onAppStop", null));
-            } catch (Throwable t) {
-                log("lifecycle stop failed: " + t);
-            }
-        }
+        setHandshakeUnavailable("hard-stopped:" + stopReason, false);
+        endNavigation("hard-stopped:" + stopReason, false);
+        pauseAndStopSession(oldGeneration, stopReason);
         releaseBinding(connection);
         clearSessionState();
         bindDeferredReason = "";
-        log("stopped reason=" + stopReason);
+        log("hard stopped reason=" + stopReason);
+    }
+
+    private void pauseAndStopSession(int expectedGeneration, String reason) {
+        ICarApp app = carApp;
+        boolean pause = resumed;
+        boolean stop = appStarted;
+        resumed = false;
+        appStarted = false;
+        if (app == null || (!pause && !stop)) return;
+        try {
+            if (pause) app.onAppPause(new DoneCallback(expectedGeneration, "onAppPause", null));
+            if (stop) app.onAppStop(new DoneCallback(expectedGeneration, "onAppStop", null));
+            log("session lifecycle stopped pause=" + pause + " stop=" + stop
+                    + " reason=" + safeText(reason));
+        } catch (Throwable t) {
+            log("lifecycle stop failed: " + t);
+        }
     }
 
     private void connectWaze(int expectedGeneration) {
@@ -347,18 +406,30 @@ public final class WazeDirectChannel {
     private void createSession(int expectedGeneration) throws Exception {
         ICarApp app = requireCarApp();
         app.onAppCreate(carHost, new Intent(), context.getResources().getConfiguration(),
-                new DoneCallback(expectedGeneration, "onAppCreate", ignored ->
-                        requireCarApp().onAppStart(new DoneCallback(
-                                expectedGeneration, "onAppStart", started -> {
-                                    appStarted = true;
-                                    requireCarApp().onAppResume(new DoneCallback(
-                                            expectedGeneration, "onAppResume",
-                                            resumedValue -> onResumed(expectedGeneration)));
-                                }))));
+                new DoneCallback(expectedGeneration, "onAppCreate",
+                        ignored -> startSession(expectedGeneration)));
+    }
+
+    private void startSession(int expectedGeneration) throws Exception {
+        requireCarApp().onAppStart(new DoneCallback(
+                expectedGeneration, "onAppStart", ignored -> {
+                    appStarted = true;
+                    if (suspended) {
+                        pauseAndStopSession(expectedGeneration, "suspended-during-start");
+                        return;
+                    }
+                    requireCarApp().onAppResume(new DoneCallback(
+                            expectedGeneration, "onAppResume",
+                            resumedValue -> onResumed(expectedGeneration)));
+                }));
     }
 
     private void onResumed(int expectedGeneration) throws Exception {
         resumed = true;
+        if (suspended) {
+            pauseAndStopSession(expectedGeneration, "suspended-during-resume");
+            return;
+        }
         log("session resumed");
         carHost.appHost.setInvalidateCallback(() -> fetchTemplate(expectedGeneration));
         requireCarApp().getManager("app", new DoneCallback(
@@ -375,13 +446,14 @@ public final class WazeDirectChannel {
         } else {
             throw new IllegalStateException("Unexpected app manager " + value);
         }
+        if (suspended) return;
         rearmRouteTerminal("car_app_session_connected");
         setHandshakeAvailable("session_ready:" + startReason);
         fetchTemplate(expectedGeneration);
     }
 
     private void fetchTemplate(int expectedGeneration) {
-        if (!isCurrent(expectedGeneration) || appManager == null) return;
+        if (!isCurrent(expectedGeneration) || suspended || appManager == null) return;
         try {
             appManager.getTemplate(new DoneCallback(
                     expectedGeneration, "getTemplate",
@@ -395,6 +467,7 @@ public final class WazeDirectChannel {
     }
 
     private void onTemplate(int expectedGeneration, Bundleable response) throws Exception {
+        if (suspended) return;
         Object value = response == null ? null : response.get();
         if (!(value instanceof TemplateWrapper)) {
             log("unexpected template wrapper=" + typeName(value));
@@ -433,6 +506,7 @@ public final class WazeDirectChannel {
 
     private void onBindingLost(int expectedGeneration, Connection source, String reason) {
         if (!isCurrent(expectedGeneration) || source != connection) return;
+        boolean wasSuspended = suspended;
         log("binding lost: " + reason);
         releaseBinding(source);
         setHandshakeUnavailable(reason, false);
@@ -440,6 +514,12 @@ public final class WazeDirectChannel {
         endNavigation(reason, false);
         clearSessionState();
         generation++;
+        if (wasSuspended) {
+            active = false;
+            suspended = false;
+            log("binding lost while suspended; rebind deferred until next route");
+            return;
+        }
         scheduleRebind(generation);
     }
 
@@ -527,6 +607,7 @@ public final class WazeDirectChannel {
         maneuverIcons.clear();
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
+        navigationDistanceKnown = false;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         alertRevision++;
         cancelAlertWatchdog();
@@ -539,7 +620,7 @@ public final class WazeDirectChannel {
     }
 
     private void setHandshakeAvailable(String reason) {
-        if (handshakeAvailable) return;
+        if (suspended || handshakeAvailable) return;
         handshakeAvailable = true;
         callback(() -> listener.onHandshakeAvailable(reason));
     }
@@ -551,7 +632,7 @@ public final class WazeDirectChannel {
     }
 
     private void beginNavigation(String reason) {
-        if (navigationActive) return;
+        if (suspended || navigationActive) return;
         navigationActive = true;
         maneuverIcons.clear();
         recordDirectActivity("navigation_started");
@@ -559,6 +640,7 @@ public final class WazeDirectChannel {
     }
 
     private void explicitNavigationStarted() {
+        if (suspended) return;
         rearmRouteTerminal("waze_navigation_started");
         beginNavigation("waze_navigation_started");
     }
@@ -587,6 +669,7 @@ public final class WazeDirectChannel {
         alertRevision++;
         navigationFrame = DirectTbtFrame.empty();
         lastKnownRawManeuverType = -1;
+        navigationDistanceKnown = false;
         maneuverIcons.clear();
         if (!navigationActive) return;
         navigationActive = false;
@@ -599,12 +682,17 @@ public final class WazeDirectChannel {
 
     private void publishCurrentStep(Step step, Distance distance,
                                     boolean authoritativeLanes, String reason) {
+        if (suspended) {
+            log("route frame ignored while suspended source=" + reason);
+            return;
+        }
         if (terminalRouteLatched) {
             log("late route frame rejected source=" + reason);
             return;
         }
         if (!navigationActive) beginNavigation("frame_received:" + reason);
         DirectTbtFrame next = frameFromStep(step, distance);
+        navigationDistanceKnown = distance != null;
         acceptedRouteFrame = true;
         int previousKnownRaw = lastKnownRawManeuverType;
         int nextRaw = next.getRawManeuverType();
@@ -649,11 +737,31 @@ public final class WazeDirectChannel {
     }
 
     private void emitFrame(String reason) {
+        alert = alert.withRouteNative(
+                shouldUseRouteNativeDuringAlert(
+                        navigationFrame, navigationDistanceKnown, alert));
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
         callback(() -> listener.onFrame(frame, reason));
     }
 
+    static boolean shouldUseRouteNativeDuringAlert(
+            DirectTbtFrame routeFrame,
+            boolean routeDistanceKnown,
+            DirectTbtFrame.AlertOverlay alert) {
+        if (routeFrame == null || alert == null || !alert.isActive()
+                || !routeDistanceKnown || routeFrame.getRawManeuverType() < 0) {
+            return false;
+        }
+        int nativeManeuver = routeFrame.getBydManeuver();
+        if (nativeManeuver <= 0 || nativeManeuver == 99) return false;
+        int routeDistance = routeFrame.getDistanceMeters();
+        if (routeDistance <= ALERT_ROUTE_NATIVE_NEAR_METERS) return true;
+        int alertDistance = alert.getDistanceMeters();
+        return alertDistance > 0 && routeDistance <= alertDistance;
+    }
+
     private void showAlert(Alert value) {
+        if (suspended) return;
         String title = text(value.getTitle());
         String subtitle = text(value.getSubtitle());
         int distanceMeters = parseDistance(title + " " + subtitle);
@@ -1296,9 +1404,14 @@ public final class WazeDirectChannel {
                 payload = "failure decode error=" + t;
             }
             String finalPayload = payload;
-            postBinder(expectedGeneration, () -> sessionFailure(
-                    expectedGeneration, "callback_failure_" + name,
-                    new IllegalStateException(finalPayload)));
+            postBinder(expectedGeneration, () -> {
+                if (success == null) {
+                    log("callback failure=" + name + " detail=" + finalPayload);
+                    return;
+                }
+                sessionFailure(expectedGeneration, "callback_failure_" + name,
+                        new IllegalStateException(finalPayload));
+            });
         }
     }
 

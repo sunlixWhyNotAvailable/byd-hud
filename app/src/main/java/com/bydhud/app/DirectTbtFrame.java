@@ -162,21 +162,24 @@ public final class DirectTbtFrame {
     /** Alert state is an overlay; navigation lanes remain on the parent frame. */
     public static final class AlertOverlay {
         private static final AlertOverlay INACTIVE =
-                new AlertOverlay(false, -1, 0, "", null);
+                new AlertOverlay(false, -1, 0, "", null, false);
 
         private final boolean active;
         private final int id;
         private final int distanceMeters;
         private final String displayText;
         private final byte[] maneuverPng;
+        private final boolean useRouteNative;
 
         private AlertOverlay(boolean active, int id, int distanceMeters,
-                             String displayText, byte[] maneuverPng) {
+                             String displayText, byte[] maneuverPng,
+                             boolean useRouteNative) {
             this.active = active;
             this.id = id;
             this.distanceMeters = Math.max(0, distanceMeters);
             this.displayText = safeText(displayText);
             this.maneuverPng = cloneBytes(maneuverPng);
+            this.useRouteNative = useRouteNative;
         }
 
         public static AlertOverlay inactive() {
@@ -185,7 +188,12 @@ public final class DirectTbtFrame {
 
         public static AlertOverlay active(
                 int id, int distanceMeters, String displayText, byte[] maneuverPng) {
-            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng);
+            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng, false);
+        }
+
+        AlertOverlay withRouteNative(boolean enabled) {
+            if (!active || useRouteNative == enabled) return this;
+            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng, enabled);
         }
 
         public boolean isActive() {
@@ -206,6 +214,10 @@ public final class DirectTbtFrame {
 
         public byte[] getManeuverPng() {
             return maneuverPng.clone();
+        }
+
+        public boolean useRouteNative() {
+            return useRouteNative;
         }
     }
 }

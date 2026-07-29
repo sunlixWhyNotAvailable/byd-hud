@@ -1,6 +1,8 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -29,6 +31,46 @@ public final class DirectTbtPayloadTest {
                 DirectTbtPayload.Options.ALL);
 
         assertEquals(99, prepared.nativeManeuver());
+    }
+
+    @Test
+    public void activeAlertUsesRouteNativeWhenPolicyAllowsIt() {
+        DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.active(
+                7, 25, "Camera", new byte[]{8, 9}).withRouteNative(true);
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame(11, 9, 80, alert), DirectTbtPayload.Options.ALL);
+
+        assertEquals(9, prepared.nativeManeuver());
+        assertEquals(2, prepared.maneuverPngBytes());
+        assertEquals(1, prepared.laneCount());
+    }
+
+    @Test
+    public void alertNativePolicyCoversOrderingNearnessAndUnknowns() {
+        DirectTbtFrame.AlertOverlay alert250 = DirectTbtFrame.AlertOverlay.active(
+                7, 250, "Camera", new byte[]{8, 9});
+        DirectTbtFrame.AlertOverlay alert25 = DirectTbtFrame.AlertOverlay.active(
+                7, 25, "Camera", new byte[]{8, 9});
+        DirectTbtFrame.AlertOverlay unknownAlertDistance = DirectTbtFrame.AlertOverlay.active(
+                7, 0, "Camera", new byte[]{8, 9});
+
+        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 200, alert250), true, alert250));
+        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 100, alert25), true, alert25));
+        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 0, alert25), true, alert25));
+        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 101, alert25), true, alert25));
+        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 0, alert25), false, alert25));
+        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 101, unknownAlertDistance), true, unknownAlertDistance));
+        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(-1, 9, 50, alert25), true, alert25));
+        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 99, 50, alert25), true, alert25));
     }
 
     @Test
@@ -75,11 +117,19 @@ public final class DirectTbtPayloadTest {
             int rawManeuver,
             int bydManeuver,
             DirectTbtFrame.AlertOverlay alert) {
+        return frame(rawManeuver, bydManeuver, 120, alert);
+    }
+
+    private static DirectTbtFrame frame(
+            int rawManeuver,
+            int bydManeuver,
+            int distanceMeters,
+            DirectTbtFrame.AlertOverlay alert) {
         return new DirectTbtFrame(
                 rawManeuver,
                 3,
                 bydManeuver,
-                120,
+                distanceMeters,
                 "Road",
                 "Turn right",
                 "Road",

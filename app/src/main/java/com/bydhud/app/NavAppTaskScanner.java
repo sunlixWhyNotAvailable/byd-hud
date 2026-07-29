@@ -180,6 +180,13 @@ final class NavAppTaskScanner {
         parseTaskBlock(currentTaskId, currentDisplayId, block, rows);
     }
 
+    static boolean shouldReplaceTaskSelection(
+            boolean hasCurrent,
+            boolean currentVisible,
+            boolean candidateVisible) {
+        return !hasCurrent || (!currentVisible && candidateVisible);
+    }
+
     //parses source data here so downstream HUD code receives normalized navigation fields.
     private void parseTaskBlock(
             int taskId,
@@ -202,10 +209,12 @@ final class NavAppTaskScanner {
                 row = new RowBuilder(packageName);
                 rows.put(packageName, row);
             }
-            row.hasTask = true;
-            row.visible = visible;
-            row.taskId = taskId;
-            row.displayId = safeDisplayId;
+            if (shouldReplaceTaskSelection(row.hasTask, row.visible, visible)) {
+                row.hasTask = true;
+                row.visible = visible;
+                row.taskId = taskId;
+                row.displayId = safeDisplayId;
+            }
         }
     }
 

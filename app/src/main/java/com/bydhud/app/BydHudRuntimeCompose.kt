@@ -559,6 +559,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     }
 
     LaunchedEffect(selectedTab) {
+        activity.composeReportAppsTabSelected(selectedTab == RuntimeTab.Apps)
         if (selectedTab == RuntimeTab.Apps) {
             lastAppsScanRevision = activity.composeAppsScanRevision()
             activity.composeRefreshApps()

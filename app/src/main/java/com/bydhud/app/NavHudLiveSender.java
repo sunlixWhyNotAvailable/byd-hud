@@ -619,8 +619,13 @@ final class NavHudLiveSender {
         }
         wazeDirectHandshakeAvailable = false;
         if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
-            log("waze direct unavailable; route-active rebind retained reason="
-                    + safeReason(reason));
+            if (wazeDirectRouteEnded
+                    || normalizeString(reason).startsWith("suspended:")) {
+                log("waze direct suspended after route end reason=" + safeReason(reason));
+            } else {
+                log("waze direct unavailable; active-route recovery retained reason="
+                        + safeReason(reason));
+            }
             return;
         }
         if (wazeDirectRouteEnded) {
@@ -982,9 +987,14 @@ final class NavHudLiveSender {
             hudOutput.selectNavigationSource(
                     HudOutputCoordinator.Source.NONE,
                     "waze-route-terminal:" + safeReason(reason));
-            log("waze route lifecycle terminal persisted=" + terminal.accepted
-                    + " stateChanged=" + terminal.changed
-                    + " reason=" + terminal.reason);
+            if (!terminal.accepted && !terminal.snapshot.active) {
+                log("waze route lifecycle terminal already recorded reason="
+                        + terminal.reason);
+            } else {
+                log("waze route lifecycle terminal persisted=" + terminal.accepted
+                        + " stateChanged=" + terminal.changed
+                        + " reason=" + terminal.reason);
+            }
         }
         log("waze source=waiting_direct routeEnded=true reason=" + safeReason(reason));
     }
@@ -999,6 +1009,11 @@ final class NavHudLiveSender {
         wazeFallbackActive = false;
         WazeCropCapture.get(context).stop("route-lifecycle-bridge");
         if (!navigating) {
+            if (!changed && !wazeDirectChannel.isActive()) {
+                log("waze route lifecycle terminal ignored; state already inactive reason="
+                        + safeReason(reason));
+                return;
+            }
             if (active && WAZE_PACKAGE.equals(activePackage)) {
                 invalidatePendingWazeDirectFrames();
                 hudOutput.endDirectOutput("waze-route-lifecycle-end", eventElapsedMs);
@@ -2249,7 +2264,7 @@ final class NavHudLiveSender {
         activePackage = "";
         endWazeDirectSession("package-replaced-reinit");
         resetWazeDirectSessionState();
-        wazeDirectChannel.stop("package-replaced-reinit");
+        wazeDirectChannel.hardStop("package-replaced-reinit");
         endGMapsDirectSession("package-replaced-reinit");
         resetGMapsDirectSessionState();
         gmapsDirectChannel.stop("package-replaced-reinit");

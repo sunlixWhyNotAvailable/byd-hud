@@ -175,6 +175,7 @@ public final class MainActivity extends ComponentActivity {
     private boolean mainUiReady;
     private boolean activityResumed;
     private boolean activityWindowFocused;
+    private volatile boolean composeAppsTabSelected;
     private String composeBlockingUiFlow = "compose-starting";
     private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean exitRequested;
@@ -283,6 +284,9 @@ public final class MainActivity extends ComponentActivity {
         RESUMED_ACTIVITY.set(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
+        if (composeAppsTabSelected) {
+            scheduleAppScan(true);
+        }
         notifyPendingShare();
     }
 
@@ -1268,6 +1272,10 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeRefreshApps() {
         scheduleAppScan(true);
+    }
+
+    public void composeReportAppsTabSelected(boolean selected) {
+        composeAppsTabSelected = selected;
     }
 
     public long composeAppsScanRevision() {

@@ -797,6 +797,7 @@ final class NavAppDisplayController {
         int sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
         int currentTaskId = -1;
         int currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+        NavAppDisplayState selected = null;
         StringBuilder block = new StringBuilder();
         for (String line : lines) {
             Matcher displaySection = DISPLAY_SECTION_PATTERN.matcher(line);
@@ -807,14 +808,11 @@ final class NavAppDisplayController {
             }
             int[] header = parseTaskHeader(line, sectionDisplayId);
             if (header != null) {
-                NavAppDisplayState previous = taskFromBlock(
+                selected = preferVisibleTask(selected, taskFromBlock(
                         normalized,
                         currentTaskId,
                         currentDisplayId,
-                        block);
-                if (previous != null) {
-                    return previous;
-                }
+                        block));
                 currentTaskId = header[0];
                 currentDisplayId = header[1];
                 block.setLength(0);
@@ -824,16 +822,32 @@ final class NavAppDisplayController {
             } else if (containsPackage(line, normalized)) {
                 int[] inline = parseInlineTaskValues(line, sectionDisplayId);
                 if (inline != null) {
-                    return new NavAppDisplayState(
+                    selected = preferVisibleTask(selected, new NavAppDisplayState(
                             normalized,
                             inline[0],
                             inline[1],
                             parseVisible(line),
-                            "parsed");
+                            "parsed"));
                 }
             }
         }
-        return taskFromBlock(normalized, currentTaskId, currentDisplayId, block);
+        return preferVisibleTask(
+                selected,
+                taskFromBlock(normalized, currentTaskId, currentDisplayId, block));
+    }
+
+    private static NavAppDisplayState preferVisibleTask(
+            NavAppDisplayState current,
+            NavAppDisplayState candidate) {
+        if (candidate == null) {
+            return current;
+        }
+        return NavAppTaskScanner.shouldReplaceTaskSelection(
+                current != null,
+                current != null && current.visible,
+                candidate.visible)
+                ? candidate
+                : current;
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.

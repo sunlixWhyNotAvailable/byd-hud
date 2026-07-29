@@ -48,7 +48,8 @@ public final class DirectTbtPayload {
                 : (blankLaneManeuver || blankDestinationManeuver
                 ? safeOptions.blankS72Png.clone() : navManeuverPng);
         int nativeManeuver = alert.isActive()
-                ? NATIVE_BLANK_ID
+                ? (alert.useRouteNative()
+                ? safeFrame.getBydManeuver() : NATIVE_BLANK_ID)
                 : (blankLaneManeuver || destinationManeuver
                 ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
         int distanceMeters = alert.isActive()
