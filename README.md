@@ -16,7 +16,8 @@
 ## Features
 
 - HUD output for navigation maneuver, distance, road name, and lane guidance
-- `Google Maps` foreground and notification-based route detection
+- patched `Google Maps` direct structured maneuver, distance, road, and rendered-icon channel
+- stock or incompatible `Google Maps` accessibility/notification fallback
 - patched `Waze` direct structured maneuver, distance, road, lane, and alert channel
 - stock or incompatible `Waze` accessibility/visual crop fallback
 - background runtime service with watchdog recovery
@@ -46,6 +47,8 @@ After first launch:
 - `Google Maps` notification mode may provide text route data but rarely or no maneuvers and no lane guidance.
 - `Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture and resolution.
 - The direct Waze channel requires a compatible patched Waze build. BYD HUD waits up to five seconds for it before starting the visual fallback.
+- The direct Google Maps channel requires a compatible patched build; stock or incompatible builds use accessibility/notification fallback.
+- Native maneuver arrows require the vehicle's `Navigation fusion` option to be enabled.
 - `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP` (for crop mode).
 
 ## Tested
@@ -59,7 +62,7 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 - Waze maneuver/lanes parsing might break on different tablet resolution and depend on maneuvers position on the screen (meaning `No GPS` additional row at the top can break HUD parsing). This was partially addressed by introducing waze navigation bounds (black square in top left corner) parsing. Also should help in case of other resolution.
 - `Waze` roundabouts might be broken. Needs additional testing.
 - If there are missing glyphs or incorrect HUD outputs, please open an `Issue` and attach the relevant session archive for that day. Session paths are shown inside the app.
-- `Google Maps` maneuver parsing depends on the language. English is supported and tested; Ukrainian support requires additional testing.
+- Fallback `Google Maps` maneuver parsing depends on the language. English is supported and tested; Ukrainian support requires additional testing.
 
 ## Navigators used in development
 
@@ -68,18 +71,16 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 
 ## To Do
 
-- add dashboard window mode resize support;
 - add patch feat directly to the app;
-- gmaps direct nav support instead of text parsing;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again).
 
 ## Contribution
 
-Thanks to MaxTitan from Telegram for giving idea and source files for direct channel implementation.
+Thanks to MaxTitan from Telegram for sharing the direct-channel idea and reference source files.
 
 ## DISCLAIMER
 
-License: Apache License 2.0
+License: GNU Affero General Public License v3.0
 
 This project is an independent personal/community project and is not affiliated with, endorsed by, or sponsored by BYD, DiLink, Waze, Google, Google Maps or ABRP.
 BYD, DiLink, Waze, Google Maps, ABRP and related names or logos are trademarks of their respective owners.

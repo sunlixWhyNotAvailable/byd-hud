@@ -165,6 +165,10 @@ final class WazeCaptureDebugWriter {
                 () -> AppEventLogger.writeEvent(app, line, eventWallClockMs, targetDay));
     }
 
+    boolean someIpTx(Runnable work) {
+        return work != null && post("someip_tx", work);
+    }
+
     boolean frameArtifacts(
             File dir,
             String sourceFrameName,

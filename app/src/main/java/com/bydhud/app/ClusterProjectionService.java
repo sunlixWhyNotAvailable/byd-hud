@@ -404,6 +404,7 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    // Adjustable cluster-window height was inspired by BYDMate's projection controls.
     private void resizeActiveProjection(int percent, String reason) {
         DashboardProjectionPolicy.Geometry geometry = DashboardProjectionPolicy
                 .geometryForHeightPercent(percent);

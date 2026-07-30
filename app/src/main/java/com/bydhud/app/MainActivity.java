@@ -666,7 +666,7 @@ public final class MainActivity extends ComponentActivity {
                 + "\nFiles: logcat_*.txt"
                 + "\n\nDaily logs:\n"
                 + NavigationLogStorage.publicLogsPath()
-                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl"
+                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, someip_tx.jsonl"
                 + "\n\nWaze crop:\n"
                 + NavigationLogStorage.publicWazeCropPath()
                 + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";

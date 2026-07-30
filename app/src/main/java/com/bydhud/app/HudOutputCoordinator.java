@@ -42,6 +42,7 @@ final class HudOutputCoordinator {
     private final HandlerThread workerThread = new HandlerThread("BydHudOutput");
     private final Handler worker;
     private final SomeIpHudClient client;
+    private final SomeIpTxLog txLog;
 
     private boolean manualEnabled;
     private boolean directEnabled;
@@ -65,11 +66,15 @@ final class HudOutputCoordinator {
     private long lastStatsLogMs;
     private DirectTbtFrame preparedDirectFrame;
     private DirectTbtPayload.Prepared preparedDirectPayload;
+    private byte[] preparedDirectSemanticPayload;
     private GMapsDirectChannel.BitmapSelection directBitmapSelection;
     private GMapsDirectChannel.BitmapSelection preparedDirectBitmapSelection;
     private Consumer<String> directBitmapTxLogger;
     private Consumer<String> preparedDirectBitmapTxLogger;
     private String lastBitmapTxDiagnosticKey = "";
+    private String directChannel = "waze_direct";
+    private Source lastTransportSource = Source.NONE;
+    private String lastTransportChannel = "transport";
     private int preparedDirectOptionsRevision = -1;
     private boolean directAlertClearPending;
     private long pendingDirectReceivedAtMs;
@@ -127,6 +132,7 @@ final class HudOutputCoordinator {
         this.context = context;
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
+        txLog = SomeIpTxLog.get(context);
         client = new SomeIpHudClient(context, new SomeIpHudClient.Listener() {
             @Override
             public void onClientLog(String line) {
@@ -194,8 +200,10 @@ final class HudOutputCoordinator {
             directFrame = frame;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            preparedDirectSemanticPayload = null;
             directBitmapSelection = bitmapSelection;
             directBitmapTxLogger = bitmapTxLogger;
+            directChannel = bitmapTxLogger == null ? "waze_direct" : "gmaps_direct";
             if (bitmapSelection == null) lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
@@ -215,6 +223,7 @@ final class HudOutputCoordinator {
             directFrame = frame;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            preparedDirectSemanticPayload = null;
             directBitmapSelection = null;
             directBitmapTxLogger = null;
             lastBitmapTxDiagnosticKey = "";
@@ -268,6 +277,7 @@ final class HudOutputCoordinator {
             directFrame = null;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
+            preparedDirectSemanticPayload = null;
             directBitmapSelection = null;
             preparedDirectBitmapSelection = null;
             directBitmapTxLogger = null;
@@ -507,7 +517,7 @@ final class HudOutputCoordinator {
         long startedAt = SystemClock.elapsedRealtime();
         try {
             if (!serviceStarted) {
-                int startResult = client.start();
+                int startResult = startService(source, channelFor(source), reason);
                 if (startResult != 0) {
                     throw new RemoteException("start returned " + startResult);
                 }
@@ -515,14 +525,18 @@ final class HudOutputCoordinator {
                 log("service started source=" + source);
             }
             if (source == Source.DIRECT && directAlertClearPending) {
-                long clearedAtMs = sendClearBestEffort("direct alert preference disabled");
+                long clearedAtMs = sendClearBestEffort(
+                        "direct alert preference disabled", source, "alert_clear");
                 if (clearedAtMs < 0L) {
                     throw new RemoteException("direct alert clear failed");
                 }
                 directAlertClearPending = false;
             }
             byte[] payload = buildPayload(source);
-            int result = client.send(payload);
+            byte[] semanticPayload = source == Source.DIRECT
+                    ? preparedDirectSemanticPayload : payload;
+            int result = sendPayload(source, channelFor(source), "payload", reason,
+                    payload, semanticPayload);
             long duration = SystemClock.elapsedRealtime() - startedAt;
             sendCount++;
             sendDurationMs += duration;
@@ -561,6 +575,7 @@ final class HudOutputCoordinator {
                 preparedDirectOptionsRevision = optionsRevision;
                 preparedDirectPayload = DirectTbtPayload.prepare(
                         directFrame, DirectTbtPayload.Options.from(context));
+                preparedDirectSemanticPayload = preparedDirectPayload.build(0);
                 preparedDirectBitmapSelection = directBitmapSelection;
                 preparedDirectBitmapTxLogger = directBitmapTxLogger;
             }
@@ -621,7 +636,8 @@ final class HudOutputCoordinator {
             return;
         }
         long clearedAtMs = sendClearBestEffort(
-                "final " + previous + " frame=" + frame + " reason=" + reason);
+                "final " + previous + " frame=" + frame + " reason=" + reason,
+                previous, "final_clear");
         long remainingEndDetectedAtMs = endDetectedAtMs;
         if (clearedAtMs >= 0L && endDetectedAtMs > 0L) {
             logAsync("direct end first_clear detectedAtElapsedMs=" + endDetectedAtMs
@@ -652,13 +668,17 @@ final class HudOutputCoordinator {
         }
         try {
             if (!serviceStarted) {
-                int startResult = client.start();
+                int startResult = startService(
+                        pendingSource, channelFor(pendingSource), "transition-clear");
                 if (startResult != 0) {
                     throw new RemoteException("start returned " + startResult);
                 }
                 serviceStarted = true;
             }
-            int result = client.send(DirectTbtPayload.buildClear());
+            byte[] payload = DirectTbtPayload.buildClear();
+            int result = sendPayload(
+                    pendingSource, channelFor(pendingSource), "transition_clear",
+                    pendingReason, payload, payload);
             if (result != 0) {
                 throw new RemoteException("clear returned " + result);
             }
@@ -671,12 +691,13 @@ final class HudOutputCoordinator {
         }
     }
 
-    private long sendClearBestEffort(String reason) {
+    private long sendClearBestEffort(String reason, Source source, String kind) {
         if (!client.isBound()) {
             return -1L;
         }
         try {
-            int result = client.send(DirectTbtPayload.buildClear());
+            byte[] payload = DirectTbtPayload.buildClear();
+            int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
             return result == 0 ? completedAtMs : -1L;
@@ -690,16 +711,82 @@ final class HudOutputCoordinator {
         worker.removeCallbacks(bindRetry);
         worker.removeCallbacks(transportRecovery);
         if (serviceStarted && client.isBound()) {
+            long startedAtMs = SystemClock.elapsedRealtime();
             try {
-                client.stop();
-            } catch (RemoteException e) {
+                int result = client.stop();
+                txLog.recordLifecycle("service_stop", sourceName(lastTransportSource),
+                        lastTransportChannel, reason, result, "",
+                        SystemClock.elapsedRealtime() - startedAtMs);
+            } catch (RemoteException | RuntimeException e) {
+                txLog.recordLifecycle("service_stop", sourceName(lastTransportSource),
+                        lastTransportChannel, reason, null,
+                        e.getClass().getSimpleName() + ":" + safe(e.getMessage()),
+                        SystemClock.elapsedRealtime() - startedAtMs);
                 log("stop failed reason=" + reason + " error=" + safe(e.getMessage()));
             }
         }
         serviceStarted = false;
         client.unbind();
         directCounter = 0;
+        lastTransportSource = Source.NONE;
+        lastTransportChannel = "transport";
         log("transport stopped reason=" + reason);
+    }
+
+    private int startService(Source source, String channel, String reason) throws RemoteException {
+        long startedAtMs = SystemClock.elapsedRealtime();
+        lastTransportSource = source;
+        lastTransportChannel = channel;
+        try {
+            int result = client.start();
+            txLog.recordLifecycle("service_start", sourceName(source), channel,
+                    reason, result, "", SystemClock.elapsedRealtime() - startedAtMs);
+            return result;
+        } catch (RemoteException | RuntimeException e) {
+            txLog.recordLifecycle("service_start", sourceName(source), channel,
+                    reason, null, e.getClass().getSimpleName() + ":" + safe(e.getMessage()),
+                    SystemClock.elapsedRealtime() - startedAtMs);
+            throw e;
+        }
+    }
+
+    private int sendPayload(
+            Source source,
+            String channel,
+            String kind,
+            String reason,
+            byte[] payload,
+            byte[] semanticPayload) throws RemoteException {
+        long startedAtMs = SystemClock.elapsedRealtime();
+        lastTransportSource = source;
+        lastTransportChannel = channel;
+        try {
+            int result = client.send(payload);
+            txLog.recordSend(sourceName(source), channel, SomeIpHudClient.HUD_ROAD_INFO_TOPIC,
+                    kind, reason, payload, semanticPayload, result, "",
+                    SystemClock.elapsedRealtime() - startedAtMs);
+            return result;
+        } catch (RemoteException | RuntimeException e) {
+            txLog.recordSend(sourceName(source), channel, SomeIpHudClient.HUD_ROAD_INFO_TOPIC,
+                    kind, reason, payload, semanticPayload, null,
+                    e.getClass().getSimpleName() + ":" + safe(e.getMessage()),
+                    SystemClock.elapsedRealtime() - startedAtMs);
+            throw e;
+        }
+    }
+
+    private String channelFor(Source source) {
+        if (source == Source.DIRECT) return directChannel;
+        if (source == Source.LEGACY) return "legacy";
+        if (source == Source.MANUAL) return "manual";
+        return "transport";
+    }
+
+    private static String sourceName(Source source) {
+        if (source == Source.DIRECT) return "direct";
+        if (source == Source.LEGACY) return "legacy";
+        if (source == Source.MANUAL) return "manual";
+        return "none";
     }
 
     private void handleTransportFailure(String reason, Throwable error) {
