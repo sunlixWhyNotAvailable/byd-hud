@@ -775,6 +775,10 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isStreetOutputEnabled(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
+                HudPrefs.isWholeRouteMetricsEnabled(this),
+                HudPrefs.isEtaOutputEnabled(this),
+                HudPrefs.isRemainingTimeOutputEnabled(this),
+                HudPrefs.isRemainingDistanceOutputEnabled(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isFullscreenDashboardEnabled(this),
                 HudPrefs.dashboardHeightPercent(this),
@@ -1101,6 +1105,22 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetWazeAlertsEnabled(boolean enabled) {
         setWazeAlertsEnabled(enabled);
+    }
+
+    public void composeSetWholeRouteMetricsEnabled(boolean enabled) {
+        setWholeRouteMetricsEnabled(enabled);
+    }
+
+    public void composeSetEtaOutputEnabled(boolean enabled) {
+        setEtaOutputEnabled(enabled);
+    }
+
+    public void composeSetRemainingTimeOutputEnabled(boolean enabled) {
+        setRemainingTimeOutputEnabled(enabled);
+    }
+
+    public void composeSetRemainingDistanceOutputEnabled(boolean enabled) {
+        setRemainingDistanceOutputEnabled(enabled);
     }
 
     public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
@@ -1528,6 +1548,10 @@ public final class MainActivity extends ComponentActivity {
         public final boolean streetOutputEnabled;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
+        public final boolean wholeRouteMetricsEnabled;
+        public final boolean etaOutputEnabled;
+        public final boolean remainingTimeOutputEnabled;
+        public final boolean remainingDistanceOutputEnabled;
         public final boolean wazeScreenCaptureEnabled;
         public final boolean fullscreenDashboardEnabled;
         public final int dashboardHeightPercent;
@@ -1572,6 +1596,8 @@ public final class MainActivity extends ComponentActivity {
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
+                boolean wholeRouteMetricsEnabled, boolean etaOutputEnabled,
+                boolean remainingTimeOutputEnabled, boolean remainingDistanceOutputEnabled,
                 boolean wazeScreenCaptureEnabled,
                 boolean fullscreenDashboardEnabled,
                 int dashboardHeightPercent,
@@ -1600,6 +1626,10 @@ public final class MainActivity extends ComponentActivity {
             this.streetOutputEnabled = streetOutputEnabled;
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
+            this.wholeRouteMetricsEnabled = wholeRouteMetricsEnabled;
+            this.etaOutputEnabled = etaOutputEnabled;
+            this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
+            this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
             this.dashboardHeightPercent = DashboardProjectionPolicy.clampHeightPercent(
@@ -2463,8 +2493,8 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setSmallDistanceClampEnabled(this, enabled);
         cachedPayloadKey = "";
         appendStatus("Small distance clamp " + (enabled
-                ? "ON: HUD displays min 20m for active 0..19m"
-                : "OFF: HUD sends raw 0..19m"));
+                ? "ON: HUD displays 11m for active 0..10m"
+                : "OFF: HUD sends raw 0..10m"));
         AppEventLogger.event(this, "ui small_distance_clamp=" + enabled);
         refreshControls();
     }
@@ -2538,6 +2568,38 @@ public final class MainActivity extends ComponentActivity {
         NavHudLiveSender.get(this).onWazeAlertsPreferenceChanged(enabled);
         appendStatus("Waze alerts " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui waze_alerts=" + enabled);
+        refreshControls();
+    }
+
+    private void setWholeRouteMetricsEnabled(boolean enabled) {
+        HudPrefs.setWholeRouteMetricsEnabled(this, enabled);
+        cachedPayloadKey = "";
+        appendStatus("Whole route metrics " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui whole_route_metrics=" + enabled);
+        refreshControls();
+    }
+
+    private void setEtaOutputEnabled(boolean enabled) {
+        HudPrefs.setEtaOutputEnabled(this, enabled);
+        cachedPayloadKey = "";
+        appendStatus("ETA output " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui output_eta=" + enabled);
+        refreshControls();
+    }
+
+    private void setRemainingTimeOutputEnabled(boolean enabled) {
+        HudPrefs.setRemainingTimeOutputEnabled(this, enabled);
+        cachedPayloadKey = "";
+        appendStatus("Remaining time output " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui output_remaining_time=" + enabled);
+        refreshControls();
+    }
+
+    private void setRemainingDistanceOutputEnabled(boolean enabled) {
+        HudPrefs.setRemainingDistanceOutputEnabled(this, enabled);
+        cachedPayloadKey = "";
+        appendStatus("Remaining distance output " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui output_remaining_distance=" + enabled);
         refreshControls();
     }
 

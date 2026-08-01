@@ -240,6 +240,14 @@ private data class Copy(
     val textDirectionOutputHint: String,
     val showWazeAlerts: String,
     val showWazeAlertsHint: String,
+    val showWholeRouteMetrics: String,
+    val showWholeRouteMetricsHint: String,
+    val showEta: String,
+    val showEtaHint: String,
+    val showRemainingTime: String,
+    val showRemainingTimeHint: String,
+    val showRemainingDistance: String,
+    val showRemainingDistanceHint: String,
     val fullscreenDashboard: String,
     val fullscreenDashboardHint: String,
     val dashboardHeight: String,
@@ -1048,6 +1056,37 @@ private fun OptionsTab(
                 Divider(palette)
                 SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
                     runAction { activity.composeSetWazeAlertsEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.showWholeRouteMetrics,
+                    copy.showWholeRouteMetricsHint,
+                    snapshot.wholeRouteMetricsEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetWholeRouteMetricsEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette) {
+                    runAction { activity.composeSetEtaOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.showRemainingTime,
+                    copy.showRemainingTimeHint,
+                    snapshot.remainingTimeOutputEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.showRemainingDistance,
+                    copy.showRemainingDistanceHint,
+                    snapshot.remainingDistanceOutputEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
                 }
                 Divider(palette)
                 SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
@@ -3442,6 +3481,14 @@ private fun enCopy() = Copy(
     textDirectionOutputHint = "Send text direction in street output (\"Continue straight\") if no street text available. Street output has priority.",
     showWazeAlerts = "Show Waze alerts",
     showWazeAlertsHint = "Display Waze alerts on the HUD.",
+    showWholeRouteMetrics = "Show ETA/time/distance for entire route",
+    showWholeRouteMetricsHint = "When supported, show values for the entire route. Waze currently shows values to the next stop.",
+    showEta = "Show ETA",
+    showEtaHint = "Prepend the estimated arrival time to the street text.",
+    showRemainingTime = "Show remaining time",
+    showRemainingTimeHint = "Prepend the remaining trip time to the street text.",
+    showRemainingDistance = "Show remaining distance",
+    showRemainingDistanceHint = "Prepend the remaining trip distance to the street text.",
     fullscreenDashboard = "Fullscreen dashboard",
     fullscreenDashboardHint = "Use fullscreen dashboard mode.",
     dashboardHeight = "Height",
@@ -3617,6 +3664,14 @@ private fun uaCopy() = enCopy().copy(
     textDirectionOutputHint = "Виводити у поле для вулиці текстові напрямки (\"Прямуйте далі\"), якщо відсутній текст вулиці. Вивід вулиці має пріоритет.",
     showWazeAlerts = "Показувати попередження Waze",
     showWazeAlertsHint = "Відображати попередження Waze на HUD.",
+    showWholeRouteMetrics = "Показувати ETA/час/дистанцію всього маршруту",
+    showWholeRouteMetricsHint = "Якщо навігатор підтримує, показувати значення для всього маршруту. Waze наразі показує значення до наступної зупинки.",
+    showEta = "Показувати час прибуття",
+    showEtaHint = "Додавати очікуваний час прибуття перед назвою вулиці.",
+    showRemainingTime = "Показувати залишок часу",
+    showRemainingTimeHint = "Додавати залишок часу поїздки перед назвою вулиці.",
+    showRemainingDistance = "Показувати залишок дистанції",
+    showRemainingDistanceHint = "Додавати залишок дистанції поїздки перед назвою вулиці.",
     fullscreenDashboard = "Повний екран приборки",
     fullscreenDashboardHint = "Використовувати повноекранний режим приборки.",
     dashboardHeight = "Висота",

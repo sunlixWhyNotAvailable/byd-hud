@@ -17,6 +17,7 @@ public final class DirectTbtFrame {
     private final byte[] lanePng;
     private final List<Lane> lanes;
     private final AlertOverlay alertOverlay;
+    private final TripMetrics tripMetrics;
 
     public DirectTbtFrame(
             int rawManeuverType,
@@ -30,6 +31,24 @@ public final class DirectTbtFrame {
             byte[] lanePng,
             List<Lane> lanes,
             AlertOverlay alertOverlay) {
+        this(rawManeuverType, amapManeuver, bydManeuver, distanceMeters,
+                roadText, cueText, displayText, maneuverPng, lanePng, lanes,
+                alertOverlay, TripMetrics.empty());
+    }
+
+    public DirectTbtFrame(
+            int rawManeuverType,
+            int amapManeuver,
+            int bydManeuver,
+            int distanceMeters,
+            String roadText,
+            String cueText,
+            String displayText,
+            byte[] maneuverPng,
+            byte[] lanePng,
+            List<Lane> lanes,
+            AlertOverlay alertOverlay,
+            TripMetrics tripMetrics) {
         this.rawManeuverType = rawManeuverType;
         this.amapManeuver = Math.max(0, amapManeuver);
         this.bydManeuver = Math.max(0, bydManeuver);
@@ -42,6 +61,7 @@ public final class DirectTbtFrame {
         this.lanes = Collections.unmodifiableList(new ArrayList<>(
                 lanes == null ? Collections.emptyList() : lanes));
         this.alertOverlay = alertOverlay == null ? AlertOverlay.inactive() : alertOverlay;
+        this.tripMetrics = tripMetrics == null ? TripMetrics.empty() : tripMetrics;
     }
 
     public static DirectTbtFrame empty() {
@@ -97,16 +117,20 @@ public final class DirectTbtFrame {
         return alertOverlay;
     }
 
+    public TripMetrics getTripMetrics() {
+        return tripMetrics;
+    }
+
     DirectTbtFrame withAlertOverlay(AlertOverlay overlay) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
-                lanes, overlay);
+                lanes, overlay, tripMetrics);
     }
 
     DirectTbtFrame withManeuverPng(byte[] png) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, png, lanePng,
-                lanes, alertOverlay);
+                lanes, alertOverlay, tripMetrics);
     }
 
     boolean hasLaneGuidance() {
@@ -117,7 +141,107 @@ public final class DirectTbtFrame {
         if (other == null || !other.hasLaneGuidance()) return this;
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng,
-                other.lanePng, other.lanes, alertOverlay);
+                other.lanePng, other.lanes, alertOverlay, tripMetrics);
+    }
+
+    DirectTbtFrame withTripMetrics(TripMetrics metrics) {
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, metrics);
+    }
+
+    /** Structured trip totals carried independently from the current maneuver. */
+    public static final class TripMetrics {
+        private static final TripMetrics EMPTY = new TripMetrics(
+                TravelMetrics.unavailable(), TravelMetrics.unavailable());
+
+        private final TravelMetrics nextStop;
+        private final TravelMetrics wholeRoute;
+
+        public TripMetrics(TravelMetrics nextStop, TravelMetrics wholeRoute) {
+            this.nextStop = nextStop == null ? TravelMetrics.unavailable() : nextStop;
+            this.wholeRoute = wholeRoute == null ? TravelMetrics.unavailable() : wholeRoute;
+        }
+
+        public static TripMetrics empty() {
+            return EMPTY;
+        }
+
+        public static TripMetrics nextStopOnly(TravelMetrics nextStop) {
+            return new TripMetrics(nextStop, TravelMetrics.unavailable());
+        }
+
+        public TravelMetrics getNextStop() {
+            return nextStop;
+        }
+
+        public TravelMetrics getWholeRoute() {
+            return wholeRoute;
+        }
+
+        public boolean isEmpty() {
+            return !nextStop.hasAnyValue() && !wholeRoute.hasAnyValue();
+        }
+    }
+
+    /** One destination scope; negative values mean that field is unavailable. */
+    public static final class TravelMetrics {
+        public static final int UNKNOWN_ZONE_OFFSET_SECONDS = Integer.MIN_VALUE;
+        private static final TravelMetrics UNAVAILABLE = new TravelMetrics(
+                -1L, UNKNOWN_ZONE_OFFSET_SECONDS, -1L, -1L);
+
+        private final long arrivalTimeEpochMs;
+        private final int arrivalZoneOffsetSeconds;
+        private final long remainingTimeSeconds;
+        private final long remainingDistanceMeters;
+
+        public TravelMetrics(
+                long arrivalTimeEpochMs,
+                long remainingTimeSeconds,
+                long remainingDistanceMeters) {
+            this(arrivalTimeEpochMs, UNKNOWN_ZONE_OFFSET_SECONDS,
+                    remainingTimeSeconds, remainingDistanceMeters);
+        }
+
+        public TravelMetrics(
+                long arrivalTimeEpochMs,
+                int arrivalZoneOffsetSeconds,
+                long remainingTimeSeconds,
+                long remainingDistanceMeters) {
+            this.arrivalTimeEpochMs = arrivalTimeEpochMs > 0L ? arrivalTimeEpochMs : -1L;
+            this.arrivalZoneOffsetSeconds = arrivalTimeEpochMs > 0L
+                    ? arrivalZoneOffsetSeconds : UNKNOWN_ZONE_OFFSET_SECONDS;
+            this.remainingTimeSeconds = remainingTimeSeconds >= 0L
+                    ? remainingTimeSeconds : -1L;
+            this.remainingDistanceMeters = remainingDistanceMeters >= 0L
+                    ? remainingDistanceMeters : -1L;
+        }
+
+        public static TravelMetrics unavailable() {
+            return UNAVAILABLE;
+        }
+
+        public long getArrivalTimeEpochMs() {
+            return arrivalTimeEpochMs;
+        }
+
+        public int getArrivalZoneOffsetSeconds() {
+            return arrivalZoneOffsetSeconds;
+        }
+
+        public long getRemainingTimeSeconds() {
+            return remainingTimeSeconds;
+        }
+
+        public long getRemainingDistanceMeters() {
+            return remainingDistanceMeters;
+        }
+
+        public boolean hasAnyValue() {
+            return arrivalTimeEpochMs > 0L
+                    || remainingTimeSeconds >= 0L
+                    || remainingDistanceMeters >= 0L;
+        }
     }
 
     private static byte[] cloneBytes(byte[] value) {

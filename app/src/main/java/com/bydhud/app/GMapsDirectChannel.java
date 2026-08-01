@@ -188,6 +188,8 @@ final class GMapsDirectChannel {
             if (road.isEmpty()) road = joinedLines(summary.get("longCueLines"));
             long frameAtMs = data.getLong(
                     "sourceElapsedMs", SystemClock.elapsedRealtime());
+            DirectTbtFrame.TripMetrics tripMetrics = tripMetrics(
+                    summary, System.currentTimeMillis());
             byte[] fallbackPng = HudGraphicPayload.buildOemTurnPng(mapping.fallbackSource);
             BitmapSelection bitmapSelection = BitmapSelection.select(
                     sequence,
@@ -211,7 +213,8 @@ final class GMapsDirectChannel {
                     maneuverPng,
                     null,
                     Collections.emptyList(),
-                    DirectTbtFrame.AlertOverlay.inactive());
+                    DirectTbtFrame.AlertOverlay.inactive(),
+                    tripMetrics);
             if (!navigating) {
                 navigating = true;
                 listener.onNavigationStarted("first-frame");
@@ -226,6 +229,10 @@ final class GMapsDirectChannel {
                     + " source=" + mapping.fallbackSource
                     + " native=" + mapping.nativeManeuver
                     + " distanceM=" + distance
+                    + " nextStopSeconds="
+                    + tripMetrics.getNextStop().getRemainingTimeSeconds()
+                    + " wholeRouteSeconds="
+                    + tripMetrics.getWholeRoute().getRemainingTimeSeconds()
                     + " lanesParsed=" + laneCount
                     + " bitmap=" + bitmapSelection.selected);
             logBitmapSelection(bitmapSelection);
@@ -388,6 +395,32 @@ final class GMapsDirectChannel {
         long number = ((Number) value).longValue();
         return number < Integer.MIN_VALUE || number > Integer.MAX_VALUE
                 ? fallback : (int) number;
+    }
+
+    private static long longValue(Object value, long fallback) {
+        return value instanceof Number ? ((Number) value).longValue() : fallback;
+    }
+
+    private static DirectTbtFrame.TripMetrics tripMetrics(
+            Map<String, Object> summary, long frameWallTimeMs) {
+        DirectTbtFrame.TravelMetrics nextStop = travelMetrics(
+                longValue(summary.get("nextStopRemainingSeconds"), -1L),
+                longValue(summary.get("nextStopRemainingDistanceMeters"), -1L),
+                frameWallTimeMs);
+        DirectTbtFrame.TravelMetrics wholeRoute = travelMetrics(
+                longValue(summary.get("wholeRouteRemainingSeconds"), -1L),
+                longValue(summary.get("wholeRouteRemainingDistanceMeters"), -1L),
+                frameWallTimeMs);
+        return new DirectTbtFrame.TripMetrics(nextStop, wholeRoute);
+    }
+
+    private static DirectTbtFrame.TravelMetrics travelMetrics(
+            long seconds, long meters, long frameWallTimeMs) {
+        long arrivalTimeMs = -1L;
+        if (seconds >= 0L && seconds <= (Long.MAX_VALUE - frameWallTimeMs) / 1000L) {
+            arrivalTimeMs = frameWallTimeMs + seconds * 1000L;
+        }
+        return new DirectTbtFrame.TravelMetrics(arrivalTimeMs, seconds, meters);
     }
 
     private static String stringValue(Object value) {

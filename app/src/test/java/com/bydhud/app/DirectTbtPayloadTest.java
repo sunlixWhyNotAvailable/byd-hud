@@ -7,6 +7,7 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 import java.util.Collections;
+import java.util.Calendar;
 
 public final class DirectTbtPayloadTest {
     @Test
@@ -111,6 +112,103 @@ public final class DirectTbtPayloadTest {
                 true, true, true, true, true, true, true);
 
         assertEquals(11, DirectTbtPayload.prepare(frame, options).distanceMeters());
+    }
+
+    @Test
+    public void selectedTripMetricsPrefixUsesStableOrderAndFormatting() {
+        long nextArrival = localTime(12, 20);
+        long wholeArrival = localTime(13, 40);
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                new DirectTbtFrame.TripMetrics(
+                        new DirectTbtFrame.TravelMetrics(nextArrival, 601, 5100),
+                        new DirectTbtFrame.TravelMetrics(wholeArrival, 1069, 10310)));
+
+        DirectTbtPayload.Prepared nextStop = DirectTbtPayload.prepare(
+                frame, metricOptions(false, true, true, true, true, true));
+        DirectTbtPayload.Prepared wholeRoute = DirectTbtPayload.prepare(
+                frame, metricOptions(true, true, true, true, true, true));
+
+        assertEquals("[ETA: 12:20 | 11 min | 5.1 km] Road", nextStop.displayText());
+        assertEquals("[ETA: 13:40 | 18 min | 10.3 km] Road", wholeRoute.displayText());
+    }
+
+    @Test
+    public void tripMetricsCanRenderWithoutStreetAndFallBackToNextStop() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "",
+                DirectTbtFrame.TripMetrics.nextStopOnly(
+                        new DirectTbtFrame.TravelMetrics(-1, 60, 999)));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, metricOptions(true, false, true, true, false, false));
+
+        assertEquals("[1 min | 999 m]", prepared.displayText());
+    }
+
+    @Test
+    public void wholeRoutePreferenceFallsBackPerUnavailableField() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                new DirectTbtFrame.TripMetrics(
+                        new DirectTbtFrame.TravelMetrics(localTime(12, 20), 601, 5100),
+                        new DirectTbtFrame.TravelMetrics(-1, 1069, -1)));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, metricOptions(true, true, true, true, true, true));
+
+        assertEquals("[ETA: 12:20 | 18 min | 5.1 km] Road", prepared.displayText());
+    }
+
+    @Test
+    public void etaUsesNavigatorSuppliedZoneOffset() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                DirectTbtFrame.TripMetrics.nextStopOnly(
+                        new DirectTbtFrame.TravelMetrics(3_600_000L, 7200, 60, 100)));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, metricOptions(false, true, false, false, true, true));
+
+        assertEquals("[ETA: 03:00] Road", prepared.displayText());
+    }
+
+    @Test
+    public void activeAlertSuppressesTripMetricsPrefix() {
+        DirectTbtFrame base = frameWithMetrics(
+                "Road",
+                DirectTbtFrame.TripMetrics.nextStopOnly(
+                        new DirectTbtFrame.TravelMetrics(localTime(12, 20), 601, 5100)));
+        DirectTbtFrame frame = base.withAlertOverlay(
+                DirectTbtFrame.AlertOverlay.active(7, 25, "Camera", new byte[]{8, 9}));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, metricOptions(false, true, true, true, true, true));
+
+        assertEquals("Camera", prepared.displayText());
+    }
+
+    private static DirectTbtPayload.Options metricOptions(
+            boolean wholeRoute, boolean eta, boolean time, boolean tripDistance,
+            boolean street, boolean textDirection) {
+        return new DirectTbtPayload.Options(
+                true, true, true, true, street, textDirection, false,
+                wholeRoute, eta, time, tripDistance, new byte[]{7, 2});
+    }
+
+    private static DirectTbtFrame frameWithMetrics(
+            String road, DirectTbtFrame.TripMetrics metrics) {
+        return new DirectTbtFrame(
+                11, 3, 9, 120, road, "Turn right", road,
+                new byte[]{1, 2, 3}, new byte[0], Collections.emptyList(),
+                DirectTbtFrame.AlertOverlay.inactive(), metrics);
+    }
+
+    private static long localTime(int hour, int minute) {
+        Calendar calendar = Calendar.getInstance();
+        calendar.set(2026, Calendar.JANUARY, 1, hour, minute, 0);
+        calendar.set(Calendar.MILLISECOND, 0);
+        return calendar.getTimeInMillis();
     }
 
     private static DirectTbtFrame frame(

@@ -19,6 +19,10 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_STREET = "output_street";
     private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
+    private static final String KEY_WHOLE_ROUTE_METRICS = "whole_route_metrics";
+    private static final String KEY_OUTPUT_ETA = "output_eta";
+    private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
+    private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
     private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
@@ -54,6 +58,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setSmallDistanceClampEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_SMALL_DISTANCE_CLAMP, enabled).apply();
+        outputOptionsRevision++;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -136,6 +141,42 @@ final class HudPrefs {
 
     static void setWazeAlertsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_WAZE_ALERTS, enabled).apply();
+    }
+
+    static boolean isWholeRouteMetricsEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_WHOLE_ROUTE_METRICS, false);
+    }
+
+    static void setWholeRouteMetricsEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_WHOLE_ROUTE_METRICS, enabled).apply();
+        outputOptionsRevision++;
+    }
+
+    static boolean isEtaOutputEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_OUTPUT_ETA, false);
+    }
+
+    static void setEtaOutputEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_OUTPUT_ETA, enabled).apply();
+        outputOptionsRevision++;
+    }
+
+    static boolean isRemainingTimeOutputEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_OUTPUT_REMAINING_TIME, false);
+    }
+
+    static void setRemainingTimeOutputEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_OUTPUT_REMAINING_TIME, enabled).apply();
+        outputOptionsRevision++;
+    }
+
+    static boolean isRemainingDistanceOutputEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_OUTPUT_REMAINING_DISTANCE, false);
+    }
+
+    static void setRemainingDistanceOutputEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_OUTPUT_REMAINING_DISTANCE, enabled).apply();
+        outputOptionsRevision++;
     }
 
     static boolean isWazeScreenCaptureEnabled(Context context) {

@@ -19,6 +19,7 @@
 - patched `Google Maps` direct structured maneuver, distance, road, and rendered-icon channel
 - stock or incompatible `Google Maps` accessibility/notification fallback
 - patched `Waze` direct structured maneuver, distance, road, lane, and alert channel
+- optional direct-channel ETA, remaining-time, and remaining-distance prefix in the street field
 - stock or incompatible `Waze` accessibility/visual crop fallback
 - background runtime service with watchdog recovery
 - storage management
@@ -48,6 +49,7 @@ After first launch:
 - `Waze` visual parsing may require template updates when Waze changes its UI elements. Heavily dependent on the screen capture and resolution.
 - The direct Waze channel requires a compatible patched Waze build. BYD HUD waits up to five seconds for it before starting the visual fallback.
 - The direct Google Maps channel requires a compatible patched build; stock or incompatible builds use accessibility/notification fallback.
+- Whole-route ETA/time/distance is available through Google Maps direct. Waze direct currently reports these values to the next stop only.
 - Native maneuver arrows require the vehicle's `Navigation fusion` option to be enabled.
 - `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP` (for crop mode).
 
@@ -72,6 +74,7 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 ## To Do
 
 - add patch feat directly to the app;
+- extend the Waze direct patch with structured totals for every remaining route leg;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again).
 
 ## Contribution

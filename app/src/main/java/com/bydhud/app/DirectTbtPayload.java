@@ -8,15 +8,18 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
+import java.util.SimpleTimeZone;
+import java.text.SimpleDateFormat;
 
 /** Builds complete 0x8001 road-info payloads without owning a transport. */
 public final class DirectTbtPayload {
     private static final int NATIVE_BLANK_ID = 99;
     private static final Object OPTIONS_LOCK = new Object();
-    private static final Options[] OPTIONS_CACHE = new Options[128];
+    private static final Options[] OPTIONS_CACHE = new Options[2048];
     private static byte[] cachedBlankS72Png;
 
     private DirectTbtPayload() {
@@ -65,6 +68,13 @@ public final class DirectTbtPayload {
             displayText = safeFrame.getCueText();
         } else {
             displayText = "";
+        }
+        if (!alert.isActive()) {
+            String metricPrefix = metricPrefix(safeFrame, safeOptions);
+            if (!metricPrefix.isEmpty()) {
+                displayText = displayText.isEmpty()
+                        ? metricPrefix : metricPrefix + " " + displayText;
+            }
         }
 
         if (!safeOptions.png) maneuverPng = new byte[0];
@@ -128,6 +138,65 @@ public final class DirectTbtPayload {
 
     private static boolean nonBlank(String value) {
         return value != null && !value.trim().isEmpty();
+    }
+
+    private static String metricPrefix(DirectTbtFrame frame, Options options) {
+        if (!options.showEta && !options.showRemainingTime
+                && !options.showRemainingDistance) {
+            return "";
+        }
+        DirectTbtFrame.TripMetrics metrics = frame.getTripMetrics();
+        DirectTbtFrame.TravelMetrics nextStop = metrics.getNextStop();
+        DirectTbtFrame.TravelMetrics wholeRoute = metrics.getWholeRoute();
+        StringBuilder values = new StringBuilder();
+        DirectTbtFrame.TravelMetrics eta = selectMetric(
+                options.wholeRouteMetrics, wholeRoute.getArrivalTimeEpochMs() > 0L,
+                wholeRoute, nextStop);
+        if (options.showEta && eta.getArrivalTimeEpochMs() > 0L) {
+            SimpleDateFormat formatter = new SimpleDateFormat("HH:mm", Locale.US);
+            if (eta.getArrivalZoneOffsetSeconds()
+                    != DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS) {
+                formatter.setTimeZone(new SimpleTimeZone(
+                        eta.getArrivalZoneOffsetSeconds() * 1000, "ETA"));
+            }
+            appendMetric(values, "ETA: "
+                    + formatter.format(new Date(eta.getArrivalTimeEpochMs())));
+        }
+        DirectTbtFrame.TravelMetrics time = selectMetric(
+                options.wholeRouteMetrics, wholeRoute.getRemainingTimeSeconds() >= 0L,
+                wholeRoute, nextStop);
+        if (options.showRemainingTime && time.getRemainingTimeSeconds() >= 0L) {
+            long minutes = (time.getRemainingTimeSeconds() + 59L) / 60L;
+            appendMetric(values, minutes + " min");
+        }
+        DirectTbtFrame.TravelMetrics distance = selectMetric(
+                options.wholeRouteMetrics, wholeRoute.getRemainingDistanceMeters() >= 0L,
+                wholeRoute, nextStop);
+        if (options.showRemainingDistance && distance.getRemainingDistanceMeters() >= 0L) {
+            appendMetric(values, formatDistance(distance.getRemainingDistanceMeters()));
+        }
+        return values.length() == 0 ? "" : "[" + values + "]";
+    }
+
+    private static DirectTbtFrame.TravelMetrics selectMetric(
+            boolean preferWholeRoute,
+            boolean wholeRouteFieldAvailable,
+            DirectTbtFrame.TravelMetrics wholeRoute,
+            DirectTbtFrame.TravelMetrics nextStop) {
+        return preferWholeRoute && wholeRouteFieldAvailable ? wholeRoute : nextStop;
+    }
+
+    private static void appendMetric(StringBuilder values, String value) {
+        if (values.length() > 0) values.append(" | ");
+        values.append(value);
+    }
+
+    private static String formatDistance(long meters) {
+        if (meters < 1000L) return meters + " m";
+        double kilometers = meters / 1000d;
+        String value = String.format(Locale.US, "%.1f", kilometers);
+        if (value.endsWith(".0")) value = value.substring(0, value.length() - 2);
+        return value + " km";
     }
 
     static String shortSha256(byte[] bytes) {
@@ -310,7 +379,9 @@ public final class DirectTbtPayload {
 
     /** Independent switches for each optional cluster output. */
     public static final class Options {
-        public static final Options ALL = new Options(true, true, true, true, true, true, false);
+        public static final Options ALL = new Options(
+                true, true, true, true, true, true, false,
+                false, false, false, false, null);
 
         public final boolean png;
         public final boolean nativeManeuver;
@@ -319,6 +390,10 @@ public final class DirectTbtPayload {
         public final boolean street;
         public final boolean textDirection;
         public final boolean clampSmallDistance;
+        public final boolean wholeRouteMetrics;
+        public final boolean showEta;
+        public final boolean showRemainingTime;
+        public final boolean showRemainingDistance;
         private final byte[] blankS72Png;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
@@ -335,12 +410,21 @@ public final class DirectTbtPayload {
                 boolean distance, boolean street, boolean textDirection,
                 boolean clampSmallDistance) {
             this(png, nativeManeuver, lanes, distance, street, textDirection,
-                    clampSmallDistance, null);
+                    clampSmallDistance, false, false, false, false, null);
         }
 
         Options(boolean png, boolean nativeManeuver, boolean lanes,
                 boolean distance, boolean street, boolean textDirection,
                 boolean clampSmallDistance, byte[] blankS72Png) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, false, false, false, false, blankS72Png);
+        }
+
+        Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, boolean wholeRouteMetrics,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, byte[] blankS72Png) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -348,6 +432,10 @@ public final class DirectTbtPayload {
             this.street = street;
             this.textDirection = textDirection;
             this.clampSmallDistance = clampSmallDistance;
+            this.wholeRouteMetrics = wholeRouteMetrics;
+            this.showEta = showEta;
+            this.showRemainingTime = showRemainingTime;
+            this.showRemainingDistance = showRemainingDistance;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
         }
 
@@ -360,19 +448,28 @@ public final class DirectTbtPayload {
             boolean street = HudPrefs.isStreetOutputEnabled(safeContext);
             boolean textDirection = HudPrefs.isTextDirectionOutputEnabled(safeContext);
             boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(safeContext);
+            boolean wholeRouteMetrics = HudPrefs.isWholeRouteMetricsEnabled(safeContext);
+            boolean showEta = HudPrefs.isEtaOutputEnabled(safeContext);
+            boolean showRemainingTime = HudPrefs.isRemainingTimeOutputEnabled(safeContext);
+            boolean showRemainingDistance = HudPrefs.isRemainingDistanceOutputEnabled(safeContext);
             int key = (png ? 1 : 0)
                     | (nativeManeuver ? 2 : 0)
                     | (lanes ? 4 : 0)
                     | (distance ? 8 : 0)
                     | (street ? 16 : 0)
                     | (textDirection ? 32 : 0)
-                    | (clampSmallDistance ? 64 : 0);
+                    | (clampSmallDistance ? 64 : 0)
+                    | (wholeRouteMetrics ? 128 : 0)
+                    | (showEta ? 256 : 0)
+                    | (showRemainingTime ? 512 : 0)
+                    | (showRemainingDistance ? 1024 : 0);
             synchronized (OPTIONS_LOCK) {
                 Options cached = OPTIONS_CACHE[key];
                 if (cached != null) return cached;
                 if (cachedBlankS72Png == null) cachedBlankS72Png = loadBlankS72(safeContext);
                 cached = new Options(png, nativeManeuver, lanes, distance, street, textDirection,
-                        clampSmallDistance, cachedBlankS72Png);
+                        clampSmallDistance, wholeRouteMetrics, showEta,
+                        showRemainingTime, showRemainingDistance, cachedBlankS72Png);
                 OPTIONS_CACHE[key] = cached;
                 return cached;
             }

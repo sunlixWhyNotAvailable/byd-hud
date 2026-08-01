@@ -32,6 +32,7 @@ import androidx.car.app.model.Alert;
 import androidx.car.app.model.CarIcon;
 import androidx.car.app.model.CarText;
 import androidx.car.app.model.Distance;
+import androidx.car.app.model.DateTimeWithZone;
 import androidx.car.app.model.Template;
 import androidx.car.app.model.TemplateWrapper;
 import androidx.car.app.navigation.INavigationHost;
@@ -682,6 +683,12 @@ public final class WazeDirectChannel {
 
     private void publishCurrentStep(Step step, Distance distance,
                                     boolean authoritativeLanes, String reason) {
+        publishCurrentStep(step, distance, authoritativeLanes, reason, null);
+    }
+
+    private void publishCurrentStep(Step step, Distance distance,
+                                    boolean authoritativeLanes, String reason,
+                                    DirectTbtFrame.TripMetrics tripMetrics) {
         if (suspended) {
             log("route frame ignored while suspended source=" + reason);
             return;
@@ -691,7 +698,9 @@ public final class WazeDirectChannel {
             return;
         }
         if (!navigationActive) beginNavigation("frame_received:" + reason);
-        DirectTbtFrame next = frameFromStep(step, distance);
+        DirectTbtFrame.TripMetrics selectedMetrics = tripMetrics == null
+                ? navigationFrame.getTripMetrics() : tripMetrics;
+        DirectTbtFrame next = frameFromStep(step, distance, selectedMetrics);
         navigationDistanceKnown = distance != null;
         acceptedRouteFrame = true;
         int previousKnownRaw = lastKnownRawManeuverType;
@@ -713,7 +722,8 @@ public final class WazeDirectChannel {
         emitFrame(reason);
     }
 
-    private DirectTbtFrame frameFromStep(Step step, Distance distance) {
+    private DirectTbtFrame frameFromStep(
+            Step step, Distance distance, DirectTbtFrame.TripMetrics tripMetrics) {
         Maneuver maneuver = step.getManeuver();
         int rawType = maneuver == null ? -1 : maneuver.getType();
         int amap = maneuver == null ? 0 : mapWazeToAmap(rawType);
@@ -733,7 +743,8 @@ public final class WazeDirectChannel {
 
         return new DirectTbtFrame(rawType, amap, byd, meters(distance), road, cue,
                 road.isEmpty() ? cue : road, maneuverPng, lanePng,
-                mapLanes(step.getLanes()), DirectTbtFrame.AlertOverlay.inactive());
+                mapLanes(step.getLanes()), DirectTbtFrame.AlertOverlay.inactive(),
+                tripMetrics);
     }
 
     private void emitFrame(String reason) {
@@ -1035,6 +1046,22 @@ public final class WazeDirectChannel {
             default:
                 return (int) Math.round(value);
         }
+    }
+
+    static DirectTbtFrame.TripMetrics destinationMetrics(TravelEstimate estimate) {
+        if (estimate == null) return DirectTbtFrame.TripMetrics.empty();
+        DateTimeWithZone arrival = estimate.getArrivalTimeAtDestination();
+        long arrivalTimeMs = arrival == null ? -1L : arrival.getTimeSinceEpochMillis();
+        int arrivalZoneOffsetSeconds = arrival == null
+                ? DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS
+                : arrival.getZoneOffsetSeconds();
+        long remainingSeconds = estimate.getRemainingTimeSeconds();
+        Distance remainingDistance = estimate.getRemainingDistance();
+        long remainingMeters = remainingDistance == null ? -1L : meters(remainingDistance);
+        return DirectTbtFrame.TripMetrics.nextStopOnly(
+                new DirectTbtFrame.TravelMetrics(
+                        arrivalTimeMs, arrivalZoneOffsetSeconds,
+                        remainingSeconds, remainingMeters));
     }
 
     private static int directionFromShape(int shape) {
@@ -1345,9 +1372,22 @@ public final class WazeDirectChannel {
                         return;
                     }
                     Trip trip = (Trip) value;
+                    TravelEstimate destinationEstimate = null;
+                    List<TravelEstimate> destinationEstimates =
+                            trip.getDestinationTravelEstimates();
+                    if (destinationEstimates != null && !destinationEstimates.isEmpty()) {
+                        destinationEstimate = destinationEstimates.get(0);
+                    }
+                    DirectTbtFrame.TripMetrics tripMetrics =
+                            destinationMetrics(destinationEstimate);
                     List<Step> steps = trip.getSteps();
                     if (steps == null || steps.isEmpty()) {
-                        log("trip has no steps");
+                        navigationFrame = navigationFrame.withTripMetrics(tripMetrics);
+                        log("trip has no steps; destination metrics updated");
+                        if (navigationActive || acceptedRouteFrame) {
+                            recordDirectActivity("frame:trip_metrics_only");
+                            emitFrame("trip_metrics_only");
+                        }
                         return;
                     }
                     Distance distance = null;
@@ -1355,8 +1395,15 @@ public final class WazeDirectChannel {
                     if (estimates != null && !estimates.isEmpty()) {
                         distance = estimates.get(0).getRemainingDistance();
                     }
-                    publishCurrentStep(steps.get(0), distance, false, "trip_current");
+                    publishCurrentStep(steps.get(0), distance, false,
+                            "trip_current", tripMetrics);
                     logNextStep(steps.size() > 1 ? steps.get(1) : null, "trip_next");
+                    log("trip destination estimates="
+                            + (destinationEstimates == null ? 0 : destinationEstimates.size())
+                            + " remainingSeconds="
+                            + tripMetrics.getNextStop().getRemainingTimeSeconds()
+                            + " remainingMeters="
+                            + tripMetrics.getNextStop().getRemainingDistanceMeters());
                 } catch (Throwable t) {
                     log("trip parse failed: " + t);
                 }

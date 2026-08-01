@@ -15,6 +15,7 @@ public final class GmapsWireParser {
     private static final int MAX_PAYLOAD_BYTES = 512 * 1024;
     private static final int MAX_FIELDS_PER_MESSAGE = 4096;
     private static final int MAX_STEPS = 1024;
+    private static final int MAX_ROUTE_LEGS = 64;
     private static final int MAX_TEXT_BYTES = 32 * 1024;
     private static final int MAX_CUE_OPTIONS = 128;
     private static final int MAX_CUE_LINES = 32;
@@ -132,21 +133,28 @@ public final class GmapsWireParser {
         }
 
         List<Field> route = parse(routeBytes);
-        byte[] routeStateBytes = firstBytes(route, 2);
-        if (routeStateBytes == null) return shape(result, "route_without_state");
+        List<byte[]> routeLegBytes = allBytes(route, 2);
+        if (routeLegBytes.isEmpty()) return shape(result, "route_without_state");
+        if (routeLegBytes.size() > MAX_ROUTE_LEGS) throw new IOException("too many route legs");
 
-        List<Field> routeState = parse(routeStateBytes);
-        List<byte[]> steps = allBytes(routeState, 2);
-        if (steps.size() > MAX_STEPS) throw new IOException("too many route steps");
-        int currentIndex = checkedInt(firstVarint(routeState, 3, 0L), "current step index");
+        List<LegState> routeLegs = new ArrayList<>();
+        for (byte[] legBytes : routeLegBytes) routeLegs.add(parseLegState(legBytes));
+        LegState currentLeg = routeLegs.get(0);
+        List<byte[]> steps = currentLeg.steps;
+        int currentIndex = currentLeg.currentIndex;
         shape(result, "route_state");
         result.put("routeRevision", firstVarint(route, 1, -1L));
+        result.put("routeLegCount", routeLegs.size());
         result.put("stepCount", steps.size());
         result.put("currentStepIndex", currentIndex);
-        byte[] routeMetric = firstBytes(routeState, 4);
-        if (routeMetric != null) {
-            result.put("routeMetricSeconds", firstVarint(parse(routeMetric), 1, -1L));
+        if (currentLeg.remainingSeconds >= 0L) {
+            result.put("routeMetricSeconds", currentLeg.remainingSeconds);
+            result.put("nextStopRemainingSeconds", currentLeg.remainingSeconds);
         }
+        if (currentLeg.distanceAvailable) {
+            result.put("nextStopRemainingDistanceMeters", currentLeg.remainingDistanceMeters);
+        }
+        putWholeRouteMetrics(result, routeLegs);
         if (currentIndex < 0 || currentIndex >= steps.size()) {
             result.put("currentStepAvailable", false);
             return result;
@@ -185,6 +193,62 @@ public final class GmapsWireParser {
         putOptionalBoolean(result, "stepFlag9", step, 9);
         putString(result, "maneuverQualifierText", firstString(step, 10));
         return result;
+    }
+
+    private static LegState parseLegState(byte[] routeStateBytes) throws IOException {
+        List<Field> routeState = parse(routeStateBytes);
+        List<byte[]> steps = allBytes(routeState, 2);
+        if (steps.size() > MAX_STEPS) throw new IOException("too many route steps");
+        int currentIndex = checkedInt(
+                firstVarint(routeState, 3, 0L), "current step index");
+        byte[] routeMetric = firstBytes(routeState, 4);
+        long remainingSeconds = routeMetric == null
+                ? -1L : firstVarint(parse(routeMetric), 1, -1L);
+        long remainingDistanceMeters = 0L;
+        boolean distanceAvailable = false;
+        int firstRemainingStep = Math.max(0, currentIndex);
+        if (firstRemainingStep < steps.size()) {
+            for (int index = firstRemainingStep; index < steps.size(); index++) {
+                byte[] distance = firstBytes(parse(steps.get(index)), 3);
+                if (distance == null) continue;
+                long meters = firstVarint(parse(distance), 1, -1L);
+                if (meters < 0L) continue;
+                remainingDistanceMeters = checkedAdd(
+                        remainingDistanceMeters, meters, "route distance");
+                distanceAvailable = true;
+            }
+        }
+        return new LegState(steps, currentIndex, remainingSeconds,
+                remainingDistanceMeters, distanceAvailable);
+    }
+
+    private static void putWholeRouteMetrics(
+            Map<String, Object> result, List<LegState> routeLegs) throws IOException {
+        long seconds = 0L;
+        long meters = 0L;
+        boolean timeAvailable = true;
+        boolean distanceAvailable = true;
+        for (LegState leg : routeLegs) {
+            if (leg.remainingSeconds < 0L) {
+                timeAvailable = false;
+            } else if (timeAvailable) {
+                seconds = checkedAdd(seconds, leg.remainingSeconds, "route time");
+            }
+            if (!leg.distanceAvailable) {
+                distanceAvailable = false;
+            } else if (distanceAvailable) {
+                meters = checkedAdd(meters, leg.remainingDistanceMeters, "route distance");
+            }
+        }
+        if (timeAvailable) result.put("wholeRouteRemainingSeconds", seconds);
+        if (distanceAvailable) result.put("wholeRouteRemainingDistanceMeters", meters);
+    }
+
+    private static long checkedAdd(long left, long right, String name) throws IOException {
+        if (right < 0L || left > Long.MAX_VALUE - right) {
+            throw new IOException("invalid " + name);
+        }
+        return left + right;
     }
 
     public static String maneuverName(int value) {
@@ -533,6 +597,23 @@ public final class GmapsWireParser {
 
         static Field fixed32(int number, int value) {
             return new Field(number, 0, false, null, value, true);
+        }
+    }
+
+    private static final class LegState {
+        final List<byte[]> steps;
+        final int currentIndex;
+        final long remainingSeconds;
+        final long remainingDistanceMeters;
+        final boolean distanceAvailable;
+
+        LegState(List<byte[]> steps, int currentIndex, long remainingSeconds,
+                 long remainingDistanceMeters, boolean distanceAvailable) {
+            this.steps = steps;
+            this.currentIndex = currentIndex;
+            this.remainingSeconds = remainingSeconds;
+            this.remainingDistanceMeters = remainingDistanceMeters;
+            this.distanceAvailable = distanceAvailable;
         }
     }
 }
