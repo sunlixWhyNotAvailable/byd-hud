@@ -147,6 +147,8 @@ final class NavHudLiveSender {
     private long lastWazeFallbackReadinessCheckMs;
     private boolean gmapsDirectFrameReceived;
     private boolean gmapsDirectFallbackActive;
+    private boolean gmapsDirectTimedOut;
+    private boolean gmapsLegacyUnavailableLogged;
     private boolean gmapsDirectRouteEnded;
     private boolean gmapsDirectTimeoutScheduled;
     private long lastGMapsDirectRegistrationProbeMs;
@@ -176,13 +178,9 @@ final class NavHudLiveSender {
             return;
         }
         gmapsDirectFrameReceived = false;
-        gmapsDirectFallbackActive = true;
-        hudOutput.selectNavigationSource(
-                HudOutputCoordinator.Source.LEGACY, "gmaps-direct-timeout");
-        hudOutput.ensureBound("gmaps-direct-timeout");
+        gmapsDirectTimedOut = true;
+        activateGMapsLegacyFallbackIfReady("direct-frame-timeout");
         ensureGMapsRegisteredWhenTransportReady("frame-timeout");
-        sendLatestIfReady("gmaps-direct-timeout");
-        log("gmaps source=legacy reason=direct-frame-timeout");
     }
 
     private final Runnable sendLoop = new Runnable() {
@@ -263,13 +261,21 @@ final class NavHudLiveSender {
                     scheduleRouteHealthLoop();
                     return;
                 }
-                if (gmapsDirectFrameReceived || !gmapsDirectFallbackActive) {
+                if (gmapsDirectFallbackActive) {
+                    activateGMapsLegacyFallbackIfReady("fallback-health");
+                }
+                if (!gmapsDirectTimedOut) {
                     if (!gmapsDirectTimeoutScheduled) scheduleGMapsDirectTimeout();
                     scheduleRouteHealthLoop();
                     return;
                 }
+                activateGMapsLegacyFallbackIfReady("fallback-health");
                 if (now - lastGMapsDirectRegistrationProbeMs >= GMAPS_DIRECT_TIMEOUT_MS) {
                     ensureGMapsRegisteredWhenTransportReady("fallback-health");
+                }
+                if (!gmapsDirectFallbackActive) {
+                    scheduleRouteHealthLoop();
+                    return;
                 }
             }
             if (WAZE_PACKAGE.equals(activePackage) && !wazeFallbackActive) {
@@ -768,20 +774,29 @@ final class NavHudLiveSender {
         if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
                 || gmapsDirectRouteEnded) return;
         gmapsDirectFrameReceived = false;
-        if (!gmapsDirectTimeoutScheduled) scheduleGMapsDirectTimeout();
+        if (gmapsDirectTimedOut) {
+            activateGMapsLegacyFallbackIfReady("handshake-unavailable");
+        } else if (!gmapsDirectTimeoutScheduled) {
+            scheduleGMapsDirectTimeout();
+        }
         log("gmaps direct handshake unavailable reason=" + safeReason(reason));
     }
 
     private void onGMapsDirectNavigationStarted(String reason) {
         if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+        boolean keepFallbackUntilFrame = shouldKeepGMapsFallbackOnDirectStart(
+                gmapsDirectFallbackActive);
         gmapsDirectRouteEnded = false;
         gmapsDirectFrameReceived = false;
-        gmapsDirectFallbackActive = false;
+        gmapsDirectTimedOut = false;
+        gmapsLegacyUnavailableLogged = false;
         gmapsDirectRegistrationSuppressed = false;
         lastGMapsDirectRegistrationProbeMs = 0L;
-        hudOutput.selectNavigationSource(
-                HudOutputCoordinator.Source.NONE,
-                "gmaps-direct-start:" + safeReason(reason));
+        if (!keepFallbackUntilFrame) {
+            hudOutput.selectNavigationSource(
+                    HudOutputCoordinator.Source.NONE,
+                    "gmaps-direct-start:" + safeReason(reason));
+        }
         scheduleGMapsDirectTimeout();
         log("gmaps direct navigation started reason=" + safeReason(reason));
     }
@@ -795,6 +810,8 @@ final class NavHudLiveSender {
         long now = SystemClock.elapsedRealtime();
         gmapsDirectFrameReceived = true;
         gmapsDirectFallbackActive = false;
+        gmapsDirectTimedOut = false;
+        gmapsLegacyUnavailableLogged = false;
         gmapsDirectRegistrationSuppressed = false;
         lastGMapsDirectRegistrationProbeMs = 0L;
         cancelGMapsDirectTimeout();
@@ -872,7 +889,7 @@ final class NavHudLiveSender {
     private void scheduleGMapsDirectTimeout() {
         handler.removeCallbacks(gmapsDirectTimeout);
         if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
-                || gmapsDirectRouteEnded) {
+                || gmapsDirectRouteEnded || gmapsDirectTimedOut) {
             gmapsDirectTimeoutScheduled = false;
             return;
         }
@@ -889,9 +906,69 @@ final class NavHudLiveSender {
         cancelGMapsDirectTimeout();
         gmapsDirectFrameReceived = false;
         gmapsDirectFallbackActive = false;
+        gmapsDirectTimedOut = false;
+        gmapsLegacyUnavailableLogged = false;
         gmapsDirectRouteEnded = false;
         gmapsDirectRegistrationSuppressed = false;
         lastGMapsDirectRegistrationProbeMs = 0L;
+    }
+
+    private void activateGMapsLegacyFallbackIfReady(String reason) {
+        boolean captureReady = NavRuntimePermissionStatus.check(context).readyForCapture();
+        if (shouldDeactivateGMapsLegacyFallback(gmapsDirectFallbackActive, captureReady)) {
+            gmapsDirectFallbackActive = false;
+            resetLatestPayload();
+            hudOutput.selectNavigationSource(
+                    HudOutputCoordinator.Source.NONE,
+                    "gmaps-fallback-unavailable:" + safeReason(reason));
+            log("gmaps fallback stopped capture services unavailable reason="
+                    + safeReason(reason));
+        }
+        if (!shouldActivateGMapsLegacyFallback(
+                active,
+                activePackage,
+                gmapsDirectRouteEnded,
+                gmapsDirectFallbackActive,
+                captureReady)) {
+            if (!gmapsDirectFallbackActive
+                    && !captureReady
+                    && !gmapsLegacyUnavailableLogged) {
+                gmapsLegacyUnavailableLogged = true;
+                log("gmaps fallback waiting capture services reason=" + safeReason(reason));
+            }
+            return;
+        }
+        gmapsLegacyUnavailableLogged = false;
+        gmapsDirectFallbackActive = true;
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.LEGACY,
+                "gmaps-fallback:" + safeReason(reason));
+        hudOutput.ensureBound("gmaps-fallback:" + safeReason(reason));
+        requestActiveInputState(GMapsDirectChannel.PACKAGE_NAME, reason);
+        sendLatestIfReady("gmaps-fallback");
+        log("gmaps source=legacy reason=" + safeReason(reason));
+    }
+
+    static boolean shouldActivateGMapsLegacyFallback(
+            boolean active,
+            String activePackage,
+            boolean routeEnded,
+            boolean fallbackActive,
+            boolean captureReady) {
+        return active
+                && GMapsDirectChannel.PACKAGE_NAME.equals(normalizePackage(activePackage))
+                && !routeEnded
+                && !fallbackActive
+                && captureReady;
+    }
+
+    static boolean shouldDeactivateGMapsLegacyFallback(
+            boolean fallbackActive, boolean captureReady) {
+        return fallbackActive && !captureReady;
+    }
+
+    static boolean shouldKeepGMapsFallbackOnDirectStart(boolean fallbackActive) {
+        return fallbackActive;
     }
 
     private void eventGMapsDirectSession(String event, String detail) {

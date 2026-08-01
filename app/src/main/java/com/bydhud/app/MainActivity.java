@@ -74,7 +74,7 @@ public final class MainActivity extends ComponentActivity {
             "BG settings: Settings-DiLink-Apps-Disable background apps";
     private static final String THEME_WARNING_TAG = "theme_warning";
     private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
-    private static final AtomicBoolean STORAGE_SHARE_OPERATION = new AtomicBoolean(false);
+    private static final AtomicBoolean SHARE_OPERATION = new AtomicBoolean(false);
     private static final AtomicReference<File> PENDING_SHARE_FILE = new AtomicReference<>();
     private static final AtomicReference<MainActivity> RESUMED_ACTIVITY = new AtomicReference<>();
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -1468,7 +1468,7 @@ public final class MainActivity extends ComponentActivity {
 
     //Creates one bounded ZIP off the UI thread, then posts a read-only Android share chooser.
     public String composeShareStorageDays(List<String> days) {
-        if (!STORAGE_SHARE_OPERATION.compareAndSet(false, true)) {
+        if (!SHARE_OPERATION.compareAndSet(false, true)) {
             return "failed: share already running";
         }
         try {
@@ -1480,7 +1480,25 @@ public final class MainActivity extends ComponentActivity {
             notifyPendingShare();
             return "ready " + result.file.getName() + " " + result.detail;
         } finally {
-            STORAGE_SHARE_OPERATION.set(false);
+            SHARE_OPERATION.set(false);
+        }
+    }
+
+    //Creates one bounded diagnostic ZIP and enriches it through ADB only when already available.
+    public String composeShareVehicleConfiguration() {
+        if (!SHARE_OPERATION.compareAndSet(false, true)) {
+            return "failed: share already running";
+        }
+        try {
+            VehicleConfigurationZip.Result result = VehicleConfigurationZip.create(this);
+            if (!result.ok || result.file == null) {
+                return "failed: " + result.detail;
+            }
+            PENDING_SHARE_FILE.set(result.file);
+            notifyPendingShare();
+            return "ready " + result.file.getName() + " " + result.detail;
+        } finally {
+            SHARE_OPERATION.set(false);
         }
     }
 
@@ -1515,7 +1533,7 @@ public final class MainActivity extends ComponentActivity {
             PENDING_SHARE_FILE.compareAndSet(file, null);
         } catch (RuntimeException e) {
             PENDING_SHARE_FILE.compareAndSet(file, null);
-            AppEventLogger.event(this, "storage_share_chooser_failed error="
+            AppEventLogger.event(this, "share_chooser_failed error="
                     + e.getClass().getSimpleName() + " "
                     + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
         }
@@ -2293,7 +2311,7 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("nav capture ignored: system package " + normalized);
             return;
         }
-        if (enabled && !"com.waze".equals(normalized)
+        if (enabled && requiresLegacyCaptureRuntimeReady(normalized)
                 && !ensureNavCaptureRuntimeReadyForStart("hud", normalized)) {
             return;
         }
@@ -2353,6 +2371,12 @@ public final class MainActivity extends ComponentActivity {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedHudPackage(String packageName) {
         return NavCapturePrefs.isSupportedHudPackage(packageName);
+    }
+
+    static boolean requiresLegacyCaptureRuntimeReady(String packageName) {
+        String normalized = normalizePackage(packageName);
+        return !"com.waze".equals(normalized)
+                && !GMapsDirectChannel.PACKAGE_NAME.equals(normalized);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

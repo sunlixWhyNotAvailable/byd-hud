@@ -23,6 +23,7 @@ import java.util.zip.ZipOutputStream;
 final class LogShareZip {
     private static final String SHARE_DIR = "log-shares";
     private static final String ZIP_PREFIX = "BYD-HUD-logs-";
+    private static final String CONFIG_ZIP_PREFIX = "BYD-HUD-vehicle-config-";
     private static final int BUFFER_BYTES = 64 * 1024;
     private static final long COMPLETED_ZIP_MIN_AGE_MS = 10L * 60L * 1000L;
     private static final AtomicBoolean CLEANUP_STARTED = new AtomicBoolean(false);
@@ -332,7 +333,7 @@ final class LogShareZip {
         }
     }
 
-    private static File writableShareDir(Context context) {
+    static File writableShareDir(Context context) {
         File external = context.getExternalCacheDir();
         if (external != null) {
             File dir = new File(external, SHARE_DIR);
@@ -346,11 +347,11 @@ final class LogShareZip {
 
     private static boolean isShareArtifact(String name) {
         return name != null
-                && name.startsWith(ZIP_PREFIX)
+                && (name.startsWith(ZIP_PREFIX) || name.startsWith(CONFIG_ZIP_PREFIX))
                 && (name.endsWith(".zip") || name.endsWith(".zip.part"));
     }
 
-    private static void deleteArtifact(File file) {
+    static void deleteArtifact(File file) {
         try {
             if (file != null && file.exists()) {
                 file.delete();

@@ -74,6 +74,19 @@ final class LocalAdbBridge {
             "rm "
                     + CAPTURE_SHELL_ROOT
                     + CAPTURE_SESSION_PATH);
+    private static final Pattern VEHICLE_CONFIG_PROPERTY_COMMAND = Pattern.compile(
+            "getprop (?:ro\\.(?:build\\.(?:fingerprint|display\\.id)|product\\."
+                    + "(?:brand|device|manufacturer|model|name)|hardware|board\\.platform|"
+                    + "build\\.version\\.(?:release|sdk))|vendor\\.ro\\.build\\.system\\."
+                    + "fission_single_os|ro\\.build\\.car\\.series|debug\\.cluster\\.type)");
+    private static final Pattern VEHICLE_CONFIG_READ_COMMAND = Pattern.compile(
+            "cat /(?:system|vendor|product|odm)/etc/[A-Za-z0-9_./+@:-]{1,512}");
+    private static final Pattern VEHICLE_CONFIG_METADATA_COMMAND = Pattern.compile(
+            "(?:stat -c %s|sha256sum) /(?:system|vendor|product|odm)/"
+                    + "(?:etc|lib|lib64)/[A-Za-z0-9_./+@:-]{1,512}");
+    private static final Pattern VEHICLE_CONFIG_APK_METADATA_COMMAND = Pattern.compile(
+            "(?:stat -c %s|sha256sum) /(?:data/app|system|vendor|product|odm)/"
+                    + "[A-Za-z0-9_./+@=:-]{1,508}\\.apk");
     private static final byte[] ADB_AUTH_PADDING = new byte[]{
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E,
             0x03, 0x02, 0x1A, 0x05, 0x00, 0x04, 0x14
@@ -480,9 +493,48 @@ final class LocalAdbBridge {
     private static boolean isAllowedRuntimeShellCommand(String command) {
         return "dumpsys display".equals(command)
                 || "dumpsys activity activities".equals(command)
+                || isVehicleConfigurationCommand(command)
                 || MOVE_STACK_COMMAND.matcher(command).matches()
                 || WAZE_SCREENSHOT_COMMAND.matcher(command).matches()
                 || APP_LOCAL_RM_COMMAND.matcher(command).matches();
+    }
+
+    private static boolean isVehicleConfigurationCommand(String command) {
+        if (command.contains("..")) {
+            return false;
+        }
+        if (VEHICLE_CONFIG_PROPERTY_COMMAND.matcher(command).matches()
+                || VEHICLE_CONFIG_READ_COMMAND.matcher(command).matches()
+                || VEHICLE_CONFIG_METADATA_COMMAND.matcher(command).matches()
+                || VEHICLE_CONFIG_APK_METADATA_COMMAND.matcher(command).matches()) {
+            return true;
+        }
+        switch (command) {
+            case "id":
+            case "uname -a":
+            case "service list":
+            case "ps -A":
+            case "ip -details link":
+            case "ip addr":
+            case "ip route show table all":
+            case "ip rule":
+            case "ip neigh":
+            case "ss -a -n -p":
+            case "dumpsys package com.ts.car.someip.service":
+            case "dumpsys activity services com.ts.car.someip.service":
+            case "find /system/etc /vendor/etc /product/etc /odm/etc -type f":
+            case "find /system/lib /system/lib64 /vendor/lib /vendor/lib64 "
+                    + "/product/lib /product/lib64 /odm/lib /odm/lib64 -type f":
+            case "pm path com.bydhud.app":
+            case "pm path com.waze":
+            case "pm path app.revanced.android.apps.maps":
+            case "pm path com.google.android.apps.maps":
+            case "pm path com.ts.car.someip.service":
+            case "pm path com.byd.launchermap":
+                return true;
+            default:
+                return false;
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

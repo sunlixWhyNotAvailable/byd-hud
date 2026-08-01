@@ -282,6 +282,7 @@ private data class Copy(
     val waiting: String,
     val startLogcat: String,
     val stopLogcat: String,
+    val shareConfiguration: String,
     val applicationState: String,
     val navigationLogs: String,
     val pathHint: String,
@@ -465,6 +466,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var storageDeleteTotal by remember { mutableStateOf(0) }
     var storageShareDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageShareBusy by remember { mutableStateOf(false) }
+    var configurationShareBusy by remember { mutableStateOf(false) }
     var lastAppsScanRevision by remember { mutableStateOf(activity.composeAppsScanRevision()) }
     var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
     var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
@@ -813,7 +815,31 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         },
                         onShareSelected = ::beginStorageShare
                     )
-                    RuntimeTab.Logs -> LogsTab(copy, palette, snapshot, activity, ::runAction)
+                    RuntimeTab.Logs -> LogsTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        activity = activity,
+                        configurationShareBusy = configurationShareBusy,
+                        runAction = ::runAction,
+                        onShareConfiguration = {
+                            if (!configurationShareBusy) {
+                                configurationShareBusy = true
+                                updateScope.launch {
+                                    val detail = try {
+                                        withContext(Dispatchers.IO) {
+                                            activity.composeShareVehicleConfiguration()
+                                        }
+                                    } catch (error: Exception) {
+                                        "failed: ${error.message}"
+                                    }
+                                    activity.composeAppendStatus("Configuration share: $detail")
+                                    configurationShareBusy = false
+                                    refresh()
+                                }
+                            }
+                        }
+                    )
                     RuntimeTab.Patch -> PatchTab(
                         copy = copy,
                         palette = palette,
@@ -1919,7 +1945,9 @@ private fun LogsTab(
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
-    runAction: (() -> Unit) -> Unit
+    configurationShareBusy: Boolean,
+    runAction: (() -> Unit) -> Unit,
+    onShareConfiguration: () -> Unit
 ) {
     LazyPageSurface(copy.logs, copy.logsHint, palette) {
         item(key = "log-status") {
@@ -1948,7 +1976,7 @@ private fun LogsTab(
                         primary = !snapshot.logcatRecording,
                         enabled = !snapshot.logcatRecording,
                         width = 0.dp,
-                        modifier = Modifier.weight(0.65f)
+                        modifier = Modifier.weight(1f)
                     ) {
                         runAction { activity.composeStartLogcat() }
                     }
@@ -1958,10 +1986,19 @@ private fun LogsTab(
                         primary = snapshot.logcatRecording,
                         enabled = snapshot.logcatRecording,
                         width = 0.dp,
-                        modifier = Modifier.weight(0.35f)
+                        modifier = Modifier.weight(1f)
                     ) {
                         runAction { activity.composeStopLogcat() }
                     }
+                    HudButton(
+                        copy.shareConfiguration,
+                        palette,
+                        primary = false,
+                        enabled = !configurationShareBusy,
+                        width = 0.dp,
+                        modifier = Modifier.weight(1f),
+                        onClick = onShareConfiguration
+                    )
                 }
                 }
                 Section(copy.applicationState, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
@@ -3929,8 +3966,9 @@ private fun enCopy() = Copy(
     logcatRecorder = "Logcat recorder",
     recorderStatus = "Recorder status",
     waiting = "waiting",
-    startLogcat = "Start Logcat",
+    startLogcat = "Record Logcat",
     stopLogcat = "Stop Logcat",
+    shareConfiguration = "Share configuration",
     applicationState = "Application state",
     navigationLogs = "Navigation logs",
     pathHint = "Path to navigation logs on tablet.",
@@ -4122,8 +4160,9 @@ private fun uaCopy() = enCopy().copy(
     logcatRecorder = "Запис logcat",
     recorderStatus = "Стан запису",
     waiting = "очікування",
-    startLogcat = "Почати запис logcat",
-    stopLogcat = "Зупинити запис logcat",
+    startLogcat = "Записати Logcat",
+    stopLogcat = "Зупинити logcat",
+    shareConfiguration = "Поділитись конф-єю",
     applicationState = "Стан застосунку",
     navigationLogs = "Навігаційні логи",
     pathHint = "Шлях до навігаційних логів на планшеті.",

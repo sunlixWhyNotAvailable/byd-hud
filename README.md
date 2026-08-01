@@ -22,6 +22,7 @@
 - optional direct-channel ETA, remaining-time, and remaining-distance prefix in the street field
 - stock or incompatible `Waze` accessibility/visual crop fallback
 - guarded local patcher for monolithic Waze and Google Maps ReVanced APKs
+- shareable vehicle-configuration diagnostics with optional ADB enrichment
 - background runtime service with watchdog recovery
 - storage management
 - built-in stable and opt-in beta update channels
@@ -32,7 +33,7 @@ Download and install the latest APK from GitHub Releases
 
 After first launch:
 1. Open BYD HUD.	
-2. Grant ADB access when Android shows the RSA authorization prompt.
+2. Optionally grant ADB access when Android shows the RSA authorization prompt. Patched Waze and Google Maps direct channels do not require ADB; ADB enables system permissions, public log storage, dashboard controls, and richer diagnostics.
 3. Set `Disable background Apps -> BYD HUD = OFF` in the BYD system settings.
 4. Optionally change prefered navigation settings.
 5. Choose supported navigation app from the list of supported apps and toogle `HUD`.
@@ -40,6 +41,11 @@ After first launch:
 7. Optionally use `Send to dashboard`.
 8. If you plan in helping debugging maneuvers/lanes parser - turn on `Save diagnostic screenshots and extended logs` to start saving screenshots for analysis (be aware - it can clog internal storage).
 9. Optionally take part in beta-testing (warning: broken builds are to be expected).
+
+`Share configuration` on the `Logs` tab always exports the diagnostics visible
+to BYD HUD. When the local ADB bridge is already authorized, the same ZIP also
+contains relevant system, network, SOME/IP, and navigation-configuration data.
+The export does not request ADB access.
 
 The `Patch` tab can inspect either an installed navigator or a monolithic APK
 selected with the Android file picker. It patches only exact supported DEX

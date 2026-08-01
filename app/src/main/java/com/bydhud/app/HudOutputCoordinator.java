@@ -27,6 +27,10 @@ final class HudOutputCoordinator {
     private static final long FINAL_STOP_DELAY_MS = 300L;
     private static final long BIND_RETRY_MS = 200L;
     private static final int BIND_RETRY_LIMIT = 30;
+    private static final int RESULT_OK = 0;
+    private static final int RESULT_NOT_STARTED = 11;
+    private static final int RESULT_ALREADY_STARTED = 13;
+    private static final long[] PROTOCOL_RETRY_DELAYS_MS = {1_000L, 2_000L, 5_000L};
     private static final long STATS_INTERVAL_MS = 30_000L;
 
     private static HudOutputCoordinator instance;
@@ -57,6 +61,8 @@ final class HudOutputCoordinator {
     private long pendingActivationNotBeforeMs;
     private boolean serviceStarted;
     private boolean sendScheduled;
+    private boolean protocolRetryScheduled;
+    private int protocolFailureCount;
     private int generation;
     private int directCounter;
     private int bindAttempts;
@@ -125,6 +131,21 @@ final class HudOutputCoordinator {
             } else {
                 ensureBoundOnWorker("transport-recovery");
             }
+        }
+    };
+
+    private final Runnable protocolRetry = new Runnable() {
+        @Override
+        public void run() {
+            protocolRetryScheduled = false;
+            if (desiredSource() == Source.NONE) {
+                return;
+            }
+            if (!client.isBound()) {
+                ensureBoundOnWorker("protocol-retry");
+                return;
+            }
+            resumeActivation("protocol-retry");
         }
     };
 
@@ -372,6 +393,9 @@ final class HudOutputCoordinator {
             reconcile("pending-target-changed");
             return;
         }
+        if (protocolRetryScheduled) {
+            return;
+        }
         if (!pendingNeedsClear) {
             long remainingMs = pendingActivationNotBeforeMs - SystemClock.elapsedRealtime();
             if (remainingMs > 0L) {
@@ -485,6 +509,9 @@ final class HudOutputCoordinator {
     }
 
     private void scheduleImmediate(String reason) {
+        if (protocolRetryScheduled) {
+            return;
+        }
         if (activeSource == Source.DIRECT && sendScheduled) {
             return;
         }
@@ -497,7 +524,9 @@ final class HudOutputCoordinator {
     }
 
     private void scheduleSend(long delayMs) {
-        if (activeSource == Source.NONE || !hasFrame(activeSource)) {
+        if (protocolRetryScheduled
+                || activeSource == Source.NONE
+                || !hasFrame(activeSource)) {
             return;
         }
         worker.removeCallbacks(sendLoop);
@@ -518,17 +547,17 @@ final class HudOutputCoordinator {
         try {
             if (!serviceStarted) {
                 int startResult = startService(source, channelFor(source), reason);
-                if (startResult != 0) {
-                    throw new RemoteException("start returned " + startResult);
+                if (!isStartReadyResult(startResult)) {
+                    handleProtocolResult("start source=" + source, startResult);
+                    return;
                 }
                 serviceStarted = true;
-                log("service started source=" + source);
+                log("service ready source=" + source + " result=" + startResult);
             }
             if (source == Source.DIRECT && directAlertClearPending) {
-                long clearedAtMs = sendClearBestEffort(
-                        "direct alert preference disabled", source, "alert_clear");
-                if (clearedAtMs < 0L) {
-                    throw new RemoteException("direct alert clear failed");
+                if (!sendRequiredClear(
+                        "direct alert preference disabled", source, "alert_clear")) {
+                    return;
                 }
                 directAlertClearPending = false;
             }
@@ -541,9 +570,11 @@ final class HudOutputCoordinator {
             sendCount++;
             sendDurationMs += duration;
             HudDeliveryStatus.recordNonClearResult(result);
-            if (result != 0) {
-                throw new RemoteException("send returned " + result);
+            if (!isPayloadSuccessResult(result)) {
+                handleProtocolResult("send source=" + source, result);
+                return;
             }
+            recordPayloadSuccess();
             if (source == Source.DIRECT) {
                 emitBitmapTxAfterSuccess(SystemClock.elapsedRealtime());
             }
@@ -559,9 +590,11 @@ final class HudOutputCoordinator {
                 directCounter = (directCounter + 1) & 0xff;
             }
             scheduleSend(source == Source.DIRECT ? DIRECT_INTERVAL_MS : DEFAULT_INTERVAL_MS);
-        } catch (RemoteException | RuntimeException e) {
+        } catch (RemoteException e) {
             sendFailures++;
             handleTransportFailure("send source=" + source, e);
+        } catch (RuntimeException e) {
+            handleProtocolException("send source=" + source, e);
         }
     }
 
@@ -670,25 +703,39 @@ final class HudOutputCoordinator {
             if (!serviceStarted) {
                 int startResult = startService(
                         pendingSource, channelFor(pendingSource), "transition-clear");
-                if (startResult != 0) {
-                    throw new RemoteException("start returned " + startResult);
+                if (!isStartReadyResult(startResult)) {
+                    handleProtocolResult("transition-clear start", startResult);
+                    return false;
                 }
                 serviceStarted = true;
             }
-            byte[] payload = DirectTbtPayload.buildClear();
-            int result = sendPayload(
-                    pendingSource, channelFor(pendingSource), "transition_clear",
-                    pendingReason, payload, payload);
-            if (result != 0) {
-                throw new RemoteException("clear returned " + result);
+            if (!sendRequiredClear(
+                    pendingReason, pendingSource, "transition_clear")) {
+                return false;
             }
             log("transition clear result=0 target=" + pendingSource
                     + " reason=" + pendingReason);
             return true;
-        } catch (RemoteException | RuntimeException e) {
+        } catch (RemoteException e) {
             handleTransportFailure("transition-clear", e);
             return false;
+        } catch (RuntimeException e) {
+            handleProtocolException("transition-clear", e);
+            return false;
         }
+    }
+
+    private boolean sendRequiredClear(String reason, Source source, String kind)
+            throws RemoteException {
+        byte[] payload = DirectTbtPayload.buildClear();
+        int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
+        logAsync("clear result=" + result + " reason=" + reason);
+        if (!isPayloadSuccessResult(result)) {
+            handleProtocolResult(kind, result);
+            return false;
+        }
+        recordPayloadSuccess();
+        return true;
     }
 
     private long sendClearBestEffort(String reason, Source source, String kind) {
@@ -710,6 +757,9 @@ final class HudOutputCoordinator {
     private void stopServiceAndUnbind(String reason) {
         worker.removeCallbacks(bindRetry);
         worker.removeCallbacks(transportRecovery);
+        worker.removeCallbacks(protocolRetry);
+        protocolRetryScheduled = false;
+        protocolFailureCount = 0;
         if (serviceStarted && client.isBound()) {
             long startedAtMs = SystemClock.elapsedRealtime();
             try {
@@ -793,9 +843,12 @@ final class HudOutputCoordinator {
         HudDeliveryStatus.recordFailure();
         serviceStarted = false;
         sendScheduled = false;
+        protocolRetryScheduled = false;
+        protocolFailureCount = 0;
         worker.removeCallbacks(sendLoop);
         worker.removeCallbacks(bindRetry);
         worker.removeCallbacks(transportRecovery);
+        worker.removeCallbacks(protocolRetry);
         client.unbind();
         log("transport failure reason=" + reason
                 + (error == null ? "" : " error=" + error.getClass().getSimpleName()
@@ -805,11 +858,65 @@ final class HudOutputCoordinator {
         }
     }
 
+    private void handleProtocolResult(String reason, int result) {
+        sendFailures++;
+        if (resultMarksServiceUnstarted(result)) {
+            serviceStarted = false;
+        }
+        handleProtocolFailure(reason + " result=" + result);
+    }
+
+    private void handleProtocolException(String reason, RuntimeException error) {
+        sendFailures++;
+        handleProtocolFailure(reason + " error=" + error.getClass().getSimpleName()
+                + ":" + safe(error.getMessage()));
+    }
+
+    private void handleProtocolFailure(String detail) {
+        HudDeliveryStatus.recordFailure();
+        sendScheduled = false;
+        worker.removeCallbacks(sendLoop);
+        if (protocolRetryScheduled || desiredSource() == Source.NONE) {
+            return;
+        }
+        protocolFailureCount++;
+        long delayMs = protocolRetryDelayMs(protocolFailureCount);
+        protocolRetryScheduled = true;
+        worker.postDelayed(protocolRetry, delayMs);
+        log("protocol backoff delayMs=" + delayMs + " " + detail);
+    }
+
+    private void recordPayloadSuccess() {
+        protocolFailureCount = 0;
+        protocolRetryScheduled = false;
+        worker.removeCallbacks(protocolRetry);
+    }
+
+    static boolean isStartReadyResult(int result) {
+        return result == RESULT_OK || result == RESULT_ALREADY_STARTED;
+    }
+
+    static boolean isPayloadSuccessResult(int result) {
+        return result == RESULT_OK;
+    }
+
+    static boolean resultMarksServiceUnstarted(int result) {
+        return result == RESULT_NOT_STARTED;
+    }
+
+    static long protocolRetryDelayMs(int failureCount) {
+        int index = Math.max(1, failureCount) - 1;
+        return PROTOCOL_RETRY_DELAYS_MS[Math.min(index, PROTOCOL_RETRY_DELAYS_MS.length - 1)];
+    }
+
     private void cancelScheduledWork() {
         worker.removeCallbacks(sendLoop);
         worker.removeCallbacks(bindRetry);
         worker.removeCallbacks(transportRecovery);
+        worker.removeCallbacks(protocolRetry);
         sendScheduled = false;
+        protocolRetryScheduled = false;
+        protocolFailureCount = 0;
     }
 
     private void maybeLogStats(Source source, int payloadBytes, long lastSendMs) {
