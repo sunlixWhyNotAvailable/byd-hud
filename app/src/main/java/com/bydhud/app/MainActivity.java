@@ -11,6 +11,7 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -245,6 +246,7 @@ public final class MainActivity extends ComponentActivity {
             AppEventLogger.event(this, "storage_share_cleanup files=" + staleShareArtifacts);
         }
         NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
+        NavigatorPackageInstaller.reconcile(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-create");
         } else {
@@ -755,7 +757,7 @@ public final class MainActivity extends ComponentActivity {
         List<ActiveAppRow> supportedApps = loadCuratedApps(rawApps, capturePackages, observedPackages);
         List<ComposeAppRow> supportedRows = composeRows(
                 supportedApps, hudPackage, logOnlyPackages, observedPackages, true);
-        ComposeWazePatchRow wazePatchRow = composeWazePatchRow();
+        List<ComposeNavigatorPatchRow> patchRows = composeNavigatorPatchRows();
         List<ComposeAppRow> allRows = new ArrayList<>();
         for (ActiveAppRow app : rawApps) {
             if (!NavAppFilter.isCuratedNavigationPackage(app.packageName)) {
@@ -816,7 +818,91 @@ public final class MainActivity extends ComponentActivity {
                 storage.storageDays,
                 supportedRows,
                 allRows,
-                wazePatchRow);
+                patchRows,
+                composePatchOperation());
+    }
+
+    public String composeSelectPatchSource(Uri uri) throws Exception {
+        if (uri == null) return "";
+        String displayName = "selected.apk";
+        try (android.database.Cursor cursor = getContentResolver().query(
+                uri, new String[]{android.provider.OpenableColumns.DISPLAY_NAME},
+                null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    String value = cursor.getString(index);
+                    if (value != null && !value.trim().isEmpty()) displayName = value;
+                }
+            }
+        }
+        NavigatorPatchStore.Profile profile = NavigatorPatchPipeline.inspectSelectedPackage(
+                this, uri, displayName);
+        return profile.id;
+    }
+
+    public void composeClearPatchSource(String profileId) {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        if (profile != null) {
+            NavigatorPatchStore.clearExternal(this, profile);
+            NavigatorPatchStore.transition(this, profile, NavigatorPatchStore.IDLE, "");
+        }
+    }
+
+    public void composeCheckNavigatorPatch(String profileId) throws Exception {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
+        NavigatorPatchPipeline.scan(this, profile, false);
+    }
+
+    public void composeApplyNavigatorPatch(String profileId, boolean destructiveApproved)
+            throws Exception {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
+        NavigatorPatchPipeline.PreparedPatch prepared =
+                NavigatorPatchPipeline.prepare(this, profile);
+        if (prepared.destructive && !destructiveApproved) {
+            NavigatorPatchPipeline.discardPrepared(this, prepared,
+                    "Installed signer changed; destructive confirmation is required");
+            throw new IllegalStateException(
+                    "Installed signer changed; review the destructive warning and retry");
+        }
+        try {
+            NavigatorPackageInstaller.begin(this, prepared);
+        } catch (Exception error) {
+            NavigatorPatchStore.transition(this, profile,
+                    prepared.destructive && !NavigatorPackageInstaller.isInstalled(
+                            this, profile.packageName)
+                            ? NavigatorPatchStore.RECOVERY_REQUIRED
+                            : NavigatorPatchStore.FAILED,
+                    error.getMessage());
+            throw error;
+        }
+    }
+
+    public void composeRestoreNavigator(String profileId) throws Exception {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
+        NavigatorPackageInstaller.beginRestore(this, profile);
+    }
+
+    public boolean composeCanInstallNavigatorApks() {
+        return NavigatorPackageInstaller.canInstall(this);
+    }
+
+    public void composeOpenNavigatorInstallPermission() {
+        Intent intent = new Intent(
+                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                Uri.parse("package:" + getPackageName()));
+        startActivity(intent);
+    }
+
+    public boolean composeNavigatorPatchIsDestructive(String profileId) {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        if (profile == null || !NavigatorPackageInstaller.isInstalled(this, profile.packageName)) {
+            return false;
+        }
+        return !NavigatorSigningKey.installedUsesLocalKey(this, profile.packageName);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -900,22 +986,28 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
-    private ComposeWazePatchRow composeWazePatchRow() {
-        PackageManager packageManager = getPackageManager();
-        try {
-            PackageInfo packageInfo = packageManager.getPackageInfo(WAZE_PACKAGE, 0);
-            ApplicationInfo applicationInfo = packageInfo.applicationInfo;
-            CharSequence systemLabel = applicationInfo == null
-                    ? null
-                    : packageManager.getApplicationLabel(applicationInfo);
-            return new ComposeWazePatchRow(
-                    systemLabel == null ? WAZE_PACKAGE : systemLabel.toString(),
-                    WAZE_PACKAGE,
-                    packageInfo.versionName,
-                    true);
-        } catch (PackageManager.NameNotFoundException ignored) {
-            return new ComposeWazePatchRow("Waze", WAZE_PACKAGE, "", false);
+    private List<ComposeNavigatorPatchRow> composeNavigatorPatchRows() {
+        List<ComposeNavigatorPatchRow> rows = new ArrayList<>();
+        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
+            NavigatorPatchStore.ProfileSnapshot value =
+                    NavigatorPatchStore.snapshot(this, profile);
+            if (!value.installed && !value.externalSource) continue;
+            rows.add(new ComposeNavigatorPatchRow(
+                    profile.id, value.label, profile.packageName,
+                    value.installedVersion, value.installed,
+                    value.externalSource, value.sourceName, value.sourceVersion,
+                    value.directState, value.optionalState, profile.optionalLabel,
+                    value.reason, value.patchEnabled));
         }
+        return rows;
+    }
+
+    private ComposePatchOperation composePatchOperation() {
+        NavigatorPatchStore.OperationSnapshot value = NavigatorPatchStore.operation(this);
+        return new ComposePatchOperation(
+                value.profile == null ? "" : value.profile.id,
+                value.phase, value.detail, value.destructive,
+                value.busy(), NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase));
     }
 
     //keeps Google Maps variants as one UI target while leaving parser package support unchanged.
@@ -1589,7 +1681,8 @@ public final class MainActivity extends ComponentActivity {
         public final List<ComposeStorageDay> storageDays;
         public final List<ComposeAppRow> supportedApps;
         public final List<ComposeAppRow> allApps;
-        public final ComposeWazePatchRow patchWaze;
+        public final List<ComposeNavigatorPatchRow> patchRows;
+        public final ComposePatchOperation patchOperation;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
@@ -1614,7 +1707,8 @@ public final class MainActivity extends ComponentActivity {
                 List<String> navCaptureFolderPaths, boolean storageCalculating,
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
-                ComposeWazePatchRow wazePatchRow) {
+                List<ComposeNavigatorPatchRow> patchRows,
+                ComposePatchOperation patchOperation) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
@@ -1670,9 +1764,12 @@ public final class MainActivity extends ComponentActivity {
             this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
             this.supportedApps = supportedApps == null ? Collections.emptyList() : supportedApps;
             this.allApps = allApps == null ? Collections.emptyList() : allApps;
-            this.patchWaze = wazePatchRow == null
-                    ? new ComposeWazePatchRow("Waze", WAZE_PACKAGE, "", false)
-                    : wazePatchRow;
+            this.patchRows = patchRows == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(patchRows));
+            this.patchOperation = patchOperation == null
+                    ? new ComposePatchOperation("", NavigatorPatchStore.IDLE,
+                    "", false, false, false)
+                    : patchOperation;
         }
     }
 
@@ -1759,18 +1856,58 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
-    public static final class ComposeWazePatchRow {
+    public static final class ComposeNavigatorPatchRow {
+        public final String profileId;
         public final String label;
         public final String packageName;
-        public final String versionName;
+        public final String installedVersion;
         public final boolean installed;
+        public final boolean externalSource;
+        public final String sourceName;
+        public final String sourceVersion;
+        public final String directState;
+        public final String optionalState;
+        public final String optionalLabel;
+        public final String reason;
+        public final boolean patchEnabled;
 
-        ComposeWazePatchRow(String label, String packageName, String versionName,
-                boolean installed) {
+        ComposeNavigatorPatchRow(String profileId, String label, String packageName,
+                String installedVersion, boolean installed, boolean externalSource,
+                String sourceName, String sourceVersion, String directState,
+                String optionalState, String optionalLabel, String reason,
+                boolean patchEnabled) {
+            this.profileId = profileId == null ? "" : profileId;
             this.label = label == null ? "" : label;
             this.packageName = packageName == null ? "" : packageName;
-            this.versionName = versionName == null ? "" : versionName;
+            this.installedVersion = installedVersion == null ? "" : installedVersion;
             this.installed = installed;
+            this.externalSource = externalSource;
+            this.sourceName = sourceName == null ? "" : sourceName;
+            this.sourceVersion = sourceVersion == null ? "" : sourceVersion;
+            this.directState = directState == null ? NavigatorPatchStore.NOT_CHECKED : directState;
+            this.optionalState = optionalState == null ? NavigatorPatchStore.NOT_CHECKED : optionalState;
+            this.optionalLabel = optionalLabel == null ? "" : optionalLabel;
+            this.reason = reason == null ? "" : reason;
+            this.patchEnabled = patchEnabled;
+        }
+    }
+
+    public static final class ComposePatchOperation {
+        public final String profileId;
+        public final String phase;
+        public final String detail;
+        public final boolean destructive;
+        public final boolean busy;
+        public final boolean recoveryRequired;
+
+        ComposePatchOperation(String profileId, String phase, String detail,
+                boolean destructive, boolean busy, boolean recoveryRequired) {
+            this.profileId = profileId == null ? "" : profileId;
+            this.phase = phase == null ? NavigatorPatchStore.IDLE : phase;
+            this.detail = detail == null ? "" : detail;
+            this.destructive = destructive;
+            this.busy = busy;
+            this.recoveryRequired = recoveryRequired;
         }
     }
 

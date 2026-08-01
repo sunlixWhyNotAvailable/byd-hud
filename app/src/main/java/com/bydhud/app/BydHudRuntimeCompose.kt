@@ -3,7 +3,9 @@ package com.bydhud.app
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
 import android.os.SystemClock
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.DrawableRes
 import androidx.compose.animation.core.LinearEasing
 import androidx.compose.animation.core.animateDpAsState
@@ -324,6 +326,17 @@ private data class Copy(
     val noSupportedNavigators: String,
     val appVersion: String,
     val patchNotChecked: String,
+    val patchDirectChannel: String,
+    val patchSelectApk: String,
+    val patchClearSelection: String,
+    val patchPatchable: String,
+    val patchPatched: String,
+    val patchFailed: String,
+    val patchSource: String,
+    val patchInstalledSource: String,
+    val patchProgress: String,
+    val patchRecovery: String,
+    val patchRestore: String,
     val checkPatch: String,
     val applyPatch: String,
     val patchConfirmTitle: String,
@@ -461,6 +474,9 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
     var pendingUpdateDialog by remember { mutableStateOf(false) }
     var updateState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Checking) }
+    var pendingPatchProfile by rememberSaveable { mutableStateOf("") }
+    var pendingPatchDestructive by rememberSaveable { mutableStateOf(false) }
+    var patchActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
     val latestAutoUpdateCheckEnabled by rememberUpdatedState(autoUpdateCheckEnabled)
@@ -474,6 +490,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
         storageShareBusy -> "storage-share"
+        pendingPatchProfile.isNotEmpty() || patchActionPending || snapshot.patchOperation.busy -> "patch"
         else -> ""
     }
 
@@ -488,6 +505,24 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     fun runAction(action: () -> Unit) {
         action()
         refresh()
+    }
+
+    val apkPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri == null) {
+            patchActionPending = false
+            return@rememberLauncherForActivityResult
+        }
+        if (!patchActionPending) patchActionPending = true
+        updateScope.launch {
+            try {
+                withContext(Dispatchers.IO) { activity.composeSelectPatchSource(uri) }
+            } catch (error: Exception) {
+                activity.composeAppendStatus("Patch source rejected: ${error.message}")
+            } finally {
+                patchActionPending = false
+            }
+            refresh()
+        }
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -779,7 +814,69 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         onShareSelected = ::beginStorageShare
                     )
                     RuntimeTab.Logs -> LogsTab(copy, palette, snapshot, activity, ::runAction)
-                    RuntimeTab.Patch -> PatchTab(copy, palette, snapshot)
+                    RuntimeTab.Patch -> PatchTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        actionPending = patchActionPending,
+                        onSelectApk = {
+                            if (!patchActionPending) {
+                                patchActionPending = true
+                                apkPicker.launch(arrayOf(
+                                    "application/vnd.android.package-archive",
+                                    "application/octet-stream"
+                                ))
+                            }
+                        },
+                        onClear = { profileId ->
+                            runAction { activity.composeClearPatchSource(profileId) }
+                        },
+                        onCheck = { profileId ->
+                            if (!patchActionPending) {
+                                patchActionPending = true
+                                updateScope.launch {
+                                    try {
+                                        withContext(Dispatchers.IO) {
+                                            activity.composeCheckNavigatorPatch(profileId)
+                                        }
+                                    } catch (error: Exception) {
+                                        activity.composeAppendStatus("Patch check failed: ${error.message}")
+                                    } finally {
+                                        patchActionPending = false
+                                    }
+                                    refresh()
+                                }
+                            }
+                        },
+                        onPatch = { profileId ->
+                            if (!activity.composeCanInstallNavigatorApks()) {
+                                activity.composeOpenNavigatorInstallPermission()
+                            } else {
+                                pendingPatchProfile = profileId
+                                pendingPatchDestructive =
+                                    activity.composeNavigatorPatchIsDestructive(profileId)
+                            }
+                        },
+                        onRestore = { profileId ->
+                            if (!activity.composeCanInstallNavigatorApks()) {
+                                activity.composeOpenNavigatorInstallPermission()
+                            } else if (!patchActionPending) {
+                                patchActionPending = true
+                                updateScope.launch {
+                                    try {
+                                        withContext(Dispatchers.IO) {
+                                            activity.composeRestoreNavigator(profileId)
+                                        }
+                                    } catch (error: Exception) {
+                                        activity.composeAppendStatus("Restore failed: ${error.message}")
+                                    } finally {
+                                        patchActionPending = false
+                                    }
+                                    refresh()
+                                }
+                            }
+                        }
+                    )
                     RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
                 }
             }
@@ -824,6 +921,44 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 },
                 onClose = { showUpdateDialog = false }
             )
+        }
+
+        if (pendingPatchProfile.isNotEmpty()) {
+            val row = snapshot.patchRows.firstOrNull { it.profileId == pendingPatchProfile }
+            PatchConfirmOverlay(
+                copy = copy,
+                palette = palette,
+                navigator = row?.label ?: pendingPatchProfile,
+                destructive = pendingPatchDestructive,
+                onConfirm = {
+                    if (!patchActionPending) {
+                        val profileId = pendingPatchProfile
+                        val destructiveApproved = pendingPatchDestructive
+                        pendingPatchProfile = ""
+                        patchActionPending = true
+                        updateScope.launch {
+                            try {
+                                withContext(Dispatchers.IO) {
+                                    activity.composeApplyNavigatorPatch(
+                                        profileId,
+                                        destructiveApproved
+                                    )
+                                }
+                            } catch (error: Exception) {
+                                activity.composeAppendStatus("Patch failed: ${error.message}")
+                            } finally {
+                                patchActionPending = false
+                            }
+                            refresh()
+                        }
+                    }
+                },
+                onDismiss = { pendingPatchProfile = "" }
+            )
+        }
+
+        if (snapshot.patchOperation.busy) {
+            PatchProgressOverlay(copy, palette, snapshot.patchOperation)
         }
 
         if (pendingStorageDeleteDays.isNotEmpty()) {
@@ -2012,9 +2147,15 @@ private fun StorageTab(
 private fun PatchTab(
     copy: Copy,
     palette: Palette,
-    snapshot: MainActivity.ComposeSnapshot
+    snapshot: MainActivity.ComposeSnapshot,
+    actionPending: Boolean,
+    onSelectApk: () -> Unit,
+    onClear: (String) -> Unit,
+    onCheck: (String) -> Unit,
+    onPatch: (String) -> Unit,
+    onRestore: (String) -> Unit
 ) {
-    val waze = snapshot.patchWaze?.takeIf { it.installed }
+    val busy = actionPending || snapshot.patchOperation.busy
     LazyPageSurface(copy.patchTab, copy.patchHint, palette) {
         item(key = "patch-warning") {
             Section(copy.patchWarning, palette) {
@@ -2030,45 +2171,232 @@ private fun PatchTab(
 
         item(key = "available-navigators") {
             Section(copy.availableNavigators, palette) {
-                if (waze == null) {
-                    Box(
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .border(1.dp, palette.border, RoundedCornerShape(8.dp))
-                        .padding(18.dp),
-                    contentAlignment = Alignment.Center
+                        .padding(horizontal = 10.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    HudButton(
+                        copy.patchSelectApk,
+                        palette,
+                        primary = false,
+                        enabled = !busy,
+                        width = 190.dp,
+                        onClick = onSelectApk
+                    )
+                }
+                if (snapshot.patchRows.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 10.dp, vertical = 0.dp)
+                            .clip(RoundedCornerShape(8.dp))
+                            .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                            .padding(18.dp),
+                        contentAlignment = Alignment.Center
                     ) {
                         Text(copy.noSupportedNavigators, color = palette.muted, fontSize = 14.sp)
                     }
                 } else {
-                    Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(10.dp)
-                        .clip(RoundedCornerShape(8.dp))
-                        .border(1.dp, palette.border, RoundedCornerShape(8.dp))
-                        .background(palette.field)
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(waze.label, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-                            Text(waze.packageName, color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 12.sp)
-                            Text("${copy.appVersion}: ${waze.versionName}", color = palette.muted, fontSize = 12.sp)
-                            Spacer(Modifier.height(8.dp))
-                            StatusChip(copy.patchNotChecked, ChipKind.Neutral, palette, width = 150.dp)
+                    snapshot.patchRows.forEach { row ->
+                        Divider(palette)
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(10.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                                .background(palette.field)
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                        ) {
+                            Column(modifier = Modifier.width(245.dp)) {
+                                Text(
+                                    row.label,
+                                    color = palette.text,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 17.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    row.packageName,
+                                    color = palette.muted,
+                                    fontFamily = FontFamily.Monospace,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                val version = if (row.externalSource) {
+                                    row.sourceVersion
+                                } else {
+                                    row.installedVersion
+                                }
+                                if (version.isNotEmpty()) {
+                                    Text("${copy.appVersion}: $version", color = palette.muted, fontSize = 12.sp)
+                                }
+                                Text(
+                                    "${copy.patchSource}: ${if (row.externalSource) row.sourceName else copy.patchInstalledSource}",
+                                    color = palette.muted,
+                                    fontSize = 12.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                            Row(
+                                modifier = Modifier.weight(1f),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                if (row.directState == "PATCHED" && row.optionalState == "PATCHED") {
+                                    StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 160.dp)
+                                } else {
+                                    PatchComponentChip(
+                                        copy.patchDirectChannel,
+                                        row.directState,
+                                        copy,
+                                        palette
+                                    )
+                                    PatchComponentChip(
+                                        patchOptionalLabel(row, copy.language),
+                                        row.optionalState,
+                                        copy,
+                                        palette
+                                    )
+                                }
+                            }
+                            Column(
+                                modifier = Modifier.width(320.dp),
+                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    HudButton(
+                                        copy.checkPatch,
+                                        palette,
+                                        enabled = !busy,
+                                        width = 150.dp,
+                                        onClick = { onCheck(row.profileId) }
+                                    )
+                                    HudButton(
+                                        copy.applyPatch,
+                                        palette,
+                                        primary = true,
+                                        enabled = !busy && row.patchEnabled,
+                                        width = 150.dp,
+                                        onClick = { onPatch(row.profileId) }
+                                    )
+                                }
+                                if (row.externalSource) {
+                                    HudButton(
+                                        copy.patchClearSelection,
+                                        palette,
+                                        enabled = !busy,
+                                        width = 150.dp,
+                                        onClick = { onClear(row.profileId) }
+                                    )
+                                }
+                            }
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                            HudButton(copy.checkPatch, palette, enabled = false, width = 170.dp, onClick = {})
-                            HudButton(copy.applyPatch, palette, enabled = false, width = 170.dp, onClick = {})
+                        if (row.reason.isNotEmpty()) {
+                            Text(
+                                patchReasonText(row.reason, copy.language),
+                                color = if (row.directState == "FAILED") palette.red else palette.muted,
+                                fontSize = 12.sp,
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+                            )
                         }
                     }
                 }
             }
         }
+
+        if (snapshot.patchOperation.recoveryRequired) {
+            item(key = "patch-recovery") {
+                Section(copy.patchRecovery, palette) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Text(
+                            snapshot.patchOperation.detail,
+                            color = palette.red,
+                            fontSize = 14.sp,
+                            modifier = Modifier.weight(1f)
+                        )
+                        HudButton(
+                            copy.patchRestore,
+                            palette,
+                            primary = true,
+                            enabled = !busy,
+                            width = 190.dp,
+                            onClick = { onRestore(snapshot.patchOperation.profileId) }
+                        )
+                    }
+                }
+            }
+        }
+
+        if (snapshot.patchOperation.phase == "FAILED"
+            && snapshot.patchOperation.detail.isNotEmpty()) {
+            item(key = "patch-failure") {
+                Section(copy.patchFailed, palette) {
+                    Text(
+                        snapshot.patchOperation.detail,
+                        color = palette.red,
+                        fontSize = 14.sp,
+                        modifier = Modifier.padding(14.dp)
+                    )
+                }
+            }
+        }
     }
+}
+
+private fun patchReasonText(reason: String, language: Language): String {
+    if (language != Language.Ua) return reason
+    return when (reason) {
+        "Compatible" -> "Сумісно"
+        "Patched" -> "Пропатчено"
+        "Direct channel is already patched" -> "Прямий канал уже пропатчено"
+        "Stable session anchors are incompatible" -> "Маркери стабільної сесії несумісні"
+        "Mandatory Google Maps anchors are incompatible" -> "Обов'язкові маркери Google Maps несумісні"
+        else -> reason
+    }
+}
+
+private fun patchOptionalLabel(
+    row: MainActivity.ComposeNavigatorPatchRow,
+    language: Language
+): String {
+    if (language != Language.Ua) return row.optionalLabel
+    return if (row.profileId == "waze") "Стабільна сесія" else "Аудіоканал"
+}
+
+@Composable
+private fun PatchComponentChip(
+    label: String,
+    state: String,
+    copy: Copy,
+    palette: Palette
+) {
+    val stateCopy = when (state) {
+        "PATCHABLE" -> copy.patchPatchable
+        "PATCHED" -> copy.patchPatched
+        "FAILED" -> copy.patchFailed
+        else -> copy.patchNotChecked
+    }
+    val kind = when (state) {
+        "PATCHABLE" -> ChipKind.Yellow
+        "PATCHED" -> ChipKind.Green
+        "FAILED" -> ChipKind.Red
+        else -> ChipKind.Neutral
+    }
+    StatusChip("$label: $stateCopy", kind, palette, width = 190.dp)
 }
 
 @Composable
@@ -2088,6 +2416,8 @@ private fun RepositoryLink(palette: Palette) {
 private fun PatchConfirmOverlay(
     copy: Copy,
     palette: Palette,
+    navigator: String,
+    destructive: Boolean,
     onConfirm: () -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -2107,7 +2437,12 @@ private fun PatchConfirmOverlay(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(copy.patchConfirmTitle, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(
+                copy.patchConfirmTitle.replace("%s", navigator),
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -2117,7 +2452,16 @@ private fun PatchConfirmOverlay(
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Text(copy.patchConfirmText, color = palette.text, fontSize = 15.sp, lineHeight = 21.sp)
+                Text(
+                    if (destructive) copy.patchConfirmText else if (copy.language == Language.Ua) {
+                        "Патч буде встановлено як оновлення. Дані навігатора буде збережено."
+                    } else {
+                        "The patch will be installed as an update. Navigation app data will be preserved."
+                    },
+                    color = palette.text,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
                 Text(copy.patchRiskWarning, color = palette.yellow, fontSize = 15.sp, lineHeight = 21.sp)
             }
             Row(
@@ -2128,6 +2472,72 @@ private fun PatchConfirmOverlay(
                 HudButton(copy.patchConfirmCancel, palette, width = 138.dp, onClick = onDismiss)
             }
         }
+    }
+}
+
+@Composable
+private fun PatchProgressOverlay(
+    copy: Copy,
+    palette: Palette,
+    operation: MainActivity.ComposePatchOperation
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(520.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            LoadingSpinner(palette)
+            Text(copy.patchProgress, color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Text(
+                patchPhaseLabel(operation.phase, copy.language),
+                color = palette.muted,
+                fontSize = 14.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+            )
+        }
+    }
+}
+
+private fun patchPhaseLabel(phase: String, language: Language): String {
+    if (language == Language.Ua) {
+        return when (phase) {
+            "COPYING" -> "Копіювання APK"
+            "VERIFYING" -> "Перевірка APK"
+            "SCANNING" -> "Перевірка сумісності"
+            "PATCHING" -> "Застосування патчу"
+            "REPACKING" -> "Перепакування APK"
+            "SIGNING" -> "Підпис APK"
+            "OUTPUT_VERIFY" -> "Перевірка результату"
+            "COMMITTING" -> "Передавання APK системному інсталятору"
+            "UNINSTALL_REQUESTED" -> "Очікування видалення"
+            "INSTALL_REQUESTED" -> "Очікування встановлення"
+            else -> "Підготовка операції"
+        }
+    }
+    return when (phase) {
+        "COPYING" -> "Copying APK"
+        "VERIFYING" -> "Verifying APK"
+        "SCANNING" -> "Checking compatibility"
+        "PATCHING" -> "Applying patch"
+        "REPACKING" -> "Repacking APK"
+        "SIGNING" -> "Signing APK"
+        "OUTPUT_VERIFY" -> "Verifying result"
+        "COMMITTING" -> "Submitting APK to Android installer"
+        "UNINSTALL_REQUESTED" -> "Waiting for removal"
+        "INSTALL_REQUESTED" -> "Waiting for installation"
+        else -> phase.lowercase(Locale.ROOT).replace('_', ' ')
     }
 }
 
@@ -3558,16 +3968,27 @@ private fun enCopy() = Copy(
     patchTab = "APPLICATION PATCH",
     patchHint = "Patch navigation apps to enable direct HUD output.",
     patchWarning = "Warning",
-    patchWarningText = "A supported navigation app can be patched to enable the direct HUD channel. The installed original app and its data will be removed, then a modified version will be installed in its place. If your Waze version is unsupported, report it to the author for analysis:",
+    patchWarningText = "Select an installed navigator or a monolithic APK file. Compatible components will be patched locally and verified before Android asks you to install the result. Split APK bundles are not supported. Compatibility checks do not prove publisher identity; select only an APK you trust. Report unsupported versions for analysis:",
     patchRiskWarning = "Proceed at your own risk. App developer is not responsible for any data loss or errors.",
     availableNavigators = "Available navigation apps",
     noSupportedNavigators = "No supported navigation apps",
     appVersion = "Version",
     patchNotChecked = "not checked",
+    patchDirectChannel = "Direct channel",
+    patchSelectApk = "Select APK",
+    patchClearSelection = "Use installed app",
+    patchPatchable = "can patch",
+    patchPatched = "patched",
+    patchFailed = "unavailable",
+    patchSource = "Source",
+    patchInstalledSource = "installed app",
+    patchProgress = "Applying navigator patch",
+    patchRecovery = "Recovery required",
+    patchRestore = "Restore source APK",
     checkPatch = "Check",
     applyPatch = "Patch",
-    patchConfirmTitle = "Patch Waze?",
-    patchConfirmText = "Waze will be checked again before patching. The installed original app and its data will be removed, then the modified version will be installed in its place.",
+    patchConfirmTitle = "Patch %s?",
+    patchConfirmText = "The installed navigation app must be removed before the patched APK can be installed. Its local data will be lost. The selected source APK is kept for recovery.",
     patchConfirmOk = "OK",
     patchConfirmCancel = "Cancel",
     manualHint = "Direct manual payload checks for HUD output.",
@@ -3740,16 +4161,27 @@ private fun uaCopy() = enCopy().copy(
     patchTab = "ПАТЧ ЗАСТОСУНКУ",
     patchHint = "Патч навігатора для підтримки прямого каналу виводу на HUD.",
     patchWarning = "Попередження",
-    patchWarningText = "Для підтримуваного навігатора можна застосувати патч, який вмикає прямий канал HUD. Установлений оригінальний застосунок буде видалено разом із його даними, а замість нього встановлено модифіковану версію. Якщо ваша версія Waze не підтримується, повідомте автору для аналізу:",
+    patchWarningText = "Оберіть установлений навігатор або файл монолітного APK. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Набори split APK не підтримуються. Перевірка сумісності не підтверджує видавця: обирайте лише APK, якому довіряєте. Повідомляйте про непідтримувані версії для аналізу:",
     patchRiskWarning = "Дійте на власний ризик. Розробник застосунку не несе відповідальності за втрату даних та помилки.",
     availableNavigators = "Доступні навігатори",
     noSupportedNavigators = "Немає підтримуваних навігаторів",
     appVersion = "Версія",
     patchNotChecked = "не перевірено",
+    patchDirectChannel = "Прямий канал",
+    patchSelectApk = "Обрати APK",
+    patchClearSelection = "Установлений застосунок",
+    patchPatchable = "можна патчити",
+    patchPatched = "пропатчено",
+    patchFailed = "недоступно",
+    patchSource = "Джерело",
+    patchInstalledSource = "установлений застосунок",
+    patchProgress = "Застосування патчу навігатора",
+    patchRecovery = "Потрібне відновлення",
+    patchRestore = "Відновити вихідний APK",
     checkPatch = "Перевірити",
     applyPatch = "Пропатчити",
-    patchConfirmTitle = "Пропатчити Waze?",
-    patchConfirmText = "Перед застосуванням патчу Waze буде перевірено ще раз. Установлений оригінальний застосунок буде видалено разом із його даними, а замість нього встановлено модифіковану версію.",
+    patchConfirmTitle = "Пропатчити %s?",
+    patchConfirmText = "Перед встановленням пропатченого APK установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний APK зберігається для відновлення.",
     patchConfirmOk = "Ок",
     patchConfirmCancel = "Скасувати",
     manualHint = "Пряма ручна перевірка даних для HUD.",

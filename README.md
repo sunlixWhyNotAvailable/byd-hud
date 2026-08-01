@@ -21,6 +21,7 @@
 - patched `Waze` direct structured maneuver, distance, road, lane, and alert channel
 - optional direct-channel ETA, remaining-time, and remaining-distance prefix in the street field
 - stock or incompatible `Waze` accessibility/visual crop fallback
+- guarded local patcher for monolithic Waze and Google Maps ReVanced APKs
 - background runtime service with watchdog recovery
 - storage management
 - built-in stable and opt-in beta update channels
@@ -39,6 +40,15 @@ After first launch:
 7. Optionally use `Send to dashboard`.
 8. If you plan in helping debugging maneuvers/lanes parser - turn on `Save diagnostic screenshots and extended logs` to start saving screenshots for analysis (be aware - it can clog internal storage).
 9. Optionally take part in beta-testing (warning: broken builds are to be expected).
+
+The `Patch` tab can inspect either an installed navigator or a monolithic APK
+selected with the Android file picker. It patches only exact supported DEX
+structures, signs the result with a persistent key generated on the tablet and
+hands installation to Android. The confirmation dialog states whether the
+current signer permits an in-place update or requires removing the installed
+app and its local data.
+Compatibility checks do not establish APK publisher provenance; only select a
+source APK you trust.
    
 ## Known Limitations
 
@@ -50,6 +60,9 @@ After first launch:
 - The direct Waze channel requires a compatible patched Waze build. BYD HUD waits up to five seconds for it before starting the visual fallback.
 - The direct Google Maps channel requires a compatible patched build; stock or incompatible builds use accessibility/notification fallback.
 - Whole-route ETA/time/distance is available through Google Maps direct. Waze direct currently reports these values to the next stop only.
+- The built-in patcher supports monolithic APK files only. Split APK/APKS/APKM/XAPK packages are rejected.
+- Clearing BYD HUD data or uninstalling it removes the local navigator signing key. A later patch can then require another data-removing navigator replacement.
+- Waze patching includes the direct-channel allowlist and optional stable-session lifecycle bridge. The Waze alert hook is not patched.
 - Native maneuver arrows require the vehicle's `Navigation fusion` option to be enabled.
 - `Waze` offers vast range of maneuvers/lanes glyphs which are not standard for base car navigation. Therefore all new lanes/maneuvers are created using `GIMP` (for crop mode).
 
@@ -73,7 +86,6 @@ If there are missing glyphs or inconsistency in glyph outputs, archive of releva
 
 ## To Do
 
-- add patch feat directly to the app;
 - extend the Waze direct patch with structured totals for every remaining route leg;
 - add basic `ABRP` support. As of now `ABRP` is the same as `Waze`: no notification, only accessibility with no lanes/maneuvers (won't go crop path again).
 

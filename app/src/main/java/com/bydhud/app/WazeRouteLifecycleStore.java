@@ -57,6 +57,7 @@ final class WazeRouteLifecycleStore {
     }
 
     static boolean isBridgeSupported(Context context) {
+        if (NavigatorPatchStore.isInstalledWazeLifecycleV2(context)) return true;
         try {
             ApplicationInfo info = context.getPackageManager().getApplicationInfo(
                     WAZE_PACKAGE, PackageManager.GET_META_DATA);

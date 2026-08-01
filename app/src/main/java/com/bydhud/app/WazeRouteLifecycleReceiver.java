@@ -42,6 +42,11 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
                 + " elapsedMs=" + eventElapsedMs);
         if (!result.accepted) return;
 
+        dispatchAccepted(context, navigating, eventElapsedMs, result);
+    }
+
+    static void dispatchAccepted(Context context, boolean navigating, long eventElapsedMs,
+            WazeRouteLifecycleStore.RecordResult result) {
         NavHudLiveSender.onWazeRouteLifecycleEvent(
                 context.getApplicationContext(), navigating, eventElapsedMs,
                 result.changed, result.reason);
@@ -54,7 +59,7 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
         }
     }
 
-    private static void log(Context context, String value) {
+    static void log(Context context, String value) {
         AppEventLogger.event(context, "waze_route_lifecycle " + value);
     }
 }

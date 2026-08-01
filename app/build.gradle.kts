@@ -56,6 +56,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.car.app:app:1.9.0-alpha01")
     implementation("androidx.core:core:1.13.1")
+    implementation("org.smali:dexlib2:2.5.2")
+    implementation("com.google.guava:guava:27.1-android")
+    implementation("com.android.tools.build:apksig:8.7.3")
+    implementation("com.android:zipflinger:8.7.3")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }

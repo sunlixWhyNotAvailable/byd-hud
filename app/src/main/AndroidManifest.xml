@@ -13,6 +13,7 @@
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
 
     <queries>
         <package android:name="com.ts.car.someip.service" />
@@ -127,6 +128,20 @@
                 <action android:name="com.bydhud.app.action.WAZE_NAVIGATION_STATE" />
             </intent-filter>
         </receiver>
+
+        <receiver
+            android:name=".WazeRouteLifecycleV2Receiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.bydhud.app.action.WAZE_NAVIGATION_STATE_V2" />
+            </intent-filter>
+        </receiver>
+
+        <receiver
+            android:name=".NavigatorPackageResultReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <provider
             android:name="androidx.core.content.FileProvider"
