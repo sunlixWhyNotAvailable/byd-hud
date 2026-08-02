@@ -822,9 +822,8 @@ public final class MainActivity extends ComponentActivity {
                 composePatchOperation());
     }
 
-    public String composeSelectPatchSource(Uri uri) throws Exception {
-        if (uri == null) return "";
-        String displayName = "selected.apk";
+    public String composePatchSourceDisplayName(Uri uri) {
+        if (uri == null) return "selected";
         try (android.database.Cursor cursor = getContentResolver().query(
                 uri, new String[]{android.provider.OpenableColumns.DISPLAY_NAME},
                 null, null, null)) {
@@ -832,13 +831,24 @@ public final class MainActivity extends ComponentActivity {
                 int index = cursor.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
                 if (index >= 0) {
                     String value = cursor.getString(index);
-                    if (value != null && !value.trim().isEmpty()) displayName = value;
+                    if (value != null && !value.trim().isEmpty()) return value.trim();
                 }
             }
+        } catch (RuntimeException ignored) {
+            // The pipeline will report a source failure if the provider cannot be read.
         }
-        NavigatorPatchStore.Profile profile = NavigatorPatchPipeline.inspectSelectedPackage(
-                this, uri, displayName);
-        return profile.id;
+        return "selected";
+    }
+
+    public String composeSelectPatchSource(
+            String profileId, Uri uri, String displayName) throws Exception {
+        NavigatorPatchStore.Profile expected = NavigatorPatchStore.Profile.fromId(profileId);
+        if (expected == null) throw new IllegalArgumentException("Unknown patch profile");
+        String name = displayName == null || displayName.trim().isEmpty()
+                ? "selected" : displayName.trim();
+        NavigatorPatchStore.Profile actual = NavigatorPatchPipeline.inspectSelectedPackage(
+                this, expected, uri, name);
+        return actual.id;
     }
 
     public void composeClearPatchSource(String profileId) {
@@ -852,7 +862,7 @@ public final class MainActivity extends ComponentActivity {
     public void composeCheckNavigatorPatch(String profileId) throws Exception {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
-        NavigatorPatchPipeline.scan(this, profile, false);
+        NavigatorPatchPipeline.scan(this, profile);
     }
 
     public void composeApplyNavigatorPatch(String profileId, boolean destructiveApproved)
@@ -1006,7 +1016,7 @@ public final class MainActivity extends ComponentActivity {
         NavigatorPatchStore.OperationSnapshot value = NavigatorPatchStore.operation(this);
         return new ComposePatchOperation(
                 value.profile == null ? "" : value.profile.id,
-                value.phase, value.detail, value.destructive,
+                value.kind, value.phase, value.detail, value.destructive,
                 value.busy(), NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase));
     }
 
@@ -1785,7 +1795,7 @@ public final class MainActivity extends ComponentActivity {
             this.patchRows = patchRows == null ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(patchRows));
             this.patchOperation = patchOperation == null
-                    ? new ComposePatchOperation("", NavigatorPatchStore.IDLE,
+                    ? new ComposePatchOperation("", "", NavigatorPatchStore.IDLE,
                     "", false, false, false)
                     : patchOperation;
         }
@@ -1912,15 +1922,17 @@ public final class MainActivity extends ComponentActivity {
 
     public static final class ComposePatchOperation {
         public final String profileId;
+        public final String kind;
         public final String phase;
         public final String detail;
         public final boolean destructive;
         public final boolean busy;
         public final boolean recoveryRequired;
 
-        ComposePatchOperation(String profileId, String phase, String detail,
+        ComposePatchOperation(String profileId, String kind, String phase, String detail,
                 boolean destructive, boolean busy, boolean recoveryRequired) {
             this.profileId = profileId == null ? "" : profileId;
+            this.kind = kind == null ? "" : kind;
             this.phase = phase == null ? NavigatorPatchStore.IDLE : phase;
             this.detail = detail == null ? "" : detail;
             this.destructive = destructive;

@@ -328,8 +328,12 @@ private data class Copy(
     val appVersion: String,
     val patchNotChecked: String,
     val patchDirectChannel: String,
-    val patchSelectApk: String,
     val patchClearSelection: String,
+    val patchSelectFile: String,
+    val patchSelectFileTitle: String,
+    val patchSelectFileText: String,
+    val patchUnsupportedFileText: String,
+    val patchSelectionErrorText: String,
     val patchPatchable: String,
     val patchPatched: String,
     val patchFailed: String,
@@ -478,6 +482,9 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var updateState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Checking) }
     var pendingPatchProfile by rememberSaveable { mutableStateOf("") }
     var pendingPatchDestructive by rememberSaveable { mutableStateOf(false) }
+    var pendingPatchFileConfirmProfile by rememberSaveable { mutableStateOf("") }
+    var pendingPatchFilePickerProfile by rememberSaveable { mutableStateOf("") }
+    var patchSourceError by rememberSaveable { mutableStateOf("") }
     var patchActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
@@ -492,6 +499,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
         storageShareBusy -> "storage-share"
+        pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty() -> "patch"
         pendingPatchProfile.isNotEmpty() || patchActionPending || snapshot.patchOperation.busy -> "patch"
         else -> ""
     }
@@ -510,16 +518,29 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     }
 
     val apkPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val profileId = pendingPatchFilePickerProfile
+        pendingPatchFilePickerProfile = ""
         if (uri == null) {
             patchActionPending = false
             return@rememberLauncherForActivityResult
         }
-        if (!patchActionPending) patchActionPending = true
+        if (profileId.isEmpty()) return@rememberLauncherForActivityResult
         updateScope.launch {
             try {
-                withContext(Dispatchers.IO) { activity.composeSelectPatchSource(uri) }
+                val displayName = withContext(Dispatchers.IO) {
+                    activity.composePatchSourceDisplayName(uri)
+                }
+                patchActionPending = true
+                withContext(Dispatchers.IO) {
+                    activity.composeSelectPatchSource(profileId, uri, displayName)
+                }
             } catch (error: Exception) {
-                activity.composeAppendStatus("Patch source rejected: ${error.message}")
+                val message = error.message.orEmpty()
+                patchSourceError = if (message.startsWith("Unsupported source format")) {
+                    copy.patchUnsupportedFileText
+                } else {
+                    message.ifEmpty { copy.patchSelectionErrorText }
+                }
             } finally {
                 patchActionPending = false
             }
@@ -845,14 +866,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         palette = palette,
                         snapshot = snapshot,
                         actionPending = patchActionPending,
-                        onSelectApk = {
-                            if (!patchActionPending) {
-                                patchActionPending = true
-                                apkPicker.launch(arrayOf(
-                                    "application/vnd.android.package-archive",
-                                    "application/octet-stream"
-                                ))
-                            }
+                        onSelectFile = { profileId ->
+                            if (!patchActionPending) pendingPatchFileConfirmProfile = profileId
                         },
                         onClear = { profileId ->
                             runAction { activity.composeClearPatchSource(profileId) }
@@ -980,6 +995,33 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     }
                 },
                 onDismiss = { pendingPatchProfile = "" }
+            )
+        }
+
+        if (pendingPatchFileConfirmProfile.isNotEmpty()) {
+            PatchFileSelectionOverlay(
+                copy = copy,
+                palette = palette,
+                onConfirm = {
+                    val profileId = pendingPatchFileConfirmProfile
+                    pendingPatchFileConfirmProfile = ""
+                    pendingPatchFilePickerProfile = profileId
+                    apkPicker.launch(arrayOf(
+                        "application/vnd.android.package-archive",
+                        "application/zip",
+                        "application/octet-stream"
+                    ))
+                },
+                onDismiss = { pendingPatchFileConfirmProfile = "" }
+            )
+        }
+
+        if (patchSourceError.isNotEmpty()) {
+            PatchFileErrorOverlay(
+                copy = copy,
+                palette = palette,
+                message = patchSourceError,
+                onClose = { patchSourceError = "" }
             )
         }
 
@@ -2186,7 +2228,7 @@ private fun PatchTab(
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
     actionPending: Boolean,
-    onSelectApk: () -> Unit,
+    onSelectFile: (String) -> Unit,
     onClear: (String) -> Unit,
     onCheck: (String) -> Unit,
     onPatch: (String) -> Unit,
@@ -2208,21 +2250,6 @@ private fun PatchTab(
 
         item(key = "available-navigators") {
             Section(copy.availableNavigators, palette) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 10.dp, vertical = 10.dp),
-                    horizontalArrangement = Arrangement.End
-                ) {
-                    HudButton(
-                        copy.patchSelectApk,
-                        palette,
-                        primary = false,
-                        enabled = !busy,
-                        width = 190.dp,
-                        onClick = onSelectApk
-                    )
-                }
                 if (snapshot.patchRows.isEmpty()) {
                     Box(
                         modifier = Modifier
@@ -2284,31 +2311,46 @@ private fun PatchTab(
                             }
                             Row(
                                 modifier = Modifier.weight(1f),
-                                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                if (row.directState == "PATCHED" && row.optionalState == "PATCHED") {
-                                    StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 160.dp)
-                                } else {
-                                    PatchComponentChip(
-                                        copy.patchDirectChannel,
-                                        row.directState,
-                                        copy,
-                                        palette
-                                    )
-                                    PatchComponentChip(
-                                        patchOptionalLabel(row, copy.language),
-                                        row.optionalState,
-                                        copy,
-                                        palette
-                                    )
+                                Column(
+                                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                                    horizontalAlignment = Alignment.Start
+                                ) {
+                                    if (row.directState == "PATCHED" && row.optionalState == "PATCHED") {
+                                        StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 240.dp)
+                                    } else {
+                                        PatchComponentChip(copy.patchDirectChannel, row.directState, copy, palette)
+                                        PatchComponentChip(
+                                            patchOptionalLabel(row, copy.language),
+                                            row.optionalState,
+                                            copy,
+                                            palette
+                                        )
+                                    }
                                 }
                             }
                             Column(
-                                modifier = Modifier.width(320.dp),
+                                modifier = Modifier.width(550.dp),
                                 verticalArrangement = Arrangement.spacedBy(8.dp)
                             ) {
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    if (row.externalSource) {
+                                        SelectedPatchFileField(
+                                            version = selectedPatchVersion(row),
+                                            copy = copy,
+                                            palette = palette,
+                                            onClear = { onClear(row.profileId) }
+                                        )
+                                    } else {
+                                        HudButton(
+                                            copy.patchSelectFile,
+                                            palette,
+                                            enabled = !busy,
+                                            width = 210.dp,
+                                            onClick = { onSelectFile(row.profileId) }
+                                        )
+                                    }
                                     HudButton(
                                         copy.checkPatch,
                                         palette,
@@ -2325,24 +2367,7 @@ private fun PatchTab(
                                         onClick = { onPatch(row.profileId) }
                                     )
                                 }
-                                if (row.externalSource) {
-                                    HudButton(
-                                        copy.patchClearSelection,
-                                        palette,
-                                        enabled = !busy,
-                                        width = 150.dp,
-                                        onClick = { onClear(row.profileId) }
-                                    )
-                                }
                             }
-                        }
-                        if (row.reason.isNotEmpty()) {
-                            Text(
-                                patchReasonText(row.reason, copy.language),
-                                color = if (row.directState == "FAILED") palette.red else palette.muted,
-                                fontSize = 12.sp,
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
-                            )
                         }
                     }
                 }
@@ -2378,32 +2403,13 @@ private fun PatchTab(
             }
         }
 
-        if (snapshot.patchOperation.phase == "FAILED"
-            && snapshot.patchOperation.detail.isNotEmpty()) {
-            item(key = "patch-failure") {
-                Section(copy.patchFailed, palette) {
-                    Text(
-                        snapshot.patchOperation.detail,
-                        color = palette.red,
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(14.dp)
-                    )
-                }
-            }
-        }
     }
 }
 
-private fun patchReasonText(reason: String, language: Language): String {
-    if (language != Language.Ua) return reason
-    return when (reason) {
-        "Compatible" -> "Сумісно"
-        "Patched" -> "Пропатчено"
-        "Direct channel is already patched" -> "Прямий канал уже пропатчено"
-        "Stable session anchors are incompatible" -> "Маркери стабільної сесії несумісні"
-        "Mandatory Google Maps anchors are incompatible" -> "Обов'язкові маркери Google Maps несумісні"
-        else -> reason
-    }
+private fun selectedPatchVersion(row: MainActivity.ComposeNavigatorPatchRow): String {
+    if (row.sourceVersion.isNotEmpty()) return row.sourceVersion
+    val match = Regex("\\d+(?:\\.\\d+){2,}").find(row.sourceName)
+    return match?.value ?: row.sourceName.ifEmpty { "selected" }
 }
 
 private fun patchOptionalLabel(
@@ -2433,7 +2439,7 @@ private fun PatchComponentChip(
         "FAILED" -> ChipKind.Red
         else -> ChipKind.Neutral
     }
-    StatusChip("$label: $stateCopy", kind, palette, width = 190.dp)
+    StatusChip("$label: $stateCopy", kind, palette, width = 240.dp)
 }
 
 @Composable
@@ -2447,6 +2453,144 @@ private fun RepositoryLink(palette: Palette) {
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier.clickable { uriHandler.openUri(PROJECT_REPOSITORY_URL) }
     )
+}
+
+@Composable
+private fun SelectedPatchFileField(
+    version: String,
+    copy: Copy,
+    palette: Palette,
+    onClear: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .width(210.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(palette.panelAlt),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            text = version,
+            color = palette.text,
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f).padding(start = 11.dp)
+        )
+        HudIconButton(
+            icon = android.R.drawable.ic_menu_close_clear_cancel,
+            contentDescription = copy.patchClearSelection,
+            palette = palette,
+            tint = palette.muted,
+            modifier = Modifier.width(40.dp).height(44.dp),
+            onClick = onClear
+        )
+    }
+}
+
+@Composable
+private fun PatchFileSelectionOverlay(
+    copy: Copy,
+    palette: Palette,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(620.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                text = highlightPatchSelectionText(copy.patchSelectFileTitle, copy.language, palette.yellow),
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                text = highlightPatchSelectionText(copy.patchSelectFileText, copy.language, palette.yellow),
+                color = palette.text,
+                fontSize = 15.sp,
+                lineHeight = 21.sp,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp)
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+            ) {
+                HudButton(copy.patchConfirmOk, palette, primary = true, width = 138.dp, onClick = onConfirm)
+                HudButton(copy.patchConfirmCancel, palette, width = 138.dp, onClick = onDismiss)
+            }
+        }
+    }
+}
+
+@Composable
+private fun PatchFileErrorOverlay(
+    copy: Copy,
+    palette: Palette,
+    message: String,
+    onClose: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(copy.patchSelectionErrorText, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(message, color = palette.text, fontSize = 15.sp, lineHeight = 21.sp)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                HudButton(copy.updateClose, palette, primary = true, width = 138.dp, onClick = onClose)
+            }
+        }
+    }
+}
+
+private fun highlightPatchSelectionText(
+    text: String,
+    language: Language,
+    highlight: Color
+) = buildAnnotatedString {
+    append(text)
+    val words = if (language == Language.Ua) listOf("іншу", "замінить")
+    else listOf("another", "replace")
+    words.forEach { word ->
+        var start = text.indexOf(word)
+        while (start >= 0) {
+            addStyle(SpanStyle(color = highlight), start, start + word.length)
+            start = text.indexOf(word, start + word.length)
+        }
+    }
 }
 
 @Composable
@@ -2536,9 +2680,14 @@ private fun PatchProgressOverlay(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             LoadingSpinner(palette)
-            Text(copy.patchProgress, color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             Text(
-                patchPhaseLabel(operation.phase, copy.language),
+                patchProgressTitle(operation, copy),
+                color = palette.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                patchStepLabel(operation, copy.language),
                 color = palette.muted,
                 fontSize = 14.sp,
                 textAlign = androidx.compose.ui.text.style.TextAlign.Center
@@ -2547,11 +2696,52 @@ private fun PatchProgressOverlay(
     }
 }
 
+private fun patchProgressTitle(
+    operation: MainActivity.ComposePatchOperation,
+    copy: Copy
+): String {
+    return if (operation.kind == "CHECK" || operation.kind == "SELECT") {
+        if (copy.language == Language.Ua) {
+            "Перевірка сумісності навігатора для патчу"
+        } else {
+            "Checking navigator compatibility for patching"
+        }
+    } else {
+        copy.patchProgress
+    }
+}
+
+private fun patchStepLabel(
+    operation: MainActivity.ComposePatchOperation,
+    language: Language
+): String {
+    val step = when (operation.kind) {
+        "CHECK" -> when (operation.phase) {
+            "COPYING" -> 1 to 3
+            "VERIFYING" -> 2 to 3
+            "SCANNING" -> 3 to 3
+            else -> null
+        }
+        "PATCH" -> when (operation.phase) {
+            "COPYING" -> 1 to 6
+            "VERIFYING" -> 2 to 6
+            "SCANNING" -> 3 to 6
+            "PATCHING" -> 4 to 6
+            "SIGNING" -> 5 to 6
+            "OUTPUT_VERIFY" -> 6 to 6
+            else -> null
+        }
+        else -> null
+    }
+    val label = patchPhaseLabel(operation.phase, language)
+    return if (step == null) label else "(${step.first}/${step.second}) $label"
+}
+
 private fun patchPhaseLabel(phase: String, language: Language): String {
     if (language == Language.Ua) {
         return when (phase) {
-            "COPYING" -> "Копіювання APK"
-            "VERIFYING" -> "Перевірка APK"
+            "COPYING" -> "Копіювання застосунку"
+            "VERIFYING" -> "Перевірка пакета"
             "SCANNING" -> "Перевірка сумісності"
             "PATCHING" -> "Застосування патчу"
             "REPACKING" -> "Перепакування APK"
@@ -2564,8 +2754,8 @@ private fun patchPhaseLabel(phase: String, language: Language): String {
         }
     }
     return when (phase) {
-        "COPYING" -> "Copying APK"
-        "VERIFYING" -> "Verifying APK"
+        "COPYING" -> "Copying application"
+        "VERIFYING" -> "Verifying package"
         "SCANNING" -> "Checking compatibility"
         "PATCHING" -> "Applying patch"
         "REPACKING" -> "Repacking APK"
@@ -4006,15 +4196,19 @@ private fun enCopy() = Copy(
     patchTab = "APPLICATION PATCH",
     patchHint = "Patch navigation apps to enable direct HUD output.",
     patchWarning = "Warning",
-    patchWarningText = "Select an installed navigator or a monolithic APK file. Compatible components will be patched locally and verified before Android asks you to install the result. Split APK bundles are not supported. Compatibility checks do not prove publisher identity; select only an APK you trust. Report unsupported versions for analysis:",
+    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components will be patched locally and verified before Android asks you to install the result. Compatibility checks do not prove publisher identity; select only a source you trust. Report unsupported versions for analysis:",
     patchRiskWarning = "Proceed at your own risk. App developer is not responsible for any data loss or errors.",
     availableNavigators = "Available navigation apps",
     noSupportedNavigators = "No supported navigation apps",
     appVersion = "Version",
     patchNotChecked = "not checked",
     patchDirectChannel = "Direct channel",
-    patchSelectApk = "Select APK",
-    patchClearSelection = "Use installed app",
+    patchClearSelection = "Clear selected file",
+    patchSelectFile = "Optionally select file",
+    patchSelectFileTitle = "Select another app version?",
+    patchSelectFileText = "Select another downloaded version of the app that will replace the currently installed version.",
+    patchUnsupportedFileText = "Only APK, APKM, APKS, and APK-only XAPK files are supported.",
+    patchSelectionErrorText = "The selected source could not be used.",
     patchPatchable = "can patch",
     patchPatched = "patched",
     patchFailed = "unavailable",
@@ -4022,11 +4216,11 @@ private fun enCopy() = Copy(
     patchInstalledSource = "installed app",
     patchProgress = "Applying navigator patch",
     patchRecovery = "Recovery required",
-    patchRestore = "Restore source APK",
+    patchRestore = "Restore source package",
     checkPatch = "Check",
     applyPatch = "Patch",
     patchConfirmTitle = "Patch %s?",
-    patchConfirmText = "The installed navigation app must be removed before the patched APK can be installed. Its local data will be lost. The selected source APK is kept for recovery.",
+    patchConfirmText = "The installed navigation app must be removed before the patched package can be installed. Its local data will be lost. The selected source package is kept for recovery.",
     patchConfirmOk = "OK",
     patchConfirmCancel = "Cancel",
     manualHint = "Direct manual payload checks for HUD output.",
@@ -4200,15 +4394,19 @@ private fun uaCopy() = enCopy().copy(
     patchTab = "ПАТЧ ЗАСТОСУНКУ",
     patchHint = "Патч навігатора для підтримки прямого каналу виводу на HUD.",
     patchWarning = "Попередження",
-    patchWarningText = "Оберіть установлений навігатор або файл монолітного APK. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Набори split APK не підтримуються. Перевірка сумісності не підтверджує видавця: обирайте лише APK, якому довіряєте. Повідомляйте про непідтримувані версії для аналізу:",
+    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Перевірка сумісності не підтверджує видавця: обирайте лише джерело, якому довіряєте. Повідомляйте про непідтримувані версії для аналізу:",
     patchRiskWarning = "Дійте на власний ризик. Розробник застосунку не несе відповідальності за втрату даних та помилки.",
     availableNavigators = "Доступні навігатори",
     noSupportedNavigators = "Немає підтримуваних навігаторів",
     appVersion = "Версія",
     patchNotChecked = "не перевірено",
     patchDirectChannel = "Прямий канал",
-    patchSelectApk = "Обрати APK",
-    patchClearSelection = "Установлений застосунок",
+    patchClearSelection = "Скасувати вибір файла",
+    patchSelectFile = "Опційно обрати файл",
+    patchSelectFileTitle = "Обрати іншу версію застосунку?",
+    patchSelectFileText = "Обрати іншу завантажену версію застосунку, яка замінить поточну встановлену версію застосунку.",
+    patchUnsupportedFileText = "Підтримуються лише файли APK, APKM, APKS та XAPK без OBB.",
+    patchSelectionErrorText = "Обране джерело неможливо використати.",
     patchPatchable = "можна патчити",
     patchPatched = "пропатчено",
     patchFailed = "недоступно",
@@ -4216,11 +4414,11 @@ private fun uaCopy() = enCopy().copy(
     patchInstalledSource = "установлений застосунок",
     patchProgress = "Застосування патчу навігатора",
     patchRecovery = "Потрібне відновлення",
-    patchRestore = "Відновити вихідний APK",
+    patchRestore = "Відновити вихідний пакет",
     checkPatch = "Перевірити",
     applyPatch = "Пропатчити",
     patchConfirmTitle = "Пропатчити %s?",
-    patchConfirmText = "Перед встановленням пропатченого APK установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний APK зберігається для відновлення.",
+    patchConfirmText = "Перед встановленням пропатченого пакета установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний пакет зберігається для відновлення.",
     patchConfirmOk = "Ок",
     patchConfirmCancel = "Скасувати",
     manualHint = "Пряма ручна перевірка даних для HUD.",

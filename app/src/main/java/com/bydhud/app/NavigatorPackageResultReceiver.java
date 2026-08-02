@@ -41,10 +41,10 @@ public final class NavigatorPackageResultReceiver extends BroadcastReceiver {
         }
         try {
             if (NavigatorPackageInstaller.OP_UNINSTALL.equals(operation)) {
-                NavigatorPackageInstaller.commitPreparedSession(
+                NavigatorPackageInstaller.commitAfterUninstall(
                         context, profile, NavigatorPackageInstaller.OP_INSTALL);
             } else if (NavigatorPackageInstaller.OP_UNINSTALL_RESTORE.equals(operation)) {
-                NavigatorPackageInstaller.commitPreparedSession(
+                NavigatorPackageInstaller.commitAfterUninstall(
                         context, profile, NavigatorPackageInstaller.OP_INSTALL_RESTORE);
             } else if (NavigatorPackageInstaller.OP_INSTALL.equals(operation)) {
                 NavigatorPackageInstaller.verifyInstalledAsync(

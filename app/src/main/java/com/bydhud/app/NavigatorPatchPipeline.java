@@ -2,32 +2,23 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.content.res.AssetFileDescriptor;
-import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 
 import com.android.apksig.ApkSigner;
 import com.android.apksig.ApkVerifier;
-import com.android.apksig.internal.apk.AndroidBinXmlParser;
 import com.android.zipflinger.BytesSource;
 import com.android.zipflinger.ZipArchive;
 import com.bydhud.gmapsdiag.patcher.GmapsDiagnosticPatcher;
 
-import org.json.JSONObject;
-
 import java.io.ByteArrayOutputStream;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
-import java.nio.ByteBuffer;
-import java.nio.ByteOrder;
-import java.security.MessageDigest;
-import java.security.cert.X509Certificate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
@@ -42,8 +33,6 @@ import java.util.zip.ZipFile;
 final class NavigatorPatchPipeline {
     private static final long MAX_SOURCE_APK_BYTES = 512L * 1024L * 1024L;
     private static final long MAX_DEX_BYTES = 64L * 1024L * 1024L;
-    private static final long MAX_TOTAL_DEX_BYTES = 256L * 1024L * 1024L;
-    private static final int MAX_DEX_ENTRIES = 32;
     private static final String GMAPS_PATCHABLE = "PATCHABLE_STOCK";
     private static final String GMAPS_DIRECT = "MESSENGER_BRIDGE_POC";
     private static final String GMAPS_AUDIO = "NAVIGATION_AUDIO";
@@ -71,31 +60,6 @@ final class NavigatorPatchPipeline {
             this.reason = reason;
         }
 
-        JSONObject toJson() {
-            JSONObject value = new JSONObject();
-            try {
-                value.put("profile", profile.id);
-                value.put("sha256", sha256);
-                value.put("versionName", versionName);
-                value.put("versionCode", versionCode);
-                value.put("signerSha256", signerSha256);
-                value.put("direct", directState);
-                value.put("optional", optionalState);
-                value.put("reason", reason);
-            } catch (Exception ignored) {
-            }
-            return value;
-        }
-
-        static ScanResult fromJson(JSONObject value) throws Exception {
-            NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(
-                    value.getString("profile"));
-            if (profile == null) throw new IOException("unknown patch profile");
-            return new ScanResult(profile, value.getString("sha256"),
-                    value.optString("versionName"), value.optLong("versionCode", -1L),
-                    value.optString("signerSha256"), value.optString("direct"),
-                    value.optString("optional"), value.optString("reason"));
-        }
     }
 
     static final class PreparedPatch {
@@ -108,11 +72,12 @@ final class NavigatorPatchPipeline {
         final long installedUpdateTime;
         final long installedVersionCode;
         final String installedSignerSha256;
+        final String installedFingerprint;
 
         PreparedPatch(NavigatorPatchStore.Profile profile, ScanResult input, ScanResult output,
                 File directory, boolean destructive, boolean optionalApplied,
                 long installedUpdateTime, long installedVersionCode,
-                String installedSignerSha256) {
+                String installedSignerSha256, String installedFingerprint) {
             this.profile = profile;
             this.input = input;
             this.output = output;
@@ -122,6 +87,7 @@ final class NavigatorPatchPipeline {
             this.installedUpdateTime = installedUpdateTime;
             this.installedVersionCode = installedVersionCode;
             this.installedSignerSha256 = installedSignerSha256;
+            this.installedFingerprint = installedFingerprint;
         }
     }
 
@@ -129,59 +95,53 @@ final class NavigatorPatchPipeline {
     }
 
     static NavigatorPatchStore.Profile inspectSelectedPackage(
-            Context context, Uri uri, String displayName) throws Exception {
+            Context context, NavigatorPatchStore.Profile expectedProfile,
+            Uri uri, String displayName) throws Exception {
+        if (expectedProfile == null) throw new IllegalArgumentException("Patch profile is required");
         NavigatorPatchStore.claim(
-                context, null, NavigatorPatchStore.COPYING, displayName);
-        File input = temporary(context, "selected-", ".apk");
+                context, expectedProfile, NavigatorPatchStore.OP_SELECT,
+                NavigatorPatchStore.COPYING, displayName);
+        File input = temporary(context, "selected-", suffix(displayName));
+        File setDirectory = temporaryDirectory(context, "selected-set-");
         try {
-            rejectContainerName(displayName);
             copyUri(context, uri, input);
-            PackageInfo info = archiveInfo(context, input);
-            NavigatorPatchStore.Profile profile =
-                    NavigatorPatchStore.Profile.fromPackage(info.packageName);
-            if (profile == null) throw new IOException("Unsupported package: " + info.packageName);
-            rejectSplitArchive(input, info);
-            verifySignature(input);
+            NavigatorApkSet.SetInfo set = NavigatorApkSet.materializeSource(
+                    context, expectedProfile, input, setDirectory);
+            NavigatorPatchStore.Profile profile = expectedProfile;
+            PackageInfo installed = installedInfo(context, profile.packageName);
+            if (installed != null && set.versionCode < installed.getLongVersionCode()) {
+                throw new IOException("Selected APK-set is older than installed version");
+            }
             context.getContentResolver().takePersistableUriPermission(
                     uri, android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION);
             NavigatorPatchStore.selectExternal(
-                    context, profile, uri.toString(), displayName);
+                    context, profile, uri.toString(), displayName,
+                    set.versionName, set.versionCode, set.fingerprint, set.signerSha256);
             NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.IDLE, "");
             return profile;
         } catch (Exception error) {
             NavigatorPatchStore.transition(
-                    context, null, NavigatorPatchStore.FAILED, error.getMessage());
+                    context, expectedProfile, NavigatorPatchStore.FAILED, error.getMessage());
             throw error;
         } finally {
             input.delete();
+            deleteTree(setDirectory);
         }
     }
 
-    static ScanResult scan(Context context, NavigatorPatchStore.Profile profile,
-            boolean ignoreCache) throws Exception {
+    static ScanResult scan(Context context, NavigatorPatchStore.Profile profile) throws Exception {
         NavigatorPatchStore.claim(
-                context, profile, NavigatorPatchStore.COPYING, "Copying APK");
-        File input = temporary(context, profile.id + "-scan-", ".apk");
+                context, profile, NavigatorPatchStore.OP_CHECK,
+                NavigatorPatchStore.COPYING, "Copying APK");
+        File setDirectory = temporaryDirectory(context, profile.id + "-scan-");
         try {
-            copyCurrentSource(context, profile, input);
+            NavigatorApkSet.SetInfo set = materializeCurrentSource(context, profile, setDirectory);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.VERIFYING, "Verifying APK");
-            ScanResult preflight = verifyAndInspectMetadata(context, profile, input);
-            if (!ignoreCache) {
-                ScanResult cached = NavigatorPatchStore.cached(
-                        context, profile, preflight.sha256);
-                if (cached != null
-                        && cached.versionCode == preflight.versionCode
-                        && cached.signerSha256.equals(preflight.signerSha256)) {
-                    NavigatorPatchStore.saveScan(context, cached);
-                    NavigatorPatchStore.transition(
-                            context, profile, NavigatorPatchStore.IDLE, "");
-                    return cached;
-                }
-            }
+            ScanResult preflight = metadata(set, profile);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.SCANNING, "Scanning DEX");
-            ScanResult result = inspectComponents(context, input, preflight);
+            ScanResult result = inspectComponents(context, set, preflight);
             NavigatorPatchStore.saveScan(context, result);
             NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.IDLE, "");
             return result;
@@ -189,14 +149,15 @@ final class NavigatorPatchPipeline {
             saveFailure(context, profile, error);
             throw error;
         } finally {
-            input.delete();
+            deleteTree(setDirectory);
         }
     }
 
     static PreparedPatch prepare(Context context, NavigatorPatchStore.Profile profile)
             throws Exception {
         NavigatorPatchStore.claim(
-                context, profile, NavigatorPatchStore.COPYING, "Copying APK");
+                context, profile, NavigatorPatchStore.OP_PATCH,
+                NavigatorPatchStore.COPYING, "Copying APK");
         File transaction = null;
         try {
             PackageInfo initialInstalled = installedInfo(context, profile.packageName);
@@ -216,16 +177,20 @@ final class NavigatorPatchPipeline {
             if (!transaction.mkdirs()) {
                 throw new IOException("Cannot create transaction directory");
             }
-            File source = new File(transaction, "source.apk");
-            File patched = new File(transaction, "patched.apk");
-            copyCurrentSource(context, profile, source);
-            ensureWorkingSpace(context, source.length());
+            File source = new File(transaction, "source-set");
+            File patched = new File(transaction, "patched-set");
+            NavigatorApkSet.SetInfo sourceSet = materializeCurrentSource(context, profile, source);
+            String initialFingerprint = initialInstalled == null ? ""
+                    : NavigatorPatchStore.selectedUri(context, profile).isEmpty()
+                    ? sourceSet.fingerprint
+                    : NavigatorApkSet.inspectInstalled(context, profile).fingerprint;
+            ensureWorkingSpace(context, sourceSet);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.VERIFYING, "Verifying source");
-            ScanResult metadata = verifyAndInspectMetadata(context, profile, source);
+            ScanResult metadata = metadata(sourceSet, profile);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.SCANNING, "Rechecking DEX");
-            ScanResult input = inspectComponents(context, source, metadata);
+            ScanResult input = inspectComponents(context, sourceSet, metadata);
             String previousSha = NavigatorPatchStore.prefs(context)
                     .getString(profile.id + "_scan_sha", "");
             if (previousSha == null || !previousSha.equals(input.sha256)) {
@@ -239,33 +204,42 @@ final class NavigatorPatchPipeline {
 
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.PATCHING, "Patching direct channel");
-            File unsigned = buildUnsigned(context, profile, source, transaction, input);
+            boolean optionalFailed = buildUnsignedSet(
+                    context, profile, sourceSet, patched, transaction, input);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.SIGNING, "Signing APK");
-            sign(unsigned, patched);
+            signSet(patched);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.OUTPUT_VERIFY, "Verifying output");
-            ScanResult outputMetadata = verifyAndInspectMetadata(context, profile, patched);
-            ScanResult output = inspectComponents(context, patched, outputMetadata);
+            NavigatorApkSet.SetInfo outputSet = NavigatorApkSet.readDirectory(
+                    context, profile, patched);
+            ScanResult outputMetadata = metadata(outputSet, profile);
+            ScanResult output = inspectComponents(context, outputSet, outputMetadata);
             if (!NavigatorPatchStore.PATCHED.equals(output.directState)) {
                 throw new IOException("Direct channel post-verification failed");
+            }
+            if (optionalFailed) {
+                output = copyStates(output, output.directState, NavigatorPatchStore.FAILED,
+                        "Optional patch attempt failed");
             }
             boolean optionalApplied = NavigatorPatchStore.PATCHABLE.equals(input.optionalState)
                     && NavigatorPatchStore.PATCHED.equals(output.optionalState);
             assertInstalledTarget(context, profile, initialUpdateTime,
-                    initialVersionCode, initialSigner);
+                    initialVersionCode, initialSigner, initialFingerprint);
             boolean installed = initialInstalled != null;
             boolean destructive = installed
                     && !NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName);
             NavigatorPatchStore.setTransaction(
                     context, profile, transaction, destructive, output,
-                    initialUpdateTime, initialVersionCode, initialSigner);
+                    initialUpdateTime, initialVersionCode, initialSigner,
+                    initialFingerprint);
             NavigatorPatchStore.transition(context, profile,
                     NavigatorPatchStore.READY_TO_INSTALL,
                     destructive ? "Replacement requires data removal" : "Ready to install");
             return new PreparedPatch(
                     profile, input, output, transaction, destructive, optionalApplied,
-                    initialUpdateTime, initialVersionCode, initialSigner);
+                    initialUpdateTime, initialVersionCode, initialSigner,
+                    initialFingerprint);
         } catch (Exception error) {
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.FAILED, error.getMessage());
@@ -276,33 +250,22 @@ final class NavigatorPatchPipeline {
 
     static ScanResult inspectInstalled(Context context, NavigatorPatchStore.Profile profile)
             throws Exception {
-        File input = temporary(context, profile.id + "-installed-", ".apk");
+        File setDirectory = temporaryDirectory(context, profile.id + "-installed-");
         try {
-            copyInstalled(context, profile, input);
-            ScanResult metadata = verifyAndInspectMetadata(context, profile, input);
-            return inspectComponents(context, input, metadata);
+            NavigatorApkSet.SetInfo set = NavigatorApkSet.materializeInstalled(
+                    context, profile, setDirectory);
+            ScanResult metadata = metadata(set, profile);
+            return inspectComponents(context, set, metadata);
         } finally {
-            input.delete();
+            deleteTree(setDirectory);
         }
     }
 
     static ScanResult verifyRecoverySource(Context context,
             NavigatorPatchStore.Profile profile, File source) throws Exception {
-        validateArchiveLimits(source);
-        ApkVerifier.Result verified = verifySignature(source);
-        PackageInfo info = archiveInfo(context, source);
-        if (!profile.packageName.equals(info.packageName)) {
-            throw new IOException("Recovery APK package mismatch");
-        }
-        rejectSplitArchive(source, info);
-        if (verified.getSignerCertificates().size() != 1) {
-            throw new IOException("Recovery APK must have exactly one signer");
-        }
-        return new ScanResult(profile, sha256(source),
-                info.versionName == null ? "" : info.versionName,
-                info.getLongVersionCode(),
-                NavigatorSigningKey.archiveCertificateSha256(
-                        verified.getSignerCertificates()),
+        NavigatorApkSet.SetInfo set = NavigatorApkSet.readDirectory(context, profile, source);
+        return new ScanResult(profile, set.fingerprint, set.versionName,
+                set.versionCode, set.signerSha256,
                 NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED, "");
     }
 
@@ -314,145 +277,298 @@ final class NavigatorPatchPipeline {
                 NavigatorPatchStore.FAILED, reason);
     }
 
-    private static File buildUnsigned(Context context, NavigatorPatchStore.Profile profile,
-            File source, File transaction, ScanResult input) throws Exception {
-        if (profile == NavigatorPatchStore.Profile.WAZE) {
-            return patchWaze(context, source, transaction, input);
-        }
-        return patchGmaps(context, source, transaction, input);
-    }
-
-    private static File patchGmaps(Context context, File source, File transaction,
-            ScanResult input) throws Exception {
-        File mandatory = new File(transaction, "mandatory-unsigned.apk");
-        File loggerDex = new File(transaction, "gmaps-bridge.dex");
-        File report = new File(transaction, "gmaps-direct-report.json");
-        if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
-            PatchPayloadDex.extract(
-                    context, "Lcom/bydhud/gmapsdiag/NavInfoLogger", loggerDex);
-            GmapsDiagnosticPatcher.patchDirect(source, mandatory, loggerDex, report);
-        } else {
-            stripSignatures(source, mandatory);
-        }
-        if (!NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) return mandatory;
-        File optional = new File(transaction, "optional-unsigned.apk");
-        try {
-            NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.GMAPS,
-                    NavigatorPatchStore.PATCHING, "Patching audio channel");
-            GmapsDiagnosticPatcher.patchNavigationAudio(
-                    mandatory, optional, new File(transaction, "gmaps-audio-report.json"));
-            return optional;
-        } catch (Exception optionalError) {
-            AppEventLogger.event(context, "navigator_patch optional_failed profile=gmaps error="
-                    + clean(optionalError.getMessage()));
-            return mandatory;
-        }
-    }
-
-    private static File patchWaze(Context context, File source, File transaction,
-            ScanResult input) throws Exception {
-        WazeApkInspection inspection = inspectWaze(source);
-        Map<String, File> mandatoryReplacements = new HashMap<>();
-        if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
-            File rewritten = new File(transaction, "waze-direct.dex");
-            WazePatchEngine.patchWazeAllowlist(
-                    readEntry(source, inspection.allowlistDex), rewritten);
-            mandatoryReplacements.put(inspection.allowlistDex, rewritten);
-        }
-        File mandatory = new File(transaction, "mandatory-unsigned.apk");
-        repack(source, mandatory, mandatoryReplacements, Collections.emptyMap());
-        if (!NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) return mandatory;
-
-        try {
-            NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.WAZE,
-                    NavigatorPatchStore.PATCHING, "Patching stable session");
-            WazeApkInspection current = inspectWaze(mandatory);
-            if (current.lifecyclePatched()) return mandatory;
-            Map<String, File> lifecycleReplacements = new HashMap<>();
-            for (String dexEntry : current.lifecycleDexEntries) {
-                File rewritten = new File(transaction,
-                        "lifecycle-" + dexEntry.replace('/', '_'));
-                WazePatchEngine.patchLifecycle(readEntry(mandatory, dexEntry), rewritten);
-                lifecycleReplacements.put(dexEntry, rewritten);
+    private static NavigatorApkSet.SetInfo materializeCurrentSource(
+            Context context, NavigatorPatchStore.Profile profile, File outputDirectory)
+            throws Exception {
+        String selected = NavigatorPatchStore.selectedUri(context, profile);
+        if (selected != null && !selected.isEmpty()) {
+            String name = NavigatorPatchStore.selectedName(context, profile);
+            File input = temporary(context, profile.id + "-source-", suffix(name));
+            try {
+                copyUri(context, Uri.parse(selected), input);
+                return NavigatorApkSet.materializeSource(
+                        context, profile, input, outputDirectory);
+            } finally {
+                input.delete();
             }
-            File bridgeDex = new File(transaction, "waze-route-v2.dex");
-            PatchPayloadDex.extract(
-                    context, "Lcom/waze/bydhud/RouteStateBridgeV2", bridgeDex);
-            Map<String, File> additions = new HashMap<>();
-            additions.put(nextDexEntry(current.dexEntries), bridgeDex);
-            File optional = new File(transaction, "optional-unsigned.apk");
-            repack(mandatory, optional, lifecycleReplacements, additions);
-            return optional;
-        } catch (Exception optionalError) {
-            AppEventLogger.event(context, "navigator_patch optional_failed profile=waze error="
-                    + clean(optionalError.getMessage()));
-            return mandatory;
         }
+        return NavigatorApkSet.materializeInstalled(context, profile, outputDirectory);
     }
 
-    private static ScanResult verifyAndInspectMetadata(Context context,
-            NavigatorPatchStore.Profile profile, File apk) throws Exception {
-        validateArchiveLimits(apk);
-        ApkVerifier.Result verified = verifySignature(apk);
-        PackageInfo info = archiveInfo(context, apk);
-        if (!profile.packageName.equals(info.packageName)) {
-            throw new IOException("APK package=" + info.packageName
-                    + ", expected=" + profile.packageName);
-        }
-        rejectSplitArchive(apk, info);
-        PackageInfo installed = installedInfo(context, profile.packageName);
-        if (installed != null && info.getLongVersionCode() < installed.getLongVersionCode()) {
-            throw new IOException("Selected APK is older than installed version");
-        }
-        return new ScanResult(profile, sha256(apk),
-                info.versionName == null ? "" : info.versionName,
-                info.getLongVersionCode(),
-                NavigatorSigningKey.archiveCertificateSha256(
-                        verified.getSignerCertificates()),
+    private static ScanResult metadata(NavigatorApkSet.SetInfo set,
+            NavigatorPatchStore.Profile profile) {
+        return new ScanResult(profile, set.fingerprint, set.versionName,
+                set.versionCode, set.signerSha256,
                 NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED, "");
     }
 
-    private static ScanResult inspectComponents(
-            Context context, File apk, ScanResult metadata) throws Exception {
+    private static ScanResult inspectComponents(Context context,
+            NavigatorApkSet.SetInfo set, ScanResult metadata) throws Exception {
         if (metadata.profile == NavigatorPatchStore.Profile.GMAPS) {
-            String direct = GmapsDiagnosticPatcher.inspectDirectClassification(apk);
-            if (!GMAPS_PATCHABLE.equals(direct) && !GMAPS_DIRECT.equals(direct)) {
+            String direct = "";
+            String audio = "";
+            int directTargets = 0;
+            int audioTargets = 0;
+            for (NavigatorApkSet.Member member : set.members) {
+                String memberDirect = GmapsDiagnosticPatcher.inspectDirectClassification(member.file);
+                String memberAudio = GmapsDiagnosticPatcher.inspectAudioClassification(member.file);
+                if (GMAPS_PATCHABLE.equals(memberDirect) || GMAPS_DIRECT.equals(memberDirect)) {
+                    direct = memberDirect;
+                    directTargets++;
+                }
+                if (GMAPS_PATCHABLE.equals(memberAudio) || GMAPS_AUDIO.equals(memberAudio)) {
+                    audio = memberAudio;
+                    audioTargets++;
+                }
+            }
+            if (directTargets != 1 || (!GMAPS_PATCHABLE.equals(direct)
+                    && !GMAPS_DIRECT.equals(direct))) {
                 return copyStates(metadata, NavigatorPatchStore.FAILED,
                         NavigatorPatchStore.NOT_CHECKED,
                         "Mandatory Google Maps anchors are incompatible");
             }
-            String audio = GmapsDiagnosticPatcher.inspectAudioClassification(apk);
             String directState = GMAPS_PATCHABLE.equals(direct)
                     ? NavigatorPatchStore.PATCHABLE : NavigatorPatchStore.PATCHED;
-            String optionalState = GMAPS_PATCHABLE.equals(audio)
+            String optionalState = audioTargets == 1 && GMAPS_PATCHABLE.equals(audio)
                     ? NavigatorPatchStore.PATCHABLE
-                    : GMAPS_AUDIO.equals(audio)
+                    : audioTargets == 1 && GMAPS_AUDIO.equals(audio)
                     ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.FAILED;
             String reason = NavigatorPatchStore.FAILED.equals(optionalState)
                     ? "Audio channel anchors are incompatible" : "Compatible";
             return copyStates(metadata, directState, optionalState, reason);
         }
-        WazeApkInspection inspection = inspectWaze(apk);
-        String direct;
-        if (WazePatchEngine.PATCHABLE_STOCK.equals(inspection.allowlistClassification)) {
-            direct = NavigatorPatchStore.PATCHABLE;
-        } else if (WazePatchEngine.ALREADY_PATCHED.equals(inspection.allowlistClassification)) {
-            direct = NavigatorPatchStore.PATCHED;
-        } else {
-            return copyStates(metadata, NavigatorPatchStore.FAILED,
-                    NavigatorPatchStore.NOT_CHECKED, inspection.reason);
+        int stock = 0;
+        int patched = 0;
+        int lifecycleTargets = 0;
+        boolean lifecycleStock = false;
+        boolean lifecyclePatched = false;
+        String reason = "Waze allowlist target missing";
+        for (NavigatorApkSet.Member member : set.members) {
+            WazeApkInspection inspection = inspectWaze(member.file);
+            if (WazePatchEngine.PATCHABLE_STOCK.equals(inspection.allowlistClassification)) {
+                stock++;
+            } else if (WazePatchEngine.ALREADY_PATCHED.equals(inspection.allowlistClassification)) {
+                patched++;
+            }
+            lifecycleTargets += inspection.applicationTargetCount + inspection.routeTargetCount;
+            lifecycleStock |= inspection.lifecycleStock();
+            lifecyclePatched |= inspection.lifecyclePatched();
+            if (!inspection.reason.isEmpty()) reason = inspection.reason;
         }
-        String optional;
-        if (inspection.lifecycleStock()) optional = NavigatorPatchStore.PATCHABLE;
-        else if (inspection.lifecyclePatched()) {
-            optional = NavigatorSigningKey.certificateMatchesLocalIfPresent(
-                    metadata.signerSha256)
-                    ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
+        String directState;
+        if (stock == 1 && patched == 0) directState = NavigatorPatchStore.PATCHABLE;
+        else if (stock == 0 && patched == 1) directState = NavigatorPatchStore.PATCHED;
+        else return copyStates(metadata, NavigatorPatchStore.FAILED,
+                NavigatorPatchStore.NOT_CHECKED, reason);
+        String optional = lifecycleTargets == 0 ? NavigatorPatchStore.FAILED
+                : lifecycleStock ? NavigatorPatchStore.PATCHABLE
+                : lifecyclePatched ? NavigatorPatchStore.PATCHED
+                : NavigatorPatchStore.FAILED;
+        return copyStates(metadata, directState, optional,
+                NavigatorPatchStore.FAILED.equals(optional)
+                        ? "Stable session anchors are incompatible" : "Compatible");
+    }
+
+    private static boolean buildUnsignedSet(Context context, NavigatorPatchStore.Profile profile,
+            NavigatorApkSet.SetInfo sourceSet, File outputDirectory, File transaction,
+            ScanResult input) throws Exception {
+        File sourceDirectory = sourceSet.members.get(0).file.getParentFile().getParentFile();
+        copySetDirectory(sourceDirectory, outputDirectory);
+        if (profile == NavigatorPatchStore.Profile.WAZE) {
+            return patchWazeSet(context, sourceSet, outputDirectory, transaction, input);
         }
-        else optional = NavigatorPatchStore.FAILED;
-        String reason = NavigatorPatchStore.FAILED.equals(optional)
-                ? "Stable session anchors are incompatible" : "Compatible";
-        return copyStates(metadata, direct, optional, reason);
+        return patchGmapsSet(context, sourceSet, outputDirectory, transaction, input);
+    }
+
+    private static boolean patchGmapsSet(Context context, NavigatorApkSet.SetInfo sourceSet,
+            File outputDirectory, File transaction, ScanResult input) throws Exception {
+        File directMember = null;
+        File audioMember = null;
+        for (NavigatorApkSet.Member member : sourceSet.members) {
+            String direct = GmapsDiagnosticPatcher.inspectDirectClassification(member.file);
+            String audio = GmapsDiagnosticPatcher.inspectAudioClassification(member.file);
+            if (GMAPS_PATCHABLE.equals(direct)) {
+                if (directMember != null) throw new IOException("Multiple Google Maps direct targets");
+                directMember = outputMember(outputDirectory, member.installName);
+            } else if (GMAPS_DIRECT.equals(direct)) {
+                if (directMember != null) throw new IOException("Multiple Google Maps direct targets");
+                directMember = null;
+            }
+            if (GMAPS_PATCHABLE.equals(audio)) {
+                if (audioMember != null) throw new IOException("Multiple Google Maps audio targets");
+                audioMember = outputMember(outputDirectory, member.installName);
+            }
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
+            if (directMember == null) throw new IOException("Google Maps direct target member missing");
+            File rewritten = new File(transaction, "gmaps-direct-unsigned.apk");
+            File loggerDex = new File(transaction, "gmaps-bridge.dex");
+            File report = new File(transaction, "gmaps-direct-report.json");
+            PatchPayloadDex.extract(
+                    context, "Lcom/bydhud/gmapsdiag/NavInfoLogger", loggerDex);
+            GmapsDiagnosticPatcher.patchDirect(directMember, rewritten, loggerDex, report);
+            replaceFile(rewritten, directMember);
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) {
+            if (audioMember == null) {
+                AppEventLogger.event(context,
+                        "navigator_patch operation=patch profile=gmaps stage=optional code=OPTIONAL_INCOMPATIBLE");
+                return true;
+            }
+            try {
+                File optional = new File(transaction, "gmaps-audio-unsigned.apk");
+                NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.GMAPS,
+                        NavigatorPatchStore.PATCHING, "Patching audio channel");
+                GmapsDiagnosticPatcher.patchNavigationAudio(
+                        audioMember, optional, new File(transaction, "gmaps-audio-report.json"));
+                replaceFile(optional, audioMember);
+            } catch (Exception optionalError) {
+                AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
+                        + " stage=optional code=OPTIONAL_PATCH_FAILED detail="
+                        + clean(optionalError.getMessage()));
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean patchWazeSet(Context context, NavigatorApkSet.SetInfo sourceSet,
+            File outputDirectory, File transaction, ScanResult input) throws Exception {
+        List<WazeApkInspection> inspections = new ArrayList<>();
+        WazeApkInspection allowlist = null;
+        int allowlistCount = 0;
+        for (NavigatorApkSet.Member member : sourceSet.members) {
+            WazeApkInspection inspection = inspectWaze(member.file);
+            inspections.add(inspection);
+            if (inspection.allowlistTargetCount == 1) {
+                allowlist = inspection;
+                allowlistCount++;
+            }
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
+            if (allowlistCount != 1 || allowlist == null) {
+                throw new IOException("Waze allowlist target member is ambiguous");
+            }
+            File target = outputMember(outputDirectory, allowlist.fileName);
+            File rewrittenDex = new File(transaction, "waze-direct.dex");
+            WazePatchEngine.patchWazeAllowlist(
+                    readEntry(target, allowlist.allowlistDex), rewrittenDex);
+            File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
+            Map<String, File> replacements = new HashMap<>();
+            replacements.put(allowlist.allowlistDex, rewrittenDex);
+            repack(target, rewrittenApk, replacements, Collections.emptyMap());
+            replaceFile(rewrittenApk, target);
+        }
+        if (!NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) return false;
+        try {
+            NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.WAZE,
+                    NavigatorPatchStore.PATCHING, "Patching stable session");
+            WazeApkInspection lifecycleOwner = null;
+            for (WazeApkInspection inspection : inspections) {
+                if (inspection.applicationTargetCount > 0 || inspection.routeTargetCount > 0) {
+                    if (lifecycleOwner != null) {
+                        throw new IOException("Waze stable-session target member is ambiguous");
+                    }
+                    lifecycleOwner = inspection;
+                }
+            }
+            if (lifecycleOwner == null || lifecycleOwner.routeTargetCount != 1
+                    || lifecycleOwner.applicationTargetCount != 1) {
+                throw new IOException("Waze stable-session target missing");
+            }
+            File target = outputMember(outputDirectory, lifecycleOwner.fileName);
+            Map<String, File> replacements = new HashMap<>();
+            for (String dexEntry : lifecycleOwner.lifecycleDexEntries) {
+                File rewritten = new File(transaction,
+                        "lifecycle-" + lifecycleOwner.fileName + "-"
+                                + dexEntry.replace('/', '_'));
+                WazePatchEngine.patchLifecycle(readEntry(target, dexEntry), rewritten);
+                replacements.put(dexEntry, rewritten);
+            }
+            File lifecycleApk = new File(transaction, "waze-lifecycle-unsigned.apk");
+            repack(target, lifecycleApk, replacements, Collections.emptyMap());
+            File bridgeDex = new File(transaction, "waze-route-v2.dex");
+            PatchPayloadDex.extract(
+                    context, "Lcom/waze/bydhud/RouteStateBridgeV2", bridgeDex);
+            File optionalApk = new File(transaction, "waze-optional-unsigned.apk");
+            Map<String, File> additions = new HashMap<>();
+            List<String> dexEntries = dexEntries(lifecycleApk);
+            additions.put(nextDexEntry(dexEntries), bridgeDex);
+            repack(lifecycleApk, optionalApk, Collections.emptyMap(), additions);
+            replaceFile(optionalApk, target);
+        } catch (Exception optionalError) {
+            AppEventLogger.event(context, "navigator_patch operation=patch profile=waze"
+                    + " stage=optional code=OPTIONAL_PATCH_FAILED detail="
+                    + clean(optionalError.getMessage()));
+            return true;
+        }
+        return false;
+    }
+
+    private static void signSet(File directory) throws Exception {
+        List<File> members = new ArrayList<>();
+        File memberDirectory = new File(directory, "members");
+        File[] files = memberDirectory.listFiles((file, name) -> name.endsWith(".apk"));
+        if (files == null || files.length == 0) throw new IOException("APK-set is empty");
+        Collections.addAll(members, files);
+        for (File input : members) {
+            File signed = new File(input.getParentFile(), input.getName() + ".signed");
+            sign(input, signed);
+            replaceFile(signed, input);
+        }
+    }
+
+    private static void copySetDirectory(File source, File target) throws IOException {
+        deleteTree(target);
+        if (!target.mkdirs()) throw new IOException("Cannot create patched APK-set");
+        File sourceMembers = new File(source, "members");
+        File targetMembers = new File(target, "members");
+        if (!targetMembers.mkdirs()) throw new IOException("Cannot create patched APK members");
+        File[] files = sourceMembers.listFiles((file, name) -> name.endsWith(".apk"));
+        if (files == null || files.length == 0) throw new IOException("Source APK-set is empty");
+        for (File file : files) {
+            Files.copy(file.toPath(), new File(targetMembers, file.getName()).toPath(),
+                    StandardCopyOption.REPLACE_EXISTING);
+        }
+    }
+
+    private static File outputMember(File directory, String installName) throws IOException {
+        File member = new File(new File(directory, "members"), installName);
+        if (!member.isFile()) throw new IOException("Missing APK-set member: " + installName);
+        return member;
+    }
+
+    private static void replaceFile(File source, File target) throws IOException {
+        Files.move(source.toPath(), target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+    }
+
+    private static List<String> dexEntries(File apk) throws IOException {
+        List<String> result = new ArrayList<>();
+        try (ZipFile zip = new ZipFile(apk)) {
+            java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                String name = entries.nextElement().getName();
+                if (name.matches("classes(\\d*)\\.dex")) result.add(name);
+            }
+        }
+        return result;
+    }
+
+    private static String suffix(String name) {
+        String lower = name == null ? "" : name.toLowerCase(Locale.ROOT);
+        if (lower.endsWith(".apkm")) return ".apkm";
+        if (lower.endsWith(".apks")) return ".apks";
+        if (lower.endsWith(".xapk")) return ".xapk";
+        return ".apk";
+    }
+
+    private static File temporaryDirectory(Context context, String prefix) throws IOException {
+        File root = new File(context.getCacheDir(), "navigator-patcher");
+        if (!root.exists() && !root.mkdirs()) throw new IOException("Cannot create patch cache");
+        File directory = new File(root, prefix + UUID.randomUUID());
+        if (!directory.mkdirs()) throw new IOException("Cannot create temporary APK-set");
+        return directory;
     }
 
     private static ScanResult copyStates(ScanResult source, String direct,
@@ -463,6 +579,7 @@ final class NavigatorPatchPipeline {
 
     private static WazeApkInspection inspectWaze(File apk) throws IOException {
         WazeApkInspection result = new WazeApkInspection();
+        result.fileName = apk.getName();
         try (ZipFile zip = new ZipFile(apk)) {
             java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
             while (entries.hasMoreElements()) {
@@ -481,9 +598,12 @@ final class NavigatorPatchPipeline {
                         WazePatchEngine.inspectLifecycle(bytes);
                 result.applicationTargetCount += lifecycle.applicationTargetCount;
                 result.applicationHookCount += lifecycle.applicationHookCount;
+                result.legacyApplicationHookCount += lifecycle.legacyApplicationHookCount;
                 result.routeTargetCount += lifecycle.routeTargetCount;
                 result.routeHookCount += lifecycle.routeHookCount;
+                result.legacyRouteHookCount += lifecycle.legacyRouteHookCount;
                 result.bridgeClassCount += lifecycle.bridgeClassCount;
+                result.legacyBridgeClassCount += lifecycle.legacyBridgeClassCount;
                 if (lifecycle.applicationTargetCount > 0
                         || lifecycle.routeTargetCount > 0) {
                     result.lifecycleDexEntries.add(entry.getName());
@@ -500,49 +620,6 @@ final class NavigatorPatchPipeline {
             result.allowlistDex = "";
         }
         return result;
-    }
-
-    private static void copyCurrentSource(Context context,
-            NavigatorPatchStore.Profile profile, File target) throws Exception {
-        String selectedUri = NavigatorPatchStore.selectedUri(context, profile);
-        if (selectedUri != null && !selectedUri.isEmpty()) {
-            copyUri(context, Uri.parse(selectedUri), target);
-        } else {
-            copyInstalled(context, profile, target);
-        }
-    }
-
-    private static void copyInstalled(Context context,
-            NavigatorPatchStore.Profile profile, File target) throws Exception {
-        PackageInfo before = context.getPackageManager().getPackageInfo(
-                profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
-        ApplicationInfo application = before.applicationInfo;
-        if (application == null || application.sourceDir == null) {
-            throw new IOException("Installed APK path is unavailable");
-        }
-        if (application.splitSourceDirs != null && application.splitSourceDirs.length > 0) {
-            throw new IOException("Split APK is unsupported in this patcher version");
-        }
-        File source = new File(application.sourceDir);
-        rejectOversizedSource(source.length());
-        ensureCopySpace(target, source.length());
-        Files.copy(source.toPath(), target.toPath(),
-                StandardCopyOption.REPLACE_EXISTING);
-        PackageInfo after = context.getPackageManager().getPackageInfo(
-                profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
-        if (before.lastUpdateTime != after.lastUpdateTime
-                || before.getLongVersionCode() != after.getLongVersionCode()
-                || after.applicationInfo == null
-                || !application.sourceDir.equals(after.applicationInfo.sourceDir)) {
-            throw new IOException("Installed navigator changed during copy");
-        }
-        String installedSigner = NavigatorSigningKey.installedCertificateSha256(
-                context, profile.packageName);
-        String copiedSigner = NavigatorSigningKey.archiveCertificateSha256(
-                verifySignature(target).getSignerCertificates());
-        if (!installedSigner.equals(copiedSigner)) {
-            throw new IOException("Copied APK signer differs from installed package");
-        }
     }
 
     private static void copyUri(Context context, Uri uri, File target) throws IOException {
@@ -572,101 +649,6 @@ final class NavigatorPatchPipeline {
             throw error;
         }
         if (target.length() <= 0L) throw new IOException("Selected APK is empty");
-    }
-
-    private static PackageInfo archiveInfo(Context context, File apk) throws IOException {
-        PackageInfo info = context.getPackageManager().getPackageArchiveInfo(
-                apk.getAbsolutePath(), PackageManager.GET_SIGNING_CERTIFICATES);
-        if (info == null) throw new IOException("AndroidManifest could not be parsed");
-        return info;
-    }
-
-    private static void rejectSplitArchive(File apk, PackageInfo info) throws IOException {
-        if (info.splitNames != null && info.splitNames.length > 0) {
-            throw new IOException("Split APK is unsupported in this patcher version");
-        }
-        byte[] manifest;
-        try (ZipFile zip = new ZipFile(apk)) {
-            manifest = readEntry(zip, "AndroidManifest.xml", 8L * 1024L * 1024L);
-        }
-        try {
-            AndroidBinXmlParser parser = new AndroidBinXmlParser(
-                    ByteBuffer.wrap(manifest).order(ByteOrder.LITTLE_ENDIAN));
-            int event = parser.getEventType();
-            while (event != AndroidBinXmlParser.EVENT_END_DOCUMENT) {
-                if (event == AndroidBinXmlParser.EVENT_START_ELEMENT) {
-                    if ("uses-split".equals(parser.getName())) {
-                        throw new IOException("APK requires an unsupported split");
-                    }
-                    if ("manifest".equals(parser.getName())) {
-                        for (int index = 0; index < parser.getAttributeCount(); index++) {
-                            String name = parser.getAttributeName(index);
-                            int type = parser.getAttributeValueType(index);
-                            if (("split".equals(name) || "configForSplit".equals(name))
-                                    && type == AndroidBinXmlParser.VALUE_TYPE_STRING
-                                    && !parser.getAttributeStringValue(index).isEmpty()) {
-                                throw new IOException(
-                                        "Split APK is unsupported in this patcher version");
-                            }
-                            if ("isSplitRequired".equals(name)
-                                    && type == AndroidBinXmlParser.VALUE_TYPE_BOOLEAN
-                                    && parser.getAttributeBooleanValue(index)) {
-                                throw new IOException("APK declares required splits");
-                            }
-                        }
-                    }
-                }
-                event = parser.next();
-            }
-        } catch (AndroidBinXmlParser.XmlParserException error) {
-            throw new IOException("Binary AndroidManifest could not be parsed", error);
-        }
-    }
-
-    private static void validateArchiveLimits(File apk) throws IOException {
-        rejectOversizedSource(apk.length());
-        int dexCount = 0;
-        long totalDexBytes = 0L;
-        try (ZipFile zip = new ZipFile(apk)) {
-            java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
-            while (entries.hasMoreElements()) {
-                ZipEntry entry = entries.nextElement();
-                if (!entry.getName().matches("classes(\\d*)\\.dex")) continue;
-                dexCount++;
-                if (dexCount > MAX_DEX_ENTRIES) {
-                    throw new IOException("APK contains too many DEX files");
-                }
-                long expanded = drainEntry(zip, entry, MAX_DEX_BYTES);
-                totalDexBytes += expanded;
-                if (totalDexBytes > MAX_TOTAL_DEX_BYTES) {
-                    throw new IOException("APK DEX payload exceeds 256 MiB limit");
-                }
-            }
-        }
-        if (dexCount == 0) throw new IOException("APK contains no DEX files");
-    }
-
-    private static long drainEntry(ZipFile zip, ZipEntry entry, long limit) throws IOException {
-        long total = 0L;
-        try (InputStream input = zip.getInputStream(entry)) {
-            byte[] buffer = new byte[128 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) {
-                total += read;
-                if (total > limit) {
-                    throw new IOException("APK entry exceeds limit: " + entry.getName());
-                }
-            }
-        }
-        return total;
-    }
-
-    private static void rejectContainerName(String displayName) throws IOException {
-        String lower = displayName == null ? "" : displayName.toLowerCase(Locale.ROOT);
-        if (lower.endsWith(".apks") || lower.endsWith(".apkm")
-                || lower.endsWith(".xapk")) {
-            throw new IOException("Select one monolithic .apk file, not a split container");
-        }
     }
 
     private static void rejectOversizedSource(long length) throws IOException {
@@ -735,10 +717,6 @@ final class NavigatorPatchPipeline {
         }
     }
 
-    private static void stripSignatures(File input, File output) throws IOException {
-        repack(input, output, Collections.emptyMap(), Collections.emptyMap());
-    }
-
     private static byte[] readEntry(File apk, String name) throws IOException {
         try (ZipFile zip = new ZipFile(apk)) {
             return readEntry(zip, name);
@@ -784,15 +762,18 @@ final class NavigatorPatchPipeline {
         }
     }
 
+    private static void ensureWorkingSpace(Context context, NavigatorApkSet.SetInfo set)
+            throws IOException {
+        long total = 0L;
+        for (NavigatorApkSet.Member member : set.members) total += member.file.length();
+        ensureWorkingSpace(context, total);
+    }
+
     private static File temporary(Context context, String prefix, String suffix)
             throws IOException {
         File root = new File(context.getCacheDir(), "navigator-patcher");
         if (!root.exists() && !root.mkdirs()) throw new IOException("Cannot create patch cache");
         return File.createTempFile(prefix, suffix, root);
-    }
-
-    private static boolean isInstalled(Context context, String packageName) {
-        return installedInfo(context, packageName) != null;
     }
 
     private static PackageInfo installedInfo(Context context, String packageName) {
@@ -806,7 +787,7 @@ final class NavigatorPatchPipeline {
 
     private static void assertInstalledTarget(Context context,
             NavigatorPatchStore.Profile profile, long updateTime,
-            long versionCode, String signer) throws Exception {
+            long versionCode, String signer, String fingerprint) throws Exception {
         PackageInfo current = installedInfo(context, profile.packageName);
         if (updateTime < 0L) {
             if (current != null) throw new IOException("Navigator was installed during patching");
@@ -819,20 +800,10 @@ final class NavigatorPatchPipeline {
                 context, profile.packageName))) {
             throw new IOException("Installed navigator changed during patching");
         }
-    }
-
-    static String sha256(File file) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        try (FileInputStream input = new FileInputStream(file)) {
-            byte[] buffer = new byte[128 * 1024];
-            int read;
-            while ((read = input.read(buffer)) >= 0) digest.update(buffer, 0, read);
+        if (!fingerprint.equals(
+                NavigatorApkSet.inspectInstalled(context, profile).fingerprint)) {
+            throw new IOException("Installed APK-set changed during patching");
         }
-        StringBuilder value = new StringBuilder();
-        for (byte part : digest.digest()) {
-            value.append(String.format(Locale.ROOT, "%02X", part));
-        }
-        return value.toString();
     }
 
     private static void saveFailure(Context context, NavigatorPatchStore.Profile profile,
@@ -867,6 +838,7 @@ final class NavigatorPatchPipeline {
     }
 
     private static final class WazeApkInspection {
+        String fileName = "";
         final List<String> dexEntries = new ArrayList<>();
         final List<String> lifecycleDexEntries = new ArrayList<>();
         int allowlistTargetCount;
@@ -875,26 +847,47 @@ final class NavigatorPatchPipeline {
         String reason = "Waze allowlist target missing";
         int applicationTargetCount;
         int applicationHookCount;
+        int legacyApplicationHookCount;
         String applicationGuard = "not found";
         int routeTargetCount;
         int routeHookCount;
+        int legacyRouteHookCount;
         String routeGuard = "not found";
         int bridgeClassCount;
+        int legacyBridgeClassCount;
 
         boolean lifecycleStock() {
             return applicationTargetCount == 1 && applicationHookCount == 0
+                    && legacyApplicationHookCount == 0
                     && "ok".equals(applicationGuard)
                     && routeTargetCount == 1 && routeHookCount == 0
+                    && legacyRouteHookCount == 0
                     && "ok".equals(routeGuard)
-                    && bridgeClassCount == 0;
+                    && bridgeClassCount == 0 && legacyBridgeClassCount == 0;
+        }
+
+        boolean lifecycleV2Patched() {
+            return applicationTargetCount == 1 && applicationHookCount == 1
+                    && legacyApplicationHookCount == 0
+                    && "ok".equals(applicationGuard)
+                    && routeTargetCount == 1 && routeHookCount == 1
+                    && legacyRouteHookCount == 0
+                    && "ok".equals(routeGuard)
+                    && bridgeClassCount == 1 && legacyBridgeClassCount == 0;
+        }
+
+        boolean lifecycleLegacyPatched() {
+            return applicationTargetCount == 1 && applicationHookCount == 0
+                    && legacyApplicationHookCount == 1
+                    && "ok".equals(applicationGuard)
+                    && routeTargetCount == 1 && routeHookCount == 0
+                    && legacyRouteHookCount == 1
+                    && "ok".equals(routeGuard)
+                    && bridgeClassCount == 0 && legacyBridgeClassCount == 1;
         }
 
         boolean lifecyclePatched() {
-            return applicationTargetCount == 1 && applicationHookCount == 1
-                    && "ok".equals(applicationGuard)
-                    && routeTargetCount == 1 && routeHookCount == 1
-                    && "ok".equals(routeGuard)
-                    && bridgeClassCount == 1;
+            return lifecycleV2Patched() || lifecycleLegacyPatched();
         }
     }
 }

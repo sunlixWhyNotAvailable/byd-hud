@@ -10,6 +10,7 @@ import org.jf.dexlib2.iface.DexFile;
 import org.jf.dexlib2.iface.Method;
 import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.instruction.Instruction;
+import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.OffsetInstruction;
 import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
@@ -47,10 +48,16 @@ final class WazePatchEngine {
     private static final String ROUTE_ENUM = "Lcom/waze/navigate/ee;";
     private static final String ROUTE_FLOW = "Lkotlinx/coroutines/b/bn;";
     private static final String BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridgeV2;";
+    private static final String LEGACY_BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridge;";
     private static final ImmutableMethodReference BRIDGE_INIT = new ImmutableMethodReference(
             BRIDGE_CLASS, "init", Collections.singletonList("Landroid/content/Context;"), "V");
     private static final ImmutableMethodReference BRIDGE_EMIT = new ImmutableMethodReference(
             BRIDGE_CLASS, "emit", Collections.singletonList("Z"), "V");
+    private static final ImmutableMethodReference LEGACY_BRIDGE_INIT = new ImmutableMethodReference(
+            LEGACY_BRIDGE_CLASS, "init",
+            Collections.singletonList("Landroid/content/Context;"), "V");
+    private static final ImmutableMethodReference LEGACY_BRIDGE_EMIT = new ImmutableMethodReference(
+            LEGACY_BRIDGE_CLASS, "emit", Collections.singletonList("Z"), "V");
     static final String PATCHABLE_STOCK = "PATCHABLE_STOCK";
     static final String ALREADY_PATCHED = "ALREADY_PATCHED";
     static final String UNSUPPORTED = "UNSUPPORTED";
@@ -109,16 +116,19 @@ final class WazePatchEngine {
         LifecycleInspection result = new LifecycleInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (BRIDGE_CLASS.equals(classDef.getType())) result.bridgeClassCount++;
+            if (LEGACY_BRIDGE_CLASS.equals(classDef.getType())) result.legacyBridgeClassCount++;
             for (Method method : classDef.getMethods()) {
                 if (matchesApplication(method)) {
                     result.applicationTargetCount++;
                     result.applicationHookCount += countCall(method, BRIDGE_INIT);
+                    result.legacyApplicationHookCount += countCall(method, LEGACY_BRIDGE_INIT);
                     result.applicationGuard = method.getImplementation() == null
                             ? "missing implementation" : "ok";
                 }
                 if (matchesRoute(method)) {
                     result.routeTargetCount++;
                     result.routeHookCount += countCall(method, BRIDGE_EMIT);
+                    result.legacyRouteHookCount += countCall(method, LEGACY_BRIDGE_EMIT);
                     result.routeGuard = inspectRouteGuard(method);
                 }
             }
@@ -217,10 +227,44 @@ final class WazePatchEngine {
             if (isField(instruction, ROUTE_ENUM, "a")) inactiveEnumCount++;
         }
         int anchor = routeAnchorIndex(method, true);
-        return anchor >= 0 && activeEnumCount == 1 && inactiveEnumCount == 1
+        int legacyAnchor = legacyRouteAnchorIndex(method);
+        return (anchor >= 0 || legacyAnchor >= 0)
+                && activeEnumCount == 1 && inactiveEnumCount == 1
                 ? "ok"
                 : "route guard mismatch anchor=" + (anchor >= 0 ? 1 : 0)
+                + ", legacyAnchor=" + (legacyAnchor >= 0 ? 1 : 0)
                 + ", active=" + activeEnumCount + ", inactive=" + inactiveEnumCount;
+    }
+
+    private static int legacyRouteAnchorIndex(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null || implementation.getRegisterCount() < 3) return -1;
+        int transitionRegister = implementation.getRegisterCount() - 1;
+        int stateRegister = implementation.getRegisterCount() - 2;
+        List<? extends Instruction> instructions = toList(implementation);
+        int match = -1;
+        for (int index = 3; index < instructions.size(); index++) {
+            Instruction call = instructions.get(index);
+            if (!isCall(call, LEGACY_BRIDGE_EMIT)
+                    || !(call instanceof FiveRegisterInstruction)
+                    || ((FiveRegisterInstruction) call).getRegisterC() != stateRegister) {
+                continue;
+            }
+            Instruction branch = instructions.get(index - 1);
+            Instruction result = instructions.get(index - 2);
+            if (branch.getOpcode() != Opcode.IF_EQZ
+                    || !(branch instanceof OneRegisterInstruction)
+                    || ((OneRegisterInstruction) branch).getRegisterA() != transitionRegister
+                    || result.getOpcode() != Opcode.MOVE_RESULT
+                    || !(result instanceof OneRegisterInstruction)
+                    || ((OneRegisterInstruction) result).getRegisterA() != transitionRegister
+                    || !isRouteFlowUpdate(instructions.get(index - 3))) {
+                continue;
+            }
+            if (match >= 0) return -1;
+            match = index;
+        }
+        return match;
     }
 
     private static int routeAnchorIndex(Method method, boolean allowBridge) {
@@ -245,7 +289,8 @@ final class WazePatchEngine {
             }
             int next = index + 1;
             if (allowBridge && next < instructions.size()
-                    && isCall(instructions.get(next), BRIDGE_EMIT)) next++;
+                    && (isCall(instructions.get(next), BRIDGE_EMIT)
+                    || isCall(instructions.get(next), LEGACY_BRIDGE_EMIT))) next++;
             if (next >= instructions.size() || !isRouteStateField(instructions.get(next))) {
                 continue;
             }
@@ -330,7 +375,6 @@ final class WazePatchEngine {
         int addAllowedHostsCount = 0;
         int buildCount = 0;
         int returnAfterAllowAll = 0;
-        boolean allowAllReturnsDirectly = false;
         int controlFlowBeforeAllowAll = 0;
         int controlFlowTotal = 0;
         int terminalBeforeAllowAll = 0;
@@ -370,15 +414,6 @@ final class WazePatchEngine {
             return new WazeInspection(1, UNSUPPORTED,
                     "ALLOW_ALL_HOSTS_VALIDATOR count=" + allowAllCount);
         }
-        if (allowAllIndex + 1 < instructions.size()) {
-            Instruction load = instructions.get(allowAllIndex);
-            Instruction returned = instructions.get(allowAllIndex + 1);
-            allowAllReturnsDirectly = load instanceof OneRegisterInstruction
-                    && returned.getOpcode() == Opcode.RETURN_OBJECT
-                    && returned instanceof OneRegisterInstruction
-                    && ((OneRegisterInstruction) load).getRegisterA()
-                    == ((OneRegisterInstruction) returned).getRegisterA();
-        }
         for (int index = 0; index < instructions.size(); index++) {
             Opcode opcode = instructions.get(index).getOpcode();
             if (index < allowAllIndex && isControlFlow(opcode)) controlFlowBeforeAllowAll++;
@@ -388,7 +423,7 @@ final class WazePatchEngine {
                 break;
             }
         }
-        if (allowAllReturnsDirectly && returnAfterAllowAll == 1
+        if (returnAfterAllowAll == 1
                 && controlFlowTotal == 0 && terminalBeforeAllowAll == 0) {
             return new WazeInspection(1, ALREADY_PATCHED,
                     "ALLOW_ALL_HOSTS_VALIDATOR is reached unconditionally");
@@ -403,7 +438,6 @@ final class WazePatchEngine {
                 && controlFlowTotal == 1
                 && controlFlowBeforeAllowAll == 1
                 && terminalBeforeAllowAll == 0
-                && allowAllReturnsDirectly
                 && returnAfterAllowAll == 1;
         if (!exactMarkers || guardedBranchIndex <= 0 || builderIndex < 0
                 || guardedBranchIndex + 1 != allowAllIndex
@@ -520,11 +554,14 @@ final class WazePatchEngine {
     static final class LifecycleInspection {
         int applicationTargetCount;
         int applicationHookCount;
+        int legacyApplicationHookCount;
         String applicationGuard = "not found";
         int routeTargetCount;
         int routeHookCount;
+        int legacyRouteHookCount;
         String routeGuard = "not found";
         int bridgeClassCount;
+        int legacyBridgeClassCount;
 
         boolean stockTargets() {
             return applicationTargetCount == 1 && applicationHookCount == 0

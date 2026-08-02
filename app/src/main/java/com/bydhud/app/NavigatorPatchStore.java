@@ -7,8 +7,6 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 
-import org.json.JSONObject;
-
 import java.io.File;
 import java.io.IOException;
 import java.util.UUID;
@@ -35,11 +33,16 @@ final class NavigatorPatchStore {
     static final String INSTALL_REQUESTED = "INSTALL_REQUESTED";
     static final String VERIFIED = "VERIFIED";
     static final String RECOVERY_REQUIRED = "RECOVERY_REQUIRED";
+    static final String OP_SELECT = "SELECT";
+    static final String OP_CHECK = "CHECK";
+    static final String OP_PATCH = "PATCH";
+    static final String OP_RECOVERY = "RECOVERY";
 
     private static final String PREFS = "navigator_patcher";
     private static final String KEY_OPERATION_PROFILE = "operation_profile";
     private static final String KEY_OPERATION_PHASE = "operation_phase";
     private static final String KEY_OPERATION_DETAIL = "operation_detail";
+    private static final String KEY_OPERATION_KIND = "operation_kind";
     private static final String KEY_TRANSACTION_DIR = "transaction_dir";
     private static final String KEY_DESTRUCTIVE = "destructive";
     private static final String KEY_STATE_AT = "state_at";
@@ -53,27 +56,26 @@ final class NavigatorPatchStore {
     private static final String KEY_INITIAL_UPDATE_TIME = "initial_update_time";
     private static final String KEY_INITIAL_VERSION_CODE = "initial_version_code";
     private static final String KEY_INITIAL_SIGNER = "initial_signer";
+    private static final String KEY_INITIAL_FINGERPRINT = "initial_fingerprint";
     private static final String KEY_EXPECTED_CALLBACK = "expected_callback";
     private static final String KEY_CALLBACK_CONSUMED = "callback_consumed";
 
     enum Profile {
-        WAZE("waze", "com.waze", "Waze", "Stable session", 2),
+        WAZE("waze", "com.waze", "Waze", "Stable session"),
         GMAPS("gmaps", "app.revanced.android.apps.maps", "Google Maps (ReVanced)",
-                "Audio channel", 1);
+                "Audio channel");
 
         final String id;
         final String packageName;
         final String fallbackLabel;
         final String optionalLabel;
-        final int revision;
 
         Profile(String id, String packageName, String fallbackLabel,
-                String optionalLabel, int revision) {
+                String optionalLabel) {
             this.id = id;
             this.packageName = packageName;
             this.fallbackLabel = fallbackLabel;
             this.optionalLabel = optionalLabel;
-            this.revision = revision;
         }
 
         static Profile fromId(String id) {
@@ -81,12 +83,6 @@ final class NavigatorPatchStore {
             return null;
         }
 
-        static Profile fromPackage(String packageName) {
-            for (Profile profile : values()) {
-                if (profile.packageName.equals(packageName)) return profile;
-            }
-            return null;
-        }
     }
 
     static final class ProfileSnapshot {
@@ -127,12 +123,15 @@ final class NavigatorPatchStore {
 
     static final class OperationSnapshot {
         final Profile profile;
+        final String kind;
         final String phase;
         final String detail;
         final boolean destructive;
 
-        OperationSnapshot(Profile profile, String phase, String detail, boolean destructive) {
+        OperationSnapshot(Profile profile, String kind, String phase,
+                String detail, boolean destructive) {
             this.profile = profile;
+            this.kind = kind;
             this.phase = phase;
             this.detail = detail;
             this.destructive = destructive;
@@ -156,11 +155,24 @@ final class NavigatorPatchStore {
         return prefs(context).getString(profile.id + "_selected_uri", "");
     }
 
+    static String selectedName(Context context, Profile profile) {
+        return prefs(context).getString(profile.id + "_selected_name", "");
+    }
+
     static void selectExternal(Context context, Profile profile, String uri, String name) {
+        selectExternal(context, profile, uri, name, "", -1L, "", "");
+    }
+
+    static void selectExternal(Context context, Profile profile, String uri, String name,
+            String versionName, long versionCode, String fingerprint, String signer) {
         String previous = selectedUri(context, profile);
         prefs(context).edit()
                 .putString(profile.id + "_selected_uri", uri == null ? "" : uri)
                 .putString(profile.id + "_selected_name", name == null ? "" : name)
+                .putString(profile.id + "_selected_version", versionName == null ? "" : versionName)
+                .putLong(profile.id + "_selected_version_code", versionCode)
+                .putString(profile.id + "_selected_fingerprint", fingerprint == null ? "" : fingerprint)
+                .putString(profile.id + "_selected_signer", signer == null ? "" : signer)
                 .remove(profile.id + "_scan_sha")
                 .remove(profile.id + "_scan_version")
                 .remove(profile.id + "_scan_version_code")
@@ -185,7 +197,6 @@ final class NavigatorPatchStore {
 
     static void saveScan(Context context, NavigatorPatchPipeline.ScanResult result) {
         Profile profile = result.profile;
-        JSONObject cache = result.toJson();
         String sourceUri = selectedUri(context, profile);
         PackageInfo installed = installedInfo(context, profile.packageName);
         prefs(context).edit()
@@ -198,27 +209,17 @@ final class NavigatorPatchStore {
                 .putString(profile.id + "_scan_source_uri", sourceUri == null ? "" : sourceUri)
                 .putLong(profile.id + "_scan_installed_update",
                         installed == null ? -1L : installed.lastUpdateTime)
-                .putString(cacheKey(profile, result.sha256), cache.toString())
                 .commit();
     }
 
-    static NavigatorPatchPipeline.ScanResult cached(
-            Context context, Profile profile, String sha256) {
-        String value = prefs(context).getString(cacheKey(profile, sha256), "");
-        if (value == null || value.isEmpty()) return null;
-        try {
-            return NavigatorPatchPipeline.ScanResult.fromJson(new JSONObject(value));
-        } catch (Exception ignored) {
-            return null;
-        }
-    }
-
-    static synchronized void claim(Context context, Profile profile, String phase, String detail)
+    static synchronized void claim(Context context, Profile profile, String kind,
+            String phase, String detail)
             throws IOException {
         OperationSnapshot current = operation(context);
         if (current.busy() || RECOVERY_REQUIRED.equals(current.phase)) {
             throw new IOException("Another patch or recovery transaction is active");
         }
+        prefs(context).edit().putString(KEY_OPERATION_KIND, kind).commit();
         transition(context, profile, phase, detail);
     }
 
@@ -228,6 +229,7 @@ final class NavigatorPatchStore {
         if (!RECOVERY_REQUIRED.equals(current.phase) || current.profile != profile) {
             throw new IOException("No matching recovery transaction is available");
         }
+        prefs(context).edit().putString(KEY_OPERATION_KIND, OP_RECOVERY).commit();
         transition(context, profile, phase, detail);
     }
 
@@ -239,8 +241,10 @@ final class NavigatorPatchStore {
                 .putString(KEY_OPERATION_DETAIL, detail == null ? "" : detail)
                 .putLong(KEY_STATE_AT, System.currentTimeMillis())
                 .commit();
-        AppEventLogger.event(context, "navigator_patch phase=" + phase
+        String operation = prefs(context).getString(KEY_OPERATION_KIND, "");
+        AppEventLogger.event(context, "navigator_patch operation=" + operation
                 + " profile=" + (profile == null ? "" : profile.id)
+                + " stage=" + phase + " code=" + eventCode(operation, phase, detail)
                 + " detail=" + clean(detail));
     }
 
@@ -257,6 +261,7 @@ final class NavigatorPatchStore {
         SharedPreferences preferences = prefs(context);
         return new OperationSnapshot(
                 Profile.fromId(preferences.getString(KEY_OPERATION_PROFILE, "")),
+                preferences.getString(KEY_OPERATION_KIND, ""),
                 preferences.getString(KEY_OPERATION_PHASE, IDLE),
                 preferences.getString(KEY_OPERATION_DETAIL, ""),
                 preferences.getBoolean(KEY_DESTRUCTIVE, false));
@@ -264,7 +269,8 @@ final class NavigatorPatchStore {
 
     static synchronized void setTransaction(Context context, Profile profile, File directory,
             boolean destructive, NavigatorPatchPipeline.ScanResult expected,
-            long initialUpdateTime, long initialVersionCode, String initialSigner) {
+            long initialUpdateTime, long initialVersionCode, String initialSigner,
+            String initialFingerprint) {
         prefs(context).edit()
                 .putString(KEY_OPERATION_PROFILE, profile.id)
                 .putString(KEY_TRANSACTION_DIR, directory.getName())
@@ -279,6 +285,8 @@ final class NavigatorPatchStore {
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
+                .putString(KEY_INITIAL_FINGERPRINT,
+                        initialFingerprint == null ? "" : initialFingerprint)
                 .putString(KEY_EXPECTED_CALLBACK, "")
                 .putBoolean(KEY_CALLBACK_CONSUMED, false)
                 .commit();
@@ -286,7 +294,9 @@ final class NavigatorPatchStore {
 
     static synchronized void beginRestoreTransaction(
             Context context, Profile profile,
-            NavigatorPatchPipeline.ScanResult expected) {
+            NavigatorPatchPipeline.ScanResult expected,
+            long initialUpdateTime, long initialVersionCode,
+            String initialSigner, String initialFingerprint) {
         prefs(context).edit()
                 .putString(KEY_OPERATION_PROFILE, profile.id)
                 .putString(KEY_TRANSACTION_TOKEN, "restore-" + UUID.randomUUID())
@@ -297,9 +307,11 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_SIGNER, expected.signerSha256)
                 .putString(KEY_EXPECTED_DIRECT, "")
                 .putString(KEY_EXPECTED_OPTIONAL, "")
-                .putLong(KEY_INITIAL_UPDATE_TIME, -1L)
-                .putLong(KEY_INITIAL_VERSION_CODE, -1L)
-                .putString(KEY_INITIAL_SIGNER, "")
+                .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
+                .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
+                .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
+                .putString(KEY_INITIAL_FINGERPRINT,
+                        initialFingerprint == null ? "" : initialFingerprint)
                 .putString(KEY_EXPECTED_CALLBACK, "")
                 .putBoolean(KEY_CALLBACK_CONSUMED, false)
                 .commit();
@@ -349,6 +361,10 @@ final class NavigatorPatchStore {
         return prefs(context).getString(KEY_INITIAL_SIGNER, "");
     }
 
+    static String initialFingerprint(Context context) {
+        return prefs(context).getString(KEY_INITIAL_FINGERPRINT, "");
+    }
+
     static long stateAt(Context context) {
         return prefs(context).getLong(KEY_STATE_AT, 0L);
     }
@@ -390,12 +406,8 @@ final class NavigatorPatchStore {
                 name == null || name.isEmpty() ? "unset" : name);
     }
 
-    static File originalApk(Context context) {
-        return new File(transactionDirectory(context), "source.apk");
-    }
-
-    static File patchedApk(Context context) {
-        return new File(transactionDirectory(context), "patched.apk");
+    static File originalSet(Context context) {
+        return new File(transactionDirectory(context), "source-set");
     }
 
     static synchronized void clearTransactionMetadata(Context context) {
@@ -412,8 +424,10 @@ final class NavigatorPatchStore {
                 .remove(KEY_INITIAL_UPDATE_TIME)
                 .remove(KEY_INITIAL_VERSION_CODE)
                 .remove(KEY_INITIAL_SIGNER)
+                .remove(KEY_INITIAL_FINGERPRINT)
                 .remove(KEY_EXPECTED_CALLBACK)
                 .remove(KEY_CALLBACK_CONSUMED)
+                .remove(KEY_OPERATION_KIND)
                 .commit();
     }
 
@@ -467,6 +481,10 @@ final class NavigatorPatchStore {
                 : isInstalled ? label : "";
         String sourceVersion = preferences.getString(profile.id + "_scan_version", "");
         long sourceCode = preferences.getLong(profile.id + "_scan_version_code", -1L);
+        if (external && sourceVersion.isEmpty()) {
+            sourceVersion = preferences.getString(profile.id + "_selected_version", "");
+            sourceCode = preferences.getLong(profile.id + "_selected_version_code", -1L);
+        }
         String direct = preferences.getString(profile.id + "_scan_direct", NOT_CHECKED);
         String optional = preferences.getString(profile.id + "_scan_optional", NOT_CHECKED);
         String reason = preferences.getString(profile.id + "_scan_reason", "");
@@ -506,11 +524,46 @@ final class NavigatorPatchStore {
         }
     }
 
-    private static String cacheKey(Profile profile, String sha256) {
-        return "cache_" + profile.id + "_" + profile.revision + "_" + sha256;
+    private static String clean(String value) {
+        if (value == null) return "";
+        String result = value.replace('\n', ' ').replace('\r', ' ');
+        return result.length() > 320 ? result.substring(0, 320) : result;
     }
 
-    private static String clean(String value) {
-        return value == null ? "" : value.replace('\n', ' ').replace('\r', ' ');
+    private static String eventCode(String operation, String phase, String detail) {
+        String value = clean(detail).toLowerCase(java.util.Locale.ROOT);
+        if (RECOVERY_REQUIRED.equals(phase)) return "RECOVERY_REQUIRED";
+        if (value.contains("unsupported format")) return "UNSUPPORTED_SOURCE_FORMAT";
+        if (value.contains("package") && (value.contains("mismatch")
+                || value.contains("expected="))) return "PACKAGE_MISMATCH";
+        if (value.contains("older") || value.contains("downgrade")) return "VERSION_DOWNGRADE";
+        if (value.contains("signer") || value.contains("signature")) return "SIGNATURE_INVALID";
+        if (value.contains("insufficient storage")) return "INSUFFICIENT_STORAGE";
+        if (value.contains("too many") || value.contains("exceeds")
+                || value.contains("too large") || value.contains("unsafe path")) {
+            return "ARCHIVE_LIMIT_EXCEEDED";
+        }
+        if (value.contains("feature") || value.contains("unknown split")
+                || value.contains("unknown configuration")) {
+            return "UNSUPPORTED_SPLIT_TOPOLOGY";
+        }
+        if (value.contains("ambiguous") || value.contains("multiple base")
+                || value.contains("duplicate split")) return "APK_SET_AMBIGUOUS";
+        if (value.contains("manifest") || value.contains("no apk")
+                || value.contains("empty")) return "ARCHIVE_INVALID";
+        if (value.contains("mandatory") || value.contains("direct channel")) {
+            return "MANDATORY_INCOMPATIBLE";
+        }
+        if (value.contains("audio channel") || value.contains("stable session")
+                || value.contains("optional")) return "OPTIONAL_INCOMPATIBLE";
+        if (OUTPUT_VERIFY.equals(phase)) return "OUTPUT_VERIFY_FAILED";
+        if (FAILED.equals(phase)) {
+            if (OP_SELECT.equals(operation)) return "SOURCE_SELECTION_FAILED";
+            if (OP_CHECK.equals(operation)) return "CHECK_FAILED";
+            if (OP_PATCH.equals(operation)) return "PATCH_FAILED";
+            if (OP_RECOVERY.equals(operation)) return "RECOVERY_FAILED";
+            return "OPERATION_FAILED";
+        }
+        return "STATE";
     }
 }
