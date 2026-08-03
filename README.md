@@ -37,7 +37,7 @@ After first launch:
 4. Optionally change prefered navigation settings.
 5. Choose supported navigation app from the list of supported apps and toogle `HUD`.
 6. Patched `Waze` uses the direct channel without a casting prompt. For stock or incompatible `Waze`, press `Start now` when the crop fallback requests `Casting with BYD HUD`.
-7. Optionally use `Send to dashboard`.
+7. Optionally use `Send to dashboard`. Resize idea was inspired by [BYD Mate](https://github.com/AndyShaman/BYDMate) project.
 8. If you plan in helping debugging maneuvers/lanes parser - turn on `Save diagnostic screenshots and extended logs` to start saving screenshots for analysis (be aware - it can clog internal storage).
 9. Optionally take part in beta-testing (warning: broken builds are to be expected).
 
