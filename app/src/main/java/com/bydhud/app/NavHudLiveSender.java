@@ -3,6 +3,8 @@ package com.bydhud.app;
 //converts parser snapshots into HUD commands so live route evidence reaches the cluster consistently.
 
 import android.content.Context;
+import android.content.pm.PackageInfo;
+import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
@@ -98,6 +100,8 @@ final class NavHudLiveSender {
     private final Object wazeDirectFrameLock = new Object();
     private DirectTbtFrame pendingWazeDirectFrame;
     private String pendingWazeDirectFrameReason = "";
+    private String pendingWazeDirectFrameOwner = "";
+    private int pendingWazeDirectFrameSessionGeneration;
     private int pendingWazeDirectFrameGeneration;
     private int wazeDirectFrameGeneration;
     private int coalescedWazeDirectFrames;
@@ -140,6 +144,7 @@ final class NavHudLiveSender {
     private boolean wazeDirectFrameReceived;
     private boolean wazeDirectRouteEnded;
     private boolean wazeDirectProbeScheduled;
+    private int wazeDirectProbeSessionGeneration;
     private volatile int wazeRouteGeneration;
     private boolean wazeFallbackActive;
     private boolean wazeFallbackReadinessCheckInFlight;
@@ -151,14 +156,19 @@ final class NavHudLiveSender {
     private boolean gmapsLegacyUnavailableLogged;
     private boolean gmapsDirectRouteEnded;
     private boolean gmapsDirectTimeoutScheduled;
+    private long gmapsDirectTimeoutSessionGeneration;
     private long lastGMapsDirectRegistrationProbeMs;
     private boolean gmapsDirectRegistrationSuppressed;
     private volatile DirectSessionLog wazeDirectSession;
     private volatile DirectSessionLog gmapsDirectSession;
+    private Boolean cachedWazeBridgeSupported;
+    private long cachedWazeVersionCode = Long.MIN_VALUE;
+    private long cachedWazeLastUpdateTime = Long.MIN_VALUE;
 
     private final Runnable wazeDirectProbeTimeout = () -> {
         wazeDirectProbeScheduled = false;
         if (!active || !WAZE_PACKAGE.equals(activePackage)
+                || !isCurrentWazeProbeToken()
                 || !isWazeScreenCaptureEnabled()
                 || wazeDirectFrameReceived
                 || wazeFallbackActive
@@ -174,9 +184,15 @@ final class NavHudLiveSender {
     private void onGMapsDirectTimeout() {
         gmapsDirectTimeoutScheduled = false;
         if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
-                || gmapsDirectRouteEnded) {
+                || gmapsDirectRouteEnded
+                || !isCurrentGMapsTimeoutToken()) {
             return;
         }
+        hudOutput.clearDirectFrameForLoss(
+                GMapsDirectChannel.OWNER_PACKAGE,
+                gmapsDirectTimeoutSessionGeneration,
+                "gmaps-direct-timeout",
+                SystemClock.elapsedRealtime());
         gmapsDirectFrameReceived = false;
         gmapsDirectTimedOut = true;
         activateGMapsLegacyFallbackIfReady("direct-frame-timeout");
@@ -400,41 +416,60 @@ final class NavHudLiveSender {
         this.wazeDirectChannel = new WazeDirectChannel(context,
                 new WazeDirectChannel.Listener() {
                     @Override
-                    public void onHandshakeAvailable(String reason) {
-                        handler.post(() -> onWazeDirectHandshakeAvailable(reason));
+                    public void onHandshakeAvailable(String ownerPackage,
+                            int sessionGeneration, String reason) {
+                        handler.post(() -> onWazeDirectHandshakeAvailable(
+                                ownerPackage, sessionGeneration, reason));
                     }
 
                     @Override
-                    public void onHandshakeUnavailable(String reason) {
+                    public void onHandshakeUnavailable(String ownerPackage,
+                            int sessionGeneration, String reason) {
                         invalidatePendingWazeDirectFrames();
-                        handler.post(() -> onWazeDirectHandshakeUnavailable(reason));
+                        handler.post(() -> onWazeDirectHandshakeUnavailable(
+                                ownerPackage, sessionGeneration, reason));
                     }
 
                     @Override
-                    public void onNavigationStarted(String reason) {
+                    public void onNavigationStarted(String ownerPackage,
+                            int sessionGeneration, String reason) {
                         invalidatePendingWazeDirectFrames();
                         handler.post(() -> {
+                            if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
                             ensureWazeDirectSession(
                                     "navigation-started:" + safeReason(reason));
                             eventWazeDirectSession("navigation_started", reason);
-                            onWazeDirectNavigationStarted(reason);
+                            onWazeDirectNavigationStarted(
+                                    ownerPackage, sessionGeneration, reason);
                         });
                     }
 
                     @Override
-                    public void onFrame(DirectTbtFrame frame, String reason) {
-                        enqueueLatestWazeDirectFrame(frame, reason);
+                    public void onFrame(String ownerPackage, int sessionGeneration,
+                            DirectTbtFrame frame, String reason) {
+                        enqueueLatestWazeDirectFrame(
+                                ownerPackage, sessionGeneration, frame, reason);
                     }
 
                     @Override
-                    public void onAlertCleared(DirectTbtFrame frame, String reason) {
+                    public void onAlertCleared(String ownerPackage, int sessionGeneration,
+                            DirectTbtFrame frame, String reason) {
                         invalidatePendingWazeDirectFrames();
-                        hudOutput.clearDirectAlertAndRepublish(
-                                frame, reason, SystemClock.elapsedRealtime());
+                        handler.post(() -> {
+                            if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
+                            hudOutput.clearDirectAlertAndRepublish(
+                                    ownerPackage, sessionGeneration, frame, reason,
+                                    SystemClock.elapsedRealtime());
+                        });
                     }
 
                     @Override
-                    public void onNavigationEnded(String reason) {
+                    public void onNavigationEnded(String ownerPackage,
+                            int sessionGeneration, String reason) {
                         invalidatePendingWazeDirectFrames();
                         long detectedAtMs = SystemClock.elapsedRealtime();
                         String safeEndReason = safeReason(reason);
@@ -443,14 +478,34 @@ final class NavHudLiveSender {
                         }
                         Log.i(TAG, "waze direct navigation ended detected reason="
                                 + safeEndReason + " elapsedMs=" + detectedAtMs);
+                        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
+                            return;
+                        }
                         WazeCaptureDebugWriter.get().appEvent(context,
                                 "nav_live waze_direct navigation_ended_detected reason="
                                         + safeEndReason + " elapsedMs=" + detectedAtMs);
                         hudOutput.endDirectOutput(
+                                ownerPackage, sessionGeneration,
                                 "waze-direct-ended:" + safeEndReason, detectedAtMs);
                         handler.post(() -> {
+                            if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
                             endWazeDirectSession("navigation-ended:" + safeEndReason);
-                            onWazeDirectNavigationEnded(reason, detectedAtMs);
+                            onWazeDirectNavigationEnded(
+                                    ownerPackage, sessionGeneration, reason, detectedAtMs);
+                        });
+                    }
+
+                    @Override
+                    public void onLiveness(String ownerPackage, int sessionGeneration,
+                            String reason) {
+                        handler.post(() -> {
+                            if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
+                            hudOutput.renewDirectLease(
+                                    ownerPackage, sessionGeneration, reason);
                         });
                     }
 
@@ -466,41 +521,68 @@ final class NavHudLiveSender {
         this.gmapsDirectChannel = new GMapsDirectChannel(context,
                 new GMapsDirectChannel.Listener() {
                     @Override
-                    public void onHandshakeAvailable(String reason) {
-                        handler.post(() -> onGMapsDirectHandshakeAvailable(reason));
+                    public void onHandshakeAvailable(String ownerPackage,
+                            long sessionGeneration, String reason) {
+                        handler.post(() -> onGMapsDirectHandshakeAvailable(
+                                ownerPackage, sessionGeneration, reason));
                     }
 
                     @Override
-                    public void onHandshakeUnavailable(String reason) {
-                        handler.post(() -> onGMapsDirectHandshakeUnavailable(reason));
+                    public void onHandshakeUnavailable(String ownerPackage,
+                            long sessionGeneration, String reason) {
+                        handler.post(() -> onGMapsDirectHandshakeUnavailable(
+                                ownerPackage, sessionGeneration, reason));
                     }
 
                     @Override
-                    public void onNavigationStarted(String reason) {
+                    public void onNavigationStarted(String ownerPackage,
+                            long sessionGeneration, String reason) {
                         handler.post(() -> {
+                            if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
                             ensureGMapsDirectSession(
                                     "navigation-started:" + safeReason(reason));
                             eventGMapsDirectSession("navigation_started", reason);
-                            onGMapsDirectNavigationStarted(reason);
+                            onGMapsDirectNavigationStarted(
+                                    ownerPackage, sessionGeneration, reason);
                         });
                     }
 
                     @Override
-                    public void onFrame(DirectTbtFrame frame, String reason,
+                    public void onFrame(String ownerPackage, long sessionGeneration,
+                            DirectTbtFrame frame, String reason,
                             GMapsDirectChannel.BitmapSelection bitmapSelection) {
                         handler.post(() -> onGMapsDirectFrame(
-                                frame, reason, bitmapSelection));
+                                ownerPackage, sessionGeneration, frame, reason, bitmapSelection));
                     }
 
                     @Override
-                    public void onNavigationEnded(String reason) {
+                    public void onNavigationEnded(String ownerPackage,
+                            long sessionGeneration, String reason) {
                         long detectedAtMs = SystemClock.elapsedRealtime();
                         handler.post(() -> {
+                            if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
                             hudOutput.endDirectOutput(
+                                    ownerPackage, sessionGeneration,
                                     "gmaps-direct-ended:" + safeReason(reason), detectedAtMs);
                             endGMapsDirectSession(
                                     "navigation-ended:" + safeReason(reason));
                             onGMapsDirectNavigationEnded(reason, detectedAtMs);
+                        });
+                    }
+
+                    @Override
+                    public void onLiveness(String ownerPackage, long sessionGeneration,
+                            String reason) {
+                        handler.post(() -> {
+                            if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) {
+                                return;
+                            }
+                            hudOutput.renewDirectLease(
+                                    ownerPackage, sessionGeneration, reason);
                         });
                     }
 
@@ -512,7 +594,8 @@ final class NavHudLiveSender {
     }
 
     //coalesces complete direct snapshots so a busy state worker never replays stale guidance.
-    private void enqueueLatestWazeDirectFrame(DirectTbtFrame frame, String reason) {
+    private void enqueueLatestWazeDirectFrame(String ownerPackage,
+            int sessionGeneration, DirectTbtFrame frame, String reason) {
         if (frame == null) {
             return;
         }
@@ -522,6 +605,8 @@ final class NavHudLiveSender {
             }
             pendingWazeDirectFrame = frame;
             pendingWazeDirectFrameReason = safeReason(reason);
+            pendingWazeDirectFrameOwner = normalizeString(ownerPackage);
+            pendingWazeDirectFrameSessionGeneration = sessionGeneration;
             pendingWazeDirectFrameGeneration = wazeDirectFrameGeneration;
             if (!wazeDirectFrameDispatchScheduled) {
                 wazeDirectFrameDispatchScheduled = true;
@@ -538,19 +623,23 @@ final class NavHudLiveSender {
             wazeDirectFrameDispatchScheduled = false;
             DirectTbtFrame frame = pendingWazeDirectFrame;
             String reason = pendingWazeDirectFrameReason;
+            String ownerPackage = pendingWazeDirectFrameOwner;
+            int sessionGeneration = pendingWazeDirectFrameSessionGeneration;
             int generation = pendingWazeDirectFrameGeneration;
             int coalesced = coalescedWazeDirectFrames;
             pendingWazeDirectFrame = null;
             pendingWazeDirectFrameReason = "";
+            pendingWazeDirectFrameOwner = "";
             coalescedWazeDirectFrames = 0;
-            if (frame == null || generation != wazeDirectFrameGeneration) {
+            if (frame == null || generation != wazeDirectFrameGeneration
+                    || !isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
                 return;
             }
             if (coalesced > 0) {
                 WazeCaptureDebugWriter.get().appEvent(context,
                         "nav_live waze_direct frames_coalesced=" + coalesced);
             }
-            onWazeDirectFrame(frame, reason);
+            onWazeDirectFrame(ownerPackage, sessionGeneration, frame, reason);
         }
     }
 
@@ -560,6 +649,7 @@ final class NavHudLiveSender {
             wazeDirectFrameGeneration++;
             pendingWazeDirectFrame = null;
             pendingWazeDirectFrameReason = "";
+            pendingWazeDirectFrameOwner = "";
             coalescedWazeDirectFrames = 0;
             wazeDirectFrameDispatchScheduled = false;
             handler.removeCallbacks(wazeDirectFrameDispatch);
@@ -611,31 +701,34 @@ final class NavHudLiveSender {
         log("waze source=waiting_route_lifecycle reason=" + safeReason(reason));
     }
 
-    private void onWazeDirectHandshakeAvailable(String reason) {
-        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+    private void onWazeDirectHandshakeAvailable(String ownerPackage,
+            int sessionGeneration, String reason) {
+        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
             return;
         }
         wazeDirectHandshakeAvailable = true;
+        hudOutput.renewDirectLease(ownerPackage, sessionGeneration, reason);
         log("waze direct handshake available reason=" + safeReason(reason));
     }
 
-    private void onWazeDirectHandshakeUnavailable(String reason) {
-        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+    private void onWazeDirectHandshakeUnavailable(String ownerPackage,
+            int sessionGeneration, String reason) {
+        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
             return;
         }
         wazeDirectHandshakeAvailable = false;
-        if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
-            if (wazeDirectRouteEnded
-                    || normalizeString(reason).startsWith("suspended:")) {
-                log("waze direct suspended after route end reason=" + safeReason(reason));
-            } else {
-                log("waze direct unavailable; active-route recovery retained reason="
-                        + safeReason(reason));
-            }
+        String normalizedReason = normalizeString(reason);
+        if (wazeDirectRouteEnded
+                || normalizedReason.startsWith("suspended:")
+                || normalizedReason.startsWith("hard-stopped:")) {
+            log("waze direct expected stop reason=" + safeReason(reason));
             return;
         }
-        if (wazeDirectRouteEnded) {
-            log("waze direct unavailable ignored after route end reason="
+        hudOutput.clearDirectFrameForLoss(
+                ownerPackage, sessionGeneration, "waze-direct-unavailable:" + safeReason(reason),
+                SystemClock.elapsedRealtime());
+        if (isWazeBridgeSupportedCached()) {
+            log("waze direct unavailable; active-route recovery retained reason="
                     + safeReason(reason));
             return;
         }
@@ -649,8 +742,9 @@ final class NavHudLiveSender {
         }
     }
 
-    private void onWazeDirectNavigationStarted(String reason) {
-        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+    private void onWazeDirectNavigationStarted(String ownerPackage,
+            int sessionGeneration, String reason) {
+        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
             return;
         }
         if (!wazeDirectNavigating) wazeDirectFrameReceived = false;
@@ -661,15 +755,17 @@ final class NavHudLiveSender {
                 WAZE_PACKAGE, "waze_direct", "navigation_started", now);
         WazeRouteTracker.get(context).onDirectRouteEvidence(
                 "direct-navigation-started", now);
-        if (!WazeRouteLifecycleStore.isBridgeSupported(context)) {
+        hudOutput.renewDirectLease(ownerPackage, sessionGeneration, reason);
+        if (!isWazeBridgeSupportedCached()) {
             scheduleWazeDirectColdTimeout("direct-navigation-started");
         }
         log("waze direct navigation started reason=" + safeReason(reason));
     }
 
-    private void onWazeDirectFrame(DirectTbtFrame frame, String reason) {
-        if (!active || !WAZE_PACKAGE.equals(activePackage) || !wazeDirectNavigating
-                || frame == null) {
+    private void onWazeDirectFrame(String ownerPackage, int sessionGeneration,
+            DirectTbtFrame frame, String reason) {
+        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)
+                || !wazeDirectNavigating || frame == null) {
             log("waze direct frame ignored active=" + active
                     + " navigating=" + wazeDirectNavigating
                     + " reason=" + safeReason(reason));
@@ -688,10 +784,11 @@ final class NavHudLiveSender {
         long receivedWallClockMs = System.currentTimeMillis();
         logWazeDirectFrame(frame, reason, now, receivedWallClockMs,
                 DirectTbtPayload.Options.from(context));
-        hudOutput.publishDirect(frame, reason, now);
+        hudOutput.publishDirect(frame, reason, now, ownerPackage, sessionGeneration);
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.DIRECT,
-                "waze-direct-frame:" + safeReason(reason));
+                "waze-direct-frame:" + safeReason(reason),
+                ownerPackage, sessionGeneration);
         if (wazeFallbackActive) {
             WazeCropCapture.get(context).stop("direct-recovered");
             resetLatestPayload();
@@ -765,14 +862,22 @@ final class NavHudLiveSender {
                 + " reason=" + safeReason(reason));
     }
 
-    private void onGMapsDirectHandshakeAvailable(String reason) {
-        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+    private void onGMapsDirectHandshakeAvailable(String ownerPackage,
+            long sessionGeneration, String reason) {
+        if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        gmapsDirectTimeoutSessionGeneration = sessionGeneration;
+        hudOutput.renewDirectLease(ownerPackage, sessionGeneration, reason);
         log("gmaps direct handshake available reason=" + safeReason(reason));
     }
 
-    private void onGMapsDirectHandshakeUnavailable(String reason) {
-        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+    private void onGMapsDirectHandshakeUnavailable(String ownerPackage,
+            long sessionGeneration, String reason) {
+        if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)
                 || gmapsDirectRouteEnded) return;
+        gmapsDirectTimeoutSessionGeneration = sessionGeneration;
+        hudOutput.clearDirectFrameForLoss(
+                ownerPackage, sessionGeneration, "gmaps-direct-unavailable:" + safeReason(reason),
+                SystemClock.elapsedRealtime());
         gmapsDirectFrameReceived = false;
         if (gmapsDirectTimedOut) {
             activateGMapsLegacyFallbackIfReady("handshake-unavailable");
@@ -782,8 +887,10 @@ final class NavHudLiveSender {
         log("gmaps direct handshake unavailable reason=" + safeReason(reason));
     }
 
-    private void onGMapsDirectNavigationStarted(String reason) {
-        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+    private void onGMapsDirectNavigationStarted(String ownerPackage,
+            long sessionGeneration, String reason) {
+        if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        gmapsDirectTimeoutSessionGeneration = sessionGeneration;
         boolean keepFallbackUntilFrame = shouldKeepGMapsFallbackOnDirectStart(
                 gmapsDirectFallbackActive);
         gmapsDirectRouteEnded = false;
@@ -801,12 +908,14 @@ final class NavHudLiveSender {
         log("gmaps direct navigation started reason=" + safeReason(reason));
     }
 
-    private void onGMapsDirectFrame(DirectTbtFrame frame, String reason,
+    private void onGMapsDirectFrame(String ownerPackage, long sessionGeneration,
+            DirectTbtFrame frame, String reason,
             GMapsDirectChannel.BitmapSelection bitmapSelection) {
-        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+        if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)
                 || gmapsDirectRouteEnded || frame == null) {
             return;
         }
+        gmapsDirectTimeoutSessionGeneration = sessionGeneration;
         long now = SystemClock.elapsedRealtime();
         gmapsDirectFrameReceived = true;
         gmapsDirectFallbackActive = false;
@@ -819,10 +928,12 @@ final class NavHudLiveSender {
                 GMapsDirectChannel.PACKAGE_NAME, "gmaps_direct", safeReason(reason), now);
         logGMapsDirectFrame(frame, reason, now);
         hudOutput.publishDirect(
-                frame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent);
+                frame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent,
+                ownerPackage, sessionGeneration);
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.DIRECT,
-                "gmaps-direct-frame:" + safeReason(reason));
+                "gmaps-direct-frame:" + safeReason(reason),
+                ownerPackage, sessionGeneration);
         scheduleGMapsDirectTimeout();
         log("gmaps source=direct reason=" + safeReason(reason));
     }
@@ -894,12 +1005,16 @@ final class NavHudLiveSender {
             return;
         }
         gmapsDirectTimeoutScheduled = true;
+        gmapsDirectTimeoutSessionGeneration = gmapsDirectChannel.isRunning()
+                ? gmapsDirectChannel.sessionGeneration()
+                : gmapsDirectChannel.sessionGeneration() + 1L;
         handler.postDelayed(gmapsDirectTimeout, GMAPS_DIRECT_TIMEOUT_MS);
     }
 
     private void cancelGMapsDirectTimeout() {
         handler.removeCallbacks(gmapsDirectTimeout);
         gmapsDirectTimeoutScheduled = false;
+        gmapsDirectTimeoutSessionGeneration = 0L;
     }
 
     private void resetGMapsDirectSessionState() {
@@ -1025,11 +1140,12 @@ final class NavHudLiveSender {
         return value.toString();
     }
 
-    private void onWazeDirectNavigationEnded(String reason, long detectedAtMs) {
-        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
+    private void onWazeDirectNavigationEnded(String ownerPackage, int sessionGeneration,
+            String reason, long detectedAtMs) {
+        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
             return;
         }
-        boolean bridgeSupported = WazeRouteLifecycleStore.isBridgeSupported(context);
+        boolean bridgeSupported = isWazeBridgeSupportedCached();
         WazeRouteLifecycleStore.RecordResult terminal = bridgeSupported
                 ? WazeRouteLifecycleStore.recordLocalTerminal(context, detectedAtMs)
                 : null;
@@ -1078,7 +1194,7 @@ final class NavHudLiveSender {
 
     private void onWazeRouteLifecycleEventOnMain(boolean navigating,
             long eventElapsedMs, boolean changed, String reason) {
-        if (!WazeRouteLifecycleStore.isBridgeSupported(context)) return;
+        if (!isWazeBridgeSupportedCached()) return;
         log("waze route lifecycle navigating=" + navigating
                 + " elapsedMs=" + eventElapsedMs
                 + " reason=" + safeReason(reason));
@@ -1093,9 +1209,17 @@ final class NavHudLiveSender {
             }
             if (active && WAZE_PACKAGE.equals(activePackage)) {
                 invalidatePendingWazeDirectFrames();
-                hudOutput.endDirectOutput("waze-route-lifecycle-end", eventElapsedMs);
+                int sessionGeneration = wazeDirectChannel.sessionGeneration();
+                if (!isCurrentWazeDirectCallback(WAZE_PACKAGE, sessionGeneration)) {
+                    return;
+                }
+                hudOutput.endDirectOutput(
+                        WAZE_PACKAGE, sessionGeneration,
+                        "waze-route-lifecycle-end", eventElapsedMs);
                 endWazeDirectSession("route-lifecycle-end");
-                onWazeDirectNavigationEnded("route-lifecycle-end", eventElapsedMs);
+                onWazeDirectNavigationEnded(
+                        WAZE_PACKAGE, sessionGeneration,
+                        "route-lifecycle-end", eventElapsedMs);
             }
             return;
         }
@@ -1119,7 +1243,7 @@ final class NavHudLiveSender {
         if (!active || !WAZE_PACKAGE.equals(activePackage)) {
             return;
         }
-        if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
+        if (isWazeBridgeSupportedCached()) {
             log("waze fallback suppressed for route-lifecycle bridge reason="
                     + safeReason(reason));
             return;
@@ -1192,6 +1316,9 @@ final class NavHudLiveSender {
             return;
         }
         wazeDirectProbeScheduled = true;
+        wazeDirectProbeSessionGeneration = wazeDirectChannel.isActive()
+                ? wazeDirectChannel.sessionGeneration()
+                : wazeDirectChannel.sessionGeneration() + 1;
         handler.postDelayed(wazeDirectProbeTimeout, WAZE_DIRECT_TIMEOUT_MS);
         log("waze direct cold probe armed timeoutMs=" + WAZE_DIRECT_TIMEOUT_MS
                 + " reason=" + safeReason(reason));
@@ -1213,10 +1340,11 @@ final class NavHudLiveSender {
     private void cancelWazeDirectColdTimeout() {
         handler.removeCallbacks(wazeDirectProbeTimeout);
         wazeDirectProbeScheduled = false;
+        wazeDirectProbeSessionGeneration = 0;
     }
 
     private void onWazeLegacyRouteEvidence(String reason) {
-        if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
+        if (isWazeBridgeSupportedCached()) {
             cancelWazeFallbackReadiness();
             wazeFallbackActive = false;
             WazeCropCapture.get(context).stop("route-lifecycle-bridge");
@@ -1589,7 +1717,7 @@ final class NavHudLiveSender {
         }
         if (active && packageName.equals(activePackage)) {
             if (WAZE_PACKAGE.equals(packageName) && !wazeDirectChannel.isActive()) {
-                boolean bridgeSupported = WazeRouteLifecycleStore.isBridgeSupported(context);
+                boolean bridgeSupported = isWazeBridgeSupportedCached();
                 if (shouldStartWazeDirectHost(
                         bridgeSupported, WazeRouteLifecycleStore.isRouteActive(context))) {
                     if (bridgeSupported) {
@@ -1627,7 +1755,7 @@ final class NavHudLiveSender {
         lastDashboardWatchdogMs = 0L;
         log("start package=" + packageName + " reason=" + reason);
         if (WAZE_PACKAGE.equals(packageName)) {
-            boolean bridgeSupported = WazeRouteLifecycleStore.isBridgeSupported(context);
+            boolean bridgeSupported = isWazeBridgeSupportedCached();
             if (shouldStartWazeDirectHost(
                     bridgeSupported, WazeRouteLifecycleStore.isRouteActive(context))) {
                 if (bridgeSupported) startWazeDirectForRoute(reason);
@@ -2187,7 +2315,7 @@ final class NavHudLiveSender {
         if (!active || !WAZE_PACKAGE.equals(activePackage)) {
             return;
         }
-        if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
+        if (isWazeBridgeSupportedCached()) {
             cancelWazeFallbackReadiness();
             wazeFallbackActive = false;
             WazeCropCapture.get(context).stop("route-lifecycle-bridge");
@@ -2235,7 +2363,7 @@ final class NavHudLiveSender {
                                              NavAppDisplayState state, boolean usable) {
         if (expectedGeneration != wazeFallbackReadinessGeneration) return;
         wazeFallbackReadinessCheckInFlight = false;
-        if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
+        if (isWazeBridgeSupportedCached()) {
             wazeFallbackActive = false;
             WazeCropCapture.get(context).stop("route-lifecycle-bridge");
             return;
@@ -2511,6 +2639,56 @@ final class NavHudLiveSender {
         log("package reinit complete restartPackage=" + restartPackage
                 + " reason=" + safeReason(restartReason));
         startOnMain(restartPackage, restartReason);
+    }
+
+    private boolean isCurrentWazeDirectCallback(String ownerPackage,
+            int sessionGeneration) {
+        return active
+                && WAZE_PACKAGE.equals(activePackage)
+                && WAZE_PACKAGE.equals(ownerPackage)
+                && wazeDirectChannel.sessionGeneration() == sessionGeneration;
+    }
+
+    private boolean isCurrentWazeProbeToken() {
+        return wazeDirectChannel.sessionGeneration() == wazeDirectProbeSessionGeneration;
+    }
+
+    private boolean isCurrentGMapsTimeoutToken() {
+        return gmapsDirectChannel.sessionGeneration() == gmapsDirectTimeoutSessionGeneration;
+    }
+
+    private boolean isCurrentGMapsDirectCallback(String ownerPackage,
+            long sessionGeneration) {
+        return active
+                && GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                && GMapsDirectChannel.OWNER_PACKAGE.equals(ownerPackage)
+                && gmapsDirectChannel.sessionGeneration() == sessionGeneration;
+    }
+
+    private boolean isWazeBridgeSupportedCached() {
+        long versionCode = Long.MIN_VALUE;
+        long lastUpdateTime = Long.MIN_VALUE;
+        try {
+            PackageManager packageManager = context.getPackageManager();
+            PackageInfo packageInfo = packageManager.getPackageInfo(WAZE_PACKAGE, 0);
+            versionCode = packageInfo.getLongVersionCode();
+            lastUpdateTime = packageInfo.lastUpdateTime;
+        } catch (Throwable error) {
+            log("waze capability package metadata unavailable error="
+                    + error.getClass().getSimpleName());
+        }
+        if (cachedWazeBridgeSupported != null
+                && cachedWazeVersionCode == versionCode
+                && cachedWazeLastUpdateTime == lastUpdateTime) {
+            return cachedWazeBridgeSupported;
+        }
+        boolean supported = WazeRouteLifecycleStore.isBridgeSupported(context);
+        cachedWazeVersionCode = versionCode;
+        cachedWazeLastUpdateTime = lastUpdateTime;
+        cachedWazeBridgeSupported = supported;
+        log("waze capability refreshed versionCode=" + versionCode
+                + " lastUpdateTime=" + lastUpdateTime + " supported=" + supported);
+        return supported;
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

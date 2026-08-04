@@ -6,6 +6,8 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.util.Collections;
+
 public final class NavAppTaskSelectionTest {
     @Test
     public void visibleTaskWinsRegardlessOfDumpsysOrder() {
@@ -19,6 +21,24 @@ public final class NavAppTaskSelectionTest {
         assertTrue(NavAppTaskScanner.shouldReplaceTaskSelection(true, false, true));
         assertFalse(NavAppTaskScanner.shouldReplaceTaskSelection(true, true, false));
         assertFalse(NavAppTaskScanner.shouldReplaceTaskSelection(true, true, true));
+    }
+
+    @Test
+    public void runtimeStatusRequiresSuccessfulTaskScan() {
+        assertTrue(snapshot("task", "ok").hasAuthoritativeTaskState(false));
+        assertFalse(snapshot("task", "ok").hasAuthoritativeTaskState(true));
+        assertFalse(snapshot("process", "initial").hasAuthoritativeTaskState(false));
+        assertFalse(snapshot("process", "adb unavailable").hasAuthoritativeTaskState(false));
+        assertFalse(snapshot("task", "error").hasAuthoritativeTaskState(false));
+    }
+
+    private static NavAppTaskScanner.Snapshot snapshot(String source, String status) {
+        return new NavAppTaskScanner.Snapshot(
+                Collections.<NavAppTaskScanner.Row>emptyList(),
+                1L,
+                "00:00:01",
+                source,
+                status);
     }
 
     private static void assertVisibleMainTask(String dumpsys) {

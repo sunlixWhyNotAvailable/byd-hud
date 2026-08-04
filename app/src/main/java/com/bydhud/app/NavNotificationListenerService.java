@@ -45,6 +45,9 @@ public final class NavNotificationListenerService extends NotificationListenerSe
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveNotificationScan(Context context, String reason) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            return;
+        }
         NavNotificationListenerService service = activeService;
         if (service == null) {
             AppEventLogger.event(context, "notification_active_scan skipped no-listener reason="
@@ -70,6 +73,11 @@ public final class NavNotificationListenerService extends NotificationListenerSe
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestRuntimeRebind(Context context, String reason) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            AppEventLogger.event(context, "notification_listener rebind skipped shutdown_active reason="
+                    + safe(reason));
+            return;
+        }
         try {
             android.content.ComponentName component = new android.content.ComponentName(
                     context.getPackageName(),
@@ -83,12 +91,40 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    static void suspendForUserShutdown(Context context, String reason) {
+        NavNotificationListenerService service = activeService;
+        if (service == null) {
+            return;
+        }
+        Handler handler = service.notificationHandler;
+        if (handler != null) {
+            handler.removeCallbacksAndMessages(null);
+        }
+        try {
+            service.requestUnbind();
+            AppEventLogger.event(context, "notification_listener request_unbind reason="
+                    + safe(reason));
+        } catch (RuntimeException error) {
+            AppEventLogger.event(context, "notification_listener request_unbind failed "
+                    + error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
+        }
+    }
+
+    static void resumeAfterUserShutdown(Context context, String reason) {
+        requestRuntimeRebind(context, "resume-after-shutdown:" + safe(reason));
+    }
+
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onListenerConnected() {
         super.onListenerConnected();
         activeService = this;
         lastConnectedElapsedMs = SystemClock.elapsedRealtime();
+        if (HudPrefs.isUserShutdownActive(this)) {
+            lastRuntimeDetail = "connected while shutdown active";
+            suspendForUserShutdown(this, "listener-connected-shutdown-active");
+            return;
+        }
         lastRuntimeDetail = "connected";
         postNotificationWork(() -> {
             AppEventLogger.event(this, "notification_listener connected");
@@ -131,11 +167,17 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationPosted(StatusBarNotification sbn) {
+        if (HudPrefs.isUserShutdownActive(this)) {
+            return;
+        }
         postNotificationWork(() -> processPostedNotification(sbn, "posted"));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void processActiveNotifications(String reason) {
+        if (HudPrefs.isUserShutdownActive(this)) {
+            return;
+        }
         try {
             StatusBarNotification[] notifications = getActiveNotifications();
             int count = notifications == null ? 0 : notifications.length;
@@ -162,7 +204,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void processPostedNotification(StatusBarNotification sbn, String source) {
-        if (sbn == null) {
+        if (sbn == null || HudPrefs.isUserShutdownActive(this)) {
             return;
         }
         String packageName = sbn.getPackageName();
@@ -206,11 +248,14 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationRemoved(StatusBarNotification sbn) {
+        if (HudPrefs.isUserShutdownActive(this)) {
+            return;
+        }
         postNotificationWork(() -> processRemovedNotification(sbn));
     }
 
     private void processRemovedNotification(StatusBarNotification sbn) {
-        if (sbn == null) {
+        if (sbn == null || HudPrefs.isUserShutdownActive(this)) {
             return;
         }
         String packageName = sbn.getPackageName();
@@ -233,7 +278,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     private boolean postNotificationWork(Runnable work) {
         Handler handler = notificationHandler;
         return handler != null && work != null && handler.post(() -> {
-            if (activeService == this) {
+            if (activeService == this && !HudPrefs.isUserShutdownActive(this)) {
                 work.run();
             }
         });

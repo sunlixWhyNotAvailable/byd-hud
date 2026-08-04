@@ -239,6 +239,8 @@ public final class MainActivity extends ComponentActivity {
         if (HudPrefs.isUserShutdownActive(this)) {
             HudPrefs.setUserShutdownActive(this, false);
             AppEventLogger.event(this, "shutdown cleared reason=activity-create");
+            NavNotificationListenerService.resumeAfterUserShutdown(
+                    this, "activity-create");
         }
         HudGraphicPayload.setContext(this);
         int staleShareArtifacts = LogShareZip.cleanupStaleArtifacts(this);
@@ -810,6 +812,7 @@ public final class MainActivity extends ComponentActivity {
                 state.roadName == null ? "" : state.roadName,
                 state.laneString == null ? "" : state.laneString,
                 appScan.lastScanText,
+                appScan.hasAuthoritativeTaskState(appScanInProgress.get()),
                 HudPrefs.storageLimitGb(this),
                 storage.rootPaths,
                 storage.calculating,
@@ -1007,6 +1010,7 @@ public final class MainActivity extends ComponentActivity {
                     value.installedVersion, value.installed,
                     value.externalSource, value.sourceName, value.sourceVersion,
                     value.directState, value.optionalState, profile.optionalLabel,
+                    value.alertState, profile.alertLabel,
                     value.reason, value.patchEnabled));
         }
         return rows;
@@ -1424,21 +1428,26 @@ public final class MainActivity extends ComponentActivity {
         if (!appScanInProgress.compareAndSet(false, true)) {
             return;
         }
+        advanceAppScanRevision();
         Context appContext = getApplicationContext();
         new Thread(() -> {
             try {
                 NavAppTaskScanner.Snapshot scan = NavAppTaskScanner.get(appContext).forceScan();
                 appVersionNames = scanInstalledAppVersions(scan);
-                appScanRevision = scan.scannedAtMs;
                 AppEventLogger.event(appContext, "apps_refresh force=" + force
                         + " source=" + scan.source
                         + " rows=" + scan.rows.size()
                         + " status=" + scan.status);
             } finally {
                 appScanInProgress.set(false);
+                advanceAppScanRevision();
                 handler.post(this::refreshActiveAppsList);
             }
         }, "bydhud-app-scan").start();
+    }
+
+    private void advanceAppScanRevision() {
+        appScanRevision = Math.max(appScanRevision + 1L, System.currentTimeMillis());
     }
 
     private Map<String, String> scanInstalledAppVersions(NavAppTaskScanner.Snapshot scan) {
@@ -1494,6 +1503,39 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    public ComposeStorageShareSummary composeDescribeStorageShareDays(List<String> days) {
+        LogShareZip.SelectionSummary summary = LogShareZip.summarize(this, days);
+        return new ComposeStorageShareSummary(summary.ok, summary.dayCount,
+                summary.fileCount, summary.sourceBytes, summary.detail);
+    }
+
+    //Creates and uploads the same complete-day ZIP only after explicit in-app consent.
+    public ComposeSentryUploadResult composeUploadStorageDaysToSentry(
+            List<String> days, Runnable uploadStarted) {
+        if (!SHARE_OPERATION.compareAndSet(false, true)) {
+            return new ComposeSentryUploadResult(false, "", "share already running");
+        }
+        try {
+            LogShareZip.Result archive = LogShareZip.create(this, days);
+            if (!archive.ok || archive.file == null) {
+                return new ComposeSentryUploadResult(false, "", archive.detail);
+            }
+            try {
+                if (uploadStarted != null) {
+                    uploadStarted.run();
+                }
+            } catch (RuntimeException error) {
+                LogShareZip.deleteArtifact(archive.file);
+                return new ComposeSentryUploadResult(false, "",
+                        error.getClass().getSimpleName() + ": " + error.getMessage());
+            }
+            SentryLogUploader.Result upload = SentryLogUploader.upload(this, archive.file, days);
+            return new ComposeSentryUploadResult(upload.ok, upload.eventId, upload.detail);
+        } finally {
+            SHARE_OPERATION.set(false);
+        }
+    }
+
     //Creates one bounded diagnostic ZIP and enriches it through ADB only when already available.
     public String composeShareVehicleConfiguration() {
         if (!SHARE_OPERATION.compareAndSet(false, true)) {
@@ -1507,6 +1549,34 @@ public final class MainActivity extends ComponentActivity {
             PENDING_SHARE_FILE.set(result.file);
             notifyPendingShare();
             return "ready " + result.file.getName() + " " + result.detail;
+        } finally {
+            SHARE_OPERATION.set(false);
+        }
+    }
+
+    //Creates and uploads one vehicle-configuration ZIP only after explicit in-app consent.
+    public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(
+            Runnable uploadStarted) {
+        if (!SHARE_OPERATION.compareAndSet(false, true)) {
+            return new ComposeSentryUploadResult(false, "", "share already running");
+        }
+        try {
+            VehicleConfigurationZip.Result archive = VehicleConfigurationZip.create(this);
+            if (!archive.ok || archive.file == null) {
+                return new ComposeSentryUploadResult(false, "", archive.detail);
+            }
+            try {
+                if (uploadStarted != null) {
+                    uploadStarted.run();
+                }
+            } catch (RuntimeException error) {
+                LogShareZip.deleteArtifact(archive.file);
+                return new ComposeSentryUploadResult(false, "",
+                        error.getClass().getSimpleName() + ": " + error.getMessage());
+            }
+            SentryLogUploader.Result upload =
+                    SentryLogUploader.uploadConfiguration(this, archive.file);
+            return new ComposeSentryUploadResult(upload.ok, upload.eventId, upload.detail);
         } finally {
             SHARE_OPERATION.set(false);
         }
@@ -1701,6 +1771,7 @@ public final class MainActivity extends ComponentActivity {
         public final String streetText;
         public final String laneBitmap;
         public final String lastScanText;
+        public final boolean appRuntimeStatusKnown;
         public final int storageLimitGb;
         public final List<String> navCaptureFolderPaths;
         public final boolean storageCalculating;
@@ -1731,7 +1802,8 @@ public final class MainActivity extends ComponentActivity {
                 String logPaths, String applicationState, boolean manualModeEnabled,
                 boolean arrowCuratedMode, int curatedIndex, int curatedCount,
                 int pngSourceId, int nativeManeuverId, int distanceMeters, String streetText,
-                String laneBitmap, String lastScanText, int storageLimitGb,
+                String laneBitmap, String lastScanText, boolean appRuntimeStatusKnown,
+                int storageLimitGb,
                 List<String> navCaptureFolderPaths, boolean storageCalculating,
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
@@ -1782,6 +1854,7 @@ public final class MainActivity extends ComponentActivity {
             this.streetText = streetText == null ? "" : streetText;
             this.laneBitmap = laneBitmap == null ? "" : laneBitmap;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
+            this.appRuntimeStatusKnown = appRuntimeStatusKnown;
             this.storageLimitGb = Math.max(1, Math.min(10, storageLimitGb));
             this.navCaptureFolderPaths = navCaptureFolderPaths == null
                     ? Collections.emptyList()
@@ -1896,13 +1969,16 @@ public final class MainActivity extends ComponentActivity {
         public final String directState;
         public final String optionalState;
         public final String optionalLabel;
+        public final String alertState;
+        public final String alertLabel;
         public final String reason;
         public final boolean patchEnabled;
 
         ComposeNavigatorPatchRow(String profileId, String label, String packageName,
                 String installedVersion, boolean installed, boolean externalSource,
                 String sourceName, String sourceVersion, String directState,
-                String optionalState, String optionalLabel, String reason,
+                String optionalState, String optionalLabel, String alertState,
+                String alertLabel, String reason,
                 boolean patchEnabled) {
             this.profileId = profileId == null ? "" : profileId;
             this.label = label == null ? "" : label;
@@ -1915,8 +1991,39 @@ public final class MainActivity extends ComponentActivity {
             this.directState = directState == null ? NavigatorPatchStore.NOT_CHECKED : directState;
             this.optionalState = optionalState == null ? NavigatorPatchStore.NOT_CHECKED : optionalState;
             this.optionalLabel = optionalLabel == null ? "" : optionalLabel;
+            this.alertState = alertState == null ? NavigatorPatchStore.NOT_CHECKED : alertState;
+            this.alertLabel = alertLabel == null ? "" : alertLabel;
             this.reason = reason == null ? "" : reason;
             this.patchEnabled = patchEnabled;
+        }
+    }
+
+    public static final class ComposeStorageShareSummary {
+        public final boolean ok;
+        public final int dayCount;
+        public final int fileCount;
+        public final long sourceBytes;
+        public final String detail;
+
+        ComposeStorageShareSummary(boolean ok, int dayCount, int fileCount,
+                long sourceBytes, String detail) {
+            this.ok = ok;
+            this.dayCount = Math.max(0, dayCount);
+            this.fileCount = Math.max(0, fileCount);
+            this.sourceBytes = Math.max(0L, sourceBytes);
+            this.detail = detail == null ? "" : detail;
+        }
+    }
+
+    public static final class ComposeSentryUploadResult {
+        public final boolean ok;
+        public final String eventId;
+        public final String detail;
+
+        ComposeSentryUploadResult(boolean ok, String eventId, String detail) {
+            this.ok = ok;
+            this.eventId = eventId == null ? "" : eventId;
+            this.detail = detail == null ? "" : detail;
         }
     }
 
@@ -2586,6 +2693,8 @@ public final class MainActivity extends ComponentActivity {
         exitRequested = true;
         HudPrefs.setUserShutdownActive(this, true);
         AppEventLogger.event(this, "shutdown requested reason=" + safeReason);
+        NavNotificationListenerService.suspendForUserShutdown(this, safeReason);
+        NavAccessibilityService.suspendForUserShutdown(this, safeReason);
 
         if (pendingNavPermissionSelfCheckRunnable != null) {
             handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);

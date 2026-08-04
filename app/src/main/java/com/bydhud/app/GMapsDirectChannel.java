@@ -18,15 +18,18 @@ import com.bydhud.gmapswire.GmapsWireParser;
 
 import java.security.MessageDigest;
 import java.util.Arrays;
+import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 
 /** Receives bounded navigation snapshots from the separately patched ReVanced GMaps process. */
 final class GMapsDirectChannel {
     static final String PACKAGE_NAME = "app.revanced.android.apps.maps";
+    static final String OWNER_PACKAGE = PACKAGE_NAME;
 
     private static final String RECEIVER =
             "com.google.android.libraries.geo.navcore.navinfo.NavigationInfoBroadcastReceiver";
@@ -43,6 +46,7 @@ final class GMapsDirectChannel {
     private static final int MESSAGE_MANEUVER_BITMAP = 5;
     private static final int MAX_FRAME_BYTES = 512 * 1024;
     private static final int MAX_BITMAP_DIMENSION = 256;
+    static final int MAX_MANEUVER_BITMAP_CACHE = 64;
     private static final long REGISTER_RETRY_MS = 5000L;
 
     private final Context context;
@@ -51,13 +55,14 @@ final class GMapsDirectChannel {
     private final Handler handler;
     private final Messenger inbound;
     private final GMapsDirectManeuverMap maneuverMap = new GMapsDirectManeuverMap();
-    private final Map<String, ManeuverBitmap> maneuverBitmaps = new HashMap<>();
+    private final Map<String, ManeuverBitmap> maneuverBitmaps = newManeuverBitmapCache();
     private final Runnable registrationRetry = this::retryRegistration;
 
     private boolean running;
     private boolean connected;
     private boolean navigating;
     private boolean terminalLatched;
+    private volatile long sessionGeneration;
     private long lastSequence = -1L;
     private long currentStructuredFrameAtMs;
     private String currentManeuver = "";
@@ -76,6 +81,7 @@ final class GMapsDirectChannel {
 
     void start(String reason) {
         handler.post(() -> {
+            sessionGeneration++;
             running = true;
             connected = false;
             navigating = false;
@@ -88,6 +94,7 @@ final class GMapsDirectChannel {
     void ensureRegistered(String reason) {
         handler.post(() -> {
             if (!running) return;
+            sessionGeneration++;
             connected = false;
             resetSession();
             registerClient("retry:" + safe(reason));
@@ -98,6 +105,7 @@ final class GMapsDirectChannel {
         handler.post(() -> {
             if (!running) return;
             sendRegistration(ACTION_UNREGISTER, false);
+            sessionGeneration++;
             running = false;
             connected = false;
             navigating = false;
@@ -108,7 +116,45 @@ final class GMapsDirectChannel {
         });
     }
 
+    long sessionGeneration() {
+        return sessionGeneration;
+    }
+
+    boolean isRunning() {
+        return running;
+    }
+
     private boolean handleMessage(Message message) {
+        return runMessageBoundary(
+                () -> handleMessageSafely(message),
+                error -> listener.onLog("message rejected reason=exception error="
+                        + error.getClass().getSimpleName()));
+    }
+
+    static boolean runMessageBoundary(MessageWork work, Consumer<Throwable> onError) {
+        try {
+            return work.run();
+        } catch (Throwable error) {
+            onError.accept(error);
+            return true;
+        }
+    }
+
+    interface MessageWork {
+        boolean run();
+    }
+
+    static Map<String, ManeuverBitmap> newManeuverBitmapCache() {
+        return new LinkedHashMap<String, ManeuverBitmap>(
+                MAX_MANEUVER_BITMAP_CACHE, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, ManeuverBitmap> eldest) {
+                return size() > MAX_MANEUVER_BITMAP_CACHE;
+            }
+        };
+    }
+
+    private boolean handleMessageSafely(Message message) {
         if (!running || message == null) return true;
         Bundle data = message.getData();
         if (data == null || data.getInt("protocolVersion", -1) != PROTOCOL_VERSION) {
@@ -120,14 +166,17 @@ final class GMapsDirectChannel {
             case MESSAGE_HELLO:
                 connected = true;
                 handler.removeCallbacks(registrationRetry);
-                listener.onHandshakeAvailable("hello");
+                listener.onHandshakeAvailable(OWNER_PACKAGE, sessionGeneration, "hello");
+                listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "hello");
                 return true;
             case MESSAGE_START:
+                sessionGeneration++;
                 connected = true;
                 navigating = true;
                 terminalLatched = false;
                 resetSession();
-                listener.onNavigationStarted("start");
+                listener.onNavigationStarted(OWNER_PACKAGE, sessionGeneration, "start");
+                listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "start");
                 return true;
             case MESSAGE_FRAME:
                 handleFrame(data);
@@ -202,6 +251,7 @@ final class GMapsDirectChannel {
             currentManeuver = mapping.maneuverName;
             currentStructuredFrameAtMs = frameAtMs;
             currentFallbackPng = fallbackPng;
+            List<DirectTbtFrame.Lane> lanes = mapLanes(summary.get("lanes"));
             currentFrame = new DirectTbtFrame(
                     wireValue,
                     mapping.intermediate,
@@ -212,14 +262,15 @@ final class GMapsDirectChannel {
                     road,
                     maneuverPng,
                     null,
-                    Collections.emptyList(),
+                    lanes,
                     DirectTbtFrame.AlertOverlay.inactive(),
                     tripMetrics);
             if (!navigating) {
                 navigating = true;
-                listener.onNavigationStarted("first-frame");
+                listener.onNavigationStarted(OWNER_PACKAGE, sessionGeneration, "first-frame");
             }
             connected = true;
+            listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "frame");
             int laneCount = summary.get("lanes") instanceof List
                     ? ((List<?>) summary.get("lanes")).size() : 0;
             listener.onLog("frame sequence=" + sequence
@@ -234,9 +285,11 @@ final class GMapsDirectChannel {
                     + " wholeRouteSeconds="
                     + tripMetrics.getWholeRoute().getRemainingTimeSeconds()
                     + " lanesParsed=" + laneCount
+                    + " lanesMapped=" + lanes.size()
                     + " bitmap=" + bitmapSelection.selected);
             logBitmapSelection(bitmapSelection);
-            listener.onFrame(currentFrame, "frame-" + sequence, bitmapSelection);
+            listener.onFrame(OWNER_PACKAGE, sessionGeneration,
+                    currentFrame, "frame-" + sequence, bitmapSelection);
         } catch (Exception error) {
             listener.onLog("frame rejected reason=parse sequence=" + sequence
                     + " error=" + error.getClass().getSimpleName());
@@ -293,16 +346,19 @@ final class GMapsDirectChannel {
                     currentStructuredFrameAtMs,
                     "late-match");
             logBitmapSelection(bitmapSelection);
-            listener.onFrame(currentFrame, "maneuver-bitmap", bitmapSelection);
+            listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "maneuver-bitmap");
+            listener.onFrame(OWNER_PACKAGE, sessionGeneration,
+                    currentFrame, "maneuver-bitmap", bitmapSelection);
         }
     }
 
     private void finishNavigation(String reason) {
+        long endedGeneration = ++sessionGeneration;
         terminalLatched = true;
         if (!navigating && currentFrame == null) return;
         navigating = false;
         resetSession();
-        listener.onNavigationEnded(reason);
+        listener.onNavigationEnded(OWNER_PACKAGE, endedGeneration, reason);
     }
 
     private void resetSession() {
@@ -321,7 +377,8 @@ final class GMapsDirectChannel {
         if (sendRegistration(ACTION_REGISTER, true)) {
             listener.onLog("registration sent reason=" + reason);
         } else {
-            listener.onHandshakeUnavailable("registration-failed");
+            listener.onHandshakeUnavailable(
+                    OWNER_PACKAGE, sessionGeneration, "registration-failed");
         }
         if (running && !connected) handler.postDelayed(registrationRetry, REGISTER_RETRY_MS);
     }
@@ -388,6 +445,69 @@ final class GMapsDirectChannel {
             output.append(text);
         }
         return output.toString();
+    }
+
+    private List<DirectTbtFrame.Lane> mapLanes(Object value) {
+        List<DirectTbtFrame.Lane> mapped = mapLanesForTest(value);
+        int rawCount = value instanceof List ? ((List<?>) value).size() : 0;
+        if (mapped.size() < rawCount) {
+            listener.onLog("lanes skipped unsupported=" + (rawCount - mapped.size()));
+        }
+        return mapped;
+    }
+
+    static List<DirectTbtFrame.Lane> mapLanesForTest(Object value) {
+        if (!(value instanceof List)) return Collections.emptyList();
+        List<DirectTbtFrame.Lane> mapped = new ArrayList<>();
+        for (Object laneValue : (List<?>) value) {
+            if (!(laneValue instanceof Map)) continue;
+            Map<?, ?> lane = (Map<?, ?>) laneValue;
+            Object arrowsValue = lane.get("arrows");
+            if (!(arrowsValue instanceof List)) continue;
+            Map<?, ?> firstSupported = null;
+            Map<?, ?> recommendedSupported = null;
+            StringBuilder raw = new StringBuilder();
+            for (Object arrowValue : (List<?>) arrowsValue) {
+                if (!(arrowValue instanceof Map)) continue;
+                Map<?, ?> arrow = (Map<?, ?>) arrowValue;
+                if (raw.length() > 0) raw.append('|');
+                raw.append("shape=").append(stringValue(arrow.get("shape")))
+                        .append("(").append(intValue(arrow.get("shapeEnum"), -1)).append(')')
+                        .append(",side=").append(stringValue(arrow.get("side")))
+                        .append("(").append(intValue(arrow.get("sideEnum"), -1)).append(')')
+                        .append(",recommended=")
+                        .append(Boolean.TRUE.equals(arrow.get("recommended")));
+                int direction = mapLaneDirection(arrow);
+                if (direction == 0) continue;
+                if (firstSupported == null) firstSupported = arrow;
+                if (Boolean.TRUE.equals(arrow.get("recommended"))
+                        && recommendedSupported == null) {
+                    recommendedSupported = arrow;
+                }
+            }
+            Map<?, ?> selected = recommendedSupported == null
+                    ? firstSupported : recommendedSupported;
+            if (selected == null) continue;
+            int direction = mapLaneDirection(selected);
+            mapped.add(new DirectTbtFrame.Lane(
+                    direction,
+                    Boolean.TRUE.equals(selected.get("recommended")),
+                    raw.toString()));
+        }
+        return mapped;
+    }
+
+    private static int mapLaneDirection(Map<?, ?> arrow) {
+        int shape = intValue(arrow.get("shapeEnum"), -1);
+        if (shape == 1 || shape == 2) return 9;
+        if (shape < 3 || shape > 10) return 0;
+        int side = intValue(arrow.get("sideEnum"), -1);
+        if (side == 1) return 2;
+        if (side == 2) return 3;
+        String sideText = safe(stringValue(arrow.get("side"))).toUpperCase(Locale.US);
+        if (sideText.contains("LEFT")) return 2;
+        if (sideText.contains("RIGHT")) return 3;
+        return 0;
     }
 
     private static int intValue(Object value, int fallback) {
@@ -607,11 +727,13 @@ final class GMapsDirectChannel {
     }
 
     interface Listener {
-        void onHandshakeAvailable(String reason);
-        void onHandshakeUnavailable(String reason);
-        void onNavigationStarted(String reason);
-        void onFrame(DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection);
-        void onNavigationEnded(String reason);
+        void onHandshakeAvailable(String ownerPackage, long sessionGeneration, String reason);
+        void onHandshakeUnavailable(String ownerPackage, long sessionGeneration, String reason);
+        void onNavigationStarted(String ownerPackage, long sessionGeneration, String reason);
+        void onFrame(String ownerPackage, long sessionGeneration,
+                DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection);
+        void onNavigationEnded(String ownerPackage, long sessionGeneration, String reason);
+        void onLiveness(String ownerPackage, long sessionGeneration, String reason);
         void onLog(String message);
     }
 }

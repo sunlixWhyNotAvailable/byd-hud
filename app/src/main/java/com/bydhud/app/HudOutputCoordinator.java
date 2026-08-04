@@ -27,6 +27,7 @@ final class HudOutputCoordinator {
     private static final long FINAL_STOP_DELAY_MS = 300L;
     private static final long BIND_RETRY_MS = 200L;
     private static final int BIND_RETRY_LIMIT = 30;
+    private static final long DIRECT_LEASE_MS = 15_000L;
     private static final int RESULT_OK = 0;
     private static final int RESULT_NOT_STARTED = 11;
     private static final int RESULT_ALREADY_STARTED = 13;
@@ -83,8 +84,15 @@ final class HudOutputCoordinator {
     private String lastTransportChannel = "transport";
     private int preparedDirectOptionsRevision = -1;
     private boolean directAlertClearPending;
+    private boolean directLossClearPending;
+    private boolean directLossClearSent;
+    private String directOwnerPackage = "";
+    private long directOwnerSessionGeneration = Long.MIN_VALUE;
+    private long directLeaseDeadlineMs;
     private long pendingDirectReceivedAtMs;
     private String pendingDirectReason = "";
+
+    private final Runnable directLeaseExpiry = this::expireDirectLease;
 
     private final Runnable sendLoop = new Runnable() {
         @Override
@@ -164,6 +172,7 @@ final class HudOutputCoordinator {
             public void onTransportConnected() {
                 worker.post(() -> {
                     bindAttempts = 0;
+                    flushPendingDirectLossClear();
                     resumeActivation("connected");
                 });
             }
@@ -210,14 +219,18 @@ final class HudOutputCoordinator {
         });
     }
 
-    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs) {
-        publishDirect(frame, reason, receivedAtMs, null, null);
+    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
+            String ownerPackage, long ownerSessionGeneration) {
+        publishDirect(frame, reason, receivedAtMs, null, null,
+                ownerPackage, ownerSessionGeneration);
     }
 
     void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
             GMapsDirectChannel.BitmapSelection bitmapSelection,
-            Consumer<String> bitmapTxLogger) {
+            Consumer<String> bitmapTxLogger,
+            String ownerPackage, long ownerSessionGeneration) {
         worker.post(() -> {
+            if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) return;
             directFrame = frame;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
@@ -228,15 +241,19 @@ final class HudOutputCoordinator {
             if (bitmapSelection == null) lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
+            directLossClearSent = false;
+            renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
             if (activeSource == Source.DIRECT && !sendScheduled) {
                 scheduleSend(0L);
             }
         });
     }
 
-    void clearDirectAlertAndRepublish(DirectTbtFrame frame, String reason, long receivedAtMs) {
+    void clearDirectAlertAndRepublish(String ownerPackage, long ownerSessionGeneration,
+            DirectTbtFrame frame, String reason, long receivedAtMs) {
         worker.post(() -> {
-            if (frame == null || (!directEnabled
+            if (!matchesDirectOwner(ownerPackage, ownerSessionGeneration)
+                    || frame == null || (!directEnabled
                     && activeSource != Source.DIRECT
                     && pendingSource != Source.DIRECT)) {
                 return;
@@ -251,6 +268,7 @@ final class HudOutputCoordinator {
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
             directAlertClearPending = true;
+            renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
             if (activeSource == Source.DIRECT) {
                 worker.removeCallbacks(sendLoop);
                 sendScheduled = false;
@@ -260,10 +278,24 @@ final class HudOutputCoordinator {
     }
 
     void selectNavigationSource(Source source, String reason) {
+        selectNavigationSource(source, reason, "", -1L);
+    }
+
+    void selectNavigationSource(Source source, String reason,
+            String ownerPackage, long ownerSessionGeneration) {
         if (source != Source.DIRECT && source != Source.LEGACY && source != Source.NONE) {
             throw new IllegalArgumentException("navigation source=" + source);
         }
         worker.post(() -> {
+            if (source == Source.DIRECT
+                    && !matchesDirectOwner(ownerPackage, ownerSessionGeneration)) {
+                log("direct source rejected owner=" + safe(ownerPackage)
+                        + " session=" + ownerSessionGeneration);
+                return;
+            }
+            if (source != Source.DIRECT) {
+                invalidateDirectOwnerOnWorker("source=" + source + " reason=" + reason);
+            }
             directEnabled = source == Source.DIRECT;
             legacyEnabled = source == Source.LEGACY;
             if (source != Source.DIRECT) {
@@ -280,35 +312,63 @@ final class HudOutputCoordinator {
         });
     }
 
-    void endDirectOutput(String reason, long detectedAtMs) {
+    void endDirectOutput(String ownerPackage, long ownerSessionGeneration,
+            String reason, long detectedAtMs) {
         worker.post(() -> {
-            boolean directSelected = directEnabled
-                    || activeSource == Source.DIRECT
-                    || pendingSource == Source.DIRECT;
-            if (!directSelected) {
-                logAsync("direct end ignored reason=" + safe(reason)
-                        + " detectedAtElapsedMs=" + detectedAtMs);
-                return;
-            }
-            long now = SystemClock.elapsedRealtime();
-            logAsync("direct end accepted reason=" + safe(reason)
-                    + " detectedAtElapsedMs=" + detectedAtMs
-                    + " workerHandoffMs=" + Math.max(0L, now - detectedAtMs));
-            directEnabled = false;
-            directFrame = null;
-            preparedDirectFrame = null;
-            preparedDirectPayload = null;
-            preparedDirectSemanticPayload = null;
-            directBitmapSelection = null;
-            preparedDirectBitmapSelection = null;
-            directBitmapTxLogger = null;
-            preparedDirectBitmapTxLogger = null;
-            lastBitmapTxDiagnosticKey = "";
-            directAlertClearPending = false;
-            pendingDirectReceivedAtMs = 0L;
-            pendingDirectReason = "";
-            reconcile(reason, detectedAtMs);
+            endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason, detectedAtMs);
         });
+    }
+
+    private void endDirectOutputOnWorker(String ownerPackage, long ownerSessionGeneration,
+            String reason, long detectedAtMs) {
+        if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) {
+            logAsync("direct end rejected owner=" + safe(ownerPackage)
+                    + " session=" + ownerSessionGeneration
+                    + " reason=" + safe(reason));
+            return;
+        }
+        boolean directSelected = directEnabled
+                || activeSource == Source.DIRECT
+                || pendingSource == Source.DIRECT;
+        if (!directSelected) {
+            logAsync("direct end ignored reason=" + safe(reason)
+                    + " detectedAtElapsedMs=" + detectedAtMs);
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        logAsync("direct end accepted reason=" + safe(reason)
+                + " detectedAtElapsedMs=" + detectedAtMs
+                + " workerHandoffMs=" + Math.max(0L, now - detectedAtMs));
+        directEnabled = false;
+        directFrame = null;
+        preparedDirectFrame = null;
+        preparedDirectPayload = null;
+        preparedDirectSemanticPayload = null;
+        directBitmapSelection = null;
+        preparedDirectBitmapSelection = null;
+        directBitmapTxLogger = null;
+        preparedDirectBitmapTxLogger = null;
+        lastBitmapTxDiagnosticKey = "";
+        directAlertClearPending = false;
+        directLossClearPending = false;
+        directLossClearSent = false;
+        pendingDirectReceivedAtMs = 0L;
+        pendingDirectReason = "";
+        invalidateDirectOwnerOnWorker("end:" + reason);
+        reconcile(reason, detectedAtMs);
+    }
+
+    void renewDirectLease(String ownerPackage, long ownerSessionGeneration, String reason) {
+        worker.post(() -> {
+            if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) return;
+            renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
+        });
+    }
+
+    void clearDirectFrameForLoss(String ownerPackage, long ownerSessionGeneration,
+            String reason, long detectedAtMs) {
+        worker.post(() -> clearDirectFrameForLossOnWorker(
+                ownerPackage, ownerSessionGeneration, reason, detectedAtMs));
     }
 
     void resetTransport(String reason) {
@@ -323,6 +383,7 @@ final class HudOutputCoordinator {
             pendingActivationNotBeforeMs = 0L;
             serviceStarted = false;
             directAlertClearPending = false;
+            invalidateDirectOwnerOnWorker("transport-reset:" + reason);
             lastBitmapTxDiagnosticKey = "";
             HudDeliveryStatus.reset();
             reconcile("reset:" + reason);
@@ -340,6 +401,7 @@ final class HudOutputCoordinator {
             directBitmapTxLogger = null;
             lastBitmapTxDiagnosticKey = "";
             directAlertClearPending = false;
+            invalidateDirectOwnerOnWorker("shutdown:" + reason);
             legacyState = null;
             reconcile(reason);
         });
@@ -451,6 +513,14 @@ final class HudOutputCoordinator {
             return;
         }
         activeSource = target;
+        if (target == Source.DIRECT && directLossClearPending) {
+            if (!client.isBound()) {
+                ensureBoundOnWorker("direct-loss-clear");
+                return;
+            }
+            flushPendingDirectLossClear();
+            if (directLossClearPending) return;
+        }
         if (!hasFrame(target)) {
             HudDeliveryStatus.reset();
             log("waiting source=" + target + " reason=" + reason);
@@ -489,6 +559,7 @@ final class HudOutputCoordinator {
 
     private void ensureBoundOnWorker(String reason) {
         if (client.isBound()) {
+            flushPendingDirectLossClear();
             resumeActivation(reason);
             return;
         }
@@ -553,6 +624,13 @@ final class HudOutputCoordinator {
                 }
                 serviceStarted = true;
                 log("service ready source=" + source + " result=" + startResult);
+            }
+            if (source == Source.DIRECT && directLossClearPending) {
+                if (!sendRequiredClear("direct producer loss", source, "direct_loss_clear")) {
+                    return;
+                }
+                directLossClearPending = false;
+                directLossClearSent = true;
             }
             if (source == Source.DIRECT && directAlertClearPending) {
                 if (!sendRequiredClear(
@@ -907,6 +985,172 @@ final class HudOutputCoordinator {
     static long protocolRetryDelayMs(int failureCount) {
         int index = Math.max(1, failureCount) - 1;
         return PROTOCOL_RETRY_DELAYS_MS[Math.min(index, PROTOCOL_RETRY_DELAYS_MS.length - 1)];
+    }
+
+    private boolean directSelectedOnWorker() {
+        return directEnabled
+                || activeSource == Source.DIRECT
+                || pendingSource == Source.DIRECT;
+    }
+
+    private boolean claimDirectOwner(String ownerPackage, long ownerSessionGeneration) {
+        String owner = safe(ownerPackage);
+        DirectOwnerDecision decision = directOwnerDecision(
+                directOwnerPackage, directOwnerSessionGeneration,
+                owner, ownerSessionGeneration);
+        if (decision == DirectOwnerDecision.REJECT) {
+            log("direct owner rejected owner=" + owner
+                    + " session=" + ownerSessionGeneration);
+            return false;
+        }
+        if (decision == DirectOwnerDecision.ADVANCE) {
+            worker.removeCallbacks(directLeaseExpiry);
+            directLeaseDeadlineMs = 0L;
+            directLossClearPending = false;
+            directLossClearSent = false;
+            directOwnerPackage = owner;
+            directOwnerSessionGeneration = ownerSessionGeneration;
+            log("direct owner advanced owner=" + owner
+                    + " session=" + ownerSessionGeneration);
+        }
+        return true;
+    }
+
+    static DirectOwnerDecision directOwnerDecision(
+            String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        String current = safe(currentOwner);
+        String incoming = safe(incomingOwner);
+        if (incoming.isEmpty() || incomingGeneration < 0L) {
+            return DirectOwnerDecision.REJECT;
+        }
+        if (current.isEmpty()) return DirectOwnerDecision.ADVANCE;
+        if (!current.equals(incoming) || incomingGeneration < currentGeneration) {
+            return DirectOwnerDecision.REJECT;
+        }
+        return incomingGeneration == currentGeneration
+                ? DirectOwnerDecision.ACCEPT
+                : DirectOwnerDecision.ADVANCE;
+    }
+
+    enum DirectOwnerDecision {
+        REJECT,
+        ACCEPT,
+        ADVANCE
+    }
+
+    private boolean matchesDirectOwner(String ownerPackage, long ownerSessionGeneration) {
+        return !directOwnerPackage.isEmpty()
+                && directOwnerPackage.equals(safe(ownerPackage))
+                && directOwnerSessionGeneration == ownerSessionGeneration;
+    }
+
+    private void renewDirectLeaseOnWorker(String ownerPackage,
+            long ownerSessionGeneration, String reason) {
+        if (!matchesDirectOwner(ownerPackage, ownerSessionGeneration)) return;
+        long now = SystemClock.elapsedRealtime();
+        directLeaseDeadlineMs = now + DIRECT_LEASE_MS;
+        worker.removeCallbacks(directLeaseExpiry);
+        worker.postDelayed(directLeaseExpiry, DIRECT_LEASE_MS);
+        if (!safe(reason).isEmpty()) {
+            log("direct lease renewed owner=" + safe(ownerPackage)
+                    + " session=" + ownerSessionGeneration
+                    + " reason=" + safe(reason));
+        }
+    }
+
+    private void expireDirectLease() {
+        if (directLeaseDeadlineMs <= 0L) return;
+        long now = SystemClock.elapsedRealtime();
+        if (!isDirectLeaseExpired(directLeaseDeadlineMs, now)) {
+            worker.postDelayed(directLeaseExpiry, directLeaseDeadlineMs - now);
+            return;
+        }
+        String owner = directOwnerPackage;
+        long session = directOwnerSessionGeneration;
+        directLeaseDeadlineMs = 0L;
+        clearDirectFrameForLossOnWorker(owner, session, "direct-lease-expired", now);
+    }
+
+    private void clearDirectFrameForLossOnWorker(String ownerPackage,
+            long ownerSessionGeneration, String reason, long detectedAtMs) {
+        if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)
+                || !directSelectedOnWorker()) {
+            return;
+        }
+        if (!shouldQueueDirectLossClear(
+                true, true, directLossClearSent, directLossClearPending)) return;
+        directFrame = null;
+        preparedDirectFrame = null;
+        preparedDirectPayload = null;
+        preparedDirectSemanticPayload = null;
+        directBitmapSelection = null;
+        preparedDirectBitmapSelection = null;
+        directBitmapTxLogger = null;
+        preparedDirectBitmapTxLogger = null;
+        lastBitmapTxDiagnosticKey = "";
+        directAlertClearPending = false;
+        pendingDirectReceivedAtMs = 0L;
+        pendingDirectReason = "";
+        worker.removeCallbacks(directLeaseExpiry);
+        directLeaseDeadlineMs = 0L;
+        directLossClearPending = true;
+        logAsync("direct producer loss owner=" + safe(ownerPackage)
+                + " session=" + ownerSessionGeneration
+                + " reason=" + safe(reason)
+                + " detectedAtElapsedMs=" + detectedAtMs);
+        if (client.isBound()) {
+            flushPendingDirectLossClear();
+        }
+        if (directLossClearPending) {
+            ensureBoundOnWorker("direct-loss-clear");
+        }
+    }
+
+    static boolean shouldQueueDirectLossClear(boolean ownerAccepted, boolean directSelected,
+            boolean clearSent, boolean clearPending) {
+        return ownerAccepted && directSelected && !clearSent && !clearPending;
+    }
+
+    static boolean isDirectLeaseExpired(long deadlineMs, long nowMs) {
+        return deadlineMs > 0L && nowMs >= deadlineMs;
+    }
+
+    private boolean flushPendingDirectLossClear() {
+        if (!directLossClearPending || !directSelectedOnWorker() || !client.isBound()) {
+            return false;
+        }
+        try {
+            if (!serviceStarted) {
+                int startResult = startService(
+                        Source.DIRECT, channelFor(Source.DIRECT), "direct-loss-clear");
+                if (!isStartReadyResult(startResult)) {
+                    handleProtocolResult("direct-loss-clear start", startResult);
+                    return false;
+                }
+                serviceStarted = true;
+            }
+            if (!sendRequiredClear("direct producer loss", Source.DIRECT,
+                    "direct_loss_clear")) {
+                return false;
+            }
+            directLossClearPending = false;
+            directLossClearSent = true;
+            return true;
+        } catch (RemoteException | RuntimeException error) {
+            logAsync("direct loss clear failed error=" + safe(error.getMessage()));
+            return false;
+        }
+    }
+
+    private void invalidateDirectOwnerOnWorker(String reason) {
+        worker.removeCallbacks(directLeaseExpiry);
+        directLeaseDeadlineMs = 0L;
+        directOwnerPackage = "";
+        directOwnerSessionGeneration = Long.MIN_VALUE;
+        directLossClearPending = false;
+        directLossClearSent = false;
+        log("direct owner invalidated reason=" + safe(reason));
     }
 
     private void cancelScheduledWork() {

@@ -13,6 +13,7 @@ import java.util.UUID;
 
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
+    private static final int SCAN_CACHE_REVISION = 2;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";
@@ -53,6 +54,7 @@ final class NavigatorPatchStore {
     private static final String KEY_EXPECTED_SIGNER = "expected_signer";
     private static final String KEY_EXPECTED_DIRECT = "expected_direct";
     private static final String KEY_EXPECTED_OPTIONAL = "expected_optional";
+    private static final String KEY_EXPECTED_ALERT = "expected_alert";
     private static final String KEY_INITIAL_UPDATE_TIME = "initial_update_time";
     private static final String KEY_INITIAL_VERSION_CODE = "initial_version_code";
     private static final String KEY_INITIAL_SIGNER = "initial_signer";
@@ -61,21 +63,23 @@ final class NavigatorPatchStore {
     private static final String KEY_CALLBACK_CONSUMED = "callback_consumed";
 
     enum Profile {
-        WAZE("waze", "com.waze", "Waze", "Stable session"),
+        WAZE("waze", "com.waze", "Waze", "Stable session", "Waze alerts"),
         GMAPS("gmaps", "app.revanced.android.apps.maps", "Google Maps (ReVanced)",
-                "Audio channel");
+                "Audio channel", "");
 
         final String id;
         final String packageName;
         final String fallbackLabel;
         final String optionalLabel;
+        final String alertLabel;
 
         Profile(String id, String packageName, String fallbackLabel,
-                String optionalLabel) {
+                String optionalLabel, String alertLabel) {
             this.id = id;
             this.packageName = packageName;
             this.fallbackLabel = fallbackLabel;
             this.optionalLabel = optionalLabel;
+            this.alertLabel = alertLabel;
         }
 
         static Profile fromId(String id) {
@@ -97,6 +101,7 @@ final class NavigatorPatchStore {
         final long sourceVersionCode;
         final String directState;
         final String optionalState;
+        final String alertState;
         final String reason;
         final boolean patchEnabled;
 
@@ -104,6 +109,7 @@ final class NavigatorPatchStore {
                 String installedVersion, long installedVersionCode,
                 boolean externalSource, String sourceName, String sourceVersion,
                 long sourceVersionCode, String directState, String optionalState,
+                String alertState,
                 String reason, boolean patchEnabled) {
             this.profile = profile;
             this.installed = installed;
@@ -116,6 +122,7 @@ final class NavigatorPatchStore {
             this.sourceVersionCode = sourceVersionCode;
             this.directState = directState;
             this.optionalState = optionalState;
+            this.alertState = alertState;
             this.reason = reason;
             this.patchEnabled = patchEnabled;
         }
@@ -178,9 +185,11 @@ final class NavigatorPatchStore {
                 .remove(profile.id + "_scan_version_code")
                 .remove(profile.id + "_scan_direct")
                 .remove(profile.id + "_scan_optional")
+                .remove(profile.id + "_scan_alert")
                 .remove(profile.id + "_scan_reason")
                 .remove(profile.id + "_scan_source_uri")
                 .remove(profile.id + "_scan_installed_update")
+                .remove(profile.id + "_scan_revision")
                 .commit();
         if (previous != null && !previous.isEmpty() && !previous.equals(uri)) {
             try {
@@ -205,10 +214,12 @@ final class NavigatorPatchStore {
                 .putLong(profile.id + "_scan_version_code", result.versionCode)
                 .putString(profile.id + "_scan_direct", result.directState)
                 .putString(profile.id + "_scan_optional", result.optionalState)
+                .putString(profile.id + "_scan_alert", result.alertState)
                 .putString(profile.id + "_scan_reason", result.reason)
                 .putString(profile.id + "_scan_source_uri", sourceUri == null ? "" : sourceUri)
                 .putLong(profile.id + "_scan_installed_update",
                         installed == null ? -1L : installed.lastUpdateTime)
+                .putInt(profile.id + "_scan_revision", SCAN_CACHE_REVISION)
                 .commit();
     }
 
@@ -282,6 +293,7 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_SIGNER, expected.signerSha256)
                 .putString(KEY_EXPECTED_DIRECT, expected.directState)
                 .putString(KEY_EXPECTED_OPTIONAL, expected.optionalState)
+                .putString(KEY_EXPECTED_ALERT, expected.alertState)
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
@@ -307,6 +319,7 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_SIGNER, expected.signerSha256)
                 .putString(KEY_EXPECTED_DIRECT, "")
                 .putString(KEY_EXPECTED_OPTIONAL, "")
+                .putString(KEY_EXPECTED_ALERT, "")
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
@@ -347,6 +360,10 @@ final class NavigatorPatchStore {
 
     static String expectedOptional(Context context) {
         return prefs(context).getString(KEY_EXPECTED_OPTIONAL, "");
+    }
+
+    static String expectedAlert(Context context) {
+        return prefs(context).getString(KEY_EXPECTED_ALERT, "");
     }
 
     static long initialUpdateTime(Context context) {
@@ -421,6 +438,7 @@ final class NavigatorPatchStore {
                 .remove(KEY_EXPECTED_SIGNER)
                 .remove(KEY_EXPECTED_DIRECT)
                 .remove(KEY_EXPECTED_OPTIONAL)
+                .remove(KEY_EXPECTED_ALERT)
                 .remove(KEY_INITIAL_UPDATE_TIME)
                 .remove(KEY_INITIAL_VERSION_CODE)
                 .remove(KEY_INITIAL_SIGNER)
@@ -433,13 +451,14 @@ final class NavigatorPatchStore {
 
     static void recordInstalledVerification(
             Context context, Profile profile, long updateTime, long versionCode,
-            String sha256, String directState, String optionalState) {
+            String sha256, String directState, String optionalState, String alertState) {
         prefs(context).edit()
                 .putLong(profile.id + "_installed_update", updateTime)
                 .putLong(profile.id + "_installed_version_code", versionCode)
                 .putString(profile.id + "_installed_sha", sha256)
                 .putString(profile.id + "_installed_direct", directState)
                 .putString(profile.id + "_installed_optional", optionalState)
+                .putString(profile.id + "_installed_alert", alertState)
                 .commit();
     }
 
@@ -487,6 +506,7 @@ final class NavigatorPatchStore {
         }
         String direct = preferences.getString(profile.id + "_scan_direct", NOT_CHECKED);
         String optional = preferences.getString(profile.id + "_scan_optional", NOT_CHECKED);
+        String alert = preferences.getString(profile.id + "_scan_alert", NOT_CHECKED);
         String reason = preferences.getString(profile.id + "_scan_reason", "");
         String scannedUri = preferences.getString(profile.id + "_scan_source_uri", "");
         long scannedInstalledUpdate = preferences.getLong(
@@ -495,24 +515,29 @@ final class NavigatorPatchStore {
                 ? uri.equals(scannedUri)
                 : isInstalled && (scannedUri == null || scannedUri.isEmpty())
                 && scannedInstalledUpdate == installed.lastUpdateTime;
+        currentScan &= preferences.getInt(profile.id + "_scan_revision", 0)
+                == SCAN_CACHE_REVISION;
         if (!currentScan) {
             sourceVersion = "";
             sourceCode = -1L;
             direct = NOT_CHECKED;
             optional = NOT_CHECKED;
+            alert = NOT_CHECKED;
             reason = "";
         }
         if (!external && !isInstalled) {
             direct = NOT_CHECKED;
             optional = NOT_CHECKED;
+            alert = NOT_CHECKED;
             reason = "";
         }
         boolean patchEnabled = PATCHABLE.equals(direct)
-                || (PATCHED.equals(direct) && PATCHABLE.equals(optional));
+                || (PATCHED.equals(direct)
+                && (PATCHABLE.equals(optional) || PATCHABLE.equals(alert)));
         return new ProfileSnapshot(profile, isInstalled, label, installedVersion, installedCode,
                 external, sourceName == null ? "" : sourceName,
                 sourceVersion == null ? "" : sourceVersion, sourceCode,
-                direct, optional, reason == null ? "" : reason, patchEnabled);
+                direct, optional, alert, reason == null ? "" : reason, patchEnabled);
     }
 
     private static PackageInfo installedInfo(Context context, String packageName) {
@@ -533,6 +558,13 @@ final class NavigatorPatchStore {
     private static String eventCode(String operation, String phase, String detail) {
         String value = clean(detail).toLowerCase(java.util.Locale.ROOT);
         if (RECOVERY_REQUIRED.equals(phase)) return "RECOVERY_REQUIRED";
+        if (value.contains("trust_profile_required")) return "TRUST_PROFILE_REQUIRED";
+        if (value.contains("trust_signer_missing")) return "TRUST_SIGNER_MISSING";
+        if (value.contains("trust_unknown_signer")) return "TRUST_UNKNOWN_SIGNER";
+        if (value.contains("trust_local_signer_unpatched")) {
+            return "TRUST_LOCAL_SIGNER_UNPATCHED";
+        }
+        if (value.contains("trust_")) return "TRUST_REJECTED";
         if (value.contains("unsupported format")) return "UNSUPPORTED_SOURCE_FORMAT";
         if (value.contains("package") && (value.contains("mismatch")
                 || value.contains("expected="))) return "PACKAGE_MISMATCH";
@@ -555,6 +587,7 @@ final class NavigatorPatchStore {
             return "MANDATORY_INCOMPATIBLE";
         }
         if (value.contains("audio channel") || value.contains("stable session")
+                || value.contains("waze alert")
                 || value.contains("optional")) return "OPTIONAL_INCOMPATIBLE";
         if (OUTPUT_VERIFY.equals(phase)) return "OUTPUT_VERIFY_FAILED";
         if (FAILED.equals(phase)) {

@@ -2,11 +2,21 @@ package com.bydhud.app;
 
 import org.jf.dexlib2.Opcode;
 import org.jf.dexlib2.Opcodes;
+import org.jf.dexlib2.AccessFlags;
+import org.jf.dexlib2.builder.MethodImplementationBuilder;
 import org.jf.dexlib2.builder.MutableMethodImplementation;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction10x;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction11n;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction12x;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21t;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction22c;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction35c;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.DexFile;
+import org.jf.dexlib2.iface.Field;
 import org.jf.dexlib2.iface.Method;
 import org.jf.dexlib2.iface.MethodImplementation;
 import org.jf.dexlib2.iface.instruction.Instruction;
@@ -16,10 +26,17 @@ import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.iface.reference.FieldReference;
 import org.jf.dexlib2.iface.reference.MethodReference;
+import org.jf.dexlib2.iface.reference.StringReference;
 import org.jf.dexlib2.iface.reference.TypeReference;
+import org.jf.dexlib2.immutable.ImmutableClassDef;
+import org.jf.dexlib2.immutable.ImmutableDexFile;
+import org.jf.dexlib2.immutable.ImmutableField;
 import org.jf.dexlib2.immutable.ImmutableMethod;
 import org.jf.dexlib2.immutable.ImmutableMethodImplementation;
+import org.jf.dexlib2.immutable.reference.ImmutableFieldReference;
 import org.jf.dexlib2.immutable.reference.ImmutableMethodReference;
+import org.jf.dexlib2.immutable.reference.ImmutableStringReference;
+import org.jf.dexlib2.immutable.reference.ImmutableTypeReference;
 import org.jf.dexlib2.immutable.instruction.ImmutableInstruction10x;
 import org.jf.dexlib2.rewriter.DexRewriter;
 import org.jf.dexlib2.rewriter.Rewriter;
@@ -49,6 +66,22 @@ final class WazePatchEngine {
     private static final String ROUTE_FLOW = "Lkotlinx/coroutines/b/bn;";
     private static final String BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridgeV2;";
     private static final String LEGACY_BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridge;";
+    private static final String ALERT_SESSION_CLASS = "Lcom/waze/car_lib/e/q;";
+    private static final ImmutableFieldReference ALERT_GUARD =
+            new ImmutableFieldReference(ALERT_SESSION_CLASS, "g", "Z");
+    private static final ImmutableMethodReference ALERT_ANCHOR = new ImmutableMethodReference(
+            "Lcom/waze/car_lib/i/f;", "b", java.util.Arrays.asList(
+            "Lcom/waze/car_lib/aq;", "Landroidx/lifecycle/Lifecycle;",
+            "Lcom/waze/car_lib/i/a/a;", "Lkotlinx/coroutines/aj;",
+            "Landroidx/car/app/CarContext;"), "V");
+    private static final ImmutableMethodReference ALERT_HELPER = new ImmutableMethodReference(
+            ALERT_SESSION_CLASS, "c", Collections.emptyList(), "V");
+    private static final ImmutableMethodReference ALERT_PRODUCER = new ImmutableMethodReference(
+            "Lcom/waze/car_lib/b/ap;", "L", java.util.Arrays.asList(
+            "Landroidx/car/app/CarContext;", "Lkotlinx/coroutines/aj;"), "V");
+    private static final ImmutableMethodReference ALERT_COLLECTOR = new ImmutableMethodReference(
+            "Lcom/waze/car_lib/b/f;", "h", java.util.Arrays.asList(
+            "Landroidx/lifecycle/Lifecycle;", "Landroidx/car/app/CarContext;"), "V");
     private static final ImmutableMethodReference BRIDGE_INIT = new ImmutableMethodReference(
             BRIDGE_CLASS, "init", Collections.singletonList("Landroid/content/Context;"), "V");
     private static final ImmutableMethodReference BRIDGE_EMIT = new ImmutableMethodReference(
@@ -165,6 +198,223 @@ final class WazePatchEngine {
         }
     }
 
+    static AlertInspection inspectAlertHook(byte[] dex) throws IOException {
+        DexBackedDexFile file = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        AlertInspection result = new AlertInspection();
+        for (ClassDef classDef : file.getClasses()) {
+            if (!ALERT_SESSION_CLASS.equals(classDef.getType())) continue;
+            result.classCount++;
+            for (Field field : classDef.getFields()) {
+                if ("f".equals(field.getName()) && "Lh/f;".equals(field.getType())
+                        && AccessFlags.PRIVATE.isSet(field.getAccessFlags())
+                        && AccessFlags.FINAL.isSet(field.getAccessFlags())) {
+                    result.fieldAnchorCount++;
+                }
+                if ("g".equals(field.getName()) && "Z".equals(field.getType())) {
+                    result.guardFieldCount++;
+                }
+            }
+            for (Method method : classDef.getMethods()) {
+                if (matchesAlertTarget(method)) {
+                    result.targetMethodCount++;
+                    result.anchorCount += countCall(method, ALERT_ANCHOR);
+                    result.hookCallCount += countCall(method, ALERT_HELPER);
+                    result.hookAfterAnchorCount += countAdjacentCalls(
+                            method, ALERT_ANCHOR, ALERT_HELPER);
+                }
+                if (matchesAlertHelper(method)) {
+                    result.helperMethodCount++;
+                    result.producerCallCount += countCall(method, ALERT_PRODUCER);
+                    result.collectorCallCount += countCall(method, ALERT_COLLECTOR);
+                    result.guardReadCount += countFieldOpcode(
+                            method, ALERT_GUARD, Opcode.IGET_BOOLEAN);
+                    result.guardWriteCount += countFieldOpcode(
+                            method, ALERT_GUARD, Opcode.IPUT_BOOLEAN);
+                    result.logMarkerCount += countString(
+                            method, "cluster alert producer/collector attached");
+                }
+            }
+        }
+        return result;
+    }
+
+    static void patchAlertHook(byte[] inputDex, File outputDex) throws IOException {
+        AlertInspection inspection = inspectAlertHook(inputDex);
+        if (!inspection.stockTargets()) {
+            throw new IOException("Waze alert-hook target is not compatible stock: "
+                    + inspection.summary());
+        }
+        DexBackedDexFile input = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new ByteArrayInputStream(inputDex));
+        List<ClassDef> classes = new ArrayList<>();
+        int rewritten = 0;
+        for (ClassDef classDef : input.getClasses()) {
+            if (ALERT_SESSION_CLASS.equals(classDef.getType())) {
+                classes.add(rewriteAlertClass(classDef));
+                rewritten++;
+            } else {
+                classes.add(ImmutableClassDef.of(classDef));
+            }
+        }
+        if (rewritten != 1) {
+            throw new IOException("Waze alert-hook class rewrite count=" + rewritten);
+        }
+        DexPool.writeTo(outputDex.getAbsolutePath(),
+                new ImmutableDexFile(input.getOpcodes(), classes));
+        AlertInspection verified = inspectAlertHook(Files.readAllBytes(outputDex.toPath()));
+        if (!verified.patchedTargets()) {
+            throw new IOException("Waze alert-hook verification failed: " + verified.summary());
+        }
+    }
+
+    private static ClassDef rewriteAlertClass(ClassDef classDef) {
+        List<Field> fields = new ArrayList<>();
+        classDef.getFields().forEach(fields::add);
+        fields.add(new ImmutableField(
+                ALERT_SESSION_CLASS, "g", "Z", AccessFlags.PRIVATE.getValue(),
+                null, Collections.emptySet(), Collections.emptySet()));
+
+        List<Method> methods = new ArrayList<>();
+        int targetCount = 0;
+        for (Method method : classDef.getMethods()) {
+            if (matchesAlertTarget(method)) {
+                methods.add(injectAlertHelperCall(method));
+                targetCount++;
+            } else {
+                methods.add(ImmutableMethod.of(method));
+            }
+        }
+        if (targetCount != 1) {
+            throw new IllegalStateException("Waze alert target count=" + targetCount);
+        }
+        methods.add(buildAlertHelper());
+        return new ImmutableClassDef(
+                classDef.getType(), classDef.getAccessFlags(), classDef.getSuperclass(),
+                classDef.getInterfaces(), classDef.getSourceFile(), classDef.getAnnotations(),
+                fields, methods);
+    }
+
+    private static Method injectAlertHelperCall(Method method) {
+        MethodImplementation source = method.getImplementation();
+        if (source == null || countCall(method, ALERT_HELPER) != 0) {
+            throw new IllegalStateException("Waze alert target is not stock");
+        }
+        List<? extends Instruction> instructions = toList(source);
+        int anchor = -1;
+        for (int index = 0; index < instructions.size(); index++) {
+            if (!isCall(instructions.get(index), ALERT_ANCHOR)) continue;
+            if (anchor >= 0) throw new IllegalStateException("Waze alert anchor is ambiguous");
+            anchor = index;
+        }
+        if (anchor < 0) throw new IllegalStateException("Waze alert anchor is missing");
+        int parameterWords = 1;
+        for (CharSequence type : method.getParameterTypes()) {
+            parameterWords += "J".contentEquals(type) || "D".contentEquals(type) ? 2 : 1;
+        }
+        int thisRegister = source.getRegisterCount() - parameterWords;
+        MutableMethodImplementation mutable = new MutableMethodImplementation(source);
+        mutable.addInstruction(anchor + 1, new BuilderInstruction35c(
+                Opcode.INVOKE_DIRECT, 1, thisRegister, 0, 0, 0, 0, ALERT_HELPER));
+        return immutable(method, mutable);
+    }
+
+    private static Method buildAlertHelper() {
+        MethodImplementationBuilder code = new MethodImplementationBuilder(8);
+        code.addInstruction(new BuilderInstruction22c(
+                Opcode.IGET_BOOLEAN, 0, 7, ALERT_GUARD));
+        code.addInstruction(new BuilderInstruction21t(
+                Opcode.IF_NEZ, 0, code.getLabel("return")));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 1, 7, 0, 0, 0, 0,
+                method("Landroidx/car/app/Session;", "getCarContext",
+                        Collections.emptyList(), "Landroidx/car/app/CarContext;")));
+        code.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 0));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 1, 7, 0, 0, 0, 0,
+                method("Landroidx/car/app/Session;", "getLifecycle",
+                        Collections.emptyList(), "Landroidx/lifecycle/Lifecycle;")));
+        code.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 1));
+        code.addInstruction(new BuilderInstruction12x(Opcode.MOVE_OBJECT, 2, 7));
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.CHECK_CAST, 2,
+                new ImmutableTypeReference("Landroidx/lifecycle/LifecycleOwner;")));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 1, 2, 0, 0, 0, 0,
+                method("Landroidx/lifecycle/LifecycleOwnerKt;", "getLifecycleScope",
+                        Collections.singletonList("Landroidx/lifecycle/LifecycleOwner;"),
+                        "Landroidx/lifecycle/LifecycleCoroutineScope;")));
+        code.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 2));
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.CHECK_CAST, 2, new ImmutableTypeReference("Lkotlinx/coroutines/aj;")));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_INTERFACE, 1, 7, 0, 0, 0, 0,
+                method("Lorg/a/d/a/a;", "getKoin", Collections.emptyList(), "Lorg/a/d/a;")));
+        code.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 1, 3, 0, 0, 0, 0,
+                method("Lorg/a/d/a;", "a", Collections.emptyList(), "Lorg/a/d/j/a;")));
+        code.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 1, 3, 0, 0, 0, 0,
+                method("Lorg/a/d/j/a;", "c", Collections.emptyList(), "Lorg/a/d/k/b;")));
+        code.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3));
+        addKoinLookup(code, 3, 4, 5, 4, true, "Lcom/waze/car_lib/b/ap;");
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 3, 4, 0, 2, 0, 0, ALERT_PRODUCER));
+        addKoinLookup(code, 3, 4, 5, 3, false, "Lcom/waze/car_lib/b/f;");
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 3, 3, 1, 0, 0, 0, ALERT_COLLECTOR));
+        code.addInstruction(new BuilderInstruction11n(Opcode.CONST_4, 0, 1));
+        code.addInstruction(new BuilderInstruction22c(
+                Opcode.IPUT_BOOLEAN, 0, 7, ALERT_GUARD));
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.CONST_STRING, 0, new ImmutableStringReference("BYD_WAZE_ALERT")));
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.CONST_STRING, 1,
+                new ImmutableStringReference("cluster alert producer/collector attached")));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 2, 0, 1, 0, 0, 0,
+                method("Landroid/util/Log;", "i",
+                        java.util.Arrays.asList("Ljava/lang/String;", "Ljava/lang/String;"), "I")));
+        code.addLabel("return");
+        code.addInstruction(new BuilderInstruction10x(Opcode.RETURN_VOID));
+        return new ImmutableMethod(
+                ALERT_SESSION_CLASS, "c", Collections.emptyList(), "V",
+                AccessFlags.PRIVATE.getValue() | AccessFlags.FINAL.getValue(),
+                Collections.emptySet(), Collections.emptySet(), code.getMethodImplementation());
+    }
+
+    private static void addKoinLookup(MethodImplementationBuilder code, int rootRegister,
+            int lookupRegister, int classRegister, int resultRegister,
+            boolean clearNullRegister, String type) {
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.NEW_INSTANCE, lookupRegister, new ImmutableTypeReference("Lh/g/b/m;")));
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.CONST_CLASS, classRegister, new ImmutableTypeReference(type)));
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_DIRECT, 2, lookupRegister, classRegister, 0, 0, 0,
+                method("Lh/g/b/m;", "<init>",
+                        Collections.singletonList("Ljava/lang/Class;"), "V")));
+        if (clearNullRegister) {
+            code.addInstruction(new BuilderInstruction11n(Opcode.CONST_4, 6, 0));
+        }
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 4, rootRegister, lookupRegister, 6, 6, 0,
+                method("Lorg/a/d/k/b;", "a", java.util.Arrays.asList(
+                        "Lh/l/c;", "Lorg/a/d/i/a;", "Lh/g/a/a;"),
+                        "Ljava/lang/Object;")));
+        code.addInstruction(new BuilderInstruction11x(
+                Opcode.MOVE_RESULT_OBJECT, resultRegister));
+        code.addInstruction(new BuilderInstruction21c(
+                Opcode.CHECK_CAST, resultRegister, new ImmutableTypeReference(type)));
+    }
+
+    private static ImmutableMethodReference method(
+            String owner, String name, List<String> parameters, String returnType) {
+        return new ImmutableMethodReference(owner, name, parameters, returnType);
+    }
+
     private static Method injectApplicationInit(Method method) {
         if (countCall(method, BRIDGE_INIT) != 0 || method.getImplementation() == null) {
             throw new IllegalStateException("Waze application lifecycle hook is not stock");
@@ -212,6 +462,22 @@ final class WazePatchEngine {
                 && method.getParameterTypes().size() == 2
                 && "Z".equals(method.getParameterTypes().get(0).toString())
                 && "I".equals(method.getParameterTypes().get(1).toString())
+                && "V".equals(method.getReturnType());
+    }
+
+    private static boolean matchesAlertTarget(Method method) {
+        return ALERT_SESSION_CLASS.equals(method.getDefiningClass())
+                && "onCreateScreen".equals(method.getName())
+                && method.getParameterTypes().size() == 1
+                && "Landroid/content/Intent;".equals(
+                method.getParameterTypes().get(0).toString())
+                && "Landroidx/car/app/Screen;".equals(method.getReturnType());
+    }
+
+    private static boolean matchesAlertHelper(Method method) {
+        return ALERT_SESSION_CLASS.equals(method.getDefiningClass())
+                && "c".equals(method.getName())
+                && method.getParameterTypes().isEmpty()
                 && "V".equals(method.getReturnType());
     }
 
@@ -344,11 +610,58 @@ final class WazePatchEngine {
         return count;
     }
 
+    private static int countAdjacentCalls(
+            Method method, MethodReference first, MethodReference second) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        List<? extends Instruction> instructions = toList(implementation);
+        int count = 0;
+        for (int index = 0; index + 1 < instructions.size(); index++) {
+            if (isCall(instructions.get(index), first)
+                    && isCall(instructions.get(index + 1), second)) count++;
+        }
+        return count;
+    }
+
+    private static int countFieldOpcode(
+            Method method, FieldReference expected, Opcode opcode) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        int count = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (instruction.getOpcode() != opcode
+                    || !(instruction instanceof ReferenceInstruction)) continue;
+            Object reference = ((ReferenceInstruction) instruction).getReference();
+            if (reference instanceof FieldReference
+                    && sameField((FieldReference) reference, expected)) count++;
+        }
+        return count;
+    }
+
+    private static int countString(Method method, String expected) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        int count = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (!(instruction instanceof ReferenceInstruction)) continue;
+            Object reference = ((ReferenceInstruction) instruction).getReference();
+            if (reference instanceof StringReference
+                    && expected.equals(((StringReference) reference).getString())) count++;
+        }
+        return count;
+    }
+
     private static boolean sameMethod(MethodReference first, MethodReference second) {
         return first.getDefiningClass().equals(second.getDefiningClass())
                 && first.getName().equals(second.getName())
                 && first.getParameterTypes().equals(second.getParameterTypes())
                 && first.getReturnType().equals(second.getReturnType());
+    }
+
+    private static boolean sameField(FieldReference first, FieldReference second) {
+        return first.getDefiningClass().equals(second.getDefiningClass())
+                && first.getName().equals(second.getName())
+                && first.getType().equals(second.getType());
     }
 
     private static List<? extends Instruction> toList(MethodImplementation implementation) {
@@ -577,6 +890,47 @@ final class WazePatchEngine {
                     && routeTargetCount == 1 && routeHookCount == 1
                     && "ok".equals(routeGuard)
                     && bridgeClassCount == 1;
+        }
+    }
+
+    static final class AlertInspection {
+        int classCount;
+        int fieldAnchorCount;
+        int guardFieldCount;
+        int targetMethodCount;
+        int anchorCount;
+        int hookCallCount;
+        int hookAfterAnchorCount;
+        int helperMethodCount;
+        int producerCallCount;
+        int collectorCallCount;
+        int guardReadCount;
+        int guardWriteCount;
+        int logMarkerCount;
+
+        boolean stockTargets() {
+            return classCount == 1 && fieldAnchorCount == 1 && guardFieldCount == 0
+                    && targetMethodCount == 1 && anchorCount == 1
+                    && hookCallCount == 0 && helperMethodCount == 0;
+        }
+
+        boolean patchedTargets() {
+            return classCount == 1 && fieldAnchorCount == 1 && guardFieldCount == 1
+                    && targetMethodCount == 1 && anchorCount == 1
+                    && hookCallCount == 1 && hookAfterAnchorCount == 1
+                    && helperMethodCount == 1 && producerCallCount == 1
+                    && collectorCallCount == 1 && guardReadCount == 1
+                    && guardWriteCount == 1 && logMarkerCount == 1;
+        }
+
+        String summary() {
+            return "class=" + classCount + ", anchorField=" + fieldAnchorCount
+                    + ", field=" + guardFieldCount
+                    + ", target=" + targetMethodCount + ", anchor=" + anchorCount
+                    + ", hook=" + hookCallCount + ", adjacent=" + hookAfterAnchorCount
+                    + ", helper=" + helperMethodCount + ", producer=" + producerCallCount
+                    + ", collector=" + collectorCallCount + ", guardRead=" + guardReadCount
+                    + ", guardWrite=" + guardWriteCount + ", marker=" + logMarkerCount;
         }
     }
 }

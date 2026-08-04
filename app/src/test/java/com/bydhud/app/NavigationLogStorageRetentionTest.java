@@ -11,8 +11,26 @@ import org.junit.rules.TemporaryFolder;
 import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
+import java.util.List;
 
 public final class NavigationLogStorageRetentionTest {
+    @Test
+    public void findsNestedInterruptedRetentionTombstones() throws Exception {
+        File root = temporaryFolder.newFolder("retention-cleanup");
+        File session = new File(root, "20260720/waze-direct/session");
+        assertTrue(session.mkdirs());
+        File nestedDirectory = new File(session, ".delete-20260720-1-0");
+        assertTrue(nestedDirectory.mkdirs());
+        File nestedFile = new File(session, ".delete-20260720-2-0");
+        Files.write(nestedFile.toPath(), new byte[]{1});
+
+        List<File> tombstones = NavigationLogStorage.findRetiredTombstones(root);
+
+        assertEquals(2, tombstones.size());
+        assertTrue(tombstones.contains(nestedDirectory));
+        assertTrue(tombstones.contains(nestedFile));
+    }
+
     @Rule
     public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 
@@ -45,6 +63,22 @@ public final class NavigationLogStorageRetentionTest {
 
         assertTrue(current.exists());
         assertFalse(old.getParentFile().exists());
+    }
+
+    @Test
+    public void activeCropRetentionKeepsOnlyCurrentScreenshotWhenNeeded() throws IOException {
+        File root = temporaryFolder.newFolder("active-crop-screenshots");
+        File old = write(root,
+                "20260720/waze-crop/current/source_frame_1.png", 10);
+        File current = write(root,
+                "20260720/waze-crop/current/source_frame_2.png", 10);
+
+        NavigationLogStorage.enforceNavCaptureRetentionForTest(
+                root, "20260720", "waze-crop", "current",
+                "source_frame_2.png", 10L);
+
+        assertFalse(old.exists());
+        assertTrue(current.exists());
     }
 
     @Test

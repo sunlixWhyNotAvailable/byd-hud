@@ -43,6 +43,23 @@ final class LogShareZip {
         }
     }
 
+    static final class SelectionSummary {
+        final boolean ok;
+        final int dayCount;
+        final int fileCount;
+        final long sourceBytes;
+        final String detail;
+
+        SelectionSummary(boolean ok, int dayCount, int fileCount,
+                long sourceBytes, String detail) {
+            this.ok = ok;
+            this.dayCount = Math.max(0, dayCount);
+            this.fileCount = Math.max(0, fileCount);
+            this.sourceBytes = Math.max(0L, sourceBytes);
+            this.detail = detail == null ? "" : detail;
+        }
+    }
+
     private static final class SnapshotFile {
         final File file;
         final String entryName;
@@ -52,6 +69,30 @@ final class LogShareZip {
             this.file = file;
             this.entryName = entryName;
             this.length = length;
+        }
+    }
+
+    //Describes the current selection before the user chooses an export destination.
+    static SelectionSummary summarize(Context context, List<String> selectedDays) {
+        if (context == null) {
+            return new SelectionSummary(false, 0, 0, 0L, "missing context");
+        }
+        List<String> days;
+        try {
+            days = checkedDays(selectedDays);
+        } catch (IOException error) {
+            return new SelectionSummary(false, 0, 0, 0L, error.getMessage());
+        }
+        try {
+            List<SnapshotFile> files = snapshotFiles(context.getApplicationContext(), days);
+            long bytes = 0L;
+            for (SnapshotFile file : files) {
+                bytes += file.length;
+            }
+            return new SelectionSummary(!files.isEmpty(), days.size(), files.size(), bytes,
+                    files.isEmpty() ? "no readable files" : "ready");
+        } catch (IOException | RuntimeException error) {
+            return new SelectionSummary(false, days.size(), 0, 0L, error.getMessage());
         }
     }
 

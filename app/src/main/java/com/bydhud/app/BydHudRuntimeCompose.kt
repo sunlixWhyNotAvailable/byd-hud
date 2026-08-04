@@ -144,6 +144,18 @@ private sealed class UpdateCheckState {
     data class Error(val message: String) : UpdateCheckState()
 }
 
+private enum class StorageShareDestination {
+    Sentry,
+    Android
+}
+
+private enum class SentryUploadPhase {
+    Preparing,
+    Uploading,
+    Success,
+    Failure
+}
+
 //defines Palette UI/state support so Compose code can keep rendering intent explicit.
 private data class Palette(
     val dark: Boolean,
@@ -328,6 +340,7 @@ private data class Copy(
     val appVersion: String,
     val patchNotChecked: String,
     val patchDirectChannel: String,
+    val patchWazeAlerts: String,
     val patchClearSelection: String,
     val patchSelectFile: String,
     val patchSelectFileTitle: String,
@@ -368,6 +381,29 @@ private data class Copy(
     val randomize: String,
     val currentSelection: String,
     val manualPreview: String
+)
+
+private data class ShareCopy(
+    val shareLogsTitle: String,
+    val shareLogsSelection: String,
+    val shareLogsArchiveHint: String,
+    val shareLogsSensitiveWarning: String,
+    val shareLogsSentryNotice: String,
+    val shareToSentry: String,
+    val shareToAnotherApp: String,
+    val cancel: String,
+    val uploadTitle: String,
+    val preparing: String,
+    val uploading: String,
+    val success: String,
+    val failure: String,
+    val reportId: String,
+    val close: String,
+    val configurationTitle: String,
+    val configurationWarning: String,
+    val configurationUploadTitle: String,
+    val configurationSuccess: String,
+    val configurationFailure: String
 )
 
 //defines PressFeedback UI/state support so Compose code can keep rendering intent explicit.
@@ -470,7 +506,20 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var storageDeleteTotal by remember { mutableStateOf(0) }
     var storageShareDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageShareBusy by remember { mutableStateOf(false) }
+    var storageShareSummary by remember {
+        mutableStateOf<MainActivity.ComposeStorageShareSummary?>(null)
+    }
+    var storageShareDestination by remember { mutableStateOf<StorageShareDestination?>(null) }
+    var sentryUploadPhase by remember { mutableStateOf<SentryUploadPhase?>(null) }
+    var sentryUploadEventId by remember { mutableStateOf("") }
+    var sentryUploadError by remember { mutableStateOf("") }
+    var sentryUploadingConfiguration by remember { mutableStateOf(false) }
     var configurationShareBusy by remember { mutableStateOf(false) }
+    var configurationShareVisible by rememberSaveable { mutableStateOf(false) }
+    var configurationShareDestination by remember {
+        mutableStateOf<StorageShareDestination?>(null)
+    }
+    var logcatBusy by remember { mutableStateOf(false) }
     var lastAppsScanRevision by remember { mutableStateOf(activity.composeAppsScanRevision()) }
     var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
     var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
@@ -494,11 +543,15 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     val latestShowUpdateDialog by rememberUpdatedState(showUpdateDialog)
     val palette = if (snapshot.darkTheme) darkPalette() else lightPalette()
     val copy = if (snapshot.uaLanguage) uaCopy() else enCopy()
+    val shareCopy = shareCopy(copy.language)
     val blockingUiFlow = when {
         showSetupDialog -> "setup"
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
-        storageShareBusy -> "storage-share"
+        storageShareBusy || storageShareSummary != null
+            || (sentryUploadPhase != null && !sentryUploadingConfiguration) -> "storage-share"
+        configurationShareVisible || configurationShareBusy
+            || (sentryUploadPhase != null && sentryUploadingConfiguration) -> "configuration-share"
         pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty() -> "patch"
         pendingPatchProfile.isNotEmpty() || patchActionPending || snapshot.patchOperation.busy -> "patch"
         else -> ""
@@ -607,6 +660,54 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
         storageShareDays = days
         storageShareBusy = true
+        storageShareDestination = null
+        updateScope.launch {
+            try {
+                val summary = withContext(Dispatchers.IO) {
+                    activity.composeDescribeStorageShareDays(days)
+                }
+                if (summary.ok) {
+                    storageShareSummary = summary
+                } else {
+                    storageShareDays = emptyList()
+                    activity.composeAppendStatus("Storage share failed: ${summary.detail}")
+                }
+            } catch (error: Exception) {
+                storageShareDays = emptyList()
+                storageShareDestination = null
+                storageShareSummary = null
+                activity.composeAppendStatus(
+                    "Storage share failed: ${error.message ?: error.javaClass.simpleName}"
+                )
+            } finally {
+                storageShareBusy = false
+            }
+        }
+    }
+
+    fun runLogcatAction(start: Boolean) {
+        if (logcatBusy) return
+        logcatBusy = true
+        updateScope.launch {
+            withContext(Dispatchers.IO) {
+                if (start) activity.composeStartLogcat() else activity.composeStopLogcat()
+            }
+            logcatBusy = false
+            refresh()
+        }
+    }
+
+    fun beginConfigurationShare(destination: StorageShareDestination) {
+        if (configurationShareBusy) return
+        configurationShareVisible = false
+        configurationShareDestination = destination
+        configurationShareBusy = true
+        sentryUploadingConfiguration = destination == StorageShareDestination.Sentry
+        if (destination == StorageShareDestination.Sentry) {
+            sentryUploadEventId = ""
+            sentryUploadError = ""
+            sentryUploadPhase = SentryUploadPhase.Preparing
+        }
     }
 
     LaunchedEffect(blockingUiFlow) {
@@ -748,17 +849,85 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         refresh()
     }
 
-    LaunchedEffect(storageShareBusy, storageShareDays) {
-        if (!storageShareBusy) {
+    LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination) {
+        val destination = storageShareDestination
+        if (!storageShareBusy || destination == null) {
             return@LaunchedEffect
         }
-        val detail = withContext(Dispatchers.IO + NonCancellable) {
-            activity.composeShareStorageDays(storageShareDays)
+        try {
+            if (destination == StorageShareDestination.Sentry) {
+                val result = withContext(Dispatchers.IO + NonCancellable) {
+                    activity.composeUploadStorageDaysToSentry(storageShareDays) {
+                        activity.runOnUiThread { sentryUploadPhase = SentryUploadPhase.Uploading }
+                    }
+                }
+                sentryUploadEventId = result.eventId
+                sentryUploadError = result.detail
+                sentryUploadPhase = if (result.ok) {
+                    SentryUploadPhase.Success
+                } else {
+                    SentryUploadPhase.Failure
+                }
+                activity.composeAppendStatus("Sentry log upload: ${result.detail}")
+            } else {
+                val detail = withContext(Dispatchers.IO + NonCancellable) {
+                    activity.composeShareStorageDays(storageShareDays)
+                }
+                activity.composeAppendStatus("Storage share: $detail")
+            }
+        } catch (error: Exception) {
+            val detail = error.message ?: error.javaClass.simpleName
+            if (destination == StorageShareDestination.Sentry) {
+                sentryUploadError = detail
+                sentryUploadPhase = SentryUploadPhase.Failure
+            }
+            activity.composeAppendStatus("Storage share failed: $detail")
+        } finally {
+            storageShareBusy = false
+            storageShareDays = emptyList()
+            storageShareDestination = null
+            refresh()
         }
-        activity.composeAppendStatus("Storage share: $detail")
-        storageShareBusy = false
-        storageShareDays = emptyList()
-        refresh()
+    }
+
+    LaunchedEffect(configurationShareBusy, configurationShareDestination) {
+        val destination = configurationShareDestination
+        if (!configurationShareBusy || destination == null) {
+            return@LaunchedEffect
+        }
+        try {
+            if (destination == StorageShareDestination.Sentry) {
+                val result = withContext(Dispatchers.IO + NonCancellable) {
+                    activity.composeUploadVehicleConfigurationToSentry {
+                        activity.runOnUiThread { sentryUploadPhase = SentryUploadPhase.Uploading }
+                    }
+                }
+                sentryUploadEventId = result.eventId
+                sentryUploadError = result.detail
+                sentryUploadPhase = if (result.ok) {
+                    SentryUploadPhase.Success
+                } else {
+                    SentryUploadPhase.Failure
+                }
+                activity.composeAppendStatus("Sentry configuration upload: ${result.detail}")
+            } else {
+                val detail = withContext(Dispatchers.IO + NonCancellable) {
+                    activity.composeShareVehicleConfiguration()
+                }
+                activity.composeAppendStatus("Configuration share: $detail")
+            }
+        } catch (error: Exception) {
+            val detail = error.message ?: error.javaClass.simpleName
+            if (destination == StorageShareDestination.Sentry) {
+                sentryUploadError = detail
+                sentryUploadPhase = SentryUploadPhase.Failure
+            }
+            activity.composeAppendStatus("Configuration share failed: $detail")
+        } finally {
+            configurationShareBusy = false
+            configurationShareDestination = null
+            refresh()
+        }
     }
 
     Box(
@@ -842,22 +1011,13 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         snapshot = snapshot,
                         activity = activity,
                         configurationShareBusy = configurationShareBusy,
-                        runAction = ::runAction,
+                        logcatBusy = logcatBusy,
+                        onStartLogcat = { runLogcatAction(true) },
+                        onStopLogcat = { runLogcatAction(false) },
                         onShareConfiguration = {
-                            if (!configurationShareBusy) {
-                                configurationShareBusy = true
-                                updateScope.launch {
-                                    val detail = try {
-                                        withContext(Dispatchers.IO) {
-                                            activity.composeShareVehicleConfiguration()
-                                        }
-                                    } catch (error: Exception) {
-                                        "failed: ${error.message}"
-                                    }
-                                    activity.composeAppendStatus("Configuration share: $detail")
-                                    configurationShareBusy = false
-                                    refresh()
-                                }
+                            if (!configurationShareBusy
+                                && activity.composeTryStartBlockingUiFlow("configuration-share")) {
+                                configurationShareVisible = true
                             }
                         }
                     )
@@ -944,6 +1104,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             UpdateCheckOverlay(
                 copy = copy,
                 palette = palette,
+                uaLanguage = snapshot.uaLanguage,
                 state = updateState,
                 onUpdate = {
                     val available = updateState
@@ -1036,6 +1197,58 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 folderCount = pendingStorageDeleteDays.size,
                 onConfirm = { beginStorageDelete(pendingStorageDeleteDays) },
                 onDismiss = { pendingStorageDeleteDays = emptyList() }
+            )
+        }
+
+        storageShareSummary?.let { summary ->
+            StorageShareDestinationOverlay(
+                copy = copy,
+                shareCopy = shareCopy,
+                palette = palette,
+                summary = summary,
+                onSentry = {
+                    storageShareSummary = null
+                    sentryUploadingConfiguration = false
+                    sentryUploadEventId = ""
+                    sentryUploadError = ""
+                    sentryUploadPhase = SentryUploadPhase.Preparing
+                    storageShareDestination = StorageShareDestination.Sentry
+                    storageShareBusy = true
+                },
+                onAnotherApp = {
+                    storageShareSummary = null
+                    storageShareDestination = StorageShareDestination.Android
+                    storageShareBusy = true
+                },
+                onCancel = {
+                    storageShareSummary = null
+                    storageShareDays = emptyList()
+                }
+            )
+        }
+
+        sentryUploadPhase?.let { phase ->
+            SentryUploadOverlay(
+                copy = shareCopy,
+                palette = palette,
+                phase = phase,
+                eventId = sentryUploadEventId,
+                error = sentryUploadError,
+                configuration = sentryUploadingConfiguration,
+                onClose = {
+                    sentryUploadPhase = null
+                    sentryUploadingConfiguration = false
+                }
+            )
+        }
+
+        if (configurationShareVisible) {
+            ConfigurationShareDestinationOverlay(
+                copy = shareCopy,
+                palette = palette,
+                onSentry = { beginConfigurationShare(StorageShareDestination.Sentry) },
+                onAnotherApp = { beginConfigurationShare(StorageShareDestination.Android) },
+                onCancel = { configurationShareVisible = false }
             )
         }
 
@@ -1396,6 +1609,7 @@ private fun SetupReminderOverlay(
 private fun UpdateCheckOverlay(
     copy: Copy,
     palette: Palette,
+    uaLanguage: Boolean,
     state: UpdateCheckState,
     onUpdate: () -> Unit,
     onClose: () -> Unit
@@ -1454,7 +1668,10 @@ private fun UpdateCheckOverlay(
                             copy = copy,
                             palette = palette,
                             version = state.info.version,
-                            notes = state.info.releaseNotes
+                            notes = AppUpdateManager.releaseNotesForLanguage(
+                                state.info.releaseNotes,
+                                uaLanguage
+                            )
                         )
                         is UpdateCheckState.Downloading -> {
                             Text(
@@ -1467,7 +1684,10 @@ private fun UpdateCheckOverlay(
                                 copy = copy,
                                 palette = palette,
                                 version = state.info.version,
-                                notes = state.info.releaseNotes
+                                notes = AppUpdateManager.releaseNotesForLanguage(
+                                    state.info.releaseNotes,
+                                    uaLanguage
+                                )
                             )
                         }
                         is UpdateCheckState.Error -> Text(
@@ -1685,6 +1905,245 @@ private fun UpdateProgressBar(progress: String, palette: Palette) {
 }
 
 @Composable
+private fun StorageShareDestinationOverlay(
+    copy: Copy,
+    shareCopy: ShareCopy,
+    palette: Palette,
+    summary: MainActivity.ComposeStorageShareSummary,
+    onSentry: () -> Unit,
+    onAnotherApp: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                shareCopy.shareLogsTitle,
+                color = palette.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    String.format(
+                        Locale.US,
+                        shareCopy.shareLogsSelection,
+                        summary.dayCount,
+                        summary.fileCount,
+                        formatBytes(summary.sourceBytes, copy)
+                    ),
+                    color = palette.text,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Text(
+                    shareCopy.shareLogsArchiveHint,
+                    color = palette.text,
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp
+                )
+                Text(
+                    shareCopy.shareLogsSensitiveWarning,
+                    color = palette.yellow,
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp
+                )
+                Text(
+                    shareCopy.shareLogsSentryNotice,
+                    color = palette.text,
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+            ) {
+                HudButton(
+                    shareCopy.shareToSentry,
+                    palette,
+                    primary = true,
+                    width = 210.dp,
+                    onClick = onSentry
+                )
+                HudButton(
+                    shareCopy.shareToAnotherApp,
+                    palette,
+                    width = 150.dp,
+                    onClick = onAnotherApp
+                )
+                HudButton(shareCopy.cancel, palette, width = 138.dp, onClick = onCancel)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SentryUploadOverlay(
+    copy: ShareCopy,
+    palette: Palette,
+    phase: SentryUploadPhase,
+    eventId: String,
+    error: String,
+    configuration: Boolean,
+    onClose: () -> Unit
+) {
+    val complete = phase == SentryUploadPhase.Success || phase == SentryUploadPhase.Failure
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                if (configuration) copy.configurationUploadTitle else copy.uploadTitle,
+                color = palette.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            if (!complete) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    LoadingSpinner(palette)
+                    Spacer(Modifier.width(14.dp))
+                    Text(
+                        if (phase == SentryUploadPhase.Preparing) copy.preparing else copy.uploading,
+                        color = palette.text,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+            } else {
+                Text(
+                    if (phase == SentryUploadPhase.Success) {
+                        if (configuration) copy.configurationSuccess else copy.success
+                    } else {
+                        if (configuration) copy.configurationFailure else copy.failure
+                    },
+                    color = if (phase == SentryUploadPhase.Success) palette.green else palette.red,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                val detail = if (phase == SentryUploadPhase.Success) {
+                    "${copy.reportId}: $eventId"
+                } else {
+                    error
+                }
+                CodeBlock(detail, palette, compact = true)
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    HudButton(copy.close, palette, width = 138.dp, onClick = onClose)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ConfigurationShareDestinationOverlay(
+    copy: ShareCopy,
+    palette: Palette,
+    onSentry: () -> Unit,
+    onAnotherApp: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(760.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                copy.configurationTitle,
+                color = palette.text,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    copy.configurationWarning,
+                    color = palette.yellow,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+                Text(
+                    copy.shareLogsSentryNotice,
+                    color = palette.text,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+            ) {
+                HudButton(
+                    copy.shareToSentry,
+                    palette,
+                    primary = true,
+                    width = 210.dp,
+                    onClick = onSentry
+                )
+                HudButton(
+                    copy.shareToAnotherApp,
+                    palette,
+                    width = 220.dp,
+                    onClick = onAnotherApp
+                )
+                HudButton(copy.cancel, palette, width = 138.dp, onClick = onCancel)
+            }
+        }
+    }
+}
+
+@Composable
 //asks once before deleting folders so a miss-click cannot start destructive cleanup.
 private fun StorageDeleteConfirmOverlay(
     copy: Copy,
@@ -1881,7 +2340,15 @@ private fun AppsTab(
             Section(copy.supportedApps, palette) {
                 snapshot.supportedApps.forEachIndexed { index, row ->
                     if (index > 0) Divider(palette)
-                    AppRow(row, copy, palette, supported = true, activity = activity, runAction = runAction)
+                    AppRow(
+                        row,
+                        copy,
+                        palette,
+                        supported = true,
+                        runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                        activity = activity,
+                        runAction = runAction
+                    )
                 }
             }
         }
@@ -1893,7 +2360,15 @@ private fun AppsTab(
                 } else {
                     snapshot.allApps.forEachIndexed { index, row ->
                         if (index > 0) Divider(palette)
-                        AppRow(row, copy, palette, supported = false, activity = activity, runAction = runAction)
+                        AppRow(
+                            row,
+                            copy,
+                            palette,
+                            supported = false,
+                            runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                            activity = activity,
+                            runAction = runAction
+                        )
                     }
                 }
             }
@@ -1908,6 +2383,7 @@ private fun AppRow(
     copy: Copy,
     palette: Palette,
     supported: Boolean,
+    runtimeStatusKnown: Boolean,
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
 ) {
@@ -1944,8 +2420,10 @@ private fun AppRow(
                     StatusChip(if (row.installed) copy.installed else copy.notInstalled,
                         if (row.installed) ChipKind.Green else ChipKind.Red, palette, width = 116.dp)
                 }
-                StatusChip(if (runningForStatus) copy.running else copy.notRunning,
-                    if (runningForStatus) ChipKind.Green else ChipKind.Yellow, palette, width = 174.dp)
+                if (runtimeStatusKnown) {
+                    StatusChip(if (runningForStatus) copy.running else copy.notRunning,
+                        if (runningForStatus) ChipKind.Green else ChipKind.Yellow, palette, width = 174.dp)
+                }
                 StatusChip(
                     when {
                         supported && row.supportedHud -> copy.supported
@@ -1988,7 +2466,9 @@ private fun LogsTab(
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
     configurationShareBusy: Boolean,
-    runAction: (() -> Unit) -> Unit,
+    logcatBusy: Boolean,
+    onStartLogcat: () -> Unit,
+    onStopLogcat: () -> Unit,
     onShareConfiguration: () -> Unit
 ) {
     LazyPageSurface(copy.logs, copy.logsHint, palette) {
@@ -2016,21 +2496,21 @@ private fun LogsTab(
                         copy.startLogcat,
                         palette,
                         primary = !snapshot.logcatRecording,
-                        enabled = !snapshot.logcatRecording,
+                        enabled = !snapshot.logcatRecording && !logcatBusy,
                         width = 0.dp,
                         modifier = Modifier.weight(1f)
                     ) {
-                        runAction { activity.composeStartLogcat() }
+                        onStartLogcat()
                     }
                     HudButton(
                         copy.stopLogcat,
                         palette,
                         primary = snapshot.logcatRecording,
-                        enabled = snapshot.logcatRecording,
+                        enabled = snapshot.logcatRecording && !logcatBusy,
                         width = 0.dp,
                         modifier = Modifier.weight(1f)
                     ) {
-                        runAction { activity.composeStopLogcat() }
+                        onStopLogcat()
                     }
                     HudButton(
                         copy.shareConfiguration,
@@ -2309,24 +2789,32 @@ private fun PatchTab(
                                     overflow = TextOverflow.Ellipsis
                                 )
                             }
+                            val componentStates = buildList {
+                                add(copy.patchDirectChannel to row.directState)
+                                add(patchOptionalLabel(row, copy.language) to row.optionalState)
+                                if (row.alertLabel.isNotEmpty()) {
+                                    add(patchAlertLabel(row, copy.language, copy) to row.alertState)
+                                }
+                            }
+                            val allPatched = componentStates.all { (_, state) -> state == "PATCHED" }
                             Row(
                                 modifier = Modifier.weight(1f),
-                                verticalAlignment = Alignment.CenterVertically
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                verticalAlignment = Alignment.Top
                             ) {
-                                Column(
-                                    verticalArrangement = Arrangement.spacedBy(6.dp),
-                                    horizontalAlignment = Alignment.Start
-                                ) {
-                                    if (row.directState == "PATCHED" && row.optionalState == "PATCHED") {
-                                        StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 240.dp)
-                                    } else {
-                                        PatchComponentChip(copy.patchDirectChannel, row.directState, copy, palette)
-                                        PatchComponentChip(
-                                            patchOptionalLabel(row, copy.language),
-                                            row.optionalState,
-                                            copy,
-                                            palette
-                                        )
+                                if (allPatched) {
+                                    StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 240.dp)
+                                } else {
+                                    componentStates.chunked(2).forEach { columnStates ->
+                                        Column(
+                                            modifier = Modifier.weight(1f),
+                                            verticalArrangement = Arrangement.spacedBy(6.dp),
+                                            horizontalAlignment = Alignment.Start
+                                        ) {
+                                            columnStates.forEach { (label, state) ->
+                                                PatchComponentChip(label, state, copy, palette)
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -2418,6 +2906,15 @@ private fun patchOptionalLabel(
 ): String {
     if (language != Language.Ua) return row.optionalLabel
     return if (row.profileId == "waze") "Стабільна сесія" else "Аудіоканал"
+}
+
+private fun patchAlertLabel(
+    row: MainActivity.ComposeNavigatorPatchRow,
+    language: Language,
+    copy: Copy
+): String {
+    if (row.profileId != "waze") return row.alertLabel
+    return if (language == Language.Ua) copy.patchWazeAlerts else row.alertLabel
 }
 
 @Composable
@@ -4196,13 +4693,14 @@ private fun enCopy() = Copy(
     patchTab = "APPLICATION PATCH",
     patchHint = "Patch navigation apps to enable direct HUD output.",
     patchWarning = "Warning",
-    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components will be patched locally and verified before Android asks you to install the result. Compatibility checks do not prove publisher identity; select only a source you trust. Report unsupported versions for analysis:",
+    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components are patched locally and verified before Android asks you to install the result. Only known original, project, or confirmed device-local patch signers are accepted. Report unsupported versions for analysis:",
     patchRiskWarning = "Proceed at your own risk. App developer is not responsible for any data loss or errors.",
     availableNavigators = "Available navigation apps",
     noSupportedNavigators = "No supported navigation apps",
     appVersion = "Version",
     patchNotChecked = "not checked",
     patchDirectChannel = "Direct channel",
+    patchWazeAlerts = "Waze alerts",
     patchClearSelection = "Clear selected file",
     patchSelectFile = "Optionally select file",
     patchSelectFileTitle = "Select another app version?",
@@ -4394,13 +4892,14 @@ private fun uaCopy() = enCopy().copy(
     patchTab = "ПАТЧ ЗАСТОСУНКУ",
     patchHint = "Патч навігатора для підтримки прямого каналу виводу на HUD.",
     patchWarning = "Попередження",
-    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Перевірка сумісності не підтверджує видавця: обирайте лише джерело, якому довіряєте. Повідомляйте про непідтримувані версії для аналізу:",
+    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Приймаються лише відомі оригінальні, проєктні або підтверджені локальні ключі патчу цього пристрою. Повідомляйте про непідтримувані версії для аналізу:",
     patchRiskWarning = "Дійте на власний ризик. Розробник застосунку не несе відповідальності за втрату даних та помилки.",
     availableNavigators = "Доступні навігатори",
     noSupportedNavigators = "Немає підтримуваних навігаторів",
     appVersion = "Версія",
     patchNotChecked = "не перевірено",
     patchDirectChannel = "Прямий канал",
+    patchWazeAlerts = "Попередження Waze",
     patchClearSelection = "Скасувати вибір файла",
     patchSelectFile = "Опційно обрати файл",
     patchSelectFileTitle = "Обрати іншу версію застосунку?",
@@ -4442,3 +4941,51 @@ private fun uaCopy() = enCopy().copy(
     currentSelection = "Поточний вибір",
     manualPreview = "попередній перегляд ручного виводу"
 )
+
+private fun shareCopy(language: Language) = if (language == Language.Ua) {
+    ShareCopy(
+        shareLogsTitle = "Поділитися навігаційними логами",
+        shareLogsSelection = "Обрано днів: %d · файлів: %d · %s",
+        shareLogsArchiveHint = "Буде підготовлено один ZIP-архів із повним вмістом усіх обраних тек за дні.",
+        shareLogsSensitiveWarning = "Архів може містити точні координати, маршрути, назви вулиць і пошукові запити, знімки або direct-зображення Waze та повний системний logcat.",
+        shareLogsSentryNotice = "Надсилання розробнику використовує сервіс Sentry.",
+        shareToSentry = "Надіслати розробнику",
+        shareToAnotherApp = "Інший застосунок",
+        cancel = "Скасувати",
+        uploadTitle = "Надсилання логів розробнику",
+        preparing = "Готуємо архів...",
+        uploading = "Надсилаємо архів...",
+        success = "Логи успішно надіслано.",
+        failure = "Не вдалося надіслати логи.",
+        reportId = "ID звіту",
+        close = "Закрити",
+        configurationTitle = "Поділитися конфігурацією авто",
+        configurationWarning = "Архів міститиме технічні відомості про пристрій, установлені пакети й процеси, мережеву конфігурацію та SOME/IP. Перевірте отримувача перед надсиланням.",
+        configurationUploadTitle = "Надсилання конфігурації розробнику",
+        configurationSuccess = "Конфігурацію успішно надіслано.",
+        configurationFailure = "Не вдалося надіслати конфігурацію."
+    )
+} else {
+    ShareCopy(
+        shareLogsTitle = "Share navigation logs",
+        shareLogsSelection = "%d selected days · %d files · %s",
+        shareLogsArchiveHint = "One ZIP archive containing the complete selected day folders will be prepared.",
+        shareLogsSensitiveWarning = "The archive may contain exact coordinates, routes, street and search text, Waze screenshots or direct images, and full system logcat output.",
+        shareLogsSentryNotice = "Sending to developer uses Sentry service.",
+        shareToSentry = "Send to developer",
+        shareToAnotherApp = "Another app",
+        cancel = "Cancel",
+        uploadTitle = "Sending logs to developer",
+        preparing = "Preparing the archive...",
+        uploading = "Uploading the archive...",
+        success = "Logs were sent successfully.",
+        failure = "The logs could not be sent.",
+        reportId = "Report ID",
+        close = "Close",
+        configurationTitle = "Share vehicle configuration",
+        configurationWarning = "The archive will include technical device, installed package and process details, network configuration, and SOME/IP data. Verify the recipient before sending.",
+        configurationUploadTitle = "Sending configuration to developer",
+        configurationSuccess = "Configuration sent successfully.",
+        configurationFailure = "The configuration could not be sent."
+    )
+}

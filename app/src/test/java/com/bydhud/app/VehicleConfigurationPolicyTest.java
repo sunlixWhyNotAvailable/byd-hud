@@ -53,4 +53,46 @@ public final class VehicleConfigurationPolicyTest {
         assertFalse(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(
                 "sha256sum /data/app/app.revanced.android.apps.maps/base.apk; id"));
     }
+
+    @Test
+    public void configRedactionKeepsUsefulInventoryAndMasksCredentials() {
+        String source = "{\"service\":\"someip\",\"password\":\"secret\","
+                + "\"token\":\"abc\",\"port\":52001}";
+
+        String redacted = VehicleConfigurationZip.redactConfigContent(source);
+
+        assertTrue(redacted.contains("someip"));
+        assertTrue(redacted.contains("52001"));
+        assertTrue(redacted.contains("[REDACTED]"));
+        assertFalse(redacted.contains("secret"));
+        assertFalse(redacted.contains("abc"));
+    }
+
+    @Test
+    public void configRedactionMasksXmlAndAuthorizationValues() {
+        String source = "<location><latitude>50.1</latitude></location>\n"
+                + "Authorization: Bearer abc.def\n"
+                + "port=52001";
+
+        String redacted = VehicleConfigurationZip.redactConfigContent(source);
+
+        assertTrue(redacted.contains("[REDACTED]"));
+        assertTrue(redacted.contains("port=52001"));
+        assertFalse(redacted.contains("50.1"));
+        assertFalse(redacted.contains("abc.def"));
+    }
+
+    @Test
+    public void configRedactionMasksSensitiveXmlAttributePairs() {
+        String source = "<property name=\"vin\" value=\"secret-vin\"/>\n"
+                + "<entry key='token' data='secret-token'/>";
+
+        assertTrue(VehicleConfigurationZip.containsSensitiveConfigContent(source));
+        String redacted = VehicleConfigurationZip.redactConfigContent(source);
+
+        assertFalse(redacted.contains("secret-vin"));
+        assertFalse(redacted.contains("secret-token"));
+        assertTrue(redacted.contains("name=\"vin\" value=\"[REDACTED]\""));
+        assertTrue(redacted.contains("key='token' data='[REDACTED]'"));
+    }
 }

@@ -361,6 +361,10 @@ final class NavAppTaskScanner {
             this.source = source == null ? "" : source;
             this.status = status == null ? "" : status;
         }
+
+        boolean hasAuthoritativeTaskState(boolean scanInProgress) {
+            return !scanInProgress && "task".equals(source) && "ok".equals(status);
+        }
     }
 
     //defines the Row module boundary so related behavior stays readable inside one unit.

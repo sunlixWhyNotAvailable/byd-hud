@@ -23,8 +23,6 @@ public final class HudRuntimeService extends Service {
 
     private static final String ACTION_START_PERSISTENT =
             "com.bydhud.app.action.START_PERSISTENT_RUNTIME";
-    private static final String ACTION_STOP_PERSISTENT =
-            "com.bydhud.app.action.STOP_PERSISTENT_RUNTIME";
     private static final String EXTRA_REASON = "reason";
     private static final long HEARTBEAT_INTERVAL_MS = 30_000L;
     private static final long IDLE_HEARTBEAT_INTERVAL_MS = 5L * 60L * 1000L;
@@ -61,10 +59,11 @@ public final class HudRuntimeService extends Service {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static void stopPersistent(Context context, String reason) {
-        Intent intent = new Intent(context, HudRuntimeService.class);
-        intent.setAction(ACTION_STOP_PERSISTENT);
-        intent.putExtra(EXTRA_REASON, reason);
-        context.startService(intent);
+        Context appContext = context.getApplicationContext();
+        HudRuntimeWatchdog.cancel(appContext);
+        appContext.stopService(new Intent(appContext, HudRuntimeService.class));
+        HudPrefs.setRuntimeServiceRunning(appContext, false);
+        HudRuntimeState.markStopped(appContext, "stop:" + reason);
     }
 
     @Override
@@ -91,13 +90,6 @@ public final class HudRuntimeService extends Service {
                 + " reason=" + reason
                 + " boot=" + HudPrefs.isBootEnabled(this)
                 + " shutdown=" + HudPrefs.isUserShutdownActive(this));
-        if (ACTION_STOP_PERSISTENT.equals(action)) {
-            HudRuntimeWatchdog.cancel(this);
-            HudRuntimeState.markStopped(this, "stop:" + reason);
-            stopForegroundCompat();
-            stopSelf(startId);
-            return START_NOT_STICKY;
-        }
         if (HudPrefs.isUserShutdownActive(this)) {
             HudRuntimeWatchdog.cancel(this);
             HudRuntimeState.markStopped(this, "shutdown-active:" + reason);

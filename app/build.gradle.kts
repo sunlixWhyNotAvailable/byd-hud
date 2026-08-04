@@ -12,8 +12,8 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        versionCode = 81
-        versionName = "2.2.2"
+        versionCode = 82
+        versionName = "2.3.0"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
@@ -25,6 +25,11 @@ android {
             "\"https://api.github.com/repos/sunlixWhyNotAvailable/byd-hud/releases\""
         )
         buildConfigField("String", "UPDATE_USER_AGENT", "\"BYD-HUD-UpdateCheck\"")
+        buildConfigField(
+            "String",
+            "SENTRY_DSN",
+            "\"https://4f2ef57219c6c022c2155b02c14ae05c@o4511845885149184.ingest.de.sentry.io/4511845917982800\""
+        )
         buildConfigField("boolean", "WAZE_FRAME_CAPTURE_BETA", "true")
     }
 
@@ -60,6 +65,7 @@ dependencies {
     implementation("com.google.guava:guava:27.1-android")
     implementation("com.android.tools.build:apksig:8.7.3")
     implementation("com.android:zipflinger:8.7.3")
+    implementation("io.sentry:sentry-android-core:8.43.0")
     debugImplementation("androidx.compose.ui:ui-tooling")
     testImplementation("junit:junit:4.13.2")
 }

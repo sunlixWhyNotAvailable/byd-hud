@@ -31,6 +31,11 @@ final class NavRuntimePermissionRepair {
             boolean allowAdb,
             LocalAdbBridge.AuthorizationPromptMode promptMode) {
         Context appContext = context.getApplicationContext();
+        if (HudPrefs.isUserShutdownActive(appContext)) {
+            AppEventLogger.event(appContext, "nav_permission_repair skipped shutdown_active reason="
+                    + safe(reason));
+            return;
+        }
         LocalAdbBridge.AuthorizationPromptMode safeMode = promptMode == null
                 ? LocalAdbBridge.AuthorizationPromptMode.NEVER
                 : promptMode;
@@ -70,6 +75,9 @@ final class NavRuntimePermissionRepair {
             boolean allowAdb,
             LocalAdbBridge.AuthorizationPromptMode promptMode) {
         Context appContext = context.getApplicationContext();
+        if (HudPrefs.isUserShutdownActive(appContext)) {
+            return LocalAdbBridge.Result.partial("Shutdown active");
+        }
         LocalAdbBridge.AuthorizationPromptMode safeMode = promptMode == null
                 ? LocalAdbBridge.AuthorizationPromptMode.NEVER
                 : promptMode;
@@ -120,6 +128,9 @@ final class NavRuntimePermissionRepair {
             String reason,
             boolean allowAdb,
             LocalAdbBridge.AuthorizationPromptMode safeMode) {
+        if (HudPrefs.isUserShutdownActive(appContext)) {
+            return LocalAdbBridge.Result.partial("Shutdown active");
+        }
         NavRuntimePermissionStatus before = NavRuntimePermissionStatus.check(appContext);
         boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
         AppEventLogger.event(appContext, "nav_permission_repair start reason="
@@ -133,6 +144,9 @@ final class NavRuntimePermissionRepair {
         if (before.settingsGranted() && !before.readyForCapture()) {
             NavNotificationListenerService.requestRuntimeRebind(appContext, reason);
             sleepQuietly(REBIND_SETTLE_MS);
+            if (HudPrefs.isUserShutdownActive(appContext)) {
+                return LocalAdbBridge.Result.partial("Shutdown active");
+            }
             NavRuntimePermissionStatus rebound = NavRuntimePermissionStatus.check(appContext);
             if (rebound.readyForCapture()
                     && LocalAdbBridge.canShortCircuitReadyForCapture(appContext, safeMode)) {
@@ -145,6 +159,10 @@ final class NavRuntimePermissionRepair {
         if (!allowAdb) {
             NavRuntimePermissionStatus afterRebind = NavRuntimePermissionStatus.check(appContext);
             return LocalAdbBridge.Result.partial(afterRebind.summary());
+        }
+
+        if (HudPrefs.isUserShutdownActive(appContext)) {
+            return LocalAdbBridge.Result.partial("Shutdown active");
         }
 
         LocalAdbBridge.Result result =

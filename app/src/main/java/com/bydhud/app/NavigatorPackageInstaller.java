@@ -168,7 +168,7 @@ final class NavigatorPackageInstaller {
                 NavigatorPatchStore.recordInstalledVerification(
                         context, profile, info.lastUpdateTime, info.getLongVersionCode(),
                         visibleResult.sha256, visibleResult.directState,
-                        visibleResult.optionalState);
+                        visibleResult.optionalState, visibleResult.alertState);
                 NavigatorPatchStore.transition(
                         context, profile, NavigatorPatchStore.VERIFIED, "Installed and verified");
                 NavigatorPatchStore.clearTransactionMetadata(context);
@@ -367,12 +367,13 @@ final class NavigatorPackageInstaller {
             throw new IOException("Installed APK does not match the staged artifact");
         }
         String expectedOptional = NavigatorPatchStore.expectedOptional(context);
+        String expectedAlert = NavigatorPatchStore.expectedAlert(context);
         boolean optionalMatches = expectedOptional.equals(actual.optionalState)
                 || (NavigatorPatchStore.FAILED.equals(expectedOptional)
                 && NavigatorPatchStore.PATCHABLE.equals(actual.optionalState));
         if (includeComponents
                 && (!NavigatorPatchStore.expectedDirect(context).equals(actual.directState)
-                || !optionalMatches)) {
+                || !optionalMatches || !expectedAlert.equals(actual.alertState))) {
             throw new IOException("Installed patch components do not match staged output");
         }
     }
@@ -387,6 +388,7 @@ final class NavigatorPackageInstaller {
         return new NavigatorPatchPipeline.ScanResult(
                 actual.profile, actual.sha256, actual.versionName, actual.versionCode,
                 actual.signerSha256, actual.directState, NavigatorPatchStore.FAILED,
+                actual.alertState,
                 "Optional patch attempt failed");
     }
 

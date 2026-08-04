@@ -61,6 +61,7 @@ import java.util.regex.Pattern;
 
 /** Direct, surface-free AndroidX Car App host for Waze cluster navigation data. */
 public final class WazeDirectChannel {
+    static final String OWNER_PACKAGE = "com.waze";
     private static final String CAR_APP_ACTION = "androidx.car.app.CarAppService";
     private static final ComponentName WAZE_SERVICE = new ComponentName(
             "com.waze", "com.waze.car_lib.WazeCarAppService");
@@ -83,6 +84,7 @@ public final class WazeDirectChannel {
     private final Map<Integer, byte[]> maneuverIcons = new HashMap<>();
 
     private volatile int generation;
+    private volatile int sessionGeneration;
     private volatile boolean active;
     private volatile boolean suspended;
     private volatile boolean shutdown;
@@ -155,13 +157,19 @@ public final class WazeDirectChannel {
         return handshakeAvailable;
     }
 
+    int sessionGeneration() {
+        return sessionGeneration;
+    }
+
     public void onWazeAlertsPreferenceChanged(boolean enabled) {
         wazeAlertsEnabled = enabled;
         runOnChannel(() -> {
             if (enabled || !alert.isActive()) return;
             clearAlert(false, "alerts_disabled");
             DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
-            callback(() -> listener.onAlertCleared(frame, "alerts_disabled"));
+            int callbackGeneration = sessionGeneration;
+            callback(() -> listener.onAlertCleared(
+                    OWNER_PACKAGE, callbackGeneration, frame, "alerts_disabled"));
         });
     }
 
@@ -181,6 +189,7 @@ public final class WazeDirectChannel {
         active = true;
         suspended = false;
         generation++;
+        sessionGeneration++;
         prepareRouteStart(reason);
         log("start generation=" + generation + " reason=" + startReason);
         connectWaze(generation);
@@ -188,6 +197,7 @@ public final class WazeDirectChannel {
 
     private void resumeOnChannel(String reason) {
         suspended = false;
+        sessionGeneration++;
         prepareRouteStart(reason);
         log("resume generation=" + generation + " reason=" + startReason);
         if (carApp != null && bound) {
@@ -221,13 +231,14 @@ public final class WazeDirectChannel {
             return;
         }
 
+        int oldGeneration = generation;
         suspended = true;
         cancelRebind();
         cancelAlertWatchdog();
         cancelDirectHealth();
         setHandshakeUnavailable("suspended:" + stopReason, false);
         endNavigation("suspended:" + stopReason, false);
-        pauseAndStopSession(generation, stopReason);
+        pauseAndStopSession(oldGeneration, stopReason);
         bindDeferredReason = "";
         log("suspended reason=" + stopReason + " bindingRetained=" + bound);
     }
@@ -243,6 +254,7 @@ public final class WazeDirectChannel {
         active = false;
         suspended = false;
         generation++;
+        sessionGeneration++;
         cancelRebind();
         cancelAlertWatchdog();
         cancelDirectHealth();
@@ -510,11 +522,12 @@ public final class WazeDirectChannel {
         boolean wasSuspended = suspended;
         log("binding lost: " + reason);
         releaseBinding(source);
+        generation++;
+        sessionGeneration++;
         setHandshakeUnavailable(reason, false);
         unavailableBindFailureReported = true;
         endNavigation(reason, false);
         clearSessionState();
-        generation++;
         if (wasSuspended) {
             active = false;
             suspended = false;
@@ -531,9 +544,11 @@ public final class WazeDirectChannel {
         if (source != null) {
             onBindingLost(expectedGeneration, source, reason);
         } else {
+            generation++;
+            sessionGeneration++;
             unavailableBindFailureReported = true;
             setHandshakeUnavailable(reason, true);
-            scheduleRebind(expectedGeneration);
+            scheduleRebind(generation);
         }
     }
 
@@ -623,13 +638,19 @@ public final class WazeDirectChannel {
     private void setHandshakeAvailable(String reason) {
         if (suspended || handshakeAvailable) return;
         handshakeAvailable = true;
-        callback(() -> listener.onHandshakeAvailable(reason));
+        int callbackGeneration = sessionGeneration;
+        callback(() -> listener.onHandshakeAvailable(
+                OWNER_PACKAGE, callbackGeneration, reason));
+        callback(() -> listener.onLiveness(
+                OWNER_PACKAGE, callbackGeneration, "handshake:" + reason));
     }
 
     private void setHandshakeUnavailable(String reason, boolean force) {
         boolean changed = handshakeAvailable;
         handshakeAvailable = false;
-        if (changed || force) callback(() -> listener.onHandshakeUnavailable(reason));
+        int callbackGeneration = sessionGeneration;
+        if (changed || force) callback(() -> listener.onHandshakeUnavailable(
+                OWNER_PACKAGE, callbackGeneration, reason));
     }
 
     private void beginNavigation(String reason) {
@@ -637,7 +658,9 @@ public final class WazeDirectChannel {
         navigationActive = true;
         maneuverIcons.clear();
         recordDirectActivity("navigation_started");
-        callback(() -> listener.onNavigationStarted(reason));
+        int callbackGeneration = sessionGeneration;
+        callback(() -> listener.onNavigationStarted(
+                OWNER_PACKAGE, callbackGeneration, reason));
     }
 
     private void explicitNavigationStarted() {
@@ -673,9 +696,11 @@ public final class WazeDirectChannel {
         navigationDistanceKnown = false;
         maneuverIcons.clear();
         if (!navigationActive) return;
+        int callbackGeneration = notifyListener ? ++sessionGeneration : sessionGeneration;
         navigationActive = false;
         if (notifyListener) {
-            callback(() -> listener.onNavigationEnded(reason));
+            callback(() -> listener.onNavigationEnded(
+                    OWNER_PACKAGE, callbackGeneration, reason));
         } else {
             log("navigation session cleared without route end reason=" + reason);
         }
@@ -752,7 +777,9 @@ public final class WazeDirectChannel {
                 shouldUseRouteNativeDuringAlert(
                         navigationFrame, navigationDistanceKnown, alert));
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
-        callback(() -> listener.onFrame(frame, reason));
+        int callbackGeneration = sessionGeneration;
+        callback(() -> listener.onFrame(
+                OWNER_PACKAGE, callbackGeneration, frame, reason));
     }
 
     static boolean shouldUseRouteNativeDuringAlert(
@@ -842,6 +869,9 @@ public final class WazeDirectChannel {
             log("health probe recovered reason=" + reason);
         }
         scheduleFrameSilenceCheck();
+        int callbackGeneration = sessionGeneration;
+        callback(() -> listener.onLiveness(
+                OWNER_PACKAGE, callbackGeneration, reason));
     }
 
     private void recordTemplateResponse(String reason) {
@@ -1180,17 +1210,21 @@ public final class WazeDirectChannel {
     }
 
     public interface Listener {
-        void onHandshakeAvailable(String reason);
+        void onHandshakeAvailable(String ownerPackage, int sessionGeneration, String reason);
 
-        void onHandshakeUnavailable(String reason);
+        void onHandshakeUnavailable(String ownerPackage, int sessionGeneration, String reason);
 
-        void onNavigationStarted(String reason);
+        void onNavigationStarted(String ownerPackage, int sessionGeneration, String reason);
 
-        void onFrame(DirectTbtFrame frame, String reason);
+        void onFrame(String ownerPackage, int sessionGeneration,
+                DirectTbtFrame frame, String reason);
 
-        void onAlertCleared(DirectTbtFrame frame, String reason);
+        void onAlertCleared(String ownerPackage, int sessionGeneration,
+                DirectTbtFrame frame, String reason);
 
-        void onNavigationEnded(String reason);
+        void onNavigationEnded(String ownerPackage, int sessionGeneration, String reason);
+
+        void onLiveness(String ownerPackage, int sessionGeneration, String reason);
 
         void onLog(String message);
     }

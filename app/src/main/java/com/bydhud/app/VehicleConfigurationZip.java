@@ -45,6 +45,24 @@ final class VehicleConfigurationZip {
     private static final Pattern CONFIG_KEY = Pattern.compile(
             "(?i)(?:^|[\\s\\\"'<,{;])([a-z0-9_.-]{1,128})"
                     + "(?=\\s*(?:[\\\"']\\s*)?[:=>])");
+    private static final Pattern XML_SENSITIVE_CONTENT = Pattern.compile(
+            "(?is)(<\\s*(password|passwd|passphrase|token|secret|api[_-]?key|"
+                    + "access[_-]?key|private[_-]?key|client[_-]?secret|authorization|"
+                    + "cookie|credential|credentials|username|email|vin|latitude|longitude|"
+                    + "coordinates?|location|account(?:id)?|vehicleidentification)\\b[^>]*>)"
+                    + ".*?(</\\s*\\2\\s*>)");
+    private static final Pattern XML_TAG = Pattern.compile("(?s)<[^>]+>");
+    private static final Pattern XML_ATTRIBUTE = Pattern.compile(
+            "(?is)\\b([a-z_][a-z0-9_.:-]*)\\s*=\\s*([\\\"'])(.*?)\\2");
+    private static final Pattern AUTHORIZATION_VALUE = Pattern.compile(
+            "(?i)\\b(Bearer|Basic)\\s+[A-Za-z0-9._~+/=-]+");
+    private static final Pattern PEM_VALUE = Pattern.compile(
+            "(?s)-----BEGIN [^-]+-----.*?-----END [^-]+-----");
+    private static final Pattern SENSITIVE_KEY = Pattern.compile(
+            "(?i)(?:password|passwd|passphrase|token|secret|api[_-]?key|access[_-]?key|"
+                    + "private[_-]?key|client[_-]?secret|authorization|cookie|credential|"
+                    + "credentials|username|email|user|vin|lat|latitude|lon|longitude|"
+                    + "coordinates?|location|account(?:s|id)?|vehicleidentification)");
     private static final String CONFIG_FIND =
             "find /system/etc /vendor/etc /product/etc /odm/etc -type f";
     private static final String LIBRARY_FIND =
@@ -181,6 +199,21 @@ final class VehicleConfigurationZip {
             collectRemoteConfigs();
             collectRemoteLibraries();
             collectPackageApkMetadata();
+            collectFidCatalog();
+        }
+
+        private void collectFidCatalog() {
+            FidCatalog.Result result = FidCatalog.collect();
+            try {
+                addText("adb/fid-catalog.txt", "reflection", FidCatalog.text(result), "");
+                addText("adb/fid-catalog.json", "reflection", FidCatalog.json(result), "");
+                if (!result.available()) {
+                    unavailable("fid-catalog", "BYD FID classes unavailable");
+                }
+            } catch (Exception e) {
+                unavailable("fid-catalog", e.getClass().getSimpleName()
+                        + ": " + safe(e.getMessage()));
+            }
         }
 
         private void collectCommand(String entry, String command) {
@@ -212,12 +245,11 @@ final class VehicleConfigurationZip {
                     unavailable(path, read == null ? "read failed" : read.shortDetail());
                     continue;
                 }
-                if (containsSensitiveConfigContent(read.output)) {
-                    excludeRemote(path, size, "sensitive configuration not included");
-                    continue;
-                }
-                addText("adb/config" + path, "adb:" + path, read.output,
-                        "remoteBytes=" + size);
+                boolean redacted = containsSensitiveConfigContent(read.output);
+                String body = redacted ? redactConfigContent(read.output) : read.output;
+                addText("adb/config" + path, "adb:" + path, body,
+                        "remoteBytes=" + size
+                                + (redacted ? "; sensitiveValuesRedacted=true" : ""));
             }
         }
 
@@ -334,6 +366,7 @@ final class VehicleConfigurationZip {
             policy.put("navigationLogsIncluded", false);
             policy.put("apksIncluded", false);
             policy.put("nativeLibrariesIncluded", false);
+            policy.put("configurationValuesRedacted", true);
             policy.put("excludedSensitiveData",
                     new JSONArray(Arrays.asList("VIN", "coordinates", "accounts")));
             manifest.put("policy", policy);
@@ -581,22 +614,222 @@ final class VehicleConfigurationZip {
         java.util.regex.Matcher matcher = CONFIG_KEY.matcher(value);
         while (matcher.find()) {
             String key = matcher.group(1).toLowerCase(Locale.ROOT);
-            if ("vehicleidentification".equals(key.replace("_", "").replace("-", ""))) {
+            if (isSensitiveConfigKey(key)) {
                 return true;
             }
-            for (String segment : key.split("[._-]+")) {
-                if ("vin".equals(segment) || "lat".equals(segment)
-                        || "latitude".equals(segment) || "lon".equals(segment)
-                        || "longitude".equals(segment) || "coordinate".equals(segment)
-                        || "coordinates".equals(segment) || "account".equals(segment)
-                        || "accounts".equals(segment) || "accountid".equals(segment)
-                        || "user".equals(segment) || "username".equals(segment)
-                        || "email".equals(segment)) {
+        }
+        return XML_SENSITIVE_CONTENT.matcher(value).find()
+                || containsSensitiveXmlAttributeValue(value)
+                || AUTHORIZATION_VALUE.matcher(value).find()
+                || PEM_VALUE.matcher(value).find();
+    }
+
+    static String redactConfigContent(String value) {
+        if (value == null || value.isEmpty()) {
+            return value == null ? "" : value;
+        }
+        String redacted = redactXmlAttributeValues(redactXmlValues(value));
+        java.util.regex.Matcher matcher = CONFIG_KEY.matcher(redacted);
+        List<RedactionRange> ranges = new ArrayList<>();
+        while (matcher.find()) {
+            String key = matcher.group(1).toLowerCase(Locale.ROOT);
+            if (!isSensitiveConfigKey(key)) {
+                continue;
+            }
+            int start = matcher.end();
+            while (start < redacted.length()
+                    && Character.isWhitespace(redacted.charAt(start))) {
+                start++;
+            }
+            if (start < redacted.length()
+                    && (redacted.charAt(start) == '\"' || redacted.charAt(start) == '\'')) {
+                start++;
+                while (start < redacted.length()
+                        && Character.isWhitespace(redacted.charAt(start))) {
+                    start++;
+                }
+            }
+            if (start < redacted.length()
+                    && (redacted.charAt(start) == ':' || redacted.charAt(start) == '=')) {
+                start++;
+            }
+            while (start < redacted.length()
+                    && Character.isWhitespace(redacted.charAt(start))) {
+                start++;
+            }
+            int end = configValueEnd(redacted, start);
+            if (end > start) {
+                ranges.add(new RedactionRange(start, end, redactionFor(
+                        redacted.substring(start, end))));
+            }
+        }
+        for (int i = ranges.size() - 1; i >= 0; i--) {
+            RedactionRange range = ranges.get(i);
+            redacted = redacted.substring(0, range.start)
+                    + range.replacement + redacted.substring(range.end);
+        }
+        redacted = AUTHORIZATION_VALUE.matcher(redacted)
+                .replaceAll("$1 [REDACTED]");
+        return PEM_VALUE.matcher(redacted).replaceAll("[REDACTED PEM]");
+    }
+
+    private static String redactXmlValues(String value) {
+        java.util.regex.Matcher matcher = XML_SENSITIVE_CONTENT.matcher(value);
+        StringBuffer buffer = new StringBuffer();
+        while (matcher.find()) {
+            String replacement = matcher.group(1) + "[REDACTED]" + matcher.group(3);
+            matcher.appendReplacement(buffer,
+                    java.util.regex.Matcher.quoteReplacement(replacement));
+        }
+        matcher.appendTail(buffer);
+        return buffer.toString();
+    }
+
+    private static boolean containsSensitiveXmlAttributeValue(String value) {
+        java.util.regex.Matcher tags = XML_TAG.matcher(value);
+        while (tags.find()) {
+            java.util.regex.Matcher attributes = XML_ATTRIBUTE.matcher(tags.group());
+            while (attributes.find()) {
+                String name = attributes.group(1).toLowerCase(Locale.ROOT);
+                if ((name.equals("name") || name.equals("key"))
+                        && isSensitiveConfigKey(attributes.group(3))) {
                     return true;
                 }
             }
         }
         return false;
+    }
+
+    private static String redactXmlAttributeValues(String value) {
+        java.util.regex.Matcher tags = XML_TAG.matcher(value);
+        StringBuffer output = new StringBuffer();
+        while (tags.find()) {
+            String tag = tags.group();
+            java.util.regex.Matcher attributes = XML_ATTRIBUTE.matcher(tag);
+            boolean sensitive = false;
+            while (attributes.find()) {
+                String name = attributes.group(1).toLowerCase(Locale.ROOT);
+                if ((name.equals("name") || name.equals("key"))
+                        && isSensitiveConfigKey(attributes.group(3))) {
+                    sensitive = true;
+                    break;
+                }
+            }
+            if (!sensitive) {
+                continue;
+            }
+            attributes.reset();
+            StringBuffer redactedTag = new StringBuffer();
+            while (attributes.find()) {
+                String name = attributes.group(1).toLowerCase(Locale.ROOT);
+                if (!name.equals("value") && !name.equals("val")
+                        && !name.equals("content") && !name.equals("data")) {
+                    continue;
+                }
+                String replacement = attributes.group(1) + "="
+                        + attributes.group(2) + "[REDACTED]" + attributes.group(2);
+                attributes.appendReplacement(redactedTag,
+                        java.util.regex.Matcher.quoteReplacement(replacement));
+            }
+            attributes.appendTail(redactedTag);
+            tags.appendReplacement(output,
+                    java.util.regex.Matcher.quoteReplacement(redactedTag.toString()));
+        }
+        tags.appendTail(output);
+        return output.toString();
+    }
+
+    private static boolean isSensitiveConfigKey(String key) {
+        String safe = key == null ? "" : key.toLowerCase(Locale.ROOT);
+        if (SENSITIVE_KEY.matcher(safe.replace("_", "").replace("-", ""))
+                .matches()) {
+            return true;
+        }
+        for (String segment : safe.split("[._-]+")) {
+            if (SENSITIVE_KEY.matcher(segment).matches()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int configValueEnd(String value, int start) {
+        if (start >= value.length()) {
+            return start;
+        }
+        char first = value.charAt(start);
+        if (first == '\"' || first == '\'') {
+            boolean escaped = false;
+            for (int i = start + 1; i < value.length(); i++) {
+                char current = value.charAt(i);
+                if (escaped) {
+                    escaped = false;
+                } else if (current == '\\') {
+                    escaped = true;
+                } else if (current == first) {
+                    return i + 1;
+                }
+            }
+            return value.length();
+        }
+        if (first == '{' || first == '[') {
+            char close = first == '{' ? '}' : ']';
+            int depth = 0;
+            char quote = 0;
+            boolean escaped = false;
+            for (int i = start; i < value.length(); i++) {
+                char current = value.charAt(i);
+                if (quote != 0) {
+                    if (escaped) {
+                        escaped = false;
+                    } else if (current == '\\') {
+                        escaped = true;
+                    } else if (current == quote) {
+                        quote = 0;
+                    }
+                    continue;
+                }
+                if (current == '\"' || current == '\'') {
+                    quote = current;
+                } else if (current == first) {
+                    depth++;
+                } else if (current == close && --depth == 0) {
+                    return i + 1;
+                }
+            }
+            return value.length();
+        }
+        int end = start;
+        while (end < value.length()) {
+            char current = value.charAt(end);
+            if (current == '\r' || current == '\n' || current == ';'
+                    || current == ',' || current == '}') {
+                break;
+            }
+            end++;
+        }
+        return end;
+    }
+
+    private static String redactionFor(String value) {
+        if (value.length() >= 2
+                && ((value.charAt(0) == '\"' && value.charAt(value.length() - 1) == '\"')
+                || (value.charAt(0) == '\'' && value.charAt(value.length() - 1) == '\''))) {
+            return value.charAt(0) + "[REDACTED]" + value.charAt(value.length() - 1);
+        }
+        return "[REDACTED]";
+    }
+
+    private static final class RedactionRange {
+        final int start;
+        final int end;
+        final String replacement;
+
+        RedactionRange(int start, int end, String replacement) {
+            this.start = start;
+            this.end = end;
+            this.replacement = replacement;
+        }
     }
 
     static boolean isSafeSystemPath(String path) {

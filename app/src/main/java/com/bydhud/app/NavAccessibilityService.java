@@ -65,6 +65,9 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveWindowCapture(Context context, String packageName, String reason) {
+        if (HudPrefs.isUserShutdownActive(context)) {
+            return;
+        }
         NavAccessibilityService service = activeService;
         if (service == null) {
             AppEventLogger.event(context, "accessibility_active_scan skipped no-service reason="
@@ -72,6 +75,23 @@ public final class NavAccessibilityService extends AccessibilityService {
             return;
         }
         service.postCaptureActiveWindow(packageName, "active-" + safe(reason));
+    }
+
+    static void suspendForUserShutdown(Context context, String reason) {
+        NavAccessibilityService service = activeService;
+        if (service == null) {
+            return;
+        }
+        Handler handler = service.captureHandler;
+        if (handler != null) {
+            handler.removeCallbacksAndMessages(null);
+        }
+        synchronized (service.captureQueueLock) {
+            service.pendingPackageName = null;
+            service.pendingSource = null;
+            service.captureScheduled = false;
+        }
+        AppEventLogger.event(context, "accessibility_service suspended reason=" + safe(reason));
     }
 
     @Override
@@ -88,7 +108,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event == null) {
+        if (event == null || HudPrefs.isUserShutdownActive(this)) {
             return;
         }
         String packageName = String.valueOf(event.getPackageName());
@@ -133,6 +153,9 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //guard active-window traversal so accessibility node trees are captured by one serialized path.
     private void postCaptureActiveWindow(String packageName, String source) {
+        if (HudPrefs.isUserShutdownActive(this)) {
+            return;
+        }
         Handler handler = captureHandler;
         if (handler == null) {
             return;
@@ -153,7 +176,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     }
 
     private void drainLatestCapture() {
-        while (activeService == this) {
+        while (activeService == this && !HudPrefs.isUserShutdownActive(this)) {
             String packageName;
             String source;
             synchronized (captureQueueLock) {
@@ -175,6 +198,9 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void captureActiveWindow(String packageName, String source) {
+        if (HudPrefs.isUserShutdownActive(this)) {
+            return;
+        }
         try {
             lastEventElapsedMs = SystemClock.elapsedRealtime();
             runtimeCrashed = false;
@@ -237,6 +263,9 @@ public final class NavAccessibilityService extends AccessibilityService {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavRouteEvidencePolicy.RawRouteState publishAccessibilityPayload(
             String packageName, String payload, boolean feedLiveParser) {
+        if (HudPrefs.isUserShutdownActive(this)) {
+            return NavRouteEvidencePolicy.RawRouteState.UNKNOWN;
+        }
         NavCaptureStore.rawEvent(this, "accessibility", packageName, payload);
         NavRouteEvidencePolicy.RawRouteState rawState =
                 NavRouteEvidencePolicy.classifyRawPayload(packageName, payload);

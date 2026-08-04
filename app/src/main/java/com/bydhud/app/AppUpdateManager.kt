@@ -35,6 +35,16 @@ object AppUpdateManager {
     private const val RELEASE_API_HOST = "api.github.com"
     private const val APK_DOWNLOAD_HOST = "github.com"
     private const val RELEASE_PATH_MARKER = "/sunlixWhyNotAvailable/byd-hud/releases/download/"
+    private const val RELEASE_NOTES_EN_OPEN = "<!-- bydhud:release-notes:en -->"
+    private const val RELEASE_NOTES_EN_CLOSE = "<!-- /bydhud:release-notes:en -->"
+    private const val RELEASE_NOTES_UK_OPEN = "<!-- bydhud:release-notes:uk -->"
+    private const val RELEASE_NOTES_UK_CLOSE = "<!-- /bydhud:release-notes:uk -->"
+    private val RELEASE_NOTES_MARKERS = setOf(
+        RELEASE_NOTES_EN_OPEN,
+        RELEASE_NOTES_EN_CLOSE,
+        RELEASE_NOTES_UK_OPEN,
+        RELEASE_NOTES_UK_CLOSE
+    )
     private val GIT_TAG_PATTERN = Regex("""^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$""")
     private val ANDROID_VERSION_PATTERN = Regex("""^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$""")
 
@@ -66,6 +76,27 @@ object AppUpdateManager {
         val downloadUrl: String,
         val releaseNotes: String
     )
+
+    fun releaseNotesForLanguage(body: String, uaLanguage: Boolean): String {
+        val requested = if (uaLanguage) {
+            releaseNotesBlock(body, RELEASE_NOTES_UK_OPEN, RELEASE_NOTES_UK_CLOSE)
+        } else {
+            releaseNotesBlock(body, RELEASE_NOTES_EN_OPEN, RELEASE_NOTES_EN_CLOSE)
+        }
+        return requested
+            ?: releaseNotesBlock(body, RELEASE_NOTES_EN_OPEN, RELEASE_NOTES_EN_CLOSE)
+            ?: body
+    }
+
+    private fun releaseNotesBlock(body: String, open: String, close: String): String? {
+        val lines = body.replace("\r\n", "\n").replace('\r', '\n').lines()
+        val opens = lines.indices.filter { lines[it] == open }
+        val closes = lines.indices.filter { lines[it] == close }
+        if (opens.size != 1 || closes.size != 1 || closes[0] <= opens[0]) return null
+        val content = lines.subList(opens[0] + 1, closes[0])
+        if (content.any { it in RELEASE_NOTES_MARKERS }) return null
+        return content.joinToString("\n").trim().takeIf { it.isNotEmpty() }
+    }
 
     //defines CheckResult UI/state support so Compose code can keep rendering intent explicit.
     sealed class CheckResult {
