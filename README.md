@@ -33,35 +33,42 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | --- | --- |
 | Navigation output | Maneuver image, native arrow, distance, street or cue, lanes, and optional route metrics |
 | Direct channels | Structured low-latency data from a compatible patched Google Maps or Waze build |
-| Automatic fallback | Accessibility, notification, or visual parsing when a direct channel is unavailable |
+| Optional legacy input | Accessibility, notification, or visual parsing after its settings and services are explicitly enabled |
 | Dashboard control | Move a running navigator between displays and set the height of its dashboard projection |
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
 | Logs and storage | Record diagnostics, manage logs by day, and share only the selected data |
 | Updates | Stable releases by default, with an optional beta channel |
 | Manual testing | Send individual HUD fields and glyph IDs for diagnostics |
 
-<!-- Screenshot slot: docs/screenshots/en/apps.png
-Place a clean Apps-tab screenshot here after the Features table.
-Suggested markup:
-<p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="900"></p>
--->
+<p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
 ## Navigation channels
 
-BYD HUD chooses the best available channel for the selected navigator. A compatible direct channel is preferred. If it is not available, the app automatically falls back to the supported legacy source.
+BYD HUD prefers a compatible direct channel for the selected navigator. Legacy inputs are optional, disabled on a clean installation, and become available only after their settings, permissions, and services are enabled.
 
-| Navigator | Preferred direct channel | Automatic fallback | Main limitations |
+| Navigator | Preferred direct channel | Optional legacy input | Main limitations |
 | --- | --- | --- | --- |
-| Google Maps | Structured maneuver, distance, road, rendered maneuver image, ETA, remaining time, and remaining distance | Accessibility and notification data | Fallback has no lane guidance and may have limited maneuver data |
-| Waze | Structured maneuver, distance, street, lanes, and session alerts | Accessibility and visual crop parsing | Current direct session does not provide trip metrics; visual fallback depends on Waze layout and screen resolution |
+| Google Maps | Structured maneuver, distance, road, rendered maneuver image, ETA, remaining time, and remaining distance | Accessibility and notification data after capture services are granted and connected | Legacy input has no lane guidance and may have limited maneuver data |
+| Waze | Structured maneuver, distance, street, lanes, and session alerts | Screen capture and visual parsing after `Screen capture channel (legacy)` is enabled | The legacy channel is off by default, layout-dependent, and no longer supported by the developer |
 
 The direct channel does not replace the map with a separate surface. Waze or Google Maps continues to show and control the route on the tablet while navigation data is sent to BYD HUD in the background.
+
+### Current navigator contract
+
+| Navigator use | Package | Currently supported profile |
+| --- | --- | --- |
+| Waze direct output and patching | `com.waze` | stock `4.95.0.3` or project-patched `5.20.0.1` |
+| Google Maps direct output and patching | `app.revanced.android.apps.maps` | Google Maps ReVanced `25.16.03.747108139` |
+| Official Google Maps legacy input only | `com.google.android.apps.maps` | Accessibility/notification capture when its services are enabled; not accepted by the patcher |
+
+The patcher still verifies exact package, signer, split, and DEX structures. A matching version label alone is not sufficient.
 
 ### Direct-channel switching
 
 - BYD HUD switches to a direct channel as soon as valid data arrives.
-- Google Maps and Waze wait up to five seconds for a direct frame before switching to an available fallback.
-- When valid direct data returns, BYD HUD clears the fallback state and switches back to the direct channel immediately.
+- A five-second direct-frame timeout permits a legacy handoff only when that navigator's optional legacy path is already enabled and ready.
+- Google Maps requires granted and connected accessibility/notification capture services. Waze additionally requires the unsupported `Screen capture channel (legacy)` switch, which is off by default.
+- Without those prerequisites, no fallback starts after the timeout. When valid direct data returns, BYD HUD clears any legacy state and switches back immediately.
 - The `HUD` status is active only while navigation payloads are actually being sent. Selecting a navigator without starting navigation leaves it in the waiting state.
 
 ## Using the Apps tab
@@ -92,11 +99,7 @@ The same tab also lists other applications that can be moved between displays, b
 
 The `Options` tab controls what BYD HUD sends. Changing a switch affects the next outgoing HUD state; it does not change the map inside the navigator.
 
-<!-- Screenshot slot: docs/screenshots/en/options.png
-Place the full Options-tab screenshot directly below this paragraph.
-Suggested markup:
-<p align="center"><img src="docs/screenshots/en/options.png" alt="Navigation output and dashboard options" width="900"></p>
--->
+<p align="center"><img src="docs/screenshots/en/options.png" alt="Navigation output and dashboard options" width="100%"></p>
 
 ### Basic navigation output
 
@@ -145,7 +148,7 @@ Google Maps direct currently supplies the complete metric contract. The current 
 | `Fullscreen dashboard` | On | Uses the full dashboard navigation mode; off selects the compact map mode |
 | `Height` | 100% | Changes the projected window height live from 20% to 100% |
 
-The navigator must already be running. BYD HUD verifies the requested dashboard mode and reapplies it when the vehicle state does not match the selected option. Dashboard control requires authorized ADB access on the tested firmware.
+The navigator must already be running. Before moving it, BYD HUD sends the OEM `30011` command for the selected full or compact layout, then verifies that the application task reached the target display. It cannot read back the actual fullscreen/partial cluster mode and does not run a watchdog that reapplies that mode. The switch therefore represents the requested layout, not an authoritative vehicle state. Dashboard control requires authorized ADB access on the tested firmware.
 
 <!-- Photo slot: docs/screenshots/en/dashboard.jpg
 Use a landscape photo showing the real instrument cluster. Place it here.
@@ -157,22 +160,18 @@ Suggested markup:
 
 ## Navigator patcher
 
-The `Patch` tab is optional. It can add a BYD HUD direct channel to a structurally compatible navigator without uploading the APK anywhere.
+The `Patch` tab is optional. It can add a BYD HUD direct channel to a structurally compatible Waze or Google Maps ReVanced package without uploading the APK anywhere.
 
-<!-- Screenshot slot: docs/screenshots/en/patch.png
-Place the Patch-tab screenshot here, preferably after both navigator rows have been checked.
-Suggested markup:
-<p align="center"><img src="docs/screenshots/en/patch.png" alt="Local navigator patch compatibility and status" width="900"></p>
--->
+<p align="center"><img src="docs/screenshots/en/patch.png" alt="Local navigator patch compatibility and status" width="100%"></p>
 
 ### Supported input
 
-- an installed Google Maps or Waze package;
+- an installed `com.waze` or `app.revanced.android.apps.maps` package;
 - a downloaded `.apk` file;
 - compatible `.apkm` or `.apks` split-package archives;
 - an APK-only `.xapk` archive.
 
-Bundles with OBB expansion data or unsupported feature-split layouts are rejected.
+Official Google Maps package `com.google.android.apps.maps`, bundles with OBB expansion data, and unsupported feature-split layouts are rejected. The currently guarded patch profiles are Waze `4.95.0.3` / `5.20.0.1` and Google Maps ReVanced `25.16.03.747108139`.
 
 ### How patching works
 
@@ -209,14 +208,9 @@ Back up important navigator data and sign in to its account before patching. The
 
 BYD HUD stores navigation evidence in day folders so one trip can be shared without exposing unrelated days.
 
-<!-- Screenshot slots: docs/screenshots/en/storage.png and docs/screenshots/en/logs.png
-Place these two screenshots side by side here.
-Suggested markup:
-<p align="center">
-  <img src="docs/screenshots/en/storage.png" alt="Daily log storage and sharing" width="49%">
-  <img src="docs/screenshots/en/logs.png" alt="Logcat and configuration diagnostics" width="49%">
-</p>
--->
+<p align="center"><img src="docs/screenshots/en/storage.png" alt="Daily log storage and sharing" width="100%"></p>
+
+<p align="center"><img src="docs/screenshots/en/logs.png" alt="Logcat and configuration diagnostics" width="100%"></p>
 
 ### Storage tab
 
@@ -244,9 +238,7 @@ BYD HUD does not automatically send crashes, ANRs, sessions, breadcrumbs, traces
 
 The `Manual` tab is a diagnostic tool. It can send individual text, distance, lane, PNG, and native-arrow values without starting a route. It is useful for confirming vehicle glyph mappings and should not be used as a navigation source.
 
-<!-- Optional screenshot slot: docs/screenshots/en/manual.png
-Add only if the Manual tab needs to be documented visually.
--->
+<p align="center"><img src="docs/screenshots/en/manual.png" alt="Manual HUD payload testing" width="100%"></p>
 
 ## Installation
 
@@ -266,7 +258,7 @@ Add only if the Manual tab needs to be documented visually.
 4. Optionally authorize the ADB RSA prompt for dashboard control, public log storage, automatic permission repair, and richer diagnostics.
 5. Open BYD system settings and set `Disable background Apps -> BYD HUD` to `Off`.
 6. Return to `Apps`, enable `HUD` for Google Maps or Waze, and start navigation.
-7. For a compatible patched navigator, the direct channel starts automatically. A stock or incompatible navigator uses the available fallback and may request screen-capture permission.
+7. For a compatible navigator, the direct channel starts automatically. A legacy input starts only if its capture settings, permissions, and services were enabled separately. The Waze screen-capture channel is off by default and no longer supported by the developer.
 
 ### What requires ADB
 
@@ -299,11 +291,11 @@ Add only if the Manual tab needs to be documented visually.
 
 Another application may be writing to the same SOME/IP HUD channel. Stop the other HUD application and test again.
 
-### Waze fallback is delayed or incorrect
+### Optional Waze legacy output is delayed or incorrect
 
-Visual parsing depends on Waze layout, resolution, language, and temporary rows such as `No GPS`. Enable detailed diagnostics for one reproducible trip and share that day.
+The unsupported screen-capture parser depends on Waze layout, resolution, language, and temporary rows such as `No GPS`. Enable detailed diagnostics for one reproducible trip and share that day.
 
-### Google Maps fallback has no lanes
+### Optional Google Maps legacy output has no lanes
 
 This is expected. Accessibility and notification fallback do not provide lane guidance. Use a compatible direct build when structured lanes or complete route metrics are required.
 
@@ -332,8 +324,10 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 ## Known limitations
 
 - Other applications using the same SOME/IP output can cause HUD blinking or instability.
-- Fallback parsing depends on the navigator UI, language, notification structure, and screen resolution.
-- Google Maps fallback has no lane guidance and may provide incomplete maneuver data.
+- Legacy parsing is off until its settings and capture services are enabled, and then depends on the navigator UI, language, notification structure, and screen resolution.
+- Google Maps legacy input has no lane guidance and may provide incomplete maneuver data.
+- Waze screen-capture output is off by default and no longer supported by the developer.
+- The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
 - The current Waze direct session does not provide ETA, remaining time, or remaining route distance.
 - Waze alerts still depend on Waze supplying an alert; the built-in alert hook is available only for the supported Waze 5.20.0.1 structure.
 - Stock cluster firmware may add dark overlays to dashboard projection.

@@ -19,6 +19,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -54,7 +55,9 @@ final class NavAppTaskScanner {
 
     private final Context context;
     private final Object lock = new Object();
+    private final AtomicBoolean scanInProgress = new AtomicBoolean(false);
     private Snapshot snapshot;
+    private long revision;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAppTaskScanner(Context context) {
@@ -78,12 +81,39 @@ final class NavAppTaskScanner {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    Snapshot forceScan() {
-        Snapshot scanned = scanWithTasks();
-        synchronized (lock) {
-            snapshot = scanned;
+    Snapshot forceScanIfIdle() {
+        if (!scanInProgress.compareAndSet(false, true)) {
+            return null;
         }
-        return scanned;
+        try {
+            Snapshot scanned = scanWithTasks();
+            synchronized (lock) {
+                snapshot = preferredSnapshot(snapshot, scanned);
+                revision = Math.max(revision + 1L, System.currentTimeMillis());
+                return snapshot;
+            }
+        } finally {
+            scanInProgress.set(false);
+        }
+    }
+
+    long revision() {
+        synchronized (lock) {
+            return revision;
+        }
+    }
+
+    static Snapshot preferredSnapshotForTest(Snapshot current, Snapshot scanned) {
+        return preferredSnapshot(current, scanned);
+    }
+
+    private static Snapshot preferredSnapshot(Snapshot current, Snapshot scanned) {
+        if (current != null
+                && current.hasAuthoritativeTaskState()
+                && (scanned == null || !scanned.hasAuthoritativeTaskState())) {
+            return current;
+        }
+        return scanned == null ? current : scanned;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -362,8 +392,8 @@ final class NavAppTaskScanner {
             this.status = status == null ? "" : status;
         }
 
-        boolean hasAuthoritativeTaskState(boolean scanInProgress) {
-            return !scanInProgress && "task".equals(source) && "ok".equals(status);
+        boolean hasAuthoritativeTaskState() {
+            return "task".equals(source) && "ok".equals(status);
         }
     }
 

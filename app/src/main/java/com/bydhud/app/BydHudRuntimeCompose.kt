@@ -292,6 +292,10 @@ private data class Copy(
     val logcatRecorder: String,
     val recorderStatus: String,
     val waiting: String,
+    val logcatWaiting: String,
+    val logcatRecording: String,
+    val logcatSaving: String,
+    val logcatSaved: String,
     val startLogcat: String,
     val stopLogcat: String,
     val shareConfiguration: String,
@@ -2483,7 +2487,7 @@ private fun LogsTab(
                 ) {
                     Column(Modifier.weight(1f)) {
                         Text(copy.recorderStatus, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        Text(snapshot.logcatStatus.ifBlank { copy.waiting }, color = palette.muted, fontSize = 13.sp)
+                        Text(localizedLogcatStatus(snapshot.logcatStatus, copy), color = palette.muted, fontSize = 13.sp)
                     }
                     Pill(if (snapshot.logcatRecording) "recording" else copy.waiting, palette.yellow, palette.yellowSoft)
                 }
@@ -2892,6 +2896,18 @@ private fun PatchTab(
         }
 
     }
+}
+
+private fun localizedLogcatStatus(status: String, copy: Copy): String {
+    val lines = status.split('\n', limit = 2)
+    val localized = when (lines.firstOrNull()) {
+        LogcatRecorder.STATUS_WAITING, "" -> copy.logcatWaiting
+        LogcatRecorder.STATUS_RECORDING -> copy.logcatRecording
+        LogcatRecorder.STATUS_SAVING -> copy.logcatSaving
+        LogcatRecorder.STATUS_SAVED -> copy.logcatSaved
+        else -> lines.first()
+    }
+    return if (lines.size == 1) localized else "$localized\n${lines[1]}"
 }
 
 private fun selectedPatchVersion(row: MainActivity.ComposeNavigatorPatchRow): String {
@@ -4653,6 +4669,10 @@ private fun enCopy() = Copy(
     logcatRecorder = "Logcat recorder",
     recorderStatus = "Recorder status",
     waiting = "waiting",
+    logcatWaiting = "Waiting to record",
+    logcatRecording = "Recording log",
+    logcatSaving = "Saving log",
+    logcatSaved = "Log saved",
     startLogcat = "Record Logcat",
     stopLogcat = "Stop Logcat",
     shareConfiguration = "Share configuration",
@@ -4852,6 +4872,10 @@ private fun uaCopy() = enCopy().copy(
     logcatRecorder = "Запис logcat",
     recorderStatus = "Стан запису",
     waiting = "очікування",
+    logcatWaiting = "Очікування запису",
+    logcatRecording = "Йде запис логу",
+    logcatSaving = "Збереження логу",
+    logcatSaved = "Лог збережено",
     startLogcat = "Записати Logcat",
     stopLogcat = "Зупинити logcat",
     shareConfiguration = "Поділитись конф-єю",

@@ -25,7 +25,6 @@ public final class HudRuntimeService extends Service {
             "com.bydhud.app.action.START_PERSISTENT_RUNTIME";
     private static final String EXTRA_REASON = "reason";
     private static final long HEARTBEAT_INTERVAL_MS = 30_000L;
-    private static final long IDLE_HEARTBEAT_INTERVAL_MS = 5L * 60L * 1000L;
 
     private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
     private final Runnable heartbeatRunnable = new Runnable() {
@@ -35,8 +34,8 @@ public final class HudRuntimeService extends Service {
             boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(HudRuntimeService.this);
             HudRuntimeState.markHeartbeat(HudRuntimeService.this,
                     activeWork ? "periodic" : "idle-periodic");
-            heartbeatHandler.postDelayed(this,
-                    activeWork ? HEARTBEAT_INTERVAL_MS : IDLE_HEARTBEAT_INTERVAL_MS);
+            requestBackgroundAppScan();
+            heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
         }
     };
 
@@ -110,7 +109,6 @@ public final class HudRuntimeService extends Service {
         }
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
-        scheduleHeartbeat();
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         updateNotification(activeWork ? "Runtime active" : "Runtime idle");
         String hudPackage = NavCapturePrefs.getHudPackage(this);
@@ -226,6 +224,17 @@ public final class HudRuntimeService extends Service {
     private void scheduleHeartbeat() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
+    }
+
+    private void requestBackgroundAppScan() {
+        new Thread(() -> {
+            NavAppTaskScanner.Snapshot scan =
+                    NavAppTaskScanner.get(this).forceScanIfIdle();
+            if (scan != null) {
+                AppEventLogger.event(this, "apps_background_refresh completed revision="
+                        + NavAppTaskScanner.get(this).revision());
+            }
+        }, "bydhud-background-app-scan").start();
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

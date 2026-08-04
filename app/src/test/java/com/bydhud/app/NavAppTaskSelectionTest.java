@@ -24,12 +24,20 @@ public final class NavAppTaskSelectionTest {
     }
 
     @Test
-    public void runtimeStatusRequiresSuccessfulTaskScan() {
-        assertTrue(snapshot("task", "ok").hasAuthoritativeTaskState(false));
-        assertFalse(snapshot("task", "ok").hasAuthoritativeTaskState(true));
-        assertFalse(snapshot("process", "initial").hasAuthoritativeTaskState(false));
-        assertFalse(snapshot("process", "adb unavailable").hasAuthoritativeTaskState(false));
-        assertFalse(snapshot("task", "error").hasAuthoritativeTaskState(false));
+    public void runtimeStatusKeepsLastSuccessfulTaskScanDuringRefresh() {
+        assertTrue(snapshot("task", "ok").hasAuthoritativeTaskState());
+        assertFalse(snapshot("process", "initial").hasAuthoritativeTaskState());
+        assertFalse(snapshot("process", "adb unavailable").hasAuthoritativeTaskState());
+        assertFalse(snapshot("task", "error").hasAuthoritativeTaskState());
+    }
+
+    @Test
+    public void failedRefreshDoesNotReplaceLastAuthoritativeTaskState() {
+        NavAppTaskScanner.Snapshot current = snapshot("task", "ok");
+        NavAppTaskScanner.Snapshot failed = snapshot("process", "adb unavailable");
+
+        assertTrue(current == NavAppTaskScanner.preferredSnapshotForTest(current, failed));
+        assertTrue(failed == NavAppTaskScanner.preferredSnapshotForTest(null, failed));
     }
 
     private static NavAppTaskScanner.Snapshot snapshot(String source, String status) {

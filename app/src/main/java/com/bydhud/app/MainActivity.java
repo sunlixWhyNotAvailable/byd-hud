@@ -60,7 +60,6 @@ public final class MainActivity extends ComponentActivity {
     private static final int NAV_RUNTIME_RECONNECT_RETRY_LIMIT = 2;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
-    private static final long APP_SCAN_REFRESH_INTERVAL_MS = 5000L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
     private static final boolean BACKGROUND_MODE = true;
     private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
@@ -80,12 +79,10 @@ public final class MainActivity extends ComponentActivity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HudState state = new HudState();
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
-    private final AtomicBoolean appScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageForceRefreshPending = new AtomicBoolean(false);
     private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
     private volatile Map<String, String> appVersionNames = Collections.emptyMap();
-    private volatile long appScanRevision;
     private HudOutputCoordinator hudOutput;
 
     private TextView statusView;
@@ -257,7 +254,7 @@ public final class MainActivity extends ComponentActivity {
         hudOutput = HudOutputCoordinator.get(this);
         NavAppDisplayController.get(this).setListener(() -> runOnUiThread(() -> {
             refreshControls();
-            scheduleAppScan(true);
+            scheduleAppScan();
         }));
         BydHudRuntimeCompose.install(this);
         appendStatus(buildSafetyBanner());
@@ -289,7 +286,7 @@ public final class MainActivity extends ComponentActivity {
         maybeStartPendingAdbAuthorization();
         refreshControls();
         if (composeAppsTabSelected) {
-            scheduleAppScan(true);
+            scheduleAppScan();
         }
         notifyPendingShare();
     }
@@ -812,7 +809,7 @@ public final class MainActivity extends ComponentActivity {
                 state.roadName == null ? "" : state.roadName,
                 state.laneString == null ? "" : state.laneString,
                 appScan.lastScanText,
-                appScan.hasAuthoritativeTaskState(appScanInProgress.get()),
+                appScan.hasAuthoritativeTaskState(),
                 HudPrefs.storageLimitGb(this),
                 storage.rootPaths,
                 storage.calculating,
@@ -1397,7 +1394,7 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeRefreshApps() {
-        scheduleAppScan(true);
+        scheduleAppScan();
     }
 
     public void composeReportAppsTabSelected(boolean selected) {
@@ -1405,7 +1402,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public long composeAppsScanRevision() {
-        return appScanRevision;
+        return NavAppTaskScanner.get(this).revision();
     }
 
     public String composeHudDeliveryStatus() {
@@ -1416,38 +1413,20 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void scheduleAppScan(boolean force) {
-        NavAppTaskScanner.Snapshot current = NavAppTaskScanner.get(this).currentSnapshot();
-        long ageMs = current.scannedAtMs <= 0
-                ? Long.MAX_VALUE
-                : Math.max(0L, System.currentTimeMillis() - current.scannedAtMs);
-        boolean initialSnapshot = "initial".equals(current.status);
-        if (!force && !initialSnapshot && ageMs < APP_SCAN_REFRESH_INTERVAL_MS) {
-            return;
-        }
-        if (!appScanInProgress.compareAndSet(false, true)) {
-            return;
-        }
-        advanceAppScanRevision();
+    private void scheduleAppScan() {
         Context appContext = getApplicationContext();
         new Thread(() -> {
-            try {
-                NavAppTaskScanner.Snapshot scan = NavAppTaskScanner.get(appContext).forceScan();
-                appVersionNames = scanInstalledAppVersions(scan);
-                AppEventLogger.event(appContext, "apps_refresh force=" + force
-                        + " source=" + scan.source
-                        + " rows=" + scan.rows.size()
-                        + " status=" + scan.status);
-            } finally {
-                appScanInProgress.set(false);
-                advanceAppScanRevision();
-                handler.post(this::refreshActiveAppsList);
+            NavAppTaskScanner.Snapshot scan =
+                    NavAppTaskScanner.get(appContext).forceScanIfIdle();
+            if (scan == null) {
+                return;
             }
+            appVersionNames = scanInstalledAppVersions(scan);
+            AppEventLogger.event(appContext, "apps_refresh source=" + scan.source
+                    + " rows=" + scan.rows.size()
+                    + " status=" + scan.status);
+            handler.post(this::refreshActiveAppsList);
         }, "bydhud-app-scan").start();
-    }
-
-    private void advanceAppScanRevision() {
-        appScanRevision = Math.max(appScanRevision + 1L, System.currentTimeMillis());
     }
 
     private Map<String, String> scanInstalledAppVersions(NavAppTaskScanner.Snapshot scan) {
