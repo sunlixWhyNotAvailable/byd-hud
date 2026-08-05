@@ -120,8 +120,8 @@ final class NavigatorAssetManager {
         List<Asset> assets = new ArrayList<>();
         assets.add(new Asset(
                 "waze-stock-4.95.0.3",
-                "Waze stock",
-                "Waze сток",
+                "Waze original version",
+                "Waze оригінальна версія",
                 "4.95.0.3",
                 1023098L,
                 "com.waze",
@@ -133,8 +133,8 @@ final class NavigatorAssetManager {
                 NavigatorPatchStore.Profile.WAZE));
         assets.add(new Asset(
                 "waze-direct-5.20.0.1",
-                "Waze patched",
-                "Waze патчений",
+                "Waze patched version",
+                "Waze патчена версія",
                 "5.20.0.1",
                 1030706L,
                 "com.waze",
@@ -146,8 +146,8 @@ final class NavigatorAssetManager {
                 NavigatorPatchStore.Profile.WAZE));
         assets.add(new Asset(
                 "gmaps-direct-25.16.03.747108139",
-                "Google Maps ReVanced",
-                "Google Maps ReVanced",
+                "Google Maps ReVanced patched version",
+                "Google Maps ReVanced патчена версія",
                 "25.16.03.747108139",
                 1068022637L,
                 "app.revanced.android.apps.maps",

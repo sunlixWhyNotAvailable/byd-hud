@@ -10,6 +10,7 @@ import android.os.HandlerThread;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
 
@@ -59,7 +60,20 @@ final class NavHudLiveSender {
     }
 
     void onWazeAlertsPreferenceChanged(boolean enabled) {
+        if (!enabled) {
+            DirectTbtFrame clusterFrame = latestWazeClusterFrame;
+            if (clusterFrame != null) {
+                latestWazeClusterFrame = clusterFrame.withAlertOverlay(
+                        DirectTbtFrame.AlertOverlay.inactive());
+            }
+            DirectTbtFrame surfaceFrame = latestWazeSurfaceFrame;
+            if (surfaceFrame != null) {
+                latestWazeSurfaceFrame = surfaceFrame.withAlertOverlay(
+                        DirectTbtFrame.AlertOverlay.inactive());
+            }
+        }
         wazeDirectChannel.onWazeAlertsPreferenceChanged(enabled);
+        wazeSurfaceDirectChannel.onWazeAlertsPreferenceChanged(enabled);
     }
 
     boolean isWazeDirectChannelActiveForProbe() {
@@ -97,6 +111,7 @@ final class NavHudLiveSender {
     private final Handler handler;
     private final HudOutputCoordinator hudOutput;
     private final WazeDirectChannel wazeDirectChannel;
+    private final WazeDirectChannel wazeSurfaceDirectChannel;
     private final GMapsDirectChannel gmapsDirectChannel;
     private final Object wazeDirectFrameLock = new Object();
     private DirectTbtFrame pendingWazeDirectFrame;
@@ -104,6 +119,7 @@ final class NavHudLiveSender {
     private String pendingWazeDirectFrameOwner = "";
     private int pendingWazeDirectFrameSessionGeneration;
     private int pendingWazeDirectFrameGeneration;
+    private boolean pendingWazeDirectFrameFromSurface;
     private int wazeDirectFrameGeneration;
     private int coalescedWazeDirectFrames;
     private boolean wazeDirectFrameDispatchScheduled;
@@ -152,11 +168,18 @@ final class NavHudLiveSender {
     private int wazeFallbackReadinessGeneration;
     private long lastWazeFallbackReadinessCheckMs;
     private boolean wazeSurfaceLaunchPending;
-    private boolean wazeSurfaceActive;
+    private volatile boolean wazeSurfaceActive;
     private boolean wazeSurfaceEnabledForRoute;
     private boolean wazeSurfaceDismissedForRoute;
     private int wazeSurfaceTaskId = -1;
     private long wazeSurfaceInstanceId;
+    private volatile DirectTbtFrame latestWazeClusterFrame;
+    private volatile String latestWazeClusterFrameReason = "";
+    private volatile int latestWazeClusterFrameSessionGeneration;
+    private volatile DirectTbtFrame latestWazeSurfaceFrame;
+    private volatile String latestWazeSurfaceFrameReason = "";
+    private volatile int latestWazeSurfaceFrameSessionGeneration;
+    private volatile int wazeSurfaceRouteGeneration = -1;
     private boolean gmapsDirectFrameReceived;
     private boolean gmapsDirectFallbackActive;
     private boolean gmapsDirectTimedOut;
@@ -460,18 +483,34 @@ final class NavHudLiveSender {
                     @Override
                     public void onFrame(String ownerPackage, int sessionGeneration,
                             DirectTbtFrame frame, String reason) {
-                        enqueueLatestWazeDirectFrame(
-                                ownerPackage, sessionGeneration, frame, reason);
+                        DirectTbtFrame previousFrame = latestWazeClusterFrame;
+                        latestWazeClusterFrameReason = safeReason(reason);
+                        latestWazeClusterFrameSessionGeneration = sessionGeneration;
+                        latestWazeClusterFrame = frame;
+                        if (!wazeSurfaceActive) {
+                            enqueueLatestWazeDirectFrame(
+                                    ownerPackage, sessionGeneration, frame, reason, false);
+                        } else if (wazeAlertStateChanged(previousFrame, frame)
+                                && latestWazeSurfaceFrame != null) {
+                            enqueueLatestWazeDirectFrame(
+                                    ownerPackage, latestWazeSurfaceFrameSessionGeneration,
+                                    withRetainedWazeClusterAlert(latestWazeSurfaceFrame),
+                                    "surface-alert-sync:" + safeReason(reason), true);
+                        }
                     }
 
                     @Override
                     public void onAlertCleared(String ownerPackage, int sessionGeneration,
                             DirectTbtFrame frame, String reason) {
+                        latestWazeClusterFrameReason = safeReason(reason);
+                        latestWazeClusterFrameSessionGeneration = sessionGeneration;
+                        latestWazeClusterFrame = frame;
                         invalidatePendingWazeDirectFrames();
                         handler.post(() -> {
                             if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
                                 return;
                             }
+                            if (wazeSurfaceActive) return;
                             hudOutput.clearDirectAlertAndRepublish(
                                     ownerPackage, sessionGeneration, frame, reason,
                                     SystemClock.elapsedRealtime());
@@ -542,6 +581,8 @@ final class NavHudLiveSender {
                                 context, "nav_live " + line);
                     }
                 });
+        this.wazeSurfaceDirectChannel = new WazeDirectChannel(
+                context, createWazeSurfaceListener());
         this.gmapsDirectChannel = new GMapsDirectChannel(context,
                 new GMapsDirectChannel.Listener() {
                     @Override
@@ -617,9 +658,120 @@ final class NavHudLiveSender {
                 });
     }
 
+    private WazeDirectChannel.Listener createWazeSurfaceListener() {
+        return new WazeDirectChannel.Listener() {
+            @Override
+            public void onHandshakeAvailable(String ownerPackage,
+                    int sessionGeneration, String reason) {
+                handler.post(() -> {
+                    if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+                    log("waze surface channel ready reason=" + safeReason(reason));
+                });
+            }
+
+            @Override
+            public void onHandshakeUnavailable(String ownerPackage,
+                    int sessionGeneration, String reason) {
+                handler.post(() -> {
+                    if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+                    if (wazeSurfaceLaunchPending || wazeSurfaceActive) {
+                        fallbackFromWazeSurface("surface-channel-unavailable:"
+                                + safeReason(reason));
+                    }
+                });
+            }
+
+            @Override
+            public void onNavigationStarted(String ownerPackage,
+                    int sessionGeneration, String reason) {
+                if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+                eventWazeDirectSession("surface_navigation_started", reason);
+            }
+
+            @Override
+            public void onFrame(String ownerPackage, int sessionGeneration,
+                    DirectTbtFrame frame, String reason) {
+                latestWazeSurfaceFrameReason = safeReason(reason);
+                latestWazeSurfaceFrameSessionGeneration = sessionGeneration;
+                latestWazeSurfaceFrame = frame;
+                if (wazeSurfaceActive) {
+                    enqueueLatestWazeDirectFrame(
+                            ownerPackage, sessionGeneration,
+                            withRetainedWazeClusterAlert(frame),
+                            "surface:" + safeReason(reason), true);
+                }
+            }
+
+            @Override
+            public void onAlertCleared(String ownerPackage, int sessionGeneration,
+                    DirectTbtFrame frame, String reason) {
+                latestWazeSurfaceFrameReason = safeReason(reason);
+                latestWazeSurfaceFrameSessionGeneration = sessionGeneration;
+                latestWazeSurfaceFrame = frame;
+                handler.post(() -> {
+                    if (!wazeSurfaceActive
+                            || !isCurrentWazeSurfaceCallback(
+                            ownerPackage, sessionGeneration)) return;
+                    DirectTbtFrame outputFrame = withRetainedWazeClusterAlert(frame);
+                    if (outputFrame.getAlertOverlay().isActive()) {
+                        enqueueLatestWazeDirectFrame(
+                                ownerPackage, sessionGeneration, outputFrame,
+                                "surface-alert-retained:" + safeReason(reason), true);
+                    } else {
+                        hudOutput.clearDirectAlertAndRepublish(
+                                ownerPackage, wazeDirectChannel.sessionGeneration(), outputFrame,
+                                "surface:" + safeReason(reason),
+                                SystemClock.elapsedRealtime());
+                    }
+                });
+            }
+
+            @Override
+            public void onNavigationEnded(String ownerPackage,
+                    int sessionGeneration, String reason) {
+                if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+                eventWazeDirectSession("surface_navigation_ended", reason);
+            }
+
+            @Override
+            public void onLiveness(String ownerPackage, int sessionGeneration, String reason) {
+                handler.post(() -> {
+                    if (!wazeSurfaceActive
+                            || !isCurrentWazeSurfaceCallback(
+                            ownerPackage, sessionGeneration)) return;
+                    hudOutput.renewDirectLease(
+                            ownerPackage, wazeDirectChannel.sessionGeneration(),
+                            "surface:" + safeReason(reason));
+                });
+            }
+
+            @Override
+            public void onSurfaceReady(String ownerPackage, int sessionGeneration) {
+                handler.post(() -> onWazeSurfaceReady(
+                        ownerPackage, sessionGeneration));
+            }
+
+            @Override
+            public void onSurfaceUnavailable(String ownerPackage,
+                    int sessionGeneration, String reason) {
+                handler.post(() -> onWazeSurfaceUnavailable(
+                        ownerPackage, sessionGeneration, reason));
+            }
+
+            @Override
+            public void onLog(String message) {
+                String line = "waze_surface_direct " + normalizeString(message);
+                eventWazeDirectSession("surface_channel", message);
+                Log.i(TAG, line);
+                WazeCaptureDebugWriter.get().appEvent(context, "nav_live " + line);
+            }
+        };
+    }
+
     //coalesces complete direct snapshots so a busy state worker never replays stale guidance.
     private void enqueueLatestWazeDirectFrame(String ownerPackage,
-            int sessionGeneration, DirectTbtFrame frame, String reason) {
+            int sessionGeneration, DirectTbtFrame frame, String reason,
+            boolean fromSurface) {
         if (frame == null) {
             return;
         }
@@ -632,6 +784,7 @@ final class NavHudLiveSender {
             pendingWazeDirectFrameOwner = normalizeString(ownerPackage);
             pendingWazeDirectFrameSessionGeneration = sessionGeneration;
             pendingWazeDirectFrameGeneration = wazeDirectFrameGeneration;
+            pendingWazeDirectFrameFromSurface = fromSurface;
             if (!wazeDirectFrameDispatchScheduled) {
                 wazeDirectFrameDispatchScheduled = true;
                 handler.post(wazeDirectFrameDispatch);
@@ -650,20 +803,25 @@ final class NavHudLiveSender {
             String ownerPackage = pendingWazeDirectFrameOwner;
             int sessionGeneration = pendingWazeDirectFrameSessionGeneration;
             int generation = pendingWazeDirectFrameGeneration;
+            boolean fromSurface = pendingWazeDirectFrameFromSurface;
             int coalesced = coalescedWazeDirectFrames;
             pendingWazeDirectFrame = null;
             pendingWazeDirectFrameReason = "";
             pendingWazeDirectFrameOwner = "";
             coalescedWazeDirectFrames = 0;
-            if (frame == null || generation != wazeDirectFrameGeneration
-                    || !isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
+            boolean current = fromSurface
+                    ? isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)
+                    : isCurrentWazeDirectCallback(ownerPackage, sessionGeneration);
+            if (frame == null || generation != wazeDirectFrameGeneration || !current
+                    || fromSurface != wazeSurfaceActive) {
                 return;
             }
             if (coalesced > 0) {
                 WazeCaptureDebugWriter.get().appEvent(context,
                         "nav_live waze_direct frames_coalesced=" + coalesced);
             }
-            onWazeDirectFrame(ownerPackage, sessionGeneration, frame, reason);
+            onWazeDirectFrame(ownerPackage, wazeDirectChannel.sessionGeneration(),
+                    frame, reason);
         }
     }
 
@@ -674,6 +832,7 @@ final class NavHudLiveSender {
             pendingWazeDirectFrame = null;
             pendingWazeDirectFrameReason = "";
             pendingWazeDirectFrameOwner = "";
+            pendingWazeDirectFrameFromSurface = false;
             coalescedWazeDirectFrames = 0;
             wazeDirectFrameDispatchScheduled = false;
             handler.removeCallbacks(wazeDirectFrameDispatch);
@@ -681,17 +840,33 @@ final class NavHudLiveSender {
     }
 
     private void startWazeDirectProbe(String reason) {
-        startWazeDirectHost(reason, true, true);
+        startWazeDirectHost(reason, true, true, false);
     }
 
     private void startWazeDirectForRoute(String reason) {
-        startWazeDirectHost(reason, false, false);
+        startWazeDirectForRoute(reason, false);
+    }
+
+    private void startWazeDirectForRoute(String reason, boolean recoveringRoute) {
+        startWazeDirectHost(reason, false, false, recoveringRoute);
     }
 
     private void startWazeDirectHost(String reason, boolean clearLegacyRoute,
-            boolean allowLegacyTimeout) {
+            boolean allowLegacyTimeout, boolean recoveringRoute) {
+        boolean retainSurfaceRoute = recoveringRoute
+                && (wazeSurfaceLaunchPending || wazeSurfaceActive);
+        DirectTbtFrame retainedSurfaceFrame = latestWazeSurfaceFrame;
+        String retainedSurfaceReason = latestWazeSurfaceFrameReason;
+        int retainedSurfaceSessionGeneration = latestWazeSurfaceFrameSessionGeneration;
         endWazeDirectSession("restart:" + safeReason(reason));
         resetWazeDirectSessionState();
+        if (recoveringRoute) wazeDirectNavigating = true;
+        if (retainSurfaceRoute) {
+            wazeSurfaceRouteGeneration = wazeRouteGeneration;
+            latestWazeSurfaceFrameReason = retainedSurfaceReason;
+            latestWazeSurfaceFrameSessionGeneration = retainedSurfaceSessionGeneration;
+            latestWazeSurfaceFrame = retainedSurfaceFrame;
+        }
         wazeDirectSession = DirectSessionLog.start(
                 context, NavigationLogStorage.WAZE_DIRECT_DIR, reason);
         if (clearLegacyRoute) {
@@ -718,6 +893,7 @@ final class NavHudLiveSender {
         endWazeDirectSession("wait-route:" + safeReason(reason));
         resetWazeDirectSessionState();
         wazeDirectChannel.stop("wait-route:" + safeReason(reason));
+        wazeSurfaceDirectChannel.stop("wait-route:" + safeReason(reason));
         WazeCropCapture.get(context).stop("wait-route:" + safeReason(reason));
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.NONE,
@@ -741,8 +917,9 @@ final class NavHudLiveSender {
             return;
         }
         wazeDirectHandshakeAvailable = false;
-        if (wazeSurfaceLaunchPending || wazeSurfaceActive) {
-            fallbackFromWazeSurface("direct-unavailable:" + safeReason(reason));
+        if (wazeSurfaceActive && wazeSurfaceDirectChannel.isActive()) {
+            log("waze cluster unavailable while surface channel remains active reason="
+                    + safeReason(reason));
             return;
         }
         String normalizedReason = normalizeString(reason);
@@ -794,6 +971,12 @@ final class NavHudLiveSender {
             scheduleWazeDirectColdTimeout("direct-navigation-started");
         }
         log("waze direct navigation started reason=" + safeReason(reason));
+        if (wazeSurfaceActive && latestWazeSurfaceFrame != null) {
+            enqueueLatestWazeDirectFrame(
+                    WAZE_PACKAGE, latestWazeSurfaceFrameSessionGeneration,
+                    withRetainedWazeClusterAlert(latestWazeSurfaceFrame),
+                    "surface-recovery:" + latestWazeSurfaceFrameReason, true);
+        }
         maybeLaunchWazeSurface("navigation-started:" + safeReason(reason));
     }
 
@@ -806,16 +989,11 @@ final class NavHudLiveSender {
                 WazeSurfaceActivity.finishActive("not-eligible");
                 return;
             }
-            invalidatePendingWazeDirectFrames();
-            int previousGeneration = wazeDirectChannel.sessionGeneration();
-            hudOutput.clearDirectFrameForLoss(
-                    WAZE_PACKAGE, previousGeneration, "waze-surface-mode-switch",
-                    SystemClock.elapsedRealtime());
-            wazeDirectFrameReceived = false;
-            wazeDirectHandshakeAvailable = false;
-            wazeDirectChannel.start(
+            wazeSurfaceRouteGeneration = wazeRouteGeneration;
+            wazeSurfaceDirectChannel.start(
                     "surface-activity-created", WazeDirectChannel.Mode.MAIN_SURFACE);
-            log("waze surface activity created task=" + taskId);
+            log("waze surface activity created task=" + taskId
+                    + " clusterSession=" + wazeDirectChannel.sessionGeneration());
         });
     }
 
@@ -868,19 +1046,32 @@ final class NavHudLiveSender {
     }
 
     private void onWazeSurfaceReady(String ownerPackage, int sessionGeneration) {
-        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)
+        if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)
                 || !shouldUseWazeSurface()) return;
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         wazeSurfaceLaunchPending = false;
         wazeSurfaceActive = true;
+        invalidatePendingWazeDirectFrames();
+        int hudSessionGeneration = wazeDirectChannel.sessionGeneration();
+        hudOutput.clearDirectFrameForLoss(
+                WAZE_PACKAGE, hudSessionGeneration, "waze-surface-ready",
+                SystemClock.elapsedRealtime());
+        if (latestWazeSurfaceFrame != null
+                && latestWazeSurfaceFrameSessionGeneration == sessionGeneration) {
+            enqueueLatestWazeDirectFrame(
+                    WAZE_PACKAGE, sessionGeneration,
+                    withRetainedWazeClusterAlert(latestWazeSurfaceFrame),
+                    "surface:" + latestWazeSurfaceFrameReason, true);
+        }
         log("waze surface ready task=" + wazeSurfaceTaskId
-                + " session=" + sessionGeneration);
+                + " surfaceSession=" + sessionGeneration
+                + " clusterSession=" + hudSessionGeneration);
     }
 
     private void onWazeSurfaceUnavailable(String ownerPackage, int sessionGeneration,
             String reason) {
-        if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) return;
-        if (wazeSurfaceLaunchPending && !wazeSurfaceActive) {
+        if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+        if (wazeSurfaceLaunchPending || wazeSurfaceActive) {
             fallbackFromWazeSurface("surface-unavailable:" + safeReason(reason));
         } else {
             log("waze surface temporarily unavailable reason=" + safeReason(reason));
@@ -889,6 +1080,7 @@ final class NavHudLiveSender {
 
     private void fallbackFromWazeSurface(String reason) {
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
+        boolean wasSurfaceActive = wazeSurfaceActive;
         boolean wasSurface = wazeSurfaceLaunchPending || wazeSurfaceActive
                 || WazeSurfaceActivity.isActive();
         wazeSurfaceLaunchPending = false;
@@ -896,19 +1088,65 @@ final class NavHudLiveSender {
         wazeSurfaceTaskId = -1;
         wazeSurfaceInstanceId = 0L;
         wazeSurfaceDismissedForRoute = true;
+        wazeSurfaceRouteGeneration = -1;
         WazeSurfaceActivity.finishActive(reason);
+        //Stopping the main host during an active route invokes Waze onAppStop and ends navigation.
         if (!wasSurface || !active || !WAZE_PACKAGE.equals(activePackage)
                 || !wazeDirectNavigating) return;
+        if (!wasSurfaceActive) {
+            log("waze surface attempt ended before HUD source switch reason="
+                    + safeReason(reason));
+            return;
+        }
         invalidatePendingWazeDirectFrames();
-        int previousGeneration = wazeDirectChannel.sessionGeneration();
+        int clusterGeneration = wazeDirectChannel.sessionGeneration();
         hudOutput.clearDirectFrameForLoss(
-                WAZE_PACKAGE, previousGeneration, "waze-surface-fallback:" + safeReason(reason),
+                WAZE_PACKAGE, clusterGeneration,
+                "waze-surface-fallback:" + safeReason(reason),
                 SystemClock.elapsedRealtime());
-        wazeDirectFrameReceived = false;
-        wazeDirectHandshakeAvailable = false;
-        wazeDirectChannel.start(
-                "surface-fallback:" + safeReason(reason), WazeDirectChannel.Mode.CLUSTER);
-        log("waze surface fallback to cluster reason=" + safeReason(reason));
+        if (latestWazeClusterFrame != null
+                && latestWazeClusterFrameSessionGeneration == clusterGeneration) {
+            enqueueLatestWazeDirectFrame(
+                    WAZE_PACKAGE, clusterGeneration, latestWazeClusterFrame,
+                    "surface-fallback:" + latestWazeClusterFrameReason, false);
+        }
+        log("waze surface fallback retained cluster session=" + clusterGeneration
+                + " reason=" + safeReason(reason));
+    }
+
+    private DirectTbtFrame withRetainedWazeClusterAlert(DirectTbtFrame surfaceFrame) {
+        if (surfaceFrame == null) {
+            return surfaceFrame;
+        }
+        if (!HudPrefs.isWazeAlertsEnabled(context)) {
+            return surfaceFrame.withAlertOverlay(DirectTbtFrame.AlertOverlay.inactive());
+        }
+        if (surfaceFrame.getAlertOverlay().isActive()) return surfaceFrame;
+        DirectTbtFrame clusterFrame = latestWazeClusterFrame;
+        if (clusterFrame == null
+                || latestWazeClusterFrameSessionGeneration
+                != wazeDirectChannel.sessionGeneration()
+                || !clusterFrame.getAlertOverlay().isActive()) {
+            return surfaceFrame;
+        }
+        return surfaceFrame.withAlertOverlay(clusterFrame.getAlertOverlay());
+    }
+
+    private static boolean wazeAlertStateChanged(
+            DirectTbtFrame previousFrame, DirectTbtFrame nextFrame) {
+        DirectTbtFrame.AlertOverlay previous = previousFrame == null
+                ? DirectTbtFrame.AlertOverlay.inactive()
+                : previousFrame.getAlertOverlay();
+        DirectTbtFrame.AlertOverlay next = nextFrame == null
+                ? DirectTbtFrame.AlertOverlay.inactive()
+                : nextFrame.getAlertOverlay();
+        if (previous.isActive() != next.isActive()) return true;
+        if (!previous.isActive()) return false;
+        return previous.getId() != next.getId()
+                || previous.getDistanceMeters() != next.getDistanceMeters()
+                || previous.useRouteNative() != next.useRouteNative()
+                || !previous.getDisplayText().equals(next.getDisplayText())
+                || !Arrays.equals(previous.getManeuverPng(), next.getManeuverPng());
     }
 
     private void closeWazeSurface(String reason) {
@@ -919,6 +1157,7 @@ final class NavHudLiveSender {
         wazeSurfaceDismissedForRoute = false;
         wazeSurfaceTaskId = -1;
         wazeSurfaceInstanceId = 0L;
+        wazeSurfaceRouteGeneration = -1;
         WazeSurfaceActivity.finishActive(reason);
     }
 
@@ -1323,6 +1562,7 @@ final class NavHudLiveSender {
                 + Math.max(0L, SystemClock.elapsedRealtime() - detectedAtMs)
                 + " reason=" + safeReason(reason));
         closeWazeSurface("navigation-ended:" + safeReason(reason));
+        wazeSurfaceDirectChannel.stop("route-terminal:" + safeReason(reason));
         cancelWazeDirectColdTimeout();
         cancelWazeFallbackReadiness();
         wazeDirectNavigating = false;
@@ -1364,6 +1604,8 @@ final class NavHudLiveSender {
         WazeCropCapture.get(context).stop("route-lifecycle-bridge");
         if (!navigating) {
             closeWazeSurface("route-lifecycle-end:" + safeReason(reason));
+            wazeSurfaceDirectChannel.stop(
+                    "route-lifecycle-end:" + safeReason(reason));
             if (!changed && !wazeDirectChannel.isActive()) {
                 log("waze route lifecycle terminal ignored; state already inactive reason="
                         + safeReason(reason));
@@ -1394,14 +1636,16 @@ final class NavHudLiveSender {
             startOnMain(WAZE_PACKAGE, "route-lifecycle-start");
             return;
         }
-        if (wazeSurfaceLaunchPending || wazeSurfaceActive) {
-            wazeDirectChannel.start(
-                    "route-lifecycle-surface-ensure", WazeDirectChannel.Mode.MAIN_SURFACE);
-        } else if (changed || !wazeDirectChannel.isActive()) {
-            startWazeDirectForRoute("route-lifecycle-start");
+        if (changed || !wazeDirectChannel.isActive()) {
+            startWazeDirectForRoute("route-lifecycle-start", !changed);
         } else {
             wazeDirectChannel.start(
                     "route-lifecycle-ensure", WazeDirectChannel.Mode.CLUSTER);
+        }
+        if ((wazeSurfaceLaunchPending || wazeSurfaceActive)
+                && !wazeSurfaceDirectChannel.isActive()) {
+            wazeSurfaceDirectChannel.start(
+                    "route-lifecycle-surface-ensure", WazeDirectChannel.Mode.MAIN_SURFACE);
         }
     }
 
@@ -1449,6 +1693,12 @@ final class NavHudLiveSender {
         wazeDirectRouteEnded = false;
         wazeRouteGeneration++;
         wazeFallbackActive = false;
+        latestWazeClusterFrame = null;
+        latestWazeClusterFrameReason = "";
+        latestWazeClusterFrameSessionGeneration = 0;
+        latestWazeSurfaceFrame = null;
+        latestWazeSurfaceFrameReason = "";
+        latestWazeSurfaceFrameSessionGeneration = 0;
     }
 
     private void eventWazeDirectSession(String event, String detail) {
@@ -1887,7 +2137,8 @@ final class NavHudLiveSender {
                 if (shouldStartWazeDirectHost(
                         bridgeSupported, WazeRouteLifecycleStore.isRouteActive(context))) {
                     if (bridgeSupported) {
-                        startWazeDirectForRoute("active-restart:" + safeReason(reason));
+                        startWazeDirectForRoute(
+                                "active-restart:" + safeReason(reason), true);
                     } else {
                         startWazeDirectProbe("active-restart:" + safeReason(reason));
                     }
@@ -1908,6 +2159,7 @@ final class NavHudLiveSender {
             endWazeDirectSession("source-switch:" + packageName);
             resetWazeDirectSessionState();
             wazeDirectChannel.stop("source-switch:" + packageName);
+            wazeSurfaceDirectChannel.stop("source-switch:" + packageName);
             WazeCropCapture.get(context).stop("source-switch:" + packageName);
         }
         if (GMapsDirectChannel.PACKAGE_NAME.equals(previousPackage)
@@ -2272,6 +2524,7 @@ final class NavHudLiveSender {
             endWazeDirectSession(reason);
             resetWazeDirectSessionState();
             wazeDirectChannel.stop(reason);
+            wazeSurfaceDirectChannel.stop(reason);
         }
         if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
             endGMapsDirectSession(reason);
@@ -2639,6 +2892,7 @@ final class NavHudLiveSender {
         endWazeDirectSession("package-replaced-reinit");
         resetWazeDirectSessionState();
         wazeDirectChannel.hardStop("package-replaced-reinit");
+        wazeSurfaceDirectChannel.hardStop("package-replaced-reinit");
         endGMapsDirectSession("package-replaced-reinit");
         resetGMapsDirectSessionState();
         gmapsDirectChannel.stop("package-replaced-reinit");
@@ -2816,6 +3070,15 @@ final class NavHudLiveSender {
                 && WAZE_PACKAGE.equals(activePackage)
                 && WAZE_PACKAGE.equals(ownerPackage)
                 && wazeDirectChannel.sessionGeneration() == sessionGeneration;
+    }
+
+    private boolean isCurrentWazeSurfaceCallback(String ownerPackage,
+            int sessionGeneration) {
+        return active
+                && WAZE_PACKAGE.equals(activePackage)
+                && WAZE_PACKAGE.equals(ownerPackage)
+                && wazeSurfaceRouteGeneration == wazeRouteGeneration
+                && wazeSurfaceDirectChannel.sessionGeneration() == sessionGeneration;
     }
 
     private boolean isCurrentWazeProbeToken() {

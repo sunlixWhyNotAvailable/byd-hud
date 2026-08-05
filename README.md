@@ -54,7 +54,7 @@ BYD HUD prefers a compatible direct channel for the selected navigator. Legacy i
 | Google Maps | Structured maneuver, distance, road, rendered maneuver image, ETA, remaining time, and remaining distance | Accessibility and notification data after capture services are granted and connected | Legacy input has no lane guidance and may have limited maneuver data |
 | Waze | Structured maneuver, distance, street, lanes, and session alerts | Screen capture and visual parsing after `Screen capture channel (legacy)` is enabled | The legacy channel is off by default, layout-dependent, and no longer supported by the developer |
 
-By default, the direct channel leaves the navigator activity unchanged while navigation data is sent to BYD HUD in the background. With `Start with custom surface` enabled, Waze still handles search and route selection in its normal activity, then supplies the active route map and controls to a separate BYD HUD surface after navigation starts. If that surface is not ready within five seconds, BYD HUD returns to the normal Waze direct session without ending the route. Google Maps always keeps its normal activity.
+By default, the direct channel leaves the navigator activity unchanged while navigation data is sent to BYD HUD in the background. With `Start with custom surface` enabled, Waze still handles search and route selection in its normal activity, then supplies the active route map and controls to a separate BYD HUD surface after navigation starts. Normal Waze direct guidance remains available while the surface starts; if it is not ready within five seconds, BYD HUD keeps that guidance without ending the route. Google Maps always keeps its normal activity.
 
 ### Current navigator contract
 
@@ -126,7 +126,7 @@ Street text has priority over the text direction because both use the same vehic
 | `Show Waze alerts` | On | Keeps a supplied Waze alert visible while route distance, street, lanes, and the matching native maneuver continue to update |
 | `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate surface; Back returns to the normal Waze activity for the rest of that route |
 
-The custom surface is route-scoped. Changing its switch during an active route does not hot-swap sessions. A five-second readiness failure returns to the standard Waze direct session and suppresses another surface attempt until the next route. The Waze alert switch controls HUD alert output only; alerts supplied to the custom Waze surface remain visible there.
+The custom surface is route-scoped. Changing its switch during an active route does not hot-swap sessions. A five-second readiness failure keeps the standard Waze direct guidance active and suppresses another surface attempt until the next route. The Waze alert switch controls HUD alert output only; alerts supplied to the custom Waze surface remain visible there.
 
 ### Route metrics
 
@@ -343,7 +343,7 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 - The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
 - The standard Waze cluster direct session does not provide ETA, remaining time, or remaining route distance; these values depend on Waze supplying them in a custom-surface main session.
 - Waze alerts still depend on Waze supplying an alert; the built-in alert hook is available only for the supported Waze 5.20.0.1 structure.
-- Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure returns to the normal direct session after five seconds.
+- Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure keeps the normal direct guidance active after five seconds.
 - Stock cluster firmware may add dark overlays to dashboard projection.
 - Unsupported split-package topologies and XAPK files with OBB data cannot be patched.
 - Native arrows require `Navigation fusion` in the vehicle HUD settings.
