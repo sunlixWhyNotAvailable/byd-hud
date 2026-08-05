@@ -6,14 +6,14 @@
 
 BYD HUD connects an active Google Maps or Waze route to the navigation fields already available in compatible Chinese-market BYD vehicles. The map stays in the navigator; maneuver, distance, street, lanes, alerts, and optional trip metrics are sent separately to the HUD.
 
-The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, and can locally prepare compatible navigator packages for a structured direct channel.
+The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
 
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
 - **Need help:** read [Troubleshooting](#troubleshooting), then [report a problem](#report-a-problem) with the relevant day archive
 
-BYD HUD is not an Android Auto replacement and does not replace or redesign the navigator interface on the center display.
+BYD HUD is not an Android Auto replacement. Normal navigator activities remain responsible for route search and selection; an optional Waze custom surface applies only after navigation starts.
 
 ## What BYD HUD does
 
@@ -37,6 +37,7 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Direct channels | Structured low-latency data from a compatible patched Google Maps or Waze build |
 | Optional legacy input | Accessibility, notification, or visual parsing after its settings and services are explicitly enabled |
 | Dashboard control | Move a running navigator between displays and set the height of its dashboard projection |
+| Navigator downloads | Download and validate the supported Waze and Google Maps builds from the fixed project release |
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
 | Logs and storage | Record diagnostics, manage logs by day, and share only the selected data |
 | Updates | Stable releases by default, with an optional beta channel |
@@ -53,7 +54,7 @@ BYD HUD prefers a compatible direct channel for the selected navigator. Legacy i
 | Google Maps | Structured maneuver, distance, road, rendered maneuver image, ETA, remaining time, and remaining distance | Accessibility and notification data after capture services are granted and connected | Legacy input has no lane guidance and may have limited maneuver data |
 | Waze | Structured maneuver, distance, street, lanes, and session alerts | Screen capture and visual parsing after `Screen capture channel (legacy)` is enabled | The legacy channel is off by default, layout-dependent, and no longer supported by the developer |
 
-The direct channel does not replace the map with a separate surface. Waze or Google Maps continues to show and control the route on the tablet while navigation data is sent to BYD HUD in the background.
+By default, the direct channel leaves the navigator activity unchanged while navigation data is sent to BYD HUD in the background. With `Start with custom surface` enabled, Waze still handles search and route selection in its normal activity, then supplies the active route map and controls to a separate BYD HUD surface after navigation starts. If that surface is not ready within five seconds, BYD HUD returns to the normal Waze direct session without ending the route. Google Maps always keeps its normal activity.
 
 ### Current navigator contract
 
@@ -76,6 +77,8 @@ The patcher still verifies exact package, signer, split, and DEX structures. A m
 ## Using the Apps tab
 
 The `Apps` tab is the normal starting screen after initial setup.
+
+The notice at the top lists the supported navigator builds. Each `Download` action retrieves one fixed asset from the project release, shows inline progress, verifies its SHA-256, package, version, version code, and signer, then offers the Android installer. An already compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot replace the installed signer or version safely.
 
 1. Find Google Maps or Waze under `Supported navigation apps`.
 2. Enable `HUD` before or after launching the navigator.
@@ -116,11 +119,19 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 
 Street text has priority over the text direction because both use the same vehicle HUD field.
 
-### Alerts and route metrics
+### Waze functions
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Show Waze alerts` | On | Keeps a supplied Waze alert visible while route distance, street, lanes, and the matching native maneuver continue to update |
+| `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate surface; Back returns to the normal Waze activity for the rest of that route |
+
+The custom surface is route-scoped. Changing its switch during an active route does not hot-swap sessions. A five-second readiness failure returns to the standard Waze direct session and suppresses another surface attempt until the next route. The Waze alert switch controls HUD alert output only; alerts supplied to the custom Waze surface remain visible there.
+
+### Route metrics
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
 | `Show ETA/time/distance for entire route` | Off | Off uses metrics to the next stop; on requests whole-route metrics when the source distinguishes them |
 | `Show ETA` | Off | Adds the expected arrival time to the street field |
 | `Show remaining time` | Off | Adds remaining travel time to the street field |
@@ -132,7 +143,7 @@ Enabled metrics are added before the street or cue, for example:
 [ETA: 12:20 | 11 min | 5.1 km] Main Street
 ```
 
-Google Maps direct currently supplies the complete metric contract. The current Waze direct session does not provide trip metrics, so the metric switches have no visible effect for Waze until that source changes.
+Google Maps direct supplies the complete metric contract. The standard Waze cluster session does not provide trip metrics; an active custom-surface main session can expose them when Waze includes them.
 
 ### Additional navigation behavior
 
@@ -150,7 +161,7 @@ Google Maps direct currently supplies the complete metric contract. The current 
 | `Fullscreen dashboard` | On | Uses the full dashboard navigation mode; off selects the compact map mode |
 | `Height` | 100% | Changes the projected window height live from 20% to 100% |
 
-The navigator must already be running. Before moving it, BYD HUD sends the OEM `30011` command for the selected full or compact layout, then verifies that the application task reached the target display. It cannot read back the actual fullscreen/partial cluster mode and does not run a watchdog that reapplies that mode. The switch therefore represents the requested layout, not an authoritative vehicle state. Dashboard control requires authorized ADB access on the tested firmware.
+The navigator must already be running. Before moving it, BYD HUD sends the OEM `30011` command for the selected full or compact layout, then verifies that the application task reached the target display. During an active Waze custom-surface route, the separate surface task follows the navigator task so the BYD HUD settings screen is never moved by mistake. BYD HUD cannot read back the actual fullscreen/partial cluster mode and does not run a watchdog that reapplies that mode. The switch therefore represents the requested layout, not an authoritative vehicle state. Dashboard control requires authorized ADB access on the tested firmware.
 
 <!-- Photo slot: docs/screenshots/en/dashboard.jpg
 Use a landscape photo showing the real instrument cluster. Place it here.
@@ -193,7 +204,7 @@ The direct-channel layer is mandatory. Optional layers, such as the Google Maps 
 - Clearing BYD HUD data or uninstalling BYD HUD also removes its local signing key.
 - Unknown publisher signatures are rejected.
 
-Back up important navigator data and sign in to its account before patching. The patcher never downloads navigator APKs and never sends selected APKs to a server.
+Back up important navigator data and sign in to its account before patching. The patcher never sends selected APKs to a server. The separate download actions on the `Apps` tab retrieve only the three fixed, pinned navigator assets documented above; patching a user-selected source still operates locally.
 
 ## Runtime and maintenance options
 
@@ -330,8 +341,9 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 - Google Maps legacy input has no lane guidance and may provide incomplete maneuver data.
 - Waze screen-capture output is off by default and no longer supported by the developer.
 - The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
-- The current Waze direct session does not provide ETA, remaining time, or remaining route distance.
+- The standard Waze cluster direct session does not provide ETA, remaining time, or remaining route distance; these values depend on Waze supplying them in a custom-surface main session.
 - Waze alerts still depend on Waze supplying an alert; the built-in alert hook is available only for the supported Waze 5.20.0.1 structure.
+- Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure returns to the normal direct session after five seconds.
 - Stock cluster firmware may add dark overlays to dashboard projection.
 - Unsupported split-package topologies and XAPK files with OBB data cannot be patched.
 - Native arrows require `Navigation fusion` in the vehicle HUD settings.

@@ -61,6 +61,15 @@
             android:taskAffinity=""
             android:theme="@android:style/Theme.Translucent.NoTitleBar" />
         <activity
+            android:name=".WazeSurfaceActivity"
+            android:autoRemoveFromRecents="true"
+            android:configChanges="density|orientation|screenSize|smallestScreenSize|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTask"
+            android:taskAffinity="com.bydhud.app.waze_surface"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
+        <activity
             android:name=".WazeSdkProbeActivity"
             android:excludeFromRecents="true"
             android:exported="true"

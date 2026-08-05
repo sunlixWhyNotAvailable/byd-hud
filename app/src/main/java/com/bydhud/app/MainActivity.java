@@ -246,6 +246,7 @@ public final class MainActivity extends ComponentActivity {
         }
         NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
         NavigatorPackageInstaller.reconcile(this);
+        NavigatorAssetManager.reconcile(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-create");
         } else {
@@ -283,6 +284,7 @@ public final class MainActivity extends ComponentActivity {
         super.onResume();
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
+        NavigatorAssetManager.reconcile(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
         if (composeAppsTabSelected) {
@@ -746,6 +748,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public ComposeSnapshot composeSnapshot() {
         NavRuntimePermissionStatus permissionStatus = NavRuntimePermissionStatus.check(this);
+        boolean uaLanguage = HudPrefs.isUaLanguage(this);
         NavAppDisplayController displayController = NavAppDisplayController.get(this);
         Set<String> capturePackages = NavCapturePrefs.getCapturePackages(this);
         Set<String> observedPackages = NavCapturePrefs.getObservedPackages(this);
@@ -781,6 +784,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
+                HudPrefs.isWazeCustomSurfaceEnabled(this),
                 HudPrefs.isFullscreenDashboardEnabled(this),
                 HudPrefs.dashboardHeightPercent(this),
                 HudPrefs.isSmallDistanceClampEnabled(this),
@@ -819,7 +823,29 @@ public final class MainActivity extends ComponentActivity {
                 supportedRows,
                 allRows,
                 patchRows,
+                NavigatorAssetManager.snapshots(this, uaLanguage),
                 composePatchOperation());
+    }
+
+    public void composeStartNavigatorAssetDownload(String assetId) throws Exception {
+        NavigatorAssetManager.startDownload(this, assetId);
+        refreshControls();
+    }
+
+    public boolean composeNavigatorAssetRequiresDestructiveConfirm(String assetId)
+            throws Exception {
+        return NavigatorAssetManager.requiresDestructiveConfirmation(this, assetId);
+    }
+
+    public void composeInstallNavigatorAsset(String assetId, boolean destructiveApproved)
+            throws Exception {
+        NavigatorAssetManager.install(this, assetId, destructiveApproved);
+        refreshControls();
+    }
+
+    public void composeRestoreNavigatorAsset(String assetId) throws Exception {
+        NavigatorAssetManager.restore(this, assetId);
+        refreshControls();
     }
 
     public String composePatchSourceDisplayName(Uri uri) {
@@ -1228,6 +1254,13 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
         setWazeScreenCaptureEnabled(enabled);
+    }
+
+    public void composeSetWazeCustomSurfaceEnabled(boolean enabled) {
+        HudPrefs.setWazeCustomSurfaceEnabled(this, enabled);
+        appendStatus("Waze custom surface " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui waze_custom_surface=" + enabled);
+        refreshControls();
     }
 
     public void composeSetFullscreenDashboardEnabled(boolean enabled) {
@@ -1722,6 +1755,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
         public final boolean wazeScreenCaptureEnabled;
+        public final boolean wazeCustomSurfaceEnabled;
         public final boolean fullscreenDashboardEnabled;
         public final int dashboardHeightPercent;
         public final boolean smallDistanceClampEnabled;
@@ -1760,6 +1794,7 @@ public final class MainActivity extends ComponentActivity {
         public final List<ComposeAppRow> supportedApps;
         public final List<ComposeAppRow> allApps;
         public final List<ComposeNavigatorPatchRow> patchRows;
+        public final List<NavigatorAssetManager.AssetSnapshot> navigatorAssets;
         public final ComposePatchOperation patchOperation;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
@@ -1770,6 +1805,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean wholeRouteMetricsEnabled, boolean etaOutputEnabled,
                 boolean remainingTimeOutputEnabled, boolean remainingDistanceOutputEnabled,
                 boolean wazeScreenCaptureEnabled,
+                boolean wazeCustomSurfaceEnabled,
                 boolean fullscreenDashboardEnabled,
                 int dashboardHeightPercent,
                 boolean smallDistanceClampEnabled,
@@ -1787,6 +1823,7 @@ public final class MainActivity extends ComponentActivity {
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
                 List<ComposeNavigatorPatchRow> patchRows,
+                List<NavigatorAssetManager.AssetSnapshot> navigatorAssets,
                 ComposePatchOperation patchOperation) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
@@ -1804,6 +1841,7 @@ public final class MainActivity extends ComponentActivity {
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
+            this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
             this.dashboardHeightPercent = DashboardProjectionPolicy.clampHeightPercent(
                     dashboardHeightPercent);
@@ -1846,6 +1884,8 @@ public final class MainActivity extends ComponentActivity {
             this.allApps = allApps == null ? Collections.emptyList() : allApps;
             this.patchRows = patchRows == null ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(patchRows));
+            this.navigatorAssets = navigatorAssets == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(navigatorAssets));
             this.patchOperation = patchOperation == null
                     ? new ComposePatchOperation("", "", NavigatorPatchStore.IDLE,
                     "", false, false, false)

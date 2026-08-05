@@ -9,6 +9,7 @@ import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
+import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
 import android.location.Location;
 import android.os.Handler;
@@ -16,6 +17,7 @@ import android.os.HandlerThread;
 import android.os.IBinder;
 import android.os.Process;
 import android.os.SystemClock;
+import android.view.Surface;
 
 import androidx.car.app.AppInfo;
 import androidx.car.app.FailureResponse;
@@ -28,6 +30,7 @@ import androidx.car.app.IOnDoneCallback;
 import androidx.car.app.ISurfaceCallback;
 import androidx.car.app.SessionInfo;
 import androidx.car.app.SessionInfoIntentEncoder;
+import androidx.car.app.SurfaceContainer;
 import androidx.car.app.model.Alert;
 import androidx.car.app.model.CarIcon;
 import androidx.car.app.model.CarText;
@@ -59,8 +62,12 @@ import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Direct, surface-free AndroidX Car App host for Waze cluster navigation data. */
+/** Direct AndroidX Car App host for Waze cluster data or the optional main Surface. */
 public final class WazeDirectChannel {
+    enum Mode {
+        CLUSTER,
+        MAIN_SURFACE
+    }
     static final String OWNER_PACKAGE = "com.waze";
     private static final String CAR_APP_ACTION = "androidx.car.app.CarAppService";
     private static final ComponentName WAZE_SERVICE = new ComponentName(
@@ -119,6 +126,7 @@ public final class WazeDirectChannel {
     private long lastDirectActivityMs;
     private boolean healthProbeInFlight;
     private int healthProbeSequence;
+    private Mode mode = Mode.CLUSTER;
 
     public WazeDirectChannel(Context context, Listener listener) {
         this.context = Objects.requireNonNull(context, "context").getApplicationContext();
@@ -129,7 +137,12 @@ public final class WazeDirectChannel {
     }
 
     public void start(String reason) {
-        runOnChannel(() -> startOnChannel(reason));
+        start(reason, Mode.CLUSTER);
+    }
+
+    public void start(String reason, Mode requestedMode) {
+        Mode selected = requestedMode == null ? Mode.CLUSTER : requestedMode;
+        runOnChannel(() -> startOnChannel(reason, selected));
     }
 
     public void stop(String reason) {
@@ -173,11 +186,16 @@ public final class WazeDirectChannel {
         });
     }
 
-    private void startOnChannel(String reason) {
+    private void startOnChannel(String reason, Mode requestedMode) {
         if (shutdown) {
             log("start ignored after shutdown: " + safeText(reason));
             return;
         }
+        if (active && mode != requestedMode) {
+            switchModeOnChannel(requestedMode, reason);
+            return;
+        }
+        mode = requestedMode;
         if (active) {
             if (suspended) {
                 resumeOnChannel(reason);
@@ -192,6 +210,27 @@ public final class WazeDirectChannel {
         sessionGeneration++;
         prepareRouteStart(reason);
         log("start generation=" + generation + " reason=" + startReason);
+        connectWaze(generation);
+    }
+
+    private void switchModeOnChannel(Mode requestedMode, String reason) {
+        int oldGeneration = generation;
+        cancelRebind();
+        cancelAlertWatchdog();
+        cancelDirectHealth();
+        setHandshakeUnavailable("mode-switch:" + safeText(reason), false);
+        endNavigation("mode-switch:" + safeText(reason), false);
+        pauseAndStopSession(oldGeneration, "mode-switch:" + safeText(reason));
+        releaseBinding(connection);
+        clearSessionState();
+        mode = requestedMode;
+        active = true;
+        suspended = false;
+        generation++;
+        sessionGeneration++;
+        prepareRouteStart(reason);
+        log("mode switched mode=" + mode + " generation=" + generation
+                + " reason=" + safeText(reason));
         connectWaze(generation);
     }
 
@@ -292,8 +331,10 @@ public final class WazeDirectChannel {
         CarHost nextHost = new CarHost(expectedGeneration);
         Connection nextConnection = new Connection(expectedGeneration);
         Intent intent = new Intent(CAR_APP_ACTION).setComponent(WAZE_SERVICE);
-        SessionInfoIntentEncoder.encode(
-                new SessionInfo(SessionInfo.DISPLAY_TYPE_CLUSTER, "cluster"), intent);
+        SessionInfo sessionInfo = mode == Mode.MAIN_SURFACE
+                ? SessionInfo.DEFAULT_SESSION_INFO
+                : new SessionInfo(SessionInfo.DISPLAY_TYPE_CLUSTER, "cluster");
+        SessionInfoIntentEncoder.encode(sessionInfo, intent);
 
         carHost = nextHost;
         connection = nextConnection;
@@ -302,7 +343,8 @@ public final class WazeDirectChannel {
             bound = context.bindService(intent, nextConnection, Context.BIND_AUTO_CREATE);
             binding = bound;
             if (bound) {
-                log("bind result=true component=" + WAZE_SERVICE.flattenToShortString());
+                log("bind result=true component=" + WAZE_SERVICE.flattenToShortString()
+                        + " mode=" + mode);
                 scheduleBindCallbackTimeout(expectedGeneration, nextConnection);
             } else {
                 releaseBinding(nextConnection);
@@ -487,6 +529,7 @@ public final class WazeDirectChannel {
             return;
         }
         Template template = ((TemplateWrapper) value).getTemplate();
+        if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.showTemplate(template);
         if (!(template instanceof NavigationTemplate)) {
             log("template=" + typeName(template));
             return;
@@ -614,6 +657,7 @@ public final class WazeDirectChannel {
     }
 
     private void clearSessionState() {
+        if (carHost != null) carHost.appHost.clearSurfaceSession("session-cleared");
         carApp = null;
         appManager = null;
         carHost = null;
@@ -1226,6 +1270,10 @@ public final class WazeDirectChannel {
 
         void onLiveness(String ownerPackage, int sessionGeneration, String reason);
 
+        void onSurfaceReady(String ownerPackage, int sessionGeneration);
+
+        void onSurfaceUnavailable(String ownerPackage, int sessionGeneration, String reason);
+
         void onLog(String message);
     }
 
@@ -1267,6 +1315,7 @@ public final class WazeDirectChannel {
             this.expectedGeneration = expectedGeneration;
             navigationHost = new NavigationHost(expectedGeneration);
             appHost = new AppHost(expectedGeneration);
+            if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.attachHostBridge(appHost);
         }
 
         @Override
@@ -1297,9 +1346,18 @@ public final class WazeDirectChannel {
         }
     }
 
-    private final class AppHost extends IAppHost.Stub {
+    private final class AppHost extends IAppHost.Stub
+            implements WazeSurfaceActivity.HostBridge {
         private final int expectedGeneration;
         private Runnable invalidateCallback;
+        private ISurfaceCallback surfaceCallback;
+        private Surface surface;
+        private int surfaceWidth;
+        private int surfaceHeight;
+        private int surfaceDpi;
+        private final Rect visibleArea = new Rect();
+        private boolean surfaceDeliveryAttempted;
+        private boolean surfaceDelivered;
 
         AppHost(int expectedGeneration) {
             this.expectedGeneration = expectedGeneration;
@@ -1316,7 +1374,163 @@ public final class WazeDirectChannel {
 
         @Override
         public void setSurfaceCallback(ISurfaceCallback callback) {
-            postBinder(expectedGeneration, () -> log("surface callback ignored"));
+            postBinder(expectedGeneration, () -> {
+                if (surfaceCallback != callback && surfaceCallback != null) {
+                    notifySurfaceDestroyed("callback-replaced");
+                    surfaceDeliveryAttempted = false;
+                    surfaceDelivered = false;
+                }
+                surfaceCallback = callback;
+                log("surface callback present=" + (callback != null) + " mode=" + mode);
+                deliverSurfaceIfReady();
+            });
+        }
+
+        void clearSurfaceSession(String reason) {
+            WazeSurfaceActivity.detachHostBridge(this);
+            notifySurfaceDestroyed(reason);
+            surfaceCallback = null;
+            surface = null;
+            visibleArea.setEmpty();
+            surfaceDeliveryAttempted = false;
+            surfaceDelivered = false;
+        }
+
+        @Override
+        public void onSurfaceReady(Surface value, int width, int height, int dpi, Rect area) {
+            runOnChannel(() -> {
+                if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE
+                        || value == null || !value.isValid()) return;
+                surface = value;
+                surfaceWidth = Math.max(1, width);
+                surfaceHeight = Math.max(1, height);
+                surfaceDpi = Math.max(1, dpi);
+                visibleArea.set(area == null ? new Rect() : area);
+                deliverSurfaceIfReady();
+            });
+        }
+
+        @Override
+        public void onSurfaceDestroyed() {
+            runOnChannel(() -> {
+                notifySurfaceDestroyed("activity-surface-destroyed");
+                surface = null;
+                surfaceDelivered = false;
+                int callbackGeneration = sessionGeneration;
+                callback(() -> listener.onSurfaceUnavailable(
+                        OWNER_PACKAGE, callbackGeneration, "activity-surface-destroyed"));
+            });
+        }
+
+        @Override
+        public void onVisibleAreaChanged(Rect area) {
+            runOnChannel(() -> {
+                visibleArea.set(area == null ? new Rect() : area);
+                sendVisibleArea();
+            });
+        }
+
+        @Override
+        public void onClick(float x, float y) {
+            dispatchSurfaceInput("click", callback -> callback.onClick(x, y));
+        }
+
+        @Override
+        public void onScroll(float distanceX, float distanceY) {
+            dispatchSurfaceInput("scroll", callback -> callback.onScroll(distanceX, distanceY));
+        }
+
+        @Override
+        public void onFling(float velocityX, float velocityY) {
+            dispatchSurfaceInput("fling", callback -> callback.onFling(velocityX, velocityY));
+        }
+
+        @Override
+        public void onScale(float focusX, float focusY, float scaleFactor) {
+            dispatchSurfaceInput("scale",
+                    callback -> callback.onScale(focusX, focusY, scaleFactor));
+        }
+
+        @Override
+        public void onBackPressedByHost() {
+            runOnChannel(() -> {
+                if (appManager == null) return;
+                try {
+                    appManager.onBackPressed(new DoneCallback(
+                            expectedGeneration, "onBackPressed", null));
+                } catch (Throwable error) {
+                    log("surface back failed: " + error);
+                }
+            });
+        }
+
+        private void deliverSurfaceIfReady() {
+            ISurfaceCallback surfaceCallbackValue = surfaceCallback;
+            Surface value = surface;
+            if (surfaceDelivered || mode != Mode.MAIN_SURFACE
+                    || surfaceCallbackValue == null || value == null
+                    || !value.isValid()) return;
+            surfaceDeliveryAttempted = true;
+            try {
+                surfaceCallbackValue.onSurfaceAvailable(Bundleable.create(new SurfaceContainer(
+                                value, surfaceWidth, surfaceHeight, surfaceDpi)),
+                        new DoneCallback(expectedGeneration, "onSurfaceAvailable", ignored -> {
+                            if (surfaceCallbackValue != surfaceCallback || surface != value
+                                    || !value.isValid()) return;
+                            surfaceDelivered = true;
+                            sendVisibleArea();
+                            int callbackGeneration = sessionGeneration;
+                            callback(() -> listener.onSurfaceReady(
+                                    OWNER_PACKAGE, callbackGeneration));
+                            log("surface delivered width=" + surfaceWidth
+                                    + " height=" + surfaceHeight + " dpi=" + surfaceDpi);
+                        }));
+            } catch (Throwable error) {
+                log("surface delivery failed: " + error);
+                int callbackGeneration = sessionGeneration;
+                callback(() -> listener.onSurfaceUnavailable(
+                        OWNER_PACKAGE, callbackGeneration, "surface-delivery-failed"));
+            }
+        }
+
+        private void notifySurfaceDestroyed(String reason) {
+            ISurfaceCallback callback = surfaceCallback;
+            if (!surfaceDeliveryAttempted || callback == null) return;
+            try {
+                callback.onSurfaceDestroyed(Bundleable.create(
+                                new SurfaceContainer(null, 0, 0, 0)),
+                        new DoneCallback(expectedGeneration, "onSurfaceDestroyed", null));
+                log("surface destroyed notified reason=" + safeText(reason));
+            } catch (Throwable error) {
+                log("surface destroy notify failed: " + error);
+            }
+        }
+
+        private void sendVisibleArea() {
+            ISurfaceCallback callback = surfaceCallback;
+            if (!surfaceDelivered || callback == null || visibleArea.isEmpty()) return;
+            Rect area = new Rect(visibleArea);
+            try {
+                callback.onVisibleAreaChanged(area,
+                        new DoneCallback(expectedGeneration, "onVisibleAreaChanged", null));
+                callback.onStableAreaChanged(area,
+                        new DoneCallback(expectedGeneration, "onStableAreaChanged", null));
+            } catch (Throwable error) {
+                log("surface area failed: " + error);
+            }
+        }
+
+        private void dispatchSurfaceInput(String type, SurfaceInput input) {
+            runOnChannel(() -> {
+                ISurfaceCallback callback = surfaceCallback;
+                if (callback == null) return;
+                try {
+                    input.run(callback);
+                    log("surface input type=" + type);
+                } catch (Throwable error) {
+                    log("surface input failed type=" + type + " error=" + error);
+                }
+            });
         }
 
         @Override
@@ -1335,12 +1549,14 @@ public final class WazeDirectChannel {
 
         @Override
         public void showAlert(Bundleable bundle) {
-            if (!wazeAlertsEnabled) return;
             postBinder(expectedGeneration, () -> {
-                if (!wazeAlertsEnabled) return;
                 try {
                     Object value = bundle == null ? null : bundle.get();
-                    if (value instanceof Alert) WazeDirectChannel.this.showAlert((Alert) value);
+                    if (value instanceof Alert) {
+                        Alert alert = (Alert) value;
+                        if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.showAlert(alert);
+                        if (wazeAlertsEnabled) WazeDirectChannel.this.showAlert(alert);
+                    }
                     else log("invalid alert=" + typeName(value));
                 } catch (Throwable t) {
                     log("alert parse failed: " + t);
@@ -1350,7 +1566,10 @@ public final class WazeDirectChannel {
 
         @Override
         public void dismissAlert(int alertId) {
-            postBinder(expectedGeneration, () -> WazeDirectChannel.this.dismissAlert(alertId));
+            postBinder(expectedGeneration, () -> {
+                if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.dismissAlert(alertId);
+                WazeDirectChannel.this.dismissAlert(alertId);
+            });
         }
 
         @Override
@@ -1363,6 +1582,10 @@ public final class WazeDirectChannel {
         public void sendLocation(Location location) {
             postBinder(expectedGeneration, () -> log(
                     "location provider=" + (location == null ? "null" : location.getProvider())));
+        }
+
+        private interface SurfaceInput {
+            void run(ISurfaceCallback callback) throws Exception;
         }
     }
 

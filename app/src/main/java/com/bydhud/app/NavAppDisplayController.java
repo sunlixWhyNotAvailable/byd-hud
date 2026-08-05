@@ -354,6 +354,8 @@ final class NavAppDisplayController {
                         "independent-return-confirm");
                 boolean onMain = confirmed.taskId >= 0
                         && confirmed.displayId == MAIN_DISPLAY_ID;
+                if (onMain) moveWazeSurfaceTaskIfActive(
+                        packageName, MAIN_DISPLAY_ID, "dashboard-return:" + safe(reason));
                 synchronized (lock) {
                     if (onMain
                             && packageName.equals(activeDashboardPackage)) {
@@ -400,6 +402,8 @@ final class NavAppDisplayController {
                         + operation + " detail=" + safe(protocolFailure));
             }
             if (alreadyProjected) {
+                moveWazeSurfaceTaskIfActive(
+                        packageName, current.displayId, "dashboard-existing:" + safe(reason));
                 reconcileConfirmedDashboardOwnership(
                         packageName,
                         current,
@@ -438,6 +442,8 @@ final class NavAppDisplayController {
                     packageName,
                     confirmed,
                     "independent-dashboard-confirmed:" + safe(reason));
+            moveWazeSurfaceTaskIfActive(
+                    packageName, confirmed.displayId, "dashboard-confirmed:" + safe(reason));
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
@@ -567,6 +573,69 @@ final class NavAppDisplayController {
                     false,
                     label + " failed: " + safe(e.getMessage())));
         }
+    }
+
+    private void moveWazeSurfaceTaskIfActive(
+            String logicalPackage, int targetDisplay, String reason) {
+        if (!"com.waze".equals(logicalPackage)) return;
+        int surfaceTaskId = WazeSurfaceActivity.activeTaskId();
+        if (surfaceTaskId < 0) return;
+        NavAppDisplayState surface = moveTaskIdToDisplayBlocking(
+                logicalPackage, surfaceTaskId, targetDisplay, reason);
+        log(logicalPackage, "waze_surface_task_move task=" + surfaceTaskId
+                + " target=" + targetDisplay + " actual=" + surface.displayId
+                + " reason=" + safe(reason));
+    }
+
+    synchronized NavAppDisplayState moveTaskIdToDisplayBlocking(
+            String logicalPackage,
+            int taskId,
+            int targetDisplay,
+            String reason) {
+        String normalized = normalizePackage(logicalPackage);
+        String label = "move_task_to_display";
+        try {
+            if (normalized.isEmpty() || taskId < 0) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                        label + " failed: invalid target");
+            }
+            NavAppDisplayState current = checkTaskId(normalized, taskId, reason);
+            if (current == null) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                        label + " failed: task missing");
+            }
+            if (current.displayId == targetDisplay) return current;
+            LocalAdbBridge.ShellResult move = runCommand(
+                    normalized,
+                    "cmd activity display move-stack " + taskId + " " + targetDisplay,
+                    label + " target=" + targetDisplay + " reason=" + safe(reason));
+            if (!move.success()) {
+                return new NavAppDisplayState(normalized, taskId, current.displayId,
+                        current.visible, label + " failed: " + move.shortDetail());
+            }
+            NavAppDisplayState confirmed = checkTaskId(
+                    normalized, taskId, label + "-confirm");
+            return confirmed == null
+                    ? new NavAppDisplayState(normalized, taskId,
+                            NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                            label + " confirmation missing")
+                    : confirmed;
+        } catch (IOException | SecurityException error) {
+            return new NavAppDisplayState(normalized, taskId,
+                    NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                    label + " failed: " + safe(error.getMessage()));
+        }
+    }
+
+    private NavAppDisplayState checkTaskId(
+            String logicalPackage, int taskId, String reason) throws IOException {
+        LocalAdbBridge.ShellResult result = runCommand(
+                logicalPackage,
+                "dumpsys activity activities",
+                "check_task_id reason=" + safe(reason));
+        return result.success() ? parseTaskId(logicalPackage, taskId, result.output) : null;
     }
 
     //waits for the app-owned virtual display, then moves the task there if Android created it late.
@@ -834,6 +903,38 @@ final class NavAppDisplayController {
         return preferVisibleTask(
                 selected,
                 taskFromBlock(normalized, currentTaskId, currentDisplayId, block));
+    }
+
+    private static NavAppDisplayState parseTaskId(
+            String logicalPackage, int targetTaskId, String dumpsys) {
+        if (targetTaskId < 0 || dumpsys == null || dumpsys.isEmpty()) return null;
+        String[] lines = dumpsys.split("\\r?\\n");
+        int sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+        int currentTaskId = -1;
+        int currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+        StringBuilder block = new StringBuilder();
+        for (String line : lines) {
+            Matcher section = DISPLAY_SECTION_PATTERN.matcher(line);
+            if (section.matches()) {
+                sectionDisplayId = parseInt(
+                        section.group(1), NavAppDisplayState.DISPLAY_UNKNOWN);
+            }
+            int[] header = parseTaskHeader(line, sectionDisplayId);
+            if (header != null) {
+                if (currentTaskId == targetTaskId) {
+                    return new NavAppDisplayState(logicalPackage, targetTaskId,
+                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id");
+                }
+                currentTaskId = header[0];
+                currentDisplayId = header[1];
+                block.setLength(0);
+            }
+            if (currentTaskId >= 0) block.append(line).append('\n');
+        }
+        return currentTaskId == targetTaskId
+                ? new NavAppDisplayState(logicalPackage, targetTaskId, currentDisplayId,
+                        parseVisible(block.toString()), "parsed-task-id")
+                : null;
     }
 
     private static NavAppDisplayState preferVisibleTask(

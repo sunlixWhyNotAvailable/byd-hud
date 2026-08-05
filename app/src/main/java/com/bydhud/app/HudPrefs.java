@@ -24,6 +24,7 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
     private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
     private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
+    private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
     private static final String KEY_DARK_THEME = "dark_theme";
@@ -185,6 +186,14 @@ final class HudPrefs {
 
     static void setWazeScreenCaptureEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_WAZE_SCREEN_CAPTURE, enabled).apply();
+    }
+
+    static boolean isWazeCustomSurfaceEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_WAZE_CUSTOM_SURFACE, false);
+    }
+
+    static void setWazeCustomSurfaceEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_WAZE_CUSTOM_SURFACE, enabled).apply();
     }
 
     static boolean isFullscreenDashboardEnabled(Context context) {
