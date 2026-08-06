@@ -139,7 +139,7 @@ final class NavigatorAssetManager {
                 1030706L,
                 "com.waze",
                 NavigatorPatchTrustPolicy.WAZE_PROJECT_SIGNER,
-                "3E0BC1E4103423E4FE6D3455816F45CAEFB6AF41E08CB90F1409C686147BE388",
+                "327769330D5FF62943166091F4C28B6E0FBFEC6DCAA76E5082770B4A855340E1",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/waze-5.20.0.1-direct.apk",
                 "waze-5.20.0.1-direct.apk",
@@ -152,7 +152,7 @@ final class NavigatorAssetManager {
                 1068022637L,
                 "app.revanced.android.apps.maps",
                 NavigatorPatchTrustPolicy.GMAPS_PROJECT_SIGNER,
-                "D19127AAA0532150C3234D9AF7A17330351D912795D3F5D4666F779D5C041D72",
+                "33E8BE8187F87F720A8D08D6C8653DAB58F4AAC80C61988AAC8F384A9295CD35",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/google-maps-revanced-25.16.03.747108139-direct.apk",
                 "google-maps-revanced-25.16.03.747108139-direct.apk",
@@ -174,8 +174,9 @@ final class NavigatorAssetManager {
     }
 
     static AssetSnapshot snapshot(Context context, Asset asset, boolean ukrainian) {
+        reconcileCatalogRevision(context, asset);
         reconcileDownload(context, asset);
-        boolean installed = matchesInstalled(context, asset);
+        boolean installed = matchesInstalledCached(context, asset);
         String state = string(context, asset, "state", NOT_DOWNLOADED);
         if (installed) state = INSTALLED;
         String progress = string(context, asset, "progress", "0%");
@@ -231,7 +232,7 @@ final class NavigatorAssetManager {
         if (installed == null || matchesInstalled(context, asset)) return false;
         String signer = installedSigner(context, asset.packageName);
         return !asset.signerSha256.equals(signer)
-                || installed.getLongVersionCode() >= asset.versionCode;
+                || installed.getLongVersionCode() > asset.versionCode;
     }
 
     static void install(Context context, String assetId, boolean destructiveApproved)
@@ -317,8 +318,15 @@ final class NavigatorAssetManager {
 
     static void reconcile(Context context) {
         for (Asset asset : ASSETS) {
+            reconcileCatalogRevision(context, asset);
             reconcileDownload(context, asset);
             reconcileInstall(context, asset);
+        }
+    }
+
+    static void refreshInstalledMatches(Context context) {
+        for (Asset asset : ASSETS) {
+            matchesInstalled(context, asset);
         }
     }
 
@@ -518,8 +526,39 @@ final class NavigatorAssetManager {
         }
     }
 
+    private static boolean matchesInstalledCached(Context context, Asset asset) {
+        PackageInfo info = installedInfo(context, asset.packageName);
+        if (!installedMetadataMatches(context, asset, info)) return false;
+        String identity = installedIdentity(info, asset);
+        return identity.equals(string(context, asset, "installed_identity", ""))
+                && prefs(context).getBoolean(key(asset, "installed_matches"), false);
+    }
+
     private static boolean matchesInstalled(Context context, Asset asset) {
         PackageInfo info = installedInfo(context, asset.packageName);
+        if (!installedMetadataMatches(context, asset, info)) return false;
+        String identity = installedIdentity(info, asset);
+        if (identity.equals(string(context, asset, "installed_identity", ""))) {
+            return prefs(context).getBoolean(key(asset, "installed_matches"), false);
+        }
+        boolean matches = false;
+        try {
+            String sourceDir = info.applicationInfo == null ? "" : info.applicationInfo.sourceDir;
+            matches = !sourceDir.isEmpty() && asset.sha256.equals(sha256(new File(sourceDir)));
+        } catch (Exception error) {
+            AppEventLogger.event(context, "navigator_asset installed_hash_failed id="
+                    + asset.id + " error=" + error.getClass().getSimpleName());
+            return false;
+        }
+        prefs(context).edit()
+                .putString(key(asset, "installed_identity"), identity)
+                .putBoolean(key(asset, "installed_matches"), matches)
+                .commit();
+        return matches;
+    }
+
+    private static boolean installedMetadataMatches(Context context, Asset asset,
+            PackageInfo info) {
         if (info == null || !asset.versionName.equals(info.versionName)
                 || asset.versionCode != info.getLongVersionCode()) return false;
         try {
@@ -527,6 +566,28 @@ final class NavigatorAssetManager {
         } catch (Exception ignored) {
             return false;
         }
+    }
+
+    private static String installedIdentity(PackageInfo info, Asset asset) {
+        String sourceDir = info.applicationInfo == null ? "" : info.applicationInfo.sourceDir;
+        File source = new File(sourceDir);
+        return asset.sha256 + "|" + info.lastUpdateTime + "|" + sourceDir + "|"
+                + source.length() + "|" + source.lastModified();
+    }
+
+    private static void reconcileCatalogRevision(Context context, Asset asset) {
+        String previous = string(context, asset, "catalog_sha", "");
+        if (asset.sha256.equals(previous)) return;
+        android.content.SharedPreferences.Editor editor = prefs(context).edit()
+                .putString(key(asset, "catalog_sha"), asset.sha256)
+                .remove(key(asset, "installed_identity"))
+                .remove(key(asset, "installed_matches"));
+        if (PHASE_NONE.equals(string(context, asset, "phase", PHASE_NONE))) {
+            editor.putString(key(asset, "state"), NOT_DOWNLOADED)
+                    .putString(key(asset, "progress"), "0%")
+                    .putString(key(asset, "error"), "");
+        }
+        editor.commit();
     }
 
     private static PackageInfo installedInfo(Context context, String packageName) {

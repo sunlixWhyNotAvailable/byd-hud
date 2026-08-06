@@ -17,8 +17,11 @@ final class WazeRouteLifecycleStore {
     static final String CAPABILITY_META_DATA = "com.bydhud.waze.ROUTE_LIFECYCLE_PROTOCOL";
     static final String EXTRA_PROTOCOL_VERSION = "protocol_version";
     static final String EXTRA_NAVIGATING = "navigating";
+    static final String EXTRA_REASON_CODE = "reason_code";
+    static final String EXTRA_BRIDGE_GENERATION = "bridge_generation";
     static final String EXTRA_EVENT_ELAPSED_MS = "event_elapsed_ms";
     static final int PROTOCOL_VERSION = 1;
+    static final int REASON_UNAVAILABLE = -1;
 
     private static final String PREFS_NAME = "waze_route_lifecycle";
     private static final String KEY_ACTIVE = "route_active";
@@ -44,12 +47,21 @@ final class WazeRouteLifecycleStore {
         final boolean changed;
         final Snapshot snapshot;
         final String reason;
+        final boolean terminal;
+        final boolean rawNavigating;
+        final int reasonCode;
+        final String reasonName;
 
-        RecordResult(boolean accepted, boolean changed, Snapshot snapshot, String reason) {
+        RecordResult(boolean accepted, boolean changed, Snapshot snapshot, String reason,
+                boolean terminal, boolean rawNavigating, int reasonCode, String reasonName) {
             this.accepted = accepted;
             this.changed = changed;
             this.snapshot = snapshot;
             this.reason = reason;
+            this.terminal = terminal;
+            this.rawNavigating = rawNavigating;
+            this.reasonCode = reasonCode;
+            this.reasonName = reasonName;
         }
     }
 
@@ -87,23 +99,51 @@ final class WazeRouteLifecycleStore {
             Snapshot previous = validatedSnapshotLocked(context, now);
             String decision = eventDecision(previous.eventElapsedMs, eventElapsedMs, now);
             if (!"accept".equals(decision)) {
-                return new RecordResult(false, false, previous, decision);
+                return new RecordResult(false, false, previous, decision,
+                        false, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
             }
-
-            long packageUpdateMs = installedPackageUpdateTime(context);
-            Snapshot updated = new Snapshot(active, eventElapsedMs, packageUpdateMs);
-            boolean committed = prefs(context).edit()
-                    .putBoolean(KEY_ACTIVE, active)
-                    .putLong(KEY_EVENT_ELAPSED_MS, eventElapsedMs)
-                    .putLong(KEY_PACKAGE_UPDATE_MS, packageUpdateMs)
-                    .putInt(KEY_BOOT_COUNT, bootCount(context))
-                    .commit();
-            if (!committed) {
-                return new RecordResult(false, false, previous, "commit_failed");
-            }
-            return new RecordResult(true, previous.active != active, updated,
-                    previous.active == active ? "watermark" : "transition");
+            return commitLocked(context, previous, active, eventElapsedMs,
+                    !active, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
         }
+    }
+
+    static RecordResult recordBridge(Context context, boolean navigating, int reasonCode,
+            boolean reasonAvailable, long eventElapsedMs) {
+        synchronized (LOCK) {
+            long now = SystemClock.elapsedRealtime();
+            Snapshot previous = validatedSnapshotLocked(context, now);
+            String decision = eventDecision(previous.eventElapsedMs, eventElapsedMs, now);
+            String reasonName = reasonAvailable ? reasonName(reasonCode) : "UNAVAILABLE";
+            if (!"accept".equals(decision)) {
+                return new RecordResult(false, false, previous, decision,
+                        false, navigating, reasonCode, reasonName);
+            }
+            boolean terminal = !navigating && reasonAvailable && isTerminalReason(reasonCode);
+            boolean active = resolveBridgeActive(
+                    previous.active, navigating, reasonAvailable, reasonCode);
+            return commitLocked(context, previous, active, eventElapsedMs,
+                    terminal, navigating, reasonCode, reasonName);
+        }
+    }
+
+    private static RecordResult commitLocked(Context context, Snapshot previous, boolean active,
+            long eventElapsedMs, boolean terminal, boolean rawNavigating, int reasonCode,
+            String reasonName) {
+        long packageUpdateMs = installedPackageUpdateTime(context);
+        Snapshot updated = new Snapshot(active, eventElapsedMs, packageUpdateMs);
+        boolean committed = prefs(context).edit()
+                .putBoolean(KEY_ACTIVE, active)
+                .putLong(KEY_EVENT_ELAPSED_MS, eventElapsedMs)
+                .putLong(KEY_PACKAGE_UPDATE_MS, packageUpdateMs)
+                .putInt(KEY_BOOT_COUNT, bootCount(context))
+                .commit();
+        if (!committed) {
+            return new RecordResult(false, false, previous, "commit_failed",
+                    false, rawNavigating, reasonCode, reasonName);
+        }
+        String state = previous.active == active ? "watermark" : "transition";
+        return new RecordResult(true, previous.active != active, updated,
+                state + ":" + reasonName, terminal, rawNavigating, reasonCode, reasonName);
     }
 
     static RecordResult recordLocalTerminal(Context context, long detectedAtMs) {
@@ -122,6 +162,37 @@ final class WazeRouteLifecycleStore {
         if (incomingElapsedMs > nowElapsedMs) return "future_timestamp";
         if (storedElapsedMs > 0L && incomingElapsedMs <= storedElapsedMs) return "stale_timestamp";
         return "accept";
+    }
+
+    static boolean isTerminalReason(int reasonCode) {
+        return reasonCode == 1 || reasonCode == 5 || reasonCode == 6 || reasonCode == 7;
+    }
+
+    static boolean isTransitionReason(int reasonCode) {
+        return reasonCode == 4 || reasonCode == 8 || reasonCode == 9;
+    }
+
+    static boolean resolveBridgeActive(boolean previousActive, boolean navigating,
+            boolean reasonAvailable, int reasonCode) {
+        return navigating || previousActive
+                && !(reasonAvailable && isTerminalReason(reasonCode));
+    }
+
+    static String reasonName(int reasonCode) {
+        switch (reasonCode) {
+            case 0: return "UNKNOWN";
+            case 1: return "REACHED_DESTINATION";
+            case 2: return "SERVER_ERROR";
+            case 3: return "TRANSPORT_APP";
+            case 4: return "NEW_DEST";
+            case 5: return "TERMINATE";
+            case 6: return "USER";
+            case 7: return "PARKED";
+            case 8: return "NEW_ROUTE_RECEIVED";
+            case 9: return "NEW_ROUTE_REQUESTED";
+            default: return reasonCode == REASON_UNAVAILABLE
+                    ? "UNAVAILABLE" : "UNRECOGNIZED_" + reasonCode;
+        }
     }
 
     private static Snapshot validatedSnapshotLocked(Context context, long nowElapsedMs) {

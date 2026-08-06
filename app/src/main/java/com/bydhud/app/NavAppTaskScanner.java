@@ -82,18 +82,27 @@ final class NavAppTaskScanner {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     Snapshot forceScanIfIdle() {
-        if (!scanInProgress.compareAndSet(false, true)) {
-            return null;
+        synchronized (lock) {
+            if (!scanInProgress.compareAndSet(false, true)) {
+                return null;
+            }
         }
+        boolean completed = false;
         try {
             Snapshot scanned = scanWithTasks();
             synchronized (lock) {
                 snapshot = preferredSnapshot(snapshot, scanned);
                 revision = Math.max(revision + 1L, System.currentTimeMillis());
+                scanInProgress.set(false);
+                completed = true;
                 return snapshot;
             }
         } finally {
-            scanInProgress.set(false);
+            if (!completed) {
+                synchronized (lock) {
+                    scanInProgress.set(false);
+                }
+            }
         }
     }
 

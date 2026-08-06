@@ -20,15 +20,30 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
     private static final String KEY_WHOLE_ROUTE_METRICS = "whole_route_metrics";
+    private static final String KEY_ROUTE_METRICS_MODE = "route_metrics_mode";
     private static final String KEY_OUTPUT_ETA = "output_eta";
     private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
     private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
+    private static final String KEY_SPEED_LIMIT_MODE = "speed_limit_mode";
+    private static final String KEY_SPEED_LIMIT_FREE_FALLBACK = "speed_limit_free_fallback";
+    private static final String KEY_SPEED_LIMIT_OVERLAY_SECONDS = "speed_limit_overlay_seconds";
     private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
+
+    static final int ROUTE_METRICS_OFF = 0;
+    static final int ROUTE_METRICS_NEXT_STOP = 1;
+    static final int ROUTE_METRICS_WHOLE_ROUTE = 2;
+    static final int SPEED_LIMIT_OFF = 0;
+    static final int SPEED_LIMIT_MANEUVER = 1;
+    static final int SPEED_LIMIT_LANES = 2;
+    static final int SPEED_LIMIT_FREE = 3;
+    static final int SPEED_LIMIT_FALLBACK_OFF = 0;
+    static final int SPEED_LIMIT_FALLBACK_MANEUVER = 1;
+    static final int SPEED_LIMIT_FALLBACK_LANES = 2;
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
@@ -145,11 +160,35 @@ final class HudPrefs {
     }
 
     static boolean isWholeRouteMetricsEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_WHOLE_ROUTE_METRICS, false);
+        return routeMetricsMode(context) == ROUTE_METRICS_WHOLE_ROUTE;
     }
 
     static void setWholeRouteMetricsEnabled(Context context, boolean enabled) {
-        prefs(context).edit().putBoolean(KEY_WHOLE_ROUTE_METRICS, enabled).apply();
+        int current = routeMetricsMode(context);
+        setRouteMetricsMode(context, enabled ? ROUTE_METRICS_WHOLE_ROUTE
+                : current == ROUTE_METRICS_OFF ? ROUTE_METRICS_OFF
+                : ROUTE_METRICS_NEXT_STOP);
+    }
+
+    static int routeMetricsMode(Context context) {
+        SharedPreferences preferences = prefs(context);
+        if (!preferences.contains(KEY_ROUTE_METRICS_MODE)) {
+            boolean anyMetric = preferences.getBoolean(KEY_OUTPUT_ETA, false)
+                    || preferences.getBoolean(KEY_OUTPUT_REMAINING_TIME, false)
+                    || preferences.getBoolean(KEY_OUTPUT_REMAINING_DISTANCE, false);
+            int migrated = !anyMetric ? ROUTE_METRICS_OFF
+                    : preferences.getBoolean(KEY_WHOLE_ROUTE_METRICS, false)
+                    ? ROUTE_METRICS_WHOLE_ROUTE : ROUTE_METRICS_NEXT_STOP;
+            preferences.edit().putInt(KEY_ROUTE_METRICS_MODE, migrated).apply();
+            return migrated;
+        }
+        return clamp(preferences.getInt(KEY_ROUTE_METRICS_MODE, ROUTE_METRICS_OFF),
+                ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE);
+    }
+
+    static void setRouteMetricsMode(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_ROUTE_METRICS_MODE,
+                clamp(mode, ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE)).apply();
         outputOptionsRevision++;
     }
 
@@ -177,6 +216,39 @@ final class HudPrefs {
 
     static void setRemainingDistanceOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_REMAINING_DISTANCE, enabled).apply();
+        outputOptionsRevision++;
+    }
+
+    static int speedLimitMode(Context context) {
+        return clamp(prefs(context).getInt(KEY_SPEED_LIMIT_MODE, SPEED_LIMIT_OFF),
+                SPEED_LIMIT_OFF, SPEED_LIMIT_FREE);
+    }
+
+    static void setSpeedLimitMode(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_MODE,
+                clamp(mode, SPEED_LIMIT_OFF, SPEED_LIMIT_FREE)).apply();
+        outputOptionsRevision++;
+    }
+
+    static int speedLimitFreeFallback(Context context) {
+        return clamp(prefs(context).getInt(
+                KEY_SPEED_LIMIT_FREE_FALLBACK, SPEED_LIMIT_FALLBACK_OFF),
+                SPEED_LIMIT_FALLBACK_OFF, SPEED_LIMIT_FALLBACK_LANES);
+    }
+
+    static void setSpeedLimitFreeFallback(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_FREE_FALLBACK,
+                clamp(mode, SPEED_LIMIT_FALLBACK_OFF, SPEED_LIMIT_FALLBACK_LANES)).apply();
+        outputOptionsRevision++;
+    }
+
+    static int speedLimitOverlaySeconds(Context context) {
+        return clamp(prefs(context).getInt(KEY_SPEED_LIMIT_OVERLAY_SECONDS, 5), 1, 10);
+    }
+
+    static void setSpeedLimitOverlaySeconds(Context context, int seconds) {
+        prefs(context).edit().putInt(
+                KEY_SPEED_LIMIT_OVERLAY_SECONDS, clamp(seconds, 1, 10)).apply();
         outputOptionsRevision++;
     }
 
@@ -318,5 +390,9 @@ final class HudPrefs {
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+    }
+
+    private static int clamp(int value, int minimum, int maximum) {
+        return Math.max(minimum, Math.min(maximum, value));
     }
 }

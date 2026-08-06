@@ -381,7 +381,7 @@ final class NavigatorPatchPipeline {
         int stock = 0;
         int patched = 0;
         int lifecycleTargets = 0;
-        boolean lifecycleStock = false;
+        boolean lifecyclePatchable = false;
         boolean lifecyclePatched = false;
         int alertTargets = 0;
         boolean alertStock = false;
@@ -394,8 +394,9 @@ final class NavigatorPatchPipeline {
             } else if (WazePatchEngine.ALREADY_PATCHED.equals(inspection.allowlistClassification)) {
                 patched++;
             }
-            lifecycleTargets += inspection.applicationTargetCount + inspection.routeTargetCount;
-            lifecycleStock |= inspection.lifecycleStock();
+            lifecycleTargets += inspection.applicationTargetCount + inspection.routeTargetCount
+                    + inspection.speedTargetCount + inspection.clusterEtaTargetCount;
+            lifecyclePatchable |= inspection.lifecyclePatchable();
             lifecyclePatched |= inspection.lifecyclePatched();
             alertTargets += inspection.alertClassCount;
             alertStock |= inspection.alertStock();
@@ -408,7 +409,7 @@ final class NavigatorPatchPipeline {
         else return copyStates(metadata, NavigatorPatchStore.FAILED,
                 NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED, reason);
         String optional = lifecycleTargets == 0 ? NavigatorPatchStore.FAILED
-                : lifecycleStock ? NavigatorPatchStore.PATCHABLE
+                : lifecyclePatchable ? NavigatorPatchStore.PATCHABLE
                 : lifecyclePatched ? NavigatorPatchStore.PATCHED
                 : NavigatorPatchStore.FAILED;
         String alert = alertTargets != 1 ? NavigatorPatchStore.FAILED
@@ -517,7 +518,9 @@ final class NavigatorPatchPipeline {
                     NavigatorPatchStore.PATCHING, "Patching stable session");
             WazeApkInspection lifecycleOwner = null;
             for (WazeApkInspection inspection : inspections) {
-                if (inspection.applicationTargetCount > 0 || inspection.routeTargetCount > 0) {
+                if (inspection.applicationTargetCount > 0 || inspection.routeTargetCount > 0
+                        || inspection.speedTargetCount > 0
+                        || inspection.clusterEtaTargetCount > 0) {
                     if (lifecycleOwner != null) {
                         throw new IOException("Waze stable-session target member is ambiguous");
                     }
@@ -525,9 +528,12 @@ final class NavigatorPatchPipeline {
                 }
             }
             if (lifecycleOwner == null || lifecycleOwner.routeTargetCount != 1
-                    || lifecycleOwner.applicationTargetCount != 1) {
+                    || lifecycleOwner.applicationTargetCount != 1
+                    || lifecycleOwner.speedTargetCount != 1
+                    || lifecycleOwner.clusterEtaTargetCount != 1) {
                 throw new IOException("Waze stable-session target missing");
             }
+            boolean addV2Bridge = lifecycleOwner.lifecycleCoreStock();
             File target = outputMember(outputDirectory, lifecycleOwner.fileName);
             Map<String, File> replacements = new HashMap<>();
             for (String dexEntry : lifecycleOwner.lifecycleDexEntries) {
@@ -539,15 +545,19 @@ final class NavigatorPatchPipeline {
             }
             File lifecycleApk = new File(transaction, "waze-lifecycle-unsigned.apk");
             repack(target, lifecycleApk, replacements, Collections.emptyMap());
-            File bridgeDex = new File(transaction, "waze-route-v2.dex");
-            PatchPayloadDex.extract(
-                    context, "Lcom/waze/bydhud/RouteStateBridgeV2", bridgeDex);
-            File optionalApk = new File(transaction, "waze-optional-unsigned.apk");
-            Map<String, File> additions = new HashMap<>();
-            List<String> dexEntries = dexEntries(lifecycleApk);
-            additions.put(nextDexEntry(dexEntries), bridgeDex);
-            repack(lifecycleApk, optionalApk, Collections.emptyMap(), additions);
-            replaceFile(optionalApk, target);
+            if (addV2Bridge) {
+                File bridgeDex = new File(transaction, "waze-route-v2.dex");
+                PatchPayloadDex.extract(
+                        context, "Lcom/waze/bydhud/RouteStateBridgeV2", bridgeDex);
+                File optionalApk = new File(transaction, "waze-optional-unsigned.apk");
+                Map<String, File> additions = new HashMap<>();
+                List<String> dexEntries = dexEntries(lifecycleApk);
+                additions.put(nextDexEntry(dexEntries), bridgeDex);
+                repack(lifecycleApk, optionalApk, Collections.emptyMap(), additions);
+                replaceFile(optionalApk, target);
+            } else {
+                replaceFile(lifecycleApk, target);
+            }
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.alertState)) {
             NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.WAZE,
@@ -673,17 +683,29 @@ final class NavigatorPatchPipeline {
                 result.legacyApplicationHookCount += lifecycle.legacyApplicationHookCount;
                 result.routeTargetCount += lifecycle.routeTargetCount;
                 result.routeHookCount += lifecycle.routeHookCount;
+                result.v1RouteHookCount += lifecycle.v1RouteHookCount;
                 result.legacyRouteHookCount += lifecycle.legacyRouteHookCount;
+                result.speedTargetCount += lifecycle.speedTargetCount;
+                result.speedHookCount += lifecycle.speedHookCount;
+                result.legacySpeedHookCount += lifecycle.legacySpeedHookCount;
+                result.clusterEtaTargetCount += lifecycle.clusterEtaTargetCount;
+                result.clusterEtaPatchCount += lifecycle.clusterEtaPatchCount;
                 result.bridgeClassCount += lifecycle.bridgeClassCount;
                 result.legacyBridgeClassCount += lifecycle.legacyBridgeClassCount;
                 if (lifecycle.applicationTargetCount > 0
-                        || lifecycle.routeTargetCount > 0) {
+                        || lifecycle.routeTargetCount > 0
+                        || lifecycle.speedTargetCount > 0
+                        || lifecycle.clusterEtaTargetCount > 0) {
                     result.lifecycleDexEntries.add(entry.getName());
                 }
                 if (lifecycle.applicationTargetCount > 0) {
                     result.applicationGuard = lifecycle.applicationGuard;
                 }
                 if (lifecycle.routeTargetCount > 0) result.routeGuard = lifecycle.routeGuard;
+                if (lifecycle.speedTargetCount > 0) result.speedGuard = lifecycle.speedGuard;
+                if (lifecycle.clusterEtaTargetCount > 0) {
+                    result.clusterEtaGuard = lifecycle.clusterEtaGuard;
+                }
                 WazePatchEngine.AlertInspection alert =
                         WazePatchEngine.inspectAlertHook(bytes);
                 result.alertClassCount += alert.classCount;
@@ -941,8 +963,16 @@ final class NavigatorPatchPipeline {
         String applicationGuard = "not found";
         int routeTargetCount;
         int routeHookCount;
+        int v1RouteHookCount;
         int legacyRouteHookCount;
         String routeGuard = "not found";
+        int speedTargetCount;
+        int speedHookCount;
+        int legacySpeedHookCount;
+        String speedGuard = "not found";
+        int clusterEtaTargetCount;
+        int clusterEtaPatchCount;
+        String clusterEtaGuard = "not found";
         int bridgeClassCount;
         int legacyBridgeClassCount;
         int alertClassCount;
@@ -959,38 +989,76 @@ final class NavigatorPatchPipeline {
         int alertGuardWriteCount;
         int alertLogMarkerCount;
 
-        boolean lifecycleStock() {
+        boolean lifecycleCoreStock() {
             return applicationTargetCount == 1 && applicationHookCount == 0
                     && legacyApplicationHookCount == 0
                     && "ok".equals(applicationGuard)
                     && routeTargetCount == 1 && routeHookCount == 0
-                    && legacyRouteHookCount == 0
+                    && v1RouteHookCount == 0 && legacyRouteHookCount == 0
                     && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 0
+                    && legacySpeedHookCount == 0
+                    && "ok".equals(speedGuard)
                     && bridgeClassCount == 0 && legacyBridgeClassCount == 0;
         }
 
-        boolean lifecycleV2Patched() {
+        boolean lifecycleCoreV2Patched() {
             return applicationTargetCount == 1 && applicationHookCount == 1
                     && legacyApplicationHookCount == 0
                     && "ok".equals(applicationGuard)
                     && routeTargetCount == 1 && routeHookCount == 1
-                    && legacyRouteHookCount == 0
+                    && v1RouteHookCount == 0 && legacyRouteHookCount == 0
                     && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 1
+                    && legacySpeedHookCount == 0
+                    && "ok".equals(speedGuard)
                     && bridgeClassCount == 1 && legacyBridgeClassCount == 0;
         }
 
-        boolean lifecycleLegacyPatched() {
+        boolean lifecycleCoreV1Patched() {
+            return applicationTargetCount == 1 && applicationHookCount == 1
+                    && legacyApplicationHookCount == 0
+                    && "ok".equals(applicationGuard)
+                    && routeTargetCount == 1 && routeHookCount == 0
+                    && v1RouteHookCount == 1 && legacyRouteHookCount == 0
+                    && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 1
+                    && legacySpeedHookCount == 0
+                    && "ok".equals(speedGuard)
+                    && bridgeClassCount == 1 && legacyBridgeClassCount == 0;
+        }
+
+        boolean lifecycleCoreLegacyPatched() {
             return applicationTargetCount == 1 && applicationHookCount == 0
                     && legacyApplicationHookCount == 1
                     && "ok".equals(applicationGuard)
                     && routeTargetCount == 1 && routeHookCount == 0
                     && legacyRouteHookCount == 1
                     && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 0
+                    && legacySpeedHookCount == 1
+                    && "ok".equals(speedGuard)
                     && bridgeClassCount == 0 && legacyBridgeClassCount == 1;
         }
 
+        boolean clusterEtaStock() {
+            return clusterEtaTargetCount == 1 && clusterEtaPatchCount == 0
+                    && "stock".equals(clusterEtaGuard);
+        }
+
+        boolean clusterEtaPatched() {
+            return clusterEtaTargetCount == 1 && clusterEtaPatchCount == 1
+                    && "patched".equals(clusterEtaGuard);
+        }
+
+        boolean lifecyclePatchable() {
+            boolean coreCompatible = lifecycleCoreStock() || lifecycleCoreV2Patched();
+            boolean etaCompatible = clusterEtaStock() || clusterEtaPatched();
+            return coreCompatible && etaCompatible && !lifecyclePatched();
+        }
+
         boolean lifecyclePatched() {
-            return lifecycleV2Patched() || lifecycleLegacyPatched();
+            return lifecycleCoreV2Patched() && clusterEtaPatched();
         }
 
         boolean alertStock() {

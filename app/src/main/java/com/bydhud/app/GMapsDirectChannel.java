@@ -38,12 +38,13 @@ final class GMapsDirectChannel {
     private static final String EXTRA_CLIENT = "com.bydhud.gmapsbridge.CLIENT";
     private static final String EXTRA_PROTOCOL = "com.bydhud.gmapsbridge.PROTOCOL_VERSION";
     private static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
-    private static final int PROTOCOL_VERSION = 2;
+    private static final int PROTOCOL_VERSION = 3;
     private static final int MESSAGE_HELLO = 1;
     private static final int MESSAGE_START = 2;
     private static final int MESSAGE_FRAME = 3;
     private static final int MESSAGE_STOP = 4;
     private static final int MESSAGE_MANEUVER_BITMAP = 5;
+    private static final int MESSAGE_SPEED_LIMIT = 6;
     private static final int MAX_FRAME_BYTES = 512 * 1024;
     private static final int MAX_BITMAP_DIMENSION = 256;
     static final int MAX_MANEUVER_BITMAP_CACHE = 64;
@@ -104,7 +105,7 @@ final class GMapsDirectChannel {
     void stop(String reason) {
         handler.post(() -> {
             if (!running) return;
-            sendRegistration(ACTION_UNREGISTER, false);
+            sendRegistration(ACTION_UNREGISTER, false, PROTOCOL_VERSION);
             sessionGeneration++;
             running = false;
             connected = false;
@@ -157,7 +158,8 @@ final class GMapsDirectChannel {
     private boolean handleMessageSafely(Message message) {
         if (!running || message == null) return true;
         Bundle data = message.getData();
-        if (data == null || data.getInt("protocolVersion", -1) != PROTOCOL_VERSION) {
+        int protocol = data == null ? -1 : data.getInt("protocolVersion", -1);
+        if (data == null || (protocol != 2 && protocol != PROTOCOL_VERSION)) {
             listener.onLog("message rejected reason=protocol what="
                     + (message == null ? -1 : message.what));
             return true;
@@ -186,6 +188,9 @@ final class GMapsDirectChannel {
                 return true;
             case MESSAGE_MANEUVER_BITMAP:
                 handleManeuverBitmap(data);
+                return true;
+            case MESSAGE_SPEED_LIMIT:
+                handleSpeedLimit(data);
                 return true;
             default:
                 listener.onLog("message ignored what=" + message.what);
@@ -374,7 +379,9 @@ final class GMapsDirectChannel {
 
     private void registerClient(String reason) {
         handler.removeCallbacks(registrationRetry);
-        if (sendRegistration(ACTION_REGISTER, true)) {
+        boolean current = sendRegistration(ACTION_REGISTER, true, PROTOCOL_VERSION);
+        boolean legacy = sendRegistration(ACTION_REGISTER, true, 2);
+        if (current || legacy) {
             listener.onLog("registration sent reason=" + reason);
         } else {
             listener.onHandshakeUnavailable(
@@ -387,7 +394,7 @@ final class GMapsDirectChannel {
         if (running && !connected) registerClient("periodic");
     }
 
-    private boolean sendRegistration(String action, boolean includeClient) {
+    private boolean sendRegistration(String action, boolean includeClient, int protocol) {
         try {
             Intent intent = new Intent(action);
             intent.setComponent(new ComponentName(PACKAGE_NAME, RECEIVER));
@@ -396,7 +403,7 @@ final class GMapsDirectChannel {
             if (includeClient) {
                 intent.putExtra("channel_identifier",
                         "byd_hud_" + SystemClock.elapsedRealtime());
-                intent.putExtra(EXTRA_PROTOCOL, PROTOCOL_VERSION);
+                intent.putExtra(EXTRA_PROTOCOL, protocol);
                 intent.putExtra(EXTRA_CLIENT, inbound);
             }
             context.sendOrderedBroadcast(intent, null);
@@ -445,6 +452,25 @@ final class GMapsDirectChannel {
             output.append(text);
         }
         return output.toString();
+    }
+
+    private void handleSpeedLimit(Bundle data) {
+        int limit = data.getInt("speedLimit", -1);
+        int kph = data.getInt("speedLimitKph", -1);
+        String unit = safe(data.getString("speedUnit"));
+        long sourceElapsedMs = data.getLong(
+                "bridgeElapsedMs", SystemClock.elapsedRealtime());
+        if (limit < 0 || limit > 300 || kph < 0 || kph > 300
+                || !(unit.isEmpty() || "km/h".equals(unit) || "mph".equals(unit))) {
+            listener.onLog("speed limit rejected value=" + limit + " kph=" + kph
+                    + " unit=" + unit);
+            return;
+        }
+        connected = true;
+        listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "speed-limit");
+        listener.onSpeedLimit(
+                OWNER_PACKAGE, sessionGeneration, limit, kph, unit, sourceElapsedMs);
+        listener.onLog("speed_limit value=" + limit + " kph=" + kph + " unit=" + unit);
     }
 
     private List<DirectTbtFrame.Lane> mapLanes(Object value) {
@@ -732,6 +758,8 @@ final class GMapsDirectChannel {
         void onNavigationStarted(String ownerPackage, long sessionGeneration, String reason);
         void onFrame(String ownerPackage, long sessionGeneration,
                 DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection);
+        void onSpeedLimit(String ownerPackage, long sessionGeneration,
+                int displayValue, int kph, String unit, long eventElapsedMs);
         void onNavigationEnded(String ownerPackage, long sessionGeneration, String reason);
         void onLiveness(String ownerPackage, long sessionGeneration, String reason);
         void onLog(String message);

@@ -18,6 +18,7 @@ public final class DirectTbtFrame {
     private final List<Lane> lanes;
     private final AlertOverlay alertOverlay;
     private final TripMetrics tripMetrics;
+    private final SpeedLimit speedLimit;
 
     public DirectTbtFrame(
             int rawManeuverType,
@@ -33,7 +34,7 @@ public final class DirectTbtFrame {
             AlertOverlay alertOverlay) {
         this(rawManeuverType, amapManeuver, bydManeuver, distanceMeters,
                 roadText, cueText, displayText, maneuverPng, lanePng, lanes,
-                alertOverlay, TripMetrics.empty());
+                alertOverlay, TripMetrics.empty(), SpeedLimit.inactive());
     }
 
     public DirectTbtFrame(
@@ -49,6 +50,25 @@ public final class DirectTbtFrame {
             List<Lane> lanes,
             AlertOverlay alertOverlay,
             TripMetrics tripMetrics) {
+        this(rawManeuverType, amapManeuver, bydManeuver, distanceMeters,
+                roadText, cueText, displayText, maneuverPng, lanePng, lanes,
+                alertOverlay, tripMetrics, SpeedLimit.inactive());
+    }
+
+    DirectTbtFrame(
+            int rawManeuverType,
+            int amapManeuver,
+            int bydManeuver,
+            int distanceMeters,
+            String roadText,
+            String cueText,
+            String displayText,
+            byte[] maneuverPng,
+            byte[] lanePng,
+            List<Lane> lanes,
+            AlertOverlay alertOverlay,
+            TripMetrics tripMetrics,
+            SpeedLimit speedLimit) {
         this.rawManeuverType = rawManeuverType;
         this.amapManeuver = Math.max(0, amapManeuver);
         this.bydManeuver = Math.max(0, bydManeuver);
@@ -62,6 +82,7 @@ public final class DirectTbtFrame {
                 lanes == null ? Collections.emptyList() : lanes));
         this.alertOverlay = alertOverlay == null ? AlertOverlay.inactive() : alertOverlay;
         this.tripMetrics = tripMetrics == null ? TripMetrics.empty() : tripMetrics;
+        this.speedLimit = speedLimit == null ? SpeedLimit.inactive() : speedLimit;
     }
 
     public static DirectTbtFrame empty() {
@@ -121,16 +142,20 @@ public final class DirectTbtFrame {
         return tripMetrics;
     }
 
+    public SpeedLimit getSpeedLimit() {
+        return speedLimit;
+    }
+
     DirectTbtFrame withAlertOverlay(AlertOverlay overlay) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
-                lanes, overlay, tripMetrics);
+                lanes, overlay, tripMetrics, speedLimit);
     }
 
     DirectTbtFrame withManeuverPng(byte[] png) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, png, lanePng,
-                lanes, alertOverlay, tripMetrics);
+                lanes, alertOverlay, tripMetrics, speedLimit);
     }
 
     boolean hasLaneGuidance() {
@@ -141,13 +166,60 @@ public final class DirectTbtFrame {
         if (other == null || !other.hasLaneGuidance()) return this;
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng,
-                other.lanePng, other.lanes, alertOverlay, tripMetrics);
+                other.lanePng, other.lanes, alertOverlay, tripMetrics, speedLimit);
     }
 
     DirectTbtFrame withTripMetrics(TripMetrics metrics) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
-                lanes, alertOverlay, metrics);
+                lanes, alertOverlay, metrics, speedLimit);
+    }
+
+    DirectTbtFrame withSpeedLimit(SpeedLimit value) {
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, value);
+    }
+
+    /** Canonical direct-channel speed-limit state; zero is an explicit clear. */
+    public static final class SpeedLimit {
+        private static final SpeedLimit INACTIVE = new SpeedLimit(0, 0, "", 0L);
+
+        private final int displayValue;
+        private final int kph;
+        private final String unit;
+        private final long eventElapsedMs;
+
+        public SpeedLimit(int displayValue, int kph, String unit, long eventElapsedMs) {
+            this.displayValue = displayValue > 0 && displayValue <= 300 ? displayValue : 0;
+            this.kph = kph > 0 && kph <= 300 ? kph : 0;
+            this.unit = this.displayValue == 0 ? "" : safeText(unit);
+            this.eventElapsedMs = Math.max(0L, eventElapsedMs);
+        }
+
+        public static SpeedLimit inactive() {
+            return INACTIVE;
+        }
+
+        public boolean isActive() {
+            return displayValue > 0;
+        }
+
+        public int getDisplayValue() {
+            return displayValue;
+        }
+
+        public int getKph() {
+            return kph;
+        }
+
+        public String getUnit() {
+            return unit;
+        }
+
+        public long getEventElapsedMs() {
+            return eventElapsedMs;
+        }
     }
 
     /** Structured trip totals carried independently from the current maneuver. */

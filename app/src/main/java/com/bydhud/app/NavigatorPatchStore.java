@@ -13,7 +13,7 @@ import java.util.UUID;
 
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
-    private static final int SCAN_CACHE_REVISION = 2;
+    private static final int SCAN_CACHE_REVISION = 3;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";

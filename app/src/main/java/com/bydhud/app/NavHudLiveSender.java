@@ -43,15 +43,15 @@ final class NavHudLiveSender {
         return instance;
     }
 
-    static void onWazeRouteLifecycleEvent(Context context, boolean navigating,
-            long eventElapsedMs, boolean changed, String reason) {
+    static void onWazeRouteLifecycleEvent(Context context, boolean routeActive,
+            boolean terminal, long eventElapsedMs, boolean changed, String reason) {
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
             current = instance;
         }
         if (current != null) {
             current.handler.post(() -> current.onWazeRouteLifecycleEventOnMain(
-                    navigating, eventElapsedMs, changed, reason));
+                    routeActive, terminal, eventElapsedMs, changed, reason));
         }
     }
 
@@ -169,6 +169,7 @@ final class NavHudLiveSender {
     private long lastWazeFallbackReadinessCheckMs;
     private boolean wazeSurfaceLaunchPending;
     private volatile boolean wazeSurfaceActive;
+    private boolean wazeSurfaceVisible;
     private boolean wazeSurfaceEnabledForRoute;
     private boolean wazeSurfaceDismissedForRoute;
     private int wazeSurfaceTaskId = -1;
@@ -180,6 +181,18 @@ final class NavHudLiveSender {
     private volatile String latestWazeSurfaceFrameReason = "";
     private volatile int latestWazeSurfaceFrameSessionGeneration;
     private volatile int wazeSurfaceRouteGeneration = -1;
+    private volatile DirectTbtFrame latestGMapsDirectFrame;
+    private volatile String latestGMapsDirectFrameReason = "";
+    private volatile long latestGMapsDirectFrameSessionGeneration;
+    private volatile GMapsDirectChannel.BitmapSelection latestGMapsBitmapSelection;
+    private String speedOverlayOwner = "";
+    private int speedOverlayDisplayValue;
+    private int speedOverlayKph;
+    private String speedOverlayUnit = "";
+    private boolean speedOverlayVisible;
+    private int speedOverlayPlacement = DirectTbtPayload.SPEED_PLACEMENT_NONE;
+    private boolean speedOverlayOccupied;
+    private long speedOverlayHideAtMs;
     private boolean gmapsDirectFrameReceived;
     private boolean gmapsDirectFallbackActive;
     private boolean gmapsDirectTimedOut;
@@ -210,6 +223,7 @@ final class NavHudLiveSender {
     };
 
     private final Runnable gmapsDirectTimeout = this::onGMapsDirectTimeout;
+    private final Runnable speedOverlayTimeout = this::onSpeedOverlayTimeout;
     private final Runnable wazeSurfaceReadyTimeout = () -> {
         if (!wazeSurfaceLaunchPending || wazeSurfaceActive) return;
         fallbackFromWazeSurface("surface-ready-timeout");
@@ -511,8 +525,10 @@ final class NavHudLiveSender {
                                 return;
                             }
                             if (wazeSurfaceActive) return;
+                            DirectTbtFrame outputFrame = applySpeedLimitOverlay(
+                                    ownerPackage, frame, SystemClock.elapsedRealtime());
                             hudOutput.clearDirectAlertAndRepublish(
-                                    ownerPackage, sessionGeneration, frame, reason,
+                                    ownerPackage, sessionGeneration, outputFrame, reason,
                                     SystemClock.elapsedRealtime());
                         });
                     }
@@ -623,6 +639,17 @@ final class NavHudLiveSender {
                     }
 
                     @Override
+                    public void onSpeedLimit(String ownerPackage, long sessionGeneration,
+                            int displayValue, int kph, String unit, long eventElapsedMs) {
+                        handler.post(() -> {
+                            if (!isCurrentGMapsDirectCallback(
+                                    ownerPackage, sessionGeneration)) return;
+                            onDirectSpeedLimitEvent(
+                                    ownerPackage, displayValue, kph, unit, eventElapsedMs);
+                        });
+                    }
+
+                    @Override
                     public void onNavigationEnded(String ownerPackage,
                             long sessionGeneration, String reason) {
                         long detectedAtMs = SystemClock.elapsedRealtime();
@@ -718,6 +745,8 @@ final class NavHudLiveSender {
                                 ownerPackage, sessionGeneration, outputFrame,
                                 "surface-alert-retained:" + safeReason(reason), true);
                     } else {
+                        outputFrame = applySpeedLimitOverlay(
+                                ownerPackage, outputFrame, SystemClock.elapsedRealtime());
                         hudOutput.clearDirectAlertAndRepublish(
                                 ownerPackage, wazeDirectChannel.sessionGeneration(), outputFrame,
                                 "surface:" + safeReason(reason),
@@ -854,7 +883,9 @@ final class NavHudLiveSender {
     private void startWazeDirectHost(String reason, boolean clearLegacyRoute,
             boolean allowLegacyTimeout, boolean recoveringRoute) {
         boolean retainSurfaceRoute = recoveringRoute
-                && (wazeSurfaceLaunchPending || wazeSurfaceActive);
+                && wazeSurfaceEnabledForRoute && !wazeSurfaceDismissedForRoute
+                && (wazeSurfaceLaunchPending || wazeSurfaceActive
+                || WazeSurfaceActivity.isActive() || wazeSurfaceDirectChannel.isActive());
         DirectTbtFrame retainedSurfaceFrame = latestWazeSurfaceFrame;
         String retainedSurfaceReason = latestWazeSurfaceFrameReason;
         int retainedSurfaceSessionGeneration = latestWazeSurfaceFrameSessionGeneration;
@@ -955,6 +986,7 @@ final class NavHudLiveSender {
         }
         boolean newRoute = !wazeDirectNavigating;
         if (newRoute) {
+            clearDirectSpeedLimit(WAZE_PACKAGE);
             wazeDirectFrameReceived = false;
             wazeSurfaceEnabledForRoute = HudPrefs.isWazeCustomSurfaceEnabled(context);
             wazeSurfaceDismissedForRoute = false;
@@ -997,6 +1029,21 @@ final class NavHudLiveSender {
         });
     }
 
+    void onWazeSurfaceActivityVisibilityChanged(long instanceId, boolean visible) {
+        handler.post(() -> {
+            if (instanceId != wazeSurfaceInstanceId) return;
+            wazeSurfaceVisible = visible;
+            log("waze surface activity visible=" + visible + " task=" + wazeSurfaceTaskId);
+            if (visible && shouldUseWazeSurface()
+                    && wazeSurfaceDirectChannel.isActive()) {
+                onWazeSurfaceReady(
+                        WAZE_PACKAGE, wazeSurfaceDirectChannel.sessionGeneration());
+            } else if (!visible && shouldUseWazeSurface()) {
+                suspendWazeSurface("activity-backgrounded");
+            }
+        });
+    }
+
     void onWazeSurfaceActivityDestroyed(
             int taskId, long instanceId, boolean changingConfigurations) {
         handler.post(() -> {
@@ -1007,7 +1054,7 @@ final class NavHudLiveSender {
             }
             if (changingConfigurations || wazeSurfaceDismissedForRoute
                     || !wazeDirectNavigating) return;
-            fallbackFromWazeSurface("surface-activity-destroyed");
+            suspendWazeSurface("surface-activity-destroyed");
         });
     }
 
@@ -1020,8 +1067,22 @@ final class NavHudLiveSender {
     }
 
     private void maybeLaunchWazeSurface(String reason) {
-        if (!shouldUseWazeSurface() || wazeSurfaceLaunchPending || wazeSurfaceActive
-                || WazeSurfaceActivity.isActive()) return;
+        requestWazeSurfaceActivity(reason, false);
+    }
+
+    private void onWazeAppForegroundEventOnMain(
+            long eventElapsedMs, long bridgeGeneration) {
+        log("waze app foreground elapsedMs=" + eventElapsedMs
+                + " bridgeGeneration=" + bridgeGeneration
+                + " surfaceVisible=" + WazeSurfaceActivity.isVisible());
+        if (!shouldUseWazeSurface() || WazeSurfaceActivity.isVisible()) return;
+        requestWazeSurfaceActivity("waze-app-foreground", true);
+    }
+
+    private void requestWazeSurfaceActivity(String reason, boolean bringToFront) {
+        if (!shouldUseWazeSurface() || wazeSurfaceLaunchPending
+                || wazeSurfaceActive && WazeSurfaceActivity.isVisible()
+                || !bringToFront && WazeSurfaceActivity.isActive()) return;
         NavAppDisplayState state = NavAppDisplayController.get(context).lastState(WAZE_PACKAGE);
         int displayId = state == null || state.displayId < 0 ? 0 : state.displayId;
         wazeSurfaceLaunchPending = true;
@@ -1032,6 +1093,7 @@ final class NavHudLiveSender {
             return;
         }
         log("waze surface launch requested display=" + displayId
+                + " bringToFront=" + bringToFront
                 + " timeoutMs=" + WAZE_SURFACE_READY_TIMEOUT_MS
                 + " reason=" + safeReason(reason));
     }
@@ -1051,6 +1113,7 @@ final class NavHudLiveSender {
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         wazeSurfaceLaunchPending = false;
         wazeSurfaceActive = true;
+        wazeSurfaceVisible = WazeSurfaceActivity.isVisible();
         invalidatePendingWazeDirectFrames();
         int hudSessionGeneration = wazeDirectChannel.sessionGeneration();
         hudOutput.clearDirectFrameForLoss(
@@ -1071,11 +1134,52 @@ final class NavHudLiveSender {
     private void onWazeSurfaceUnavailable(String ownerPackage, int sessionGeneration,
             String reason) {
         if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+        if (!wazeSurfaceVisible && WazeSurfaceActivity.isActive()) {
+            suspendWazeSurface("surface-backgrounded:" + safeReason(reason));
+            return;
+        }
         if (wazeSurfaceLaunchPending || wazeSurfaceActive) {
             fallbackFromWazeSurface("surface-unavailable:" + safeReason(reason));
         } else {
             log("waze surface temporarily unavailable reason=" + safeReason(reason));
         }
+    }
+
+    static void onWazeSpeedLimitEvent(
+            Context context, int displayValue, String unit, long eventElapsedMs) {
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        if (current != null) {
+            current.handler.post(() -> current.onDirectSpeedLimitEvent(
+                    WAZE_PACKAGE, displayValue, -1, unit, eventElapsedMs));
+        } else {
+            DirectSpeedLimitStore.update(
+                    WAZE_PACKAGE, displayValue, -1, unit, eventElapsedMs);
+        }
+    }
+
+    static void onWazeAppForegroundEvent(
+            Context context, long eventElapsedMs, long bridgeGeneration) {
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        if (current != null) {
+            current.handler.post(() -> current.onWazeAppForegroundEventOnMain(
+                    eventElapsedMs, bridgeGeneration));
+        }
+    }
+
+    private void suspendWazeSurface(String reason) {
+        handler.removeCallbacks(wazeSurfaceReadyTimeout);
+        boolean wasSurfaceActive = wazeSurfaceActive;
+        wazeSurfaceLaunchPending = false;
+        wazeSurfaceActive = false;
+        wazeSurfaceVisible = false;
+        publishClusterAfterSurfaceLoss(reason, wasSurfaceActive);
+        log("waze surface suspended reason=" + safeReason(reason));
     }
 
     private void fallbackFromWazeSurface(String reason) {
@@ -1085,6 +1189,7 @@ final class NavHudLiveSender {
                 || WazeSurfaceActivity.isActive();
         wazeSurfaceLaunchPending = false;
         wazeSurfaceActive = false;
+        wazeSurfaceVisible = false;
         wazeSurfaceTaskId = -1;
         wazeSurfaceInstanceId = 0L;
         wazeSurfaceDismissedForRoute = true;
@@ -1098,6 +1203,12 @@ final class NavHudLiveSender {
                     + safeReason(reason));
             return;
         }
+        publishClusterAfterSurfaceLoss(reason, true);
+    }
+
+    private void publishClusterAfterSurfaceLoss(String reason, boolean wasSurfaceActive) {
+        if (!wasSurfaceActive || !active || !WAZE_PACKAGE.equals(activePackage)
+                || !wazeDirectNavigating) return;
         invalidatePendingWazeDirectFrames();
         int clusterGeneration = wazeDirectChannel.sessionGeneration();
         hudOutput.clearDirectFrameForLoss(
@@ -1153,6 +1264,7 @@ final class NavHudLiveSender {
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         wazeSurfaceLaunchPending = false;
         wazeSurfaceActive = false;
+        wazeSurfaceVisible = false;
         wazeSurfaceEnabledForRoute = false;
         wazeSurfaceDismissedForRoute = false;
         wazeSurfaceTaskId = -1;
@@ -1180,10 +1292,13 @@ final class NavHudLiveSender {
                 WAZE_PACKAGE, "waze_direct", safeReason(reason), now);
         WazeRouteTracker.get(context).onDirectRouteEvidence(
                 "direct:" + safeReason(reason), now);
+        DirectTbtFrame outputFrame = applySpeedLimitOverlay(
+                ownerPackage, frame, now);
         long receivedWallClockMs = System.currentTimeMillis();
-        logWazeDirectFrame(frame, reason, now, receivedWallClockMs,
+        logWazeDirectFrame(outputFrame, reason, now, receivedWallClockMs,
                 DirectTbtPayload.Options.from(context));
-        hudOutput.publishDirect(frame, reason, now, ownerPackage, sessionGeneration);
+        hudOutput.publishDirect(
+                outputFrame, reason, now, ownerPackage, sessionGeneration);
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.DIRECT,
                 "waze-direct-frame:" + safeReason(reason),
@@ -1232,6 +1347,9 @@ final class NavHudLiveSender {
                 + " laneDirections=\"" + laneDirections(frame) + "\""
                 + " laneBytes=" + lanes.length
                 + " laneArtifact=\"" + laneArtifact + "\""
+                + " speedLimit=" + frame.getSpeedLimit().getDisplayValue()
+                + " speedLimitKph=" + frame.getSpeedLimit().getKph()
+                + " speedUnit=\"" + frame.getSpeedLimit().getUnit() + "\""
                 + " alert=" + alert.isActive()
                 + " alertId=" + (alert.isActive() ? alert.getId() : -1)
                 + " alertArtifact=\"" + alertArtifact + "\""
@@ -1289,6 +1407,7 @@ final class NavHudLiveSender {
     private void onGMapsDirectNavigationStarted(String ownerPackage,
             long sessionGeneration, String reason) {
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        clearDirectSpeedLimit(ownerPackage);
         gmapsDirectTimeoutSessionGeneration = sessionGeneration;
         boolean keepFallbackUntilFrame = shouldKeepGMapsFallbackOnDirectStart(
                 gmapsDirectFallbackActive);
@@ -1322,12 +1441,18 @@ final class NavHudLiveSender {
         gmapsLegacyUnavailableLogged = false;
         gmapsDirectRegistrationSuppressed = false;
         lastGMapsDirectRegistrationProbeMs = 0L;
+        latestGMapsDirectFrame = frame;
+        latestGMapsDirectFrameReason = safeReason(reason);
+        latestGMapsDirectFrameSessionGeneration = sessionGeneration;
+        latestGMapsBitmapSelection = bitmapSelection;
         cancelGMapsDirectTimeout();
         NavRouteStateStore.get(context).updateFromVisualRouteEvidence(
                 GMapsDirectChannel.PACKAGE_NAME, "gmaps_direct", safeReason(reason), now);
-        logGMapsDirectFrame(frame, reason, now);
+        DirectTbtFrame outputFrame = applySpeedLimitOverlay(
+                ownerPackage, frame, now);
+        logGMapsDirectFrame(outputFrame, reason, now);
         hudOutput.publishDirect(
-                frame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent,
+                outputFrame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent,
                 ownerPackage, sessionGeneration);
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.DIRECT,
@@ -1352,6 +1477,9 @@ final class NavHudLiveSender {
                 + " laneCount=" + frame.getLanes().size()
                 + " laneDirections=\"" + laneDirections(frame) + "\""
                 + " laneBytes=" + frame.getLanePng().length
+                + " speedLimit=" + frame.getSpeedLimit().getDisplayValue()
+                + " speedLimitKph=" + frame.getSpeedLimit().getKph()
+                + " speedUnit=\"" + frame.getSpeedLimit().getUnit() + "\""
                 + " hudManeuver=" + prepared.maneuverMode()
                 + " hudManeuverBytes=" + prepared.maneuverPngBytes()
                 + " hudNative=" + prepared.nativeManeuver()
@@ -1365,6 +1493,138 @@ final class NavHudLiveSender {
                 context, "gmaps_direct", GMapsDirectChannel.PACKAGE_NAME, raw);
     }
 
+    private void onDirectSpeedLimitEvent(String ownerPackage, int displayValue,
+            int kph, String unit, long eventElapsedMs) {
+        boolean changed = DirectSpeedLimitStore.update(
+                ownerPackage, displayValue, kph, unit, eventElapsedMs);
+        DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot(ownerPackage);
+        String line = "speed_limit owner=" + normalizeString(ownerPackage)
+                + " value=" + speed.getDisplayValue()
+                + " kph=" + speed.getKph()
+                + " unit=" + speed.getUnit()
+                + " changed=" + changed
+                + " sourceElapsedMs=" + eventElapsedMs
+                + " latencyMs=" + Math.max(
+                0L, SystemClock.elapsedRealtime() - eventElapsedMs);
+        if (WAZE_PACKAGE.equals(ownerPackage)) eventWazeDirectSession("speed_limit", line);
+        else eventGMapsDirectSession("speed_limit", line);
+        Log.i(TAG, line);
+        if (changed) republishLatestDirectFrame(ownerPackage, "speed-limit-event");
+    }
+
+    private DirectTbtFrame applySpeedLimitOverlay(
+            String ownerPackage, DirectTbtFrame frame, long now) {
+        if (frame == null) return null;
+        String owner = normalizeString(ownerPackage);
+        DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot(owner);
+        DirectTbtPayload.Options options = DirectTbtPayload.Options.from(context);
+        if (!owner.equals(speedOverlayOwner)) {
+            resetSpeedOverlayState();
+            speedOverlayOwner = owner;
+        }
+        boolean changed = speedOverlayDisplayValue != speed.getDisplayValue()
+                || speedOverlayKph != speed.getKph()
+                || !speedOverlayUnit.equals(speed.getUnit());
+        speedOverlayDisplayValue = speed.getDisplayValue();
+        speedOverlayKph = speed.getKph();
+        speedOverlayUnit = speed.getUnit();
+        if (!speed.isActive() || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF) {
+            cancelSpeedOverlayTimeout();
+            speedOverlayVisible = false;
+            speedOverlayPlacement = DirectTbtPayload.SPEED_PLACEMENT_NONE;
+            speedOverlayOccupied = false;
+            return frame.withSpeedLimit(DirectTbtFrame.SpeedLimit.inactive());
+        }
+
+        DirectTbtFrame candidate = frame.withSpeedLimit(speed);
+        int placement = DirectTbtPayload.speedPlacement(candidate, options);
+        boolean occupied = DirectTbtPayload.speedOverlaysOccupiedField(candidate, options);
+        boolean transition = placement != speedOverlayPlacement
+                || occupied != speedOverlayOccupied;
+        speedOverlayPlacement = placement;
+        speedOverlayOccupied = occupied;
+        if (placement == DirectTbtPayload.SPEED_PLACEMENT_NONE) {
+            cancelSpeedOverlayTimeout();
+            speedOverlayVisible = false;
+        } else if (!occupied) {
+            cancelSpeedOverlayTimeout();
+            speedOverlayVisible = true;
+        } else if (changed || transition) {
+            speedOverlayVisible = true;
+            speedOverlayHideAtMs = now + options.speedLimitOverlaySeconds * 1000L;
+            scheduleSpeedOverlayTimeout(now);
+        } else if (speedOverlayHideAtMs > 0L && now >= speedOverlayHideAtMs) {
+            cancelSpeedOverlayTimeout();
+            speedOverlayVisible = false;
+        }
+        return frame.withSpeedLimit(speedOverlayVisible
+                ? speed : DirectTbtFrame.SpeedLimit.inactive());
+    }
+
+    private void scheduleSpeedOverlayTimeout(long now) {
+        handler.removeCallbacks(speedOverlayTimeout);
+        handler.postDelayed(
+                speedOverlayTimeout, Math.max(1L, speedOverlayHideAtMs - now));
+    }
+
+    private void cancelSpeedOverlayTimeout() {
+        handler.removeCallbacks(speedOverlayTimeout);
+        speedOverlayHideAtMs = 0L;
+    }
+
+    private void onSpeedOverlayTimeout() {
+        long now = SystemClock.elapsedRealtime();
+        if (speedOverlayHideAtMs <= 0L) return;
+        if (now < speedOverlayHideAtMs) {
+            scheduleSpeedOverlayTimeout(now);
+            return;
+        }
+        speedOverlayHideAtMs = 0L;
+        speedOverlayVisible = false;
+        republishLatestDirectFrame(speedOverlayOwner, "speed-limit-timeout");
+    }
+
+    private void republishLatestDirectFrame(String ownerPackage, String reason) {
+        if (WAZE_PACKAGE.equals(ownerPackage)) {
+            DirectTbtFrame frame = wazeSurfaceActive
+                    ? latestWazeSurfaceFrame : latestWazeClusterFrame;
+            int generation = wazeSurfaceActive
+                    ? latestWazeSurfaceFrameSessionGeneration
+                    : latestWazeClusterFrameSessionGeneration;
+            if (frame != null) {
+                enqueueLatestWazeDirectFrame(
+                        ownerPackage, generation,
+                        wazeSurfaceActive ? withRetainedWazeClusterAlert(frame) : frame,
+                        reason, wazeSurfaceActive);
+            }
+            return;
+        }
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(ownerPackage)
+                && latestGMapsDirectFrame != null) {
+            onGMapsDirectFrame(
+                    ownerPackage, latestGMapsDirectFrameSessionGeneration,
+                    latestGMapsDirectFrame, reason, latestGMapsBitmapSelection);
+        }
+    }
+
+    private void clearDirectSpeedLimit(String ownerPackage) {
+        DirectSpeedLimitStore.clear(ownerPackage);
+        if (normalizeString(ownerPackage).equals(speedOverlayOwner)) {
+            resetSpeedOverlayState();
+        }
+    }
+
+    private void resetSpeedOverlayState() {
+        cancelSpeedOverlayTimeout();
+        speedOverlayOwner = "";
+        speedOverlayDisplayValue = 0;
+        speedOverlayKph = 0;
+        speedOverlayUnit = "";
+        speedOverlayVisible = false;
+        speedOverlayPlacement = DirectTbtPayload.SPEED_PLACEMENT_NONE;
+        speedOverlayOccupied = false;
+    }
+
     private void logGMapsDirectChannelEvent(String message) {
         String normalized = normalizeString(message);
         String line = "gmaps_direct " + normalized;
@@ -1375,6 +1635,7 @@ final class NavHudLiveSender {
 
     private void onGMapsDirectNavigationEnded(String reason, long detectedAtMs) {
         if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) return;
+        clearDirectSpeedLimit(GMapsDirectChannel.PACKAGE_NAME);
         boolean fallbackWasActive = gmapsDirectFallbackActive;
         cancelGMapsDirectTimeout();
         gmapsDirectFrameReceived = false;
@@ -1425,6 +1686,10 @@ final class NavHudLiveSender {
         gmapsDirectRouteEnded = false;
         gmapsDirectRegistrationSuppressed = false;
         lastGMapsDirectRegistrationProbeMs = 0L;
+        latestGMapsDirectFrame = null;
+        latestGMapsDirectFrameReason = "";
+        latestGMapsDirectFrameSessionGeneration = 0L;
+        latestGMapsBitmapSelection = null;
     }
 
     private void activateGMapsLegacyFallbackIfReady(String reason) {
@@ -1561,6 +1826,7 @@ final class NavHudLiveSender {
         log("waze direct navigation ended main_handoff_ms="
                 + Math.max(0L, SystemClock.elapsedRealtime() - detectedAtMs)
                 + " reason=" + safeReason(reason));
+        clearDirectSpeedLimit(WAZE_PACKAGE);
         closeWazeSurface("navigation-ended:" + safeReason(reason));
         wazeSurfaceDirectChannel.stop("route-terminal:" + safeReason(reason));
         cancelWazeDirectColdTimeout();
@@ -1593,16 +1859,17 @@ final class NavHudLiveSender {
         log("waze source=waiting_direct routeEnded=true reason=" + safeReason(reason));
     }
 
-    private void onWazeRouteLifecycleEventOnMain(boolean navigating,
+    private void onWazeRouteLifecycleEventOnMain(boolean routeActive, boolean terminal,
             long eventElapsedMs, boolean changed, String reason) {
         if (!isWazeBridgeSupportedCached()) return;
-        log("waze route lifecycle navigating=" + navigating
+        log("waze route lifecycle routeActive=" + routeActive
+                + " terminal=" + terminal
                 + " elapsedMs=" + eventElapsedMs
                 + " reason=" + safeReason(reason));
         cancelWazeFallbackReadiness();
         wazeFallbackActive = false;
         WazeCropCapture.get(context).stop("route-lifecycle-bridge");
-        if (!navigating) {
+        if (terminal) {
             closeWazeSurface("route-lifecycle-end:" + safeReason(reason));
             wazeSurfaceDirectChannel.stop(
                     "route-lifecycle-end:" + safeReason(reason));
@@ -1625,6 +1892,10 @@ final class NavHudLiveSender {
                         WAZE_PACKAGE, sessionGeneration,
                         "route-lifecycle-end", eventElapsedMs);
             }
+            return;
+        }
+        if (!routeActive) {
+            log("waze route lifecycle nonterminal inactive reason=" + safeReason(reason));
             return;
         }
         if (HudPrefs.isUserShutdownActive(context)

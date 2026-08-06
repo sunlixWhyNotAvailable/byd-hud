@@ -188,6 +188,40 @@ public final class DirectTbtPayloadTest {
         assertEquals("Camera", prepared.displayText());
     }
 
+    @Test
+    public void speedLimitPlacementRespectsFreeFieldsAndFallback() {
+        DirectTbtFrame frame = frame(
+                11, 9, DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_NONE,
+                DirectTbtPayload.speedPlacement(frame, speedOptions(
+                        HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_FALLBACK_OFF)));
+        DirectTbtPayload.Options fallback = speedOptions(
+                HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_FALLBACK_MANEUVER);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(frame, fallback));
+        assertTrue(DirectTbtPayload.speedOverlaysOccupiedField(frame, fallback));
+    }
+
+    @Test
+    public void speedLimitStoreNormalizesMphAndDeduplicates() {
+        assertTrue(DirectSpeedLimitStore.update("com.waze", 30, -1, "mph", 10L));
+        DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot("com.waze");
+        assertEquals(30, speed.getDisplayValue());
+        assertEquals(48, speed.getKph());
+        assertFalse(DirectSpeedLimitStore.update("com.waze", 30, -1, "mph", 20L));
+        assertTrue(DirectSpeedLimitStore.clear("com.waze"));
+        assertFalse(DirectSpeedLimitStore.snapshot("com.waze").isActive());
+    }
+
+    private static DirectTbtPayload.Options speedOptions(int mode, int fallback) {
+        return new DirectTbtPayload.Options(
+                true, true, true, true, true, true, false,
+                HudPrefs.ROUTE_METRICS_OFF, false, false, false,
+                mode, fallback, 5, new byte[]{7, 2});
+    }
+
     private static DirectTbtPayload.Options metricOptions(
             boolean wholeRoute, boolean eta, boolean time, boolean tripDistance,
             boolean street, boolean textDirection) {

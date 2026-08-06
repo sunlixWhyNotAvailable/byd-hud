@@ -4,8 +4,6 @@ import android.app.Activity;
 import android.app.ActivityOptions;
 import android.content.Context;
 import android.content.Intent;
-import android.graphics.Bitmap;
-import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
@@ -59,9 +57,7 @@ import androidx.car.app.navigation.model.RoutePreviewNavigationTemplate;
 import androidx.car.app.serialization.Bundleable;
 import androidx.core.graphics.drawable.IconCompat;
 
-import java.io.ByteArrayOutputStream;
 import java.lang.ref.WeakReference;
-import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
@@ -126,6 +122,13 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         return activeTaskId() >= 0;
     }
 
+    static boolean isVisible() {
+        synchronized (BRIDGE_LOCK) {
+            WazeSurfaceActivity activity = active.get();
+            return activity != null && activity.visible;
+        }
+    }
+
     private SurfaceView surfaceView;
     private LinearLayout overlay;
     private TextView templateStatus;
@@ -150,6 +153,11 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     private boolean suppressGestureUntilNextDown;
     private boolean panMode;
     private int visibleAlertId = -1;
+    private boolean visible;
+    private boolean templateRendered;
+    private boolean templateRenderPosted;
+    private Template pendingTemplate;
+    private Template lastRenderedTemplate;
 
     static void attachHostBridge(HostBridge bridge) {
         WazeSurfaceActivity activity;
@@ -176,7 +184,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
                     "type", template == null ? "null" : template.getClass().getName());
             return;
         }
-        activity.runOnUiThread(() -> activity.renderTemplate(template));
+        activity.enqueueTemplate(template);
     }
 
     static void showAlert(Alert alert) {
@@ -286,6 +294,28 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     }
 
     @Override
+    protected void onResume() {
+        super.onResume();
+        visible = true;
+        NavHudLiveSender.get(this).onWazeSurfaceActivityVisibilityChanged(instanceId, true);
+        dispatchSurfaceState();
+    }
+
+    @Override
+    protected void onPause() {
+        visible = false;
+        NavHudLiveSender.get(this).onWazeSurfaceActivityVisibilityChanged(instanceId, false);
+        super.onPause();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        SurfaceLog.event("visible_surface_activity_reused");
+        dispatchSurfaceState();
+    }
+
+    @Override
     public void onBackPressed() {
         NavHudLiveSender.get(this).onWazeSurfaceBackPressed(instanceId);
         finish();
@@ -388,7 +418,30 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         });
     }
 
+    private void enqueueTemplate(Template template) {
+        synchronized (this) {
+            pendingTemplate = template;
+            if (templateRenderPosted) return;
+            templateRenderPosted = true;
+        }
+        runOnUiThread(() -> {
+            Template latest;
+            synchronized (WazeSurfaceActivity.this) {
+                latest = pendingTemplate;
+                pendingTemplate = null;
+                templateRenderPosted = false;
+            }
+            renderTemplate(latest);
+        });
+    }
+
     private void renderTemplate(Template template) {
+        if (templateRendered && (template == lastRenderedTemplate
+                || template != null && template.equals(lastRenderedTemplate))) {
+            return;
+        }
+        templateRendered = true;
+        lastRenderedTemplate = template;
         clearActionRow(appActions);
         clearActionRow(mapActions);
         clearActionRow(contentActions);
@@ -486,9 +539,8 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         String title = text(action.getTitle());
         String label = title.isEmpty() ? Action.typeToString(action.getType()) : title;
         OnClickDelegate click = action.getOnClickDelegate();
-        String iconHash = iconHash(action.getIcon());
         inventory.add(source + "{type=" + action.getType() + ",title=" + title
-                + ",click=" + (click != null) + ",icon=" + iconHash + "}");
+                + ",click=" + (click != null) + ",icon=" + iconMarker(action.getIcon()) + "}");
         if (action.getType() == Action.TYPE_BACK) {
             addButton(appActions, label, action.getIcon(), true, source, () -> {
                 HostBridge bridge = bridge();
@@ -589,7 +641,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         String title = text(action.getTitle());
         OnClickDelegate click = action.getOnClickDelegate();
         inventory.add(source + "{type=" + action.getType() + ",title=" + title
-                + ",click=" + (click != null) + ",icon=" + iconHash(action.getIcon()) + "}");
+                + ",click=" + (click != null) + ",icon=" + iconMarker(action.getIcon()) + "}");
         String label = title.isEmpty() && action.getIcon() != null
                 ? "" : (title.isEmpty() ? Action.typeToString(action.getType()) : title);
         addButton(contentActions, label, action.getIcon(), click != null && safeEnabled(action),
@@ -817,26 +869,8 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         }
     }
 
-    private String iconHash(CarIcon icon) {
-        if (icon == null) return "";
-        try {
-            IconCompat compat = icon.getIcon();
-            Drawable drawable = compat == null ? null : compat.loadDrawable(this);
-            if (drawable == null) return "type:" + icon.getType();
-            int width = drawable.getIntrinsicWidth() > 0 ? drawable.getIntrinsicWidth() : 48;
-            int height = drawable.getIntrinsicHeight() > 0 ? drawable.getIntrinsicHeight() : 48;
-            Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(bitmap);
-            drawable.setBounds(0, 0, width, height);
-            drawable.draw(canvas);
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
-            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
-            bitmap.recycle();
-            return SurfaceLog.hash(output.toByteArray());
-        } catch (Throwable t) {
-            SurfaceLog.error("template_icon_hash_failed", t);
-            return "";
-        }
+    private static String iconMarker(CarIcon icon) {
+        return icon == null ? "" : "type:" + icon.getType();
     }
 
     private Drawable loadIcon(CarIcon icon, int sizeDp) {
@@ -907,16 +941,5 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
             event(name, "error", error == null ? "unknown" : error.toString());
         }
 
-        static String hash(byte[] value) {
-            try {
-                byte[] digest = MessageDigest.getInstance("SHA-256")
-                        .digest(value == null ? new byte[0] : value);
-                StringBuilder result = new StringBuilder(digest.length * 2);
-                for (byte item : digest) result.append(String.format("%02X", item));
-                return result.toString();
-            } catch (Exception error) {
-                return "";
-            }
-        }
     }
 }

@@ -3,9 +3,14 @@ package com.bydhud.app;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.os.SystemClock;
 
 // Receives authenticated route transitions from the patched Waze process.
 public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
+    private static final String EXTRA_EVENT_TYPE = "event_type";
+    private static final String EXTRA_SPEED_LIMIT = "speed_limit";
+    private static final String EXTRA_SPEED_UNIT = "speed_unit";
+
     @Override
     public void onReceive(Context context, Intent intent) {
         if (context == null || intent == null
@@ -17,7 +22,6 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
             return;
         }
         if (!intent.hasExtra(WazeRouteLifecycleStore.EXTRA_PROTOCOL_VERSION)
-                || !intent.hasExtra(WazeRouteLifecycleStore.EXTRA_NAVIGATING)
                 || !intent.hasExtra(WazeRouteLifecycleStore.EXTRA_EVENT_ELAPSED_MS)) {
             log(context, "ignored reason=missing_extras");
             return;
@@ -29,28 +33,66 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
             return;
         }
 
+        if ("speed_limit".equals(intent.getStringExtra(EXTRA_EVENT_TYPE))) {
+            int limit = intent.getIntExtra(EXTRA_SPEED_LIMIT, -1);
+            String unit = intent.getStringExtra(EXTRA_SPEED_UNIT);
+            long eventElapsedMs = intent.getLongExtra(
+                    WazeRouteLifecycleStore.EXTRA_EVENT_ELAPSED_MS, 0L);
+            long receivedElapsedMs = SystemClock.elapsedRealtime();
+            if (!intent.hasExtra(EXTRA_SPEED_LIMIT) || limit < 0 || limit > 300
+                    || unit == null || unit.length() > 16) {
+                log(context, "speed_limit ignored reason=invalid_payload");
+                return;
+            }
+            log(context, "speed_limit value=" + limit + " unit=" + unit
+                    + " senderElapsedMs=" + eventElapsedMs
+                    + " receiverElapsedMs=" + receivedElapsedMs
+                    + " latencyMs=" + Math.max(0L, receivedElapsedMs - eventElapsedMs));
+            NavHudLiveSender.onWazeSpeedLimitEvent(
+                    context.getApplicationContext(), limit, unit, eventElapsedMs);
+            return;
+        }
+        if (!intent.hasExtra(WazeRouteLifecycleStore.EXTRA_NAVIGATING)) {
+            log(context, "ignored reason=missing_extras");
+            return;
+        }
+
         boolean navigating = intent.getBooleanExtra(
                 WazeRouteLifecycleStore.EXTRA_NAVIGATING, false);
+        boolean reasonAvailable = intent.hasExtra(WazeRouteLifecycleStore.EXTRA_REASON_CODE);
+        int reasonCode = intent.getIntExtra(
+                WazeRouteLifecycleStore.EXTRA_REASON_CODE,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE);
+        long bridgeGeneration = intent.getLongExtra(
+                WazeRouteLifecycleStore.EXTRA_BRIDGE_GENERATION, 0L);
         long eventElapsedMs = intent.getLongExtra(
                 WazeRouteLifecycleStore.EXTRA_EVENT_ELAPSED_MS, 0L);
-        WazeRouteLifecycleStore.RecordResult result = WazeRouteLifecycleStore.record(
-                context, navigating, eventElapsedMs);
+        long receivedElapsedMs = SystemClock.elapsedRealtime();
+        WazeRouteLifecycleStore.RecordResult result = WazeRouteLifecycleStore.recordBridge(
+                context, navigating, reasonCode, reasonAvailable, eventElapsedMs);
         log(context, "event navigating=" + navigating
+                + " reasonCode=" + reasonCode
+                + " reasonName=" + result.reasonName
+                + " routeActive=" + result.snapshot.active
+                + " terminal=" + result.terminal
                 + " accepted=" + result.accepted
                 + " changed=" + result.changed
-                + " reason=" + result.reason
-                + " elapsedMs=" + eventElapsedMs);
+                + " decision=" + result.reason
+                + " senderElapsedMs=" + eventElapsedMs
+                + " receiverElapsedMs=" + receivedElapsedMs
+                + " latencyMs=" + Math.max(0L, receivedElapsedMs - eventElapsedMs)
+                + " bridgeGeneration=" + bridgeGeneration);
         if (!result.accepted) return;
 
-        dispatchAccepted(context, navigating, eventElapsedMs, result);
+        dispatchAccepted(context, eventElapsedMs, result);
     }
 
-    static void dispatchAccepted(Context context, boolean navigating, long eventElapsedMs,
+    static void dispatchAccepted(Context context, long eventElapsedMs,
             WazeRouteLifecycleStore.RecordResult result) {
         NavHudLiveSender.onWazeRouteLifecycleEvent(
-                context.getApplicationContext(), navigating, eventElapsedMs,
-                result.changed, result.reason);
-        if (navigating
+                context.getApplicationContext(), result.snapshot.active, result.terminal,
+                eventElapsedMs, result.changed, result.reason);
+        if (result.snapshot.active
                 && HudPrefs.isBootEnabled(context)
                 && !HudPrefs.isUserShutdownActive(context)
                 && NavCapturePrefs.isHudEnabled(

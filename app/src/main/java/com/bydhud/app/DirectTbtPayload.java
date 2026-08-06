@@ -18,8 +18,12 @@ import java.text.SimpleDateFormat;
 /** Builds complete 0x8001 road-info payloads without owning a transport. */
 public final class DirectTbtPayload {
     private static final int NATIVE_BLANK_ID = 99;
+    static final int SPEED_PLACEMENT_NONE = 0;
+    static final int SPEED_PLACEMENT_MANEUVER = 1;
+    static final int SPEED_PLACEMENT_LANES = 2;
     private static final Object OPTIONS_LOCK = new Object();
-    private static final Options[] OPTIONS_CACHE = new Options[2048];
+    private static Options cachedOptions;
+    private static int cachedOptionsRevision = Integer.MIN_VALUE;
     private static byte[] cachedBlankS72Png;
 
     private DirectTbtPayload() {
@@ -80,7 +84,19 @@ public final class DirectTbtPayload {
         if (!safeOptions.png) maneuverPng = new byte[0];
         if (!safeOptions.nativeManeuver) nativeManeuver = 0;
         if (!safeOptions.distance) distanceMeters = 0;
-        String maneuverMode = !safeOptions.png ? "disabled"
+        int speedPlacement = speedPlacement(safeFrame, safeOptions);
+        if (speedPlacement != SPEED_PLACEMENT_NONE) {
+            byte[] speedPng = SpeedLimitPng.get(
+                    safeFrame.getSpeedLimit().getDisplayValue());
+            if (speedPlacement == SPEED_PLACEMENT_MANEUVER) {
+                maneuverPng = speedPng;
+            } else if (speedPlacement == SPEED_PLACEMENT_LANES) {
+                lanes = Collections.emptyList();
+                lanePng = speedPng;
+            }
+        }
+        String maneuverMode = speedPlacement == SPEED_PLACEMENT_MANEUVER ? "speed_limit"
+                : !safeOptions.png ? "disabled"
                 : alert.isActive() ? "alert"
                 : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
                 : navManeuverPng.length > 0 ? "current" : "empty";
@@ -141,16 +157,19 @@ public final class DirectTbtPayload {
     }
 
     private static String metricPrefix(DirectTbtFrame frame, Options options) {
-        if (!options.showEta && !options.showRemainingTime
+        if (options.routeMetricsMode == HudPrefs.ROUTE_METRICS_OFF
+                || !options.showEta && !options.showRemainingTime
                 && !options.showRemainingDistance) {
             return "";
         }
         DirectTbtFrame.TripMetrics metrics = frame.getTripMetrics();
         DirectTbtFrame.TravelMetrics nextStop = metrics.getNextStop();
         DirectTbtFrame.TravelMetrics wholeRoute = metrics.getWholeRoute();
+        boolean preferWholeRoute = options.routeMetricsMode
+                == HudPrefs.ROUTE_METRICS_WHOLE_ROUTE;
         StringBuilder values = new StringBuilder();
         DirectTbtFrame.TravelMetrics eta = selectMetric(
-                options.wholeRouteMetrics, wholeRoute.getArrivalTimeEpochMs() > 0L,
+                preferWholeRoute, wholeRoute.getArrivalTimeEpochMs() > 0L,
                 wholeRoute, nextStop);
         if (options.showEta && eta.getArrivalTimeEpochMs() > 0L) {
             SimpleDateFormat formatter = new SimpleDateFormat("HH:mm", Locale.US);
@@ -163,14 +182,14 @@ public final class DirectTbtPayload {
                     + formatter.format(new Date(eta.getArrivalTimeEpochMs())));
         }
         DirectTbtFrame.TravelMetrics time = selectMetric(
-                options.wholeRouteMetrics, wholeRoute.getRemainingTimeSeconds() >= 0L,
+                preferWholeRoute, wholeRoute.getRemainingTimeSeconds() >= 0L,
                 wholeRoute, nextStop);
         if (options.showRemainingTime && time.getRemainingTimeSeconds() >= 0L) {
             long minutes = (time.getRemainingTimeSeconds() + 59L) / 60L;
             appendMetric(values, minutes + " min");
         }
         DirectTbtFrame.TravelMetrics distance = selectMetric(
-                options.wholeRouteMetrics, wholeRoute.getRemainingDistanceMeters() >= 0L,
+                preferWholeRoute, wholeRoute.getRemainingDistanceMeters() >= 0L,
                 wholeRoute, nextStop);
         if (options.showRemainingDistance && distance.getRemainingDistanceMeters() >= 0L) {
             appendMetric(values, formatDistance(distance.getRemainingDistanceMeters()));
@@ -197,6 +216,49 @@ public final class DirectTbtPayload {
         String value = String.format(Locale.US, "%.1f", kilometers);
         if (value.endsWith(".0")) value = value.substring(0, value.length() - 2);
         return value + " km";
+    }
+
+    static int speedPlacement(DirectTbtFrame frame, Options options) {
+        if (frame == null || options == null || !frame.getSpeedLimit().isActive()
+                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF) {
+            return SPEED_PLACEMENT_NONE;
+        }
+        if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER) {
+            return SPEED_PLACEMENT_MANEUVER;
+        }
+        if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES) {
+            return SPEED_PLACEMENT_LANES;
+        }
+        boolean maneuverOccupied = maneuverFieldOccupied(frame, options);
+        boolean lanesOccupied = laneFieldOccupied(frame, options);
+        if (!maneuverOccupied) return SPEED_PLACEMENT_MANEUVER;
+        if (!lanesOccupied) return SPEED_PLACEMENT_LANES;
+        if (options.speedLimitFreeFallback == HudPrefs.SPEED_LIMIT_FALLBACK_MANEUVER) {
+            return SPEED_PLACEMENT_MANEUVER;
+        }
+        if (options.speedLimitFreeFallback == HudPrefs.SPEED_LIMIT_FALLBACK_LANES) {
+            return SPEED_PLACEMENT_LANES;
+        }
+        return SPEED_PLACEMENT_NONE;
+    }
+
+    static boolean speedOverlaysOccupiedField(DirectTbtFrame frame, Options options) {
+        int placement = speedPlacement(frame, options);
+        return placement == SPEED_PLACEMENT_MANEUVER
+                ? maneuverFieldOccupied(frame, options)
+                : placement == SPEED_PLACEMENT_LANES && laneFieldOccupied(frame, options);
+    }
+
+    private static boolean maneuverFieldOccupied(DirectTbtFrame frame, Options options) {
+        if (!options.png) return false;
+        DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
+        return alert.isActive() && alert.getManeuverPng().length > 0
+                || !alert.isActive() && frame.getManeuverPng().length > 0;
+    }
+
+    private static boolean laneFieldOccupied(DirectTbtFrame frame, Options options) {
+        return options.lanes
+                && (frame.getLanePng().length > 0 || !frame.getLanes().isEmpty());
     }
 
     static String shortSha256(byte[] bytes) {
@@ -390,10 +452,14 @@ public final class DirectTbtPayload {
         public final boolean street;
         public final boolean textDirection;
         public final boolean clampSmallDistance;
+        public final int routeMetricsMode;
         public final boolean wholeRouteMetrics;
         public final boolean showEta;
         public final boolean showRemainingTime;
         public final boolean showRemainingDistance;
+        public final int speedLimitMode;
+        public final int speedLimitFreeFallback;
+        public final int speedLimitOverlaySeconds;
         private final byte[] blankS72Png;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
@@ -425,6 +491,22 @@ public final class DirectTbtPayload {
                 boolean clampSmallDistance, boolean wholeRouteMetrics,
                 boolean showEta, boolean showRemainingTime,
                 boolean showRemainingDistance, byte[] blankS72Png) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, wholeRouteMetrics
+                            ? HudPrefs.ROUTE_METRICS_WHOLE_ROUTE
+                            : HudPrefs.ROUTE_METRICS_NEXT_STOP,
+                    showEta, showRemainingTime, showRemainingDistance,
+                    HudPrefs.SPEED_LIMIT_OFF, HudPrefs.SPEED_LIMIT_FALLBACK_OFF,
+                    5, blankS72Png);
+        }
+
+        Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, int routeMetricsMode,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                byte[] blankS72Png) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -432,10 +514,14 @@ public final class DirectTbtPayload {
             this.street = street;
             this.textDirection = textDirection;
             this.clampSmallDistance = clampSmallDistance;
-            this.wholeRouteMetrics = wholeRouteMetrics;
+            this.routeMetricsMode = routeMetricsMode;
+            this.wholeRouteMetrics = routeMetricsMode == HudPrefs.ROUTE_METRICS_WHOLE_ROUTE;
             this.showEta = showEta;
             this.showRemainingTime = showRemainingTime;
             this.showRemainingDistance = showRemainingDistance;
+            this.speedLimitMode = speedLimitMode;
+            this.speedLimitFreeFallback = speedLimitFreeFallback;
+            this.speedLimitOverlaySeconds = speedLimitOverlaySeconds;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
         }
 
@@ -448,30 +534,27 @@ public final class DirectTbtPayload {
             boolean street = HudPrefs.isStreetOutputEnabled(safeContext);
             boolean textDirection = HudPrefs.isTextDirectionOutputEnabled(safeContext);
             boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(safeContext);
-            boolean wholeRouteMetrics = HudPrefs.isWholeRouteMetricsEnabled(safeContext);
+            int routeMetricsMode = HudPrefs.routeMetricsMode(safeContext);
             boolean showEta = HudPrefs.isEtaOutputEnabled(safeContext);
             boolean showRemainingTime = HudPrefs.isRemainingTimeOutputEnabled(safeContext);
             boolean showRemainingDistance = HudPrefs.isRemainingDistanceOutputEnabled(safeContext);
-            int key = (png ? 1 : 0)
-                    | (nativeManeuver ? 2 : 0)
-                    | (lanes ? 4 : 0)
-                    | (distance ? 8 : 0)
-                    | (street ? 16 : 0)
-                    | (textDirection ? 32 : 0)
-                    | (clampSmallDistance ? 64 : 0)
-                    | (wholeRouteMetrics ? 128 : 0)
-                    | (showEta ? 256 : 0)
-                    | (showRemainingTime ? 512 : 0)
-                    | (showRemainingDistance ? 1024 : 0);
+            int speedLimitMode = HudPrefs.speedLimitMode(safeContext);
+            int speedLimitFreeFallback = HudPrefs.speedLimitFreeFallback(safeContext);
+            int speedLimitOverlaySeconds = HudPrefs.speedLimitOverlaySeconds(safeContext);
+            int revision = HudPrefs.outputOptionsRevision();
             synchronized (OPTIONS_LOCK) {
-                Options cached = OPTIONS_CACHE[key];
-                if (cached != null) return cached;
+                if (cachedOptions != null && cachedOptionsRevision == revision) {
+                    return cachedOptions;
+                }
                 if (cachedBlankS72Png == null) cachedBlankS72Png = loadBlankS72(safeContext);
-                cached = new Options(png, nativeManeuver, lanes, distance, street, textDirection,
-                        clampSmallDistance, wholeRouteMetrics, showEta,
-                        showRemainingTime, showRemainingDistance, cachedBlankS72Png);
-                OPTIONS_CACHE[key] = cached;
-                return cached;
+                cachedOptions = new Options(
+                        png, nativeManeuver, lanes, distance, street, textDirection,
+                        clampSmallDistance, routeMetricsMode, showEta,
+                        showRemainingTime, showRemainingDistance, speedLimitMode,
+                        speedLimitFreeFallback, speedLimitOverlaySeconds,
+                        cachedBlankS72Png);
+                cachedOptionsRevision = revision;
+                return cachedOptions;
             }
         }
     }

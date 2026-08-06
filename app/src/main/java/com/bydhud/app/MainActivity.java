@@ -81,8 +81,12 @@ public final class MainActivity extends ComponentActivity {
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
     private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageForceRefreshPending = new AtomicBoolean(false);
+    private final AtomicBoolean appScanInProgress = new AtomicBoolean(false);
     private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
     private volatile Map<String, String> appVersionNames = Collections.emptyMap();
+    private volatile boolean appScanCacheAvailable;
+    private volatile String appScanStatus = "";
+    private volatile Runnable composeSnapshotInvalidationListener;
     private HudOutputCoordinator hudOutput;
 
     private TextView statusView;
@@ -710,6 +714,9 @@ public final class MainActivity extends ComponentActivity {
         long now = SystemClock.elapsedRealtime();
         boolean stale = current.scannedAtMs <= 0L
                 || now - current.scannedAtMs >= STORAGE_SCAN_CACHE_TTL_MS;
+        if (!force && current.calculating) {
+            return;
+        }
         if (!force && !stale) {
             return;
         }
@@ -718,15 +725,19 @@ public final class MainActivity extends ComponentActivity {
                 storageForceRefreshPending.set(true);
             }
             storageCacheState = current.withCalculating(true);
+            invalidateComposeSnapshot();
             return;
         }
         storageCacheState = current.withCalculating(true);
+        invalidateComposeSnapshot();
         Thread worker = new Thread(() -> {
             StorageCacheState next;
             try {
                 next = scanStorageState();
             } catch (RuntimeException e) {
-                next = storageCacheState.withCalculating(false);
+                String detail = e.getClass().getSimpleName() + ": "
+                        + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' ');
+                next = storageCacheState.withScanError(detail);
                 AppEventLogger.event(this, "storage_scan failed "
                         + e.getClass().getSimpleName() + " "
                         + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
@@ -736,6 +747,7 @@ public final class MainActivity extends ComponentActivity {
             storageCacheState = next;
             handler.post(() -> {
                 refreshControls();
+                invalidateComposeSnapshot();
                 if (storageForceRefreshPending.getAndSet(false)) {
                     composeRequestStorageRefresh(true);
                 }
@@ -755,6 +767,8 @@ public final class MainActivity extends ComponentActivity {
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         Set<String> logOnlyPackages = NavCapturePrefs.getLogOnlyPackages(this);
         NavAppTaskScanner.Snapshot appScan = NavAppTaskScanner.get(this).currentSnapshot();
+        boolean appCacheAvailable = appScanCacheAvailable
+                || (appScan.scannedAtMs > 0L && !"initial".equals(appScan.status));
         List<ActiveAppRow> rawApps = activeRowsFromScan(appScan.rows);
         List<ActiveAppRow> supportedApps = loadCuratedApps(rawApps, capturePackages, observedPackages);
         List<ComposeAppRow> supportedRows = composeRows(
@@ -780,9 +794,13 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
                 HudPrefs.isWholeRouteMetricsEnabled(this),
+                HudPrefs.routeMetricsMode(this),
                 HudPrefs.isEtaOutputEnabled(this),
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
+                HudPrefs.speedLimitMode(this),
+                HudPrefs.speedLimitFreeFallback(this),
+                HudPrefs.speedLimitOverlaySeconds(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
                 HudPrefs.isFullscreenDashboardEnabled(this),
@@ -814,9 +832,14 @@ public final class MainActivity extends ComponentActivity {
                 state.laneString == null ? "" : state.laneString,
                 appScan.lastScanText,
                 appScan.hasAuthoritativeTaskState(),
+                appScanInProgress.get(),
+                appCacheAvailable,
+                appScanStatus,
                 HudPrefs.storageLimitGb(this),
                 storage.rootPaths,
                 storage.calculating,
+                storage.hasCache(),
+                storage.scanError,
                 storage.totalSessions,
                 storage.navCaptureFolderBytes,
                 storage.storageDays,
@@ -1240,6 +1263,10 @@ public final class MainActivity extends ComponentActivity {
         setWholeRouteMetricsEnabled(enabled);
     }
 
+    public void composeSetRouteMetricsMode(int mode) {
+        setRouteMetricsMode(mode);
+    }
+
     public void composeSetEtaOutputEnabled(boolean enabled) {
         setEtaOutputEnabled(enabled);
     }
@@ -1250,6 +1277,18 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetRemainingDistanceOutputEnabled(boolean enabled) {
         setRemainingDistanceOutputEnabled(enabled);
+    }
+
+    public void composeSetSpeedLimitMode(int mode) {
+        setSpeedLimitMode(mode);
+    }
+
+    public void composeSetSpeedLimitFreeFallback(int mode) {
+        setSpeedLimitFreeFallback(mode);
+    }
+
+    public void composeSetSpeedLimitOverlaySeconds(int seconds) {
+        setSpeedLimitOverlaySeconds(seconds);
     }
 
     public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
@@ -1425,6 +1464,10 @@ public final class MainActivity extends ComponentActivity {
         appendStatus(text);
     }
 
+    public void composeSetSnapshotInvalidationListener(Runnable listener) {
+        composeSnapshotInvalidationListener = listener;
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeRefreshApps() {
         scheduleAppScan();
@@ -1445,20 +1488,62 @@ public final class MainActivity extends ComponentActivity {
         return HudDeliveryStatus.isRunning() ? "running" : "idle";
     }
 
+    private void invalidateComposeSnapshot() {
+        Runnable listener = composeSnapshotInvalidationListener;
+        if (listener != null) {
+            handler.post(listener);
+        }
+    }
+
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleAppScan() {
+        if (!appScanInProgress.compareAndSet(false, true)) {
+            return;
+        }
+        appScanStatus = "scanning";
+        invalidateComposeSnapshot();
         Context appContext = getApplicationContext();
         new Thread(() -> {
-            NavAppTaskScanner.Snapshot scan =
-                    NavAppTaskScanner.get(appContext).forceScanIfIdle();
-            if (scan == null) {
-                return;
+            try {
+                NavAppTaskScanner scanner = NavAppTaskScanner.get(appContext);
+                long previousRevision = scanner.revision();
+                NavAppTaskScanner.Snapshot scan = scanner.forceScanIfIdle();
+                if (scan == null) {
+                    for (int attempt = 0; attempt < 100
+                            && scanner.revision() == previousRevision; attempt++) {
+                        Thread.sleep(100L);
+                    }
+                    if (scanner.revision() == previousRevision) {
+                        appScanStatus = "";
+                        return;
+                    }
+                    scan = scanner.currentSnapshot();
+                }
+                appVersionNames = scanInstalledAppVersions(scan);
+                NavigatorAssetManager.refreshInstalledMatches(appContext);
+                appScanCacheAvailable = appScanCacheAvailable
+                        || scan.hasAuthoritativeTaskState() || !scan.rows.isEmpty();
+                appScanStatus = "ok".equals(scan.status) ? "" : scan.status;
+                AppEventLogger.event(appContext, "apps_refresh source=" + scan.source
+                        + " rows=" + scan.rows.size()
+                        + " status=" + scan.status);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                appScanStatus = "scan interrupted";
+            } catch (RuntimeException e) {
+                String detail = e.getMessage() == null ? "" : ": "
+                        + e.getMessage().replace('\n', ' ').replace('\r', ' ');
+                appScanStatus = "failed: " + e.getClass().getSimpleName()
+                        + detail;
+                AppEventLogger.event(appContext, "apps_refresh failed "
+                        + e.getClass().getSimpleName());
+            } finally {
+                appScanInProgress.set(false);
+                handler.post(() -> {
+                    refreshActiveAppsList();
+                    invalidateComposeSnapshot();
+                });
             }
-            appVersionNames = scanInstalledAppVersions(scan);
-            AppEventLogger.event(appContext, "apps_refresh source=" + scan.source
-                    + " rows=" + scan.rows.size()
-                    + " status=" + scan.status);
-            handler.post(this::refreshActiveAppsList);
         }, "bydhud-app-scan").start();
     }
 
@@ -1751,9 +1836,13 @@ public final class MainActivity extends ComponentActivity {
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
         public final boolean wholeRouteMetricsEnabled;
+        public final int routeMetricsMode;
         public final boolean etaOutputEnabled;
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
+        public final int speedLimitMode;
+        public final int speedLimitFreeFallback;
+        public final int speedLimitOverlaySeconds;
         public final boolean wazeScreenCaptureEnabled;
         public final boolean wazeCustomSurfaceEnabled;
         public final boolean fullscreenDashboardEnabled;
@@ -1785,9 +1874,14 @@ public final class MainActivity extends ComponentActivity {
         public final String laneBitmap;
         public final String lastScanText;
         public final boolean appRuntimeStatusKnown;
+        public final boolean appScanInProgress;
+        public final boolean appScanCacheAvailable;
+        public final String appScanStatus;
         public final int storageLimitGb;
         public final List<String> navCaptureFolderPaths;
         public final boolean storageCalculating;
+        public final boolean storageCacheAvailable;
+        public final String storageScanError;
         public final int storageSessionCount;
         public final long navCaptureFolderBytes;
         public final List<ComposeStorageDay> storageDays;
@@ -1802,8 +1896,10 @@ public final class MainActivity extends ComponentActivity {
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
-                boolean wholeRouteMetricsEnabled, boolean etaOutputEnabled,
-                boolean remainingTimeOutputEnabled, boolean remainingDistanceOutputEnabled,
+                boolean wholeRouteMetricsEnabled, int routeMetricsMode,
+                boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
+                boolean remainingDistanceOutputEnabled, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 boolean wazeScreenCaptureEnabled,
                 boolean wazeCustomSurfaceEnabled,
                 boolean fullscreenDashboardEnabled,
@@ -1818,8 +1914,9 @@ public final class MainActivity extends ComponentActivity {
                 boolean arrowCuratedMode, int curatedIndex, int curatedCount,
                 int pngSourceId, int nativeManeuverId, int distanceMeters, String streetText,
                 String laneBitmap, String lastScanText, boolean appRuntimeStatusKnown,
-                int storageLimitGb,
-                List<String> navCaptureFolderPaths, boolean storageCalculating,
+                boolean appScanInProgress, boolean appScanCacheAvailable, String appScanStatus,
+                int storageLimitGb, List<String> navCaptureFolderPaths, boolean storageCalculating,
+                boolean storageCacheAvailable, String storageScanError,
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
                 List<ComposeNavigatorPatchRow> patchRows,
@@ -1837,9 +1934,13 @@ public final class MainActivity extends ComponentActivity {
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
             this.wholeRouteMetricsEnabled = wholeRouteMetricsEnabled;
+            this.routeMetricsMode = routeMetricsMode;
             this.etaOutputEnabled = etaOutputEnabled;
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
+            this.speedLimitMode = speedLimitMode;
+            this.speedLimitFreeFallback = speedLimitFreeFallback;
+            this.speedLimitOverlaySeconds = speedLimitOverlaySeconds;
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
@@ -1872,11 +1973,16 @@ public final class MainActivity extends ComponentActivity {
             this.laneBitmap = laneBitmap == null ? "" : laneBitmap;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
             this.appRuntimeStatusKnown = appRuntimeStatusKnown;
+            this.appScanInProgress = appScanInProgress;
+            this.appScanCacheAvailable = appScanCacheAvailable;
+            this.appScanStatus = appScanStatus == null ? "" : appScanStatus;
             this.storageLimitGb = Math.max(1, Math.min(10, storageLimitGb));
             this.navCaptureFolderPaths = navCaptureFolderPaths == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(navCaptureFolderPaths));
             this.storageCalculating = storageCalculating;
+            this.storageCacheAvailable = storageCacheAvailable;
+            this.storageScanError = storageScanError == null ? "" : storageScanError;
             this.storageSessionCount = Math.max(0, storageSessionCount);
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
             this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
@@ -1942,10 +2048,11 @@ public final class MainActivity extends ComponentActivity {
         final int totalSessions;
         final long scannedAtMs;
         final boolean calculating;
+        final String scanError;
 
         private StorageCacheState(long navCaptureFolderBytes, int totalSessions,
                 List<String> rootPaths, List<ComposeStorageDay> storageDays,
-                long scannedAtMs, boolean calculating) {
+                long scannedAtMs, boolean calculating, String scanError) {
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
             this.storageDays = storageDays == null
                     ? Collections.emptyList()
@@ -1956,23 +2063,35 @@ public final class MainActivity extends ComponentActivity {
             this.totalSessions = Math.max(0, totalSessions);
             this.scannedAtMs = Math.max(0L, scannedAtMs);
             this.calculating = calculating;
+            this.scanError = scanError == null ? "" : scanError;
         }
 
         static StorageCacheState empty() {
             return new StorageCacheState(
-                    0L, 0, Collections.emptyList(), Collections.emptyList(), 0L, false);
+                    0L, 0, Collections.emptyList(), Collections.emptyList(), 0L, false, "");
         }
 
         static StorageCacheState scanned(long navCaptureFolderBytes, int totalSessions,
                 List<String> rootPaths, List<ComposeStorageDay> storageDays, long scannedAtMs) {
             return new StorageCacheState(navCaptureFolderBytes, totalSessions,
-                    rootPaths, storageDays, scannedAtMs, false);
+                    rootPaths, storageDays, scannedAtMs, false, "");
         }
 
         StorageCacheState withCalculating(boolean nextCalculating) {
             return new StorageCacheState(
                     navCaptureFolderBytes, totalSessions,
-                    rootPaths, storageDays, scannedAtMs, nextCalculating);
+                    rootPaths, storageDays, scannedAtMs, nextCalculating,
+                    nextCalculating ? "" : scanError);
+        }
+
+        StorageCacheState withScanError(String error) {
+            return new StorageCacheState(
+                    navCaptureFolderBytes, totalSessions,
+                    rootPaths, storageDays, scannedAtMs, false, error);
+        }
+
+        boolean hasCache() {
+            return scannedAtMs > 0L;
         }
     }
 
@@ -2880,6 +2999,15 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    private void setRouteMetricsMode(int mode) {
+        HudPrefs.setRouteMetricsMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.routeMetricsMode(this);
+        appendStatus("Route metrics mode " + persisted);
+        AppEventLogger.event(this, "ui route_metrics_mode=" + persisted);
+        refreshControls();
+    }
+
     private void setEtaOutputEnabled(boolean enabled) {
         HudPrefs.setEtaOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -2901,6 +3029,33 @@ public final class MainActivity extends ComponentActivity {
         cachedPayloadKey = "";
         appendStatus("Remaining distance output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_remaining_distance=" + enabled);
+        refreshControls();
+    }
+
+    private void setSpeedLimitMode(int mode) {
+        HudPrefs.setSpeedLimitMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitMode(this);
+        appendStatus("Speed limit mode " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_mode=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitFreeFallback(int mode) {
+        HudPrefs.setSpeedLimitFreeFallback(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitFreeFallback(this);
+        appendStatus("Speed limit free fallback " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_free_fallback=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitOverlaySeconds(int seconds) {
+        HudPrefs.setSpeedLimitOverlaySeconds(this, seconds);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitOverlaySeconds(this);
+        appendStatus("Speed limit overlay seconds " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_overlay_seconds=" + persisted);
         refreshControls();
     }
 

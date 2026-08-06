@@ -18,6 +18,7 @@ import org.jf.dexlib2.iface.instruction.Instruction;
 import org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction;
 import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
+import org.jf.dexlib2.iface.instruction.TwoRegisterInstruction;
 import org.jf.dexlib2.iface.reference.FieldReference;
 import org.jf.dexlib2.iface.reference.MethodReference;
 import org.jf.dexlib2.immutable.ImmutableMethod;
@@ -67,6 +68,9 @@ public final class GmapsDiagnosticPatcher {
     private static final String GATE_METHOD = "a";
     private static final List<String> GATE_PARAMETERS =
             Collections.singletonList("Lbhdu;");
+    private static final ImmutableMethodReference SPEED_CAPTURE = new ImmutableMethodReference(
+            LOGGER_CLASS, "captureSpeedLimitState",
+            Collections.singletonList("Ljava/lang/Object;"), "V");
     private static final String AUDIO_OWNER = "Lbijo;";
     private static final String AUDIO_METHOD = "g";
     private static final List<String> AUDIO_PARAMETERS = Arrays.asList("Lbilw;", "I");
@@ -303,6 +307,8 @@ public final class GmapsDiagnosticPatcher {
         producerGate.put("stockGateCount", inspection.stockGateCount);
         producerGate.put("bypassCount", inspection.gateBypassCount);
         producerGate.put("bridgeGuardCount", inspection.gateBridgeCount);
+        producerGate.put("speedStateCount", inspection.speedStateCount);
+        producerGate.put("speedHookCount", inspection.speedHookCount);
         producerGate.put("dexEntry", inspection.gateDexEntry);
         producerGate.put("guard", inspection.gateGuard);
         report.put("producerGate", producerGate);
@@ -345,6 +351,9 @@ public final class GmapsDiagnosticPatcher {
                             inspection.gateBypassCount += gate.bypassCount;
                             inspection.gateBridgeCount += gate.bridgeCount;
                             inspection.gateGuard = gate.guard;
+                            SpeedScan speed = scanSpeedState(method.getImplementation());
+                            inspection.speedStateCount += speed.stateCount;
+                            inspection.speedHookCount += speed.hookCount;
                         }
                     }
                     if (AUDIO_OWNER.equals(classDef.getType())) {
@@ -799,10 +808,13 @@ public final class GmapsDiagnosticPatcher {
     private static Method guardProducerGate(Method method) {
         MethodImplementation source = method.getImplementation();
         GateScan before = scanProducerGate(source);
+        SpeedScan speedBefore = scanSpeedState(source);
         if (!"ok".equals(before.guard) || before.stockCount != 1
-                || before.bypassCount != 0 || before.bridgeCount != 0) {
+                || before.bypassCount != 0 || before.bridgeCount != 0
+                || !"ok".equals(speedBefore.guard) || speedBefore.stateCount != 1
+                || speedBefore.hookCount != 0) {
             throw new IllegalStateException("producer gate structural guard failed: "
-                    + before.guard);
+                    + before.guard + "/" + speedBefore.guard);
         }
         MutableMethodImplementation mutable = new MutableMethodImplementation(source);
         GateLocation location = findStockGate(mutable.getInstructions());
@@ -814,9 +826,18 @@ public final class GmapsDiagnosticPatcher {
                         0, 0, 0, 0, 0, noClient));
         mutable.addInstruction(location.branchIndex + 1,
                 new BuilderInstruction11x(Opcode.MOVE_RESULT, location.register));
+        SpeedLocation speed = findSpeedState(mutable.getInstructions());
+        if (speed == null || speed.hooked) {
+            throw new IllegalStateException("speed-limit state hook target not found");
+        }
+        mutable.addInstruction(speed.insertIndex, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 1, speed.stateRegister, 0, 0, 0, 0, SPEED_CAPTURE));
         GateScan after = scanProducerGate(mutable);
+        SpeedScan speedAfter = scanSpeedState(mutable);
         if (!"ok".equals(after.guard) || after.stockCount != 0
-                || after.bypassCount != 0 || after.bridgeCount != 1) {
+                || after.bypassCount != 0 || after.bridgeCount != 1
+                || !"ok".equals(speedAfter.guard) || speedAfter.stateCount != 1
+                || speedAfter.hookCount != 1) {
             throw new IllegalStateException("producer gate post-patch verification failed");
         }
         return new ImmutableMethod(
@@ -910,6 +931,89 @@ public final class GmapsDiagnosticPatcher {
                 && "noClient".equals(method.getName())
                 && method.getParameterTypes().isEmpty()
                 && "Z".equals(method.getReturnType());
+    }
+
+    private static SpeedScan scanSpeedState(MethodImplementation implementation) {
+        if (implementation == null) return new SpeedScan(0, 0, "missing implementation");
+        List<? extends Instruction> instructions = toInstructionList(implementation);
+        int states = 0;
+        int hooks = 0;
+        for (int i = 0; i < instructions.size(); i++) {
+            SpeedLocation location = speedStateAt(instructions, i);
+            if (location == null) continue;
+            states++;
+            if (location.hooked) hooks++;
+        }
+        return new SpeedScan(states, hooks,
+                states == 1 ? "ok" : "matched speed states=" + states);
+    }
+
+    private static SpeedLocation findSpeedState(List<? extends Instruction> instructions) {
+        SpeedLocation match = null;
+        for (int i = 0; i < instructions.size(); i++) {
+            SpeedLocation candidate = speedStateAt(instructions, i);
+            if (candidate == null) continue;
+            if (match != null) return null;
+            match = candidate;
+        }
+        return match;
+    }
+
+    private static SpeedLocation speedStateAt(
+            List<? extends Instruction> instructions, int gateIndex) {
+        GateLocation gate = gateAt(instructions, gateIndex);
+        if (gate == null || gate.bypassed) return null;
+        int callIndex = gate.branchIndex + 1;
+        if (callIndex + 2 >= instructions.size()
+                || !isMethod(instructions.get(callIndex), "Lbhrz;", "c",
+                Collections.emptyList(), "Lbhhw;")
+                || instructions.get(callIndex + 1).getOpcode() != Opcode.MOVE_RESULT_OBJECT
+                || !(instructions.get(callIndex + 1) instanceof OneRegisterInstruction)) {
+            return null;
+        }
+        int stateRegister = ((OneRegisterInstruction) instructions.get(callIndex + 1)).getRegisterA();
+        int nextIndex = callIndex + 2;
+        boolean hooked = nextIndex < instructions.size()
+                && isSpeedCapture(instructions.get(nextIndex), stateRegister);
+        if (hooked) nextIndex++;
+        if (nextIndex >= instructions.size()
+                || instructions.get(nextIndex).getOpcode() != Opcode.IGET_OBJECT
+                || !(instructions.get(nextIndex) instanceof TwoRegisterInstruction)
+                || ((TwoRegisterInstruction) instructions.get(nextIndex)).getRegisterB()
+                != stateRegister
+                || !isField(instructions.get(nextIndex), "Lbhhw;", "b", "Luiz;")) {
+            return null;
+        }
+        return new SpeedLocation(callIndex + 2, stateRegister, hooked);
+    }
+
+    private static boolean isSpeedCapture(Instruction instruction, int stateRegister) {
+        return instruction instanceof FiveRegisterInstruction
+                && ((FiveRegisterInstruction) instruction).getRegisterCount() == 1
+                && ((FiveRegisterInstruction) instruction).getRegisterC() == stateRegister
+                && isMethod(instruction, LOGGER_CLASS, "captureSpeedLimitState",
+                Collections.singletonList("Ljava/lang/Object;"), "V");
+    }
+
+    private static boolean isMethod(Instruction instruction, String owner, String name,
+            List<String> parameters, String returnType) {
+        if (!(instruction instanceof ReferenceInstruction)) return false;
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        if (!(reference instanceof MethodReference)) return false;
+        MethodReference method = (MethodReference) reference;
+        return owner.equals(method.getDefiningClass()) && name.equals(method.getName())
+                && parameters.equals(toStrings(method.getParameterTypes()))
+                && returnType.equals(method.getReturnType());
+    }
+
+    private static boolean isField(
+            Instruction instruction, String owner, String name, String type) {
+        if (!(instruction instanceof ReferenceInstruction)) return false;
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        if (!(reference instanceof FieldReference)) return false;
+        FieldReference field = (FieldReference) reference;
+        return owner.equals(field.getDefiningClass()) && name.equals(field.getName())
+                && type.equals(field.getType());
     }
 
     private static boolean hasProducerFields(
@@ -1148,6 +1252,8 @@ public final class GmapsDiagnosticPatcher {
         int stockGateCount;
         int gateBypassCount;
         int gateBridgeCount;
+        int speedStateCount;
+        int speedHookCount;
         String gateDexEntry = "";
         String gateGuard = "not found";
         int audioTargetCount;
@@ -1194,10 +1300,12 @@ public final class GmapsDiagnosticPatcher {
             }
             stock &= gateTargetCount == 1 && stockGateCount == 1
                     && gateBypassCount == 0 && gateBridgeCount == 0
-                    && "ok".equals(gateGuard);
+                    && "ok".equals(gateGuard)
+                    && speedStateCount == 1 && speedHookCount == 0;
             bridge &= gateTargetCount == 1 && stockGateCount == 0
                     && gateBypassCount == 0 && gateBridgeCount == 1
-                    && "ok".equals(gateGuard);
+                    && "ok".equals(gateGuard)
+                    && speedStateCount == 1 && speedHookCount <= 1;
             if (stock) return "PATCHABLE_STOCK";
             if (bridge) return "MESSENGER_BRIDGE_POC";
             return "UNSUPPORTED";
@@ -1229,9 +1337,10 @@ public final class GmapsDiagnosticPatcher {
         }
 
         void requirePatched() throws IOException {
-            if (!"MESSENGER_BRIDGE_POC".equals(directClassification())) {
+            if (!"MESSENGER_BRIDGE_POC".equals(directClassification())
+                    || speedHookCount != 1) {
                 throw new IOException("APK direct classification=" + directClassification()
-                        + "; expected MESSENGER_BRIDGE_POC: " + details());
+                        + "; expected MESSENGER_BRIDGE_POC with speed hook: " + details());
             }
         }
 
@@ -1267,6 +1376,8 @@ public final class GmapsDiagnosticPatcher {
                     .append(stockGateCount).append('/').append(gateBypassCount)
                     .append('/').append(gateBridgeCount)
                     .append('/').append(gateGuard);
+            value.append(", speedState=").append(speedStateCount).append('/')
+                    .append(speedHookCount);
             value.append(", navigationAudio=").append(audioTargetCount).append('/')
                     .append(stockAudioCount).append('/').append(patchedAudioCount)
                     .append('/').append(audioGuard);
@@ -1372,6 +1483,30 @@ public final class GmapsDiagnosticPatcher {
             this.register = register;
             this.bypassed = bypassed;
             this.bridgeGuarded = bridgeGuarded;
+        }
+    }
+
+    private static final class SpeedScan {
+        final int stateCount;
+        final int hookCount;
+        final String guard;
+
+        SpeedScan(int stateCount, int hookCount, String guard) {
+            this.stateCount = stateCount;
+            this.hookCount = hookCount;
+            this.guard = guard;
+        }
+    }
+
+    private static final class SpeedLocation {
+        final int insertIndex;
+        final int stateRegister;
+        final boolean hooked;
+
+        SpeedLocation(int insertIndex, int stateRegister, boolean hooked) {
+            this.insertIndex = insertIndex;
+            this.stateRegister = stateRegister;
+            this.hooked = hooked;
         }
     }
 

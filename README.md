@@ -52,7 +52,7 @@ BYD HUD prefers a compatible direct channel for the selected navigator. Legacy i
 | Navigator | Preferred direct channel | Optional legacy input | Main limitations |
 | --- | --- | --- | --- |
 | Google Maps | Structured maneuver, distance, road, rendered maneuver image, ETA, remaining time, and remaining distance | Accessibility and notification data after capture services are granted and connected | Legacy input has no lane guidance and may have limited maneuver data |
-| Waze | Structured maneuver, distance, street, lanes, and session alerts | Screen capture and visual parsing after `Screen capture channel (legacy)` is enabled | The legacy channel is off by default, layout-dependent, and no longer supported by the developer |
+| Waze | Structured maneuver, distance, street, lanes, session alerts, and patched cluster trip metrics | Screen capture and visual parsing after `Screen capture channel (legacy)` is enabled | The legacy channel is off by default, layout-dependent, and no longer supported by the developer |
 
 By default, the direct channel leaves the navigator activity unchanged while navigation data is sent to BYD HUD in the background. With `Start with custom surface` enabled, Waze still handles search and route selection in its normal activity, then supplies the active route map and controls to a separate BYD HUD surface after navigation starts. Normal Waze direct guidance remains available while the surface starts; if it is not ready within five seconds, BYD HUD keeps that guidance without ending the route. Google Maps always keeps its normal activity.
 
@@ -119,23 +119,16 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 
 Street text has priority over the text direction because both use the same vehicle HUD field.
 
-### Waze functions
-
-| Setting | Default | Behavior |
-| --- | --- | --- |
-| `Show Waze alerts` | On | Keeps a supplied Waze alert visible while route distance, street, lanes, and the matching native maneuver continue to update |
-| `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate surface; Back returns to the normal Waze activity for the rest of that route |
-
-The custom surface is route-scoped. Changing its switch during an active route does not hot-swap sessions. A five-second readiness failure keeps the standard Waze direct guidance active and suppresses another surface attempt until the next route. The Waze alert switch controls HUD alert output only; alerts supplied to the custom Waze surface remain visible there.
-
 ### Route metrics
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Show ETA/time/distance for entire route` | Off | Off uses metrics to the next stop; on requests whole-route metrics when the source distinguishes them |
+| `ETA/time/distance output mode` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze always supplies only next-stop values |
 | `Show ETA` | Off | Adds the expected arrival time to the street field |
 | `Show remaining time` | Off | Adds remaining travel time to the street field |
 | `Show remaining distance` | Off | Adds remaining route distance to the street field |
+
+The three value switches are disabled while the mode is `Off`, but their saved values are preserved.
 
 Enabled metrics are added before the street or cue, for example:
 
@@ -143,7 +136,17 @@ Enabled metrics are added before the street or cue, for example:
 [ETA: 12:20 | 11 min | 5.1 km] Main Street
 ```
 
-Google Maps direct supplies the complete metric contract. The standard Waze cluster session does not provide trip metrics; an active custom-surface main session can expose them when Waze includes them.
+Google Maps direct supplies the complete metric contract. Project-patched Waze `5.20.0.1` supplies ETA and remaining distance to the next destination in its cluster session. It does not currently supply remaining travel time or distinguish whole-route metrics there.
+
+### Speed limit
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `Speed limit output mode` | Off | Places the current direct-channel speed-limit sign in the maneuver field, lane field, or the first free field |
+| `Overlay in "In a free field" mode` | Off | When both fields are occupied, optionally allows a timed replacement of the maneuver or lane field |
+| `Display time when overlapping` | 5 seconds | Sets the temporary replacement time from 1 to 10 seconds |
+
+An alert occupies the maneuver field with the same priority as a route maneuver. A sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when an occupied maneuver, alert, or lane field is replaced. This feature requires the current project-patched direct profile for Google Maps or Waze.
 
 ### Additional navigation behavior
 
@@ -151,6 +154,15 @@ Google Maps direct supplies the complete metric contract. The standard Waze clus
 | --- | --- | --- |
 | `Small distance clamp` | Off | Replaces positive distances below 11 m with 11 m to avoid invalid characters on affected HUD firmware |
 | `Roundabout left-hand traffic` | Off | Uses left-hand roundabout glyphs in the legacy visual parser |
+
+### Waze functions
+
+| Setting | Default | Behavior |
+| --- | --- | --- |
+| `Show Waze alerts` | On | Keeps a supplied Waze alert visible while route distance, street, lanes, and the matching native maneuver continue to update |
+| `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate surface; Back returns to the normal Waze activity for the rest of that route |
+
+The custom surface is route-scoped. Changing its switch during an active route does not hot-swap sessions. A five-second readiness failure keeps the standard Waze direct guidance active and suppresses another surface attempt until the next route. Returning to Waze during the same active route restores the surface; route-end reason codes close it only for terminal events. The Waze alert switch controls HUD alert output only; alerts supplied to the custom Waze surface remain visible there.
 
 ## Dashboard projection
 
@@ -194,7 +206,7 @@ Official Google Maps package `com.google.android.apps.maps`, bundles with OBB ex
 4. Press `Patch` and confirm the warning.
 5. BYD HUD repeats all structural checks, patches only known targets, signs the complete package set with a key generated on this tablet, and asks Android to install it.
 
-The direct-channel layer is mandatory. Optional layers, such as the Google Maps navigation audio channel or Waze stable-session and alert support, may be unavailable without preventing the direct channel from working. The Waze alert hook is currently limited to the structurally compatible Waze 5.20.0.1 layout.
+The direct-channel layer is mandatory. Optional layers, such as the Google Maps navigation audio channel or Waze stable-session and alert support, may be unavailable without preventing the direct channel from working. The Waze stable-session layer covers route lifecycle, direct speed limits, and cluster trip metrics. The Waze alert hook is currently limited to the structurally compatible Waze 5.20.0.1 layout.
 
 ### Signing and app data
 
@@ -341,7 +353,7 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 - Google Maps legacy input has no lane guidance and may provide incomplete maneuver data.
 - Waze screen-capture output is off by default and no longer supported by the developer.
 - The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
-- The standard Waze cluster direct session does not provide ETA, remaining time, or remaining route distance; these values depend on Waze supplying them in a custom-surface main session.
+- Project-patched Waze `5.20.0.1` cluster direct output provides ETA and remaining distance only to the next destination; remaining travel time and whole-route metrics still depend on another Waze session exposing them.
 - Waze alerts still depend on Waze supplying an alert; the built-in alert hook is available only for the supported Waze 5.20.0.1 structure.
 - Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure keeps the normal direct guidance active after five seconds.
 - Stock cluster firmware may add dark overlays to dashboard projection.

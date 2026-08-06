@@ -42,9 +42,11 @@ import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -64,6 +66,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -77,6 +83,8 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
@@ -85,6 +93,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.runtime.key
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
@@ -542,7 +551,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var logcatBusy by remember { mutableStateOf(false) }
     var lastAppsScanRevision by remember { mutableStateOf(activity.composeAppsScanRevision()) }
     var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
-    var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var betaChannelEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isBetaChannelEnabled(activity)) }
@@ -585,6 +593,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         val refreshed = activity.composeSnapshot()
         snapshot = refreshed
         liveHudStatus = refreshed.hudStatus
+        lastAppsScanRevision = activity.composeAppsScanRevision()
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -813,15 +822,16 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (selectedTab == RuntimeTab.Apps) {
             lastAppsScanRevision = activity.composeAppsScanRevision()
             activity.composeRefreshApps()
+            refresh()
         }
         if (selectedTab == RuntimeTab.Storage) {
             activity.composeRequestStorageRefresh(false)
-            lastStorageRefreshRequestMs = SystemClock.elapsedRealtime()
             refresh()
         }
     }
 
     DisposableEffect(activity) {
+        activity.composeSetSnapshotInvalidationListener { refresh() }
         appInForeground = activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         val observer = LifecycleEventObserver { _, event ->
             //guard auto-check so background launches do not show update UI over a hidden app.
@@ -834,7 +844,10 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             }
         }
         activity.lifecycle.addObserver(observer)
-        onDispose { activity.lifecycle.removeObserver(observer) }
+        onDispose {
+            activity.lifecycle.removeObserver(observer)
+            activity.composeSetSnapshotInvalidationListener(null)
+        }
     }
 
     LaunchedEffect(
@@ -865,41 +878,33 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(selectedTab) {
+        if (selectedTab != RuntimeTab.Apps) {
+            return@LaunchedEffect
+        }
         while (true) {
             delay(1000L)
-            val now = SystemClock.elapsedRealtime()
-            if (selectedTab == RuntimeTab.Apps) {
-                if (snapshot.navigatorAssets.any {
-                        it.state == NavigatorAssetManager.DOWNLOADING
-                                || it.state == NavigatorAssetManager.VERIFYING
-                                || it.state == NavigatorAssetManager.INSTALL_REQUESTED
-                                || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
-                    }) {
-                    refresh()
-                }
-                val scanRevision = activity.composeAppsScanRevision()
-                if (scanRevision != lastAppsScanRevision) {
-                    lastAppsScanRevision = scanRevision
-                    refresh()
-                }
-                val deliveryStatus = activity.composeHudDeliveryStatus()
-                val nextHudStatus = if (deliveryStatus == "idle" && !snapshot.captureReady) {
-                    "failed"
-                } else {
-                    deliveryStatus
-                }
-                if (liveHudStatus != nextHudStatus) {
-                    liveHudStatus = nextHudStatus
-                }
-            } else {
+            if (snapshot.navigatorAssets.any {
+                    it.state == NavigatorAssetManager.DOWNLOADING
+                            || it.state == NavigatorAssetManager.VERIFYING
+                            || it.state == NavigatorAssetManager.INSTALL_REQUESTED
+                            || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
+                }) {
                 refresh()
             }
-            if (selectedTab == RuntimeTab.Storage && !storageDeleteBusy) {
-                if (now - lastStorageRefreshRequestMs >= 5000L) {
-                    activity.composeRequestStorageRefresh(false)
-                    lastStorageRefreshRequestMs = now
-                }
+            val scanRevision = activity.composeAppsScanRevision()
+            if (scanRevision != lastAppsScanRevision) {
+                lastAppsScanRevision = scanRevision
+                refresh()
+            }
+            val deliveryStatus = activity.composeHudDeliveryStatus()
+            val nextHudStatus = if (deliveryStatus == "idle" && !snapshot.captureReady) {
+                "failed"
+            } else {
+                deliveryStatus
+            }
+            if (liveHudStatus != nextHudStatus) {
+                liveHudStatus = nextHudStatus
             }
         }
     }
@@ -1470,6 +1475,51 @@ private fun OptionsTab(
     onDisableBgApps: () -> Unit,
     onShutdownClick: () -> Unit
 ) {
+    val ua = copy.language == Language.Ua
+    val routeMetricModes = if (ua) {
+        listOf("Вимкнений", "До зупинки", "Весь маршрут")
+    } else {
+        listOf("Off", "Next stop", "Entire route")
+    }
+    val speedLimitModes = if (ua) {
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі")
+    } else {
+        listOf("Off", "In maneuver field", "In lane field", "In a free field")
+    }
+    val speedLimitFallbackModes = if (ua) {
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами")
+    } else {
+        listOf("Off", "In maneuver field", "In lane field")
+    }
+    val routeMetricsTitle = if (ua) {
+        "Режим виводу ЕТА/часу/дистанції"
+    } else {
+        "ETA/time/distance output mode"
+    }
+    val routeMetricsHint = if (ua) {
+        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze показує тільки значення до наступної зупинки."
+    } else {
+        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze shows only values for the next stop."
+    }
+    val speedLimitModeHint = if (ua) {
+        "Показувати поточне обмеження швидкості у вибраному полі HUD."
+    } else {
+        "Show the current speed limit in the selected HUD field."
+    }
+    val freeFallbackHint = if (ua) {
+        "Визначає, чи можна тимчасово перекрити зайняте поле, коли вільного поля немає."
+    } else {
+        "Choose whether to temporarily replace an occupied field when no field is free."
+    }
+    val overlaySecondsHint = if (ua) {
+        "Кількість секунд показу обмеження поверх активного маневру або смуг. Ціле число від 1 до 10."
+    } else {
+        "Seconds to show the speed limit over an active maneuver or lane output. Whole numbers from 1 to 10."
+    }
+    val freeFallbackEnabled = snapshot.speedLimitMode == 3
+    val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
+            || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
+
     LazyPageSurface(copy.main, copy.mainHint, palette) {
         item(key = "runtime-permissions") {
             Section(copy.permissionsRuntime, palette) {
@@ -1515,7 +1565,7 @@ private fun OptionsTab(
                 copy.betaTestingHint,
                 betaChannelEnabled,
                 palette,
-                onBetaChannelChange
+                onChecked = onBetaChannelChange
                 )
                 Divider(palette)
                 SettingRow(
@@ -1544,23 +1594,6 @@ private fun OptionsTab(
             }
         }
 
-        item(key = "waze-features") {
-            Section(copy.wazeFeatures, palette) {
-                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
-                    runAction { activity.composeSetWazeAlertsEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(
-                    copy.customSurface,
-                    copy.customSurfaceHint,
-                    snapshot.wazeCustomSurfaceEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetWazeCustomSurfaceEnabled(it) }
-                }
-            }
-        }
-
         item(key = "basic-navigation") {
             Section(copy.basicNavigationOutput, palette) {
                 SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
@@ -1585,6 +1618,115 @@ private fun OptionsTab(
             }
         }
 
+        item(key = "route-eta") {
+            Section(if (ua) "ЕТА маршруту" else "Route ETA", palette) {
+                SettingRow(
+                    title = routeMetricsTitle,
+                    hint = routeMetricsHint,
+                    palette = palette,
+                    action = {
+                        HudDropdown(
+                            selectedIndex = snapshot.routeMetricsMode,
+                            options = routeMetricModes,
+                            palette = palette,
+                            width = 190.dp,
+                            onSelected = { mode ->
+                                runAction { activity.composeSetRouteMetricsMode(mode) }
+                            }
+                        )
+                    }
+                )
+                Divider(palette)
+                SwitchRow(
+                    copy.showEta,
+                    copy.showEtaHint,
+                    snapshot.etaOutputEnabled,
+                    palette,
+                    enabled = snapshot.routeMetricsMode != 0
+                ) {
+                    runAction { activity.composeSetEtaOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.showRemainingTime,
+                    copy.showRemainingTimeHint,
+                    snapshot.remainingTimeOutputEnabled,
+                    palette,
+                    enabled = snapshot.routeMetricsMode != 0
+                ) {
+                    runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.showRemainingDistance,
+                    copy.showRemainingDistanceHint,
+                    snapshot.remainingDistanceOutputEnabled,
+                    palette,
+                    enabled = snapshot.routeMetricsMode != 0
+                ) {
+                    runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
+                }
+            }
+        }
+
+        item(key = "speed-limit") {
+            Section(if (ua) "Обмеження швидкості" else "Speed limit", palette) {
+                SettingRow(
+                    title = if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode",
+                    hint = speedLimitModeHint,
+                    palette = palette,
+                    action = {
+                        HudDropdown(
+                            selectedIndex = snapshot.speedLimitMode,
+                            options = speedLimitModes,
+                            palette = palette,
+                            width = 190.dp,
+                            onSelected = { mode ->
+                                runAction { activity.composeSetSpeedLimitMode(mode) }
+                            }
+                        )
+                    }
+                )
+                Divider(palette)
+                SettingRow(
+                    title = if (ua) "Накладання у режимі «У вільному полі»"
+                    else "Overlay in \"In a free field\" mode",
+                    hint = freeFallbackHint,
+                    palette = palette,
+                    enabled = freeFallbackEnabled,
+                    action = {
+                        HudDropdown(
+                            selectedIndex = snapshot.speedLimitFreeFallback,
+                            options = speedLimitFallbackModes,
+                            palette = palette,
+                            width = 190.dp,
+                            enabled = freeFallbackEnabled,
+                            onSelected = { mode ->
+                                runAction { activity.composeSetSpeedLimitFreeFallback(mode) }
+                            }
+                        )
+                    }
+                )
+                Divider(palette)
+                SettingRow(
+                    title = if (ua) "Час показу при накладанні" else "Display time when overlapping",
+                    hint = overlaySecondsHint,
+                    palette = palette,
+                    enabled = overlaySecondsEnabled,
+                    action = {
+                        HudIntegerStepper(
+                            value = snapshot.speedLimitOverlaySeconds,
+                            palette = palette,
+                            enabled = overlaySecondsEnabled,
+                            onValueChange = { seconds ->
+                                runAction { activity.composeSetSpeedLimitOverlaySeconds(seconds) }
+                            }
+                        )
+                    }
+                )
+            }
+        }
+
         item(key = "extra-navigation") {
             Section(copy.extraNavigationOptions, palette) {
                 SwitchRow(
@@ -1596,43 +1738,29 @@ private fun OptionsTab(
                     runAction { activity.composeSetTextDirectionOutputEnabled(it) }
                 }
                 Divider(palette)
-                SwitchRow(
-                    copy.showWholeRouteMetrics,
-                    copy.showWholeRouteMetricsHint,
-                    snapshot.wholeRouteMetricsEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetWholeRouteMetricsEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette) {
-                    runAction { activity.composeSetEtaOutputEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(
-                    copy.showRemainingTime,
-                    copy.showRemainingTimeHint,
-                    snapshot.remainingTimeOutputEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(
-                    copy.showRemainingDistance,
-                    copy.showRemainingDistanceHint,
-                    snapshot.remainingDistanceOutputEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
-                }
-                Divider(palette)
                 SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
                     runAction { activity.composeSetSmallDistanceClamp(it) }
                 }
                 Divider(palette)
                 SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
                     runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
+                }
+            }
+        }
+
+        item(key = "waze-features") {
+            Section(copy.wazeFeatures, palette) {
+                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
+                    runAction { activity.composeSetWazeAlertsEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.customSurface,
+                    copy.customSurfaceHint,
+                    snapshot.wazeCustomSurfaceEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetWazeCustomSurfaceEnabled(it) }
                 }
             }
         }
@@ -2574,9 +2702,21 @@ private fun AppsTab(
     onInstallAsset: (String) -> Unit,
     onRestoreAsset: (String) -> Unit
 ) {
+    val scanningLabel = if (copy.language == Language.Ua) "Сканування" else "Scanning"
+    val scanFailedLabel = if (copy.language == Language.Ua) "Помилка сканування" else "Scan failed"
+    val scanStatusText = when {
+        snapshot.appScanInProgress -> scanningLabel
+        snapshot.appScanStatus.isNotBlank() -> "$scanFailedLabel: ${snapshot.appScanStatus}"
+        else -> "${copy.lastScan}: ${snapshot.lastScanText}"
+    }
+    val scanStatusColor = if (snapshot.appScanStatus.isNotBlank() && !snapshot.appScanInProgress) {
+        palette.red to palette.redSoft
+    } else {
+        palette.muted to palette.disabled
+    }
     LazyPageSurface(copy.apps, copy.appsHint, palette, headerAction = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Pill("${copy.lastScan}: ${snapshot.lastScanText}", palette.muted, palette.disabled)
+            Pill(scanStatusText, scanStatusColor.first, scanStatusColor.second, Modifier.width(230.dp))
             HudButton(copy.refreshApps, palette, primary = true, width = 178.dp) {
                 runAction { activity.composeRefreshApps() }
             }
@@ -2595,37 +2735,47 @@ private fun AppsTab(
 
         item(key = "supported-apps") {
             Section(copy.supportedApps, palette) {
-                snapshot.supportedApps.forEachIndexed { index, row ->
-                    if (index > 0) Divider(palette)
-                    AppRow(
-                        row,
-                        copy,
-                        palette,
-                        supported = true,
-                        runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
-                        activity = activity,
-                        runAction = runAction
-                    )
+                if (!snapshot.appScanCacheAvailable) {
+                    Text(scanStatusText, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
+                } else {
+                    snapshot.supportedApps.forEachIndexed { index, row ->
+                        key(row.packageName) {
+                            if (index > 0) Divider(palette)
+                            AppRow(
+                                row,
+                                copy,
+                                palette,
+                                supported = true,
+                                runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                                activity = activity,
+                                runAction = runAction
+                            )
+                        }
+                    }
                 }
             }
         }
 
         item(key = "all-apps") {
             Section(copy.allApps, palette) {
-                if (snapshot.allApps.isEmpty()) {
+                if (!snapshot.appScanCacheAvailable) {
+                    Text(scanStatusText, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
+                } else if (snapshot.allApps.isEmpty()) {
                     Text(copy.noBackgroundApps, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
                 } else {
                     snapshot.allApps.forEachIndexed { index, row ->
-                        if (index > 0) Divider(palette)
-                        AppRow(
-                            row,
-                            copy,
-                            palette,
-                            supported = false,
-                            runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
-                            activity = activity,
-                            runAction = runAction
-                        )
+                        key(row.packageName) {
+                            if (index > 0) Divider(palette)
+                            AppRow(
+                                row,
+                                copy,
+                                palette,
+                                supported = false,
+                                runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                                activity = activity,
+                                runAction = runAction
+                            )
+                        }
                     }
                 }
             }
@@ -2810,6 +2960,21 @@ private fun StorageTab(
     onDeleteSelected: (List<String>) -> Unit,
     onShareSelected: (List<String>) -> Unit
 ) {
+    val storageScanText = if (copy.language == Language.Ua) {
+        "Сканування сховища..."
+    } else {
+        "Scanning storage..."
+    }
+    val storageScanFailureText = if (copy.language == Language.Ua) {
+        "Помилка сканування"
+    } else {
+        "Scan failed"
+    }
+    val coldStorageText = if (snapshot.storageScanError.isNotBlank()) {
+        "$storageScanFailureText: ${snapshot.storageScanError}"
+    } else {
+        storageScanText
+    }
     var draftLimit by rememberSaveable(snapshot.storageLimitGb) {
         mutableIntStateOf(snapshot.storageLimitGb)
     }
@@ -2858,21 +3023,40 @@ private fun StorageTab(
                 palette = palette,
                 action = {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (snapshot.storageCalculating) {
-                            Pill(copy.storageCalculating, palette.muted, palette.disabled)
+                        if (!snapshot.storageCacheAvailable) {
+                            Pill(
+                                coldStorageText,
+                                if (snapshot.storageScanError.isNotBlank()) palette.red else palette.muted,
+                                if (snapshot.storageScanError.isNotBlank()) palette.redSoft else palette.disabled
+                            )
+                        } else {
+                            if (snapshot.storageCalculating) {
+                                Pill(copy.storageCalculating, palette.muted, palette.disabled)
+                            }
+                            if (snapshot.storageScanError.isNotBlank()) {
+                                Pill(storageScanFailureText, palette.red, palette.redSoft)
+                            }
+                            val usageColors = storageUsageColors(
+                                snapshot.navCaptureFolderBytes,
+                                snapshot.storageLimitGb,
+                                palette
+                            )
+                            Pill(
+                                formatStorageUsage(
+                                    snapshot.navCaptureFolderBytes,
+                                    snapshot.storageLimitGb,
+                                    copy
+                                ),
+                                usageColors.first,
+                                usageColors.second
+                            )
+                            Text(
+                                "(${snapshot.storageSessionCount} ${copy.storageSessionsShort})",
+                                color = palette.muted,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
-                        val usageColors = storageUsageColors(snapshot.navCaptureFolderBytes, snapshot.storageLimitGb, palette)
-                        Pill(
-                            formatStorageUsage(snapshot.navCaptureFolderBytes, snapshot.storageLimitGb, copy),
-                            usageColors.first,
-                            usageColors.second
-                        )
-                        Text(
-                            "(${snapshot.storageSessionCount} ${copy.storageSessionsShort})",
-                            color = palette.muted,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
                     }
                     }
                 )
@@ -2889,9 +3073,13 @@ private fun StorageTab(
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    snapshot.navCaptureFolderPaths.forEachIndexed { index, path ->
-                        if (index > 0) Spacer(Modifier.height(6.dp))
-                        ReadOnlyPathField(path, palette, modifier = Modifier.fillMaxWidth())
+                    if (!snapshot.storageCacheAvailable) {
+                        Text(coldStorageText, color = palette.muted, fontSize = 14.sp)
+                    } else {
+                        snapshot.navCaptureFolderPaths.forEachIndexed { index, path ->
+                            if (index > 0) Spacer(Modifier.height(6.dp))
+                            ReadOnlyPathField(path, palette, modifier = Modifier.fillMaxWidth())
+                        }
                     }
                 }
                 HudIconButton(
@@ -2906,7 +3094,7 @@ private fun StorageTab(
                     if (sortOldestFirst) copy.sortByName else copy.sortByDate,
                     palette,
                     primary = false,
-                    enabled = !storageSortBusy,
+                    enabled = snapshot.storageCacheAvailable && !storageSortBusy,
                     width = 190.dp
                 ) {
                     onSortOldestFirst(!sortOldestFirst)
@@ -2915,7 +3103,10 @@ private fun StorageTab(
                 if (days.isEmpty()) {
                     Divider(palette)
                     Text(
-                        copy.storageNoDayFolders,
+                        when {
+                            !snapshot.storageCacheAvailable -> coldStorageText
+                            else -> copy.storageNoDayFolders
+                        },
                         color = palette.muted,
                         fontSize = 14.sp,
                         modifier = Modifier.padding(14.dp)
@@ -4137,6 +4328,7 @@ private fun SettingRow(
     title: String,
     hint: String,
     palette: Palette,
+    enabled: Boolean = true,
     action: @Composable () -> Unit
 ) {
     Row(
@@ -4146,12 +4338,196 @@ private fun SettingRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            Text(
+                title,
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
+            )
             if (hint.isNotBlank()) {
-                Text(hint, color = palette.muted, fontSize = 13.sp)
+                Text(
+                    hint,
+                    color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
+                    fontSize = 13.sp
+                )
             }
         }
         action()
+    }
+}
+
+@Composable
+private fun HudDropdown(
+    selectedIndex: Int,
+    options: List<String>,
+    palette: Palette,
+    width: Dp,
+    enabled: Boolean = true,
+    onSelected: (Int) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val safeIndex = selectedIndex.coerceIn(options.indices)
+    val rowHeight = 40.dp
+    val selectedBackground = palette.accent.copy(alpha = if (palette.dark) 0.78f else 0.08f)
+    val selectedContent = if (palette.dark) Color.White else palette.text
+    val fieldBackground = if (enabled) selectedBackground else palette.panelAlt
+    val fieldBorder = if (enabled) palette.accent else palette.borderStrong
+    val fieldContent = if (enabled) selectedContent else palette.muted.copy(alpha = 0.62f)
+
+    Box(modifier = Modifier.width(width)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(rowHeight)
+                .clip(RoundedCornerShape(6.dp))
+                .border(1.dp, fieldBorder, RoundedCornerShape(6.dp))
+                .background(fieldBackground)
+                .clickable(enabled = enabled) { expanded = true }
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = options[safeIndex],
+                color = fieldContent,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+            )
+            Text(
+                text = "▾",
+                color = fieldContent.copy(alpha = 0.78f),
+                fontSize = 18.sp,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
+        }
+        DropdownMenu(
+            expanded = expanded && enabled,
+            onDismissRequest = { expanded = false },
+            modifier = Modifier
+                .width(width)
+                .clip(RoundedCornerShape(6.dp))
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
+                .background(palette.panel)
+                .drawBehind {
+                    val rowHeightPx = rowHeight.toPx()
+                    drawRect(
+                        color = selectedBackground,
+                        topLeft = Offset(0f, safeIndex * rowHeightPx),
+                        size = Size(size.width, rowHeightPx)
+                    )
+                }
+        ) {
+            options.forEachIndexed { index, option ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(rowHeight)
+                        .clickable {
+                            onSelected(index)
+                            expanded = false
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = option,
+                        color = if (index == safeIndex && palette.dark) Color.White else palette.text,
+                        fontSize = 14.sp,
+                        fontWeight = if (index == safeIndex) FontWeight.SemiBold else FontWeight.Normal,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 8.dp)
+                    )
+                    if (index < options.lastIndex) {
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.BottomCenter)
+                                .fillMaxWidth()
+                                .height(1.dp)
+                                .background(palette.border)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun HudIntegerStepper(
+    value: Int,
+    palette: Palette,
+    enabled: Boolean,
+    onValueChange: (Int) -> Unit
+) {
+    val safeValue = value.coerceIn(1, 10)
+    var textValue by remember(safeValue) { mutableStateOf(safeValue.toString()) }
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        HudButton(
+            text = "-",
+            palette = palette,
+            width = 42.dp,
+            enabled = enabled && safeValue > 1,
+            onClick = { onValueChange(safeValue - 1) }
+        )
+        BasicTextField(
+            value = textValue,
+            onValueChange = { rawValue ->
+                val candidate = rawValue.filter(Char::isDigit).take(2)
+                textValue = candidate
+                val parsed = candidate.toIntOrNull()
+                if (parsed != null && parsed in 1..10) {
+                    onValueChange(parsed)
+                }
+            },
+            enabled = enabled,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            textStyle = TextStyle(
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier
+                .width(52.dp)
+                .onFocusChanged { focusState ->
+                    if (enabled && !focusState.isFocused && textValue.toIntOrNull() !in 1..10) {
+                        textValue = safeValue.toString()
+                    }
+                },
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .border(
+                            1.dp,
+                            if (enabled) palette.borderStrong else palette.border,
+                            RoundedCornerShape(7.dp)
+                        )
+                        .background(if (enabled) palette.field else palette.panelAlt),
+                    contentAlignment = Alignment.Center
+                ) {
+                    innerTextField()
+                }
+            }
+        )
+        HudButton(
+            text = "+",
+            palette = palette,
+            width = 42.dp,
+            enabled = enabled && safeValue < 10,
+            onClick = { onValueChange(safeValue + 1) }
+        )
     }
 }
 
@@ -4162,10 +4538,11 @@ private fun SwitchRow(
     hint: String,
     checked: Boolean,
     palette: Palette,
+    enabled: Boolean = true,
     onChecked: (Boolean) -> Unit
 ) {
-    SettingRow(title, hint, palette) {
-        HudSwitch(checked, onChecked, palette)
+    SettingRow(title, hint, palette, enabled = enabled) {
+        HudSwitch(checked, onChecked, palette, enabled = enabled)
     }
 }
 
@@ -4447,6 +4824,7 @@ private fun HudSwitch(
     onChecked: (Boolean) -> Unit,
     palette: Palette,
     compact: Boolean = false,
+    enabled: Boolean = true,
     externalControl: MutableState<SwitchExternalControl?>? = null
 ) {
     val width = if (compact) 42.dp else 56.dp
@@ -4457,13 +4835,13 @@ private fun HudSwitch(
     val pendingHolder = remember { mutableStateOf<SwitchPendingState?>(null) }
     val pendingState = pendingHolder.value
     val isPending = pendingState != null
-    val press = rememberPressFeedback(!isPending)
+    val press = rememberPressFeedback(enabled && !isPending)
     val scope = rememberCoroutineScope()
     val latestOnChecked by rememberUpdatedState(onChecked)
     val latestChecked by rememberUpdatedState(checked)
-    val triggerToggle = remember(scope) {
+    val triggerToggle = remember(scope, enabled) {
         {
-            if (pendingHolder.value == null) {
+            if (enabled && pendingHolder.value == null) {
                 val from = latestChecked
                 val target = !from
                 pendingHolder.value = SwitchPendingState(
@@ -4513,10 +4891,16 @@ private fun HudSwitch(
         modifier = Modifier
             .size(width = width, height = height)
             .clip(RoundedCornerShape(100.dp))
-            .background(pressBackground(if (trackChecked) palette.accent else palette.disabled, palette, press.pressed))
+            .background(
+                pressBackground(
+                    if (enabled && trackChecked) palette.accent else palette.disabled,
+                    palette,
+                    press.pressed
+                )
+            )
             .then(press.modifier)
             .clickable(
-                enabled = !isPending,
+                enabled = enabled && !isPending,
                 interactionSource = press.interactionSource,
                 indication = null
             ) { triggerToggle() }
@@ -4528,7 +4912,13 @@ private fun HudSwitch(
                 .size(knobSize)
                 .offset(x = knobOffset, y = 0.dp)
                 .clip(RoundedCornerShape(100.dp))
-                .background(if (trackChecked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
+                .background(
+                    if (enabled) {
+                        if (trackChecked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE)
+                    } else {
+                        palette.muted.copy(alpha = 0.45f)
+                    }
+                )
         )
     }
 }
@@ -4590,7 +4980,14 @@ private fun Pill(text: String, color: Color, background: Color, modifier: Modifi
             .padding(horizontal = 11.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(text, color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
+        Text(
+            text,
+            color = color,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 

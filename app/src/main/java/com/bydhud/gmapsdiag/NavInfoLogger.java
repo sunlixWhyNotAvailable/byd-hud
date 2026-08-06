@@ -20,6 +20,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -30,12 +31,13 @@ public final class NavInfoLogger {
     public static final String EXTRA_PROTOCOL_VERSION =
             "com.bydhud.gmapsbridge.PROTOCOL_VERSION";
     public static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
-    public static final int PROTOCOL_VERSION = 2;
+    public static final int PROTOCOL_VERSION = 3;
     public static final int MESSAGE_HELLO = 1;
     public static final int MESSAGE_START = 2;
     public static final int MESSAGE_FRAME = 3;
     public static final int MESSAGE_STOP = 4;
     public static final int MESSAGE_MANEUVER_BITMAP = 5;
+    public static final int MESSAGE_SPEED_LIMIT = 6;
 
     private static final String TAG = "BYD_GMAPS_BRIDGE";
     private static final String CLIENT_PACKAGE = "com.bydhud.app";
@@ -44,6 +46,7 @@ public final class NavInfoLogger {
     private static final Object FRAME_SIGNAL = new Object();
     private static final Object CLIENT_LOCK = new Object();
     private static final Object BITMAP_LOCK = new Object();
+    private static final Object SPEED_LOCK = new Object();
     private static final AtomicLong NEXT_SEQUENCE = new AtomicLong();
     private static final AtomicLong STATE_EPOCH = new AtomicLong();
     private static final AtomicReference<Event> LATEST_FRAME = new AtomicReference<>();
@@ -53,6 +56,12 @@ public final class NavInfoLogger {
     private static volatile IBinder.DeathRecipient clientDeathRecipient;
     private static String lastManeuverName = "";
     private static byte[] lastManeuverPng;
+    private static Object lastSpeedStep;
+    private static int lastSpeedProgress = -1;
+    private static int lastSpeedLimit = Integer.MIN_VALUE;
+    private static int lastSpeedLimitKph = Integer.MIN_VALUE;
+    private static String lastSpeedUnit = "";
+    private static boolean speedReflectionErrorLogged;
 
     static {
         Thread worker = new Thread(new Runnable() {
@@ -172,6 +181,62 @@ public final class NavInfoLogger {
                 captureRenderedManeuver(view, maneuver, epoch);
             }
         });
+    }
+
+    /** Mirrors GMaps' route-segment speed-limit selection without depending on its UI. */
+    public static void captureSpeedLimitState(Object state) {
+        if (noClient() || state == null) return;
+        synchronized (SPEED_LOCK) {
+            try {
+                Object route = requiredField(state, "b");
+                if (!booleanField(state, "o") || !invokeBoolean(route, "ay")) {
+                    clearSpeedLimitLocked();
+                    return;
+                }
+                Object step = requiredField(state, "c");
+                Object speedStep = step == null ? null : requiredField(step, "T");
+                if (speedStep == null) {
+                    clearSpeedLimitLocked();
+                    return;
+                }
+                int progress = intField(step, "l") - intField(state, "g");
+                if (lastSpeedStep == null || !lastSpeedStep.equals(speedStep)) {
+                    lastSpeedStep = speedStep;
+                    lastSpeedProgress = -1;
+                }
+                Object changesValue = requiredField(speedStep, "M");
+                if (!(changesValue instanceof List)) {
+                    throw new IllegalStateException("speed changes are not a list");
+                }
+                @SuppressWarnings("unchecked")
+                List<Object> changes = (List<Object>) changesValue;
+                Object countriesValue = requiredField(route, "W");
+                List<?> countries = countriesValue instanceof List
+                        ? (List<?>) countriesValue : java.util.Collections.emptyList();
+                for (Object change : changes) {
+                    int position = intField(change, "b");
+                    if (position <= lastSpeedProgress || position > progress) continue;
+                    int kph = intField(change, "c");
+                    String unit = speedUnit(intField(change, "d"), countries);
+                    if (kph < 0 || unit.isEmpty()) {
+                        publishSpeedLimitLocked(0, 0, "");
+                    } else {
+                        int display = "mph".equals(unit)
+                                ? Math.round(kph * 0.621371f) : kph;
+                        publishSpeedLimitLocked(display, kph, unit);
+                    }
+                }
+                lastSpeedProgress = progress;
+            } catch (Throwable error) {
+                clearSpeedLimitLocked();
+                if (!speedReflectionErrorLogged) {
+                    speedReflectionErrorLogged = true;
+                    Log.w(TAG, "SPEED_LIMIT_FAILED|type="
+                            + error.getClass().getSimpleName()
+                            + "|message=" + clean(error.getMessage()));
+                }
+            }
+        }
     }
 
     private static void installClient(Messenger candidate) {
@@ -345,6 +410,48 @@ public final class NavInfoLogger {
             lastManeuverName = "";
             lastManeuverPng = null;
         }
+        synchronized (SPEED_LOCK) {
+            lastSpeedStep = null;
+            lastSpeedProgress = -1;
+            lastSpeedLimit = Integer.MIN_VALUE;
+            lastSpeedLimitKph = Integer.MIN_VALUE;
+            lastSpeedUnit = "";
+            speedReflectionErrorLogged = false;
+        }
+    }
+
+    private static void clearSpeedLimitLocked() {
+        lastSpeedStep = null;
+        lastSpeedProgress = -1;
+        publishSpeedLimitLocked(0, 0, "");
+    }
+
+    private static void publishSpeedLimitLocked(int limit, int kph, String unit) {
+        if (lastSpeedLimit == limit && lastSpeedLimitKph == kph && lastSpeedUnit.equals(unit)) {
+            return;
+        }
+        Bundle data = baseBundle();
+        data.putInt("speedLimit", limit);
+        data.putInt("speedLimitKph", kph);
+        data.putString("speedUnit", unit);
+        boolean delivered = send(MESSAGE_SPEED_LIMIT, data);
+        if (delivered) {
+            lastSpeedLimit = limit;
+            lastSpeedLimitKph = kph;
+            lastSpeedUnit = unit;
+        }
+        Log.i(TAG, "SPEED_LIMIT|value=" + limit + "|kph=" + kph
+                + "|unit=" + unit + "|delivered=" + delivered);
+    }
+
+    private static String speedUnit(int code, List<?> countries) {
+        if (code == 1) return "km/h";
+        if (code == 2) return "mph";
+        if (countries.size() != 1) return "";
+        String country = String.valueOf(countries.get(0));
+        if ("US".equals(country)) return "mph";
+        return "AU".equals(country) || "BR".equals(country) || "CA".equals(country)
+                ? "km/h" : "";
     }
 
     private static void unlinkCurrentClientLocked() {
@@ -373,6 +480,51 @@ public final class NavInfoLogger {
             }
         }
         return "field_missing";
+    }
+
+    private static Object requiredField(Object target, String name) throws Exception {
+        if (target == null) return null;
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                Field field = type.getDeclaredField(name);
+                field.setAccessible(true);
+                return field.get(target);
+            } catch (NoSuchFieldException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchFieldException(target.getClass().getName() + "." + name);
+    }
+
+    private static int intField(Object target, String name) throws Exception {
+        Object value = requiredField(target, name);
+        if (!(value instanceof Number)) throw new IllegalStateException(name + " is not numeric");
+        return ((Number) value).intValue();
+    }
+
+    private static boolean booleanField(Object target, String name) throws Exception {
+        Object value = requiredField(target, name);
+        if (!(value instanceof Boolean)) throw new IllegalStateException(name + " is not boolean");
+        return (Boolean) value;
+    }
+
+    private static boolean invokeBoolean(Object target, String name) throws Exception {
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                Method method = type.getDeclaredMethod(name);
+                method.setAccessible(true);
+                Object value = method.invoke(target);
+                if (!(value instanceof Boolean)) {
+                    throw new IllegalStateException(name + " is not boolean");
+                }
+                return (Boolean) value;
+            } catch (NoSuchMethodException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(target.getClass().getName() + "." + name);
     }
 
     private static byte[] serialize(Object target) throws Exception {

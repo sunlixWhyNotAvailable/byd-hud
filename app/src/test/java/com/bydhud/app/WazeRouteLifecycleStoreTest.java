@@ -28,4 +28,32 @@ public final class WazeRouteLifecycleStoreTest {
         assertEquals(true, WazeRouteLifecycleStore.shouldInvalidateForBoot(
                 -1, -1, 20_000L, 10_000L));
     }
+
+    @Test
+    public void onlyExplicitTerminalReasonsEndAnActiveBridgeRoute() {
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 4));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 8));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 0));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 2));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 3));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 9));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, false, WazeRouteLifecycleStore.REASON_UNAVAILABLE));
+        assertEquals(false, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 1));
+        assertEquals(false, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 5));
+        assertEquals(false, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 6));
+        assertEquals(false, WazeRouteLifecycleStore.resolveBridgeActive(
+                true, false, true, 7));
+        assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
+                false, true, true, 6));
+    }
 }

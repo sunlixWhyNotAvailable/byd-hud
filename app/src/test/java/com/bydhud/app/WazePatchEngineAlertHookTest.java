@@ -51,6 +51,7 @@ public final class WazePatchEngineAlertHookTest {
         assertEquals(WazePatchEngine.ALREADY_PATCHED, allowlistClassification(stock));
         WazePatchEngine.LifecycleInspection stockLifecycle = lifecycle(stock);
         assertTrue(stockLifecycle.stockTargets()
+                && stockLifecycle.clusterEtaStock()
                 && stockLifecycle.legacyApplicationHookCount == 0
                 && stockLifecycle.legacyRouteHookCount == 0
                 && stockLifecycle.legacyBridgeClassCount == 0);
@@ -60,6 +61,26 @@ public final class WazePatchEngineAlertHookTest {
         assertEquals(WazePatchEngine.ALREADY_PATCHED, allowlistClassification(bridge));
         assertTrue(WazePatchEngine.inspectAlertHook(alertDex(bridge)).patchedTargets());
         assertTrue(lifecyclePatched(lifecycle(bridge)));
+
+        File lifecycleOutput = File.createTempFile("waze-lifecycle-", ".dex");
+        File clusterEtaOutput = File.createTempFile("waze-cluster-eta-", ".dex");
+        try {
+            WazePatchEngine.patchLifecycle(lifecycleDex(stock), lifecycleOutput);
+            WazePatchEngine.LifecycleInspection patchedLifecycle =
+                    WazePatchEngine.inspectLifecycle(Files.readAllBytes(lifecycleOutput.toPath()));
+            assertEquals(1, patchedLifecycle.applicationHookCount);
+            assertEquals(1, patchedLifecycle.routeHookCount);
+            assertEquals(1, patchedLifecycle.speedHookCount);
+            assertEquals("ok", patchedLifecycle.speedGuard);
+            WazePatchEngine.patchLifecycle(clusterEtaDex(stock), clusterEtaOutput);
+            WazePatchEngine.LifecycleInspection patchedEta =
+                    WazePatchEngine.inspectLifecycle(
+                            Files.readAllBytes(clusterEtaOutput.toPath()));
+            assertTrue(patchedEta.clusterEtaPatched());
+        } finally {
+            lifecycleOutput.delete();
+            clusterEtaOutput.delete();
+        }
 
         File output = File.createTempFile("waze-alert-hook-", ".dex");
         File duplicate = File.createTempFile("waze-alert-hook-duplicate-", ".dex");
@@ -107,6 +128,37 @@ public final class WazePatchEngineAlertHookTest {
         throw new IOException("Waze alert session DEX not found in " + apk);
     }
 
+    private static byte[] lifecycleDex(Path apk) throws Exception {
+        try (ZipFile zip = new ZipFile(apk.toFile())) {
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (!entry.getName().matches("classes(\\d*)\\.dex")) continue;
+                byte[] dex = read(zip, entry);
+                WazePatchEngine.LifecycleInspection value =
+                        WazePatchEngine.inspectLifecycle(dex);
+                if (value.applicationTargetCount == 1 && value.routeTargetCount == 1
+                        && value.speedTargetCount == 1) return dex;
+            }
+        }
+        throw new IOException("Waze lifecycle DEX missing");
+    }
+
+    private static byte[] clusterEtaDex(Path apk) throws Exception {
+        try (ZipFile zip = new ZipFile(apk.toFile())) {
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (!entry.getName().matches("classes(\\d*)\\.dex")) continue;
+                byte[] dex = read(zip, entry);
+                WazePatchEngine.LifecycleInspection value =
+                        WazePatchEngine.inspectLifecycle(dex);
+                if (value.clusterEtaTargetCount == 1) return dex;
+            }
+        }
+        throw new IOException("Waze cluster ETA DEX missing");
+    }
+
     private static String allowlistClassification(Path apk) throws Exception {
         String classification = WazePatchEngine.UNSUPPORTED;
         int targets = 0;
@@ -139,11 +191,21 @@ public final class WazePatchEngineAlertHookTest {
                 total.legacyApplicationHookCount += value.legacyApplicationHookCount;
                 total.routeTargetCount += value.routeTargetCount;
                 total.routeHookCount += value.routeHookCount;
+                total.v1RouteHookCount += value.v1RouteHookCount;
                 total.legacyRouteHookCount += value.legacyRouteHookCount;
+                total.speedTargetCount += value.speedTargetCount;
+                total.speedHookCount += value.speedHookCount;
+                total.legacySpeedHookCount += value.legacySpeedHookCount;
+                total.clusterEtaTargetCount += value.clusterEtaTargetCount;
+                total.clusterEtaPatchCount += value.clusterEtaPatchCount;
                 total.bridgeClassCount += value.bridgeClassCount;
                 total.legacyBridgeClassCount += value.legacyBridgeClassCount;
                 if (value.applicationTargetCount > 0) total.applicationGuard = value.applicationGuard;
                 if (value.routeTargetCount > 0) total.routeGuard = value.routeGuard;
+                if (value.speedTargetCount > 0) total.speedGuard = value.speedGuard;
+                if (value.clusterEtaTargetCount > 0) {
+                    total.clusterEtaGuard = value.clusterEtaGuard;
+                }
             }
         }
         return total;
@@ -151,12 +213,7 @@ public final class WazePatchEngineAlertHookTest {
 
     private static boolean lifecyclePatched(WazePatchEngine.LifecycleInspection total) {
         return total.patchedTargets()
-                || total.applicationTargetCount == 1 && total.applicationHookCount == 0
-                && total.legacyApplicationHookCount == 1
-                && total.routeTargetCount == 1 && total.routeHookCount == 0
-                && total.legacyRouteHookCount == 1
-                && total.bridgeClassCount == 0 && total.legacyBridgeClassCount == 1
-                && "ok".equals(total.applicationGuard) && "ok".equals(total.routeGuard);
+                && total.clusterEtaPatched();
     }
 
     private static byte[] read(ZipFile zip, ZipEntry entry) throws IOException {
