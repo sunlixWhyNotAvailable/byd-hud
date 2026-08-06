@@ -65,7 +65,8 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class WazeSurfaceActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "BYD_HUD_WAZE_SURFACE";
     interface HostBridge {
-        void onSurfaceReady(Surface surface, int width, int height, int dpi, Rect visibleArea);
+        void onSurfaceReady(Surface surface, int width, int height, int dpi, Rect visibleArea,
+                long activityInstanceId, int displayId, long surfaceEpoch);
         void onSurfaceDestroyed();
         void onVisibleAreaChanged(Rect visibleArea);
         void onClick(float x, float y);
@@ -118,6 +119,35 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         }
     }
 
+    static int activeDisplayId() {
+        synchronized (BRIDGE_LOCK) {
+            WazeSurfaceActivity activity = active.get();
+            return activity == null
+                    ? -1 : activity.getWindowManager().getDefaultDisplay().getDisplayId();
+        }
+    }
+
+    static long activeInstanceId() {
+        synchronized (BRIDGE_LOCK) {
+            WazeSurfaceActivity activity = active.get();
+            return activity == null ? 0L : activity.instanceId;
+        }
+    }
+
+    static long activeSurfaceEpoch() {
+        synchronized (BRIDGE_LOCK) {
+            WazeSurfaceActivity activity = active.get();
+            return activity == null ? 0L : activity.surfaceEpoch;
+        }
+    }
+
+    static boolean hasValidSurface() {
+        synchronized (BRIDGE_LOCK) {
+            WazeSurfaceActivity activity = active.get();
+            return activity != null && activity.surface != null && activity.surface.isValid();
+        }
+    }
+
     static boolean isActive() {
         return activeTaskId() >= 0;
     }
@@ -149,6 +179,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     private int surfaceDpi;
     private Rect visibleArea = new Rect();
     private final long instanceId = NEXT_INSTANCE_ID.getAndIncrement();
+    private long surfaceEpoch;
     private boolean suppressSearchCallback;
     private boolean suppressGestureUntilNextDown;
     private boolean panMode;
@@ -323,6 +354,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
 
     @Override
     public void surfaceCreated(SurfaceHolder holder) {
+        surfaceEpoch++;
         SurfaceLog.event("visible_surface_created");
     }
 
@@ -821,7 +853,7 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
         HostBridge bridge = bridge();
         if (bridge == null || surface == null || !surface.isValid()) return;
         bridge.onSurfaceReady(surface, surfaceWidth, surfaceHeight, surfaceDpi,
-                new Rect(visibleArea));
+                new Rect(visibleArea), instanceId, activeDisplayId(), surfaceEpoch);
     }
 
     private static HostBridge bridge() {

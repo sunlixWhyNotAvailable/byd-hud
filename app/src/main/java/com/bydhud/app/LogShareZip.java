@@ -1,12 +1,14 @@
 package com.bydhud.app;
 
 import android.content.Context;
+import android.util.Log;
 
 import java.io.EOFException;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InterruptedIOException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -16,19 +18,41 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
-//Creates bounded log archives without copying selected storage into an intermediate tree.
+//Creates cancellable log archives from a stable staging snapshot.
 final class LogShareZip {
+    private static final String TAG = "BydHudLogShare";
     private static final String SHARE_DIR = "log-shares";
     private static final String ZIP_PREFIX = "BYD-HUD-logs-";
     private static final String CONFIG_ZIP_PREFIX = "BYD-HUD-vehicle-config-";
     private static final int BUFFER_BYTES = 64 * 1024;
+    private static final long WRITER_CHECKPOINT_TIMEOUT_MS = 2_000L;
     private static final long COMPLETED_ZIP_MIN_AGE_MS = 10L * 60L * 1000L;
     private static final AtomicBoolean CLEANUP_STARTED = new AtomicBoolean(false);
+    private static final ThreadLocal<Consumer<Phase>> PROGRESS_LISTENER = new ThreadLocal<>();
 
     private LogShareZip() {
+    }
+
+    enum Phase {
+        WAITING_FOR_WRITES,
+        COPYING,
+        ARCHIVING
+    }
+
+    static void attachProgressListener(Consumer<Phase> listener) {
+        if (listener == null) {
+            PROGRESS_LISTENER.remove();
+        } else {
+            PROGRESS_LISTENER.set(listener);
+        }
+    }
+
+    static void clearProgressListener() {
+        PROGRESS_LISTENER.remove();
     }
 
     static final class Result {
@@ -96,7 +120,7 @@ final class LogShareZip {
         }
     }
 
-    //Background-callable; waits for pre-existing capture writes before fixing the file snapshot.
+    //Background-callable; copies a stable snapshot before releasing the topology writer lock.
     static synchronized Result create(Context context, List<String> selectedDays) {
         if (context == null) {
             return failure("missing context");
@@ -107,13 +131,7 @@ final class LogShareZip {
         } catch (IOException e) {
             return failure(e.getMessage());
         }
-
         Context app = context.getApplicationContext();
-        NavigationLogStorage.withWriteLock(() -> { });
-        if (!WazeCaptureDebugWriter.get().awaitIdle()) {
-            return failure("capture writer interrupted");
-        }
-
         File shareDir = writableShareDir(app);
         if (shareDir == null) {
             return failure("share cache unavailable");
@@ -123,29 +141,53 @@ final class LogShareZip {
                 + ".zip";
         File output = new File(shareDir, fileName);
         File part = new File(shareDir, fileName + ".part");
-        if (output.exists() || part.exists()) {
+        File staging = new File(shareDir, fileName + ".staging");
+        if (output.exists() || part.exists() || staging.exists()) {
             return failure("share name collision");
         }
 
-        List<SnapshotFile> snapshot;
         boolean writeHeld = false;
-        boolean readHeld = false;
         try {
+            phase(Phase.WAITING_FOR_WRITES, WazeCaptureDebugWriter.get().pendingTasks());
+            long waitStarted = System.currentTimeMillis();
+            boolean checkpoint = WazeCaptureDebugWriter.get()
+                    .awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS);
+            checkCancelled();
+            Log.i(TAG, "share_phase phase=WAITING_FOR_WRITES duration_ms="
+                    + (System.currentTimeMillis() - waitStarted)
+                    + " checkpoint=" + (checkpoint ? "ready" : "timeout")
+                    + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
+
+            phase(Phase.COPYING, WazeCaptureDebugWriter.get().pendingTasks());
+            long copyStarted = System.currentTimeMillis();
             NavigationLogStorage.lockTopologyWrite();
             writeHeld = true;
-            snapshot = snapshotFiles(app, days);
-            if (snapshot.isEmpty()) {
+            List<SnapshotFile> sources = snapshotFiles(app, days);
+            if (sources.isEmpty()) {
                 throw new IOException("no readable files");
             }
-            NavigationLogStorage.lockTopologyRead();
-            readHeld = true;
+            if (!staging.mkdirs()) {
+                throw new IOException("cannot create staging directory");
+            }
+            List<SnapshotFile> snapshot = copySnapshotToStaging(staging, sources);
             NavigationLogStorage.unlockTopologyWrite();
             writeHeld = false;
+            Log.i(TAG, "share_phase phase=COPYING duration_ms="
+                    + (System.currentTimeMillis() - copyStarted)
+                    + " files=" + snapshot.size()
+                    + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
 
+            phase(Phase.ARCHIVING, WazeCaptureDebugWriter.get().pendingTasks());
+            long archiveStarted = System.currentTimeMillis();
             writeZip(part, snapshot);
+            checkCancelled();
             if (!part.renameTo(output)) {
                 throw new IOException("final rename failed");
             }
+            Log.i(TAG, "share_phase phase=ARCHIVING duration_ms="
+                    + (System.currentTimeMillis() - archiveStarted)
+                    + " bytes=" + output.length()
+                    + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
             return new Result(true, output,
                     "files=" + snapshot.size() + " bytes=" + output.length());
         } catch (IOException | RuntimeException e) {
@@ -156,9 +198,7 @@ final class LogShareZip {
             if (writeHeld) {
                 NavigationLogStorage.unlockTopologyWrite();
             }
-            if (readHeld) {
-                NavigationLogStorage.unlockTopologyRead();
-            }
+            deleteTree(staging);
         }
     }
 
@@ -192,13 +232,17 @@ final class LogShareZip {
                 continue;
             }
             for (File file : files) {
-                if (file == null || !file.isFile() || !isShareArtifact(file.getName())) {
+                if (file == null || !isShareArtifact(file.getName())) {
                     continue;
                 }
-                boolean partial = file.getName().endsWith(".part");
+                boolean partial = file.isDirectory() || file.getName().endsWith(".part");
                 long ageMs = Math.max(0L, now - file.lastModified());
-                if ((partial || ageMs >= COMPLETED_ZIP_MIN_AGE_MS) && file.delete()) {
-                    deleted++;
+                if (partial || ageMs >= COMPLETED_ZIP_MIN_AGE_MS) {
+                    boolean existed = file.exists();
+                    if (file.isDirectory()) deleteTree(file); else deleteArtifact(file);
+                    if (existed && !file.exists()) {
+                        deleted++;
+                    }
                 }
             }
         }
@@ -349,17 +393,55 @@ final class LogShareZip {
         }
     }
 
+    private static List<SnapshotFile> copySnapshotToStaging(
+            File staging, List<SnapshotFile> sources) throws IOException {
+        List<SnapshotFile> copied = new ArrayList<>(sources.size());
+        for (SnapshotFile source : sources) {
+            checkCancelled();
+            File target = new File(staging,
+                    source.entryName.replace('/', File.separatorChar));
+            File parent = target.getParentFile();
+            if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
+                throw new IOException("cannot create staging path");
+            }
+            copyFile(source, target);
+            target.setLastModified(source.file.lastModified());
+            copied.add(new SnapshotFile(target, source.entryName, source.length));
+        }
+        return copied;
+    }
+
+    private static void copyFile(SnapshotFile source, File target) throws IOException {
+        byte[] buffer = new byte[BUFFER_BYTES];
+        try (FileInputStream input = new FileInputStream(source.file);
+             FileOutputStream output = new FileOutputStream(target, false)) {
+            long remaining = source.length;
+            while (remaining > 0L) {
+                checkCancelled();
+                int read = input.read(buffer, 0,
+                        (int) Math.min((long) buffer.length, remaining));
+                if (read < 0) {
+                    throw new EOFException("source truncated: " + source.entryName);
+                }
+                output.write(buffer, 0, read);
+                remaining -= read;
+            }
+        }
+    }
+
     private static void writeZip(File part, List<SnapshotFile> files) throws IOException {
         byte[] buffer = new byte[BUFFER_BYTES];
         try (FileOutputStream fileOut = new FileOutputStream(part, false);
              ZipOutputStream zip = new ZipOutputStream(fileOut)) {
             for (SnapshotFile source : files) {
+                checkCancelled();
                 ZipEntry entry = new ZipEntry(source.entryName);
                 entry.setTime(source.file.lastModified());
                 zip.putNextEntry(entry);
                 try (FileInputStream input = new FileInputStream(source.file)) {
                     long remaining = source.length;
                     while (remaining > 0L) {
+                        checkCancelled();
                         int read = input.read(buffer, 0,
                                 (int) Math.min((long) buffer.length, remaining));
                         if (read < 0) {
@@ -371,6 +453,23 @@ final class LogShareZip {
                 }
                 zip.closeEntry();
             }
+        }
+    }
+
+    private static void phase(Phase phase, int pendingTasks) {
+        Log.i(TAG, "share_phase phase=" + phase + " pending=" + pendingTasks);
+        Consumer<Phase> listener = PROGRESS_LISTENER.get();
+        if (listener == null) return;
+        try {
+            listener.accept(phase);
+        } catch (RuntimeException error) {
+            Log.w(TAG, "share progress callback failed", error);
+        }
+    }
+
+    private static void checkCancelled() throws InterruptedIOException {
+        if (Thread.currentThread().isInterrupted()) {
+            throw new InterruptedIOException("share cancelled");
         }
     }
 
@@ -389,17 +488,27 @@ final class LogShareZip {
     private static boolean isShareArtifact(String name) {
         return name != null
                 && (name.startsWith(ZIP_PREFIX) || name.startsWith(CONFIG_ZIP_PREFIX))
-                && (name.endsWith(".zip") || name.endsWith(".zip.part"));
+                && (name.endsWith(".zip") || name.endsWith(".zip.part")
+                || name.endsWith(".zip.staging"));
     }
 
     static void deleteArtifact(File file) {
         try {
-            if (file != null && file.exists()) {
-                file.delete();
-            }
+            if (file != null && file.isFile()) file.delete();
         } catch (RuntimeException ignored) {
             //The share result still reports failure if cache cleanup is denied by the platform.
         }
+    }
+
+    private static void deleteTree(File file) {
+        if (file == null || !file.exists()) return;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children != null) {
+                for (File child : children) deleteTree(child);
+            }
+        }
+        file.delete();
     }
 
     private static Result failure(String detail) {

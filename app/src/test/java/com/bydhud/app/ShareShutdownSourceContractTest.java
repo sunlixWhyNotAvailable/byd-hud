@@ -24,6 +24,55 @@ public final class ShareShutdownSourceContractTest {
     }
 
     @Test
+    public void shareUsesBoundedCheckpointAndStableStaging() throws IOException {
+        String source = source("LogShareZip.java");
+        String create = between(source,
+                "static synchronized Result create(",
+                "//Removes completed and partial archives");
+        String writer = source("WazeCaptureDebugWriter.java");
+
+        assertTrue(source.contains("WRITER_CHECKPOINT_TIMEOUT_MS = 2_000L"));
+        assertTrue(writer.contains("boolean awaitCheckpoint(long timeoutMs)"));
+        assertTrue(writer.contains("TimeUnit.MILLISECONDS"));
+        assertTrue(writer.contains("boolean awaitIdle()"));
+        assertTrue(create.contains("awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS)"));
+        assertTrue(create.contains("copySnapshotToStaging"));
+        assertFalse(create.contains("lockTopologyRead"));
+        assertTrue(create.indexOf("unlockTopologyWrite")
+                < create.indexOf("writeZip(part, snapshot)"));
+        assertTrue(create.contains("deleteTree(staging)"));
+        assertTrue(source.contains("checkCancelled();"));
+    }
+
+    @Test
+    public void shareUiIsCancellableAndCopyIsCompact() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String begin = between(source,
+                "fun beginStorageShare(days: List<String>)",
+                "fun runLogcatAction(");
+        String shareEffect = between(source,
+                "LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination)",
+                "LaunchedEffect(configurationShareBusy, configurationShareDestination)");
+        String dropdown = between(source,
+                "private fun HudDropdown(",
+                "private fun HudIntegerStepper(");
+
+        assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
+        assertFalse(shareEffect.contains("NonCancellable"));
+        assertTrue(shareEffect.contains("runInterruptible(Dispatchers.IO)"));
+        assertTrue(source.contains("StorageShareProgressOverlay("));
+        assertTrue(source.contains("waitingForWrites = \"Очікування записів\""));
+        assertTrue(source.contains("archiving = \"Archiving\""));
+        assertFalse(dropdown.contains("drawBehind"));
+        assertTrue(dropdown.contains("if (index == safeIndex) selectedBackground"));
+        assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));
+        assertTrue(source.contains("patchWazeAlerts = \"Alerts\""));
+        assertTrue(source.contains("patchNotChecked = \"перевірити\""));
+        assertTrue(source.contains("patchNotChecked = \"check\""));
+        assertTrue(source.contains("\"Стабільність\" else \"Stability\""));
+    }
+
+    @Test
     public void persistentRuntimeStopDoesNotStartService() throws IOException {
         String source = source("HudRuntimeService.java");
         String method = between(source,
@@ -63,10 +112,17 @@ public final class ShareShutdownSourceContractTest {
     }
 
     private static String source(String fileName) throws IOException {
+        return sourcePath("app/src/main/java/com/bydhud/app/" + fileName);
+    }
+
+    private static String sourcePath(String relativePath) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
-        Path file = root.resolve("app/src/main/java/com/bydhud/app").resolve(fileName);
+        Path file = root.resolve(relativePath);
         if (!Files.isRegularFile(file)) {
-            file = root.resolve("src/main/java/com/bydhud/app").resolve(fileName);
+            String withoutApp = relativePath.startsWith("app/")
+                    ? relativePath.substring("app/".length())
+                    : relativePath;
+            file = root.resolve(withoutApp);
         }
         return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
     }

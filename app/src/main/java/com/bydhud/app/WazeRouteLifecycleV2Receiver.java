@@ -112,19 +112,21 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     }
 
     private static boolean trustedIdentity(Context context, PendingIntent identity) {
-        if (identity == null
-                || !WazeRouteLifecycleStore.WAZE_PACKAGE.equals(identity.getCreatorPackage())) {
-            return false;
-        }
+        if (identity == null) return false;
         try {
             ApplicationInfo info = context.getPackageManager().getApplicationInfo(
                     WazeRouteLifecycleStore.WAZE_PACKAGE, 0);
-            return identity.getCreatorUid() == info.uid
-                    && NavigatorSigningKey.installedUsesLocalKey(
-                    context, WazeRouteLifecycleStore.WAZE_PACKAGE)
-                    && NavigatorPatchStore.isInstalledWazeLifecycleV2(context);
+            if (!matchesIdentityMetadata(identity.getCreatorPackage(), identity.getCreatorUid(),
+                    info.uid)) return false;
+            return NavigatorPatchStore.isInstalledWazeLifecycleV2(context);
         } catch (PackageManager.NameNotFoundException ignored) {
             return false;
         }
+    }
+
+    static boolean matchesIdentityMetadata(String creatorPackage, int creatorUid,
+            int installedUid) {
+        return WazeRouteLifecycleStore.WAZE_PACKAGE.equals(creatorPackage)
+                && creatorUid == installedUid;
     }
 }

@@ -37,4 +37,21 @@ public final class GMapsDirectFallbackPolicyTest {
         assertTrue(NavHudLiveSender.shouldKeepGMapsFallbackOnDirectStart(true));
         assertFalse(NavHudLiveSender.shouldKeepGMapsFallbackOnDirectStart(false));
     }
+
+    @Test
+    public void speedBeforeSyntheticFirstFrameSurvivesUntilExplicitStart() {
+        String owner = GMapsDirectChannel.PACKAGE_NAME;
+        DirectSpeedLimitStore.clear(owner);
+        DirectSpeedLimitStore.update(owner, 50, 50, "km/h", 1L);
+
+        if (NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart("first-frame")) {
+            DirectSpeedLimitStore.clear(owner);
+        }
+        assertTrue(DirectSpeedLimitStore.snapshot(owner).isActive());
+
+        if (NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart("start")) {
+            DirectSpeedLimitStore.clear(owner);
+        }
+        assertFalse(DirectSpeedLimitStore.snapshot(owner).isActive());
+    }
 }

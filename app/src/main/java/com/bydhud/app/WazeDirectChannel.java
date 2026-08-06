@@ -149,6 +149,13 @@ public final class WazeDirectChannel {
         runOnChannel(() -> suspendOnChannel(reason));
     }
 
+    void prepareSurfaceHandoff(String reason) {
+        runOnChannel(() -> {
+            if (!active || suspended || mode != Mode.MAIN_SURFACE || carHost == null) return;
+            carHost.appHost.prepareSurfaceHandoff(reason);
+        });
+    }
+
     public void hardStop(String reason) {
         runOnChannel(() -> hardStopOnChannel(reason));
     }
@@ -1270,7 +1277,8 @@ public final class WazeDirectChannel {
 
         void onLiveness(String ownerPackage, int sessionGeneration, String reason);
 
-        void onSurfaceReady(String ownerPackage, int sessionGeneration);
+        void onSurfaceReady(String ownerPackage, int sessionGeneration,
+                long activityInstanceId, int displayId, long surfaceEpoch);
 
         void onSurfaceUnavailable(String ownerPackage, int sessionGeneration, String reason);
 
@@ -1355,6 +1363,9 @@ public final class WazeDirectChannel {
         private int surfaceWidth;
         private int surfaceHeight;
         private int surfaceDpi;
+        private long activityInstanceId;
+        private int activityDisplayId = -1;
+        private long activitySurfaceEpoch;
         private final Rect visibleArea = new Rect();
         private boolean surfaceDeliveryAttempted;
         private boolean surfaceDelivered;
@@ -1396,8 +1407,18 @@ public final class WazeDirectChannel {
             surfaceDelivered = false;
         }
 
+        void prepareSurfaceHandoff(String reason) {
+            notifySurfaceDestroyed("display-handoff:" + safeText(reason));
+            surface = null;
+            visibleArea.setEmpty();
+            surfaceDeliveryAttempted = false;
+            surfaceDelivered = false;
+            log("surface delivery reset for display handoff reason=" + safeText(reason));
+        }
+
         @Override
-        public void onSurfaceReady(Surface value, int width, int height, int dpi, Rect area) {
+        public void onSurfaceReady(Surface value, int width, int height, int dpi, Rect area,
+                long instanceId, int displayId, long surfaceEpoch) {
             runOnChannel(() -> {
                 if (!isCurrent(expectedGeneration) || mode != Mode.MAIN_SURFACE
                         || value == null || !value.isValid()) return;
@@ -1405,6 +1426,9 @@ public final class WazeDirectChannel {
                 surfaceWidth = Math.max(1, width);
                 surfaceHeight = Math.max(1, height);
                 surfaceDpi = Math.max(1, dpi);
+                activityInstanceId = instanceId;
+                activityDisplayId = displayId;
+                activitySurfaceEpoch = surfaceEpoch;
                 visibleArea.set(area == null ? new Rect() : area);
                 deliverSurfaceIfReady();
             });
@@ -1471,17 +1495,25 @@ public final class WazeDirectChannel {
                     || surfaceCallbackValue == null || value == null
                     || !value.isValid()) return;
             surfaceDeliveryAttempted = true;
+            long deliveredInstanceId = activityInstanceId;
+            int deliveredDisplayId = activityDisplayId;
+            long deliveredSurfaceEpoch = activitySurfaceEpoch;
             try {
                 surfaceCallbackValue.onSurfaceAvailable(Bundleable.create(new SurfaceContainer(
                                 value, surfaceWidth, surfaceHeight, surfaceDpi)),
                         new DoneCallback(expectedGeneration, "onSurfaceAvailable", ignored -> {
                             if (surfaceCallbackValue != surfaceCallback || surface != value
-                                    || !value.isValid()) return;
+                                    || !value.isValid()
+                                    || deliveredInstanceId != activityInstanceId
+                                    || deliveredDisplayId != activityDisplayId
+                                    || deliveredSurfaceEpoch != activitySurfaceEpoch) return;
                             surfaceDelivered = true;
                             sendVisibleArea();
                             int callbackGeneration = sessionGeneration;
                             callback(() -> listener.onSurfaceReady(
-                                    OWNER_PACKAGE, callbackGeneration));
+                                    OWNER_PACKAGE, callbackGeneration,
+                                    deliveredInstanceId, deliveredDisplayId,
+                                    deliveredSurfaceEpoch));
                             log("surface delivered width=" + surfaceWidth
                                     + " height=" + surfaceHeight + " dpi=" + surfaceDpi);
                         }));

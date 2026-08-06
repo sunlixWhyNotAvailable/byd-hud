@@ -18,6 +18,7 @@ import java.io.FileWriter;
 import java.io.IOException;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 final class WazeCaptureDebugWriter {
@@ -218,6 +219,23 @@ final class WazeCaptureDebugWriter {
         try {
             idle.await();
             return true;
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+    }
+
+    //Waits only for work queued before this call, but lets cancellable share preparation move on.
+    boolean awaitCheckpoint(long timeoutMs) {
+        if (android.os.Looper.myLooper() == thread.getLooper()) {
+            return true;
+        }
+        CountDownLatch idle = new CountDownLatch(1);
+        if (!handler.post(idle::countDown)) {
+            return false;
+        }
+        try {
+            return idle.await(Math.max(0L, timeoutMs), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;

@@ -93,6 +93,27 @@ final class NavigatorPatchTrustPolicy {
         return Decision.rejected("TRUST_UNKNOWN_SIGNER");
     }
 
+    static Decision evaluateWazeLifecycleV2(String signerSha256,
+            boolean canonicalProjectAssetMatches, boolean localSignerMatches,
+            boolean localLifecyclePatchVerified) {
+        String signer = normalize(signerSha256);
+        if (signer.isEmpty()) return Decision.rejected("TRUST_SIGNER_MISSING");
+        if (WAZE_PROJECT_SIGNER.equals(signer)) {
+            return canonicalProjectAssetMatches
+                    ? Decision.accepted(Origin.WAZE_PROJECT)
+                    : Decision.rejected("TRUST_WAZE_PROJECT_ASSET_MISMATCH");
+        }
+        if (WAZE_STOCK_SIGNER.equals(signer)) {
+            return Decision.rejected("TRUST_WAZE_STOCK_LIFECYCLE_V2_UNAVAILABLE");
+        }
+        if (localSignerMatches) {
+            return localLifecyclePatchVerified
+                    ? Decision.accepted(Origin.DEVICE_LOCAL)
+                    : Decision.rejected("TRUST_LOCAL_LIFECYCLE_V2_UNVERIFIED");
+        }
+        return Decision.rejected("TRUST_UNKNOWN_SIGNER");
+    }
+
     private static String detail(NavigatorPatchStore.Profile profile, String signer,
             boolean mandatoryPatchMarkerPresent) {
         return "profile=" + (profile == null ? "" : profile.id)

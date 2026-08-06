@@ -26,6 +26,7 @@ final class NavAppDisplayController {
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
     private static final long PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS = 10000L;
     private static final long DISPLAY_CONFIRM_INTERVAL_MS = 250L;
+    private static final long WAZE_SURFACE_HANDOFF_TIMEOUT_MS = 5000L;
     private static final String PRIMARY_DASHBOARD_DISPLAY_NAME = "fission_bg_XDJAScreenProjection";
     private static final String SHARED_DASHBOARD_DISPLAY_PREFIX =
             "shared_fission_bg_XDJAScreenProjection";
@@ -329,6 +330,9 @@ final class NavAppDisplayController {
             if (!toDashboard) {
                 if (current.displayId == MAIN_DISPLAY_ID
                         && !ClusterProjectionService.isProjectedPackageCurrent(packageName)) {
+                    boolean surfaceReady = ensureWazeSurfaceOnDisplay(
+                            packageName, MAIN_DISPLAY_ID,
+                            "dashboard-already-main:" + safe(reason));
                     synchronized (lock) {
                         if (packageName.equals(activeDashboardPackage)) {
                             activeDashboardPackage = "";
@@ -340,7 +344,9 @@ final class NavAppDisplayController {
                             current.taskId,
                             current.displayId,
                             current.visible,
-                            "independent dashboard already on main"));
+                            surfaceReady
+                                    ? "independent dashboard already on main"
+                                    : "independent dashboard already on main; surface handoff failed"));
                     return;
                 }
                 ClusterProjectionService.returnToMain(
@@ -354,7 +360,7 @@ final class NavAppDisplayController {
                         "independent-return-confirm");
                 boolean onMain = confirmed.taskId >= 0
                         && confirmed.displayId == MAIN_DISPLAY_ID;
-                if (onMain) moveWazeSurfaceTaskIfActive(
+                boolean surfaceReady = !onMain || ensureWazeSurfaceOnDisplay(
                         packageName, MAIN_DISPLAY_ID, "dashboard-return:" + safe(reason));
                 synchronized (lock) {
                     if (onMain
@@ -377,7 +383,9 @@ final class NavAppDisplayController {
                         confirmed.displayId,
                         confirmed.visible,
                         onMain
-                                ? "independent dashboard returned to main"
+                                ? surfaceReady
+                                        ? "independent dashboard returned to main"
+                                        : "independent dashboard returned to main; surface handoff failed"
                                 : "independent dashboard return failed display="
                                         + confirmed.displayId));
                 return;
@@ -402,7 +410,7 @@ final class NavAppDisplayController {
                         + operation + " detail=" + safe(protocolFailure));
             }
             if (alreadyProjected) {
-                moveWazeSurfaceTaskIfActive(
+                boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                         packageName, current.displayId, "dashboard-existing:" + safe(reason));
                 reconcileConfirmedDashboardOwnership(
                         packageName,
@@ -413,10 +421,12 @@ final class NavAppDisplayController {
                         current.taskId,
                         current.displayId,
                         current.visible,
-                        protocolFailure.isEmpty()
-                                ? "independent dashboard layout updated on existing projection"
-                                : "independent dashboard projection retained; layout command failed: "
-                                        + safe(protocolFailure)));
+                        !surfaceReady
+                                ? "independent dashboard projection retained; surface handoff failed"
+                                : protocolFailure.isEmpty()
+                                        ? "independent dashboard layout updated on existing projection"
+                                        : "independent dashboard projection retained; layout command failed: "
+                                                + safe(protocolFailure)));
                 return;
             }
             ClusterProjectionService.startProjection(context, packageName, safe(reason));
@@ -442,17 +452,19 @@ final class NavAppDisplayController {
                     packageName,
                     confirmed,
                     "independent-dashboard-confirmed:" + safe(reason));
-            moveWazeSurfaceTaskIfActive(
+            boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                     packageName, confirmed.displayId, "dashboard-confirmed:" + safe(reason));
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
                     confirmed.displayId,
                     confirmed.visible,
-                    protocolFailure.isEmpty()
-                            ? "independent dashboard projection confirmed"
-                            : "independent dashboard projection confirmed; layout command failed: "
-                                    + safe(protocolFailure)));
+                    !surfaceReady
+                            ? "independent dashboard projection confirmed; surface handoff failed"
+                            : protocolFailure.isEmpty()
+                                    ? "independent dashboard projection confirmed"
+                                    : "independent dashboard projection confirmed; layout command failed: "
+                                            + safe(protocolFailure)));
         } catch (SecurityException e) {
             remember(new NavAppDisplayState(
                     packageName,
@@ -490,6 +502,12 @@ final class NavAppDisplayController {
         boolean onMain = confirmed.taskId >= 0
                 && confirmed.displayId == MAIN_DISPLAY_ID;
         if (onMain) {
+            if (!ensureWazeSurfaceOnDisplay(
+                    previous, MAIN_DISPLAY_ID,
+                    "return-previous-dashboard:" + safe(reason))) {
+                log(previous, "return_previous_dashboard_app surface_handoff_failed next="
+                        + nextPackageName + " reason=" + safe(reason));
+            }
             synchronized (lock) {
                 if (previous.equals(activeDashboardPackage)) {
                     activeDashboardPackage = "";
@@ -575,16 +593,17 @@ final class NavAppDisplayController {
         }
     }
 
-    private void moveWazeSurfaceTaskIfActive(
+    private boolean ensureWazeSurfaceOnDisplay(
             String logicalPackage, int targetDisplay, String reason) {
-        if (!"com.waze".equals(logicalPackage)) return;
-        int surfaceTaskId = WazeSurfaceActivity.activeTaskId();
-        if (surfaceTaskId < 0) return;
-        NavAppDisplayState surface = moveTaskIdToDisplayBlocking(
-                logicalPackage, surfaceTaskId, targetDisplay, reason);
-        log(logicalPackage, "waze_surface_task_move task=" + surfaceTaskId
-                + " target=" + targetDisplay + " actual=" + surface.displayId
+        if (!"com.waze".equals(logicalPackage)) return true;
+        boolean ready = NavHudLiveSender.get(context).ensureWazeSurfaceOnDisplayBlocking(
+                targetDisplay, reason, WAZE_SURFACE_HANDOFF_TIMEOUT_MS);
+        log(logicalPackage, "waze_surface_handoff target=" + targetDisplay
+                + " actual=" + WazeSurfaceActivity.activeDisplayId()
+                + " task=" + WazeSurfaceActivity.activeTaskId()
+                + " ready=" + ready
                 + " reason=" + safe(reason));
+        return ready;
     }
 
     synchronized NavAppDisplayState moveTaskIdToDisplayBlocking(

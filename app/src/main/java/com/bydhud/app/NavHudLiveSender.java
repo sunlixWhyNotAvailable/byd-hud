@@ -13,6 +13,8 @@ import android.util.Log;
 import java.util.Arrays;
 import java.util.HashSet;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 //defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
 final class NavHudLiveSender {
@@ -31,7 +33,14 @@ final class NavHudLiveSender {
     private static final long DASHBOARD_WATCHDOG_INTERVAL_MS = 5000L;
     private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
     private static final long WAZE_SURFACE_READY_TIMEOUT_MS = 5000L;
+    private static final long WAZE_SURFACE_HANDOFF_POLL_MS = 100L;
     private static final long GMAPS_DIRECT_TIMEOUT_MS = 5000L;
+    static final int SURFACE_HANDOFF_NOT_REQUIRED = 0;
+    static final int SURFACE_HANDOFF_RELAUNCH = 1;
+    static final int SURFACE_HANDOFF_MOVE = 2;
+    static final int SURFACE_HANDOFF_WAIT = 3;
+    static final int SURFACE_HANDOFF_READY = 4;
+    static final int SURFACE_HANDOFF_FAILED = 5;
 
     private static NavHudLiveSender instance;
 
@@ -170,10 +179,13 @@ final class NavHudLiveSender {
     private boolean wazeSurfaceLaunchPending;
     private volatile boolean wazeSurfaceActive;
     private boolean wazeSurfaceVisible;
-    private boolean wazeSurfaceEnabledForRoute;
-    private boolean wazeSurfaceDismissedForRoute;
+    private volatile boolean wazeSurfaceEnabledForRoute;
+    private volatile boolean wazeSurfaceDismissedForRoute;
     private int wazeSurfaceTaskId = -1;
     private long wazeSurfaceInstanceId;
+    private volatile long wazeSurfaceReadyInstanceId;
+    private volatile int wazeSurfaceReadyDisplayId = -1;
+    private volatile long wazeSurfaceReadyEpoch;
     private volatile DirectTbtFrame latestWazeClusterFrame;
     private volatile String latestWazeClusterFrameReason = "";
     private volatile int latestWazeClusterFrameSessionGeneration;
@@ -181,6 +193,7 @@ final class NavHudLiveSender {
     private volatile String latestWazeSurfaceFrameReason = "";
     private volatile int latestWazeSurfaceFrameSessionGeneration;
     private volatile int wazeSurfaceRouteGeneration = -1;
+    private volatile int wazeSurfaceFailureRouteGeneration = -1;
     private volatile DirectTbtFrame latestGMapsDirectFrame;
     private volatile String latestGMapsDirectFrameReason = "";
     private volatile long latestGMapsDirectFrameSessionGeneration;
@@ -454,6 +467,12 @@ final class NavHudLiveSender {
         }
     };
 
+    private static final class SurfaceHandoffStart {
+        final CountDownLatch ready = new CountDownLatch(1);
+        boolean required;
+        int routeGeneration = -1;
+    }
+
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavHudLiveSender(Context context) {
         this.context = context;
@@ -576,9 +595,11 @@ final class NavHudLiveSender {
                     }
 
                     @Override
-                    public void onSurfaceReady(String ownerPackage, int sessionGeneration) {
+                    public void onSurfaceReady(String ownerPackage, int sessionGeneration,
+                            long activityInstanceId, int displayId, long surfaceEpoch) {
                         handler.post(() -> onWazeSurfaceReady(
-                                ownerPackage, sessionGeneration));
+                                ownerPackage, sessionGeneration,
+                                activityInstanceId, displayId, surfaceEpoch));
                     }
 
                     @Override
@@ -775,9 +796,11 @@ final class NavHudLiveSender {
             }
 
             @Override
-            public void onSurfaceReady(String ownerPackage, int sessionGeneration) {
+            public void onSurfaceReady(String ownerPackage, int sessionGeneration,
+                    long activityInstanceId, int displayId, long surfaceEpoch) {
                 handler.post(() -> onWazeSurfaceReady(
-                        ownerPackage, sessionGeneration));
+                        ownerPackage, sessionGeneration,
+                        activityInstanceId, displayId, surfaceEpoch));
             }
 
             @Override
@@ -990,6 +1013,7 @@ final class NavHudLiveSender {
             wazeDirectFrameReceived = false;
             wazeSurfaceEnabledForRoute = HudPrefs.isWazeCustomSurfaceEnabled(context);
             wazeSurfaceDismissedForRoute = false;
+            wazeSurfaceFailureRouteGeneration = -1;
         }
         wazeDirectNavigating = true;
         wazeDirectRouteEnded = false;
@@ -1016,6 +1040,9 @@ final class NavHudLiveSender {
         handler.post(() -> {
             wazeSurfaceTaskId = taskId;
             wazeSurfaceInstanceId = instanceId;
+            if (wazeSurfaceReadyInstanceId != instanceId) {
+                invalidateWazeSurfaceReadiness();
+            }
             if (!shouldUseWazeSurface()) {
                 log("waze surface activity rejected route/config no longer eligible");
                 WazeSurfaceActivity.finishActive("not-eligible");
@@ -1035,9 +1062,10 @@ final class NavHudLiveSender {
             wazeSurfaceVisible = visible;
             log("waze surface activity visible=" + visible + " task=" + wazeSurfaceTaskId);
             if (visible && shouldUseWazeSurface()
-                    && wazeSurfaceDirectChannel.isActive()) {
-                onWazeSurfaceReady(
-                        WAZE_PACKAGE, wazeSurfaceDirectChannel.sessionGeneration());
+                    && wazeSurfaceDirectChannel.isActive()
+                    && hasCurrentWazeSurfaceReadyEvidence(
+                            WazeSurfaceActivity.activeDisplayId(), wazeRouteGeneration)) {
+                activateWazeSurface(wazeSurfaceDirectChannel.sessionGeneration());
             } else if (!visible && shouldUseWazeSurface()) {
                 suspendWazeSurface("activity-backgrounded");
             }
@@ -1051,6 +1079,7 @@ final class NavHudLiveSender {
             if (!changingConfigurations) {
                 wazeSurfaceTaskId = -1;
                 wazeSurfaceInstanceId = 0L;
+                invalidateWazeSurfaceReadiness();
             }
             if (changingConfigurations || wazeSurfaceDismissedForRoute
                     || !wazeDirectNavigating) return;
@@ -1080,11 +1109,18 @@ final class NavHudLiveSender {
     }
 
     private void requestWazeSurfaceActivity(String reason, boolean bringToFront) {
+        requestWazeSurfaceActivity(reason, bringToFront, -1);
+    }
+
+    private void requestWazeSurfaceActivity(
+            String reason, boolean bringToFront, int requestedDisplayId) {
         if (!shouldUseWazeSurface() || wazeSurfaceLaunchPending
                 || wazeSurfaceActive && WazeSurfaceActivity.isVisible()
                 || !bringToFront && WazeSurfaceActivity.isActive()) return;
         NavAppDisplayState state = NavAppDisplayController.get(context).lastState(WAZE_PACKAGE);
-        int displayId = state == null || state.displayId < 0 ? 0 : state.displayId;
+        int displayId = requestedDisplayId >= 0
+                ? requestedDisplayId
+                : state == null || state.displayId < 0 ? 0 : state.displayId;
         wazeSurfaceLaunchPending = true;
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         handler.postDelayed(wazeSurfaceReadyTimeout, WAZE_SURFACE_READY_TIMEOUT_MS);
@@ -1107,13 +1143,223 @@ final class NavHudLiveSender {
                 && !wazeSurfaceDismissedForRoute;
     }
 
-    private void onWazeSurfaceReady(String ownerPackage, int sessionGeneration) {
+    static int wazeSurfaceHandoffAction(
+            boolean routeCurrent,
+            boolean failed,
+            boolean dismissed,
+            int taskId,
+            int actualDisplay,
+            int targetDisplay,
+            boolean ready) {
+        if (!routeCurrent) return SURFACE_HANDOFF_NOT_REQUIRED;
+        if (failed) return SURFACE_HANDOFF_FAILED;
+        if (dismissed) return SURFACE_HANDOFF_NOT_REQUIRED;
+        if (taskId < 0) return SURFACE_HANDOFF_RELAUNCH;
+        if (actualDisplay != targetDisplay) return SURFACE_HANDOFF_MOVE;
+        return ready ? SURFACE_HANDOFF_READY : SURFACE_HANDOFF_WAIT;
+    }
+
+    static boolean wazeSurfaceReadyForHandoff(
+            boolean routeCurrent,
+            boolean active,
+            boolean visible,
+            boolean validSurface,
+            long activeInstanceId,
+            long readyInstanceId,
+            int actualDisplay,
+            int readyDisplay,
+            int targetDisplay,
+            long activeSurfaceEpoch,
+            long readySurfaceEpoch) {
+        return routeCurrent && active && visible && validSurface
+                && activeInstanceId > 0L
+                && activeInstanceId == readyInstanceId
+                && actualDisplay == targetDisplay
+                && readyDisplay == targetDisplay
+                && activeSurfaceEpoch > 0L
+                && activeSurfaceEpoch == readySurfaceEpoch;
+    }
+
+    static boolean wazeSurfaceHandoffNeedsLaunch(int action) {
+        return action == SURFACE_HANDOFF_RELAUNCH || action == SURFACE_HANDOFF_WAIT;
+    }
+
+    static boolean isTransientWazeSurfaceUnavailable(
+            String reason, boolean routeEligible) {
+        return routeEligible && "activity-surface-destroyed".equals(reason);
+    }
+
+    boolean ensureWazeSurfaceOnDisplayBlocking(
+            int targetDisplay, String reason, long timeoutMs) {
+        if (targetDisplay < 0 || timeoutMs <= 0L
+                || android.os.Looper.myLooper() == handler.getLooper()) {
+            log("surface_handoff_invalid target=" + targetDisplay
+                    + " timeoutMs=" + timeoutMs + " reason=" + safeReason(reason));
+            return false;
+        }
+        SurfaceHandoffStart start = new SurfaceHandoffStart();
+        handler.post(() -> {
+            start.routeGeneration = wazeRouteGeneration;
+            start.required = shouldUseWazeSurface();
+            if (start.required && WazeSurfaceActivity.activeTaskId() < 0) {
+                log("surface_missing target=" + targetDisplay
+                        + " routeGeneration=" + start.routeGeneration
+                        + " reason=" + safeReason(reason));
+                requestWazeSurfaceActivity(
+                        "display-handoff:" + safeReason(reason), true, targetDisplay);
+            }
+            start.ready.countDown();
+        });
+
+        // ponytail: this bounds polling; each ADB command still uses its transport timeout.
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        try {
+            if (!start.ready.await(timeoutMs, TimeUnit.MILLISECONDS)) {
+                log("surface_handoff_start_timeout target=" + targetDisplay
+                        + " reason=" + safeReason(reason));
+                return false;
+            }
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        }
+        if (!start.required) return true;
+
+        long lastRelaunchRequestMs = 0L;
+        while (SystemClock.elapsedRealtime() < deadline) {
+            int taskId = WazeSurfaceActivity.activeTaskId();
+            int actualDisplay = WazeSurfaceActivity.activeDisplayId();
+            boolean ready = wazeSurfaceReadyForHandoff(
+                    start.routeGeneration == wazeRouteGeneration,
+                    wazeSurfaceActive,
+                    WazeSurfaceActivity.isVisible(),
+                    WazeSurfaceActivity.hasValidSurface(),
+                    WazeSurfaceActivity.activeInstanceId(),
+                    wazeSurfaceReadyInstanceId,
+                    actualDisplay,
+                    wazeSurfaceReadyDisplayId,
+                    targetDisplay,
+                    WazeSurfaceActivity.activeSurfaceEpoch(),
+                    wazeSurfaceReadyEpoch);
+            int action = wazeSurfaceHandoffAction(
+                    start.routeGeneration == wazeRouteGeneration,
+                    wazeSurfaceFailureRouteGeneration == start.routeGeneration,
+                    wazeSurfaceDismissedForRoute,
+                    taskId,
+                    actualDisplay,
+                    targetDisplay,
+                    ready);
+            if (action == SURFACE_HANDOFF_NOT_REQUIRED) return true;
+            if (action == SURFACE_HANDOFF_FAILED) {
+                log("surface_handoff_failed target=" + targetDisplay
+                        + " routeGeneration=" + start.routeGeneration
+                        + " reason=" + safeReason(reason));
+                return false;
+            }
+            if (action == SURFACE_HANDOFF_READY) {
+                log("surface_ready task=" + taskId
+                        + " target=" + targetDisplay
+                        + " actual=" + actualDisplay
+                        + " routeGeneration=" + start.routeGeneration
+                        + " reason=" + safeReason(reason));
+                return true;
+            }
+            if (action == SURFACE_HANDOFF_MOVE) {
+                invalidateWazeSurfaceReadiness();
+                wazeSurfaceDirectChannel.prepareSurfaceHandoff(reason);
+                NavAppDisplayState moved = NavAppDisplayController.get(context)
+                        .moveTaskIdToDisplayBlocking(
+                                WAZE_PACKAGE, taskId, targetDisplay,
+                                "surface-handoff:" + safeReason(reason));
+                log("surface_move task=" + taskId
+                        + " target=" + targetDisplay
+                        + " actual=" + moved.displayId
+                        + " routeGeneration=" + start.routeGeneration
+                        + " reason=" + safeReason(reason));
+            } else if (wazeSurfaceHandoffNeedsLaunch(action)) {
+                long now = SystemClock.elapsedRealtime();
+                if (now - lastRelaunchRequestMs >= 500L) {
+                    lastRelaunchRequestMs = now;
+                    log((action == SURFACE_HANDOFF_RELAUNCH
+                            ? "surface_relaunch" : "surface_restore")
+                            + " target=" + targetDisplay
+                            + " routeGeneration=" + start.routeGeneration
+                            + " reason=" + safeReason(reason));
+                    handler.post(() -> {
+                        if (start.routeGeneration == wazeRouteGeneration
+                                && shouldUseWazeSurface()) {
+                            requestWazeSurfaceActivity(
+                                    "display-handoff:" + safeReason(reason),
+                                    true, targetDisplay);
+                        }
+                    });
+                }
+            }
+            try {
+                Thread.sleep(WAZE_SURFACE_HANDOFF_POLL_MS);
+            } catch (InterruptedException interrupted) {
+                Thread.currentThread().interrupt();
+                return false;
+            }
+        }
+        log("surface_handoff_timeout target=" + targetDisplay
+                + " routeGeneration=" + start.routeGeneration
+                + " task=" + WazeSurfaceActivity.activeTaskId()
+                + " actual=" + WazeSurfaceActivity.activeDisplayId()
+                + " reason=" + safeReason(reason));
+        return false;
+    }
+
+    private void onWazeSurfaceReady(String ownerPackage, int sessionGeneration,
+            long activityInstanceId, int displayId, long surfaceEpoch) {
         if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)
                 || !shouldUseWazeSurface()) return;
+        if (activityInstanceId != WazeSurfaceActivity.activeInstanceId()
+                || displayId != WazeSurfaceActivity.activeDisplayId()
+                || surfaceEpoch != WazeSurfaceActivity.activeSurfaceEpoch()
+                || !WazeSurfaceActivity.hasValidSurface()) {
+            log("waze surface ready ignored stale instance=" + activityInstanceId
+                    + " display=" + displayId + " epoch=" + surfaceEpoch);
+            return;
+        }
+        wazeSurfaceReadyInstanceId = activityInstanceId;
+        wazeSurfaceReadyDisplayId = displayId;
+        wazeSurfaceReadyEpoch = surfaceEpoch;
+        wazeSurfaceLaunchPending = false;
+        if (hasCurrentWazeSurfaceReadyEvidence(displayId, wazeRouteGeneration)) {
+            activateWazeSurface(sessionGeneration);
+        } else {
+            log("waze surface delivered while activity is hidden task="
+                    + wazeSurfaceTaskId + " display=" + displayId);
+        }
+    }
+
+    private boolean hasCurrentWazeSurfaceReadyEvidence(
+            int targetDisplay, int routeGeneration) {
+        return wazeSurfaceReadyForHandoff(
+                routeGeneration == wazeRouteGeneration
+                        && wazeSurfaceRouteGeneration == routeGeneration,
+                true,
+                WazeSurfaceActivity.isVisible(),
+                WazeSurfaceActivity.hasValidSurface(),
+                WazeSurfaceActivity.activeInstanceId(),
+                wazeSurfaceReadyInstanceId,
+                WazeSurfaceActivity.activeDisplayId(),
+                wazeSurfaceReadyDisplayId,
+                targetDisplay,
+                WazeSurfaceActivity.activeSurfaceEpoch(),
+                wazeSurfaceReadyEpoch);
+    }
+
+    private void activateWazeSurface(int sessionGeneration) {
+        if (wazeSurfaceActive
+                || !hasCurrentWazeSurfaceReadyEvidence(
+                        WazeSurfaceActivity.activeDisplayId(), wazeRouteGeneration)) return;
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         wazeSurfaceLaunchPending = false;
         wazeSurfaceActive = true;
-        wazeSurfaceVisible = WazeSurfaceActivity.isVisible();
+        wazeSurfaceVisible = true;
+        wazeSurfaceFailureRouteGeneration = -1;
         invalidatePendingWazeDirectFrames();
         int hudSessionGeneration = wazeDirectChannel.sessionGeneration();
         hudOutput.clearDirectFrameForLoss(
@@ -1131,9 +1377,21 @@ final class NavHudLiveSender {
                 + " clusterSession=" + hudSessionGeneration);
     }
 
+    private void invalidateWazeSurfaceReadiness() {
+        wazeSurfaceActive = false;
+        wazeSurfaceReadyInstanceId = 0L;
+        wazeSurfaceReadyDisplayId = -1;
+        wazeSurfaceReadyEpoch = 0L;
+    }
+
     private void onWazeSurfaceUnavailable(String ownerPackage, int sessionGeneration,
             String reason) {
         if (!isCurrentWazeSurfaceCallback(ownerPackage, sessionGeneration)) return;
+        if (isTransientWazeSurfaceUnavailable(reason, shouldUseWazeSurface())) {
+            invalidateWazeSurfaceReadiness();
+            suspendWazeSurface("surface-rebinding:" + safeReason(reason));
+            return;
+        }
         if (!wazeSurfaceVisible && WazeSurfaceActivity.isActive()) {
             suspendWazeSurface("surface-backgrounded:" + safeReason(reason));
             return;
@@ -1187,8 +1445,9 @@ final class NavHudLiveSender {
         boolean wasSurfaceActive = wazeSurfaceActive;
         boolean wasSurface = wazeSurfaceLaunchPending || wazeSurfaceActive
                 || WazeSurfaceActivity.isActive();
+        wazeSurfaceFailureRouteGeneration = wazeRouteGeneration;
         wazeSurfaceLaunchPending = false;
-        wazeSurfaceActive = false;
+        invalidateWazeSurfaceReadiness();
         wazeSurfaceVisible = false;
         wazeSurfaceTaskId = -1;
         wazeSurfaceInstanceId = 0L;
@@ -1263,13 +1522,14 @@ final class NavHudLiveSender {
     private void closeWazeSurface(String reason) {
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         wazeSurfaceLaunchPending = false;
-        wazeSurfaceActive = false;
+        invalidateWazeSurfaceReadiness();
         wazeSurfaceVisible = false;
         wazeSurfaceEnabledForRoute = false;
         wazeSurfaceDismissedForRoute = false;
         wazeSurfaceTaskId = -1;
         wazeSurfaceInstanceId = 0L;
         wazeSurfaceRouteGeneration = -1;
+        wazeSurfaceFailureRouteGeneration = -1;
         WazeSurfaceActivity.finishActive(reason);
     }
 
@@ -1407,7 +1667,9 @@ final class NavHudLiveSender {
     private void onGMapsDirectNavigationStarted(String ownerPackage,
             long sessionGeneration, String reason) {
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
-        clearDirectSpeedLimit(ownerPackage);
+        if (shouldClearGMapsSpeedLimitOnDirectStart(reason)) {
+            clearDirectSpeedLimit(ownerPackage);
+        }
         gmapsDirectTimeoutSessionGeneration = sessionGeneration;
         boolean keepFallbackUntilFrame = shouldKeepGMapsFallbackOnDirectStart(
                 gmapsDirectFallbackActive);
@@ -1748,6 +2010,10 @@ final class NavHudLiveSender {
 
     static boolean shouldKeepGMapsFallbackOnDirectStart(boolean fallbackActive) {
         return fallbackActive;
+    }
+
+    static boolean shouldClearGMapsSpeedLimitOnDirectStart(String reason) {
+        return "start".equals(reason);
     }
 
     private void eventGMapsDirectSession(String event, String detail) {

@@ -110,6 +110,54 @@ public final class NavigatorPatchTrustPolicyTest {
         throw new AssertionError("Unknown signer was accepted");
     }
 
+    @Test
+    public void lifecycleV2AcceptsOnlyExactCanonicalProjectAsset() {
+        NavigatorPatchTrustPolicy.Decision exact =
+                NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                        NavigatorPatchTrustPolicy.WAZE_PROJECT_SIGNER,
+                        true, false, false);
+        NavigatorPatchTrustPolicy.Decision wrongHash =
+                NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                        NavigatorPatchTrustPolicy.WAZE_PROJECT_SIGNER,
+                        false, false, true);
+
+        assertTrue(exact.accepted);
+        assertEquals(NavigatorPatchTrustPolicy.Origin.WAZE_PROJECT, exact.origin);
+        assertFalse(wrongHash.accepted);
+        assertEquals("TRUST_WAZE_PROJECT_ASSET_MISMATCH", wrongHash.code);
+    }
+
+    @Test
+    public void lifecycleV2LocalSignerRequiresCurrentPatchVerification() {
+        NavigatorPatchTrustPolicy.Decision current =
+                NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                        "BB".repeat(32), false, true, true);
+        NavigatorPatchTrustPolicy.Decision stale =
+                NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                        "BB".repeat(32), false, true, false);
+
+        assertTrue(current.accepted);
+        assertEquals(NavigatorPatchTrustPolicy.Origin.DEVICE_LOCAL, current.origin);
+        assertFalse(stale.accepted);
+        assertEquals("TRUST_LOCAL_LIFECYCLE_V2_UNVERIFIED", stale.code);
+    }
+
+    @Test
+    public void lifecycleV2RejectsStockAndUnknownSigners() {
+        NavigatorPatchTrustPolicy.Decision stock =
+                NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                        NavigatorPatchTrustPolicy.WAZE_STOCK_SIGNER,
+                        false, false, true);
+        NavigatorPatchTrustPolicy.Decision unknown =
+                NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                        "CC".repeat(32), false, false, true);
+
+        assertFalse(stock.accepted);
+        assertEquals("TRUST_WAZE_STOCK_LIFECYCLE_V2_UNAVAILABLE", stock.code);
+        assertFalse(unknown.accepted);
+        assertEquals("TRUST_UNKNOWN_SIGNER", unknown.code);
+    }
+
     private static void assertOrigin(NavigatorPatchStore.Profile profile, String signer,
             boolean marker, NavigatorPatchTrustPolicy.Origin expectedOrigin) {
         NavigatorPatchTrustPolicy.Decision decision =

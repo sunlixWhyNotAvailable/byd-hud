@@ -85,6 +85,11 @@ final class WazePatchEngine {
     private static final ImmutableMethodReference ALERT_COLLECTOR = new ImmutableMethodReference(
             "Lcom/waze/car_lib/b/f;", "h", java.util.Arrays.asList(
             "Landroidx/lifecycle/Lifecycle;", "Landroidx/car/app/CarContext;"), "V");
+    private static final ImmutableMethodReference ALERT_TRIP_PUBLISHER =
+            new ImmutableMethodReference("Lcom/waze/car_lib/j/r;", "h",
+                    java.util.Arrays.asList("Lkotlinx/coroutines/aj;",
+                            "Landroidx/lifecycle/Lifecycle;",
+                            "Landroidx/car/app/CarContext;"), "V");
     private static final ImmutableMethodReference BRIDGE_INIT = new ImmutableMethodReference(
             BRIDGE_CLASS, "init", Collections.singletonList("Landroid/content/Context;"), "V");
     private static final ImmutableMethodReference BRIDGE_EMIT = new ImmutableMethodReference(
@@ -101,6 +106,12 @@ final class WazePatchEngine {
             new ImmutableMethodReference("Lcom/waze/car_lib/r/g;", "b",
                     java.util.Arrays.asList("Ljava/util/List;", "Lh/c/e;"),
                     "Ljava/lang/Object;");
+    private static final ImmutableMethodReference CLUSTER_OEM_LIST_PRODUCER =
+            new ImmutableMethodReference("Lcom/waze/car_lib/e/a;", "a",
+                    Collections.emptyList(), "Ljava/util/List;");
+    private static final ImmutableMethodReference CLUSTER_EMPTY_OEM_LIST =
+            new ImmutableMethodReference("Ljava/util/Collections;", "emptyList",
+                    Collections.emptyList(), "Ljava/util/List;");
     private static final ImmutableMethodReference BOOLEAN_VALUE =
             new ImmutableMethodReference("Ljava/lang/Boolean;", "booleanValue",
                     Collections.emptyList(), "Z");
@@ -250,7 +261,15 @@ final class WazePatchEngine {
                     }
                     if (matchesClusterEta(method)) {
                         clusterEtaMatches.incrementAndGet();
-                        if ("patched".equals(inspectClusterEtaGuard(method))) return method;
+                        String guard = inspectClusterEtaGuard(method);
+                        if ("patched".equals(guard)) {
+                            throw new IllegalStateException(
+                                    "Waze cluster ETA target is already patched");
+                        }
+                        if (!"stock".equals(guard)) {
+                            throw new IllegalStateException(
+                                    "Waze cluster ETA target is not stock: " + guard);
+                        }
                         return enableClusterEta(method);
                     }
                     return method;
@@ -265,6 +284,14 @@ final class WazePatchEngine {
                     + applicationMatches.get() + ", route=" + routeMatches.get()
                     + ", speed=" + speedMatches.get()
                     + ", clusterEta=" + clusterEtaMatches.get());
+        }
+        if (clusterEtaMatches.get() == 1) {
+            LifecycleInspection verified = inspectLifecycle(
+                    Files.readAllBytes(outputDex.toPath()));
+            if (!verified.clusterEtaPatched()) {
+                throw new IOException("Waze cluster ETA verification failed: "
+                        + verified.clusterEtaGuard);
+            }
         }
     }
 
@@ -297,6 +324,8 @@ final class WazePatchEngine {
                     result.helperMethodCount++;
                     result.producerCallCount += countCall(method, ALERT_PRODUCER);
                     result.collectorCallCount += countCall(method, ALERT_COLLECTOR);
+                    result.tripPublisherCallCount += countCall(
+                            method, ALERT_TRIP_PUBLISHER);
                     result.guardReadCount += countFieldOpcode(
                             method, ALERT_GUARD, Opcode.IGET_BOOLEAN);
                     result.guardWriteCount += countFieldOpcode(
@@ -432,6 +461,9 @@ final class WazePatchEngine {
         addKoinLookup(code, 3, 4, 5, 4, true, "Lcom/waze/car_lib/b/ap;");
         code.addInstruction(new BuilderInstruction35c(
                 Opcode.INVOKE_VIRTUAL, 3, 4, 0, 2, 0, 0, ALERT_PRODUCER));
+        addKoinLookup(code, 3, 4, 5, 4, false, "Lcom/waze/car_lib/j/r;");
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 4, 4, 2, 1, 0, 0, ALERT_TRIP_PUBLISHER));
         addKoinLookup(code, 3, 4, 5, 3, false, "Lcom/waze/car_lib/b/f;");
         code.addInstruction(new BuilderInstruction35c(
                 Opcode.INVOKE_VIRTUAL, 3, 3, 1, 0, 0, 0, ALERT_COLLECTOR));
@@ -541,16 +573,17 @@ final class WazePatchEngine {
         if (!"stock".equals(inspectClusterEtaGuard(method))) {
             throw new IllegalStateException("Waze cluster ETA target is not stock");
         }
+        int producerIndex = clusterEtaListProducerIndex(
+                method, CLUSTER_OEM_LIST_PRODUCER);
+        if (producerIndex < 0) {
+            throw new IllegalStateException("Waze cluster ETA OEM-list producer missing");
+        }
         MutableMethodImplementation mutable = new MutableMethodImplementation(
                 method.getImplementation());
-        int branchIndex = clusterEtaBranchIndex(method);
-        if (branchIndex < 0) {
-            throw new IllegalStateException("Waze cluster ETA exclusion branch missing");
-        }
-        mutable.removeInstruction(branchIndex);
-        // IF_NEZ occupies two code units; two NOPs leave an explicit patched fingerprint.
-        mutable.addInstruction(branchIndex, new BuilderInstruction10x(Opcode.NOP));
-        mutable.addInstruction(branchIndex + 1, new BuilderInstruction10x(Opcode.NOP));
+        mutable.removeInstruction(producerIndex);
+        // Both invoke forms occupy three code units, so every stock branch offset stays intact.
+        mutable.addInstruction(producerIndex, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 0, 0, 0, 0, 0, 0, CLUSTER_EMPTY_OEM_LIST));
         return immutable(method, mutable);
     }
 
@@ -618,10 +651,12 @@ final class WazePatchEngine {
                 + ", stateFlow=" + stateFlow;
     }
 
-    private static String inspectClusterEtaGuard(Method method) {
+    static String inspectClusterEtaGuard(Method method) {
         MethodImplementation implementation = method.getImplementation();
         if (implementation == null) return "missing implementation";
         int exclusion = countCall(method, CLUSTER_OEM_EXCLUSION);
+        int stockProducer = countCall(method, CLUSTER_OEM_LIST_PRODUCER);
+        int emptyProducer = countCall(method, CLUSTER_EMPTY_OEM_LIST);
         int addDestination = countCall(method, TRIP_ADD_DESTINATION);
         int tripBuild = countCall(method, TRIP_BUILD);
         int updateTrip = countCall(method, NAVIGATION_UPDATE_TRIP);
@@ -631,9 +666,48 @@ final class WazePatchEngine {
                     + ", tripBuild=" + tripBuild + ", updateTrip=" + updateTrip;
         }
         int branch = clusterEtaBranchIndex(method);
-        if (branch >= 0) return "stock";
-        int patched = clusterEtaPatchedNopIndex(method);
-        return patched >= 0 ? "patched" : "cluster ETA decision sequence missing";
+        if (branch < 0) {
+            return clusterEtaLegacyNopIndex(method) >= 0
+                    ? "legacy NOP patch" : "cluster ETA decision sequence missing";
+        }
+        if (stockProducer == 1 && emptyProducer == 0
+                && clusterEtaListProducerIndex(method, CLUSTER_OEM_LIST_PRODUCER) >= 0) {
+            return "stock";
+        }
+        if (stockProducer == 0 && emptyProducer == 1
+                && clusterEtaListProducerIndex(method, CLUSTER_EMPTY_OEM_LIST) >= 0) {
+            return "patched";
+        }
+        return "cluster ETA producer mismatch stock=" + stockProducer
+                + ", empty=" + emptyProducer;
+    }
+
+    private static int clusterEtaListProducerIndex(
+            Method method, MethodReference producer) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return -1;
+        List<? extends Instruction> instructions = toList(implementation);
+        int producerIndex = uniqueCallIndex(instructions, producer);
+        int exclusionIndex = uniqueCallIndex(instructions, CLUSTER_OEM_EXCLUSION);
+        if (producerIndex < 0 || exclusionIndex < 0 || producerIndex >= exclusionIndex
+                || producerIndex + 1 >= instructions.size()) return -1;
+        Instruction call = instructions.get(producerIndex);
+        Instruction result = instructions.get(producerIndex + 1);
+        Instruction exclusion = instructions.get(exclusionIndex);
+        if (!(call instanceof FiveRegisterInstruction)
+                || !(result instanceof OneRegisterInstruction)
+                || !(exclusion instanceof FiveRegisterInstruction)
+                || result.getOpcode() != Opcode.MOVE_RESULT_OBJECT
+                || call.getCodeUnits() != 3) return -1;
+        FiveRegisterInstruction callRegisters = (FiveRegisterInstruction) call;
+        FiveRegisterInstruction exclusionRegisters = (FiveRegisterInstruction) exclusion;
+        boolean stock = sameMethod(producer, CLUSTER_OEM_LIST_PRODUCER);
+        if (stock && (call.getOpcode() != Opcode.INVOKE_INTERFACE
+                || callRegisters.getRegisterCount() != 1)) return -1;
+        if (!stock && (call.getOpcode() != Opcode.INVOKE_STATIC
+                || callRegisters.getRegisterCount() != 0)) return -1;
+        return ((OneRegisterInstruction) result).getRegisterA()
+                == exclusionRegisters.getRegisterD() ? producerIndex : -1;
     }
 
     private static int clusterEtaBranchIndex(Method method) {
@@ -664,7 +738,7 @@ final class WazePatchEngine {
         return -1;
     }
 
-    private static int clusterEtaPatchedNopIndex(Method method) {
+    private static int clusterEtaLegacyNopIndex(Method method) {
         MethodImplementation implementation = method.getImplementation();
         if (implementation == null) return -1;
         List<? extends Instruction> instructions = toList(implementation);
@@ -1213,6 +1287,7 @@ final class WazePatchEngine {
         int helperMethodCount;
         int producerCallCount;
         int collectorCallCount;
+        int tripPublisherCallCount;
         int guardReadCount;
         int guardWriteCount;
         int logMarkerCount;
@@ -1228,7 +1303,8 @@ final class WazePatchEngine {
                     && targetMethodCount == 1 && anchorCount == 1
                     && hookCallCount == 1 && hookAfterAnchorCount == 1
                     && helperMethodCount == 1 && producerCallCount == 1
-                    && collectorCallCount == 1 && guardReadCount == 1
+                    && collectorCallCount == 1 && tripPublisherCallCount == 1
+                    && guardReadCount == 1
                     && guardWriteCount == 1 && logMarkerCount == 1;
         }
 
@@ -1238,7 +1314,9 @@ final class WazePatchEngine {
                     + ", target=" + targetMethodCount + ", anchor=" + anchorCount
                     + ", hook=" + hookCallCount + ", adjacent=" + hookAfterAnchorCount
                     + ", helper=" + helperMethodCount + ", producer=" + producerCallCount
-                    + ", collector=" + collectorCallCount + ", guardRead=" + guardReadCount
+                    + ", collector=" + collectorCallCount
+                    + ", trip=" + tripPublisherCallCount
+                    + ", guardRead=" + guardReadCount
                     + ", guardWrite=" + guardWriteCount + ", marker=" + logMarkerCount;
         }
     }

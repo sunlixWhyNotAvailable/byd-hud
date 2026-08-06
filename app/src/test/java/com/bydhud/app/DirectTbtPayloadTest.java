@@ -8,8 +8,30 @@ import org.junit.Test;
 
 import java.util.Collections;
 import java.util.Calendar;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class DirectTbtPayloadTest {
+    @Test
+    public void outputOptionsSnapshotRetriesWhenRevisionChangesDuringRead() {
+        AtomicInteger revision = new AtomicInteger();
+        AtomicInteger value = new AtomicInteger(10);
+        AtomicInteger reads = new AtomicInteger();
+
+        DirectTbtPayload.RevisionedSnapshot<Integer> snapshot =
+                DirectTbtPayload.readStableSnapshot(revision::get, () -> {
+                    int read = value.get();
+                    if (reads.getAndIncrement() == 0) {
+                        value.set(20);
+                        revision.incrementAndGet();
+                    }
+                    return read;
+                });
+
+        assertEquals(1, snapshot.revision);
+        assertEquals(20, snapshot.values.intValue());
+        assertEquals(2, reads.get());
+    }
+
     @Test
     public void activeAlertUsesBlankNativeAndKeepsLanes() {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(

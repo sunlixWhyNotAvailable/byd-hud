@@ -13,6 +13,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.SimpleTimeZone;
+import java.util.function.IntSupplier;
+import java.util.function.Supplier;
 import java.text.SimpleDateFormat;
 
 /** Builds complete 0x8001 road-info payloads without owning a transport. */
@@ -27,6 +29,27 @@ public final class DirectTbtPayload {
     private static byte[] cachedBlankS72Png;
 
     private DirectTbtPayload() {
+    }
+
+    static <T> RevisionedSnapshot<T> readStableSnapshot(
+            IntSupplier revision, Supplier<T> values) {
+        while (true) {
+            int before = revision.getAsInt();
+            T snapshot = values.get();
+            if (before == revision.getAsInt()) {
+                return new RevisionedSnapshot<>(before, snapshot);
+            }
+        }
+    }
+
+    static final class RevisionedSnapshot<T> {
+        final int revision;
+        final T values;
+
+        RevisionedSnapshot(int revision, T values) {
+            this.revision = revision;
+            this.values = values;
+        }
     }
 
     public static byte[] build(DirectTbtFrame frame, int counter, Options options) {
@@ -527,34 +550,45 @@ public final class DirectTbtPayload {
 
         public static Options from(Context context) {
             Context safeContext = Objects.requireNonNull(context, "context");
-            boolean png = HudPrefs.isPngOutputEnabled(safeContext);
-            boolean nativeManeuver = HudPrefs.isNativeOutputEnabled(safeContext);
-            boolean lanes = HudPrefs.isLaneOutputEnabled(safeContext);
-            boolean distance = HudPrefs.isDistanceOutputEnabled(safeContext);
-            boolean street = HudPrefs.isStreetOutputEnabled(safeContext);
-            boolean textDirection = HudPrefs.isTextDirectionOutputEnabled(safeContext);
-            boolean clampSmallDistance = HudPrefs.isSmallDistanceClampEnabled(safeContext);
-            int routeMetricsMode = HudPrefs.routeMetricsMode(safeContext);
-            boolean showEta = HudPrefs.isEtaOutputEnabled(safeContext);
-            boolean showRemainingTime = HudPrefs.isRemainingTimeOutputEnabled(safeContext);
-            boolean showRemainingDistance = HudPrefs.isRemainingDistanceOutputEnabled(safeContext);
-            int speedLimitMode = HudPrefs.speedLimitMode(safeContext);
-            int speedLimitFreeFallback = HudPrefs.speedLimitFreeFallback(safeContext);
-            int speedLimitOverlaySeconds = HudPrefs.speedLimitOverlaySeconds(safeContext);
-            int revision = HudPrefs.outputOptionsRevision();
+            byte[] blankS72Png;
             synchronized (OPTIONS_LOCK) {
-                if (cachedOptions != null && cachedOptionsRevision == revision) {
+                int revision = HudPrefs.outputOptionsRevision();
+                if (cachedOptions != null && cachedOptionsRevision == revision
+                        && revision == HudPrefs.outputOptionsRevision()) {
                     return cachedOptions;
                 }
                 if (cachedBlankS72Png == null) cachedBlankS72Png = loadBlankS72(safeContext);
-                cachedOptions = new Options(
-                        png, nativeManeuver, lanes, distance, street, textDirection,
-                        clampSmallDistance, routeMetricsMode, showEta,
-                        showRemainingTime, showRemainingDistance, speedLimitMode,
-                        speedLimitFreeFallback, speedLimitOverlaySeconds,
-                        cachedBlankS72Png);
-                cachedOptionsRevision = revision;
-                return cachedOptions;
+                blankS72Png = cachedBlankS72Png;
+            }
+            while (true) {
+                RevisionedSnapshot<Options> snapshot = readStableSnapshot(
+                        HudPrefs::outputOptionsRevision,
+                        () -> new Options(
+                                HudPrefs.isPngOutputEnabled(safeContext),
+                                HudPrefs.isNativeOutputEnabled(safeContext),
+                                HudPrefs.isLaneOutputEnabled(safeContext),
+                                HudPrefs.isDistanceOutputEnabled(safeContext),
+                                HudPrefs.isStreetOutputEnabled(safeContext),
+                                HudPrefs.isTextDirectionOutputEnabled(safeContext),
+                                HudPrefs.isSmallDistanceClampEnabled(safeContext),
+                                HudPrefs.routeMetricsMode(safeContext),
+                                HudPrefs.isEtaOutputEnabled(safeContext),
+                                HudPrefs.isRemainingTimeOutputEnabled(safeContext),
+                                HudPrefs.isRemainingDistanceOutputEnabled(safeContext),
+                                HudPrefs.speedLimitMode(safeContext),
+                                HudPrefs.speedLimitFreeFallback(safeContext),
+                                HudPrefs.speedLimitOverlaySeconds(safeContext),
+                                blankS72Png));
+                synchronized (OPTIONS_LOCK) {
+                    if (snapshot.revision != HudPrefs.outputOptionsRevision()) continue;
+                    if (cachedOptions != null
+                            && cachedOptionsRevision == snapshot.revision) {
+                        return cachedOptions;
+                    }
+                    cachedOptions = snapshot.values;
+                    cachedOptionsRevision = snapshot.revision;
+                    return cachedOptions;
+                }
             }
         }
     }

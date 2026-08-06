@@ -467,11 +467,18 @@ final class NavigatorPatchStore {
             PackageInfo info = context.getPackageManager().getPackageInfo(
                     Profile.WAZE.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
             SharedPreferences preferences = prefs(context);
-            return NavigatorSigningKey.installedUsesLocalKey(context, Profile.WAZE.packageName)
-                    && PATCHED.equals(preferences.getString("waze_installed_optional", ""))
+            String signer = NavigatorSigningKey.installedCertificateSha256(
+                    context, Profile.WAZE.packageName);
+            boolean localVerificationCurrent =
+                    PATCHED.equals(preferences.getString("waze_installed_optional", ""))
                     && preferences.getLong("waze_installed_update", -1L) == info.lastUpdateTime
                     && preferences.getLong("waze_installed_version_code", -1L)
                     == info.getLongVersionCode();
+            return NavigatorPatchTrustPolicy.evaluateWazeLifecycleV2(
+                    signer,
+                    NavigatorAssetManager.isInstalledCanonicalWazeCached(context),
+                    NavigatorSigningKey.certificateMatchesLocalIfPresent(signer),
+                    localVerificationCurrent).accepted;
         } catch (Exception ignored) {
             return false;
         }
