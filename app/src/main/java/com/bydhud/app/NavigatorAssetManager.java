@@ -139,7 +139,7 @@ final class NavigatorAssetManager {
                 1030706L,
                 "com.waze",
                 NavigatorPatchTrustPolicy.WAZE_PROJECT_SIGNER,
-                "31688BBDB750274F24078ECB6D9F8F0A0AEA2442A20E17E01ECDB156D9F78815",
+                "3156C81BBAF3C80F0D731963DBAEB98EC22634CC61100EF835B9FCEE9204639E",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/waze-5.20.0.1-direct.apk",
                 "waze-5.20.0.1-direct.apk",
