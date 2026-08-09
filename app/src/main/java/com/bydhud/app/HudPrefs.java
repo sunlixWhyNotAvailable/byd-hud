@@ -27,6 +27,12 @@ final class HudPrefs {
     private static final String KEY_SPEED_LIMIT_MODE = "speed_limit_mode";
     private static final String KEY_SPEED_LIMIT_FREE_FALLBACK = "speed_limit_free_fallback";
     private static final String KEY_SPEED_LIMIT_OVERLAY_SECONDS = "speed_limit_overlay_seconds";
+    private static final String KEY_SPEED_LIMIT_COMPOSITE_PLACEMENT =
+            "speed_limit_composite_placement";
+    private static final String KEY_SPEED_LIMIT_MANEUVER_OVERLAY_SIZE =
+            "speed_limit_maneuver_overlay_size";
+    private static final String KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE =
+            "speed_limit_lane_overlay_size";
     private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
@@ -41,9 +47,14 @@ final class HudPrefs {
     static final int SPEED_LIMIT_MANEUVER = 1;
     static final int SPEED_LIMIT_LANES = 2;
     static final int SPEED_LIMIT_FREE = 3;
+    static final int SPEED_LIMIT_COMPOSITE = 4;
     static final int SPEED_LIMIT_FALLBACK_OFF = 0;
     static final int SPEED_LIMIT_FALLBACK_MANEUVER = 1;
     static final int SPEED_LIMIT_FALLBACK_LANES = 2;
+    static final int SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY = 0;
+    static final int SPEED_LIMIT_COMPOSITE_LANES_ONLY = 1;
+    static final int SPEED_LIMIT_COMPOSITE_FREE_OR_MANEUVER = 2;
+    static final int SPEED_LIMIT_COMPOSITE_FREE_OR_LANES = 3;
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
@@ -220,13 +231,13 @@ final class HudPrefs {
     }
 
     static int speedLimitMode(Context context) {
-        return clamp(prefs(context).getInt(KEY_SPEED_LIMIT_MODE, SPEED_LIMIT_OFF),
-                SPEED_LIMIT_OFF, SPEED_LIMIT_FREE);
+        return normalizeSpeedLimitMode(
+                prefs(context).getInt(KEY_SPEED_LIMIT_MODE, SPEED_LIMIT_OFF));
     }
 
     static void setSpeedLimitMode(Context context, int mode) {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_MODE,
-                clamp(mode, SPEED_LIMIT_OFF, SPEED_LIMIT_FREE)).apply();
+                normalizeSpeedLimitMode(mode)).apply();
         outputOptionsRevision++;
     }
 
@@ -250,6 +261,57 @@ final class HudPrefs {
         prefs(context).edit().putInt(
                 KEY_SPEED_LIMIT_OVERLAY_SECONDS, clamp(seconds, 1, 10)).apply();
         outputOptionsRevision++;
+    }
+
+    static int speedLimitCompositePlacement(Context context) {
+        return normalizeSpeedLimitCompositePlacement(prefs(context).getInt(
+                KEY_SPEED_LIMIT_COMPOSITE_PLACEMENT,
+                SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY));
+    }
+
+    static void setSpeedLimitCompositePlacement(Context context, int placement) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_COMPOSITE_PLACEMENT,
+                normalizeSpeedLimitCompositePlacement(placement)).apply();
+        outputOptionsRevision++;
+    }
+
+    static int speedLimitManeuverOverlaySize(Context context) {
+        return normalizeSpeedLimitManeuverOverlaySize(
+                prefs(context).getInt(KEY_SPEED_LIMIT_MANEUVER_OVERLAY_SIZE, 64));
+    }
+
+    static void setSpeedLimitManeuverOverlaySize(Context context, int size) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_MANEUVER_OVERLAY_SIZE,
+                normalizeSpeedLimitManeuverOverlaySize(size)).apply();
+        outputOptionsRevision++;
+    }
+
+    static int speedLimitLaneOverlaySize(Context context) {
+        return normalizeSpeedLimitLaneOverlaySize(
+                prefs(context).getInt(KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE, 36));
+    }
+
+    static void setSpeedLimitLaneOverlaySize(Context context, int size) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE,
+                normalizeSpeedLimitLaneOverlaySize(size)).apply();
+        outputOptionsRevision++;
+    }
+
+    static int normalizeSpeedLimitMode(int mode) {
+        return clamp(mode, SPEED_LIMIT_OFF, SPEED_LIMIT_COMPOSITE);
+    }
+
+    static int normalizeSpeedLimitCompositePlacement(int placement) {
+        return clamp(placement, SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY,
+                SPEED_LIMIT_COMPOSITE_FREE_OR_LANES);
+    }
+
+    static int normalizeSpeedLimitManeuverOverlaySize(int size) {
+        return clamp(size, 1, 103);
+    }
+
+    static int normalizeSpeedLimitLaneOverlaySize(int size) {
+        return clamp(size, 1, 36);
     }
 
     static boolean isWazeScreenCaptureEnabled(Context context) {

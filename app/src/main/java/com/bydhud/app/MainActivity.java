@@ -801,6 +801,9 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.speedLimitMode(this),
                 HudPrefs.speedLimitFreeFallback(this),
                 HudPrefs.speedLimitOverlaySeconds(this),
+                HudPrefs.speedLimitCompositePlacement(this),
+                HudPrefs.speedLimitManeuverOverlaySize(this),
+                HudPrefs.speedLimitLaneOverlaySize(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
                 HudPrefs.isFullscreenDashboardEnabled(this),
@@ -1289,6 +1292,18 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetSpeedLimitOverlaySeconds(int seconds) {
         setSpeedLimitOverlaySeconds(seconds);
+    }
+
+    public void composeSetSpeedLimitCompositePlacement(int placement) {
+        setSpeedLimitCompositePlacement(placement);
+    }
+
+    public void composeSetSpeedLimitManeuverOverlaySize(int size) {
+        setSpeedLimitManeuverOverlaySize(size);
+    }
+
+    public void composeSetSpeedLimitLaneOverlaySize(int size) {
+        setSpeedLimitLaneOverlaySize(size);
     }
 
     public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
@@ -1843,6 +1858,9 @@ public final class MainActivity extends ComponentActivity {
         public final int speedLimitMode;
         public final int speedLimitFreeFallback;
         public final int speedLimitOverlaySeconds;
+        public final int speedLimitCompositePlacement;
+        public final int speedLimitManeuverOverlaySize;
+        public final int speedLimitLaneOverlaySize;
         public final boolean wazeScreenCaptureEnabled;
         public final boolean wazeCustomSurfaceEnabled;
         public final boolean fullscreenDashboardEnabled;
@@ -1900,6 +1918,8 @@ public final class MainActivity extends ComponentActivity {
                 boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
                 boolean remainingDistanceOutputEnabled, int speedLimitMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize,
                 boolean wazeScreenCaptureEnabled,
                 boolean wazeCustomSurfaceEnabled,
                 boolean fullscreenDashboardEnabled,
@@ -1941,6 +1961,9 @@ public final class MainActivity extends ComponentActivity {
             this.speedLimitMode = speedLimitMode;
             this.speedLimitFreeFallback = speedLimitFreeFallback;
             this.speedLimitOverlaySeconds = speedLimitOverlaySeconds;
+            this.speedLimitCompositePlacement = speedLimitCompositePlacement;
+            this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
+            this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
@@ -3056,6 +3079,33 @@ public final class MainActivity extends ComponentActivity {
         int persisted = HudPrefs.speedLimitOverlaySeconds(this);
         appendStatus("Speed limit overlay seconds " + persisted);
         AppEventLogger.event(this, "ui speed_limit_overlay_seconds=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitCompositePlacement(int placement) {
+        HudPrefs.setSpeedLimitCompositePlacement(this, placement);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitCompositePlacement(this);
+        appendStatus("Speed limit composite placement " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_composite_placement=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitManeuverOverlaySize(int size) {
+        HudPrefs.setSpeedLimitManeuverOverlaySize(this, size);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitManeuverOverlaySize(this);
+        appendStatus("Speed limit maneuver overlay size " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_maneuver_overlay_size=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitLaneOverlaySize(int size) {
+        HudPrefs.setSpeedLimitLaneOverlaySize(this, size);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitLaneOverlaySize(this);
+        appendStatus("Speed limit lane overlay size " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_lane_overlay_size=" + persisted);
         refreshControls();
     }
 

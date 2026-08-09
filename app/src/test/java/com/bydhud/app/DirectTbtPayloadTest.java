@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -227,6 +228,138 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void compositePlacementUsesNamedAndOnlyFreeFields() {
+        DirectTbtFrame bothOccupied = speedFrame(new byte[]{1}, new byte[]{2});
+        DirectTbtFrame bothFree = speedFrame(new byte[0], new byte[0]);
+        DirectTbtFrame maneuverOnly = speedFrame(new byte[]{1}, new byte[0]);
+        DirectTbtFrame lanesOnly = speedFrame(new byte[0], new byte[]{2});
+
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(bothOccupied, compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY)));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(bothFree, compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_LANES_ONLY)));
+
+        DirectTbtPayload.Options freeOrManeuver = compositeOptions(
+                HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_MANEUVER);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(maneuverOnly, freeOrManeuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(lanesOnly, freeOrManeuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(bothFree, freeOrManeuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(bothOccupied, freeOrManeuver));
+
+        DirectTbtPayload.Options freeOrLanes = compositeOptions(
+                HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_LANES);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(bothFree, freeOrLanes));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(bothOccupied, freeOrLanes));
+        assertFalse(DirectTbtPayload.speedOverlaysOccupiedField(
+                bothOccupied, freeOrLanes));
+    }
+
+    @Test
+    public void legacyOptionsKeepCompositeDefaults() {
+        DirectTbtPayload.Options options = speedOptions(
+                HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_FALLBACK_OFF);
+
+        assertEquals(HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY,
+                options.speedLimitCompositePlacement);
+        assertEquals(64, options.speedLimitManeuverOverlaySize);
+        assertEquals(36, options.speedLimitLaneOverlaySize);
+    }
+
+    @Test
+    public void speedLimitPreferenceNormalizersClampBoundaries() {
+        assertEquals(0, HudPrefs.normalizeSpeedLimitMode(-1));
+        assertEquals(0, HudPrefs.normalizeSpeedLimitMode(0));
+        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(4));
+        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(5));
+
+        assertEquals(0, HudPrefs.normalizeSpeedLimitCompositePlacement(-1));
+        assertEquals(0, HudPrefs.normalizeSpeedLimitCompositePlacement(0));
+        assertEquals(3, HudPrefs.normalizeSpeedLimitCompositePlacement(3));
+        assertEquals(3, HudPrefs.normalizeSpeedLimitCompositePlacement(4));
+
+        assertEquals(1, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(0));
+        assertEquals(1, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(1));
+        assertEquals(103, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(103));
+        assertEquals(103, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(104));
+
+        assertEquals(1, HudPrefs.normalizeSpeedLimitLaneOverlaySize(0));
+        assertEquals(1, HudPrefs.normalizeSpeedLimitLaneOverlaySize(1));
+        assertEquals(36, HudPrefs.normalizeSpeedLimitLaneOverlaySize(36));
+        assertEquals(36, HudPrefs.normalizeSpeedLimitLaneOverlaySize(37));
+    }
+
+    @Test
+    public void compositeCacheKeyUsesFullBytesAndEveryOption() {
+        byte[] base = {1, 2, 3};
+        assertTrue(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, new byte[]{1, 2, 3}, 50, 64, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, new byte[]{1, 2, 4}, 50, 64, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, base, 60, 64, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, base, 50, 36, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, base, 50, 64, true));
+    }
+
+    @Test
+    public void freeFieldStandaloneSignPolicyIs96Pixels() {
+        assertEquals(96, SpeedLimitPng.STANDALONE_SIZE_PX);
+    }
+
+    @Test
+    public void compositeFailureAndMissingLaneBitmapPreserveGuidance() {
+        DirectTbtPayload.Prepared maneuver = DirectTbtPayload.prepare(
+                speedFrame(new byte[]{1, 2, 3}, new byte[0]), compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY));
+        DirectTbtFrame structuredLanes = new DirectTbtFrame(
+                11, 3, 9, 120, "Road", "Turn right", "Road",
+                new byte[]{1, 2, 3}, new byte[0],
+                Collections.singletonList(new DirectTbtFrame.Lane(2, true, "R")),
+                DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+        DirectTbtPayload.Prepared lanes = DirectTbtPayload.prepare(
+                structuredLanes, compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_LANES_ONLY));
+
+        assertEquals(3, maneuver.maneuverPngBytes());
+        assertEquals("current", maneuver.maneuverMode());
+        assertEquals(1, lanes.laneCount());
+        assertEquals(0, lanes.lanePngBytes());
+    }
+
+    @Test
+    public void compositeGeometryKeepsMarginsAndUsesRightOnTies() {
+        assertEquals(38, SpeedLimitPng.compositeCanvasSize(20, 36));
+        assertEquals(100, SpeedLimitPng.compositeCanvasSize(100, 36));
+        assertEquals(63, SpeedLimitPng.compositeBottomY(100, 36));
+        assertEquals(40, SpeedLimitPng.chooseManeuverX(105, 64, 3, 3));
+        assertEquals(1, SpeedLimitPng.chooseManeuverX(105, 64, 2, 3));
+    }
+
+    @Test
+    public void laneGeometryUsesActualColumnRunsAndLeastOverlapGap() {
+        assertArrayEquals(new int[]{1, 2, 5, 5, 8, 10},
+                SpeedLimitPng.occupiedColumnRuns(new boolean[]{
+                        false, true, true, false, false, true,
+                        false, false, true, true, true}));
+        int[] runs = {2, 6, 30, 35, 70, 75};
+        assertEquals(42, SpeedLimitPng.chooseLaneX(100, 20, runs, new int[]{3, 3}));
+        assertEquals(8, SpeedLimitPng.chooseLaneX(100, 20, runs, new int[]{1, 2}));
+        assertEquals(79, SpeedLimitPng.chooseLaneX(
+                100, 20, new int[]{2, 6, 30, 35}, new int[]{0}));
+    }
+
+    @Test
     public void speedLimitStoreNormalizesMphAndDeduplicates() {
         assertTrue(DirectSpeedLimitStore.update("com.waze", 30, -1, "mph", 10L));
         DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot("com.waze");
@@ -242,6 +375,22 @@ public final class DirectTbtPayloadTest {
                 true, true, true, true, true, true, false,
                 HudPrefs.ROUTE_METRICS_OFF, false, false, false,
                 mode, fallback, 5, new byte[]{7, 2});
+    }
+
+    private static DirectTbtPayload.Options compositeOptions(int placement) {
+        return new DirectTbtPayload.Options(
+                true, true, true, true, true, true, false,
+                HudPrefs.ROUTE_METRICS_OFF, false, false, false,
+                HudPrefs.SPEED_LIMIT_COMPOSITE, HudPrefs.SPEED_LIMIT_FALLBACK_OFF,
+                5, placement, 64, 36, new byte[]{7, 2});
+    }
+
+    private static DirectTbtFrame speedFrame(byte[] maneuverPng, byte[] lanePng) {
+        return new DirectTbtFrame(
+                11, 3, 9, 120, "Road", "Turn right", "Road",
+                maneuverPng, lanePng, Collections.emptyList(),
+                DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
     }
 
     private static DirectTbtPayload.Options metricOptions(

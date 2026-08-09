@@ -54,6 +54,7 @@ final class NavHudLiveSender {
 
     static void onWazeRouteLifecycleEvent(Context context, boolean routeActive,
             boolean terminal, long eventElapsedMs, boolean changed, String reason) {
+        if (terminal) DirectSpeedLimitStore.clear(WAZE_PACKAGE);
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
             current = instance;
@@ -66,6 +67,15 @@ final class NavHudLiveSender {
 
     static boolean shouldStartWazeDirectHost(boolean bridgeSupported, boolean routeActive) {
         return !bridgeSupported || routeActive;
+    }
+
+    static boolean shouldRestartWazeDirectForLifecycle(
+            boolean changed, boolean channelActive, boolean navigating) {
+        return !channelActive || (changed && !navigating);
+    }
+
+    static boolean shouldRecoverWazeDirectForLifecycle(boolean changed, boolean navigating) {
+        return navigating || !changed;
     }
 
     void onWazeAlertsPreferenceChanged(boolean enabled) {
@@ -1009,7 +1019,6 @@ final class NavHudLiveSender {
         }
         boolean newRoute = !wazeDirectNavigating;
         if (newRoute) {
-            clearDirectSpeedLimit(WAZE_PACKAGE);
             wazeDirectFrameReceived = false;
             wazeSurfaceEnabledForRoute = HudPrefs.isWazeCustomSurfaceEnabled(context);
             wazeSurfaceDismissedForRoute = false;
@@ -2173,8 +2182,11 @@ final class NavHudLiveSender {
             startOnMain(WAZE_PACKAGE, "route-lifecycle-start");
             return;
         }
-        if (changed || !wazeDirectChannel.isActive()) {
-            startWazeDirectForRoute("route-lifecycle-start", !changed);
+        if (shouldRestartWazeDirectForLifecycle(
+                changed, wazeDirectChannel.isActive(), wazeDirectNavigating)) {
+            startWazeDirectForRoute(
+                    "route-lifecycle-start",
+                    shouldRecoverWazeDirectForLifecycle(changed, wazeDirectNavigating));
         } else {
             wazeDirectChannel.start(
                     "route-lifecycle-ensure", WazeDirectChannel.Mode.CLUSTER);

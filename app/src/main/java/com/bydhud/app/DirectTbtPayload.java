@@ -108,17 +108,52 @@ public final class DirectTbtPayload {
         if (!safeOptions.nativeManeuver) nativeManeuver = 0;
         if (!safeOptions.distance) distanceMeters = 0;
         int speedPlacement = speedPlacement(safeFrame, safeOptions);
+        boolean maneuverSpeedApplied = false;
         if (speedPlacement != SPEED_PLACEMENT_NONE) {
-            byte[] speedPng = SpeedLimitPng.get(
-                    safeFrame.getSpeedLimit().getDisplayValue());
-            if (speedPlacement == SPEED_PLACEMENT_MANEUVER) {
-                maneuverPng = speedPng;
-            } else if (speedPlacement == SPEED_PLACEMENT_LANES) {
-                lanes = Collections.emptyList();
-                lanePng = speedPng;
+            int speedLimit = safeFrame.getSpeedLimit().getDisplayValue();
+            if (safeOptions.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE) {
+                boolean occupied = speedPlacement == SPEED_PLACEMENT_MANEUVER
+                        ? maneuverFieldOccupied(safeFrame, safeOptions)
+                        : laneFieldOccupied(safeFrame, safeOptions);
+                if (occupied) {
+                    byte[] composite = SpeedLimitPng.composite(
+                            speedLimit,
+                            speedPlacement == SPEED_PLACEMENT_MANEUVER
+                                    ? maneuverPng : lanePng,
+                            speedPlacement == SPEED_PLACEMENT_MANEUVER
+                                    ? safeOptions.speedLimitManeuverOverlaySize
+                                    : safeOptions.speedLimitLaneOverlaySize,
+                            speedPlacement == SPEED_PLACEMENT_LANES);
+                    if (composite != null) {
+                        if (speedPlacement == SPEED_PLACEMENT_MANEUVER) {
+                            maneuverPng = composite;
+                            maneuverSpeedApplied = true;
+                        } else {
+                            lanePng = composite;
+                        }
+                    }
+                } else {
+                    byte[] speedPng = SpeedLimitPng.get(
+                            speedLimit, SpeedLimitPng.STANDALONE_SIZE_PX);
+                    if (speedPlacement == SPEED_PLACEMENT_MANEUVER) {
+                        maneuverPng = speedPng;
+                        maneuverSpeedApplied = speedPng.length > 0;
+                    } else {
+                        lanePng = speedPng;
+                    }
+                }
+            } else {
+                byte[] speedPng = SpeedLimitPng.get(speedLimit);
+                if (speedPlacement == SPEED_PLACEMENT_MANEUVER) {
+                    maneuverPng = speedPng;
+                    maneuverSpeedApplied = true;
+                } else if (speedPlacement == SPEED_PLACEMENT_LANES) {
+                    lanes = Collections.emptyList();
+                    lanePng = speedPng;
+                }
             }
         }
-        String maneuverMode = speedPlacement == SPEED_PLACEMENT_MANEUVER ? "speed_limit"
+        String maneuverMode = maneuverSpeedApplied ? "speed_limit"
                 : !safeOptions.png ? "disabled"
                 : alert.isActive() ? "alert"
                 : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
@@ -254,6 +289,22 @@ public final class DirectTbtPayload {
         }
         boolean maneuverOccupied = maneuverFieldOccupied(frame, options);
         boolean lanesOccupied = laneFieldOccupied(frame, options);
+        if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE) {
+            int selector = options.speedLimitCompositePlacement;
+            if (selector == HudPrefs.SPEED_LIMIT_COMPOSITE_LANES_ONLY) {
+                return SPEED_PLACEMENT_LANES;
+            }
+            if (selector == HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_MANEUVER
+                    || selector == HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_LANES) {
+                if (maneuverOccupied != lanesOccupied) {
+                    return maneuverOccupied
+                            ? SPEED_PLACEMENT_LANES : SPEED_PLACEMENT_MANEUVER;
+                }
+                return selector == HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_LANES
+                        ? SPEED_PLACEMENT_LANES : SPEED_PLACEMENT_MANEUVER;
+            }
+            return SPEED_PLACEMENT_MANEUVER;
+        }
         if (!maneuverOccupied) return SPEED_PLACEMENT_MANEUVER;
         if (!lanesOccupied) return SPEED_PLACEMENT_LANES;
         if (options.speedLimitFreeFallback == HudPrefs.SPEED_LIMIT_FALLBACK_MANEUVER) {
@@ -266,6 +317,9 @@ public final class DirectTbtPayload {
     }
 
     static boolean speedOverlaysOccupiedField(DirectTbtFrame frame, Options options) {
+        if (options != null && options.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE) {
+            return false;
+        }
         int placement = speedPlacement(frame, options);
         return placement == SPEED_PLACEMENT_MANEUVER
                 ? maneuverFieldOccupied(frame, options)
@@ -483,6 +537,9 @@ public final class DirectTbtPayload {
         public final int speedLimitMode;
         public final int speedLimitFreeFallback;
         public final int speedLimitOverlaySeconds;
+        public final int speedLimitCompositePlacement;
+        public final int speedLimitManeuverOverlaySize;
+        public final int speedLimitLaneOverlaySize;
         private final byte[] blankS72Png;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
@@ -530,6 +587,24 @@ public final class DirectTbtPayload {
                 boolean showRemainingDistance, int speedLimitMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 byte[] blankS72Png) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds,
+                    HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY, 64, 36,
+                    blankS72Png);
+        }
+
+        Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, int routeMetricsMode,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement,
+                int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize,
+                byte[] blankS72Png) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -545,6 +620,9 @@ public final class DirectTbtPayload {
             this.speedLimitMode = speedLimitMode;
             this.speedLimitFreeFallback = speedLimitFreeFallback;
             this.speedLimitOverlaySeconds = speedLimitOverlaySeconds;
+            this.speedLimitCompositePlacement = speedLimitCompositePlacement;
+            this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
+            this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
         }
 
@@ -578,6 +656,9 @@ public final class DirectTbtPayload {
                                 HudPrefs.speedLimitMode(safeContext),
                                 HudPrefs.speedLimitFreeFallback(safeContext),
                                 HudPrefs.speedLimitOverlaySeconds(safeContext),
+                                HudPrefs.speedLimitCompositePlacement(safeContext),
+                                HudPrefs.speedLimitManeuverOverlaySize(safeContext),
+                                HudPrefs.speedLimitLaneOverlaySize(safeContext),
                                 blankS72Png));
                 synchronized (OPTIONS_LOCK) {
                     if (snapshot.revision != HudPrefs.outputOptionsRevision()) continue;

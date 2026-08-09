@@ -1520,14 +1520,19 @@ private fun OptionsTab(
         listOf("Off", "Next stop", "Entire route")
     }
     val speedLimitModes = if (ua) {
-        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі")
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний")
     } else {
-        listOf("Off", "In maneuver field", "In lane field", "In a free field")
+        listOf("Off", "In maneuver field", "In lane field", "In a free field", "Composite")
     }
     val speedLimitFallbackModes = if (ua) {
         listOf("Вимкнено", "У полі з маневром", "У полі зі смугами")
     } else {
         listOf("Off", "In maneuver field", "In lane field")
+    }
+    val speedLimitCompositePlacementModes = if (ua) {
+        listOf("Тільки маневру", "Тільки смуг", "Вільне або маневру", "Вільне або смуг")
+    } else {
+        listOf("Maneuver only", "Lanes only", "Free or maneuver", "Free or lanes")
     }
     val routeMetricsTitle = if (ua) {
         "Режим виводу ЕТА/часу/дистанції"
@@ -1554,7 +1559,23 @@ private fun OptionsTab(
     } else {
         "Seconds to show the speed limit over an active maneuver or lane output. Whole numbers from 1 to 10."
     }
+    val compositePlacementHint = if (ua) {
+        "Визначає поле для композитного знаку та пріоритет, коли одне з полів вільне."
+    } else {
+        "Choose the composite sign field and its priority when one field is free."
+    }
+    val compositeManeuverSizeHint = if (ua) {
+        "Розмір композитного знаку у пікселях для зображення маневру. Дозволено ціле число від 1 до 103."
+    } else {
+        "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only."
+    }
+    val compositeLaneSizeHint = if (ua) {
+        "Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36."
+    } else {
+        "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only."
+    }
     val freeFallbackEnabled = snapshot.speedLimitMode == 3
+    val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE
     val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
             || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
 
@@ -1762,6 +1783,83 @@ private fun OptionsTab(
                         )
                     }
                 )
+                Divider(palette)
+                SettingRow(
+                    title = if (ua) "Поле для виводу у композитному режимі"
+                    else "Composite output field",
+                    hint = compositePlacementHint,
+                    palette = palette,
+                    enabled = compositeEnabled,
+                    action = {
+                        HudDropdown(
+                            selectedIndex = snapshot.speedLimitCompositePlacement,
+                            options = speedLimitCompositePlacementModes,
+                            palette = palette,
+                            width = 190.dp,
+                            enabled = compositeEnabled,
+                            onSelected = { placement ->
+                                runAction { activity.composeSetSpeedLimitCompositePlacement(placement) }
+                            }
+                        )
+                    }
+                )
+                Divider(palette)
+                SettingRow(
+                    title = if (ua) "Розмір знаку у полі маневру"
+                    else "Sign size in maneuver field",
+                    hint = compositeManeuverSizeHint,
+                    palette = palette,
+                    enabled = compositeEnabled,
+                    action = {
+                        HudIntegerStepper(
+                            value = snapshot.speedLimitManeuverOverlaySize,
+                            palette = palette,
+                            enabled = compositeEnabled,
+                            maxValue = 103,
+                            fallbackValue = 64,
+                            onValueChange = { size ->
+                                runAction { activity.composeSetSpeedLimitManeuverOverlaySize(size) }
+                            }
+                        )
+                    }
+                )
+                Divider(palette)
+                SettingRow(
+                    title = if (ua) "Розмір знаку у полі для смуг"
+                    else "Sign size in lane field",
+                    hint = compositeLaneSizeHint,
+                    palette = palette,
+                    enabled = compositeEnabled,
+                    action = {
+                        HudIntegerStepper(
+                            value = snapshot.speedLimitLaneOverlaySize,
+                            palette = palette,
+                            enabled = compositeEnabled,
+                            maxValue = 36,
+                            fallbackValue = 36,
+                            onValueChange = { size ->
+                                runAction { activity.composeSetSpeedLimitLaneOverlaySize(size) }
+                            }
+                        )
+                    }
+                )
+            }
+        }
+
+        item(key = "waze-features") {
+            Section(copy.wazeFeatures, palette) {
+                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
+                    runAction { activity.composeSetWazeAlertsEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.customSurface,
+                    copy.customSurfaceHint,
+                    snapshot.wazeCustomSurfaceEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetWazeCustomSurfaceEnabled(it) }
+                }
             }
         }
 
@@ -1782,23 +1880,6 @@ private fun OptionsTab(
                 Divider(palette)
                 SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
                     runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
-                }
-            }
-        }
-
-        item(key = "waze-features") {
-            Section(copy.wazeFeatures, palette) {
-                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
-                    runAction { activity.composeSetWazeAlertsEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(
-                    copy.customSurface,
-                    copy.customSurfaceHint,
-                    snapshot.wazeCustomSurfaceEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetWazeCustomSurfaceEnabled(it) }
                 }
             }
         }
@@ -4549,26 +4630,33 @@ private fun HudIntegerStepper(
     value: Int,
     palette: Palette,
     enabled: Boolean,
+    minValue: Int = 1,
+    maxValue: Int? = 10,
+    fallbackValue: Int = 5,
     onValueChange: (Int) -> Unit
 ) {
-    val safeValue = value.coerceIn(1, 10)
-    var textValue by remember(safeValue) { mutableStateOf(safeValue.toString()) }
+    val current = value.takeIf { isValidHudInteger(it, minValue, maxValue) }
+        ?: fallbackValue
+    var textValue by remember(value, minValue, maxValue, fallbackValue) {
+        mutableStateOf(current.toString())
+    }
     Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
         HudButton(
             text = "-",
             palette = palette,
             width = 42.dp,
-            enabled = enabled && safeValue > 1,
-            onClick = { onValueChange(safeValue - 1) }
+            enabled = enabled && current > minValue,
+            onClick = { onValueChange(current - 1) }
         )
         BasicTextField(
             value = textValue,
             onValueChange = { rawValue ->
-                val candidate = rawValue.filter(Char::isDigit).take(2)
-                textValue = candidate
-                val parsed = candidate.toIntOrNull()
-                if (parsed != null && parsed in 1..10) {
-                    onValueChange(parsed)
+                val candidate = rawValue.filter(Char::isDigit)
+                if (candidate.isEmpty() || isValidHudInteger(
+                        candidate.toIntOrNull(), minValue, maxValue
+                    )) {
+                    textValue = candidate
+                    candidate.toIntOrNull()?.let(onValueChange)
                 }
             },
             enabled = enabled,
@@ -4583,8 +4671,11 @@ private fun HudIntegerStepper(
             modifier = Modifier
                 .width(52.dp)
                 .onFocusChanged { focusState ->
-                    if (enabled && !focusState.isFocused && textValue.toIntOrNull() !in 1..10) {
-                        textValue = safeValue.toString()
+                    if (enabled && !focusState.isFocused && !isValidHudInteger(
+                            textValue.toIntOrNull(), minValue, maxValue
+                        )) {
+                        textValue = fallbackValue.toString()
+                        onValueChange(fallbackValue)
                     }
                 },
             decorationBox = { innerTextField ->
@@ -4609,11 +4700,14 @@ private fun HudIntegerStepper(
             text = "+",
             palette = palette,
             width = 42.dp,
-            enabled = enabled && safeValue < 10,
-            onClick = { onValueChange(safeValue + 1) }
+            enabled = enabled && current < (maxValue ?: Int.MAX_VALUE),
+            onClick = { onValueChange(current + 1) }
         )
     }
 }
+
+private fun isValidHudInteger(value: Int?, minValue: Int, maxValue: Int?): Boolean =
+    value != null && value >= minValue && (maxValue == null || value <= maxValue)
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.

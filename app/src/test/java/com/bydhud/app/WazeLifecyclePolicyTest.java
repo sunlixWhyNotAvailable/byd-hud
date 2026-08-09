@@ -6,6 +6,8 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.lang.reflect.Field;
+
 public final class WazeLifecyclePolicyTest {
     private static final String WAZE = "com.waze";
 
@@ -53,5 +55,66 @@ public final class WazeLifecyclePolicyTest {
         assertFalse(NavHudLiveSender.shouldStartWazeDirectHost(true, false));
         assertTrue(NavHudLiveSender.shouldStartWazeDirectHost(true, true));
         assertTrue(NavHudLiveSender.shouldStartWazeDirectHost(false, false));
+    }
+
+    @Test
+    public void lifecycleRestartPolicyCoversAllStates() {
+        boolean[][] cases = {
+                {false, false, false, true},
+                {false, false, true, true},
+                {false, true, false, false},
+                {false, true, true, false},
+                {true, false, false, true},
+                {true, false, true, true},
+                {true, true, false, true},
+                {true, true, true, false}
+        };
+        for (boolean[] testCase : cases) {
+            assertEquals(
+                    "changed=" + testCase[0]
+                            + " channelActive=" + testCase[1]
+                            + " navigating=" + testCase[2],
+                    testCase[3],
+                    NavHudLiveSender.shouldRestartWazeDirectForLifecycle(
+                            testCase[0], testCase[1], testCase[2]));
+        }
+    }
+
+    @Test
+    public void lifecycleRestartResetsOnlyFreshRouteState() {
+        assertTrue(NavHudLiveSender.shouldRecoverWazeDirectForLifecycle(false, false));
+        assertTrue(NavHudLiveSender.shouldRecoverWazeDirectForLifecycle(false, true));
+        assertFalse(NavHudLiveSender.shouldRecoverWazeDirectForLifecycle(true, false));
+        assertTrue(NavHudLiveSender.shouldRecoverWazeDirectForLifecycle(true, true));
+    }
+
+    @Test
+    public void acceptedLifecycleTerminalClearsSpeedLimitWithoutRuntimeInstance()
+            throws Exception {
+        Field instance = NavHudLiveSender.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        Object previous;
+        synchronized (NavHudLiveSender.class) {
+            previous = instance.get(null);
+            instance.set(null, null);
+        }
+        DirectSpeedLimitStore.clear(WAZE);
+        try {
+            DirectSpeedLimitStore.update(WAZE, 50, 50, "km/h", 1L);
+
+            NavHudLiveSender.onWazeRouteLifecycleEvent(
+                    null, true, false, 2L, true, "test-start");
+            assertTrue(DirectSpeedLimitStore.snapshot(WAZE).isActive());
+            assertEquals(50, DirectSpeedLimitStore.snapshot(WAZE).getDisplayValue());
+
+            NavHudLiveSender.onWazeRouteLifecycleEvent(
+                    null, false, true, 3L, true, "test-terminal");
+            assertFalse(DirectSpeedLimitStore.snapshot(WAZE).isActive());
+        } finally {
+            DirectSpeedLimitStore.clear(WAZE);
+            synchronized (NavHudLiveSender.class) {
+                instance.set(null, previous);
+            }
+        }
     }
 }
