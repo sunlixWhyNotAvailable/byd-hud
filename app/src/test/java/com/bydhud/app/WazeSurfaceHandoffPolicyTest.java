@@ -6,6 +6,12 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 public final class WazeSurfaceHandoffPolicyTest {
     @Test
     public void handoffChoosesOnlyRequiredAction() {
@@ -52,6 +58,32 @@ public final class WazeSurfaceHandoffPolicyTest {
                 "activity-surface-destroyed", false));
     }
 
+    @Test
+    public void surfaceTeardownWaitsForBoundedHostAcknowledgment() throws IOException {
+        String activity = sourcePath(
+                "app/src/main/java/com/bydhud/app/WazeSurfaceActivity.java");
+        String channel = sourcePath(
+                "app/src/main/java/com/bydhud/app/WazeDirectChannel.java");
+
+        assertTrue(activity.contains("SURFACE_DESTROY_ACK_TIMEOUT_MS = 250L"));
+        assertTrue(activity.contains("private volatile Surface surface"));
+        assertTrue(activity.contains("private volatile int surfaceWidth"));
+        assertTrue(activity.contains("private volatile int surfaceHeight"));
+        assertTrue(activity.contains("private volatile int surfaceDpi"));
+        assertTrue(activity.contains("private volatile Rect visibleArea"));
+        assertTrue(activity.contains("private volatile long surfaceEpoch"));
+        assertTrue(activity.contains("private volatile boolean visible"));
+        assertTrue(activity.contains("Surface currentSurface = activity.surface"));
+        assertTrue(activity.contains("bridge.onSurfaceDestroyed(destroyed::countDown)"));
+        assertTrue(activity.contains(
+                "destroyed.await(SURFACE_DESTROY_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)"));
+        assertTrue(channel.contains(
+                "notifySurfaceDestroyed(\"activity-surface-destroyed\", completion)"));
+        assertTrue(channel.contains(
+                "new DoneCallback(expectedGeneration, \"onSurfaceDestroyed\", null,"));
+        assertTrue(channel.contains("if (completion != null) completion.run()"));
+    }
+
     private static int action(boolean routeCurrent, boolean failed, boolean dismissed,
             int taskId, int actualDisplay, int targetDisplay, boolean ready) {
         return NavHudLiveSender.wazeSurfaceHandoffAction(
@@ -68,5 +100,16 @@ public final class WazeSurfaceHandoffPolicyTest {
                 activeInstanceId, readyInstanceId,
                 actualDisplay, readyDisplay, targetDisplay,
                 activeSurfaceEpoch, readySurfaceEpoch);
+    }
+
+    private static String sourcePath(String relativePath) throws IOException {
+        Path root = Paths.get(System.getProperty("user.dir"));
+        Path file = root.resolve(relativePath);
+        if (!Files.isRegularFile(file) && relativePath.startsWith("app/")) {
+            file = root.resolve(relativePath.substring("app/".length()));
+        }
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n');
     }
 }

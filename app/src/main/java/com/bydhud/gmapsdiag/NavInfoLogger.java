@@ -100,35 +100,40 @@ public final class NavInfoLogger {
             Log.w(TAG, "REGISTER_IGNORED|reason=null_context_or_intent");
             return;
         }
-        String action = intent.getAction();
-        boolean unregister = ACTION_UNREGISTER.equals(action);
-        boolean startChannel = "ACTION_START_CHANNEL".equals(action);
-        if (!unregister && !startChannel) return;
-        boolean hasClient = intent.hasExtra(EXTRA_CLIENT);
-        Log.i(TAG, "REGISTER_RECEIVED|action=" + action
-                + "|clientExtra=" + hasClient
-                + "|identityExtra=" + intent.hasExtra(EXTRA_IDENTITY)
-                + "|protocol=" + intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1));
-        if (startChannel && !hasClient) {
-            Log.w(TAG, "CLIENT_REJECTED|reason=missing_messenger_extra");
-            return;
+        try {
+            String action = intent.getAction();
+            boolean unregister = ACTION_UNREGISTER.equals(action);
+            boolean startChannel = "ACTION_START_CHANNEL".equals(action);
+            if (!unregister && !startChannel) return;
+            boolean hasClient = intent.hasExtra(EXTRA_CLIENT);
+            Log.i(TAG, "REGISTER_RECEIVED|action=" + action
+                    + "|clientExtra=" + hasClient
+                    + "|identityExtra=" + intent.hasExtra(EXTRA_IDENTITY)
+                    + "|protocol=" + intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1));
+            if (startChannel && !hasClient) {
+                Log.w(TAG, "CLIENT_REJECTED|reason=missing_messenger_extra");
+                return;
+            }
+            PendingIntent identity = intent.getParcelableExtra(EXTRA_IDENTITY);
+            if (!isTrustedSender(identity)) {
+                Log.w(TAG, "CLIENT_REJECTED|reason=untrusted_sender");
+                return;
+            }
+            if (unregister) {
+                clearClient("explicit_unregister", null);
+                return;
+            }
+            int protocol = intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1);
+            Messenger candidate = intent.getParcelableExtra(EXTRA_CLIENT);
+            if (protocol != PROTOCOL_VERSION || candidate == null) {
+                Log.w(TAG, "CLIENT_REJECTED|reason=protocol_or_messenger|protocol=" + protocol);
+                return;
+            }
+            installClient(candidate);
+        } catch (RuntimeException error) {
+            Log.w(TAG, "CLIENT_REJECTED|reason=malformed_extras|type="
+                    + error.getClass().getSimpleName());
         }
-        PendingIntent identity = intent.getParcelableExtra(EXTRA_IDENTITY);
-        if (!isTrustedSender(identity)) {
-            Log.w(TAG, "CLIENT_REJECTED|reason=untrusted_sender");
-            return;
-        }
-        if (unregister) {
-            clearClient("explicit_unregister", null);
-            return;
-        }
-        int protocol = intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1);
-        Messenger candidate = intent.getParcelableExtra(EXTRA_CLIENT);
-        if (protocol != PROTOCOL_VERSION || candidate == null) {
-            Log.w(TAG, "CLIENT_REJECTED|reason=protocol_or_messenger|protocol=" + protocol);
-            return;
-        }
-        installClient(candidate);
     }
 
     /** The producer's existing IF_NEZ branch skips serialization while no client is alive. */
@@ -232,6 +237,63 @@ public final class NavInfoLogger {
                 if (!speedReflectionErrorLogged) {
                     speedReflectionErrorLogged = true;
                     Log.w(TAG, "SPEED_LIMIT_FAILED|type="
+                            + error.getClass().getSimpleName()
+                            + "|message=" + clean(error.getMessage()));
+                }
+            }
+        }
+    }
+
+    /** Maps 26.30 successor of captureSpeedLimitState. */
+    public static void captureSpeedLimitStateV26(Object aggregateState) {
+        if (noClient() || aggregateState == null) return;
+        synchronized (SPEED_LOCK) {
+            try {
+                Object state = invokeObject(aggregateState, "d");
+                Object route = requiredField(state, "b");
+                if (!booleanField(state, "p") || !invokeBoolean(route, "ay")) {
+                    clearSpeedLimitLocked();
+                    return;
+                }
+                Object step = requiredField(state, "c");
+                Object speedStep = step == null ? null : requiredField(step, "U");
+                if (speedStep == null) {
+                    clearSpeedLimitLocked();
+                    return;
+                }
+                int progress = intField(step, "l") - intField(state, "h");
+                if (lastSpeedStep == null || !lastSpeedStep.equals(speedStep)) {
+                    lastSpeedStep = speedStep;
+                    lastSpeedProgress = -1;
+                }
+                Object changesValue = requiredField(speedStep, "N");
+                if (!(changesValue instanceof List)) {
+                    throw new IllegalStateException("speed changes are not a list");
+                }
+                @SuppressWarnings("unchecked")
+                List<Object> changes = (List<Object>) changesValue;
+                Object countriesValue = requiredField(route, "Z");
+                List<?> countries = countriesValue instanceof List
+                        ? (List<?>) countriesValue : java.util.Collections.emptyList();
+                for (Object change : changes) {
+                    int position = intField(change, "b");
+                    if (position <= lastSpeedProgress || position > progress) continue;
+                    int kph = intField(change, "c");
+                    String unit = speedUnitV26(intField(change, "d"), countries);
+                    if (kph < 0 || unit.isEmpty()) {
+                        publishSpeedLimitLocked(0, 0, "");
+                    } else {
+                        int display = "mph".equals(unit)
+                                ? Math.round(kph * 0.621371f) : kph;
+                        publishSpeedLimitLocked(display, kph, unit);
+                    }
+                }
+                lastSpeedProgress = progress;
+            } catch (Throwable error) {
+                clearSpeedLimitLocked();
+                if (!speedReflectionErrorLogged) {
+                    speedReflectionErrorLogged = true;
+                    Log.w(TAG, "SPEED_LIMIT_FAILED|profile=26.30|type="
                             + error.getClass().getSimpleName()
                             + "|message=" + clean(error.getMessage()));
                 }
@@ -454,6 +516,16 @@ public final class NavInfoLogger {
                 ? "km/h" : "";
     }
 
+    private static String speedUnitV26(int code, List<?> countries) {
+        if (code == 1) return "km/h";
+        if (code == 2) return "mph";
+        if (countries.size() != 1) return "";
+        String country = String.valueOf(countries.get(0)).toUpperCase(java.util.Locale.US);
+        if (country.length() != 2) return "";
+        return "US".equals(country) || "MM".equals(country)
+                || "LR".equals(country) || "GB".equals(country) ? "mph" : "km/h";
+    }
+
     private static void unlinkCurrentClientLocked() {
         IBinder binder = clientBinder;
         IBinder.DeathRecipient recipient = clientDeathRecipient;
@@ -520,6 +592,20 @@ public final class NavInfoLogger {
                     throw new IllegalStateException(name + " is not boolean");
                 }
                 return (Boolean) value;
+            } catch (NoSuchMethodException ignored) {
+                type = type.getSuperclass();
+            }
+        }
+        throw new NoSuchMethodException(target.getClass().getName() + "." + name);
+    }
+
+    private static Object invokeObject(Object target, String name) throws Exception {
+        Class<?> type = target.getClass();
+        while (type != null) {
+            try {
+                Method method = type.getDeclaredMethod(name);
+                method.setAccessible(true);
+                return method.invoke(target);
             } catch (NoSuchMethodException ignored) {
                 type = type.getSuperclass();
             }

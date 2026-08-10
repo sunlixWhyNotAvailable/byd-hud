@@ -19,6 +19,7 @@ final class WazeRouteLifecycleStore {
     static final String EXTRA_NAVIGATING = "navigating";
     static final String EXTRA_REASON_CODE = "reason_code";
     static final String EXTRA_BRIDGE_GENERATION = "bridge_generation";
+    static final String EXTRA_BRIDGE_CAPABILITIES = "bridge_capabilities";
     static final String EXTRA_EVENT_ELAPSED_MS = "event_elapsed_ms";
     static final int PROTOCOL_VERSION = 1;
     static final int REASON_UNAVAILABLE = -1;
@@ -26,19 +27,48 @@ final class WazeRouteLifecycleStore {
     private static final String PREFS_NAME = "waze_route_lifecycle";
     private static final String KEY_ACTIVE = "route_active";
     private static final String KEY_EVENT_ELAPSED_MS = "event_elapsed_ms";
+    private static final String KEY_BRIDGE_GENERATION = "bridge_generation";
+    private static final String KEY_BRIDGE_CAPABILITIES = "bridge_capabilities";
+    private static final String KEY_SPEED_EVENT_ELAPSED_MS = "speed_event_elapsed_ms";
+    private static final String KEY_SPEED_BRIDGE_GENERATION = "speed_bridge_generation";
     private static final String KEY_PACKAGE_UPDATE_MS = "package_update_ms";
     private static final String KEY_BOOT_COUNT = "boot_count";
     private static final Object LOCK = new Object();
+    private static final Object BRIDGE_SUPPORT_LOCK = new Object();
+    private static long cachedBridgeVersionCode = Long.MIN_VALUE;
+    private static long cachedBridgeUpdateMs = Long.MIN_VALUE;
+    private static boolean cachedBridgeSupported;
 
     static final class Snapshot {
         final boolean active;
         final long eventElapsedMs;
         final long packageUpdateMs;
+        final long bridgeGeneration;
+        final int bridgeCapabilities;
 
         Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs) {
+            this(active, eventElapsedMs, packageUpdateMs, 0L, 0);
+        }
+
+        Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs,
+                long bridgeGeneration, int bridgeCapabilities) {
             this.active = active;
             this.eventElapsedMs = eventElapsedMs;
             this.packageUpdateMs = packageUpdateMs;
+            this.bridgeGeneration = bridgeGeneration;
+            this.bridgeCapabilities = bridgeCapabilities;
+        }
+    }
+
+    static final class SpeedRecordResult {
+        final boolean accepted;
+        final Snapshot snapshot;
+        final String reason;
+
+        SpeedRecordResult(boolean accepted, Snapshot snapshot, String reason) {
+            this.accepted = accepted;
+            this.snapshot = snapshot;
+            this.reason = reason;
         }
     }
 
@@ -69,17 +99,40 @@ final class WazeRouteLifecycleStore {
     }
 
     static boolean isBridgeSupported(Context context) {
-        if (NavigatorPatchStore.isInstalledWazeLifecycleV2(context)) return true;
         try {
-            ApplicationInfo info = context.getPackageManager().getApplicationInfo(
+            PackageInfo packageInfo = context.getPackageManager().getPackageInfo(
                     WAZE_PACKAGE, PackageManager.GET_META_DATA);
-            Bundle metadata = info.metaData;
-            return metadata != null
+            long versionCode = packageInfo.getLongVersionCode();
+            long updateMs = packageInfo.lastUpdateTime;
+            synchronized (BRIDGE_SUPPORT_LOCK) {
+                if (cachedBridgeSupported
+                        && cachedBridgeVersionCode == versionCode
+                        && cachedBridgeUpdateMs == updateMs) {
+                    return true;
+                }
+            }
+            if (NavigatorPatchStore.isInstalledWazeLifecycleV2(context)) {
+                cacheBridgeSupport(versionCode, updateMs);
+                return true;
+            }
+            ApplicationInfo info = packageInfo.applicationInfo;
+            Bundle metadata = info == null ? null : info.metaData;
+            boolean supported = metadata != null
                     && metadata.getInt(CAPABILITY_META_DATA, 0) == PROTOCOL_VERSION
                     && context.getPackageManager().checkPermission(
                     PERMISSION, WAZE_PACKAGE) == PackageManager.PERMISSION_GRANTED;
+            if (supported) cacheBridgeSupport(versionCode, updateMs);
+            return supported;
         } catch (PackageManager.NameNotFoundException ignored) {
             return false;
+        }
+    }
+
+    private static void cacheBridgeSupport(long versionCode, long updateMs) {
+        synchronized (BRIDGE_SUPPORT_LOCK) {
+            cachedBridgeVersionCode = versionCode;
+            cachedBridgeUpdateMs = updateMs;
+            cachedBridgeSupported = true;
         }
     }
 
@@ -103,12 +156,19 @@ final class WazeRouteLifecycleStore {
                         false, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
             }
             return commitLocked(context, previous, active, eventElapsedMs,
-                    !active, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
+                    0L, 0, !active, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
         }
     }
 
     static RecordResult recordBridge(Context context, boolean navigating, int reasonCode,
             boolean reasonAvailable, long eventElapsedMs) {
+        return recordBridge(context, navigating, reasonCode, reasonAvailable,
+                eventElapsedMs, 0L, 0);
+    }
+
+    static RecordResult recordBridge(Context context, boolean navigating, int reasonCode,
+            boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
+            int bridgeCapabilities) {
         synchronized (LOCK) {
             long now = SystemClock.elapsedRealtime();
             Snapshot previous = validatedSnapshotLocked(context, now);
@@ -121,22 +181,56 @@ final class WazeRouteLifecycleStore {
             boolean terminal = !navigating && reasonAvailable && isTerminalReason(reasonCode);
             boolean active = resolveBridgeActive(
                     previous.active, navigating, reasonAvailable, reasonCode);
+            long acceptedGeneration = active ? bridgeGeneration : 0L;
+            int acceptedCapabilities = active ? bridgeCapabilities : 0;
             return commitLocked(context, previous, active, eventElapsedMs,
+                    acceptedGeneration, acceptedCapabilities,
                     terminal, navigating, reasonCode, reasonName);
         }
     }
 
+    static SpeedRecordResult recordSpeedEvent(Context context, long bridgeGeneration,
+            int bridgeCapabilities, long eventElapsedMs) {
+        synchronized (LOCK) {
+            long now = SystemClock.elapsedRealtime();
+            Snapshot route = validatedSnapshotLocked(context, now);
+            SharedPreferences preferences = prefs(context);
+            long storedGeneration = preferences.getLong(KEY_SPEED_BRIDGE_GENERATION, 0L);
+            long storedElapsedMs = preferences.getLong(KEY_SPEED_EVENT_ELAPSED_MS, 0L);
+            String decision = speedEventDecision(route.active, route.bridgeGeneration,
+                    storedGeneration, storedElapsedMs, bridgeGeneration, eventElapsedMs, now);
+            if (!"accept".equals(decision)) {
+                return new SpeedRecordResult(false, route, decision);
+            }
+            preferences.edit()
+                    .putLong(KEY_SPEED_BRIDGE_GENERATION, bridgeGeneration)
+                    .putLong(KEY_SPEED_EVENT_ELAPSED_MS, eventElapsedMs)
+                    .putInt(KEY_BRIDGE_CAPABILITIES, bridgeCapabilities)
+                    .apply();
+            Snapshot updated = new Snapshot(route.active, route.eventElapsedMs,
+                    route.packageUpdateMs, route.bridgeGeneration, bridgeCapabilities);
+            return new SpeedRecordResult(true, updated, "accept");
+        }
+    }
+
     private static RecordResult commitLocked(Context context, Snapshot previous, boolean active,
-            long eventElapsedMs, boolean terminal, boolean rawNavigating, int reasonCode,
-            String reasonName) {
+            long eventElapsedMs, long bridgeGeneration, int bridgeCapabilities,
+            boolean terminal, boolean rawNavigating, int reasonCode, String reasonName) {
         long packageUpdateMs = installedPackageUpdateTime(context);
-        Snapshot updated = new Snapshot(active, eventElapsedMs, packageUpdateMs);
-        boolean committed = prefs(context).edit()
+        Snapshot updated = new Snapshot(active, eventElapsedMs, packageUpdateMs,
+                bridgeGeneration, bridgeCapabilities);
+        SharedPreferences.Editor editor = prefs(context).edit()
                 .putBoolean(KEY_ACTIVE, active)
                 .putLong(KEY_EVENT_ELAPSED_MS, eventElapsedMs)
+                .putLong(KEY_BRIDGE_GENERATION, bridgeGeneration)
+                .putInt(KEY_BRIDGE_CAPABILITIES, bridgeCapabilities)
                 .putLong(KEY_PACKAGE_UPDATE_MS, packageUpdateMs)
-                .putInt(KEY_BOOT_COUNT, bootCount(context))
-                .commit();
+                .putInt(KEY_BOOT_COUNT, bootCount(context));
+        if (!active || previous.bridgeGeneration != bridgeGeneration) {
+            editor.remove(KEY_SPEED_EVENT_ELAPSED_MS)
+                    .remove(KEY_SPEED_BRIDGE_GENERATION);
+        }
+        boolean committed = editor.commit();
         if (!committed) {
             return new RecordResult(false, false, previous, "commit_failed",
                     false, rawNavigating, reasonCode, reasonName);
@@ -162,6 +256,15 @@ final class WazeRouteLifecycleStore {
         if (incomingElapsedMs > nowElapsedMs) return "future_timestamp";
         if (storedElapsedMs > 0L && incomingElapsedMs <= storedElapsedMs) return "stale_timestamp";
         return "accept";
+    }
+
+    static String speedEventDecision(boolean routeActive, long routeGeneration,
+            long storedSpeedGeneration, long storedElapsedMs, long incomingGeneration,
+            long incomingElapsedMs, long nowElapsedMs) {
+        if (!routeActive) return "inactive_route";
+        if (incomingGeneration != routeGeneration) return "generation_mismatch";
+        long watermark = storedSpeedGeneration == routeGeneration ? storedElapsedMs : 0L;
+        return eventDecision(watermark, incomingElapsedMs, nowElapsedMs);
     }
 
     static boolean isTerminalReason(int reasonCode) {
@@ -199,6 +302,8 @@ final class WazeRouteLifecycleStore {
         SharedPreferences preferences = prefs(context);
         boolean active = preferences.getBoolean(KEY_ACTIVE, false);
         long eventElapsedMs = preferences.getLong(KEY_EVENT_ELAPSED_MS, 0L);
+        long bridgeGeneration = preferences.getLong(KEY_BRIDGE_GENERATION, 0L);
+        int bridgeCapabilities = preferences.getInt(KEY_BRIDGE_CAPABILITIES, 0);
         long storedPackageUpdateMs = preferences.getLong(KEY_PACKAGE_UPDATE_MS, 0L);
         long currentPackageUpdateMs = installedPackageUpdateTime(context);
         int storedBootCount = preferences.getInt(KEY_BOOT_COUNT, -1);
@@ -211,9 +316,10 @@ final class WazeRouteLifecycleStore {
             preferences.edit().clear().commit();
             AppEventLogger.event(context, "waze_route_lifecycle invalidated reboot=" + rebooted
                     + " packageChanged=" + packageChanged);
-            return new Snapshot(false, 0L, currentPackageUpdateMs);
+            return new Snapshot(false, 0L, currentPackageUpdateMs, 0L, 0);
         }
-        return new Snapshot(active, eventElapsedMs, currentPackageUpdateMs);
+        return new Snapshot(active, eventElapsedMs, currentPackageUpdateMs,
+                bridgeGeneration, bridgeCapabilities);
     }
 
     static boolean shouldInvalidateForBoot(

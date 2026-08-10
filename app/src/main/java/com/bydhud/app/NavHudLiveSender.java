@@ -32,6 +32,8 @@ final class NavHudLiveSender {
     private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
     private static final long DASHBOARD_WATCHDOG_INTERVAL_MS = 5000L;
     private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
+    private static final long WAZE_SPEED_LIMIT_EXPIRY_MS = 60_000L;
+    static final int WAZE_CAP_SPEED_LIMIT_HEARTBEAT = 1;
     private static final long WAZE_SURFACE_READY_TIMEOUT_MS = 5000L;
     private static final long WAZE_SURFACE_HANDOFF_POLL_MS = 100L;
     private static final long GMAPS_DIRECT_TIMEOUT_MS = 5000L;
@@ -43,6 +45,9 @@ final class NavHudLiveSender {
     static final int SURFACE_HANDOFF_FAILED = 5;
 
     private static NavHudLiveSender instance;
+    private static boolean wazeBridgeMetadataSeen;
+    private static long acceptedWazeBridgeGeneration;
+    private static int acceptedWazeBridgeCapabilities;
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static synchronized NavHudLiveSender get(Context context) {
@@ -54,15 +59,45 @@ final class NavHudLiveSender {
 
     static void onWazeRouteLifecycleEvent(Context context, boolean routeActive,
             boolean terminal, long eventElapsedMs, boolean changed, String reason) {
-        if (terminal) DirectSpeedLimitStore.clear(WAZE_PACKAGE);
+        onWazeRouteLifecycleEvent(
+                context, routeActive, terminal, eventElapsedMs, 0L, 0, changed, reason);
+    }
+
+    static void onWazeRouteLifecycleEvent(Context context, boolean routeActive,
+            boolean terminal, long eventElapsedMs, long bridgeGeneration,
+            int bridgeCapabilities, boolean changed, String reason) {
         NavHudLiveSender current;
+        boolean bridgeTransition = false;
         synchronized (NavHudLiveSender.class) {
             current = instance;
+            if (routeActive) {
+                bridgeTransition = shouldClearWazeSpeedForBridgeTransition(
+                        wazeBridgeMetadataSeen,
+                        acceptedWazeBridgeGeneration, acceptedWazeBridgeCapabilities,
+                        bridgeGeneration, bridgeCapabilities);
+                wazeBridgeMetadataSeen = true;
+                acceptedWazeBridgeGeneration = bridgeGeneration;
+                acceptedWazeBridgeCapabilities = bridgeCapabilities;
+            }
         }
+        if (terminal || bridgeTransition) DirectSpeedLimitStore.clear(WAZE_PACKAGE);
         if (current != null) {
+            boolean clearSpeed = bridgeTransition;
             current.handler.post(() -> current.onWazeRouteLifecycleEventOnMain(
-                    routeActive, terminal, eventElapsedMs, changed, reason));
+                    routeActive, terminal, eventElapsedMs, bridgeGeneration,
+                    bridgeCapabilities, changed, clearSpeed, reason));
         }
+    }
+
+    static boolean shouldClearWazeSpeedForBridgeTransition(
+            boolean metadataSeen, long previousGeneration, int previousCapabilities,
+            long bridgeGeneration, int bridgeCapabilities) {
+        boolean heartbeatChanged = ((previousCapabilities ^ bridgeCapabilities)
+                & WAZE_CAP_SPEED_LIMIT_HEARTBEAT) != 0;
+        return metadataSeen
+                ? previousGeneration != bridgeGeneration || heartbeatChanged
+                : bridgeGeneration != 0L
+                || (bridgeCapabilities & WAZE_CAP_SPEED_LIMIT_HEARTBEAT) != 0;
     }
 
     static boolean shouldStartWazeDirectHost(boolean bridgeSupported, boolean routeActive) {
@@ -216,6 +251,9 @@ final class NavHudLiveSender {
     private int speedOverlayPlacement = DirectTbtPayload.SPEED_PLACEMENT_NONE;
     private boolean speedOverlayOccupied;
     private long speedOverlayHideAtMs;
+    private long wazeSpeedLimitExpiryAtMs;
+    private long wazeSpeedLimitBridgeGeneration;
+    private long wazeSpeedLimitEventElapsedMs;
     private boolean gmapsDirectFrameReceived;
     private boolean gmapsDirectFallbackActive;
     private boolean gmapsDirectTimedOut;
@@ -247,6 +285,7 @@ final class NavHudLiveSender {
 
     private final Runnable gmapsDirectTimeout = this::onGMapsDirectTimeout;
     private final Runnable speedOverlayTimeout = this::onSpeedOverlayTimeout;
+    private final Runnable wazeSpeedLimitExpiry = this::onWazeSpeedLimitExpiry;
     private final Runnable wazeSurfaceReadyTimeout = () -> {
         if (!wazeSurfaceLaunchPending || wazeSurfaceActive) return;
         fallbackFromWazeSurface("surface-ready-timeout");
@@ -1414,17 +1453,30 @@ final class NavHudLiveSender {
 
     static void onWazeSpeedLimitEvent(
             Context context, int displayValue, String unit, long eventElapsedMs) {
+        onWazeSpeedLimitEvent(context, displayValue, unit, eventElapsedMs, 0L, 0);
+    }
+
+    static void onWazeSpeedLimitEvent(
+            Context context, int displayValue, String unit, long eventElapsedMs,
+            long bridgeGeneration, int bridgeCapabilities) {
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
             current = instance;
         }
         if (current != null) {
             current.handler.post(() -> current.onDirectSpeedLimitEvent(
-                    WAZE_PACKAGE, displayValue, -1, unit, eventElapsedMs));
-        } else {
+                    WAZE_PACKAGE, displayValue, -1, unit, eventElapsedMs,
+                    bridgeGeneration, bridgeCapabilities));
+        } else if (shouldRetainWazeSpeedWithoutSender(bridgeCapabilities)) {
             DirectSpeedLimitStore.update(
                     WAZE_PACKAGE, displayValue, -1, unit, eventElapsedMs);
+        } else {
+            DirectSpeedLimitStore.clear(WAZE_PACKAGE);
         }
+    }
+
+    static boolean shouldRetainWazeSpeedWithoutSender(int bridgeCapabilities) {
+        return (bridgeCapabilities & WAZE_CAP_SPEED_LIMIT_HEARTBEAT) == 0;
     }
 
     static void onWazeAppForegroundEvent(
@@ -1766,14 +1818,27 @@ final class NavHudLiveSender {
 
     private void onDirectSpeedLimitEvent(String ownerPackage, int displayValue,
             int kph, String unit, long eventElapsedMs) {
+        onDirectSpeedLimitEvent(
+                ownerPackage, displayValue, kph, unit, eventElapsedMs, 0L, 0);
+    }
+
+    private void onDirectSpeedLimitEvent(String ownerPackage, int displayValue,
+            int kph, String unit, long eventElapsedMs,
+            long bridgeGeneration, int bridgeCapabilities) {
         boolean changed = DirectSpeedLimitStore.update(
                 ownerPackage, displayValue, kph, unit, eventElapsedMs);
+        if (WAZE_PACKAGE.equals(ownerPackage)) {
+            updateWazeSpeedLimitExpiry(
+                    displayValue, eventElapsedMs, bridgeGeneration, bridgeCapabilities);
+        }
         DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot(ownerPackage);
         String line = "speed_limit owner=" + normalizeString(ownerPackage)
                 + " value=" + speed.getDisplayValue()
                 + " kph=" + speed.getKph()
                 + " unit=" + speed.getUnit()
                 + " changed=" + changed
+                + " bridgeGeneration=" + bridgeGeneration
+                + " bridgeCapabilities=" + bridgeCapabilities
                 + " sourceElapsedMs=" + eventElapsedMs
                 + " latencyMs=" + Math.max(
                 0L, SystemClock.elapsedRealtime() - eventElapsedMs);
@@ -1781,6 +1846,50 @@ final class NavHudLiveSender {
         else eventGMapsDirectSession("speed_limit", line);
         Log.i(TAG, line);
         if (changed) republishLatestDirectFrame(ownerPackage, "speed-limit-event");
+    }
+
+    private void updateWazeSpeedLimitExpiry(int displayValue, long eventElapsedMs,
+            long bridgeGeneration, int bridgeCapabilities) {
+        if (!shouldArmWazeSpeedLimitExpiry(displayValue, bridgeCapabilities)) {
+            cancelWazeSpeedLimitExpiry();
+            return;
+        }
+        handler.removeCallbacks(wazeSpeedLimitExpiry);
+        wazeSpeedLimitBridgeGeneration = bridgeGeneration;
+        wazeSpeedLimitEventElapsedMs = eventElapsedMs;
+        wazeSpeedLimitExpiryAtMs = SystemClock.elapsedRealtime()
+                + WAZE_SPEED_LIMIT_EXPIRY_MS;
+        handler.postDelayed(wazeSpeedLimitExpiry, WAZE_SPEED_LIMIT_EXPIRY_MS);
+    }
+
+    static boolean shouldArmWazeSpeedLimitExpiry(
+            int displayValue, int bridgeCapabilities) {
+        return displayValue > 0
+                && (bridgeCapabilities & WAZE_CAP_SPEED_LIMIT_HEARTBEAT) != 0;
+    }
+
+    private void cancelWazeSpeedLimitExpiry() {
+        handler.removeCallbacks(wazeSpeedLimitExpiry);
+        wazeSpeedLimitExpiryAtMs = 0L;
+        wazeSpeedLimitBridgeGeneration = 0L;
+        wazeSpeedLimitEventElapsedMs = 0L;
+    }
+
+    private void onWazeSpeedLimitExpiry() {
+        long now = SystemClock.elapsedRealtime();
+        if (wazeSpeedLimitExpiryAtMs <= 0L) return;
+        if (now < wazeSpeedLimitExpiryAtMs) {
+            handler.postDelayed(wazeSpeedLimitExpiry, wazeSpeedLimitExpiryAtMs - now);
+            return;
+        }
+        long bridgeGeneration = wazeSpeedLimitBridgeGeneration;
+        long eventElapsedMs = wazeSpeedLimitEventElapsedMs;
+        cancelWazeSpeedLimitExpiry();
+        DirectSpeedLimitStore.clear(WAZE_PACKAGE);
+        if (WAZE_PACKAGE.equals(speedOverlayOwner)) resetSpeedOverlayState();
+        republishLatestDirectFrame(WAZE_PACKAGE, "speed-limit-heartbeat-expired");
+        log("waze speed limit heartbeat expired bridgeGeneration=" + bridgeGeneration
+                + " eventElapsedMs=" + eventElapsedMs);
     }
 
     private DirectTbtFrame applySpeedLimitOverlay(
@@ -1880,6 +1989,7 @@ final class NavHudLiveSender {
 
     private void clearDirectSpeedLimit(String ownerPackage) {
         DirectSpeedLimitStore.clear(ownerPackage);
+        if (WAZE_PACKAGE.equals(ownerPackage)) cancelWazeSpeedLimitExpiry();
         if (normalizeString(ownerPackage).equals(speedOverlayOwner)) {
             resetSpeedOverlayState();
         }
@@ -2135,12 +2245,22 @@ final class NavHudLiveSender {
     }
 
     private void onWazeRouteLifecycleEventOnMain(boolean routeActive, boolean terminal,
-            long eventElapsedMs, boolean changed, String reason) {
+            long eventElapsedMs, long bridgeGeneration, int bridgeCapabilities,
+            boolean changed, boolean clearSpeedForBridgeTransition, String reason) {
+        if (clearSpeedForBridgeTransition) {
+            clearDirectSpeedLimit(WAZE_PACKAGE);
+            republishLatestDirectFrame(WAZE_PACKAGE, "speed-limit-bridge-transition");
+        }
         if (!isWazeBridgeSupportedCached()) return;
         log("waze route lifecycle routeActive=" + routeActive
                 + " terminal=" + terminal
                 + " elapsedMs=" + eventElapsedMs
+                + " bridgeGeneration=" + bridgeGeneration
+                + " bridgeCapabilities=" + bridgeCapabilities
                 + " reason=" + safeReason(reason));
+        if (terminal || (bridgeCapabilities & WAZE_CAP_SPEED_LIMIT_HEARTBEAT) == 0) {
+            cancelWazeSpeedLimitExpiry();
+        }
         cancelWazeFallbackReadiness();
         wazeFallbackActive = false;
         WazeCropCapture.get(context).stop("route-lifecycle-bridge");

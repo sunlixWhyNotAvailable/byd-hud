@@ -66,7 +66,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -90,7 +93,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
-import androidx.compose.runtime.key
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -574,9 +576,13 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     val latestAppInForeground by rememberUpdatedState(appInForeground)
     val latestShowSetupDialog by rememberUpdatedState(showSetupDialog)
     val latestShowUpdateDialog by rememberUpdatedState(showUpdateDialog)
-    val palette = if (snapshot.darkTheme) darkPalette() else lightPalette()
-    val copy = if (snapshot.uaLanguage) uaCopy() else enCopy()
-    val shareCopy = shareCopy(copy.language)
+    val palette = remember(snapshot.darkTheme) {
+        if (snapshot.darkTheme) darkPalette() else lightPalette()
+    }
+    val copy = remember(snapshot.uaLanguage) {
+        if (snapshot.uaLanguage) uaCopy() else enCopy()
+    }
+    val shareCopy = remember(copy.language) { shareCopy(copy.language) }
     val blockingUiFlow = when {
         showSetupDialog -> "setup"
         showUpdateDialog -> "update"
@@ -876,8 +882,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
-    LaunchedEffect(selectedTab) {
-        if (selectedTab != RuntimeTab.Apps) {
+    LaunchedEffect(selectedTab, appInForeground) {
+        if (selectedTab != RuntimeTab.Apps || !appInForeground) {
             return@LaunchedEffect
         }
         while (true) {
@@ -1540,9 +1546,9 @@ private fun OptionsTab(
         "ETA/time/distance output mode"
     }
     val routeMetricsHint = if (ua) {
-        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze показує тільки значення до наступної зупинки."
+        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze підтримує весь маршрут і використовує доступне значення до зупинки, якщо окремий показник маршруту відсутній."
     } else {
-        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze shows only values for the next stop."
+        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze supports the whole route and uses an available next-stop value when an individual route metric is missing."
     }
     val speedLimitModeHint = if (ua) {
         "Показувати поточне обмеження швидкості у вибраному полі HUD."
@@ -2889,7 +2895,11 @@ private fun AppsTab(
                 runAction { activity.composeRefreshApps() }
             }
         }
-    }) {
+    }, itemSpacing = 0.dp) {
+        item(key = "apps-page-gap") {
+            Spacer(Modifier.height(10.dp))
+        }
+
         item(key = "navigator-assets") {
             NavigatorAssetList(
                 copy = copy,
@@ -2901,54 +2911,211 @@ private fun AppsTab(
             )
         }
 
-        item(key = "supported-apps") {
-            Section(copy.supportedApps, palette) {
-                if (!snapshot.appScanCacheAvailable) {
-                    Text(scanStatusText, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
-                } else {
-                    snapshot.supportedApps.forEachIndexed { index, row ->
-                        key(row.packageName) {
-                            if (index > 0) Divider(palette)
-                            AppRow(
-                                row,
-                                copy,
-                                palette,
-                                supported = true,
-                                runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
-                                activity = activity,
-                                runAction = runAction
-                            )
-                        }
-                    }
+        item(key = "supported-apps-gap") {
+            Spacer(Modifier.height(10.dp))
+        }
+        item(key = "supported-apps-header") {
+            AppSectionHeader(
+                copy.supportedApps,
+                palette,
+                bottom = snapshot.appScanCacheAvailable && snapshot.supportedApps.isEmpty()
+            )
+        }
+        if (!snapshot.appScanCacheAvailable) {
+            item(key = "supported-apps-status") {
+                AppSectionMessage(scanStatusText, palette)
+            }
+        } else {
+            items(
+                count = snapshot.supportedApps.size,
+                key = { index -> snapshot.supportedApps[index].packageName }
+            ) { index ->
+                AppSectionRow(index, snapshot.supportedApps.lastIndex, palette) {
+                    AppRow(
+                        snapshot.supportedApps[index],
+                        copy,
+                        palette,
+                        supported = true,
+                        runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                        activity = activity,
+                        runAction = runAction
+                    )
                 }
             }
         }
 
-        item(key = "all-apps") {
-            Section(copy.allApps, palette) {
-                if (!snapshot.appScanCacheAvailable) {
-                    Text(scanStatusText, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
-                } else if (snapshot.allApps.isEmpty()) {
-                    Text(copy.noBackgroundApps, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
-                } else {
-                    snapshot.allApps.forEachIndexed { index, row ->
-                        key(row.packageName) {
-                            if (index > 0) Divider(palette)
-                            AppRow(
-                                row,
-                                copy,
-                                palette,
-                                supported = false,
-                                runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
-                                activity = activity,
-                                runAction = runAction
-                            )
-                        }
-                    }
+        item(key = "all-apps-gap") {
+            Spacer(Modifier.height(10.dp))
+        }
+        item(key = "all-apps-header") {
+            AppSectionHeader(copy.allApps, palette)
+        }
+        if (!snapshot.appScanCacheAvailable) {
+            item(key = "all-apps-status") {
+                AppSectionMessage(scanStatusText, palette)
+            }
+        } else if (snapshot.allApps.isEmpty()) {
+            item(key = "all-apps-empty") {
+                AppSectionMessage(copy.noBackgroundApps, palette)
+            }
+        } else {
+            items(
+                count = snapshot.allApps.size,
+                key = { index -> snapshot.allApps[index].packageName }
+            ) { index ->
+                AppSectionRow(index, snapshot.allApps.lastIndex, palette) {
+                    AppRow(
+                        snapshot.allApps[index],
+                        copy,
+                        palette,
+                        supported = false,
+                        runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                        activity = activity,
+                        runAction = runAction
+                    )
                 }
             }
         }
     }
+}
+
+@Composable
+private fun AppSectionHeader(title: String, palette: Palette, bottom: Boolean = false) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = bottom)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(
+            title.uppercase(),
+            color = palette.muted,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun AppSectionMessage(text: String, palette: Palette) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
+    ) {
+        Text(text, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
+    }
+}
+
+@Composable
+private fun AppSectionRow(
+    index: Int,
+    lastIndex: Int,
+    palette: Palette,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appSectionSegmentFrame(
+                palette,
+                palette.panel,
+                top = false,
+                bottom = index == lastIndex
+            )
+    ) {
+        if (index > 0) Divider(palette)
+        content()
+    }
+}
+
+private fun Modifier.appSectionSegmentFrame(
+    palette: Palette,
+    background: Color,
+    top: Boolean,
+    bottom: Boolean
+): Modifier {
+    val shape = RoundedCornerShape(
+        topStart = if (top) 8.dp else 0.dp,
+        topEnd = if (top) 8.dp else 0.dp,
+        bottomStart = if (bottom) 8.dp else 0.dp,
+        bottomEnd = if (bottom) 8.dp else 0.dp
+    )
+    return clip(shape)
+        .background(background)
+        .drawBehind {
+            val strokeWidth = 1.dp.toPx()
+            val halfStroke = strokeWidth / 2f
+            val radius = 8.dp.toPx()
+            val arcSize = Size(radius * 2f - strokeWidth, radius * 2f - strokeWidth)
+            val sideTop = if (top) radius else 0f
+            val sideBottom = if (bottom) size.height - radius else size.height
+            drawLine(
+                palette.border,
+                Offset(halfStroke, sideTop),
+                Offset(halfStroke, sideBottom),
+                strokeWidth
+            )
+            drawLine(
+                palette.border,
+                Offset(size.width - halfStroke, sideTop),
+                Offset(size.width - halfStroke, sideBottom),
+                strokeWidth
+            )
+            if (top) {
+                drawLine(
+                    palette.border,
+                    Offset(radius, halfStroke),
+                    Offset(size.width - radius, halfStroke),
+                    strokeWidth
+                )
+                drawArc(
+                    palette.border,
+                    180f,
+                    90f,
+                    false,
+                    Offset(halfStroke, halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+                drawArc(
+                    palette.border,
+                    270f,
+                    90f,
+                    false,
+                    Offset(size.width - radius * 2f + halfStroke, halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+            }
+            if (bottom) {
+                drawLine(
+                    palette.border,
+                    Offset(radius, size.height - halfStroke),
+                    Offset(size.width - radius, size.height - halfStroke),
+                    strokeWidth
+                )
+                drawArc(
+                    palette.border,
+                    90f,
+                    90f,
+                    false,
+                    Offset(halfStroke, size.height - radius * 2f + halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+                drawArc(
+                    palette.border,
+                    0f,
+                    90f,
+                    false,
+                    Offset(size.width - radius * 2f + halfStroke,
+                        size.height - radius * 2f + halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+            }
+        }
 }
 
 @Composable
@@ -4430,6 +4597,7 @@ private fun LazyPageSurface(
     hint: String,
     palette: Palette,
     headerAction: (@Composable () -> Unit)? = null,
+    itemSpacing: Dp = 10.dp,
     content: LazyListScope.() -> Unit
 ) {
     LazyColumn(
@@ -4439,7 +4607,7 @@ private fun LazyPageSurface(
             .border(1.dp, palette.border, RoundedCornerShape(8.dp))
             .background(palette.panel),
         contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(itemSpacing)
     ) {
         item(key = "page-header") {
             PageSurfaceHeader(title, hint, palette, headerAction)
@@ -4583,15 +4751,20 @@ private fun HudDropdown(
                 .clip(RoundedCornerShape(6.dp))
                 .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
                 .background(palette.panel)
+                .drawBehind {
+                    val rowHeightPx = rowHeight.toPx()
+                    drawRect(
+                        color = selectedBackground,
+                        topLeft = Offset(0f, safeIndex * rowHeightPx),
+                        size = Size(size.width, rowHeightPx)
+                    )
+                }
         ) {
             options.forEachIndexed { index, option ->
                 Box(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .height(rowHeight)
-                        .background(
-                            if (index == safeIndex) selectedBackground else Color.Transparent
-                        )
+                        .height(if (index == 0 || index == options.lastIndex) 32.dp else rowHeight)
                         .clickable {
                             onSelected(index)
                             expanded = false
@@ -5513,7 +5686,7 @@ private fun enCopy() = Copy(
     showWazeAlerts = "Show Waze alerts",
     showWazeAlertsHint = "Display Waze alerts on the HUD.",
     showWholeRouteMetrics = "Show ETA/time/distance for entire route",
-    showWholeRouteMetricsHint = "When supported, show values for the entire route. Waze currently shows values to the next stop.",
+    showWholeRouteMetricsHint = "Prefer whole-route values. Waze falls back to an available next-stop value when an individual whole-route metric is missing.",
     showEta = "Show ETA",
     showEtaHint = "Prepend the estimated arrival time to the street text.",
     showRemainingTime = "Show remaining time",
@@ -5732,7 +5905,7 @@ private fun uaCopy() = enCopy().copy(
     showWazeAlerts = "Показувати попередження Waze",
     showWazeAlertsHint = "Відображати попередження Waze на HUD.",
     showWholeRouteMetrics = "Показувати ETA/час/дистанцію всього маршруту",
-    showWholeRouteMetricsHint = "Якщо навігатор підтримує, показувати значення для всього маршруту. Waze наразі показує значення до наступної зупинки.",
+    showWholeRouteMetricsHint = "Надавати перевагу значенням усього маршруту. Waze використовує доступне значення до зупинки, якщо окремий показник усього маршруту відсутній.",
     showEta = "Показувати час прибуття",
     showEtaHint = "Додавати очікуваний час прибуття перед назвою вулиці.",
     showRemainingTime = "Показувати залишок часу",

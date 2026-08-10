@@ -60,14 +60,17 @@ import androidx.core.graphics.drawable.IconCompat;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class WazeSurfaceActivity extends Activity implements SurfaceHolder.Callback {
     private static final String TAG = "BYD_HUD_WAZE_SURFACE";
+    private static final long SURFACE_DESTROY_ACK_TIMEOUT_MS = 250L;
     interface HostBridge {
         void onSurfaceReady(Surface surface, int width, int height, int dpi, Rect visibleArea,
                 long activityInstanceId, int displayId, long surfaceEpoch);
-        void onSurfaceDestroyed();
+        void onSurfaceDestroyed(Runnable completion);
         void onVisibleAreaChanged(Rect visibleArea);
         void onClick(float x, float y);
         void onScroll(float distanceX, float distanceY);
@@ -144,7 +147,9 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     static boolean hasValidSurface() {
         synchronized (BRIDGE_LOCK) {
             WazeSurfaceActivity activity = active.get();
-            return activity != null && activity.surface != null && activity.surface.isValid();
+            if (activity == null) return false;
+            Surface currentSurface = activity.surface;
+            return currentSurface != null && currentSurface.isValid();
         }
     }
 
@@ -173,18 +178,18 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
     private TextWatcher searchWatcher;
     private GestureDetector gestureDetector;
     private ScaleGestureDetector scaleDetector;
-    private Surface surface;
-    private int surfaceWidth;
-    private int surfaceHeight;
-    private int surfaceDpi;
-    private Rect visibleArea = new Rect();
+    private volatile Surface surface;
+    private volatile int surfaceWidth;
+    private volatile int surfaceHeight;
+    private volatile int surfaceDpi;
+    private volatile Rect visibleArea = new Rect();
     private final long instanceId = NEXT_INSTANCE_ID.getAndIncrement();
-    private long surfaceEpoch;
+    private volatile long surfaceEpoch;
     private boolean suppressSearchCallback;
     private boolean suppressGestureUntilNextDown;
     private boolean panMode;
     private int visibleAlertId = -1;
-    private boolean visible;
+    private volatile boolean visible;
     private boolean templateRendered;
     private boolean templateRenderPosted;
     private Template pendingTemplate;
@@ -374,14 +379,27 @@ public final class WazeSurfaceActivity extends Activity implements SurfaceHolder
 
     @Override
     public void surfaceDestroyed(SurfaceHolder holder) {
+        CountDownLatch destroyed = new CountDownLatch(1);
         HostBridge bridge = bridge();
-        if (bridge != null) bridge.onSurfaceDestroyed();
+        if (bridge == null) {
+            destroyed.countDown();
+        } else {
+            bridge.onSurfaceDestroyed(destroyed::countDown);
+        }
+        try {
+            if (!destroyed.await(SURFACE_DESTROY_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+                SurfaceLog.event("surface_destroy_ack_timeout");
+            }
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+        }
         SurfaceLog.event("visible_surface_destroyed");
         SurfaceLog.milestone("visibleSurfaceReady", false);
         surface = null;
         surfaceWidth = 0;
         surfaceHeight = 0;
-        visibleArea.setEmpty();
+        surfaceDpi = 0;
+        visibleArea = new Rect();
     }
 
     private void configureGestures() {

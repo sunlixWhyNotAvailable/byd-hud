@@ -1129,8 +1129,20 @@ public final class WazeDirectChannel {
         }
     }
 
-    static DirectTbtFrame.TripMetrics destinationMetrics(TravelEstimate estimate) {
-        if (estimate == null) return DirectTbtFrame.TripMetrics.empty();
+    static DirectTbtFrame.TripMetrics destinationMetrics(
+            List<TravelEstimate> estimates) {
+        if (estimates == null || estimates.isEmpty()) {
+            return DirectTbtFrame.TripMetrics.empty();
+        }
+        DirectTbtFrame.TravelMetrics nextStop = travelMetrics(estimates.get(0));
+        DirectTbtFrame.TravelMetrics wholeRoute = estimates.size() > 1
+                ? travelMetrics(estimates.get(estimates.size() - 1))
+                : DirectTbtFrame.TravelMetrics.unavailable();
+        return new DirectTbtFrame.TripMetrics(nextStop, wholeRoute);
+    }
+
+    private static DirectTbtFrame.TravelMetrics travelMetrics(TravelEstimate estimate) {
+        if (estimate == null) return DirectTbtFrame.TravelMetrics.unavailable();
         DateTimeWithZone arrival = estimate.getArrivalTimeAtDestination();
         long arrivalTimeMs = arrival == null ? -1L : arrival.getTimeSinceEpochMillis();
         int arrivalZoneOffsetSeconds = arrival == null
@@ -1139,10 +1151,9 @@ public final class WazeDirectChannel {
         long remainingSeconds = estimate.getRemainingTimeSeconds();
         Distance remainingDistance = estimate.getRemainingDistance();
         long remainingMeters = remainingDistance == null ? -1L : meters(remainingDistance);
-        return DirectTbtFrame.TripMetrics.nextStopOnly(
-                new DirectTbtFrame.TravelMetrics(
-                        arrivalTimeMs, arrivalZoneOffsetSeconds,
-                        remainingSeconds, remainingMeters));
+        return new DirectTbtFrame.TravelMetrics(
+                arrivalTimeMs, arrivalZoneOffsetSeconds,
+                remainingSeconds, remainingMeters);
     }
 
     private static int directionFromShape(int shape) {
@@ -1435,9 +1446,9 @@ public final class WazeDirectChannel {
         }
 
         @Override
-        public void onSurfaceDestroyed() {
+        public void onSurfaceDestroyed(Runnable completion) {
             runOnChannel(() -> {
-                notifySurfaceDestroyed("activity-surface-destroyed");
+                notifySurfaceDestroyed("activity-surface-destroyed", completion);
                 surface = null;
                 surfaceDelivered = false;
                 int callbackGeneration = sessionGeneration;
@@ -1526,15 +1537,24 @@ public final class WazeDirectChannel {
         }
 
         private void notifySurfaceDestroyed(String reason) {
+            notifySurfaceDestroyed(reason, null);
+        }
+
+        private void notifySurfaceDestroyed(String reason, Runnable completion) {
             ISurfaceCallback callback = surfaceCallback;
-            if (!surfaceDeliveryAttempted || callback == null) return;
+            if (!surfaceDeliveryAttempted || callback == null) {
+                if (completion != null) completion.run();
+                return;
+            }
             try {
                 callback.onSurfaceDestroyed(Bundleable.create(
                                 new SurfaceContainer(null, 0, 0, 0)),
-                        new DoneCallback(expectedGeneration, "onSurfaceDestroyed", null));
+                        new DoneCallback(expectedGeneration, "onSurfaceDestroyed", null,
+                                completion));
                 log("surface destroyed notified reason=" + safeText(reason));
             } catch (Throwable error) {
                 log("surface destroy notify failed: " + error);
+                if (completion != null) completion.run();
             }
         }
 
@@ -1661,14 +1681,10 @@ public final class WazeDirectChannel {
                         return;
                     }
                     Trip trip = (Trip) value;
-                    TravelEstimate destinationEstimate = null;
                     List<TravelEstimate> destinationEstimates =
                             trip.getDestinationTravelEstimates();
-                    if (destinationEstimates != null && !destinationEstimates.isEmpty()) {
-                        destinationEstimate = destinationEstimates.get(0);
-                    }
                     DirectTbtFrame.TripMetrics tripMetrics =
-                            destinationMetrics(destinationEstimate);
+                            destinationMetrics(destinationEstimates);
                     List<Step> steps = trip.getSteps();
                     if (steps == null || steps.isEmpty()) {
                         navigationFrame = navigationFrame.withTripMetrics(tripMetrics);
@@ -1689,10 +1705,14 @@ public final class WazeDirectChannel {
                     logNextStep(steps.size() > 1 ? steps.get(1) : null, "trip_next");
                     log("trip destination estimates="
                             + (destinationEstimates == null ? 0 : destinationEstimates.size())
-                            + " remainingSeconds="
+                            + " nextStopSeconds="
                             + tripMetrics.getNextStop().getRemainingTimeSeconds()
+                            + " nextStopMeters="
+                            + tripMetrics.getNextStop().getRemainingDistanceMeters()
+                            + " remainingSeconds="
+                            + tripMetrics.getWholeRoute().getRemainingTimeSeconds()
                             + " remainingMeters="
-                            + tripMetrics.getNextStop().getRemainingDistanceMeters());
+                            + tripMetrics.getWholeRoute().getRemainingDistanceMeters());
                 } catch (Throwable t) {
                     log("trip parse failed: " + t);
                 }
@@ -1704,11 +1724,18 @@ public final class WazeDirectChannel {
         private final int expectedGeneration;
         private final String name;
         private final ResultHandler success;
+        private final Runnable completion;
 
         DoneCallback(int expectedGeneration, String name, ResultHandler success) {
+            this(expectedGeneration, name, success, null);
+        }
+
+        DoneCallback(int expectedGeneration, String name, ResultHandler success,
+                Runnable completion) {
             this.expectedGeneration = expectedGeneration;
             this.name = name;
             this.success = success;
+            this.completion = completion;
         }
 
         @Override
@@ -1720,11 +1747,12 @@ public final class WazeDirectChannel {
         public void onSuccess(Bundleable response) {
             postBinder(expectedGeneration, () -> {
                 log("callback success=" + name);
-                if (success == null) return;
                 try {
-                    success.run(response);
+                    if (success != null) success.run(response);
                 } catch (Throwable t) {
                     sessionFailure(expectedGeneration, "callback_handler_" + name, t);
+                } finally {
+                    if (completion != null) completion.run();
                 }
             });
         }
@@ -1741,12 +1769,16 @@ public final class WazeDirectChannel {
             }
             String finalPayload = payload;
             postBinder(expectedGeneration, () -> {
-                if (success == null) {
-                    log("callback failure=" + name + " detail=" + finalPayload);
-                    return;
+                try {
+                    if (success == null) {
+                        log("callback failure=" + name + " detail=" + finalPayload);
+                    } else {
+                        sessionFailure(expectedGeneration, "callback_failure_" + name,
+                                new IllegalStateException(finalPayload));
+                    }
+                } finally {
+                    if (completion != null) completion.run();
                 }
-                sessionFailure(expectedGeneration, "callback_failure_" + name,
-                        new IllegalStateException(finalPayload));
             });
         }
     }

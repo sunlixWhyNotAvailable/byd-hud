@@ -145,9 +145,12 @@ public final class DirectTbtPayload {
             } else {
                 byte[] speedPng = SpeedLimitPng.get(speedLimit);
                 if (speedPlacement == SPEED_PLACEMENT_MANEUVER) {
-                    maneuverPng = speedPng;
-                    maneuverSpeedApplied = true;
-                } else if (speedPlacement == SPEED_PLACEMENT_LANES) {
+                    if (speedPng.length > 0) {
+                        maneuverPng = speedPng;
+                        maneuverSpeedApplied = true;
+                    }
+                } else if (speedPlacement == SPEED_PLACEMENT_LANES
+                        && speedPng.length > 0) {
                     lanes = Collections.emptyList();
                     lanePng = speedPng;
                 }
@@ -227,7 +230,9 @@ public final class DirectTbtPayload {
                 == HudPrefs.ROUTE_METRICS_WHOLE_ROUTE;
         StringBuilder values = new StringBuilder();
         DirectTbtFrame.TravelMetrics eta = selectMetric(
-                preferWholeRoute, wholeRoute.getArrivalTimeEpochMs() > 0L,
+                preferWholeRoute,
+                wholeRoute.getArrivalTimeEpochMs() > 0L,
+                nextStop.getArrivalTimeEpochMs() > 0L,
                 wholeRoute, nextStop);
         if (options.showEta && eta.getArrivalTimeEpochMs() > 0L) {
             SimpleDateFormat formatter = new SimpleDateFormat("HH:mm", Locale.US);
@@ -240,14 +245,18 @@ public final class DirectTbtPayload {
                     + formatter.format(new Date(eta.getArrivalTimeEpochMs())));
         }
         DirectTbtFrame.TravelMetrics time = selectMetric(
-                preferWholeRoute, wholeRoute.getRemainingTimeSeconds() >= 0L,
+                preferWholeRoute,
+                wholeRoute.getRemainingTimeSeconds() >= 0L,
+                nextStop.getRemainingTimeSeconds() >= 0L,
                 wholeRoute, nextStop);
         if (options.showRemainingTime && time.getRemainingTimeSeconds() >= 0L) {
             long minutes = (time.getRemainingTimeSeconds() + 59L) / 60L;
             appendMetric(values, minutes + " min");
         }
         DirectTbtFrame.TravelMetrics distance = selectMetric(
-                preferWholeRoute, wholeRoute.getRemainingDistanceMeters() >= 0L,
+                preferWholeRoute,
+                wholeRoute.getRemainingDistanceMeters() >= 0L,
+                nextStop.getRemainingDistanceMeters() >= 0L,
                 wholeRoute, nextStop);
         if (options.showRemainingDistance && distance.getRemainingDistanceMeters() >= 0L) {
             appendMetric(values, formatDistance(distance.getRemainingDistanceMeters()));
@@ -258,9 +267,15 @@ public final class DirectTbtPayload {
     private static DirectTbtFrame.TravelMetrics selectMetric(
             boolean preferWholeRoute,
             boolean wholeRouteFieldAvailable,
+            boolean nextStopFieldAvailable,
             DirectTbtFrame.TravelMetrics wholeRoute,
             DirectTbtFrame.TravelMetrics nextStop) {
-        return preferWholeRoute && wholeRouteFieldAvailable ? wholeRoute : nextStop;
+        if (preferWholeRoute) {
+            return wholeRouteFieldAvailable || !nextStopFieldAvailable
+                    ? wholeRoute : nextStop;
+        }
+        return nextStopFieldAvailable || !wholeRouteFieldAvailable
+                ? nextStop : wholeRoute;
     }
 
     private static void appendMetric(StringBuilder values, String value) {
@@ -282,7 +297,8 @@ public final class DirectTbtPayload {
             return SPEED_PLACEMENT_NONE;
         }
         if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER) {
-            return SPEED_PLACEMENT_MANEUVER;
+            return frame.getAlertOverlay().isActive()
+                    ? SPEED_PLACEMENT_NONE : SPEED_PLACEMENT_MANEUVER;
         }
         if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES) {
             return SPEED_PLACEMENT_LANES;

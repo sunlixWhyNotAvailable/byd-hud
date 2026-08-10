@@ -44,6 +44,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
@@ -60,6 +61,7 @@ public final class MainActivity extends ComponentActivity {
     private static final int NAV_RUNTIME_RECONNECT_RETRY_LIMIT = 2;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
+    private static final long NAV_RUNTIME_PERMISSION_CACHE_MS = 750L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
     private static final boolean BACKGROUND_MODE = true;
     private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
@@ -82,10 +84,16 @@ public final class MainActivity extends ComponentActivity {
     private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
     private final AtomicBoolean storageForceRefreshPending = new AtomicBoolean(false);
     private final AtomicBoolean appScanInProgress = new AtomicBoolean(false);
+    private final Object packageMetadataCacheLock = new Object();
+    private final Map<String, String> appLabelCache = new HashMap<>();
+    private final Map<String, Boolean> installedPackageCache = new HashMap<>();
+    private final Object navRuntimePermissionCacheLock = new Object();
     private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
     private volatile Map<String, String> appVersionNames = Collections.emptyMap();
     private volatile boolean appScanCacheAvailable;
     private volatile String appScanStatus = "";
+    private volatile NavRuntimePermissionStatus cachedNavRuntimePermissionStatus;
+    private volatile long cachedNavRuntimePermissionStatusAtMs;
     private volatile Runnable composeSnapshotInvalidationListener;
     private HudOutputCoordinator hudOutput;
 
@@ -288,6 +296,7 @@ public final class MainActivity extends ComponentActivity {
         super.onResume();
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
+        invalidatePackageMetadataCache();
         NavigatorAssetManager.reconcile(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
@@ -759,7 +768,7 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public ComposeSnapshot composeSnapshot() {
-        NavRuntimePermissionStatus permissionStatus = NavRuntimePermissionStatus.check(this);
+        NavRuntimePermissionStatus permissionStatus = navRuntimePermissionStatus();
         boolean uaLanguage = HudPrefs.isUaLanguage(this);
         NavAppDisplayController displayController = NavAppDisplayController.get(this);
         Set<String> capturePackages = NavCapturePrefs.getCapturePackages(this);
@@ -1075,11 +1084,42 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps Google Maps variants as one UI target while leaving parser package support unchanged.
     private boolean isInstalledPackage(String packageName) {
-        if (!isGoogleMapsAlias(packageName)) {
-            return isPackageInstalled(packageName);
+        String normalized = normalizePackage(packageName);
+        synchronized (packageMetadataCacheLock) {
+            Boolean cached = installedPackageCache.get(normalized);
+            if (cached != null) {
+                return cached;
+            }
         }
-        return isPackageInstalled(GMAPS_REVANCED_PACKAGE)
-                || isPackageInstalled(GMAPS_OFFICIAL_PACKAGE);
+        boolean installed = isGoogleMapsAlias(normalized)
+                ? isPackageInstalled(GMAPS_REVANCED_PACKAGE)
+                || isPackageInstalled(GMAPS_OFFICIAL_PACKAGE)
+                : isPackageInstalled(normalized);
+        synchronized (packageMetadataCacheLock) {
+            installedPackageCache.put(normalized, installed);
+        }
+        return installed;
+    }
+
+    private NavRuntimePermissionStatus navRuntimePermissionStatus() {
+        long now = SystemClock.elapsedRealtime();
+        synchronized (navRuntimePermissionCacheLock) {
+            if (cachedNavRuntimePermissionStatus != null
+                    && now - cachedNavRuntimePermissionStatusAtMs
+                    < NAV_RUNTIME_PERMISSION_CACHE_MS) {
+                return cachedNavRuntimePermissionStatus;
+            }
+            cachedNavRuntimePermissionStatus = NavRuntimePermissionStatus.check(this);
+            cachedNavRuntimePermissionStatusAtMs = now;
+            return cachedNavRuntimePermissionStatus;
+        }
+    }
+
+    private void invalidateNavRuntimePermissionStatus() {
+        synchronized (navRuntimePermissionCacheLock) {
+            cachedNavRuntimePermissionStatus = null;
+            cachedNavRuntimePermissionStatusAtMs = 0L;
+        }
     }
 
     //keeps alias checks centralized so HUD/log row state cannot drift between Maps variants.
@@ -1555,6 +1595,7 @@ public final class MainActivity extends ComponentActivity {
             } finally {
                 appScanInProgress.set(false);
                 handler.post(() -> {
+                    invalidatePackageMetadataCache();
                     refreshActiveAppsList();
                     invalidateComposeSnapshot();
                 });
@@ -2008,9 +2049,12 @@ public final class MainActivity extends ComponentActivity {
             this.storageScanError = storageScanError == null ? "" : storageScanError;
             this.storageSessionCount = Math.max(0, storageSessionCount);
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
-            this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
-            this.supportedApps = supportedApps == null ? Collections.emptyList() : supportedApps;
-            this.allApps = allApps == null ? Collections.emptyList() : allApps;
+            this.storageDays = storageDays == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(storageDays));
+            this.supportedApps = supportedApps == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(supportedApps));
+            this.allApps = allApps == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(allApps));
             this.patchRows = patchRows == null ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(patchRows));
             this.navigatorAssets = navigatorAssets == null ? Collections.emptyList()
@@ -2019,6 +2063,108 @@ public final class MainActivity extends ComponentActivity {
                     ? new ComposePatchOperation("", "", NavigatorPatchStore.IDLE,
                     "", false, false, false)
                     : patchOperation;
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeSnapshot)) return false;
+            ComposeSnapshot other = (ComposeSnapshot) value;
+            return uaLanguage == other.uaLanguage
+                    && darkTheme == other.darkTheme
+                    && bootEnabled == other.bootEnabled
+                    && detailedDebugArtifactsEnabled == other.detailedDebugArtifactsEnabled
+                    && pngOutputEnabled == other.pngOutputEnabled
+                    && nativeOutputEnabled == other.nativeOutputEnabled
+                    && laneOutputEnabled == other.laneOutputEnabled
+                    && distanceOutputEnabled == other.distanceOutputEnabled
+                    && streetOutputEnabled == other.streetOutputEnabled
+                    && textDirectionOutputEnabled == other.textDirectionOutputEnabled
+                    && wazeAlertsEnabled == other.wazeAlertsEnabled
+                    && wholeRouteMetricsEnabled == other.wholeRouteMetricsEnabled
+                    && routeMetricsMode == other.routeMetricsMode
+                    && etaOutputEnabled == other.etaOutputEnabled
+                    && remainingTimeOutputEnabled == other.remainingTimeOutputEnabled
+                    && remainingDistanceOutputEnabled == other.remainingDistanceOutputEnabled
+                    && speedLimitMode == other.speedLimitMode
+                    && speedLimitFreeFallback == other.speedLimitFreeFallback
+                    && speedLimitOverlaySeconds == other.speedLimitOverlaySeconds
+                    && speedLimitCompositePlacement == other.speedLimitCompositePlacement
+                    && speedLimitManeuverOverlaySize == other.speedLimitManeuverOverlaySize
+                    && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
+                    && wazeScreenCaptureEnabled == other.wazeScreenCaptureEnabled
+                    && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
+                    && fullscreenDashboardEnabled == other.fullscreenDashboardEnabled
+                    && dashboardHeightPercent == other.dashboardHeightPercent
+                    && smallDistanceClampEnabled == other.smallDistanceClampEnabled
+                    && roundaboutLeftHandTraffic == other.roundaboutLeftHandTraffic
+                    && settingsPermissionsGranted == other.settingsPermissionsGranted
+                    && captureReady == other.captureReady
+                    && dashboardMoveInProgress == other.dashboardMoveInProgress
+                    && logcatRecording == other.logcatRecording
+                    && manualModeEnabled == other.manualModeEnabled
+                    && arrowCuratedMode == other.arrowCuratedMode
+                    && curatedIndex == other.curatedIndex
+                    && curatedCount == other.curatedCount
+                    && pngSourceId == other.pngSourceId
+                    && nativeManeuverId == other.nativeManeuverId
+                    && distanceMeters == other.distanceMeters
+                    && appRuntimeStatusKnown == other.appRuntimeStatusKnown
+                    && appScanInProgress == other.appScanInProgress
+                    && appScanCacheAvailable == other.appScanCacheAvailable
+                    && storageLimitGb == other.storageLimitGb
+                    && storageCalculating == other.storageCalculating
+                    && storageCacheAvailable == other.storageCacheAvailable
+                    && storageSessionCount == other.storageSessionCount
+                    && navCaptureFolderBytes == other.navCaptureFolderBytes
+                    && Objects.equals(permissionSummary, other.permissionSummary)
+                    && Objects.equals(adbKeyFingerprint, other.adbKeyFingerprint)
+                    && Objects.equals(hudStatus, other.hudStatus)
+                    && Objects.equals(hudPackage, other.hudPackage)
+                    && Objects.equals(logOnlyPackages, other.logOnlyPackages)
+                    && Objects.equals(observedPackages, other.observedPackages)
+                    && Objects.equals(activeDashboardPackage, other.activeDashboardPackage)
+                    && Objects.equals(logcatStatus, other.logcatStatus)
+                    && Objects.equals(logPaths, other.logPaths)
+                    && Objects.equals(applicationState, other.applicationState)
+                    && Objects.equals(streetText, other.streetText)
+                    && Objects.equals(laneBitmap, other.laneBitmap)
+                    && Objects.equals(lastScanText, other.lastScanText)
+                    && Objects.equals(appScanStatus, other.appScanStatus)
+                    && Objects.equals(navCaptureFolderPaths, other.navCaptureFolderPaths)
+                    && Objects.equals(storageScanError, other.storageScanError)
+                    && Objects.equals(storageDays, other.storageDays)
+                    && Objects.equals(supportedApps, other.supportedApps)
+                    && Objects.equals(allApps, other.allApps)
+                    && Objects.equals(patchRows, other.patchRows)
+                    && Objects.equals(navigatorAssets, other.navigatorAssets)
+                    && Objects.equals(patchOperation, other.patchOperation);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(
+                    uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
+                    pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
+                    distanceOutputEnabled, streetOutputEnabled, textDirectionOutputEnabled,
+                    wazeAlertsEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
+                    etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
+                    speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
+                    speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
+                    speedLimitLaneOverlaySize, wazeScreenCaptureEnabled,
+                    wazeCustomSurfaceEnabled, fullscreenDashboardEnabled,
+                    dashboardHeightPercent, smallDistanceClampEnabled,
+                    roundaboutLeftHandTraffic, settingsPermissionsGranted, captureReady,
+                    permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
+                    logOnlyPackages, observedPackages, activeDashboardPackage,
+                    dashboardMoveInProgress, logcatRecording, logcatStatus, logPaths,
+                    applicationState, manualModeEnabled, arrowCuratedMode, curatedIndex,
+                    curatedCount, pngSourceId, nativeManeuverId, distanceMeters, streetText,
+                    laneBitmap, lastScanText, appRuntimeStatusKnown, appScanInProgress,
+                    appScanCacheAvailable, appScanStatus, storageLimitGb,
+                    navCaptureFolderPaths, storageCalculating, storageCacheAvailable,
+                    storageScanError, storageSessionCount, navCaptureFolderBytes, storageDays,
+                    supportedApps, allApps, patchRows, navigatorAssets, patchOperation);
         }
     }
 
@@ -2056,6 +2202,24 @@ public final class MainActivity extends ComponentActivity {
             this.active = active;
             this.hasPublicStorage = hasPublicStorage;
             this.hasPrivateStorage = hasPrivateStorage;
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeStorageDay)) return false;
+            ComposeStorageDay other = (ComposeStorageDay) value;
+            return sessions == other.sessions && bytes == other.bytes && active == other.active
+                    && hasPublicStorage == other.hasPublicStorage
+                    && hasPrivateStorage == other.hasPrivateStorage
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(createdLabel, other.createdLabel);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, createdLabel, sessions, bytes, active,
+                    hasPublicStorage, hasPrivateStorage);
         }
     }
 
@@ -2157,6 +2321,34 @@ public final class MainActivity extends ComponentActivity {
             this.reason = reason == null ? "" : reason;
             this.patchEnabled = patchEnabled;
         }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeNavigatorPatchRow)) return false;
+            ComposeNavigatorPatchRow other = (ComposeNavigatorPatchRow) value;
+            return installed == other.installed && externalSource == other.externalSource
+                    && patchEnabled == other.patchEnabled
+                    && Objects.equals(profileId, other.profileId)
+                    && Objects.equals(label, other.label)
+                    && Objects.equals(packageName, other.packageName)
+                    && Objects.equals(installedVersion, other.installedVersion)
+                    && Objects.equals(sourceName, other.sourceName)
+                    && Objects.equals(sourceVersion, other.sourceVersion)
+                    && Objects.equals(directState, other.directState)
+                    && Objects.equals(optionalState, other.optionalState)
+                    && Objects.equals(optionalLabel, other.optionalLabel)
+                    && Objects.equals(alertState, other.alertState)
+                    && Objects.equals(alertLabel, other.alertLabel)
+                    && Objects.equals(reason, other.reason);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(profileId, label, packageName, installedVersion, installed,
+                    externalSource, sourceName, sourceVersion, directState, optionalState,
+                    optionalLabel, alertState, alertLabel, reason, patchEnabled);
+        }
     }
 
     public static final class ComposeStorageShareSummary {
@@ -2207,6 +2399,25 @@ public final class MainActivity extends ComponentActivity {
             this.busy = busy;
             this.recoveryRequired = recoveryRequired;
         }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposePatchOperation)) return false;
+            ComposePatchOperation other = (ComposePatchOperation) value;
+            return destructive == other.destructive && busy == other.busy
+                    && recoveryRequired == other.recoveryRequired
+                    && Objects.equals(profileId, other.profileId)
+                    && Objects.equals(kind, other.kind)
+                    && Objects.equals(phase, other.phase)
+                    && Objects.equals(detail, other.detail);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(profileId, kind, phase, detail, destructive, busy,
+                    recoveryRequired);
+        }
     }
 
     //anchors ComposeAppRow UI orchestration so controls and diagnostics are wired from one place.
@@ -2251,6 +2462,33 @@ public final class MainActivity extends ComponentActivity {
             this.processName = processName == null ? "" : processName;
             this.importance = importance;
         }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeAppRow)) return false;
+            ComposeAppRow other = (ComposeAppRow) value;
+            return installed == other.installed && runtimeBacked == other.runtimeBacked
+                    && observed == other.observed && supportedHud == other.supportedHud
+                    && supportedSection == other.supportedSection
+                    && hudEnabled == other.hudEnabled && logOnlyEnabled == other.logOnlyEnabled
+                    && onDashboard == other.onDashboard
+                    && dashboardStateKnown == other.dashboardStateKnown
+                    && dashboardMoveInProgress == other.dashboardMoveInProgress
+                    && importance == other.importance
+                    && Objects.equals(label, other.label)
+                    && Objects.equals(packageName, other.packageName)
+                    && Objects.equals(packageVersions, other.packageVersions)
+                    && Objects.equals(processName, other.processName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(label, packageName, packageVersions, installed, runtimeBacked,
+                    observed, supportedHud, supportedSection, hudEnabled, logOnlyEnabled,
+                    onDashboard, dashboardStateKnown, dashboardMoveInProgress, processName,
+                    importance);
+        }
     }
 
     public static final class ComposePackageVersion {
@@ -2260,6 +2498,20 @@ public final class MainActivity extends ComponentActivity {
         ComposePackageVersion(String packageName, String versionName) {
             this.packageName = packageName == null ? "" : packageName;
             this.versionName = versionName == null ? "" : versionName;
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposePackageVersion)) return false;
+            ComposePackageVersion other = (ComposePackageVersion) value;
+            return Objects.equals(packageName, other.packageName)
+                    && Objects.equals(versionName, other.versionName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(packageName, versionName);
         }
     }
 
@@ -2712,17 +2964,35 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String appLabel(String packageName) {
+        String normalized = normalizePackage(packageName);
+        synchronized (packageMetadataCacheLock) {
+            String cached = appLabelCache.get(normalized);
+            if (cached != null) {
+                return cached;
+            }
+        }
         PackageManager packageManager = getPackageManager();
+        String resolved = packageName;
         try {
             ApplicationInfo info = packageManager.getApplicationInfo(packageName, 0);
             CharSequence label = packageManager.getApplicationLabel(info);
             if (label != null && label.length() > 0) {
-                return label.toString();
+                resolved = label.toString();
             }
         } catch (PackageManager.NameNotFoundException ignored) {
             //guards label lookup because packages can disappear between process listing and UI rendering.
         }
-        return packageName;
+        synchronized (packageMetadataCacheLock) {
+            appLabelCache.put(normalized, resolved);
+        }
+        return resolved;
+    }
+
+    private void invalidatePackageMetadataCache() {
+        synchronized (packageMetadataCacheLock) {
+            appLabelCache.clear();
+            installedPackageCache.clear();
+        }
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
@@ -3762,7 +4032,7 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void runNavPermissionSelfCheck(boolean autoGrant) {
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
+        NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         String adbKey = LocalAdbBridge.adbKeyFingerprint(this);
         boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
         boolean autoAttemptFinished = autoAdbAuthorizationState
@@ -3801,7 +4071,7 @@ public final class MainActivity extends ComponentActivity {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private boolean ensureNavCaptureRuntimeReadyForStart(String mode, String packageName) {
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
+        NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         if (status.readyForCapture()) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
             if (!LocalAdbBridge.canShortCircuitReadyForCapture(
@@ -3898,7 +4168,8 @@ public final class MainActivity extends ComponentActivity {
         if (authorizationPromptMode != LocalAdbBridge.AuthorizationPromptMode.NEVER) {
             autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.RUNNING;
         }
-        NavRuntimePermissionStatus runningStatus = NavRuntimePermissionStatus.check(this);
+        invalidateNavRuntimePermissionStatus();
+        NavRuntimePermissionStatus runningStatus = navRuntimePermissionStatus();
         if (runningStatus.needsAdbGrant()) {
             updateAdbBridgeStatus(
                     runningStatus.uiSummary(false, LocalAdbBridge.adbKeyFingerprint(this))
@@ -3962,7 +4233,8 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         adbGrantInProgress = false;
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
+        invalidateNavRuntimePermissionStatus();
+        NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         boolean keyVerified = LocalAdbBridge.isCurrentKeyVerifiedThisProcess(this);
         boolean repairCollision = automatic
                 && result.code == LocalAdbBridge.Result.Code.PARTIAL

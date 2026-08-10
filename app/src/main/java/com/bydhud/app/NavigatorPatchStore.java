@@ -13,7 +13,7 @@ import java.util.UUID;
 
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
-    private static final int SCAN_CACHE_REVISION = 3;
+    private static final int SCAN_CACHE_REVISION = 4;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";
@@ -49,6 +49,7 @@ final class NavigatorPatchStore {
     private static final String KEY_STATE_AT = "state_at";
     private static final String KEY_SESSION_ID = "session_id";
     private static final String KEY_TRANSACTION_TOKEN = "transaction_token";
+    private static final String KEY_RECOVERY_OWNER = "recovery_owner";
     private static final String KEY_EXPECTED_SHA = "expected_sha";
     private static final String KEY_EXPECTED_VERSION_CODE = "expected_version_code";
     private static final String KEY_EXPECTED_SIGNER = "expected_signer";
@@ -244,6 +245,67 @@ final class NavigatorPatchStore {
         transition(context, profile, phase, detail);
     }
 
+    static synchronized void claimAssetRecoveryTransaction(
+            Context context, Profile profile, String recoveryOwner, File directory,
+            NavigatorPatchPipeline.ScanResult expected,
+            long initialUpdateTime, long initialVersionCode, String initialSigner,
+            String initialFingerprint, String detail) throws IOException {
+        SharedPreferences preferences = prefs(context);
+        OperationSnapshot current = operation(context);
+        String transactionName = directory.getName();
+        boolean exactRecovery = matchesRecoveryTransaction(
+                current, profile, recoveryOwner, transactionName, expected.sha256,
+                preferences.getString(KEY_RECOVERY_OWNER, ""),
+                preferences.getString(KEY_TRANSACTION_DIR, ""),
+                preferences.getString(KEY_EXPECTED_SHA, ""));
+        if (current.busy()
+                || (RECOVERY_REQUIRED.equals(current.phase) && !exactRecovery)) {
+            throw new IOException("Another recovery transaction is active");
+        }
+        boolean committed = preferences.edit()
+                .putString(KEY_OPERATION_KIND, OP_RECOVERY)
+                .putString(KEY_OPERATION_PROFILE, profile.id)
+                .putString(KEY_OPERATION_PHASE, RECOVERY_REQUIRED)
+                .putString(KEY_OPERATION_DETAIL, detail == null ? "" : detail)
+                .putLong(KEY_STATE_AT, System.currentTimeMillis())
+                .putString(KEY_TRANSACTION_DIR, transactionName)
+                .putBoolean(KEY_DESTRUCTIVE, true)
+                .putString(KEY_TRANSACTION_TOKEN, transactionName)
+                .putInt(KEY_SESSION_ID, -1)
+                .putString(KEY_RECOVERY_OWNER, recoveryOwner == null ? "" : recoveryOwner)
+                .putString(KEY_EXPECTED_SHA, expected.sha256)
+                .putLong(KEY_EXPECTED_VERSION_CODE, expected.versionCode)
+                .putString(KEY_EXPECTED_SIGNER, expected.signerSha256)
+                .putString(KEY_EXPECTED_DIRECT, expected.directState)
+                .putString(KEY_EXPECTED_OPTIONAL, expected.optionalState)
+                .putString(KEY_EXPECTED_ALERT, expected.alertState)
+                .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
+                .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
+                .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
+                .putString(KEY_INITIAL_FINGERPRINT,
+                        initialFingerprint == null ? "" : initialFingerprint)
+                .putString(KEY_EXPECTED_CALLBACK, "")
+                .putBoolean(KEY_CALLBACK_CONSUMED, false)
+                .commit();
+        if (!committed) throw new IOException("Cannot retain navigator recovery transaction");
+        AppEventLogger.event(context, "navigator_patch operation=" + OP_RECOVERY
+                + " profile=" + profile.id
+                + " stage=" + RECOVERY_REQUIRED + " code=RECOVERY_REQUIRED"
+                + " detail=" + clean(detail));
+    }
+
+    static boolean matchesRecoveryTransaction(
+            OperationSnapshot current, Profile profile,
+            String recoveryOwner, String transactionName, String expectedFingerprint,
+            String storedOwner, String storedTransaction, String storedFingerprint) {
+        return current != null
+                && RECOVERY_REQUIRED.equals(current.phase)
+                && current.profile == profile
+                && same(recoveryOwner, storedOwner)
+                && same(transactionName, storedTransaction)
+                && same(expectedFingerprint, storedFingerprint);
+    }
+
     static synchronized void transition(
             Context context, Profile profile, String phase, String detail) {
         prefs(context).edit()
@@ -301,6 +363,7 @@ final class NavigatorPatchStore {
                         initialFingerprint == null ? "" : initialFingerprint)
                 .putString(KEY_EXPECTED_CALLBACK, "")
                 .putBoolean(KEY_CALLBACK_CONSUMED, false)
+                .remove(KEY_RECOVERY_OWNER)
                 .commit();
     }
 
@@ -423,6 +486,32 @@ final class NavigatorPatchStore {
                 name == null || name.isEmpty() ? "unset" : name);
     }
 
+    static String recoveryOwner(Context context) {
+        return prefs(context).getString(KEY_RECOVERY_OWNER, "");
+    }
+
+    static String installedIdentity(Context context, Profile profile) throws Exception {
+        PackageInfo info = context.getPackageManager().getPackageInfo(
+                profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
+        ApplicationInfo applicationInfo = info.applicationInfo;
+        if (applicationInfo == null || applicationInfo.sourceDir == null) {
+            throw new IOException("Installed APK path is unavailable");
+        }
+        StringBuilder identity = new StringBuilder()
+                .append(info.lastUpdateTime).append('|')
+                .append(info.getLongVersionCode()).append('|')
+                .append(info.versionName == null ? "" : info.versionName).append('|')
+                .append(NavigatorSigningKey.installedCertificateSha256(
+                        context, profile.packageName));
+        appendFileIdentity(identity, applicationInfo.sourceDir);
+        if (applicationInfo.splitSourceDirs != null) {
+            for (String path : applicationInfo.splitSourceDirs) {
+                appendFileIdentity(identity, path);
+            }
+        }
+        return identity.toString();
+    }
+
     static File originalSet(Context context) {
         return new File(transactionDirectory(context), "source-set");
     }
@@ -433,6 +522,7 @@ final class NavigatorPatchStore {
                 .remove(KEY_DESTRUCTIVE)
                 .remove(KEY_SESSION_ID)
                 .remove(KEY_TRANSACTION_TOKEN)
+                .remove(KEY_RECOVERY_OWNER)
                 .remove(KEY_EXPECTED_SHA)
                 .remove(KEY_EXPECTED_VERSION_CODE)
                 .remove(KEY_EXPECTED_SIGNER)
@@ -447,6 +537,39 @@ final class NavigatorPatchStore {
                 .remove(KEY_CALLBACK_CONSUMED)
                 .remove(KEY_OPERATION_KIND)
                 .commit();
+    }
+
+    static synchronized void completeRestoreTransaction(
+            Context context, Profile profile, String detail) throws IOException {
+        boolean committed = prefs(context).edit()
+                .putString(KEY_OPERATION_PROFILE, profile.id)
+                .putString(KEY_OPERATION_PHASE, IDLE)
+                .putString(KEY_OPERATION_DETAIL, detail == null ? "" : detail)
+                .putLong(KEY_STATE_AT, System.currentTimeMillis())
+                .remove(KEY_TRANSACTION_DIR)
+                .remove(KEY_DESTRUCTIVE)
+                .remove(KEY_SESSION_ID)
+                .remove(KEY_TRANSACTION_TOKEN)
+                .remove(KEY_RECOVERY_OWNER)
+                .remove(KEY_EXPECTED_SHA)
+                .remove(KEY_EXPECTED_VERSION_CODE)
+                .remove(KEY_EXPECTED_SIGNER)
+                .remove(KEY_EXPECTED_DIRECT)
+                .remove(KEY_EXPECTED_OPTIONAL)
+                .remove(KEY_EXPECTED_ALERT)
+                .remove(KEY_INITIAL_UPDATE_TIME)
+                .remove(KEY_INITIAL_VERSION_CODE)
+                .remove(KEY_INITIAL_SIGNER)
+                .remove(KEY_INITIAL_FINGERPRINT)
+                .remove(KEY_EXPECTED_CALLBACK)
+                .remove(KEY_CALLBACK_CONSUMED)
+                .remove(KEY_OPERATION_KIND)
+                .commit();
+        if (!committed) throw new IOException("Cannot complete navigator recovery transaction");
+        AppEventLogger.event(context, "navigator_patch operation=" + OP_RECOVERY
+                + " profile=" + profile.id + " stage=" + IDLE
+                + " code=" + eventCode(OP_RECOVERY, IDLE, detail)
+                + " detail=" + clean(detail));
     }
 
     static void recordInstalledVerification(
@@ -562,6 +685,17 @@ final class NavigatorPatchStore {
         return result.length() > 320 ? result.substring(0, 320) : result;
     }
 
+    private static boolean same(String first, String second) {
+        return (first == null ? "" : first).equals(second == null ? "" : second);
+    }
+
+    private static void appendFileIdentity(StringBuilder identity, String path) {
+        File file = new File(path == null ? "" : path);
+        identity.append('|').append(path == null ? "" : path)
+                .append('|').append(file.length())
+                .append('|').append(file.lastModified());
+    }
+
     private static String eventCode(String operation, String phase, String detail) {
         String value = clean(detail).toLowerCase(java.util.Locale.ROOT);
         if (RECOVERY_REQUIRED.equals(phase)) return "RECOVERY_REQUIRED";
@@ -570,6 +704,9 @@ final class NavigatorPatchStore {
         if (value.contains("trust_unknown_signer")) return "TRUST_UNKNOWN_SIGNER";
         if (value.contains("trust_local_signer_unpatched")) {
             return "TRUST_LOCAL_SIGNER_UNPATCHED";
+        }
+        if (value.contains("trust_gmaps_morphe_artifact_mismatch")) {
+            return "TRUST_GMAPS_MORPHE_ARTIFACT_MISMATCH";
         }
         if (value.contains("trust_")) return "TRUST_REJECTED";
         if (value.contains("unsupported format")) return "UNSUPPORTED_SOURCE_FORMAT";

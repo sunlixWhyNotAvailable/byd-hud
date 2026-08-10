@@ -13,6 +13,28 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class DirectTbtPayloadTest {
     @Test
+    public void currentFrameWireBytesStayStable() {
+        assertArrayEquals(new byte[]{
+                        0x0a, 0x28, 0x10, 0x07, 0x28, 0x01, 0x30, 0x06,
+                        0x3a, 0x03, 0x04, 0x05, 0x06, 0x42, 0x03, 0x01,
+                        0x02, 0x03, 0x48, 0x78, 0x52, 0x04, 0x52, 0x6f,
+                        0x61, 0x64, (byte) 0x80, 0x01, 0x02, (byte) 0xd2,
+                        0x01, 0x00, (byte) 0xe0, 0x01, 0x09, (byte) 0xea,
+                        0x01, 0x04, 0x34, 0x2c, 0x34, 0x7c},
+                DirectTbtPayload.build(
+                        frame(11, 9, DirectTbtFrame.AlertOverlay.inactive()),
+                        7, DirectTbtPayload.Options.ALL));
+    }
+
+    @Test
+    public void clearWireBytesStayStable() {
+        assertArrayEquals(new byte[]{
+                        0x0a, 0x06, (byte) 0x80, 0x01, 0x01,
+                        0x30, (byte) 0xff, 0x01},
+                DirectTbtPayload.buildClear());
+    }
+
+    @Test
     public void outputOptionsSnapshotRetriesWhenRevisionChangesDuringRead() {
         AtomicInteger revision = new AtomicInteger();
         AtomicInteger value = new AtomicInteger(10);
@@ -184,6 +206,35 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void nextStopPreferenceFallsBackPerUnavailableField() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                new DirectTbtFrame.TripMetrics(
+                        new DirectTbtFrame.TravelMetrics(-1, -1, -1),
+                        new DirectTbtFrame.TravelMetrics(
+                                localTime(13, 40), 1069, 10310)));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, metricOptions(false, true, true, true, true, true));
+
+        assertEquals("[ETA: 13:40 | 18 min | 10.3 km] Road", prepared.displayText());
+    }
+
+    @Test
+    public void requestedMetricScopeWinsWhenBothFieldsExist() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                new DirectTbtFrame.TripMetrics(
+                        new DirectTbtFrame.TravelMetrics(-1, 601, 5100),
+                        new DirectTbtFrame.TravelMetrics(-1, 1069, 10310)));
+
+        assertEquals("[11 min | 5.1 km] Road", DirectTbtPayload.prepare(
+                frame, metricOptions(false, false, true, true, true, true)).displayText());
+        assertEquals("[18 min | 10.3 km] Road", DirectTbtPayload.prepare(
+                frame, metricOptions(true, false, true, true, true, true)).displayText());
+    }
+
+    @Test
     public void etaUsesNavigatorSuppliedZoneOffset() {
         DirectTbtFrame frame = frameWithMetrics(
                 "Road",
@@ -335,6 +386,40 @@ public final class DirectTbtPayloadTest {
         assertEquals("current", maneuver.maneuverMode());
         assertEquals(1, lanes.laneCount());
         assertEquals(0, lanes.lanePngBytes());
+    }
+
+    @Test
+    public void explicitManeuverSpeedDoesNotOverwriteActiveAlert() {
+        DirectTbtFrame frame = frame(
+                11, 9, DirectTbtFrame.AlertOverlay.active(
+                        7, 25, "Camera", new byte[]{8, 9})).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, speedOptions(
+                        HudPrefs.SPEED_LIMIT_MANEUVER,
+                        HudPrefs.SPEED_LIMIT_FALLBACK_OFF));
+
+        assertEquals("alert", prepared.maneuverMode());
+        assertEquals(2, prepared.maneuverPngBytes());
+    }
+
+    @Test
+    public void failedLaneSpeedPngKeepsStructuredLanes() {
+        DirectTbtFrame frame = new DirectTbtFrame(
+                11, 3, 9, 120, "Road", "Turn right", "Road",
+                new byte[]{1, 2, 3}, new byte[0],
+                Collections.singletonList(new DirectTbtFrame.Lane(2, true, "R")),
+                DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, speedOptions(
+                        HudPrefs.SPEED_LIMIT_LANES,
+                        HudPrefs.SPEED_LIMIT_FALLBACK_OFF));
+
+        assertEquals(1, prepared.laneCount());
+        assertEquals(0, prepared.lanePngBytes());
     }
 
     @Test

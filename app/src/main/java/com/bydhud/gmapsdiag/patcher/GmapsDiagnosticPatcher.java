@@ -64,22 +64,9 @@ public final class GmapsDiagnosticPatcher {
     private static final String MANEUVER_VIEW_CLASS =
             "Lcom/google/android/libraries/geo/navcore/turncard/views/"
                     + "TurnCardStepManeuverImageView;";
-    private static final String GATE_OWNER = "Lnmv;";
-    private static final String GATE_METHOD = "a";
-    private static final List<String> GATE_PARAMETERS =
-            Collections.singletonList("Lbhdu;");
-    private static final ImmutableMethodReference SPEED_CAPTURE = new ImmutableMethodReference(
-            LOGGER_CLASS, "captureSpeedLimitState",
-            Collections.singletonList("Ljava/lang/Object;"), "V");
-    private static final String AUDIO_OWNER = "Lbijo;";
     private static final String AUDIO_METHOD = "g";
-    private static final List<String> AUDIO_PARAMETERS = Arrays.asList("Lbilw;", "I");
     private static final String AUDIO_BUILDER = "Landroid/media/AudioAttributes$Builder;";
-    private static final String PLAYBACK_AUDIO_OWNER = "Lbikc;";
-    private static final List<String> PLAYBACK_AUDIO_PARAMETERS = Arrays.asList(
-            "Landroid/media/MediaPlayer;", "Lbimd;", "Ljava/util/concurrent/Executor;",
-            "Lbiiu;", "Latqe;");
-    private static final List<Hook> HOOKS = Arrays.asList(
+    private static final List<Hook> HOOKS_2516 = Arrays.asList(
             new Hook("nav_payload", "Lbpix;", "b",
                     Collections.singletonList("Lclca;"), "V",
                     "log", Collections.singletonList("Ljava/lang/Object;"), 1,
@@ -112,6 +99,58 @@ public final class GmapsDiagnosticPatcher {
                             "Ljava/lang/Object;", "Ljava/lang/Object;"), 2,
                     new Marker("method", MANEUVER_VIEW_CLASS, "a", "V"))
     );
+    private static final List<Hook> HOOKS_2630 = Arrays.asList(
+            new Hook("nav_payload", "Lbrjq;", "a",
+                    Collections.singletonList("Ldaqn;"), "V",
+                    "log", Collections.singletonList("Ljava/lang/Object;"), 1,
+                    new Marker("method", "Ljava/util/concurrent/atomic/AtomicBoolean;",
+                            "get", "Z"),
+                    new Marker("method", "Lbqoa;", "b", "V")),
+            new Hook("session_start", "Lbqny;", "d",
+                    Collections.singletonList("Lbrgx;"), "V",
+                    "sessionStart", Collections.singletonList("Ljava/lang/Object;"), 1,
+                    new Marker("method", "Lbqny;", "e", "Z")),
+            new Hook("session_output", "Lbqny;", "c",
+                    Collections.singletonList("Z"), "V",
+                    "sessionOutputChanged", Collections.singletonList("Z"), 1,
+                    new Marker("method", "Ljava/util/concurrent/atomic/AtomicBoolean;",
+                            "compareAndSet", "Z")),
+            new Hook("session_stop", "Lbqny;", "sa",
+                    Collections.emptyList(), "V",
+                    "sessionStop", Collections.emptyList(), 0,
+                    new Marker("method", "Lbrjq;", "a", "V")),
+            new Hook("bridge_register", RECEIVER_CLASS, "onReceive",
+                    Arrays.asList("Landroid/content/Context;", "Landroid/content/Intent;"), "V",
+                    "registerClient", Arrays.asList(
+                            "Landroid/content/Context;", "Landroid/content/Intent;"), 2,
+                    new Marker("method", "Landroid/content/Intent;", "getAction",
+                            "Ljava/lang/String;"),
+                    new Marker("method", "Lbqoa;", "a", "V")),
+            new Hook("maneuver_bitmap", MANEUVER_VIEW_CLASS, "setManeuver",
+                    Collections.singletonList("Lbqmm;"), "V",
+                    "captureManeuverView", Arrays.asList(
+                            "Ljava/lang/Object;", "Ljava/lang/Object;"), 2,
+                    new Marker("method", MANEUVER_VIEW_CLASS, "a", "V"))
+    );
+    private static final Profile PROFILE_2516 = new Profile(
+            "25.16", HOOKS_2516, "Lnmv;", "a",
+            Collections.singletonList("Lbhdu;"),
+            "Lbhiy;", "e", "Lbpix;", "Lbpix;", "i",
+            "captureSpeedLimitState", SpeedLayout.V25,
+            "Lbijo;", Arrays.asList("Lbilw;", "I"),
+            "Lbikc;", Arrays.asList(
+                    "Landroid/media/MediaPlayer;", "Lbimd;",
+                    "Ljava/util/concurrent/Executor;", "Lbiiu;", "Latqe;"));
+    private static final Profile PROFILE_2630 = new Profile(
+            "26.30", HOOKS_2630, "Lbimf;", "rI",
+            Collections.singletonList("Lbqiy;"),
+            "Lbqny;", "e", "Lbrjq;", "Lbrjq;", "k",
+            "captureSpeedLimitStateV26", SpeedLayout.V26,
+            "Lbrrg;", Arrays.asList("Lbrtz;", "I"),
+            "Lbrsa;", Arrays.asList(
+                    "Landroid/media/MediaPlayer;", "Lbruh;",
+                    "Ljava/util/concurrent/Executor;", "Lbrtq;"));
+    private static final List<Profile> PROFILES = Arrays.asList(PROFILE_2630, PROFILE_2516);
 
     private GmapsDiagnosticPatcher() {
     }
@@ -187,6 +226,7 @@ public final class GmapsDiagnosticPatcher {
         if (!work.mkdirs()) throw new IOException("cannot create " + work);
 
         try (ZipFile zip = new ZipFile(input)) {
+            boolean gateRewritten = false;
             for (Map.Entry<String, List<Hook>> entry : before.hooksByDex.entrySet()) {
                 byte[] source = readEntry(zip, entry.getKey());
                 File rewritten = new File(work, entry.getKey());
@@ -194,16 +234,18 @@ public final class GmapsDiagnosticPatcher {
                 if (parent != null && !parent.exists() && !parent.mkdirs()) {
                     throw new IOException("cannot create " + parent);
                 }
-                relocatedClasses.addAll(relocateDex(source, rewritten, entry.getValue()));
+                boolean containsGate = entry.getKey().equals(before.gateDexEntry);
+                relocatedClasses.addAll(relocateDex(
+                        source, rewritten, entry.getValue(), before.profile, containsGate));
+                gateRewritten |= containsGate;
                 replacements.put(entry.getKey(), rewritten);
             }
-            if (replacements.containsKey(before.gateDexEntry)) {
-                throw new IOException("producer gate unexpectedly shares a hook DEX");
+            if (!gateRewritten) {
+                byte[] source = readEntry(zip, before.gateDexEntry);
+                File rewritten = new File(work, before.gateDexEntry);
+                rewriteProducerGateDex(source, rewritten, before.profile);
+                replacements.put(before.gateDexEntry, rewritten);
             }
-            byte[] source = readEntry(zip, before.gateDexEntry);
-            File rewritten = new File(work, before.gateDexEntry);
-            rewriteProducerGateDex(source, rewritten);
-            replacements.put(before.gateDexEntry, rewritten);
         }
 
         File combinedLoggerDex = new File(work, "combined-logger.dex");
@@ -250,16 +292,26 @@ public final class GmapsDiagnosticPatcher {
         File work = new File(output.getParentFile(), "audio-dex-work");
         deleteTree(work);
         if (!work.mkdirs()) throw new IOException("cannot create " + work);
-        File rewritten = new File(work, before.audioDexEntry);
-        File parent = rewritten.getParentFile();
-        if (parent != null && !parent.exists() && !parent.mkdirs()) {
-            throw new IOException("cannot create " + parent);
-        }
+        Map<String, File> replacements = new LinkedHashMap<>();
         try (ZipFile zip = new ZipFile(input)) {
-            rewriteNavigationAudioDex(readEntry(zip, before.audioDexEntry), rewritten);
+            List<String> dexEntries = new ArrayList<>();
+            dexEntries.add(before.audioDexEntry);
+            if (!before.playbackAudioDexEntry.equals(before.audioDexEntry)) {
+                dexEntries.add(before.playbackAudioDexEntry);
+            }
+            for (String dexEntry : dexEntries) {
+                File rewritten = new File(work, dexEntry);
+                File parent = rewritten.getParentFile();
+                if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                    throw new IOException("cannot create " + parent);
+                }
+                int expectedRewrites = before.audioDexEntry.equals(dexEntry) ? 1 : 0;
+                if (before.playbackAudioDexEntry.equals(dexEntry)) expectedRewrites++;
+                rewriteNavigationAudioDex(
+                        readEntry(zip, dexEntry), rewritten, before.profile, expectedRewrites);
+                replacements.put(dexEntry, rewritten);
+            }
         }
-        Map<String, File> replacements = new HashMap<>();
-        replacements.put(before.audioDexEntry, rewritten);
         File temporary = new File(output.getAbsolutePath() + ".tmp");
         repack(input, temporary, replacements, null, null);
         Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
@@ -268,7 +320,7 @@ public final class GmapsDiagnosticPatcher {
         Map<String, Object> report = baseReport("patch-audio", output, after);
         report.put("inputSha256", sha256(input));
         report.put("outputSha256", sha256(output));
-        report.put("modifiedDexEntries", Collections.singletonList(before.audioDexEntry));
+        report.put("modifiedDexEntries", new ArrayList<>(replacements.keySet()));
         writeJson(reportFile, report);
         deleteTree(work);
     }
@@ -289,10 +341,11 @@ public final class GmapsDiagnosticPatcher {
         report.put("mode", mode);
         report.put("apk", apk.getAbsolutePath());
         report.put("classification", inspection.classification());
+        report.put("targetProfile", inspection.profile.id);
         report.put("dexCount", inspection.dexEntries.size());
         report.put("loggerClassCount", inspection.loggerClassCount);
         Map<String, Object> hooks = new LinkedHashMap<>();
-        for (Hook hook : HOOKS) {
+        for (Hook hook : inspection.profile.hooks) {
             HookResult result = inspection.results.get(hook.id);
             Map<String, Object> value = new LinkedHashMap<>();
             value.put("targetCount", result.targetCount);
@@ -331,7 +384,8 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static Inspection inspect(File apk) throws IOException {
-        Inspection inspection = new Inspection();
+        Profile profile = detectProfile(apk);
+        Inspection inspection = new Inspection(profile);
         try (ZipFile zip = new ZipFile(apk)) {
             List<? extends ZipEntry> entries = Collections.list(zip.entries());
             entries.sort(Comparator.comparing(ZipEntry::getName));
@@ -341,24 +395,26 @@ public final class GmapsDiagnosticPatcher {
                 DexBackedDexFile dex = readDex(readEntry(zip, entry.getName()));
                 for (ClassDef classDef : dex.getClasses()) {
                     if (LOGGER_CLASS.equals(classDef.getType())) inspection.loggerClassCount++;
-                    if (GATE_OWNER.equals(classDef.getType())) {
+                    if (profile.gateOwner.equals(classDef.getType())) {
                         for (Method method : classDef.getMethods()) {
-                            if (!matchesProducerGate(method)) continue;
+                            if (!matchesProducerGate(method, profile)) continue;
                             inspection.gateTargetCount++;
                             inspection.gateDexEntry = entry.getName();
-                            GateScan gate = scanProducerGate(method.getImplementation());
+                            GateScan gate = scanProducerGate(
+                                    method.getImplementation(), profile);
                             inspection.stockGateCount += gate.stockCount;
                             inspection.gateBypassCount += gate.bypassCount;
                             inspection.gateBridgeCount += gate.bridgeCount;
                             inspection.gateGuard = gate.guard;
-                            SpeedScan speed = scanSpeedState(method.getImplementation());
+                            SpeedScan speed = scanSpeedState(
+                                    method.getImplementation(), profile);
                             inspection.speedStateCount += speed.stateCount;
                             inspection.speedHookCount += speed.hookCount;
                         }
                     }
-                    if (AUDIO_OWNER.equals(classDef.getType())) {
+                    if (profile.audioOwner.equals(classDef.getType())) {
                         for (Method method : classDef.getMethods()) {
-                            if (!matchesNavigationAudio(method)) continue;
+                            if (!matchesNavigationAudio(method, profile)) continue;
                             inspection.audioTargetCount++;
                             inspection.audioDexEntry = entry.getName();
                             AudioScan audio = scanNavigationAudio(method.getImplementation());
@@ -367,9 +423,9 @@ public final class GmapsDiagnosticPatcher {
                             inspection.audioGuard = audio.guard;
                         }
                     }
-                    if (PLAYBACK_AUDIO_OWNER.equals(classDef.getType())) {
+                    if (profile.playbackAudioOwner.equals(classDef.getType())) {
                         for (Method method : classDef.getMethods()) {
-                            if (!matchesPlaybackAudio(method)) continue;
+                            if (!matchesPlaybackAudio(method, profile)) continue;
                             inspection.playbackAudioTargetCount++;
                             inspection.playbackAudioDexEntry = entry.getName();
                             PlaybackAudioScan audio =
@@ -379,7 +435,7 @@ public final class GmapsDiagnosticPatcher {
                             inspection.playbackAudioGuard = audio.guard;
                         }
                     }
-                    for (Hook hook : HOOKS) {
+                    for (Hook hook : profile.hooks) {
                         if (!hook.owner.equals(classDef.getType())) continue;
                         for (Method method : classDef.getMethods()) {
                             if (!hook.matches(method)) continue;
@@ -401,6 +457,41 @@ public final class GmapsDiagnosticPatcher {
             }
         }
         return inspection;
+    }
+
+    private static Profile detectProfile(File apk) throws IOException {
+        Map<Profile, Integer> matches = new LinkedHashMap<>();
+        for (Profile profile : PROFILES) matches.put(profile, 0);
+        try (ZipFile zip = new ZipFile(apk)) {
+            List<? extends ZipEntry> entries = Collections.list(zip.entries());
+            entries.sort(Comparator.comparing(ZipEntry::getName));
+            for (ZipEntry entry : entries) {
+                if (!isDexEntry(entry.getName())) continue;
+                DexBackedDexFile dex = readDex(readEntry(zip, entry.getName()));
+                for (ClassDef classDef : dex.getClasses()) {
+                    for (Profile profile : PROFILES) {
+                        if (!profile.gateOwner.equals(classDef.getType())) continue;
+                        for (Method method : classDef.getMethods()) {
+                            if (matchesProducerGate(method, profile)) {
+                                matches.put(profile, matches.get(profile) + 1);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Profile selected = null;
+        for (Map.Entry<Profile, Integer> entry : matches.entrySet()) {
+            if (entry.getValue() != 1) continue;
+            if (selected != null) {
+                throw new IOException("ambiguous GMaps target profiles");
+            }
+            selected = entry.getKey();
+        }
+        if (selected == null) {
+            throw new IOException("unsupported GMaps target profile: " + matches);
+        }
+        return selected;
     }
 
     private static String verifyMarkers(MethodImplementation implementation, Hook hook) {
@@ -430,10 +521,12 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static List<ClassDef> relocateDex(
-            byte[] input, File output, List<Hook> hooks) throws IOException {
+            byte[] input, File output, List<Hook> hooks,
+            Profile profile, boolean patchGate) throws IOException {
         DexBackedDexFile dex = readDex(input);
         Map<String, AtomicInteger> counts = new HashMap<>();
         for (Hook hook : hooks) counts.put(hook.id, new AtomicInteger());
+        AtomicInteger gateCount = new AtomicInteger();
         DexRewriter rewriter = new DexRewriter(new RewriterModule() {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
@@ -443,6 +536,10 @@ public final class GmapsDiagnosticPatcher {
                             counts.get(hook.id).incrementAndGet();
                             return inject(method, hook);
                         }
+                    }
+                    if (patchGate && matchesProducerGate(method, profile)) {
+                        gateCount.incrementAndGet();
+                        return guardProducerGate(method, profile);
                     }
                     return method;
                 };
@@ -476,19 +573,23 @@ public final class GmapsDiagnosticPatcher {
                 throw new IOException(hook.id + " rewrite count=" + counts.get(hook.id).get());
             }
         }
+        if (patchGate && gateCount.get() != 1) {
+            throw new IOException("producer gate rewrite count=" + gateCount.get());
+        }
         return relocated;
     }
 
-    private static void rewriteProducerGateDex(byte[] input, File output) throws IOException {
+    private static void rewriteProducerGateDex(
+            byte[] input, File output, Profile profile) throws IOException {
         DexBackedDexFile dex = readDex(input);
         AtomicInteger count = new AtomicInteger();
         DexRewriter rewriter = new DexRewriter(new RewriterModule() {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
-                    if (!matchesProducerGate(method)) return method;
+                    if (!matchesProducerGate(method, profile)) return method;
                     count.incrementAndGet();
-                    return guardProducerGate(method);
+                    return guardProducerGate(method, profile);
                 };
             }
         });
@@ -502,18 +603,19 @@ public final class GmapsDiagnosticPatcher {
         }
     }
 
-    private static void rewriteNavigationAudioDex(byte[] input, File output) throws IOException {
+    private static void rewriteNavigationAudioDex(
+            byte[] input, File output, Profile profile, int expectedRewrites) throws IOException {
         DexBackedDexFile dex = readDex(input);
         AtomicInteger count = new AtomicInteger();
         DexRewriter rewriter = new DexRewriter(new RewriterModule() {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
-                    if (matchesNavigationAudio(method)) {
+                    if (matchesNavigationAudio(method, profile)) {
                         count.incrementAndGet();
                         return patchNavigationAudio(method);
                     }
-                    if (matchesPlaybackAudio(method)) {
+                    if (matchesPlaybackAudio(method, profile)) {
                         count.incrementAndGet();
                         return patchPlaybackAudio(method);
                     }
@@ -526,7 +628,7 @@ public final class GmapsDiagnosticPatcher {
         for (ClassDef classDef : rewritten.getClasses()) classes.add(classDef);
         DexPool.writeTo(output.getAbsolutePath(),
                 new ImmutableDexFile(Opcodes.forApi(35), classes));
-        if (count.get() != 2) {
+        if (count.get() != expectedRewrites) {
             throw new IOException("navigation audio rewrite count=" + count.get());
         }
     }
@@ -558,10 +660,10 @@ public final class GmapsDiagnosticPatcher {
                 method.getHiddenApiRestrictions(), mutable);
     }
 
-    private static boolean matchesNavigationAudio(Method method) {
-        return AUDIO_OWNER.equals(method.getDefiningClass())
+    private static boolean matchesNavigationAudio(Method method, Profile profile) {
+        return profile.audioOwner.equals(method.getDefiningClass())
                 && AUDIO_METHOD.equals(method.getName())
-                && AUDIO_PARAMETERS.equals(toStrings(method.getParameterTypes()))
+                && profile.audioParameters.equals(toStrings(method.getParameterTypes()))
                 && "Z".equals(method.getReturnType());
     }
 
@@ -588,10 +690,10 @@ public final class GmapsDiagnosticPatcher {
                 method.getHiddenApiRestrictions(), mutable);
     }
 
-    private static boolean matchesPlaybackAudio(Method method) {
-        return PLAYBACK_AUDIO_OWNER.equals(method.getDefiningClass())
+    private static boolean matchesPlaybackAudio(Method method, Profile profile) {
+        return profile.playbackAudioOwner.equals(method.getDefiningClass())
                 && "<init>".equals(method.getName())
-                && PLAYBACK_AUDIO_PARAMETERS.equals(toStrings(method.getParameterTypes()))
+                && profile.playbackAudioParameters.equals(toStrings(method.getParameterTypes()))
                 && "V".equals(method.getReturnType());
     }
 
@@ -805,10 +907,10 @@ public final class GmapsDiagnosticPatcher {
                 method.getHiddenApiRestrictions(), mutable);
     }
 
-    private static Method guardProducerGate(Method method) {
+    private static Method guardProducerGate(Method method, Profile profile) {
         MethodImplementation source = method.getImplementation();
-        GateScan before = scanProducerGate(source);
-        SpeedScan speedBefore = scanSpeedState(source);
+        GateScan before = scanProducerGate(source, profile);
+        SpeedScan speedBefore = scanSpeedState(source, profile);
         if (!"ok".equals(before.guard) || before.stockCount != 1
                 || before.bypassCount != 0 || before.bridgeCount != 0
                 || !"ok".equals(speedBefore.guard) || speedBefore.stateCount != 1
@@ -817,7 +919,7 @@ public final class GmapsDiagnosticPatcher {
                     + before.guard + "/" + speedBefore.guard);
         }
         MutableMethodImplementation mutable = new MutableMethodImplementation(source);
-        GateLocation location = findStockGate(mutable.getInstructions());
+        GateLocation location = findStockGate(mutable.getInstructions(), profile);
         if (location == null) throw new IllegalStateException("producer gate not found");
         ImmutableMethodReference noClient = new ImmutableMethodReference(
                 LOGGER_CLASS, "noClient", Collections.emptyList(), "Z");
@@ -826,14 +928,17 @@ public final class GmapsDiagnosticPatcher {
                         0, 0, 0, 0, 0, noClient));
         mutable.addInstruction(location.branchIndex + 1,
                 new BuilderInstruction11x(Opcode.MOVE_RESULT, location.register));
-        SpeedLocation speed = findSpeedState(mutable.getInstructions());
+        SpeedLocation speed = findSpeedState(mutable.getInstructions(), profile);
         if (speed == null || speed.hooked) {
             throw new IllegalStateException("speed-limit state hook target not found");
         }
+        ImmutableMethodReference speedCapture = new ImmutableMethodReference(
+                LOGGER_CLASS, profile.speedCaptureMethod,
+                Collections.singletonList("Ljava/lang/Object;"), "V");
         mutable.addInstruction(speed.insertIndex, new BuilderInstruction35c(
-                Opcode.INVOKE_STATIC, 1, speed.stateRegister, 0, 0, 0, 0, SPEED_CAPTURE));
-        GateScan after = scanProducerGate(mutable);
-        SpeedScan speedAfter = scanSpeedState(mutable);
+                Opcode.INVOKE_STATIC, 1, speed.stateRegister, 0, 0, 0, 0, speedCapture));
+        GateScan after = scanProducerGate(mutable, profile);
+        SpeedScan speedAfter = scanSpeedState(mutable, profile);
         if (!"ok".equals(after.guard) || after.stockCount != 0
                 || after.bypassCount != 0 || after.bridgeCount != 1
                 || !"ok".equals(speedAfter.guard) || speedAfter.stateCount != 1
@@ -846,21 +951,22 @@ public final class GmapsDiagnosticPatcher {
                 method.getHiddenApiRestrictions(), mutable);
     }
 
-    private static boolean matchesProducerGate(Method method) {
-        return GATE_OWNER.equals(method.getDefiningClass())
-                && GATE_METHOD.equals(method.getName())
-                && GATE_PARAMETERS.equals(toStrings(method.getParameterTypes()))
+    private static boolean matchesProducerGate(Method method, Profile profile) {
+        return profile.gateOwner.equals(method.getDefiningClass())
+                && profile.gateMethod.equals(method.getName())
+                && profile.gateParameters.equals(toStrings(method.getParameterTypes()))
                 && "V".equals(method.getReturnType());
     }
 
-    private static GateScan scanProducerGate(MethodImplementation implementation) {
+    private static GateScan scanProducerGate(
+            MethodImplementation implementation, Profile profile) {
         if (implementation == null) return new GateScan(0, 0, 0, "missing implementation");
         List<? extends Instruction> instructions = toInstructionList(implementation);
         int stock = 0;
         int bypass = 0;
         int bridge = 0;
         for (int i = 0; i < instructions.size(); i++) {
-            GateLocation location = gateAt(instructions, i);
+            GateLocation location = gateAt(instructions, i, profile);
             if (location == null) continue;
             if (location.bypassed) bypass++;
             else if (location.bridgeGuarded) bridge++;
@@ -871,16 +977,19 @@ public final class GmapsDiagnosticPatcher {
                 total == 1 ? "ok" : "matched producer gates=" + total);
     }
 
-    private static GateLocation findStockGate(List<? extends Instruction> instructions) {
+    private static GateLocation findStockGate(
+            List<? extends Instruction> instructions, Profile profile) {
         for (int i = 0; i < instructions.size(); i++) {
-            GateLocation location = gateAt(instructions, i);
+            GateLocation location = gateAt(instructions, i, profile);
             if (location != null && !location.bypassed) return location;
         }
         return null;
     }
 
-    private static GateLocation gateAt(List<? extends Instruction> instructions, int index) {
-        if (!isEmptyCall(instructions.get(index)) || !hasProducerFields(instructions, index)) {
+    private static GateLocation gateAt(
+            List<? extends Instruction> instructions, int index, Profile profile) {
+        if (!isEmptyCall(instructions.get(index))
+                || !hasProducerFields(instructions, index, profile)) {
             return null;
         }
         int moveIndex = index + 1;
@@ -933,13 +1042,14 @@ public final class GmapsDiagnosticPatcher {
                 && "Z".equals(method.getReturnType());
     }
 
-    private static SpeedScan scanSpeedState(MethodImplementation implementation) {
+    private static SpeedScan scanSpeedState(
+            MethodImplementation implementation, Profile profile) {
         if (implementation == null) return new SpeedScan(0, 0, "missing implementation");
         List<? extends Instruction> instructions = toInstructionList(implementation);
         int states = 0;
         int hooks = 0;
         for (int i = 0; i < instructions.size(); i++) {
-            SpeedLocation location = speedStateAt(instructions, i);
+            SpeedLocation location = speedStateAt(instructions, i, profile);
             if (location == null) continue;
             states++;
             if (location.hooked) hooks++;
@@ -948,10 +1058,11 @@ public final class GmapsDiagnosticPatcher {
                 states == 1 ? "ok" : "matched speed states=" + states);
     }
 
-    private static SpeedLocation findSpeedState(List<? extends Instruction> instructions) {
+    private static SpeedLocation findSpeedState(
+            List<? extends Instruction> instructions, Profile profile) {
         SpeedLocation match = null;
         for (int i = 0; i < instructions.size(); i++) {
-            SpeedLocation candidate = speedStateAt(instructions, i);
+            SpeedLocation candidate = speedStateAt(instructions, i, profile);
             if (candidate == null) continue;
             if (match != null) return null;
             match = candidate;
@@ -960,9 +1071,12 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static SpeedLocation speedStateAt(
-            List<? extends Instruction> instructions, int gateIndex) {
-        GateLocation gate = gateAt(instructions, gateIndex);
+            List<? extends Instruction> instructions, int gateIndex, Profile profile) {
+        GateLocation gate = gateAt(instructions, gateIndex, profile);
         if (gate == null || gate.bypassed) return null;
+        if (profile.speedLayout == SpeedLayout.V26) {
+            return speedStateAtV26(instructions, gateIndex, gate, profile);
+        }
         int callIndex = gate.branchIndex + 1;
         if (callIndex + 2 >= instructions.size()
                 || !isMethod(instructions.get(callIndex), "Lbhrz;", "c",
@@ -974,7 +1088,7 @@ public final class GmapsDiagnosticPatcher {
         int stateRegister = ((OneRegisterInstruction) instructions.get(callIndex + 1)).getRegisterA();
         int nextIndex = callIndex + 2;
         boolean hooked = nextIndex < instructions.size()
-                && isSpeedCapture(instructions.get(nextIndex), stateRegister);
+                && isSpeedCapture(instructions.get(nextIndex), stateRegister, profile);
         if (hooked) nextIndex++;
         if (nextIndex >= instructions.size()
                 || instructions.get(nextIndex).getOpcode() != Opcode.IGET_OBJECT
@@ -987,11 +1101,34 @@ public final class GmapsDiagnosticPatcher {
         return new SpeedLocation(callIndex + 2, stateRegister, hooked);
     }
 
-    private static boolean isSpeedCapture(Instruction instruction, int stateRegister) {
+    private static SpeedLocation speedStateAtV26(
+            List<? extends Instruction> instructions, int gateIndex,
+            GateLocation gate, Profile profile) {
+        int stateRegister = -1;
+        int stateCount = 0;
+        for (int i = Math.max(0, gateIndex - 40); i + 1 < gateIndex; i++) {
+            if (!isMethod(instructions.get(i), "Lcfru;", "bs",
+                    Collections.singletonList("Lbqiy;"), "Lbqyt;")
+                    || instructions.get(i + 1).getOpcode() != Opcode.MOVE_RESULT_OBJECT
+                    || !(instructions.get(i + 1) instanceof OneRegisterInstruction)) {
+                continue;
+            }
+            stateRegister = ((OneRegisterInstruction) instructions.get(i + 1)).getRegisterA();
+            stateCount++;
+        }
+        if (stateCount != 1) return null;
+        int insertIndex = gate.branchIndex + 1;
+        boolean hooked = insertIndex < instructions.size()
+                && isSpeedCapture(instructions.get(insertIndex), stateRegister, profile);
+        return new SpeedLocation(insertIndex, stateRegister, hooked);
+    }
+
+    private static boolean isSpeedCapture(
+            Instruction instruction, int stateRegister, Profile profile) {
         return instruction instanceof FiveRegisterInstruction
                 && ((FiveRegisterInstruction) instruction).getRegisterCount() == 1
                 && ((FiveRegisterInstruction) instruction).getRegisterC() == stateRegister
-                && isMethod(instruction, LOGGER_CLASS, "captureSpeedLimitState",
+                && isMethod(instruction, LOGGER_CLASS, profile.speedCaptureMethod,
                 Collections.singletonList("Ljava/lang/Object;"), "V");
     }
 
@@ -1017,7 +1154,7 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static boolean hasProducerFields(
-            List<? extends Instruction> instructions, int endExclusive) {
+            List<? extends Instruction> instructions, int endExclusive, Profile profile) {
         boolean sessionProvider = false;
         boolean activeConsumers = false;
         for (int i = Math.max(0, endExclusive - 8); i < endExclusive; i++) {
@@ -1026,10 +1163,11 @@ public final class GmapsDiagnosticPatcher {
             Object reference = ((ReferenceInstruction) instruction).getReference();
             if (!(reference instanceof FieldReference)) continue;
             FieldReference field = (FieldReference) reference;
-            sessionProvider |= "Lbhiy;".equals(field.getDefiningClass())
-                    && "e".equals(field.getName()) && "Lbpix;".equals(field.getType());
-            activeConsumers |= "Lbpix;".equals(field.getDefiningClass())
-                    && "i".equals(field.getName());
+            sessionProvider |= profile.sessionFieldOwner.equals(field.getDefiningClass())
+                    && profile.sessionFieldName.equals(field.getName())
+                    && profile.sessionFieldType.equals(field.getType());
+            activeConsumers |= profile.consumerFieldOwner.equals(field.getDefiningClass())
+                    && profile.consumerFieldName.equals(field.getName());
         }
         return sessionProvider && activeConsumers;
     }
@@ -1243,7 +1381,63 @@ public final class GmapsDiagnosticPatcher {
         if (!file.delete()) throw new IOException("cannot delete " + file);
     }
 
+    private enum SpeedLayout {
+        V25,
+        V26
+    }
+
+    private static final class Profile {
+        final String id;
+        final List<Hook> hooks;
+        final String gateOwner;
+        final String gateMethod;
+        final List<String> gateParameters;
+        final String sessionFieldOwner;
+        final String sessionFieldName;
+        final String sessionFieldType;
+        final String consumerFieldOwner;
+        final String consumerFieldName;
+        final String speedCaptureMethod;
+        final SpeedLayout speedLayout;
+        final String audioOwner;
+        final List<String> audioParameters;
+        final String playbackAudioOwner;
+        final List<String> playbackAudioParameters;
+
+        Profile(
+                String id, List<Hook> hooks,
+                String gateOwner, String gateMethod, List<String> gateParameters,
+                String sessionFieldOwner, String sessionFieldName, String sessionFieldType,
+                String consumerFieldOwner, String consumerFieldName,
+                String speedCaptureMethod, SpeedLayout speedLayout,
+                String audioOwner, List<String> audioParameters,
+                String playbackAudioOwner, List<String> playbackAudioParameters) {
+            this.id = id;
+            this.hooks = hooks;
+            this.gateOwner = gateOwner;
+            this.gateMethod = gateMethod;
+            this.gateParameters = gateParameters;
+            this.sessionFieldOwner = sessionFieldOwner;
+            this.sessionFieldName = sessionFieldName;
+            this.sessionFieldType = sessionFieldType;
+            this.consumerFieldOwner = consumerFieldOwner;
+            this.consumerFieldName = consumerFieldName;
+            this.speedCaptureMethod = speedCaptureMethod;
+            this.speedLayout = speedLayout;
+            this.audioOwner = audioOwner;
+            this.audioParameters = audioParameters;
+            this.playbackAudioOwner = playbackAudioOwner;
+            this.playbackAudioParameters = playbackAudioParameters;
+        }
+
+        @Override
+        public String toString() {
+            return id;
+        }
+    }
+
     private static final class Inspection {
+        final Profile profile;
         final List<String> dexEntries = new ArrayList<>();
         final Map<String, HookResult> results = new LinkedHashMap<>();
         final Map<String, List<Hook>> hooksByDex = new LinkedHashMap<>();
@@ -1267,8 +1461,9 @@ public final class GmapsDiagnosticPatcher {
         String playbackAudioDexEntry = "";
         String playbackAudioGuard = "not found";
 
-        Inspection() {
-            for (Hook hook : HOOKS) results.put(hook.id, new HookResult());
+        Inspection(Profile profile) {
+            this.profile = profile;
+            for (Hook hook : profile.hooks) results.put(hook.id, new HookResult());
         }
 
         String classification() {
@@ -1291,7 +1486,7 @@ public final class GmapsDiagnosticPatcher {
         String directClassification() {
             boolean stock = loggerClassCount == 0;
             boolean bridge = loggerClassCount == 1;
-            for (Hook hook : HOOKS) {
+            for (Hook hook : profile.hooks) {
                 HookResult result = results.get(hook.id);
                 stock &= result.targetCount == 1 && result.hookCallCount == 0
                         && "ok".equals(result.guard);

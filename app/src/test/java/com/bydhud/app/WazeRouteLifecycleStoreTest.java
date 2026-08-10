@@ -56,4 +56,18 @@ public final class WazeRouteLifecycleStoreTest {
         assertEquals(true, WazeRouteLifecycleStore.resolveBridgeActive(
                 false, true, true, 6));
     }
+
+    @Test
+    public void speedEventsRequireActiveMatchingGenerationAndOwnWatermark() {
+        assertEquals("inactive_route", WazeRouteLifecycleStore.speedEventDecision(
+                false, 7L, 7L, 100L, 7L, 101L, 200L));
+        assertEquals("generation_mismatch", WazeRouteLifecycleStore.speedEventDecision(
+                true, 7L, 7L, 100L, 8L, 101L, 200L));
+        assertEquals("stale_timestamp", WazeRouteLifecycleStore.speedEventDecision(
+                true, 7L, 7L, 100L, 7L, 100L, 200L));
+        assertEquals("accept", WazeRouteLifecycleStore.speedEventDecision(
+                true, 7L, 6L, 500L, 7L, 101L, 200L));
+        assertEquals("accept", WazeRouteLifecycleStore.speedEventDecision(
+                true, 7L, 7L, 100L, 7L, 101L, 200L));
+    }
 }

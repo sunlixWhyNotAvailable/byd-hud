@@ -331,6 +331,7 @@ final class NavigatorPatchPipeline {
                     markerScan.directState);
         }
         NavigatorPatchTrustPolicy.require(profile, set.signerSha256,
+                set.versionName, set.versionCode, set.fingerprint,
                 mandatoryPatchMarker, localSigner);
     }
 

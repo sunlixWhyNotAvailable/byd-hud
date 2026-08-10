@@ -76,11 +76,13 @@ final class NavigatorPackageInstaller {
             String failedExpectedFingerprint = NavigatorPatchStore.expectedSha(context);
             PackageInfo initialInstalled = null;
             NavigatorPatchPipeline.ScanResult initialArtifact = null;
+            String initialInstalledIdentity = "";
             if (isInstalled(context, profile.packageName)) {
+                initialInstalledIdentity = NavigatorPatchStore.installedIdentity(context, profile);
                 initialArtifact = NavigatorPatchPipeline.inspectInstalled(context, profile);
                 if (sameArtifact(expected, initialArtifact)) {
                     completeRestore(context, profile, initialArtifact,
-                            "Original APK is already installed");
+                            "Original APK is already installed", initialInstalledIdentity);
                     return;
                 }
                 if (failedExpectedFingerprint.isEmpty()
@@ -152,6 +154,7 @@ final class NavigatorPackageInstaller {
                 context, profile, NavigatorPatchStore.OUTPUT_VERIFY, "Verifying installed APK");
         Thread worker = new Thread(() -> {
             try {
+                String installedIdentity = NavigatorPatchStore.installedIdentity(context, profile);
                 if (!NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName)) {
                     throw new IOException("Installed signer does not match local patcher key");
                 }
@@ -163,6 +166,10 @@ final class NavigatorPackageInstaller {
                 PackageInfo info = context.getPackageManager().getPackageInfo(
                         profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
                 File transaction = NavigatorPatchStore.transactionDirectory(context);
+                if (!installedIdentity.equals(
+                        NavigatorPatchStore.installedIdentity(context, profile))) {
+                    throw new IOException("Installed navigator changed during verification");
+                }
                 NavigatorPatchStore.clearExternal(context, profile);
                 NavigatorPatchStore.saveScan(context, visibleResult);
                 NavigatorPatchStore.recordInstalledVerification(
@@ -191,10 +198,12 @@ final class NavigatorPackageInstaller {
                 context, profile, NavigatorPatchStore.OUTPUT_VERIFY, "Verifying restored APK");
         Thread worker = new Thread(() -> {
             try {
+                String installedIdentity = NavigatorPatchStore.installedIdentity(context, profile);
                 NavigatorPatchPipeline.ScanResult result =
                         NavigatorPatchPipeline.inspectInstalled(context, profile);
                 verifyExpected(context, result, false);
-                completeRestore(context, profile, result, "Original APK restored");
+                completeRestore(context, profile, result, "Original APK restored",
+                        installedIdentity);
             } catch (Exception error) {
                 NavigatorPatchStore.transition(context, profile,
                         NavigatorPatchStore.RECOVERY_REQUIRED, error.getMessage());
@@ -400,12 +409,33 @@ final class NavigatorPackageInstaller {
     }
 
     private static void completeRestore(Context context, NavigatorPatchStore.Profile profile,
-            NavigatorPatchPipeline.ScanResult result, String detail) {
+            NavigatorPatchPipeline.ScanResult result, String detail,
+            String installedIdentity) throws Exception {
         File transaction = NavigatorPatchStore.transactionDirectory(context);
+        String recoveryOwner = NavigatorPatchStore.recoveryOwner(context);
+        String transactionName = transaction.getName();
+        String expectedFingerprint = NavigatorPatchStore.expectedSha(context);
+        if (!installedIdentity.equals(
+                NavigatorPatchStore.installedIdentity(context, profile))) {
+            throw new IOException("Installed navigator changed during recovery verification");
+        }
+        if (!NavigatorAssetManager.recordAuthoritativeRestoreVerified(
+                context, profile, recoveryOwner, transactionName, expectedFingerprint)) {
+            throw new IOException("Asset recovery completion receipt was rejected");
+        }
+        if (!installedIdentity.equals(
+                NavigatorPatchStore.installedIdentity(context, profile))) {
+            throw new IOException("Installed navigator changed during recovery verification");
+        }
         NavigatorPatchStore.clearExternal(context, profile);
         NavigatorPatchStore.saveScan(context, result);
-        NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.IDLE, detail);
-        NavigatorPatchStore.clearTransactionMetadata(context);
+        NavigatorPatchStore.completeRestoreTransaction(context, profile, detail);
+        if (!NavigatorAssetManager.finishAuthoritativeRestoreVerified(
+                context, profile, recoveryOwner, transactionName, expectedFingerprint)) {
+            AppEventLogger.event(context,
+                    "navigator_asset recovery_finalize_pending owner=" + recoveryOwner);
+            return;
+        }
         NavigatorPatchPipeline.deleteTree(transaction);
     }
 

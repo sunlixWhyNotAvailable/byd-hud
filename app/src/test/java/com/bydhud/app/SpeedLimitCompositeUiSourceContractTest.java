@@ -66,7 +66,25 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
-    public void snapshotCallbacksAndVersionUseBeta6Contract() throws IOException {
+    public void dropdownCompensatesMaterialPaddingWithoutPerRowSelectedFill() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String dropdown = between(source,
+                "private fun HudDropdown(",
+                "private fun HudIntegerStepper(");
+
+        assertTrue(dropdown.contains("val rowHeight = 40.dp"));
+        assertTrue(dropdown.contains(".drawBehind {"));
+        assertTrue(dropdown.contains("color = selectedBackground"));
+        assertTrue(dropdown.contains("topLeft = Offset(0f, safeIndex * rowHeightPx)"));
+        assertTrue(dropdown.contains("size = Size(size.width, rowHeightPx)"));
+        assertTrue(dropdown.contains(
+                ".height(if (index == 0 || index == options.lastIndex) 32.dp else rowHeight)"));
+        assertFalse(dropdown.contains(
+                "if (index == safeIndex) selectedBackground else Color.Transparent"));
+    }
+
+    @Test
+    public void snapshotCallbacksAndVersionUseBeta7Contract() throws IOException {
         String activity = sourcePath("app/src/main/java/com/bydhud/app/MainActivity.java");
         String gradle = sourcePath("app/build.gradle.kts");
 
@@ -76,8 +94,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 88"));
-        assertTrue(gradle.contains("versionName = \"2.4.0-beta.6\""));
+        assertTrue(gradle.contains("versionCode = 89"));
+        assertTrue(gradle.contains("versionName = \"2.4.0-beta.7\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

@@ -36,6 +36,62 @@ public final class NavigatorPatchTrustPolicyTest {
     }
 
     @Test
+    public void acceptsOnlyExactMorpheGMapsArtifact() {
+        NavigatorPatchTrustPolicy.Decision exact = evaluateMorphe(
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SOURCE_SIGNER,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_NAME,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_CODE,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SET_FINGERPRINT);
+
+        assertTrue(exact.accepted);
+        assertEquals("TRUST_ACCEPTED", exact.code);
+        assertEquals(NavigatorPatchTrustPolicy.Origin.GMAPS_MORPHE_SOURCE, exact.origin);
+    }
+
+    @Test
+    public void rejectsMorpheArtifactWithWrongFingerprint() {
+        NavigatorPatchTrustPolicy.Decision decision = evaluateMorphe(
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SOURCE_SIGNER,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_NAME,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_CODE,
+                "AA".repeat(32));
+
+        assertFalse(decision.accepted);
+        assertEquals("TRUST_GMAPS_MORPHE_ARTIFACT_MISMATCH", decision.code);
+    }
+
+    @Test
+    public void rejectsMorpheArtifactWithWrongVersion() {
+        NavigatorPatchTrustPolicy.Decision wrongName = evaluateMorphe(
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SOURCE_SIGNER,
+                "26.30.09.950492156",
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_CODE,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SET_FINGERPRINT);
+        NavigatorPatchTrustPolicy.Decision wrongCode = evaluateMorphe(
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SOURCE_SIGNER,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_NAME,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_CODE + 1L,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SET_FINGERPRINT);
+
+        assertFalse(wrongName.accepted);
+        assertEquals("TRUST_GMAPS_MORPHE_ARTIFACT_MISMATCH", wrongName.code);
+        assertFalse(wrongCode.accepted);
+        assertEquals("TRUST_GMAPS_MORPHE_ARTIFACT_MISMATCH", wrongCode.code);
+    }
+
+    @Test
+    public void rejectsMorpheArtifactWithUnknownSigner() {
+        NavigatorPatchTrustPolicy.Decision decision = evaluateMorphe(
+                "CC".repeat(32),
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_NAME,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_VERSION_CODE,
+                NavigatorPatchTrustPolicy.GMAPS_MORPHE_SET_FINGERPRINT);
+
+        assertFalse(decision.accepted);
+        assertEquals("TRUST_UNKNOWN_SIGNER", decision.code);
+    }
+
+    @Test
     public void rejectsConfiguredSignerForWrongProfile() {
         NavigatorPatchTrustPolicy.Decision decision =
                 NavigatorPatchTrustPolicy.evaluate(
@@ -165,5 +221,12 @@ public final class NavigatorPatchTrustPolicyTest {
         assertTrue(decision.accepted);
         assertEquals("TRUST_ACCEPTED", decision.code);
         assertEquals(expectedOrigin, decision.origin);
+    }
+
+    private static NavigatorPatchTrustPolicy.Decision evaluateMorphe(
+            String signer, String versionName, long versionCode, String fingerprint) {
+        return NavigatorPatchTrustPolicy.evaluate(
+                NavigatorPatchStore.Profile.GMAPS, signer,
+                versionName, versionCode, fingerprint, false, false);
     }
 }

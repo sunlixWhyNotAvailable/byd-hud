@@ -53,18 +53,12 @@ public final class ShareShutdownSourceContractTest {
         String shareEffect = between(source,
                 "LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination)",
                 "LaunchedEffect(configurationShareBusy, configurationShareDestination)");
-        String dropdown = between(source,
-                "private fun HudDropdown(",
-                "private fun HudIntegerStepper(");
-
         assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
         assertFalse(shareEffect.contains("NonCancellable"));
         assertTrue(shareEffect.contains("runInterruptible(Dispatchers.IO)"));
         assertTrue(source.contains("StorageShareProgressOverlay("));
         assertTrue(source.contains("waitingForWrites = \"Очікування записів\""));
         assertTrue(source.contains("archiving = \"Archiving\""));
-        assertFalse(dropdown.contains("drawBehind"));
-        assertTrue(dropdown.contains("if (index == safeIndex) selectedBackground"));
         assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));
         assertTrue(source.contains("patchWazeAlerts = \"Alerts\""));
         assertTrue(source.contains("patchNotChecked = \"перевірити\""));
