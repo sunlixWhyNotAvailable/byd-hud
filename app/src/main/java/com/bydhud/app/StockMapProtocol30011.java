@@ -11,6 +11,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BooleanSupplier;
 
 // Sends the stock map's raw dashboard-layout command without adding a generated AIDL dependency.
 final class StockMapProtocol30011 {
@@ -30,6 +31,19 @@ final class StockMapProtocol30011 {
 
     // Returns an empty string on success and a short failure detail otherwise.
     static String dispatch(Context context, boolean fullscreen) {
+        return dispatch(context, fullscreen ? 4 : 3);
+    }
+
+    // Sends the verified navigation layout operation without changing the existing 3/4 API.
+    static String dispatch(Context context, int operation) {
+        return dispatch(context, operation, () -> true);
+    }
+
+    static String dispatch(Context context, int operation, BooleanSupplier stillCurrent) {
+        if (!isSupportedOperation(operation)) {
+            return "unsupported operation=" + operation;
+        }
+        if (!isCurrent(stillCurrent)) return "cancelled stale operation";
         long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(TIMEOUT_MS);
         CountDownLatch connected = new CountDownLatch(1);
         AtomicReference<IBinder> binder = new AtomicReference<>();
@@ -68,10 +82,9 @@ final class StockMapProtocol30011 {
             try {
                 new Thread(() -> {
                     try {
-                        result.set(transact(
-                                service,
-                                context.getPackageName(),
-                                fullscreen ? 4 : 3));
+                        result.set(isCurrent(stillCurrent)
+                                ? transact(service, context.getPackageName(), operation)
+                                : "cancelled stale operation");
                     } finally {
                         TRANSACTION_IN_FLIGHT.set(false);
                         transacted.countDown();
@@ -97,6 +110,18 @@ final class StockMapProtocol30011 {
                 } catch (RuntimeException ignored) {
                 }
             }
+        }
+    }
+
+    static boolean isSupportedOperation(int operation) {
+        return operation >= 1 && operation <= 4;
+    }
+
+    private static boolean isCurrent(BooleanSupplier stillCurrent) {
+        try {
+            return stillCurrent != null && stillCurrent.getAsBoolean();
+        } catch (RuntimeException ignored) {
+            return false;
         }
     }
 

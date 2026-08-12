@@ -265,6 +265,10 @@ private data class Copy(
     val textDirectionOutputHint: String,
     val showWazeAlerts: String,
     val showWazeAlertsHint: String,
+    val tbtWithoutHudOutput: String,
+    val tbtWithoutHudOutputHint: String,
+    val switchToTbtOnHudStart: String,
+    val switchToTbtOnHudStartHint: String,
     val showWholeRouteMetrics: String,
     val showWholeRouteMetricsHint: String,
     val showEta: String,
@@ -1871,6 +1875,24 @@ private fun OptionsTab(
 
         item(key = "extra-navigation") {
             Section(copy.extraNavigationOptions, palette) {
+                SwitchRow(
+                    copy.tbtWithoutHudOutput,
+                    copy.tbtWithoutHudOutputHint,
+                    snapshot.tbtWithoutHudOutputEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetTbtWithoutHudOutputEnabled(it) }
+                }
+                Divider(palette)
+                SwitchRow(
+                    copy.switchToTbtOnHudStart,
+                    copy.switchToTbtOnHudStartHint,
+                    snapshot.switchToTbtOnHudStartEnabled,
+                    palette
+                ) {
+                    runAction { activity.composeSetSwitchToTbtOnHudStartEnabled(it) }
+                }
+                Divider(palette)
                 SwitchRow(
                 copy.textDirectionOutput,
                 copy.textDirectionOutputHint,
@@ -3579,24 +3601,19 @@ private fun PatchTab(
                                     add(patchAlertLabel(row, copy.language, copy) to row.alertState)
                                 }
                             }
-                            val allPatched = componentStates.all { (_, state) -> state == "PATCHED" }
                             Row(
                                 modifier = Modifier.weight(1f),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.Top
                             ) {
-                                if (allPatched) {
-                                    StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 240.dp)
-                                } else {
-                                    componentStates.chunked(2).forEach { columnStates ->
-                                        Column(
-                                            modifier = Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                                            horizontalAlignment = Alignment.Start
-                                        ) {
-                                            columnStates.forEach { (label, state) ->
-                                                PatchComponentChip(label, state, copy, palette)
-                                            }
+                                componentStates.chunked(2).forEach { columnStates ->
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        horizontalAlignment = Alignment.Start
+                                    ) {
+                                        columnStates.forEach { (label, state) ->
+                                            PatchComponentChip(label, state, copy, palette)
                                         }
                                     }
                                 }
@@ -5685,6 +5702,10 @@ private fun enCopy() = Copy(
     textDirectionOutputHint = "Send text direction in street output (\"Continue straight\") if no street text available. Street output has priority.",
     showWazeAlerts = "Show Waze alerts",
     showWazeAlertsHint = "Display Waze alerts on the HUD.",
+    tbtWithoutHudOutput = "Create a TBT card even for an active navigator session without HUD output",
+    tbtWithoutHudOutputHint = "The TBT card is also created for an active navigator not selected for HUD output.\nIf two navigators are active, priority goes to the navigator with HUD output, or to the most recently started navigator when no HUD output is selected.",
+    switchToTbtOnHudStart = "Switch to the TBT card when HUD output starts",
+    switchToTbtOnHudStartHint = "Automatically open the TBT card when navigation output to the HUD starts.",
     showWholeRouteMetrics = "Show ETA/time/distance for entire route",
     showWholeRouteMetricsHint = "Prefer whole-route values. Waze falls back to an available next-stop value when an individual whole-route metric is missing.",
     showEta = "Show ETA",
@@ -5810,8 +5831,8 @@ private fun enCopy() = Copy(
     patchConfirmText = "The installed navigation app must be removed before the patched package can be installed. Its local data will be lost. The selected source package is kept for recovery.",
     patchConfirmOk = "OK",
     patchConfirmCancel = "Cancel",
-    manualHint = "Direct payload checks for HUD output.",
-    manualHudOutput = "Manual HUD output",
+    manualHint = "Direct payload checks for HUD and dashboard TBT output.",
+    manualHudOutput = "Manual HUD and TBT output",
     supportedArrows = "Supported arrows",
     supportedArrowsHint = "Prev / Next sends supported PNG+Native combo",
     manualLanes = "Manual lanes",
@@ -5819,7 +5840,7 @@ private fun enCopy() = Copy(
     rawManeuverIds = "Raw maneuver IDs",
     rawManeuverHint = "Number fields send Sxx / Nxx payload IDs immediately",
     manualMode = "Manual mode",
-    manualModeHint = "When enabled, Manual controls send HUD payload immediately. Turning it off clears manual output and returns to live navigation output.",
+    manualModeHint = "When enabled, Manual controls declare navigation and send the same maneuver, street, and distance to HUD and dashboard TBT. Turning it off clears manual output and returns to live navigation output.",
     pngNumber = "PNG number",
     nativeNumber = "Native number",
     distance = "Distance, m",
@@ -5904,6 +5925,10 @@ private fun uaCopy() = enCopy().copy(
     textDirectionOutputHint = "Виводити у поле для вулиці текстові напрямки (\"Прямуйте далі\"), якщо відсутній текст вулиці. Вивід вулиці має пріоритет.",
     showWazeAlerts = "Показувати попередження Waze",
     showWazeAlertsHint = "Відображати попередження Waze на HUD.",
+    tbtWithoutHudOutput = "Формувати TBT-картку навіть для активної сесії навігатора без виводу на HUD",
+    tbtWithoutHudOutputHint = "TBT-картка формуватиметься і для активного навігатора, не вибраного для виводу на HUD.\nЯкщо одночасно активні два навігатори, пріоритет має навігатор з активним виводом на HUD або останній запущений навігатор, якщо вивід на HUD не вибрано.",
+    switchToTbtOnHudStart = "Перемикатися на TBT-картку при початку виводу на HUD",
+    switchToTbtOnHudStartHint = "Автоматично відкривати TBT-картку, коли починається вивід навігації на HUD.",
     showWholeRouteMetrics = "Показувати ETA/час/дистанцію всього маршруту",
     showWholeRouteMetricsHint = "Надавати перевагу значенням усього маршруту. Waze використовує доступне значення до зупинки, якщо окремий показник усього маршруту відсутній.",
     showEta = "Показувати час прибуття",
@@ -6028,8 +6053,8 @@ private fun uaCopy() = enCopy().copy(
     patchConfirmText = "Перед встановленням пропатченого пакета установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний пакет зберігається для відновлення.",
     patchConfirmOk = "Ок",
     patchConfirmCancel = "Скасувати",
-    manualHint = "Пряма перевірка даних для HUD.",
-    manualHudOutput = "Ручний вивід на HUD",
+    manualHint = "Пряма перевірка даних для HUD і TBT-картки приборки.",
+    manualHudOutput = "Ручний вивід на HUD і TBT",
     supportedArrows = "Підтримувані стрілки",
     supportedArrowsHint = "Попередній / Наступний одразу надсилає пару PNG і штатного маневру",
     manualLanes = "Ручні смуги",
@@ -6037,7 +6062,7 @@ private fun uaCopy() = enCopy().copy(
     rawManeuverIds = "Сирі ID маневрів",
     rawManeuverHint = "Числові поля одразу формують ідентифікатори Sxx / Nxx",
     manualMode = "Ручний режим",
-    manualModeHint = "Коли увімкнено, ручні елементи одразу надсилають дані на HUD. Вимкнення очищає ручний вивід і повертає активну навігацію.",
+    manualModeHint = "Коли увімкнено, ручні елементи оголошують навігацію та надсилають однаковий маневр, вулицю й дистанцію на HUD і TBT-картку приборки. Вимкнення очищає ручний вивід і повертає активну навігацію.",
     pngNumber = "PNG номер",
     nativeNumber = "Номер штатного маневру",
     distance = "Дистанція, м",

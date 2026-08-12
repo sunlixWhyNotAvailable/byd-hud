@@ -140,6 +140,19 @@ public final class NavigatorPatchTrustPolicyTest {
     }
 
     @Test
+    public void localSignerAcceptsAValidatedGmapsComponentMarker() {
+        NavigatorPatchTrustPolicy.Decision patched =
+                NavigatorPatchTrustPolicy.evaluate(
+                        NavigatorPatchStore.Profile.GMAPS,
+                        "BB".repeat(32),
+                        true,
+                        true);
+
+        assertTrue(patched.accepted);
+        assertEquals(NavigatorPatchTrustPolicy.Origin.DEVICE_LOCAL, patched.origin);
+    }
+
+    @Test
     public void missingProfileOrSignerHasStableClassification() {
         assertEquals(
                 "TRUST_PROFILE_REQUIRED",

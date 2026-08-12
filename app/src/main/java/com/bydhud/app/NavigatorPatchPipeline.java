@@ -36,6 +36,8 @@ final class NavigatorPatchPipeline {
     private static final String GMAPS_PATCHABLE = "PATCHABLE_STOCK";
     private static final String GMAPS_DIRECT = "MESSENGER_BRIDGE_POC";
     private static final String GMAPS_AUDIO = "NAVIGATION_AUDIO";
+    private static final String GMAPS_PIP_PATCHABLE = "PATCHABLE_STOCK";
+    private static final String GMAPS_PIP_PATCHED = "PICTURE_IN_PICTURE_DISABLED";
 
     static final class ScanResult {
         final NavigatorPatchStore.Profile profile;
@@ -90,6 +92,16 @@ final class NavigatorPatchPipeline {
             this.installedVersionCode = installedVersionCode;
             this.installedSignerSha256 = installedSignerSha256;
             this.installedFingerprint = installedFingerprint;
+        }
+    }
+
+    private static final class PatchOutcome {
+        final boolean optionalFailed;
+        final boolean auxiliaryFailed;
+
+        PatchOutcome(boolean optionalFailed, boolean auxiliaryFailed) {
+            this.optionalFailed = optionalFailed;
+            this.auxiliaryFailed = auxiliaryFailed;
         }
     }
 
@@ -203,16 +215,14 @@ final class NavigatorPatchPipeline {
             }
             // Recheck the staged source immediately before creating a destructive transaction.
             requireTrustedSource(context, profile, sourceSet);
-            if (NavigatorPatchStore.FAILED.equals(input.directState)
-                    || (!NavigatorPatchStore.PATCHABLE.equals(input.directState)
-                    && !NavigatorPatchStore.PATCHABLE.equals(input.optionalState)
-                    && !NavigatorPatchStore.PATCHABLE.equals(input.alertState))) {
+            if (!NavigatorPatchStore.isPatchEnabled(
+                    profile, input.directState, input.optionalState, input.alertState)) {
                 throw new IOException("No compatible patch is available: " + input.reason);
             }
 
             NavigatorPatchStore.transition(
-                    context, profile, NavigatorPatchStore.PATCHING, "Patching direct channel");
-            boolean optionalFailed = buildUnsignedSet(
+                    context, profile, NavigatorPatchStore.PATCHING, "Applying selected patches");
+            PatchOutcome outcome = buildUnsignedSet(
                     context, profile, sourceSet, patched, transaction, input);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.SIGNING, "Signing APK");
@@ -223,8 +233,20 @@ final class NavigatorPatchPipeline {
                     context, profile, patched);
             ScanResult outputMetadata = metadata(outputSet, profile);
             ScanResult output = inspectComponents(context, outputSet, outputMetadata);
-            if (!NavigatorPatchStore.PATCHED.equals(output.directState)) {
+            if (profile == NavigatorPatchStore.Profile.WAZE
+                    && !NavigatorPatchStore.PATCHED.equals(output.directState)) {
                 throw new IOException("Direct channel post-verification failed");
+            }
+            if (profile == NavigatorPatchStore.Profile.GMAPS
+                    && NavigatorPatchStore.PATCHABLE.equals(input.directState)
+                    && !NavigatorPatchStore.PATCHED.equals(output.directState)) {
+                throw new IOException("Google Maps direct post-verification failed");
+            }
+            if (profile == NavigatorPatchStore.Profile.GMAPS
+                    && NavigatorPatchStore.PATCHABLE.equals(input.alertState)
+                    && !outcome.auxiliaryFailed
+                    && !NavigatorPatchStore.PATCHED.equals(output.alertState)) {
+                throw new IOException("Google Maps PiP post-verification failed");
             }
             if (profile == NavigatorPatchStore.Profile.WAZE
                     && NavigatorPatchStore.PATCHABLE.equals(input.optionalState)
@@ -236,10 +258,15 @@ final class NavigatorPatchPipeline {
                     && !NavigatorPatchStore.PATCHED.equals(output.alertState)) {
                 throw new IOException("Waze alert-hook post-verification failed");
             }
-            if (optionalFailed) {
+            if (outcome.optionalFailed) {
                 output = copyStates(output, output.directState, NavigatorPatchStore.FAILED,
                         output.alertState,
                         "Optional patch attempt failed");
+            }
+            if (outcome.auxiliaryFailed) {
+                output = copyStates(output, output.directState, output.optionalState,
+                        NavigatorPatchStore.FAILED,
+                        "PiP patch attempt failed");
             }
             boolean optionalApplied = (NavigatorPatchStore.PATCHABLE.equals(input.optionalState)
                     && NavigatorPatchStore.PATCHED.equals(output.optionalState))
@@ -324,15 +351,18 @@ final class NavigatorPatchPipeline {
             throws Exception {
         boolean localSigner = NavigatorSigningKey.certificateMatchesLocalIfPresent(
                 set.signerSha256);
-        boolean mandatoryPatchMarker = false;
+        boolean verifiedPatchMarker = false;
         if (localSigner) {
             ScanResult markerScan = inspectComponents(context, set, metadata(set, profile));
-            mandatoryPatchMarker = NavigatorPatchStore.PATCHED.equals(
-                    markerScan.directState);
+            verifiedPatchMarker = profile == NavigatorPatchStore.Profile.WAZE
+                    ? NavigatorPatchStore.PATCHED.equals(markerScan.directState)
+                    : NavigatorPatchStore.PATCHED.equals(markerScan.directState)
+                    || NavigatorPatchStore.PATCHED.equals(markerScan.optionalState)
+                    || NavigatorPatchStore.PATCHED.equals(markerScan.alertState);
         }
         NavigatorPatchTrustPolicy.require(profile, set.signerSha256,
                 set.versionName, set.versionCode, set.fingerprint,
-                mandatoryPatchMarker, localSigner);
+                verifiedPatchMarker, localSigner);
     }
 
     private static ScanResult metadata(NavigatorApkSet.SetInfo set,
@@ -343,16 +373,41 @@ final class NavigatorPatchPipeline {
                 NavigatorPatchStore.NOT_CHECKED, "");
     }
 
+    private static String inspectGmapsPip(Context context, NavigatorApkSet.Member member,
+            String validatedProfile) {
+        if (!member.base) return "UNSUPPORTED";
+        try {
+            return GmapsDiagnosticPatcher.inspectPipClassification(
+                    member.file, validatedProfile);
+        } catch (Exception error) {
+            // PiP is optional. A malformed/unsupported manifest must not prevent
+            // valid direct or audio components from being scanned or patched.
+            AppEventLogger.event(context, "navigator_patch operation=scan profile=gmaps"
+                    + " stage=pip code=PIP_INSPECTION_FAILED detail="
+                    + clean(error.getMessage()));
+            return "PIP_INSPECTION_FAILED";
+        }
+    }
+
     private static ScanResult inspectComponents(Context context,
-            NavigatorApkSet.SetInfo set, ScanResult metadata) throws Exception {
+        NavigatorApkSet.SetInfo set, ScanResult metadata) throws Exception {
         if (metadata.profile == NavigatorPatchStore.Profile.GMAPS) {
+            String validatedProfile = validatedGmapsProfile(set);
             String direct = "";
             String audio = "";
+            String pip = "";
             int directTargets = 0;
             int audioTargets = 0;
+            int pipTargets = 0;
             for (NavigatorApkSet.Member member : set.members) {
-                String memberDirect = GmapsDiagnosticPatcher.inspectDirectClassification(member.file);
-                String memberAudio = GmapsDiagnosticPatcher.inspectAudioClassification(member.file);
+                boolean hasCode = hasDexEntries(member.file);
+                String memberDirect = hasCode
+                        ? GmapsDiagnosticPatcher.inspectDirectClassification(member.file)
+                        : "UNSUPPORTED";
+                String memberAudio = hasCode
+                        ? GmapsDiagnosticPatcher.inspectAudioClassification(member.file)
+                        : "UNSUPPORTED";
+                String memberPip = inspectGmapsPip(context, member, validatedProfile);
                 if (GMAPS_PATCHABLE.equals(memberDirect) || GMAPS_DIRECT.equals(memberDirect)) {
                     direct = memberDirect;
                     directTargets++;
@@ -361,23 +416,29 @@ final class NavigatorPatchPipeline {
                     audio = memberAudio;
                     audioTargets++;
                 }
+                if (GMAPS_PIP_PATCHABLE.equals(memberPip)
+                        || GMAPS_PIP_PATCHED.equals(memberPip)) {
+                    pip = memberPip;
+                    pipTargets++;
+                }
             }
-            if (directTargets != 1 || (!GMAPS_PATCHABLE.equals(direct)
-                    && !GMAPS_DIRECT.equals(direct))) {
-                return copyStates(metadata, NavigatorPatchStore.FAILED,
-                        NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED,
-                        "Mandatory Google Maps anchors are incompatible");
-            }
-            String directState = GMAPS_PATCHABLE.equals(direct)
-                    ? NavigatorPatchStore.PATCHABLE : NavigatorPatchStore.PATCHED;
+            String directState = directTargets == 1 && GMAPS_PATCHABLE.equals(direct)
+                    ? NavigatorPatchStore.PATCHABLE
+                    : directTargets == 1 && GMAPS_DIRECT.equals(direct)
+                    ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.FAILED;
             String optionalState = audioTargets == 1 && GMAPS_PATCHABLE.equals(audio)
                     ? NavigatorPatchStore.PATCHABLE
                     : audioTargets == 1 && GMAPS_AUDIO.equals(audio)
                     ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.FAILED;
-            String reason = NavigatorPatchStore.FAILED.equals(optionalState)
-                    ? "Audio channel anchors are incompatible" : "Compatible";
-            return copyStates(metadata, directState, optionalState,
-                    NavigatorPatchStore.NOT_CHECKED, reason);
+            String alertState = pipTargets == 1 && GMAPS_PIP_PATCHABLE.equals(pip)
+                    ? NavigatorPatchStore.PATCHABLE
+                    : pipTargets == 1 && GMAPS_PIP_PATCHED.equals(pip)
+                    ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.FAILED;
+            String reason = NavigatorPatchStore.FAILED.equals(directState)
+                    && NavigatorPatchStore.FAILED.equals(optionalState)
+                    && NavigatorPatchStore.FAILED.equals(alertState)
+                    ? "Google Maps patch anchors are incompatible" : "Compatible";
+            return copyStates(metadata, directState, optionalState, alertState, reason);
         }
         int stock = 0;
         int patched = 0;
@@ -424,7 +485,7 @@ final class NavigatorPatchPipeline {
         return copyStates(metadata, directState, optional, alert, compatibilityReason);
     }
 
-    private static boolean buildUnsignedSet(Context context, NavigatorPatchStore.Profile profile,
+    private static PatchOutcome buildUnsignedSet(Context context, NavigatorPatchStore.Profile profile,
             NavigatorApkSet.SetInfo sourceSet, File outputDirectory, File transaction,
             ScanResult input) throws Exception {
         File sourceDirectory = sourceSet.members.get(0).file.getParentFile().getParentFile();
@@ -435,13 +496,23 @@ final class NavigatorPatchPipeline {
         return patchGmapsSet(context, sourceSet, outputDirectory, transaction, input);
     }
 
-    private static boolean patchGmapsSet(Context context, NavigatorApkSet.SetInfo sourceSet,
+    private static PatchOutcome patchGmapsSet(Context context, NavigatorApkSet.SetInfo sourceSet,
             File outputDirectory, File transaction, ScanResult input) throws Exception {
+        String validatedProfile = validatedGmapsProfile(sourceSet);
         File directMember = null;
         File audioMember = null;
+        File pipMember = null;
+        boolean optionalFailed = false;
+        boolean auxiliaryFailed = false;
         for (NavigatorApkSet.Member member : sourceSet.members) {
-            String direct = GmapsDiagnosticPatcher.inspectDirectClassification(member.file);
-            String audio = GmapsDiagnosticPatcher.inspectAudioClassification(member.file);
+            boolean hasCode = hasDexEntries(member.file);
+            String direct = hasCode
+                    ? GmapsDiagnosticPatcher.inspectDirectClassification(member.file)
+                    : "UNSUPPORTED";
+            String audio = hasCode
+                    ? GmapsDiagnosticPatcher.inspectAudioClassification(member.file)
+                    : "UNSUPPORTED";
+            String pip = inspectGmapsPip(context, member, validatedProfile);
             if (GMAPS_PATCHABLE.equals(direct)) {
                 if (directMember != null) throw new IOException("Multiple Google Maps direct targets");
                 directMember = outputMember(outputDirectory, member.installName);
@@ -452,6 +523,10 @@ final class NavigatorPatchPipeline {
             if (GMAPS_PATCHABLE.equals(audio)) {
                 if (audioMember != null) throw new IOException("Multiple Google Maps audio targets");
                 audioMember = outputMember(outputDirectory, member.installName);
+            }
+            if (GMAPS_PIP_PATCHABLE.equals(pip)) {
+                if (pipMember != null) throw new IOException("Multiple Google Maps PiP targets");
+                pipMember = outputMember(outputDirectory, member.installName);
             }
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
@@ -468,26 +543,69 @@ final class NavigatorPatchPipeline {
             if (audioMember == null) {
                 AppEventLogger.event(context,
                         "navigator_patch operation=patch profile=gmaps stage=optional code=OPTIONAL_INCOMPATIBLE");
-                return true;
-            }
-            try {
-                File optional = new File(transaction, "gmaps-audio-unsigned.apk");
-                NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.GMAPS,
-                        NavigatorPatchStore.PATCHING, "Patching audio channel");
-                GmapsDiagnosticPatcher.patchNavigationAudio(
-                        audioMember, optional, new File(transaction, "gmaps-audio-report.json"));
-                replaceFile(optional, audioMember);
-            } catch (Exception optionalError) {
-                AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
-                        + " stage=optional code=OPTIONAL_PATCH_FAILED detail="
-                        + clean(optionalError.getMessage()));
-                return true;
+                optionalFailed = true;
+            } else {
+                try {
+                    File optional = new File(transaction, "gmaps-audio-unsigned.apk");
+                    NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.GMAPS,
+                            NavigatorPatchStore.PATCHING, "Patching audio channel");
+                    GmapsDiagnosticPatcher.patchNavigationAudio(
+                            audioMember, optional, new File(transaction, "gmaps-audio-report.json"));
+                    replaceFile(optional, audioMember);
+                } catch (Exception optionalError) {
+                    AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
+                            + " stage=optional code=OPTIONAL_PATCH_FAILED detail="
+                            + clean(optionalError.getMessage()));
+                    optionalFailed = true;
+                }
             }
         }
-        return false;
+        if (NavigatorPatchStore.PATCHABLE.equals(input.alertState)) {
+            if (pipMember == null) {
+                AppEventLogger.event(context,
+                        "navigator_patch operation=patch profile=gmaps stage=pip code=PIP_INCOMPATIBLE");
+                auxiliaryFailed = true;
+            } else {
+                try {
+                    File pip = new File(transaction, "gmaps-pip-unsigned.apk");
+                    NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.GMAPS,
+                            NavigatorPatchStore.PATCHING, "Patching PiP");
+                    GmapsDiagnosticPatcher.patchPictureInPicture(
+                            pipMember, pip, new File(transaction, "gmaps-pip-report.json"),
+                            validatedProfile);
+                    replaceFile(pip, pipMember);
+                } catch (Exception pipError) {
+                    AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
+                            + " stage=pip code=PIP_PATCH_FAILED detail="
+                            + clean(pipError.getMessage()));
+                    auxiliaryFailed = true;
+                }
+            }
+        }
+        return new PatchOutcome(optionalFailed, auxiliaryFailed);
     }
 
-    private static boolean patchWazeSet(Context context, NavigatorApkSet.SetInfo sourceSet,
+    private static String validatedGmapsProfile(NavigatorApkSet.SetInfo set)
+            throws IOException {
+        String selected = "";
+        int targets = 0;
+        for (NavigatorApkSet.Member member : set.members) {
+            if (!hasDexEntries(member.file)) continue;
+            String profile = GmapsDiagnosticPatcher.inspectProfileIdIfPresent(member.file);
+            if (profile.isEmpty()) continue;
+            if (!selected.isEmpty() && !selected.equals(profile)) {
+                throw new IOException("Ambiguous Google Maps target profiles");
+            }
+            selected = profile;
+            targets++;
+        }
+        if (selected.isEmpty() || targets != 1) {
+            throw new IOException("Google Maps target profile missing or ambiguous");
+        }
+        return selected;
+    }
+
+    private static PatchOutcome patchWazeSet(Context context, NavigatorApkSet.SetInfo sourceSet,
             File outputDirectory, File transaction, ScanResult input) throws Exception {
         List<WazeApkInspection> inspections = new ArrayList<>();
         WazeApkInspection allowlist = null;
@@ -585,7 +703,7 @@ final class NavigatorPatchPipeline {
             repack(target, alertApk, replacements, Collections.emptyMap());
             replaceFile(alertApk, target);
         }
-        return false;
+        return new PatchOutcome(false, false);
     }
 
     private static void signSet(File directory) throws Exception {
@@ -636,6 +754,10 @@ final class NavigatorPatchPipeline {
             }
         }
         return result;
+    }
+
+    private static boolean hasDexEntries(File apk) throws IOException {
+        return !dexEntries(apk).isEmpty();
     }
 
     private static String suffix(String name) {

@@ -62,7 +62,12 @@ import java.util.Objects;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Direct AndroidX Car App host for Waze cluster data or the optional main Surface. */
+/**
+ * Direct AndroidX Car App host for Waze cluster data or the optional main Surface.
+ *
+ * <p>The Waze direct-channel bridge was inspired by reference source material
+ * shared by MaxTitan.</p>
+ */
 public final class WazeDirectChannel {
     enum Mode {
         CLUSTER,
@@ -747,11 +752,12 @@ public final class WazeDirectChannel {
         navigationDistanceKnown = false;
         maneuverIcons.clear();
         if (!navigationActive) return;
+        int routeGeneration = sessionGeneration;
         int callbackGeneration = notifyListener ? ++sessionGeneration : sessionGeneration;
         navigationActive = false;
         if (notifyListener) {
             callback(() -> listener.onNavigationEnded(
-                    OWNER_PACKAGE, callbackGeneration, reason));
+                    OWNER_PACKAGE, routeGeneration, callbackGeneration, reason));
         } else {
             log("navigation session cleared without route end reason=" + reason);
         }
@@ -804,6 +810,8 @@ public final class WazeDirectChannel {
         int rawType = maneuver == null ? -1 : maneuver.getType();
         int amap = maneuver == null ? 0 : mapWazeToAmap(rawType);
         int byd = amap == 15 ? 99 : mapAmapToByd(amap);
+        int amapBroadcast = maneuver == null ? 0 : mapWazeToAmapBroadcast(rawType, amap);
+        int roundaboutExit = roundaboutExitNumber(maneuver);
         String road = text(step.getRoad());
         String cue = text(step.getCue());
         byte[] lanePng = renderIcon(step.getLanesImage(), "lanes");
@@ -820,7 +828,7 @@ public final class WazeDirectChannel {
         return new DirectTbtFrame(rawType, amap, byd, meters(distance), road, cue,
                 road.isEmpty() ? cue : road, maneuverPng, lanePng,
                 mapLanes(step.getLanes()), DirectTbtFrame.AlertOverlay.inactive(),
-                tripMetrics);
+                tripMetrics).withVehicleTbt(amapBroadcast, roundaboutExit);
     }
 
     private void emitFrame(String reason) {
@@ -1284,7 +1292,8 @@ public final class WazeDirectChannel {
         void onAlertCleared(String ownerPackage, int sessionGeneration,
                 DirectTbtFrame frame, String reason);
 
-        void onNavigationEnded(String ownerPackage, int sessionGeneration, String reason);
+        void onNavigationEnded(String ownerPackage, int routeGeneration,
+                int callbackGeneration, String reason);
 
         void onLiveness(String ownerPackage, int sessionGeneration, String reason);
 
@@ -1639,6 +1648,38 @@ public final class WazeDirectChannel {
         private interface SurfaceInput {
             void run(ISurfaceCallback callback) throws Exception;
         }
+    }
+
+    private static int mapWazeToAmapBroadcast(int type, int mappedManeuver) {
+        switch (type) {
+            case Maneuver.TYPE_ROUNDABOUT_EXIT_CW:
+                return 18;
+            case Maneuver.TYPE_ROUNDABOUT_ENTER_AND_EXIT_CW:
+            case Maneuver.TYPE_ROUNDABOUT_ENTER_AND_EXIT_CW_WITH_ANGLE:
+            case Maneuver.TYPE_ROUNDABOUT_ENTER_CW:
+                return 17;
+            case Maneuver.TYPE_ROUNDABOUT_EXIT_CCW:
+                return 12;
+            case Maneuver.TYPE_ROUNDABOUT_ENTER_AND_EXIT_CCW:
+            case Maneuver.TYPE_ROUNDABOUT_ENTER_AND_EXIT_CCW_WITH_ANGLE:
+            case Maneuver.TYPE_ROUNDABOUT_ENTER_CCW:
+                return 11;
+            default:
+                return mappedManeuver;
+        }
+    }
+
+    private static int roundaboutExitNumber(Maneuver maneuver) {
+        if (maneuver == null) return 0;
+        try {
+            return maneuver.getRoundaboutExitNumber();
+        } catch (RuntimeException ignored) {
+            return 0;
+        }
+    }
+
+    static int mapWazeToAmapBroadcastForTest(int type) {
+        return mapWazeToAmapBroadcast(type, mapWazeToAmap(type));
     }
 
     private final class NavigationHost extends INavigationHost.Stub {

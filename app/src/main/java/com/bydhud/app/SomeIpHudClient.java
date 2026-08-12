@@ -12,7 +12,6 @@ import android.os.RemoteException;
 
 /**
  * Transport boundary for BYD SOME/IP HUD output.
- * The direct ARHUD transport idea was inspired by reference work shared by MaxTitan.
  */
 final class SomeIpHudClient {
     //defines the Listener module boundary so related behavior stays readable inside one unit.

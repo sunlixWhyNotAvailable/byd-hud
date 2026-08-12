@@ -116,6 +116,9 @@ public final class HudRuntimeService extends Service {
                 && NavCapturePrefs.isHudEnabled(this, hudPackage)) {
             NavHudLiveSender.get(this).start(hudPackage, "runtime-service:" + reason);
         }
+        if (activeWork && HudPrefs.isTbtWithoutHudOutputEnabled(this)) {
+            NavHudLiveSender.get(this).refreshTbtObservers();
+        }
         if (activeWork) {
             HudRuntimeWatchdog.schedule(this, "service-start");
         } else {

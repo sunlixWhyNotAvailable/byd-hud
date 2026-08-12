@@ -521,7 +521,10 @@ final class LocalAdbBridge {
             case "ip neigh":
             case "ss -a -n -p":
             case "dumpsys package com.ts.car.someip.service":
-            case "dumpsys activity services com.ts.car.someip.service":
+              case "dumpsys activity services com.ts.car.someip.service":
+              case "dumpsys activity services com.waze":
+              case "dumpsys activity services com.google.android.apps.maps":
+              case "dumpsys activity services app.revanced.android.apps.maps":
             case "find /system/etc /vendor/etc /product/etc /odm/etc -type f":
             case "find /system/lib /system/lib64 /vendor/lib /vendor/lib64 "
                     + "/product/lib /product/lib64 /odm/lib /odm/lib64 -type f":

@@ -54,6 +54,15 @@ public final class Beta7UiResponsivenessSourceContractTest {
     }
 
     @Test
+    public void patchStatusKeepsAllComponentPillsAfterSuccessfulPatch() throws IOException {
+        String source = source("BydHudRuntimeCompose.kt");
+
+        assertTrue(source.contains("componentStates.chunked(2).forEach"));
+        assertFalse(source.contains("val allPatched = componentStates"));
+        assertFalse(source.contains("StatusChip(copy.patchPatched, ChipKind.Green"));
+    }
+
+    @Test
     public void assetProgressAndRecoveryRetainDurableMaterialUntilVerified() throws IOException {
         String source = source("NavigatorAssetManager.java");
         String restore = between(source, "static void restore(Context context", "static void reconcile(Context context)");

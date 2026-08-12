@@ -38,6 +38,7 @@ final class GMapsDirectChannel {
     private static final String EXTRA_CLIENT = "com.bydhud.gmapsbridge.CLIENT";
     private static final String EXTRA_PROTOCOL = "com.bydhud.gmapsbridge.PROTOCOL_VERSION";
     private static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
+    private static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
     private static final int PROTOCOL_VERSION = 3;
     private static final int MESSAGE_HELLO = 1;
     private static final int MESSAGE_START = 2;
@@ -64,6 +65,7 @@ final class GMapsDirectChannel {
     private boolean navigating;
     private boolean terminalLatched;
     private volatile long sessionGeneration;
+    private volatile String channelId = "";
     private long lastSequence = -1L;
     private long currentStructuredFrameAtMs;
     private String currentManeuver = "";
@@ -159,7 +161,8 @@ final class GMapsDirectChannel {
         if (!running || message == null) return true;
         Bundle data = message.getData();
         int protocol = data == null ? -1 : data.getInt("protocolVersion", -1);
-        if (data == null || (protocol != 2 && protocol != PROTOCOL_VERSION)) {
+        String incomingChannelId = data == null ? "" : safe(data.getString("channelId"));
+        if (!acceptsProtocolMessageForTest(protocol, channelId, incomingChannelId)) {
             listener.onLog("message rejected reason=protocol what="
                     + (message == null ? -1 : message.what));
             return true;
@@ -196,6 +199,13 @@ final class GMapsDirectChannel {
                 listener.onLog("message ignored what=" + message.what);
                 return true;
         }
+    }
+
+    static boolean acceptsProtocolMessageForTest(
+            int protocol, String expectedChannelId, String incomingChannelId) {
+        if (protocol != PROTOCOL_VERSION) return false;
+        String incoming = safe(incomingChannelId);
+        return incoming.isEmpty() || safe(expectedChannelId).equals(incoming);
     }
 
     private void handleFrame(Bundle data) {
@@ -269,7 +279,8 @@ final class GMapsDirectChannel {
                     null,
                     lanes,
                     DirectTbtFrame.AlertOverlay.inactive(),
-                    tripMetrics);
+                    tripMetrics).withVehicleTbt(
+                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber);
             if (!navigating) {
                 navigating = true;
                 listener.onNavigationStarted(OWNER_PACKAGE, sessionGeneration, "first-frame");
@@ -358,12 +369,14 @@ final class GMapsDirectChannel {
     }
 
     private void finishNavigation(String reason) {
-        long endedGeneration = ++sessionGeneration;
         terminalLatched = true;
         if (!navigating && currentFrame == null) return;
+        long routeGeneration = sessionGeneration;
+        long callbackGeneration = ++sessionGeneration;
         navigating = false;
         resetSession();
-        listener.onNavigationEnded(OWNER_PACKAGE, endedGeneration, reason);
+        listener.onNavigationEnded(
+                OWNER_PACKAGE, routeGeneration, callbackGeneration, reason);
     }
 
     private void resetSession() {
@@ -380,8 +393,7 @@ final class GMapsDirectChannel {
     private void registerClient(String reason) {
         handler.removeCallbacks(registrationRetry);
         boolean current = sendRegistration(ACTION_REGISTER, true, PROTOCOL_VERSION);
-        boolean legacy = sendRegistration(ACTION_REGISTER, true, 2);
-        if (current || legacy) {
+        if (current) {
             listener.onLog("registration sent reason=" + reason);
         } else {
             listener.onHandshakeUnavailable(
@@ -401,8 +413,9 @@ final class GMapsDirectChannel {
             intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
             intent.putExtra(EXTRA_IDENTITY, identity());
             if (includeClient) {
-                intent.putExtra("channel_identifier",
-                        "byd_hud_" + SystemClock.elapsedRealtime());
+                channelId = "byd_hud_" + sessionGeneration + "_"
+                        + SystemClock.elapsedRealtime();
+                intent.putExtra(EXTRA_CHANNEL_ID, channelId);
                 intent.putExtra(EXTRA_PROTOCOL, protocol);
                 intent.putExtra(EXTRA_CLIENT, inbound);
             }
@@ -425,7 +438,7 @@ final class GMapsDirectChannel {
     private void logRawFrame(long sequence, String frameCase, byte[] payload) {
         if (!HudPrefs.isDetailedDebugArtifactsEnabled(context)) return;
         NavCaptureStore.rawEvent(context, "gmaps_direct", PACKAGE_NAME,
-                "protocol=2 sequence=" + sequence
+                "protocol=" + PROTOCOL_VERSION + " sequence=" + sequence
                         + " case=" + frameCase
                         + " bytes=" + payload.length
                         + " sha256=" + sha256(payload)
@@ -760,7 +773,8 @@ final class GMapsDirectChannel {
                 DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection);
         void onSpeedLimit(String ownerPackage, long sessionGeneration,
                 int displayValue, int kph, String unit, long eventElapsedMs);
-        void onNavigationEnded(String ownerPackage, long sessionGeneration, String reason);
+        void onNavigationEnded(String ownerPackage, long routeGeneration,
+                long callbackGeneration, String reason);
         void onLiveness(String ownerPackage, long sessionGeneration, String reason);
         void onLog(String message);
     }

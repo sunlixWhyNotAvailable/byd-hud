@@ -31,6 +31,7 @@ public final class NavInfoLogger {
     public static final String EXTRA_PROTOCOL_VERSION =
             "com.bydhud.gmapsbridge.PROTOCOL_VERSION";
     public static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
+    public static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
     public static final int PROTOCOL_VERSION = 3;
     public static final int MESSAGE_HELLO = 1;
     public static final int MESSAGE_START = 2;
@@ -54,6 +55,7 @@ public final class NavInfoLogger {
     private static volatile Messenger client;
     private static volatile IBinder clientBinder;
     private static volatile IBinder.DeathRecipient clientDeathRecipient;
+    private static volatile String clientChannelId = "";
     private static String lastManeuverName = "";
     private static byte[] lastManeuverPng;
     private static Object lastSpeedStep;
@@ -125,11 +127,12 @@ public final class NavInfoLogger {
             }
             int protocol = intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1);
             Messenger candidate = intent.getParcelableExtra(EXTRA_CLIENT);
+            String channelId = intent.getStringExtra(EXTRA_CHANNEL_ID);
             if (protocol != PROTOCOL_VERSION || candidate == null) {
                 Log.w(TAG, "CLIENT_REJECTED|reason=protocol_or_messenger|protocol=" + protocol);
                 return;
             }
-            installClient(candidate);
+            installClient(candidate, channelId == null ? "" : channelId.trim());
         } catch (RuntimeException error) {
             Log.w(TAG, "CLIENT_REJECTED|reason=malformed_extras|type="
                     + error.getClass().getSimpleName());
@@ -301,7 +304,7 @@ public final class NavInfoLogger {
         }
     }
 
-    private static void installClient(Messenger candidate) {
+    private static void installClient(Messenger candidate, String channelId) {
         final IBinder binder = candidate.getBinder();
         final IBinder.DeathRecipient deathRecipient = new IBinder.DeathRecipient() {
             @Override
@@ -320,6 +323,7 @@ public final class NavInfoLogger {
             client = candidate;
             clientBinder = binder;
             clientDeathRecipient = deathRecipient;
+            clientChannelId = channelId;
         }
         resetTransientState();
         Bundle data = baseBundle();
@@ -435,6 +439,7 @@ public final class NavInfoLogger {
     private static Bundle baseBundle() {
         Bundle data = new Bundle();
         data.putInt("protocolVersion", PROTOCOL_VERSION);
+        if (!clientChannelId.isEmpty()) data.putString("channelId", clientChannelId);
         data.putLong("bridgeElapsedMs", SystemClock.elapsedRealtime());
         return data;
     }
@@ -460,6 +465,7 @@ public final class NavInfoLogger {
             client = null;
             clientBinder = null;
             clientDeathRecipient = null;
+            clientChannelId = "";
         }
         resetTransientState();
         Log.i(TAG, "CLIENT_DISCONNECTED|reason=" + clean(reason));

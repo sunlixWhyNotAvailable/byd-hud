@@ -246,8 +246,10 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
         if (result.snapshot.active
                 && HudPrefs.isBootEnabled(context)
                 && !HudPrefs.isUserShutdownActive(context)
-                && NavCapturePrefs.isHudEnabled(
-                context, WazeRouteLifecycleStore.WAZE_PACKAGE)) {
+                && (NavCapturePrefs.isHudEnabled(
+                context, WazeRouteLifecycleStore.WAZE_PACKAGE)
+                || NavHudLiveSender.shouldObserveTbtWithoutHud(
+                context, WazeRouteLifecycleStore.WAZE_PACKAGE))) {
             HudRuntimeService.startPersistent(context, "waze-route-start");
         }
     }

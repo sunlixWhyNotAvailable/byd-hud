@@ -13,6 +13,8 @@ The app also controls navigator projection on the instrument cluster, keeps day-
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
 - **Need help:** read [Troubleshooting](#troubleshooting), then [report a problem](#report-a-problem) with the relevant day archive
 
+> **AI disclosure:** Generative AI tools are used in this project for code and diagnostic-log analysis, implementation, testing, and documentation.
+
 BYD HUD is not an Android Auto replacement. Normal navigator activities remain responsible for route search and selection; an optional Waze custom surface applies only after navigation starts.
 
 ## What BYD HUD does
@@ -61,7 +63,7 @@ By default, the direct channel leaves the navigator activity unchanged while nav
 | Navigator use | Package | Currently supported profile |
 | --- | --- | --- |
 | Waze direct output and patching | `com.waze` | stock `4.95.0.3` or project-patched `5.20.0.1` |
-| Google Maps direct output and patching | `app.revanced.android.apps.maps` | Google Maps ReVanced `25.16.03.747108139` |
+| Google Maps direct output and patching | `app.revanced.android.apps.maps` | Google Maps ReVanced `25.16.03.747108139`; `26.30.09.950492155` is staged as a vehicle-validation candidate |
 | Official Google Maps legacy input only | `com.google.android.apps.maps` | Accessibility/notification capture when its services are enabled; not accepted by the patcher |
 
 The patcher still verifies exact package, signer, split, and DEX structures. A matching version label alone is not sufficient.
@@ -70,7 +72,7 @@ The patcher still verifies exact package, signer, split, and DEX structures. A m
 
 - BYD HUD switches to a direct channel as soon as valid data arrives.
 - A five-second direct-frame timeout permits a legacy handoff only when that navigator's optional legacy path is already enabled and ready.
-- Google Maps requires granted and connected accessibility/notification capture services. Waze additionally requires the unsupported `Screen capture channel (legacy)` switch, which is off by default.
+- Google Maps legacy fallback requires granted and connected accessibility/notification capture services. Waze legacy fallback additionally requires the unsupported `Screen capture channel (legacy)` switch, which is off by default.
 - Without those prerequisites, no fallback starts after the timeout. When valid direct data returns, BYD HUD clears any legacy state and switches back immediately.
 - The `HUD` status is active only while navigation payloads are actually being sent. Selecting a navigator without starting navigation leaves it in the waiting state.
 
@@ -123,7 +125,7 @@ Street text has priority over the text direction because both use the same vehic
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `ETA/time/distance output mode` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze always supplies only next-stop values |
+| `ETA/time/distance output mode` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze uses the final destination for the entire route and falls back per field to an available next-stop value |
 | `Show ETA` | Off | Adds the expected arrival time to the street field |
 | `Show remaining time` | Off | Adds remaining travel time to the street field |
 | `Show remaining distance` | Off | Adds remaining route distance to the street field |
@@ -136,17 +138,20 @@ Enabled metrics are added before the street or cue, for example:
 [ETA: 12:20 | 11 min | 5.1 km] Main Street
 ```
 
-Google Maps direct supplies the complete metric contract. Project-patched Waze `5.20.0.1` supplies ETA and remaining distance to the next destination in its cluster session. It does not currently supply remaining travel time or distinguish whole-route metrics there.
+Google Maps direct supplies the complete metric contract. Project-patched Waze `5.20.0.1` supplies ETA, remaining time, and remaining distance for the next stop and the entire route. On a multi-stop route, `Entire route` uses the final destination; if an individual whole-route value is unavailable, BYD HUD uses the corresponding available next-stop value.
 
 ### Speed limit
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Speed limit output mode` | Off | Places the current direct-channel speed-limit sign in the maneuver field, lane field, or the first free field |
+| `Speed limit output mode` | Off | Selects `Off`, `In maneuver field`, `In lane field`, `In a free field`, or `Composite` |
 | `Overlay in "In a free field" mode` | Off | When both fields are occupied, optionally allows a timed replacement of the maneuver or lane field |
-| `Display time when overlapping` | 5 seconds | Sets the temporary replacement time from 1 to 10 seconds |
+| `Display time when overlapping` | 5 seconds | Sets the temporary replacement time from 1 to 10 seconds for non-composite output over an occupied field |
+| `Composite output field` | Maneuver only | Selects `Maneuver only`, `Lanes only`, `Free or maneuver`, or `Free or lanes` |
+| `Sign size in maneuver field` | 64 px | Sets the composite sign size in the maneuver image from 1 to 103 px |
+| `Sign size in lane field` | 36 px | Sets the composite sign size in the lane image from 1 to 36 px |
 
-An alert occupies the maneuver field with the same priority as a route maneuver. A sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when an occupied maneuver, alert, or lane field is replaced. This feature requires the current project-patched direct profile for Google Maps or Waze.
+An alert occupies the maneuver field with the same priority as a route maneuver. A standalone sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when non-composite output replaces an occupied maneuver, alert, or lane field. Composite mode draws the sign into the selected maneuver or lane image without discarding its existing guidance and does not use the replacement timer. This feature requires the current project-patched direct profile for Google Maps or Waze.
 
 ### Additional navigation behavior
 
@@ -154,6 +159,8 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 | --- | --- | --- |
 | `Small distance clamp` | Off | Replaces positive distances below 11 m with 11 m to avoid invalid characters on affected HUD firmware |
 | `Roundabout left-hand traffic` | Off | Uses left-hand roundabout glyphs in the legacy visual parser |
+| `Create a TBT card even for an active navigator session without HUD output` | On | Publishes direct guidance to the dashboard TBT card independently of windshield-HUD selection; the HUD-selected navigator has priority, otherwise the most recently started route is used |
+| `Switch to the TBT card when HUD output starts` | On | Best-effort selects the dashboard TBT layout when direct HUD output starts; a layout-switch failure does not block TBT or windshield-HUD data |
 
 ### Waze functions
 
@@ -196,17 +203,17 @@ The `Patch` tab is optional. It can add a BYD HUD direct channel to a structural
 - compatible `.apkm` or `.apks` split-package archives;
 - an APK-only `.xapk` archive.
 
-Official Google Maps package `com.google.android.apps.maps`, bundles with OBB expansion data, and unsupported feature-split layouts are rejected. The currently guarded patch profiles are Waze `4.95.0.3` / `5.20.0.1` and Google Maps ReVanced `25.16.03.747108139`.
+Official Google Maps package `com.google.android.apps.maps`, bundles with OBB expansion data, and unsupported feature-split layouts are rejected. The currently guarded patch profiles are Waze `4.95.0.3` / `5.20.0.1` and Google Maps ReVanced `25.16.03.747108139`; `26.30.09.950492155` is available as a staged candidate pending vehicle validation.
 
 ### How patching works
 
 1. Select the installed navigator or optionally choose a downloaded version.
 2. Press `Check` to inspect its package name, signer, splits, and exact DEX structures.
-3. Review the component status pills. Waze reports the direct channel, stable session, and Waze alerts separately; Google Maps reports the direct and audio channels.
+3. Review the component status pills. Waze reports the direct channel, stable session, and Waze alerts separately; Google Maps reports the direct channel, audio channel, and PiP separately.
 4. Press `Patch` and confirm the warning.
 5. BYD HUD repeats all structural checks, patches only known targets, signs the complete package set with a key generated on this tablet, and asks Android to install it.
 
-The direct-channel layer is mandatory. Optional layers, such as the Google Maps navigation audio channel or Waze stable-session and alert support, may be unavailable without preventing the direct channel from working. The Waze stable-session layer covers route lifecycle, direct speed limits, and cluster trip metrics. The Waze alert hook is currently limited to the structurally compatible Waze 5.20.0.1 layout.
+For Waze, the direct-channel layer is mandatory; stable-session and alert support remain optional. For Google Maps, Direct, Audio, and PiP are independent components, so any structurally compatible component can be applied, including a PiP-only patch. The Google Maps PiP component disables navigation picture-in-picture without changing activity resize support. The Waze stable-session layer covers route lifecycle, direct speed limits, and cluster trip metrics. The Waze alert hook is currently limited to the structurally compatible Waze 5.20.0.1 layout.
 
 ### Signing and app data
 
@@ -353,7 +360,7 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 - Google Maps legacy input has no lane guidance and may provide incomplete maneuver data.
 - Waze screen-capture output is off by default and no longer supported by the developer.
 - The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
-- Project-patched Waze `5.20.0.1` cluster direct output provides ETA and remaining distance only to the next destination; remaining travel time and whole-route metrics still depend on another Waze session exposing them.
+- Waze route metrics depend on destination estimates supplied by the supported project-patched Waze `5.20.0.1` session; an unavailable whole-route field falls back to the corresponding next-stop value.
 - Waze alerts still depend on Waze supplying an alert; the built-in alert hook is available only for the supported Waze 5.20.0.1 structure.
 - Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure keeps the normal direct guidance active after five seconds.
 - Stock cluster firmware may add dark overlays to dashboard projection.
@@ -365,7 +372,8 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 
 Issues and focused pull requests are welcome. Please describe the vehicle, firmware, navigator version, and a reproducible user-visible problem before proposing navigator-specific parsing changes.
 
-- MaxTitan shared the original direct-channel idea and reference source material.
+- MaxTitan shared the original Waze direct-channel concept and reference source material demonstrating an AndroidX Car App host-to-BYD SOME/IP HUD bridge.
+- The OpenBYD project inspired the BYD-compatible system-context wrapper and navigation-state declaration used for broader TBT/HUD compatibility. Exact contracts and lifecycle behavior were independently verified on SL06 and SL07.
 - The dashboard resize approach was inspired by [BYD Mate](https://github.com/AndyShaman/BYDMate).
 - Additional Waze maneuver and lane glyphs used by the fallback parser were created specifically for this project.
 

@@ -1,5 +1,7 @@
 # Privacy
 
+**English** | [Українська](PRIVACY.uk.md)
+
 BYD HUD does not automatically send crash reports, analytics, navigation data, screenshots, logs, or usage telemetry.
 
 ## Navigation log upload

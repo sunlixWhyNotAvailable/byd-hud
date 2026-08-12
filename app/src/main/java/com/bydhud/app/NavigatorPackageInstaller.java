@@ -37,9 +37,11 @@ final class NavigatorPackageInstaller {
         if (!canInstall(context)) throw new IOException("APK install permission is not granted");
         verifyInstallTargetUnchanged(context, prepared);
         File patched = new File(prepared.directory, "patched-set");
+        verifyPatchedSetUnchanged(context, prepared, patched);
         int sessionId = prepareSession(context, prepared.profile, patched);
         NavigatorPatchStore.setSessionId(context, sessionId);
         try {
+            verifyPatchedSetUnchanged(context, prepared, patched);
             verifyInstallTargetUnchanged(context, prepared);
             NavHudLiveSender.get(context).stop(
                     prepared.profile.packageName, "navigator-patch", true);
@@ -380,24 +382,32 @@ final class NavigatorPackageInstaller {
         boolean optionalMatches = expectedOptional.equals(actual.optionalState)
                 || (NavigatorPatchStore.FAILED.equals(expectedOptional)
                 && NavigatorPatchStore.PATCHABLE.equals(actual.optionalState));
+        boolean auxiliaryMatches = expectedAlert.equals(actual.alertState)
+                || (NavigatorPatchStore.FAILED.equals(expectedAlert)
+                && NavigatorPatchStore.PATCHABLE.equals(actual.alertState));
         if (includeComponents
                 && (!NavigatorPatchStore.expectedDirect(context).equals(actual.directState)
-                || !optionalMatches || !expectedAlert.equals(actual.alertState))) {
+                || !optionalMatches || !auxiliaryMatches)) {
             throw new IOException("Installed patch components do not match staged output");
         }
     }
 
     private static NavigatorPatchPipeline.ScanResult withExpectedOptionalFailure(
             Context context, NavigatorPatchPipeline.ScanResult actual) {
-        if (!NavigatorPatchStore.FAILED.equals(
+        boolean optionalFailed = NavigatorPatchStore.FAILED.equals(
                 NavigatorPatchStore.expectedOptional(context))
-                || !NavigatorPatchStore.PATCHABLE.equals(actual.optionalState)) {
+                && NavigatorPatchStore.PATCHABLE.equals(actual.optionalState);
+        boolean auxiliaryFailed = NavigatorPatchStore.FAILED.equals(
+                NavigatorPatchStore.expectedAlert(context))
+                && NavigatorPatchStore.PATCHABLE.equals(actual.alertState);
+        if (!optionalFailed && !auxiliaryFailed) {
             return actual;
         }
         return new NavigatorPatchPipeline.ScanResult(
                 actual.profile, actual.sha256, actual.versionName, actual.versionCode,
-                actual.signerSha256, actual.directState, NavigatorPatchStore.FAILED,
-                actual.alertState,
+                actual.signerSha256, actual.directState,
+                optionalFailed ? NavigatorPatchStore.FAILED : actual.optionalState,
+                auxiliaryFailed ? NavigatorPatchStore.FAILED : actual.alertState,
                 "Optional patch attempt failed");
     }
 
@@ -489,5 +499,37 @@ final class NavigatorPackageInstaller {
                 NavigatorApkSet.inspectInstalled(context, prepared.profile).fingerprint)) {
             throw new IOException("Installed navigator changed after staging");
         }
+    }
+
+    private static void verifyPatchedSetUnchanged(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared, File patched) throws Exception {
+        NavigatorApkSet.SetInfo actual = NavigatorApkSet.readDirectory(
+                context, prepared.profile, patched);
+        if (!matchesPreparedOutputForTest(
+                prepared.output.sha256,
+                prepared.output.versionName,
+                prepared.output.versionCode,
+                prepared.output.signerSha256,
+                actual.fingerprint,
+                actual.versionName,
+                actual.versionCode,
+                actual.signerSha256)) {
+            throw new IOException("Staged patched APK-set changed before installation");
+        }
+    }
+
+    static boolean matchesPreparedOutputForTest(
+            String expectedFingerprint, String expectedVersionName,
+            long expectedVersionCode, String expectedSigner,
+            String actualFingerprint, String actualVersionName,
+            long actualVersionCode, String actualSigner) {
+        return safeEquals(expectedFingerprint, actualFingerprint)
+                && safeEquals(expectedVersionName, actualVersionName)
+                && expectedVersionCode == actualVersionCode
+                && safeEquals(expectedSigner, actualSigner);
+    }
+
+    private static boolean safeEquals(String first, String second) {
+        return first == null ? second == null : first.equals(second);
     }
 }

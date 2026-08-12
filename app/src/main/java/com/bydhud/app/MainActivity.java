@@ -55,8 +55,6 @@ import java.util.concurrent.atomic.AtomicReference;
 public final class MainActivity extends ComponentActivity {
     private static final String TAG = "BydHudTest";
     private static final long SEND_INTERVAL_MS = 1000L;
-    private static final int START_BIND_RETRY_LIMIT = 30;
-    private static final long START_BIND_RETRY_MS = 200L;
     private static final int STATUS_LOG_MAX_LINES = 35;
     private static final int NAV_RUNTIME_RECONNECT_RETRY_LIMIT = 2;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
@@ -194,8 +192,6 @@ public final class MainActivity extends ComponentActivity {
     private boolean nativeVisible = true;
     private int lastVisiblePngSourceId = 9;
     private int lastVisibleNativeId = 11;
-    private boolean startAfterBindPending;
-    private int startBindAttempts;
     private int sendCount;
     private int curatedIndex = HudArrowComboCatalog.defaultIndex();
     private String cachedPayloadKey = "";
@@ -207,37 +203,9 @@ public final class MainActivity extends ComponentActivity {
     private String cachedTurnFieldDescriptor = "";
     private String cachedTurnResource = "";
     private int cachedDisplayDistance;
-    private Runnable pendingStartAfterBindRunnable;
     private Runnable pendingNavPermissionSelfCheckRunnable;
     private Runnable pendingAutoAdbStartRunnable;
     private final Random random = new Random();
-
-    private final Runnable startAfterBindRunnable = new Runnable() {
-        @Override
-        //keeps this step explicit so callers can rely on one documented behavior boundary.
-        public void run() {
-            pendingStartAfterBindRunnable = null;
-            if (!startAfterBindPending) {
-                return;
-            }
-            if (hudOutput.isBound()) {
-                startAfterBindPending = false;
-                appendStatus("start pending: SomeIP connected");
-                startSending();
-                return;
-            }
-            if (startBindAttempts >= START_BIND_RETRY_LIMIT) {
-                startAfterBindPending = false;
-                HudDeliveryStatus.recordFailure();
-                appendStatus("start pending failed: SomeIP bind timeout");
-                refreshControls();
-                return;
-            }
-            startBindAttempts++;
-            hudOutput.ensureBound("manual-start-retry");
-            scheduleStartAfterBind();
-        }
-    };
 
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
@@ -682,7 +650,8 @@ public final class MainActivity extends ComponentActivity {
                 + "\nFiles: logcat_*.txt"
                 + "\n\nDaily logs:\n"
                 + NavigationLogStorage.publicLogsPath()
-                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, someip_tx.jsonl"
+                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, "
+                + "someip_tx.jsonl, tbt_tx.jsonl"
                 + "\n\nWaze crop:\n"
                 + NavigationLogStorage.publicWazeCropPath()
                 + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";
@@ -802,6 +771,8 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isStreetOutputEnabled(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
+                HudPrefs.isTbtWithoutHudOutputEnabled(this),
+                HudPrefs.isSwitchToTbtOnHudStartEnabled(this),
                 HudPrefs.isWholeRouteMetricsEnabled(this),
                 HudPrefs.routeMetricsMode(this),
                 HudPrefs.isEtaOutputEnabled(this),
@@ -1265,6 +1236,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this Compose helper focused so UI state changes remain easy to audit.
     public void composeSetDetailedDebugArtifactsEnabled(boolean enabled) {
         HudPrefs.setDetailedDebugArtifactsEnabled(this, enabled);
+        TbtTxLog.onDetailedModeChanged(this, enabled);
         appendStatus("Detailed debug artifacts " + (enabled ? "enabled" : "disabled"));
         refreshControls();
     }
@@ -1300,6 +1272,19 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetWazeAlertsEnabled(boolean enabled) {
         setWazeAlertsEnabled(enabled);
+    }
+
+    public void composeSetTbtWithoutHudOutputEnabled(boolean enabled) {
+        HudPrefs.setTbtWithoutHudOutputEnabled(this, enabled);
+        NavHudLiveSender.get(this).refreshTbtObservers();
+        appendStatus("TBT without HUD output " + (enabled ? "enabled" : "disabled"));
+        refreshControls();
+    }
+
+    public void composeSetSwitchToTbtOnHudStartEnabled(boolean enabled) {
+        HudPrefs.setSwitchToTbtOnHudStartEnabled(this, enabled);
+        appendStatus("Switch to TBT on HUD start " + (enabled ? "enabled" : "disabled"));
+        refreshControls();
     }
 
     public void composeSetWholeRouteMetricsEnabled(boolean enabled) {
@@ -1799,15 +1784,7 @@ public final class MainActivity extends ComponentActivity {
         setManualMode(enabled);
         if (enabled) {
             arrowCuratedMode = true;
-            if (!hudOutput.isBound()) {
-                appendStatus("manual mode: connect/start requested");
-                startAfterBindPending = true;
-                startBindAttempts = 0;
-                hudOutput.ensureBound("manual-mode");
-                scheduleStartAfterBind();
-            } else if (!sending) {
-                startSending();
-            }
+            if (!sending) startSending();
         } else {
             stopSending(true);
         }
@@ -1891,6 +1868,8 @@ public final class MainActivity extends ComponentActivity {
         public final boolean streetOutputEnabled;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
+        public final boolean tbtWithoutHudOutputEnabled;
+        public final boolean switchToTbtOnHudStartEnabled;
         public final boolean wholeRouteMetricsEnabled;
         public final int routeMetricsMode;
         public final boolean etaOutputEnabled;
@@ -1955,6 +1934,8 @@ public final class MainActivity extends ComponentActivity {
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
+                boolean tbtWithoutHudOutputEnabled,
+                boolean switchToTbtOnHudStartEnabled,
                 boolean wholeRouteMetricsEnabled, int routeMetricsMode,
                 boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
                 boolean remainingDistanceOutputEnabled, int speedLimitMode,
@@ -1994,6 +1975,8 @@ public final class MainActivity extends ComponentActivity {
             this.streetOutputEnabled = streetOutputEnabled;
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
+            this.tbtWithoutHudOutputEnabled = tbtWithoutHudOutputEnabled;
+            this.switchToTbtOnHudStartEnabled = switchToTbtOnHudStartEnabled;
             this.wholeRouteMetricsEnabled = wholeRouteMetricsEnabled;
             this.routeMetricsMode = routeMetricsMode;
             this.etaOutputEnabled = etaOutputEnabled;
@@ -2081,6 +2064,8 @@ public final class MainActivity extends ComponentActivity {
                     && streetOutputEnabled == other.streetOutputEnabled
                     && textDirectionOutputEnabled == other.textDirectionOutputEnabled
                     && wazeAlertsEnabled == other.wazeAlertsEnabled
+                    && tbtWithoutHudOutputEnabled == other.tbtWithoutHudOutputEnabled
+                    && switchToTbtOnHudStartEnabled == other.switchToTbtOnHudStartEnabled
                     && wholeRouteMetricsEnabled == other.wholeRouteMetricsEnabled
                     && routeMetricsMode == other.routeMetricsMode
                     && etaOutputEnabled == other.etaOutputEnabled
@@ -2147,7 +2132,8 @@ public final class MainActivity extends ComponentActivity {
                     uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
                     pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
                     distanceOutputEnabled, streetOutputEnabled, textDirectionOutputEnabled,
-                    wazeAlertsEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
+                    wazeAlertsEnabled, tbtWithoutHudOutputEnabled,
+                    switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
                     speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
@@ -2862,7 +2848,6 @@ public final class MainActivity extends ComponentActivity {
         String previousHudPackage = NavCapturePrefs.getHudPackage(this);
         if (enabled && !previousHudPackage.isEmpty() && !previousHudPackage.equals(normalized)) {
             returnPreviousHudAppToMain(previousHudPackage, normalized);
-            NavHudLiveSender.get(this).stop(previousHudPackage, "ui-switch", true);
             appendStatus("nav live HUD switched off: " + previousHudPackage);
         }
         if (enabled && hudOutput.isBound()) {
@@ -2883,6 +2868,7 @@ public final class MainActivity extends ComponentActivity {
             }
             appendStatus("nav live HUD stop requested");
         }
+        NavHudLiveSender.get(this).refreshTbtObservers();
         refreshActiveAppsList();
     }
 
@@ -2935,6 +2921,7 @@ public final class MainActivity extends ComponentActivity {
             NavNotificationListenerService.requestActiveNotificationScan(
                     this, "ui-start-log-only-" + normalized);
         }
+        NavHudLiveSender.get(this).refreshTbtObservers();
         refreshActiveAppsList();
     }
 
@@ -3026,11 +3013,6 @@ public final class MainActivity extends ComponentActivity {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startSending() {
-        if (!hudOutput.isBound()) {
-            appendStatus("start blocked: Connect first");
-            refreshControls();
-            return;
-        }
         if (sending) {
             appendStatus("start skipped: already sending");
             refreshControls();
@@ -3045,29 +3027,20 @@ public final class MainActivity extends ComponentActivity {
         exitRequested = false;
         sendCount = 0;
         cancelPendingHudCallbacks();
-        hudOutput.publishManual(state, "manual-start");
-        hudOutput.setManualEnabled(true, "manual-start");
+        NavHudLiveSender.get(this).startManual(state, "manual-start");
         appendStatus("sending=true intervalMs=" + SEND_INTERVAL_MS
-                + " backgroundMode=" + BACKGROUND_MODE);
+                + " backgroundMode=" + BACKGROUND_MODE
+                + " output=HUD+TBT");
         refreshControls();
-    }
-
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void scheduleStartAfterBind() {
-        if (pendingStartAfterBindRunnable != null) {
-            handler.removeCallbacks(pendingStartAfterBindRunnable);
-        }
-        pendingStartAfterBindRunnable = startAfterBindRunnable;
-        handler.postDelayed(pendingStartAfterBindRunnable, START_BIND_RETRY_MS);
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopSending(boolean clearHud) {
         sending = false;
         HudDeliveryStatus.reset();
-        startAfterBindPending = false;
         cancelPendingHudCallbacks();
-        hudOutput.setManualEnabled(false, clearHud ? "manual-stop-clear" : "manual-stop");
+        NavHudLiveSender.get(this).stopManual(
+                clearHud ? "manual-stop-clear" : "manual-stop");
         appendStatus("sending=false reason=stop");
         refreshControls();
     }
@@ -3081,9 +3054,14 @@ public final class MainActivity extends ComponentActivity {
             HudDeliveryStatus.reset();
         }
         cancelPendingHudCallbacks();
-        hudOutput.setManualEnabled(false, reason + (clearHud ? "-clear" : ""));
-        if (unbindClient && !NavHudLiveSender.get(this).isRunning()) {
-            hudOutput.shutdown(reason);
+        NavHudLiveSender sender = NavHudLiveSender.get(this);
+        String stopReason = reason + (clearHud ? "-clear" : "");
+        if (unbindClient) {
+            sender.stopManual(stopReason, false, () -> {
+                if (!sender.isRunning()) hudOutput.shutdown(reason);
+            });
+        } else {
+            sender.stopManual(stopReason, false);
         }
         appendStatus("sending=false reason=" + reason);
         refreshControls();
@@ -3091,9 +3069,6 @@ public final class MainActivity extends ComponentActivity {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelPendingHudCallbacks() {
-        startAfterBindPending = false;
-        cancelRunnable(pendingStartAfterBindRunnable);
-        pendingStartAfterBindRunnable = null;
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -4347,12 +4322,8 @@ public final class MainActivity extends ComponentActivity {
             applyNavigationFields();
         }
         refreshStateView();
-        if (!hudOutput.isBound()) {
-            appendStatus("send blocked: service not connected; tap Connect first");
-            return;
-        }
         PayloadSnapshot payload = getPayloadSnapshot();
-        hudOutput.publishManual(state, reason);
+        NavHudLiveSender.get(this).publishManual(state, reason);
         sendCount++;
         appendStatus("manual payload=" + payload.bytes.length
                 + " reason=" + reason
@@ -4761,8 +4732,6 @@ public final class MainActivity extends ComponentActivity {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean canUseManualHud() {
         return manualModeEnabled
-                && hudOutput != null
-                && hudOutput.isBound()
                 && sending;
     }
 

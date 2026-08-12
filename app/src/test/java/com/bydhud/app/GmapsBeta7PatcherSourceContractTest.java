@@ -27,6 +27,8 @@ public final class GmapsBeta7PatcherSourceContractTest {
         String speed = between(source,
                 "private static SpeedLocation speedStateAtV26(",
                 "private static boolean isSpeedCapture(");
+        String pipeline = sourcePath(
+                "app/src/main/java/com/bydhud/app/NavigatorPatchPipeline.java");
 
         assertTrue(hooks.contains("new Hook(\"nav_payload\", \"Lbrjq;\", \"a\""));
         assertTrue(hooks.contains("Collections.singletonList(\"Ldaqn;\")"));
@@ -61,12 +63,16 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(profile2516.contains("\"Lbikc;\", Arrays.asList("));
         assertTrue(source.contains(
                 "PROFILES = Arrays.asList(PROFILE_2630, PROFILE_2516)"));
+        assertTrue(pipeline.contains("private static String inspectGmapsPip("));
+        assertTrue(pipeline.contains("PIP_INSPECTION_FAILED"));
     }
 
     @Test
     public void detectionIsFailClosedAndProductionContractsRemainPublic() throws IOException {
         String source = sourcePath(
                 "app/src/main/java/com/bydhud/gmapsdiag/patcher/GmapsDiagnosticPatcher.java");
+        String pipeline = sourcePath(
+                "app/src/main/java/com/bydhud/app/NavigatorPatchPipeline.java");
         String detection = between(source,
                 "private static Profile detectProfile(File apk)",
                 "private static String verifyMarkers(");
@@ -81,8 +87,16 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(source.contains("public static String inspectClassification(File apk)"));
         assertTrue(source.contains("public static String inspectDirectClassification(File apk)"));
         assertTrue(source.contains("public static String inspectAudioClassification(File apk)"));
+        assertTrue(source.contains("detectProfile(apk);"));
+        String pipInspection = between(source,
+                "public static String inspectPipClassification(File apk)",
+                "public static void patchDirect(");
+        assertTrue(pipInspection.indexOf("detectProfile(apk);")
+                < pipInspection.indexOf("inspectPipManifest(apk)"));
         assertTrue(source.contains("public static void patchDirect("));
         assertTrue(source.contains("public static void patchNavigationAudio("));
+        assertTrue(pipeline.contains("boolean hasCode = hasDexEntries(member.file);"));
+        assertTrue(pipeline.contains("private static boolean hasDexEntries(File apk)"));
         assertTrue(source.contains("String directClassification()"));
         assertTrue(source.contains("String audioClassification()"));
         assertTrue(source.contains("return \"PATCHABLE_STOCK\""));
@@ -156,7 +170,9 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(registration.contains(
                 "CLIENT_REJECTED|reason=malformed_extras|type="));
         assertTrue(registration.contains("if (!isTrustedSender(identity))"));
-        assertTrue(registration.contains("installClient(candidate)"));
+        assertTrue(registration.contains("EXTRA_CHANNEL_ID"));
+        assertTrue(registration.contains(
+                "installClient(candidate, channelId == null ? \"\" : channelId.trim())"));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

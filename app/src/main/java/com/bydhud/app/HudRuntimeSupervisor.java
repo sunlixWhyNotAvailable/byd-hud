@@ -70,7 +70,36 @@ final class HudRuntimeSupervisor {
         Context appContext = context.getApplicationContext();
         return HudRuntimeUpgradeGuard.isPendingReinit(appContext)
                 || !NavCapturePrefs.getCapturePackages(appContext).isEmpty()
-                || !NavAppDisplayController.get(appContext).persistedDashboardPackage().isEmpty();
+                || !NavAppDisplayController.get(appContext).persistedDashboardPackage().isEmpty()
+                || hasTbtRuntimeWork(appContext);
+    }
+
+    static boolean shouldKeepTbtRuntimeForTest(
+            boolean tbtEnabled, boolean gmapsInstalled, boolean gmapsHudEnabled,
+            boolean wazeRouteActive, boolean wazeHudEnabled) {
+        return tbtEnabled
+                && ((gmapsInstalled && !gmapsHudEnabled)
+                || (wazeRouteActive && !wazeHudEnabled));
+    }
+
+    private static boolean hasTbtRuntimeWork(Context context) {
+        if (!HudPrefs.isTbtWithoutHudOutputEnabled(context)) return false;
+        boolean gmapsInstalled = isInstalled(context, GMapsDirectChannel.PACKAGE_NAME);
+        return shouldKeepTbtRuntimeForTest(
+                true,
+                gmapsInstalled,
+                NavCapturePrefs.isHudEnabled(context, GMapsDirectChannel.PACKAGE_NAME),
+                WazeRouteLifecycleStore.isRouteActive(context),
+                NavCapturePrefs.isHudEnabled(context, WazeRouteLifecycleStore.WAZE_PACKAGE));
+    }
+
+    private static boolean isInstalled(Context context, String packageName) {
+        try {
+            context.getPackageManager().getApplicationInfo(packageName, 0);
+            return true;
+        } catch (Exception ignored) {
+            return false;
+        }
     }
 
     //hard-resets post-update runtime state so stale service/capture binders cannot survive install replace.

@@ -37,6 +37,8 @@ final class HudPrefs {
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
+    private static final String KEY_TBT_WITHOUT_HUD_OUTPUT = "tbt_without_hud_output";
+    private static final String KEY_SWITCH_TO_TBT_ON_HUD_START = "switch_to_tbt_on_hud_start";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
 
@@ -348,6 +350,24 @@ final class HudPrefs {
         prefs(context).edit().putInt(
                 KEY_DASHBOARD_HEIGHT_PERCENT,
                 DashboardProjectionPolicy.clampHeightPercent(percent)).apply();
+    }
+
+    static boolean isTbtWithoutHudOutputEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_TBT_WITHOUT_HUD_OUTPUT, true);
+    }
+
+    static void setTbtWithoutHudOutputEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_TBT_WITHOUT_HUD_OUTPUT, enabled).apply();
+    }
+
+    static boolean isSwitchToTbtOnHudStartEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_SWITCH_TO_TBT_ON_HUD_START, true);
+    }
+
+    static void setSwitchToTbtOnHudStartEnabled(Context context, boolean enabled) {
+        prefs(context).edit()
+                .putBoolean(KEY_SWITCH_TO_TBT_ON_HUD_START, enabled)
+                .apply();
     }
 
     static int outputOptionsRevision() {

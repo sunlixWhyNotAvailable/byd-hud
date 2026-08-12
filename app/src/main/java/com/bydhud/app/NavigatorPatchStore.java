@@ -13,7 +13,7 @@ import java.util.UUID;
 
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
-    private static final int SCAN_CACHE_REVISION = 4;
+    private static final int SCAN_CACHE_REVISION = 5;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";
@@ -66,7 +66,7 @@ final class NavigatorPatchStore {
     enum Profile {
         WAZE("waze", "com.waze", "Waze", "Stable session", "Waze alerts"),
         GMAPS("gmaps", "app.revanced.android.apps.maps", "Google Maps (ReVanced)",
-                "Audio channel", "");
+                "Audio channel", "PiP");
 
         final String id;
         final String packageName;
@@ -661,13 +661,23 @@ final class NavigatorPatchStore {
             alert = NOT_CHECKED;
             reason = "";
         }
-        boolean patchEnabled = PATCHABLE.equals(direct)
-                || (PATCHED.equals(direct)
-                && (PATCHABLE.equals(optional) || PATCHABLE.equals(alert)));
+        boolean patchEnabled = isPatchEnabled(profile, direct, optional, alert);
         return new ProfileSnapshot(profile, isInstalled, label, installedVersion, installedCode,
                 external, sourceName == null ? "" : sourceName,
                 sourceVersion == null ? "" : sourceVersion, sourceCode,
                 direct, optional, alert, reason == null ? "" : reason, patchEnabled);
+    }
+
+    static boolean isPatchEnabled(Profile profile, String direct, String optional,
+            String auxiliary) {
+        if (profile == Profile.WAZE) {
+            return PATCHABLE.equals(direct)
+                    || (PATCHED.equals(direct)
+                    && (PATCHABLE.equals(optional) || PATCHABLE.equals(auxiliary)));
+        }
+        return PATCHABLE.equals(direct)
+                || PATCHABLE.equals(optional)
+                || PATCHABLE.equals(auxiliary);
     }
 
     private static PackageInfo installedInfo(Context context, String packageName) {

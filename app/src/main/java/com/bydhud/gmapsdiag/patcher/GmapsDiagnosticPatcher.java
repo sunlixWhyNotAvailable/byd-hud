@@ -58,6 +58,8 @@ import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
 
 public final class GmapsDiagnosticPatcher {
+    private static final long MAX_MANIFEST_BYTES = 8L * 1024L * 1024L;
+    private static final long MAX_DEX_BYTES = 64L * 1024L * 1024L;
     private static final String LOGGER_CLASS = "Lcom/bydhud/gmapsdiag/NavInfoLogger;";
     private static final String RECEIVER_CLASS =
             "Lcom/google/android/libraries/geo/navcore/navinfo/NavigationInfoBroadcastReceiver;";
@@ -170,6 +172,28 @@ public final class GmapsDiagnosticPatcher {
         return inspect(apk).audioClassification();
     }
 
+    public static String inspectProfileIdIfPresent(File apk) throws IOException {
+        requireFile(apk, "APK");
+        Profile profile = detectProfile(apk, false);
+        return profile == null ? "" : profile.id;
+    }
+
+    public static String inspectPipClassification(File apk) throws IOException {
+        requireFile(apk, "APK");
+        // PiP is supported only through the same guarded 25.16/26.30 profiles as
+        // the direct and audio components. Do not make the manifest parser a
+        // version-agnostic escape hatch.
+        detectProfile(apk);
+        return inspectPipManifest(apk).classification;
+    }
+
+    public static String inspectPipClassification(File apk, String validatedProfile)
+            throws IOException {
+        requireFile(apk, "APK");
+        requireKnownProfile(validatedProfile);
+        return inspectPipManifest(apk).classification;
+    }
+
     public static void patchDirect(
             File input, File output, File loggerDex, File reportFile) throws Exception {
         patch(input, output, loggerDex, reportFile);
@@ -178,6 +202,54 @@ public final class GmapsDiagnosticPatcher {
     public static void patchNavigationAudio(
             File input, File output, File reportFile) throws Exception {
         patchAudio(input, output, reportFile);
+    }
+
+    public static void patchPictureInPicture(
+            File input, File output, File reportFile) throws Exception {
+        requireFile(input, "GMaps APK");
+        patchPictureInPicture(input, output, reportFile, detectProfile(input).id);
+    }
+
+    public static void patchPictureInPicture(
+            File input, File output, File reportFile, String validatedProfile) throws Exception {
+        requireFile(input, "GMaps APK");
+        requireKnownProfile(validatedProfile);
+        GmapsPipManifestPatcher.Result before = inspectPipManifest(input);
+        if (!GmapsPipManifestPatcher.PATCHABLE.equals(before.classification)) {
+            throw new IOException("PiP manifest classification=" + before.classification);
+        }
+        File work = new File(output.getParentFile(), "pip-manifest-work");
+        deleteTree(work);
+        if (!work.mkdirs()) throw new IOException("cannot create " + work);
+        File manifest = new File(work, "AndroidManifest.xml");
+        try {
+            byte[] sourceManifest = readManifestEntry(input);
+            Files.write(manifest.toPath(), GmapsPipManifestPatcher.patch(sourceManifest));
+            File temporary = new File(output.getAbsolutePath() + ".tmp");
+            Map<String, File> replacements = Collections.singletonMap(
+                    "AndroidManifest.xml", manifest);
+            repack(input, temporary, replacements, null, null);
+            Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            GmapsPipManifestPatcher.Result after = inspectPipManifest(output);
+            if (!GmapsPipManifestPatcher.PATCHED.equals(after.classification)) {
+                throw new IOException("PiP manifest post-verification failed");
+            }
+            Map<String, Object> report = new LinkedHashMap<>();
+            report.put("operation", "patch-pip");
+            report.put("inputSha256", sha256(input));
+            report.put("outputSha256", sha256(output));
+            report.put("inputClassification", before.classification);
+            report.put("outputClassification", after.classification);
+            report.put("activityCount", after.activityCount);
+            report.put("attributeCount", after.attributeCount);
+            report.put("stockTrueCount", before.booleanTrueCount);
+            report.put("patchedFalseCount", after.booleanFalseCount);
+            report.put("changedAttribute", "android:supportsPictureInPicture");
+            report.put("targetProfile", validatedProfile);
+            writeJson(reportFile, report);
+        } finally {
+            deleteTree(work);
+        }
     }
 
     public static void main(String[] args) throws Exception {
@@ -198,6 +270,17 @@ public final class GmapsDiagnosticPatcher {
             verifyAudio(new File(args[1]), new File(args[2]));
             return;
         }
+        if ("patch-pip".equals(args[0]) && args.length == 4) {
+            patchPictureInPicture(new File(args[1]), new File(args[2]), new File(args[3]));
+            return;
+        }
+        if ("verify-pip".equals(args[0]) && args.length == 3) {
+            String classification = inspectPipClassification(new File(args[1]));
+            if (!GmapsPipManifestPatcher.PATCHED.equals(classification)) {
+                throw new IOException("PiP classification=" + classification);
+            }
+            return;
+        }
         usage();
     }
 
@@ -206,7 +289,31 @@ public final class GmapsDiagnosticPatcher {
                 "Usage: patch <input.apk> <unsigned.apk> <logger.dex> <report.json> "
                         + "or verify <apk> <report.json> "
                         + "or patch-audio <input.apk> <unsigned.apk> <report.json> "
-                        + "or verify-audio <apk> <report.json>");
+                        + "or verify-audio <apk> <report.json> "
+                        + "or patch-pip <input.apk> <unsigned.apk> <report.json> "
+                        + "or verify-pip <apk> <report.json>");
+    }
+
+    private static GmapsPipManifestPatcher.Result inspectPipManifest(File apk)
+            throws IOException {
+        return GmapsPipManifestPatcher.inspect(readManifestEntry(apk));
+    }
+
+    static byte[] readManifestEntry(File apk) throws IOException {
+        try (ZipFile zip = new ZipFile(apk)) {
+            ZipEntry manifest = null;
+            int count = 0;
+            Enumeration<? extends ZipEntry> entries = zip.entries();
+            while (entries.hasMoreElements()) {
+                ZipEntry entry = entries.nextElement();
+                if (!"AndroidManifest.xml".equals(entry.getName())) continue;
+                count++;
+                if (count > 1) throw new IOException("Duplicate APK manifest entries");
+                manifest = entry;
+            }
+            if (manifest == null) throw new IOException("APK manifest is missing");
+            return readEntry(zip, manifest, MAX_MANIFEST_BYTES);
+        }
     }
 
     private static void patch(File input, File output, File loggerDex, File reportFile)
@@ -384,6 +491,10 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static Inspection inspect(File apk) throws IOException {
+        // Validate the archive boundary and manifest before scanning DEX. This
+        // keeps all GMaps component scans fail-closed on duplicate/oversized
+        // manifests, not just the optional PiP scan.
+        readManifestEntry(apk);
         Profile profile = detectProfile(apk);
         Inspection inspection = new Inspection(profile);
         try (ZipFile zip = new ZipFile(apk)) {
@@ -460,6 +571,10 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static Profile detectProfile(File apk) throws IOException {
+        return detectProfile(apk, true);
+    }
+
+    private static Profile detectProfile(File apk, boolean required) throws IOException {
         Map<Profile, Integer> matches = new LinkedHashMap<>();
         for (Profile profile : PROFILES) matches.put(profile, 0);
         try (ZipFile zip = new ZipFile(apk)) {
@@ -488,10 +603,17 @@ public final class GmapsDiagnosticPatcher {
             }
             selected = entry.getKey();
         }
-        if (selected == null) {
+        if (selected == null && required) {
             throw new IOException("unsupported GMaps target profile: " + matches);
         }
         return selected;
+    }
+
+    private static void requireKnownProfile(String profileId) throws IOException {
+        for (Profile profile : PROFILES) {
+            if (profile.id.equals(profileId)) return;
+        }
+        throw new IOException("unsupported GMaps target profile: " + profileId);
     }
 
     private static String verifyMarkers(MethodImplementation implementation, Hook hook) {
@@ -1265,11 +1387,26 @@ public final class GmapsDiagnosticPatcher {
     private static byte[] readEntry(ZipFile zip, String name) throws IOException {
         ZipEntry entry = zip.getEntry(name);
         if (entry == null) throw new IOException("missing APK entry " + name);
+        return readEntry(zip, entry, MAX_DEX_BYTES);
+    }
+
+    private static byte[] readEntry(ZipFile zip, ZipEntry entry, long limit)
+            throws IOException {
+        if (entry.getSize() > limit) {
+            throw new IOException("APK entry exceeds limit: " + entry.getName());
+        }
         try (InputStream input = zip.getInputStream(entry);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             byte[] buffer = new byte[128 * 1024];
+            long total = 0L;
             int read;
-            while ((read = input.read(buffer)) >= 0) output.write(buffer, 0, read);
+            while ((read = input.read(buffer)) != -1) {
+                total += read;
+                if (total > limit) {
+                    throw new IOException("APK entry exceeds limit: " + entry.getName());
+                }
+                output.write(buffer, 0, read);
+            }
             return output.toByteArray();
         }
     }

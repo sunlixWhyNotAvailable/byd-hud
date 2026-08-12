@@ -18,7 +18,7 @@ final class HudRoadPayload {
                 state.includeLaneBitmap ? HudLaneModel.parse(state) : new HudLaneModel.LaneSpec[0];
         int trustedLaneCount = trustedLanes.length > 1 ? trustedLanes.length : 0;
 
-        writeInt32(road, 2, state.crossStatus);
+        writeInt32(road, 2, 2);
         writeInt32(road, 3, state.carToDestination);
         writeInt32(road, 4, state.timeToDestination);
         writeInt32(road, 5, trustedLaneCount);

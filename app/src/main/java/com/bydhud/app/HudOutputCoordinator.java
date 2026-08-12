@@ -25,6 +25,7 @@ final class HudOutputCoordinator {
     private static final int FINAL_CLEAR_COUNT = 5;
     private static final long FINAL_CLEAR_INTERVAL_MS = 120L;
     private static final long FINAL_STOP_DELAY_MS = 300L;
+    private static final long FINAL_CLEAR_TIMEOUT_MS = 6_000L;
     private static final long BIND_RETRY_MS = 200L;
     private static final int BIND_RETRY_LIMIT = 30;
     private static final long DIRECT_LEASE_MS = 15_000L;
@@ -91,6 +92,11 @@ final class HudOutputCoordinator {
     private long directLeaseDeadlineMs;
     private long pendingDirectReceivedAtMs;
     private String pendingDirectReason = "";
+    private Runnable pendingFinalClearCompletion;
+    private Runnable pendingTransitionClearCompletion;
+    private boolean pendingFinalClearSucceeded;
+    private boolean finalClearInProgress;
+    private long finalClearStartedAtMs;
 
     private final Runnable directLeaseExpiry = this::expireDirectLease;
 
@@ -314,18 +320,59 @@ final class HudOutputCoordinator {
 
     void endDirectOutput(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs) {
+        endDirectOutput(ownerPackage, ownerSessionGeneration, reason, detectedAtMs, null);
+    }
+
+    void endDirectOutput(String ownerPackage, long ownerSessionGeneration,
+            String reason, long detectedAtMs, Runnable firstClearCompletion) {
         worker.post(() -> {
-            endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason, detectedAtMs);
+            endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
+                    detectedAtMs, firstClearCompletion, false);
+        });
+    }
+
+    void endNavigationOutput(String ownerPackage, long ownerSessionGeneration,
+            String reason, long detectedAtMs, Runnable firstClearCompletion) {
+        worker.post(() -> {
+            boolean directSelected = directEnabled
+                    || activeSource == Source.DIRECT
+                    || pendingSource == Source.DIRECT;
+            if (directSelected) {
+                endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
+                        detectedAtMs, firstClearCompletion, true);
+                return;
+            }
+            boolean legacySelected = legacyEnabled
+                    || activeSource == Source.LEGACY
+                    || pendingSource == Source.LEGACY;
+            if (!legacySelected) {
+                reconcile(reason, detectedAtMs, firstClearCompletion);
+                return;
+            }
+            legacyEnabled = false;
+            legacyState = null;
+            invalidateDirectOwnerOnWorker("navigation-end:" + reason);
+            reconcile(reason, detectedAtMs, firstClearCompletion);
         });
     }
 
     private void endDirectOutputOnWorker(String ownerPackage, long ownerSessionGeneration,
-            String reason, long detectedAtMs) {
+            String reason, long detectedAtMs, Runnable firstClearCompletion,
+            boolean administrativeStop) {
         if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) {
             logAsync("direct end rejected owner=" + safe(ownerPackage)
                     + " session=" + ownerSessionGeneration
                     + " reason=" + safe(reason));
-            return;
+            if (!administrativeStop) return;
+            if (!shouldClearForAdministrativeStopForTest(
+                    directOwnerPackage, ownerPackage)) {
+                logAsync("direct administrative stop skipped; owner already moved current="
+                        + safe(directOwnerPackage) + " requested=" + safe(ownerPackage));
+                runCompletion(firstClearCompletion);
+                return;
+            }
+            logAsync("direct administrative stop continuing with current output reason="
+                    + safe(reason));
         }
         boolean directSelected = directEnabled
                 || activeSource == Source.DIRECT
@@ -333,6 +380,7 @@ final class HudOutputCoordinator {
         if (!directSelected) {
             logAsync("direct end ignored reason=" + safe(reason)
                     + " detectedAtElapsedMs=" + detectedAtMs);
+            reconcile(reason, detectedAtMs, firstClearCompletion);
             return;
         }
         long now = SystemClock.elapsedRealtime();
@@ -355,7 +403,7 @@ final class HudOutputCoordinator {
         pendingDirectReceivedAtMs = 0L;
         pendingDirectReason = "";
         invalidateDirectOwnerOnWorker("end:" + reason);
-        reconcile(reason, detectedAtMs);
+        reconcile(reason, detectedAtMs, firstClearCompletion);
     }
 
     void renewDirectLease(String ownerPackage, long ownerSessionGeneration, String reason) {
@@ -373,6 +421,7 @@ final class HudOutputCoordinator {
 
     void resetTransport(String reason) {
         worker.post(() -> {
+            Runnable interruptedCompletion = takePendingClearCompletions();
             generation++;
             cancelScheduledWork();
             stopServiceAndUnbind(reason);
@@ -386,12 +435,17 @@ final class HudOutputCoordinator {
             invalidateDirectOwnerOnWorker("transport-reset:" + reason);
             lastBitmapTxDiagnosticKey = "";
             HudDeliveryStatus.reset();
+            runCompletion(interruptedCompletion);
             reconcile("reset:" + reason);
         });
     }
 
     void shutdown(String reason) {
         worker.post(() -> {
+            boolean interruptedClear = finalClearInProgress
+                    || pendingFinalClearCompletion != null
+                    || pendingTransitionClearCompletion != null;
+            Runnable interruptedCompletion = takePendingClearCompletions();
             manualEnabled = false;
             directEnabled = false;
             legacyEnabled = false;
@@ -403,17 +457,41 @@ final class HudOutputCoordinator {
             directAlertClearPending = false;
             invalidateDirectOwnerOnWorker("shutdown:" + reason);
             legacyState = null;
-            reconcile(reason);
+            if (interruptedClear) {
+                generation++;
+                cancelScheduledWork();
+                stopServiceAndUnbind(reason);
+                activeSource = Source.NONE;
+                pendingSource = Source.NONE;
+                pendingReason = "";
+                pendingNeedsClear = false;
+                pendingActivationNotBeforeMs = 0L;
+                HudDeliveryStatus.reset();
+                runCompletion(interruptedCompletion);
+            } else {
+                reconcile(reason);
+            }
         });
     }
 
     private void reconcile(String reason) {
-        reconcile(reason, 0L);
+        reconcile(reason, 0L, null);
     }
 
     private void reconcile(String reason, long endDetectedAtMs) {
+        reconcile(reason, endDetectedAtMs, null);
+    }
+
+    private void reconcile(String reason, long endDetectedAtMs,
+            Runnable firstClearCompletion) {
         Source target = desiredSource();
         if (pendingSource == Source.NONE && target == activeSource) {
+            if (target == Source.NONE && pendingFinalClearCompletion != null) {
+                pendingFinalClearCompletion = chainCompletions(
+                        pendingFinalClearCompletion, firstClearCompletion);
+                return;
+            }
+            runCompletion(firstClearCompletion);
             if (target == Source.NONE && client.hasBinding()) {
                 stopServiceAndUnbind(reason);
                 HudDeliveryStatus.reset();
@@ -421,12 +499,23 @@ final class HudOutputCoordinator {
             return;
         }
         if (pendingSource == target && target != Source.NONE) {
+            pendingTransitionClearCompletion = chainCompletions(
+                    pendingTransitionClearCompletion, firstClearCompletion);
+            if (!pendingNeedsClear) completeTransitionClear();
             return;
         }
         int transitionGeneration = ++generation;
         cancelScheduledWork();
+        boolean unfinishedFinalClear = pendingFinalClearCompletion != null;
+        Runnable carriedCompletion = chainCompletions(
+                pendingFinalClearCompletion, pendingTransitionClearCompletion);
+        pendingFinalClearCompletion = null;
+        pendingTransitionClearCompletion = null;
+        finalClearInProgress = false;
+        finalClearStartedAtMs = 0L;
+        Runnable clearCompletion = chainCompletions(carriedCompletion, firstClearCompletion);
         Source previous = activeSource;
-        boolean stillNeedsClear = pendingNeedsClear;
+        boolean stillNeedsClear = pendingNeedsClear || unfinishedFinalClear;
         long existingBarrierDeadline = pendingActivationNotBeforeMs;
         activeSource = Source.NONE;
         pendingSource = Source.NONE;
@@ -435,9 +524,16 @@ final class HudOutputCoordinator {
         pendingActivationNotBeforeMs = 0L;
         HudDeliveryStatus.reset();
         if (target == Source.NONE) {
-            beginFinalStop(previous, reason, transitionGeneration, 1, endDetectedAtMs);
+            pendingFinalClearCompletion = clearCompletion;
+            pendingFinalClearSucceeded = false;
+            finalClearInProgress = previous != Source.NONE;
+            finalClearStartedAtMs = finalClearInProgress
+                    ? SystemClock.elapsedRealtime() : 0L;
+            beginFinalStop(previous, reason, transitionGeneration, 1,
+                    endDetectedAtMs);
             return;
         }
+        pendingTransitionClearCompletion = clearCompletion;
         pendingSource = target;
         pendingReason = reason;
         pendingNeedsClear = previous != Source.NONE || stillNeedsClear;
@@ -459,6 +555,7 @@ final class HudOutputCoordinator {
             return;
         }
         if (!pendingNeedsClear) {
+            completeTransitionClear();
             long remainingMs = pendingActivationNotBeforeMs - SystemClock.elapsedRealtime();
             if (remainingMs > 0L) {
                 worker.postDelayed(
@@ -477,6 +574,7 @@ final class HudOutputCoordinator {
             return;
         }
         pendingNeedsClear = false;
+        completeTransitionClear();
         pendingActivationNotBeforeMs =
                 SystemClock.elapsedRealtime() + SOURCE_CLEAR_DELAY_MS;
         HudDeliveryStatus.reset();
@@ -741,14 +839,59 @@ final class HudOutputCoordinator {
         if (stopGeneration != generation) {
             return;
         }
-        if (!serviceStarted || !client.isBound()) {
+        if (previous == Source.NONE) {
+            pendingFinalClearSucceeded = true;
+            finalClearInProgress = false;
+            finalClearStartedAtMs = 0L;
+            completeFinalClear();
             stopServiceAndUnbind(reason);
             HudDeliveryStatus.reset();
             return;
         }
+        if (finalClearTimedOutForTest(
+                finalClearStartedAtMs, SystemClock.elapsedRealtime())) {
+            abortFinalClearAfterTimeout(previous, reason);
+            return;
+        }
+        if (!client.isBound()) {
+            if (!client.hasBinding()) {
+                client.bind();
+                log("final clear bind requested reason=" + reason);
+            }
+            worker.postDelayed(
+                    () -> beginFinalStop(previous, reason, stopGeneration, frame,
+                            endDetectedAtMs),
+                    BIND_RETRY_MS);
+            return;
+        }
+        if (!serviceStarted) {
+            try {
+                int startResult = startService(previous, channelFor(previous),
+                        "final-clear:" + reason);
+                if (!isStartReadyResult(startResult)) {
+                    worker.postDelayed(
+                            () -> beginFinalStop(previous, reason, stopGeneration, frame,
+                                    endDetectedAtMs),
+                            DEFAULT_INTERVAL_MS);
+                    return;
+                }
+                serviceStarted = true;
+            } catch (RemoteException | RuntimeException error) {
+                log("final clear start failed reason=" + reason
+                        + " error=" + safe(error.getMessage()));
+                worker.postDelayed(
+                        () -> beginFinalStop(previous, reason, stopGeneration, frame,
+                                endDetectedAtMs),
+                        DEFAULT_INTERVAL_MS);
+                return;
+            }
+        }
         long clearedAtMs = sendClearBestEffort(
                 "final " + previous + " frame=" + frame + " reason=" + reason,
                 previous, "final_clear");
+        if (clearedAtMs >= 0L) {
+            pendingFinalClearSucceeded = true;
+        }
         long remainingEndDetectedAtMs = endDetectedAtMs;
         if (clearedAtMs >= 0L && endDetectedAtMs > 0L) {
             logAsync("direct end first_clear detectedAtElapsedMs=" + endDetectedAtMs
@@ -764,13 +907,47 @@ final class HudOutputCoordinator {
                     FINAL_CLEAR_INTERVAL_MS);
             return;
         }
+        if (!pendingFinalClearSucceeded) {
+            log("final clear retry reason=" + reason);
+            long retryEndDetectedAtMs = remainingEndDetectedAtMs;
+            worker.postDelayed(
+                    () -> beginFinalStop(previous, reason, stopGeneration, 1,
+                            retryEndDetectedAtMs),
+                    DEFAULT_INTERVAL_MS);
+            return;
+        }
         worker.postDelayed(() -> {
             if (stopGeneration != generation) {
                 return;
             }
+            finalClearInProgress = false;
+            finalClearStartedAtMs = 0L;
+            pendingFinalClearSucceeded = false;
             stopServiceAndUnbind(reason);
             HudDeliveryStatus.reset();
+            completeFinalClear();
         }, FINAL_STOP_DELAY_MS);
+    }
+
+    private void abortFinalClearAfterTimeout(Source previous, String reason) {
+        log("final clear timeout; hard transport reset source=" + previous
+                + " reason=" + reason);
+        cancelScheduledWork();
+        stopServiceAndUnbind("final-clear-timeout:" + reason);
+        activeSource = Source.NONE;
+        pendingSource = Source.NONE;
+        pendingReason = "";
+        pendingNeedsClear = false;
+        pendingActivationNotBeforeMs = 0L;
+        finalClearInProgress = false;
+        finalClearStartedAtMs = 0L;
+        pendingFinalClearSucceeded = false;
+        HudDeliveryStatus.reset();
+        completeFinalClear();
+    }
+
+    static boolean finalClearTimedOutForTest(long startedAtMs, long nowMs) {
+        return startedAtMs > 0L && nowMs - startedAtMs >= FINAL_CLEAR_TIMEOUT_MS;
     }
 
     private boolean sendTransitionClear() {
@@ -801,6 +978,46 @@ final class HudOutputCoordinator {
             handleProtocolException("transition-clear", e);
             return false;
         }
+    }
+
+    private static void runCompletion(Runnable completion) {
+        if (completion == null) return;
+        try {
+            completion.run();
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private static Runnable chainCompletions(Runnable first, Runnable second) {
+        if (first == null) return second;
+        if (second == null) return first;
+        return () -> {
+            runCompletion(first);
+            runCompletion(second);
+        };
+    }
+
+    private void completeTransitionClear() {
+        Runnable completion = pendingTransitionClearCompletion;
+        pendingTransitionClearCompletion = null;
+        runCompletion(completion);
+    }
+
+    private void completeFinalClear() {
+        Runnable completion = pendingFinalClearCompletion;
+        pendingFinalClearCompletion = null;
+        runCompletion(completion);
+    }
+
+    private Runnable takePendingClearCompletions() {
+        Runnable completion = chainCompletions(
+                pendingFinalClearCompletion, pendingTransitionClearCompletion);
+        pendingFinalClearCompletion = null;
+        pendingTransitionClearCompletion = null;
+        pendingFinalClearSucceeded = false;
+        finalClearInProgress = false;
+        finalClearStartedAtMs = 0L;
+        return completion;
     }
 
     private boolean sendRequiredClear(String reason, Source source, String kind)
@@ -1031,6 +1248,12 @@ final class HudOutputCoordinator {
         return incomingGeneration == currentGeneration
                 ? DirectOwnerDecision.ACCEPT
                 : DirectOwnerDecision.ADVANCE;
+    }
+
+    static boolean shouldClearForAdministrativeStopForTest(
+            String currentOwner, String requestedOwner) {
+        String current = safe(currentOwner);
+        return current.isEmpty() || current.equals(safe(requestedOwner));
     }
 
     enum DirectOwnerDecision {
