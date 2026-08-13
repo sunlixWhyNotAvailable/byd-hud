@@ -1,8 +1,11 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 
 import org.junit.Test;
+
+import java.util.Collections;
 
 public final class GMapsDirectManeuverMapTest {
     @Test
@@ -13,6 +16,8 @@ public final class GMapsDirectManeuverMapTest {
                 new GMapsDirectManeuverMap().map(1, false);
 
         assertEquals("DEPART", withDistance.maneuverName);
+        assertEquals(20, withDistance.intermediate);
+        assertEquals(20, withDistance.amapBroadcastManeuver);
         assertEquals(72, withDistance.fallbackSource);
         assertEquals(99, withDistance.nativeManeuver);
         assertEquals(72, withoutDistance.fallbackSource);
@@ -31,6 +36,23 @@ public final class GMapsDirectManeuverMapTest {
         assertEquals(23, map.map(42, true).amapBroadcastManeuver);
         assertEquals(21, map.map(43, true).amapBroadcastManeuver);
         assertEquals(24, map.map(46, true).amapBroadcastManeuver);
+    }
+
+    @Test
+    public void departDashboardOverrideDoesNotChangeRoadInfoNativeOrBitmap() {
+        GMapsDirectManeuverMap.Result mapping = new GMapsDirectManeuverMap().map(1, true);
+        byte[] bitmap = new byte[]{7, 2};
+        DirectTbtFrame frame = new DirectTbtFrame(
+                1, mapping.intermediate, mapping.nativeManeuver, 0,
+                "", "", "", bitmap, null, Collections.emptyList(),
+                DirectTbtFrame.AlertOverlay.inactive())
+                .withVehicleTbt(mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber);
+
+        assertEquals(20, frame.getAmapBroadcastManeuver());
+        assertEquals(99, frame.getBydManeuver());
+        assertArrayEquals(bitmap, frame.getManeuverPng());
+        assertEquals(99, DirectTbtPayload.prepare(
+                frame, DirectTbtPayload.Options.ALL).nativeManeuver());
     }
 
     @Test

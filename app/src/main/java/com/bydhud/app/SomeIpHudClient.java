@@ -43,43 +43,8 @@ final class SomeIpHudClient {
     private final Listener listener;
     private volatile IBinder binder;
     private volatile boolean bound;
-
-    private final ServiceConnection connection = new ServiceConnection() {
-        @Override
-        //keeps this HUD step isolated so cluster payload behavior stays predictable.
-        public void onServiceConnected(ComponentName name, IBinder service) {
-            binder = service;
-            listener.onTransportConnected();
-            log("connected: " + name.flattenToShortString());
-            try {
-                log("ready=" + isReady());
-            } catch (RemoteException e) {
-                log("ready error: " + e.getMessage());
-            }
-        }
-
-        @Override
-        //keeps this HUD step isolated so cluster payload behavior stays predictable.
-        public void onServiceDisconnected(ComponentName name) {
-            binder = null;
-            listener.onTransportUnavailable("service_disconnected");
-            log("disconnected: " + name.flattenToShortString());
-        }
-
-        @Override
-        public void onBindingDied(ComponentName name) {
-            resetBinding();
-            listener.onTransportUnavailable("binding_died");
-            log("binding died: " + name.flattenToShortString());
-        }
-
-        @Override
-        public void onNullBinding(ComponentName name) {
-            resetBinding();
-            listener.onTransportUnavailable("null_binding");
-            log("null binding: " + name.flattenToShortString());
-        }
-    };
+    private ServiceConnection connection;
+    private int bindingGeneration;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     SomeIpHudClient(Context context, Listener listener) {
@@ -98,15 +63,17 @@ final class SomeIpHudClient {
     }
 
     //opens the external boundary here so connection setup remains observable and retryable.
-    void bind() {
-        if (bound) {
-            return;
-        }
+    synchronized void bind() {
+        if (bound) return;
+        int generation = ++bindingGeneration;
+        ServiceConnection candidate = connectionFor(generation);
+        connection = candidate;
         Intent intent = new Intent();
         intent.setClassName(SOMEIP_PACKAGE, SOMEIP_SERVER_SERVICE);
         intent.setType(context.getPackageName());
-        bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE);
-        log("bindService=" + bound);
+        bound = context.bindService(intent, candidate, Context.BIND_AUTO_CREATE);
+        if (!bound && connection == candidate) connection = null;
+        log("bindService=" + bound + " generation=" + generation);
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -154,28 +121,81 @@ final class SomeIpHudClient {
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     void unbind() {
-        if (!bound) {
-            return;
+        ServiceConnection current;
+        boolean wasBound;
+        synchronized (this) {
+            ++bindingGeneration;
+            current = connection;
+            wasBound = bound;
+            connection = null;
+            binder = null;
+            bound = false;
         }
-        try {
-            context.unbindService(connection);
-        } catch (IllegalArgumentException ignored) {
-            //returns early because the service connection has already been unbound.
-        }
-        binder = null;
-        bound = false;
-    }
-
-    private void resetBinding() {
-        if (bound) {
+        if (wasBound && current != null) {
             try {
-                context.unbindService(connection);
+                context.unbindService(current);
             } catch (IllegalArgumentException ignored) {
-                // The platform may have already removed a dead binding.
+                // The platform may already have removed this generation.
             }
         }
-        binder = null;
-        bound = false;
+    }
+
+    private ServiceConnection connectionFor(int generation) {
+        return new ServiceConnection() {
+            @Override
+            public void onServiceConnected(ComponentName name, IBinder service) {
+                synchronized (SomeIpHudClient.this) {
+                    if (generation != bindingGeneration || connection != this || !bound) {
+                        log("stale connected ignored generation=" + generation);
+                        return;
+                    }
+                    binder = service;
+                }
+                listener.onTransportConnected();
+                log("connected: " + name.flattenToShortString()
+                        + " generation=" + generation);
+                try {
+                    log("ready=" + isReady() + " generation=" + generation);
+                } catch (RemoteException e) {
+                    log("ready error: " + e.getMessage());
+                }
+            }
+
+            @Override
+            public void onServiceDisconnected(ComponentName name) {
+                synchronized (SomeIpHudClient.this) {
+                    if (generation != bindingGeneration || connection != this) return;
+                    binder = null;
+                }
+                listener.onTransportUnavailable("service_disconnected");
+                log("disconnected: " + name.flattenToShortString()
+                        + " generation=" + generation);
+            }
+
+            @Override
+            public void onBindingDied(ComponentName name) {
+                if (!resetBinding(generation, this)) return;
+                listener.onTransportUnavailable("binding_died");
+                log("binding died: " + name.flattenToShortString()
+                        + " generation=" + generation);
+            }
+
+            @Override
+            public void onNullBinding(ComponentName name) {
+                if (!resetBinding(generation, this)) return;
+                listener.onTransportUnavailable("null_binding");
+                log("null binding: " + name.flattenToShortString()
+                        + " generation=" + generation);
+            }
+        };
+    }
+
+    private boolean resetBinding(int generation, ServiceConnection candidate) {
+        synchronized (this) {
+            if (generation != bindingGeneration || connection != candidate) return false;
+        }
+        unbind();
+        return true;
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

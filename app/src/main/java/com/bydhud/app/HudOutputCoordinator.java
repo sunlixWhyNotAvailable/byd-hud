@@ -28,6 +28,7 @@ final class HudOutputCoordinator {
     private static final long FINAL_CLEAR_TIMEOUT_MS = 6_000L;
     private static final long BIND_RETRY_MS = 200L;
     private static final int BIND_RETRY_LIMIT = 30;
+    private static final long BIND_TIMEOUT_MS = BIND_RETRY_MS * BIND_RETRY_LIMIT;
     private static final long DIRECT_LEASE_MS = 15_000L;
     private static final int RESULT_OK = 0;
     private static final int RESULT_NOT_STARTED = 11;
@@ -67,7 +68,9 @@ final class HudOutputCoordinator {
     private int protocolFailureCount;
     private int generation;
     private int directCounter;
-    private int bindAttempts;
+    private int bindGeneration;
+    private long bindDeadlineMs;
+    private boolean bindCheckScheduled;
     private long sendCount;
     private long sendFailures;
     private long sendDurationMs;
@@ -92,6 +95,9 @@ final class HudOutputCoordinator {
     private long directLeaseDeadlineMs;
     private long pendingDirectReceivedAtMs;
     private String pendingDirectReason = "";
+    private long directFirstFrameAtMs;
+    private long directServiceReadyAtMs;
+    private boolean directFirstPhysicalSendLogged;
     private Runnable pendingFinalClearCompletion;
     private Runnable pendingTransitionClearCompletion;
     private boolean pendingFinalClearSucceeded;
@@ -105,32 +111,6 @@ final class HudOutputCoordinator {
         public void run() {
             sendScheduled = false;
             sendActive("loop");
-        }
-    };
-
-    private final Runnable bindRetry = new Runnable() {
-        @Override
-        public void run() {
-            if (desiredSource() == Source.NONE
-                    && activeSource == Source.NONE
-                    && pendingSource == Source.NONE) {
-                return;
-            }
-            if (client.isBound()) {
-                bindAttempts = 0;
-                resumeActivation("bind-ready");
-                return;
-            }
-            bindAttempts++;
-            if (bindAttempts >= BIND_RETRY_LIMIT) {
-                HudDeliveryStatus.recordFailure();
-                log("bind timeout attempts=" + bindAttempts);
-                client.unbind();
-                bindAttempts = 0;
-                worker.postDelayed(transportRecovery, DEFAULT_INTERVAL_MS);
-                return;
-            }
-            worker.postDelayed(this, BIND_RETRY_MS);
         }
     };
 
@@ -177,7 +157,7 @@ final class HudOutputCoordinator {
             @Override
             public void onTransportConnected() {
                 worker.post(() -> {
-                    bindAttempts = 0;
+                    finishBindAttempt();
                     flushPendingDirectLossClear();
                     resumeActivation("connected");
                 });
@@ -247,6 +227,10 @@ final class HudOutputCoordinator {
             if (bitmapSelection == null) lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
+            if (directFirstFrameAtMs <= 0L) {
+                directFirstFrameAtMs = receivedAtMs > 0L
+                        ? receivedAtMs : SystemClock.elapsedRealtime();
+            }
             directLossClearSent = false;
             renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
             if (activeSource == Source.DIRECT && !sendScheduled) {
@@ -611,9 +595,11 @@ final class HudOutputCoordinator {
             return;
         }
         activeSource = target;
+        if (!client.isBound()) {
+            ensureBoundOnWorker(reason);
+        }
         if (target == Source.DIRECT && directLossClearPending) {
             if (!client.isBound()) {
-                ensureBoundOnWorker("direct-loss-clear");
                 return;
             }
             flushPendingDirectLossClear();
@@ -624,10 +610,7 @@ final class HudOutputCoordinator {
             log("waiting source=" + target + " reason=" + reason);
             return;
         }
-        if (!client.isBound()) {
-            ensureBoundOnWorker(reason);
-            return;
-        }
+        if (!client.isBound()) return;
         scheduleImmediate(reason);
     }
 
@@ -657,16 +640,67 @@ final class HudOutputCoordinator {
 
     private void ensureBoundOnWorker(String reason) {
         if (client.isBound()) {
+            finishBindAttempt();
             flushPendingDirectLossClear();
             resumeActivation(reason);
             return;
         }
         if (!client.hasBinding()) {
-            client.bind();
-            log("bind requested reason=" + reason);
+            beginBindAttempt(reason);
+            return;
         }
-        worker.removeCallbacks(bindRetry);
-        worker.postDelayed(bindRetry, BIND_RETRY_MS);
+        scheduleBindCheck(bindGeneration);
+    }
+
+    private void beginBindAttempt(String reason) {
+        int attemptGeneration = ++bindGeneration;
+        bindDeadlineMs = SystemClock.elapsedRealtime() + BIND_TIMEOUT_MS;
+        bindCheckScheduled = false;
+        client.bind();
+        log("bind requested generation=" + attemptGeneration + " reason=" + reason);
+        scheduleBindCheck(attemptGeneration);
+    }
+
+    private void scheduleBindCheck(int attemptGeneration) {
+        if (bindCheckScheduled || attemptGeneration != bindGeneration) return;
+        bindCheckScheduled = true;
+        worker.postDelayed(() -> checkBindAttempt(attemptGeneration), BIND_RETRY_MS);
+    }
+
+    private void checkBindAttempt(int attemptGeneration) {
+        if (attemptGeneration != bindGeneration) return;
+        bindCheckScheduled = false;
+        if (desiredSource() == Source.NONE
+                && activeSource == Source.NONE
+                && pendingSource == Source.NONE) {
+            finishBindAttempt();
+            return;
+        }
+        if (client.isBound()) {
+            finishBindAttempt();
+            resumeActivation("bind-ready");
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (bindDeadlineReachedForTest(bindDeadlineMs, now)) {
+            HudDeliveryStatus.recordFailure();
+            log("bind timeout generation=" + attemptGeneration
+                    + " elapsedMs=" + BIND_TIMEOUT_MS);
+            client.unbind();
+            finishBindAttempt();
+            worker.postDelayed(transportRecovery, DEFAULT_INTERVAL_MS);
+            return;
+        }
+        scheduleBindCheck(attemptGeneration);
+    }
+
+    private void finishBindAttempt() {
+        bindDeadlineMs = 0L;
+        bindCheckScheduled = false;
+    }
+
+    static boolean bindDeadlineReachedForTest(long deadlineMs, long nowMs) {
+        return deadlineMs > 0L && nowMs >= deadlineMs;
     }
 
     private void resumeActivation(String reason) {
@@ -721,6 +755,9 @@ final class HudOutputCoordinator {
                     return;
                 }
                 serviceStarted = true;
+                if (source == Source.DIRECT) {
+                    directServiceReadyAtMs = SystemClock.elapsedRealtime();
+                }
                 log("service ready source=" + source + " result=" + startResult);
             }
             if (source == Source.DIRECT && directLossClearPending) {
@@ -756,6 +793,18 @@ final class HudOutputCoordinator {
             }
             maybeLogStats(source, payload.length, duration);
             if (source == Source.DIRECT) {
+                long sentAtMs = SystemClock.elapsedRealtime();
+                if (!directFirstPhysicalSendLogged && directFirstFrameAtMs > 0L) {
+                    long serviceReadyAtMs = directServiceReadyAtMs > 0L
+                            ? directServiceReadyAtMs : sentAtMs;
+                    log("direct first_physical_send firstFrameToServiceReadyMs="
+                            + Math.max(0L, serviceReadyAtMs - directFirstFrameAtMs)
+                            + " serviceReadyToSendMs="
+                            + Math.max(0L, sentAtMs - serviceReadyAtMs)
+                            + " firstFrameToSendMs="
+                            + Math.max(0L, sentAtMs - directFirstFrameAtMs));
+                    directFirstPhysicalSendLogged = true;
+                }
                 if (pendingDirectReceivedAtMs > 0L) {
                     log("direct emitted_frame_first_send reason=" + pendingDirectReason
                             + " elapsedMs=" + Math.max(0L,
@@ -963,6 +1012,9 @@ final class HudOutputCoordinator {
                     return false;
                 }
                 serviceStarted = true;
+                if (pendingSource == Source.DIRECT) {
+                    directServiceReadyAtMs = SystemClock.elapsedRealtime();
+                }
             }
             if (!sendRequiredClear(
                     pendingReason, pendingSource, "transition_clear")) {
@@ -1050,7 +1102,8 @@ final class HudOutputCoordinator {
     }
 
     private void stopServiceAndUnbind(String reason) {
-        worker.removeCallbacks(bindRetry);
+        ++bindGeneration;
+        finishBindAttempt();
         worker.removeCallbacks(transportRecovery);
         worker.removeCallbacks(protocolRetry);
         protocolRetryScheduled = false;
@@ -1140,8 +1193,11 @@ final class HudOutputCoordinator {
         sendScheduled = false;
         protocolRetryScheduled = false;
         protocolFailureCount = 0;
+        directServiceReadyAtMs = 0L;
+        directFirstPhysicalSendLogged = false;
         worker.removeCallbacks(sendLoop);
-        worker.removeCallbacks(bindRetry);
+        ++bindGeneration;
+        finishBindAttempt();
         worker.removeCallbacks(transportRecovery);
         worker.removeCallbacks(protocolRetry);
         client.unbind();
@@ -1225,8 +1281,21 @@ final class HudOutputCoordinator {
             directLeaseDeadlineMs = 0L;
             directLossClearPending = false;
             directLossClearSent = false;
+            directFrame = null;
+            preparedDirectFrame = null;
+            preparedDirectPayload = null;
+            preparedDirectSemanticPayload = null;
+            directBitmapSelection = null;
+            preparedDirectBitmapSelection = null;
+            directBitmapTxLogger = null;
+            preparedDirectBitmapTxLogger = null;
+            directAlertClearPending = false;
+            lastBitmapTxDiagnosticKey = "";
+            pendingDirectReceivedAtMs = 0L;
+            pendingDirectReason = "";
             directOwnerPackage = owner;
             directOwnerSessionGeneration = ownerSessionGeneration;
+            resetDirectTransportTiming();
             log("direct owner advanced owner=" + owner
                     + " session=" + ownerSessionGeneration);
         }
@@ -1373,12 +1442,20 @@ final class HudOutputCoordinator {
         directOwnerSessionGeneration = Long.MIN_VALUE;
         directLossClearPending = false;
         directLossClearSent = false;
+        resetDirectTransportTiming();
         log("direct owner invalidated reason=" + safe(reason));
+    }
+
+    private void resetDirectTransportTiming() {
+        directFirstFrameAtMs = 0L;
+        directServiceReadyAtMs = 0L;
+        directFirstPhysicalSendLogged = false;
     }
 
     private void cancelScheduledWork() {
         worker.removeCallbacks(sendLoop);
-        worker.removeCallbacks(bindRetry);
+        ++bindGeneration;
+        finishBindAttempt();
         worker.removeCallbacks(transportRecovery);
         worker.removeCallbacks(protocolRetry);
         sendScheduled = false;

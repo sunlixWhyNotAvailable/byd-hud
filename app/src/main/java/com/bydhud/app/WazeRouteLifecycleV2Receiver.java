@@ -24,6 +24,7 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
 
     @Override
     public void onReceive(Context context, Intent intent) {
+        final long receiverEntryElapsedMs = SystemClock.elapsedRealtime();
         if (context == null || intent == null || !ACTION.equals(intent.getAction())) return;
         final Context appContext = context.getApplicationContext();
 
@@ -65,8 +66,12 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
         }
 
         final Runnable delivery;
+        final WazeRouteTiming timing;
         try {
             if ("app_foreground".equals(eventType)) {
+                timing = new WazeRouteTiming(
+                        "v2", eventType, eventElapsedMs, bridgeGeneration,
+                        receiverEntryElapsedMs, false);
                 delivery = () -> handleForeground(
                         appContext, eventElapsedMs, bridgeGeneration, bridgeCapabilities);
             } else if ("speed_limit".equals(eventType)) {
@@ -82,6 +87,9 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
                             context, "v2 speed_limit ignored reason=invalid_payload");
                     return;
                 }
+                timing = new WazeRouteTiming(
+                        "v2", eventType, eventElapsedMs, bridgeGeneration,
+                        receiverEntryElapsedMs, false);
                 delivery = () -> WazeRouteLifecycleReceiver.handleSpeedLimit(
                         appContext, limit, unit, eventElapsedMs, bridgeGeneration,
                         bridgeCapabilities, "v2 ");
@@ -98,9 +106,12 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
                 int reasonCode = intent.getIntExtra(
                         WazeRouteLifecycleStore.EXTRA_REASON_CODE,
                         WazeRouteLifecycleStore.REASON_UNAVAILABLE);
+                timing = new WazeRouteTiming(
+                        "v2", eventType, eventElapsedMs, bridgeGeneration,
+                        receiverEntryElapsedMs, navigating);
                 delivery = () -> WazeRouteLifecycleReceiver.handleRoute(
                         appContext, navigating, reasonCode, reasonAvailable, eventElapsedMs,
-                        bridgeGeneration, bridgeCapabilities, "v2 ");
+                        bridgeGeneration, bridgeCapabilities, "v2 ", timing);
             }
         } catch (RuntimeException malformed) {
             WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=malformed_extras");
@@ -108,7 +119,7 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
         }
 
         WazeRouteLifecycleReceiver.enqueue(appContext, goAsync(), "v2",
-                () -> trustedIdentity(appContext, identity), delivery);
+                () -> trustedIdentity(appContext, identity), delivery, timing);
     }
 
     private static void handleForeground(Context context, long eventElapsedMs,

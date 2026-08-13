@@ -13,11 +13,14 @@ import android.graphics.drawable.Icon;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Process;
 import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 
 import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 
 //anchors the NavNotificationListenerService android entry point so lifecycle recovery stays separate from business logic.
@@ -33,21 +36,24 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     private static volatile long lastDisconnectedElapsedMs;
     private static volatile String lastRuntimeDetail = "never connected";
     private final HandlerThread notificationThread =
-            new HandlerThread("BydHudNotificationCapture");
+            new HandlerThread("BydHudNotificationCapture", Process.THREAD_PRIORITY_BACKGROUND);
     private Handler notificationHandler;
+    private final Object postedLock = new Object();
+    private final LinkedHashMap<String, StatusBarNotification> pendingPosted =
+            new LinkedHashMap<>();
+    private boolean postedDrainScheduled;
+    private final Set<String> observedThisProcess = new HashSet<>();
 
     @Override
     public void onCreate() {
         super.onCreate();
         notificationThread.start();
         notificationHandler = new Handler(notificationThread.getLooper());
+        NavCaptureIngressPolicy.refreshPreferencesAsync(this);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveNotificationScan(Context context, String reason) {
-        if (HudPrefs.isUserShutdownActive(context)) {
-            return;
-        }
         NavNotificationListenerService service = activeService;
         if (service == null) {
             AppEventLogger.event(context, "notification_active_scan skipped no-listener reason="
@@ -91,6 +97,15 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
     }
 
+    static void cancelPendingPosted(String packageName) {
+        NavNotificationListenerService service = activeService;
+        if (service == null) return;
+        String prefix = safe(packageName).toLowerCase(java.util.Locale.ROOT) + "\n";
+        synchronized (service.postedLock) {
+            service.pendingPosted.keySet().removeIf(key -> key.startsWith(prefix));
+        }
+    }
+
     static void suspendForUserShutdown(Context context, String reason) {
         NavNotificationListenerService service = activeService;
         if (service == null) {
@@ -100,6 +115,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
         }
+        service.clearPendingPosted();
         try {
             service.requestUnbind();
             AppEventLogger.event(context, "notification_listener request_unbind reason="
@@ -120,13 +136,17 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         super.onListenerConnected();
         activeService = this;
         lastConnectedElapsedMs = SystemClock.elapsedRealtime();
-        if (HudPrefs.isUserShutdownActive(this)) {
-            lastRuntimeDetail = "connected while shutdown active";
-            suspendForUserShutdown(this, "listener-connected-shutdown-active");
-            return;
-        }
-        lastRuntimeDetail = "connected";
-        postNotificationWork(() -> {
+        lastRuntimeDetail = "connected; validation pending";
+        NavCaptureIngressPolicy.refreshPreferencesAsync(this);
+        Handler handler = notificationHandler;
+        if (handler != null) handler.post(() -> {
+            if (activeService != this) return;
+            if (HudPrefs.isUserShutdownActive(this)) {
+                lastRuntimeDetail = "connected while shutdown active";
+                suspendForUserShutdown(this, "listener-connected-shutdown-active");
+                return;
+            }
+            lastRuntimeDetail = "connected";
             AppEventLogger.event(this, "notification_listener connected");
             processActiveNotifications("listener-connected");
         });
@@ -142,6 +162,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
         }
+        clearPendingPosted();
         lastDisconnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "disconnected elapsedMs=" + lastDisconnectedElapsedMs;
         postNotificationTeardown("listener-disconnected");
@@ -158,6 +179,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
         }
+        clearPendingPosted();
         lastRuntimeDetail = "destroyed";
         postNotificationTeardown("listener-destroyed");
         notificationThread.quitSafely();
@@ -167,10 +189,74 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationPosted(StatusBarNotification sbn) {
-        if (HudPrefs.isUserShutdownActive(this)) {
-            return;
+        if (sbn == null) return;
+        String packageName = safe(sbn.getPackageName());
+        if (packageName.isEmpty()) return;
+        boolean newlyObserved;
+        synchronized (observedThisProcess) {
+            newlyObserved = observedThisProcess.size() < 128
+                    && observedThisProcess.add(packageName);
         }
-        postNotificationWork(() -> processPostedNotification(sbn, "posted"));
+        if (newlyObserved) postObservedPackage(packageName);
+        if (NavCaptureIngressPolicy.mode(packageName)
+                == NavCaptureIngressPolicy.Mode.OFF) return;
+        enqueuePosted(sbn);
+    }
+
+    private void postObservedPackage(String packageName) {
+        postNotificationWork(() ->
+                NavCapturePrefs.addObservedPackageFast(this, packageName));
+    }
+
+    private void enqueuePosted(StatusBarNotification sbn) {
+        Handler handler = notificationHandler;
+        if (handler == null) return;
+        String token = postedToken(sbn);
+        synchronized (postedLock) {
+            pendingPosted.put(token, sbn);
+            while (pendingPosted.size() > 32) {
+                pendingPosted.remove(pendingPosted.keySet().iterator().next());
+            }
+            if (postedDrainScheduled) return;
+            postedDrainScheduled = true;
+        }
+        if (!handler.post(this::drainPosted)) {
+            synchronized (postedLock) {
+                postedDrainScheduled = false;
+            }
+        }
+    }
+
+    private void clearPendingPosted() {
+        synchronized (postedLock) {
+            pendingPosted.clear();
+            postedDrainScheduled = false;
+        }
+    }
+
+    private void drainPosted() {
+        int processed = 0;
+        while (processed < 16) {
+            StatusBarNotification sbn;
+            synchronized (postedLock) {
+                if (pendingPosted.isEmpty()) {
+                    postedDrainScheduled = false;
+                    return;
+                }
+                Map.Entry<String, StatusBarNotification> entry =
+                        pendingPosted.entrySet().iterator().next();
+                sbn = entry.getValue();
+                pendingPosted.remove(entry.getKey());
+            }
+            processPostedNotification(sbn, "posted");
+            processed++;
+        }
+        Handler handler = notificationHandler;
+        if (handler == null || !handler.post(this::drainPosted)) {
+            synchronized (postedLock) {
+                postedDrainScheduled = false;
+            }
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -188,7 +274,9 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             }
             Set<String> activeGMapsNavigationTokens = new HashSet<>();
             for (StatusBarNotification sbn : notifications) {
-                if (isOngoingGMapsNavigationNotification(sbn)) {
+                if (NavCaptureIngressPolicy.mode(sbn.getPackageName())
+                        != NavCaptureIngressPolicy.Mode.OFF
+                        && isOngoingGMapsNavigationNotification(sbn)) {
                     activeGMapsNavigationTokens.add(NavHudLiveSender.notificationPresenceToken(
                             sbn.getPackageName(), sbn.getKey()));
                 }
@@ -208,12 +296,11 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             return;
         }
         String packageName = sbn.getPackageName();
+        NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
+        if (mode == NavCaptureIngressPolicy.Mode.OFF) return;
         Notification notification = sbn.getNotification();
         if (isOngoing(notification)) {
-            NavCapturePrefs.addObservedPackage(this, packageName);
-        }
-        if (!NavCapturePrefs.isCaptureEnabled(this, packageName)) {
-            return;
+            NavCapturePrefs.addObservedPackageFast(this, packageName);
         }
         NotificationFields fields = notificationFields(sbn);
         NavHudLiveSender.get(this).updateNavigationNotificationPresence(
@@ -228,6 +315,9 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 packageName, "notification_raw", payload, nowElapsedMs);
         WazeRouteTracker.get(this).updateFromRawPayload(
                 "notification_raw", packageName, payload, nowElapsedMs);
+        if (mode == NavCaptureIngressPolicy.Mode.DISCOVERY) return;
+        if (NavCaptureIngressPolicy.mode(packageName)
+                != NavCaptureIngressPolicy.Mode.FALLBACK) return;
         NavManeuverEvidence maneuverEvidence = largeIconEvidence(packageName, notification, nowElapsedMs);
         NavParserResult parsed = NavParserDispatcher.parseNotification(
                 packageName,
@@ -248,8 +338,9 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onNotificationRemoved(StatusBarNotification sbn) {
-        if (HudPrefs.isUserShutdownActive(this)) {
-            return;
+        if (sbn == null) return;
+        synchronized (postedLock) {
+            pendingPosted.remove(postedToken(sbn));
         }
         postNotificationWork(() -> processRemovedNotification(sbn));
     }
@@ -264,9 +355,8 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 SystemClock.elapsedRealtime());
         WazeRouteTracker.get(this).onNotificationRemoved(
                 packageName, sbn.getKey(), SystemClock.elapsedRealtime());
-        if (!NavCapturePrefs.isCaptureEnabled(this, packageName)) {
-            return;
-        }
+        if (NavCaptureIngressPolicy.mode(packageName)
+                == NavCaptureIngressPolicy.Mode.OFF) return;
         String payload = "key=" + safe(sbn.getKey());
         NavCaptureStore.rawEvent(this, "notification_removed", packageName, payload);
         if (NavParserDispatcher.isSupportedPackage(packageName)) {
@@ -282,6 +372,12 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 work.run();
             }
         });
+    }
+
+    private static String postedToken(StatusBarNotification sbn) {
+        return safe(sbn == null ? "" : sbn.getPackageName())
+                .toLowerCase(java.util.Locale.ROOT)
+                + "\n" + safe(sbn == null ? "" : sbn.getKey());
     }
 
     private void postNotificationTeardown(String reason) {

@@ -118,6 +118,7 @@ public final class WazeDirectChannel {
     private ICarApp carApp;
     private IAppManager appManager;
     private CarHost carHost;
+    private WazeRouteTiming routeTiming;
     private DirectTbtFrame navigationFrame = DirectTbtFrame.empty();
     private DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.inactive();
     private Runnable rebindRunnable;
@@ -264,6 +265,15 @@ public final class WazeDirectChannel {
 
     private void prepareRouteStart(String reason) {
         startReason = safeText(reason);
+        routeTiming = null;
+        if (mode == Mode.CLUSTER) {
+            routeTiming = WazeRouteTiming.claimForDirect(SystemClock.elapsedRealtime());
+            if (routeTiming != null) {
+                routeTiming.markDirectStart(
+                        SystemClock.elapsedRealtime(), sessionGeneration, reason);
+                log(routeTiming.directLine("direct_start"));
+            }
+        }
         unavailableBindFailureReported = false;
         bindDeferredReason = "";
         routingSequence = 0;
@@ -351,9 +361,17 @@ public final class WazeDirectChannel {
         carHost = nextHost;
         connection = nextConnection;
         binding = true;
+        if (routeTiming != null) {
+            routeTiming.markBindRequest(SystemClock.elapsedRealtime());
+            routeTiming.markBindStart(SystemClock.elapsedRealtime());
+        }
         try {
             bound = context.bindService(intent, nextConnection, Context.BIND_AUTO_CREATE);
             binding = bound;
+            if (routeTiming != null) {
+                routeTiming.markBindResult(SystemClock.elapsedRealtime(), bound);
+                log(routeTiming.directLine("bind_result"));
+            }
             if (bound) {
                 log("bind result=true component=" + WAZE_SERVICE.flattenToShortString()
                         + " mode=" + mode);
@@ -368,6 +386,10 @@ public final class WazeDirectChannel {
                 scheduleRebind(expectedGeneration);
             }
         } catch (Throwable t) {
+            if (routeTiming != null) {
+                routeTiming.markBindResult(SystemClock.elapsedRealtime(), false);
+                log(routeTiming.directLine("bind_exception"));
+            }
             releaseBinding(nextConnection);
             carHost = null;
             if (deferBindIfNeeded(expectedGeneration)) return;
@@ -439,6 +461,10 @@ public final class WazeDirectChannel {
         cancelBindCallbackTimeout(source);
         unavailableBindFailureReported = false;
         carApp = ICarApp.Stub.asInterface(binder);
+        if (routeTiming != null) {
+            routeTiming.markCarAppConnected(SystemClock.elapsedRealtime());
+            log(routeTiming.directLine("car_app_connected"));
+        }
         log("connected component=" + name.flattenToShortString());
         try {
             carApp.getAppInfo(new DoneCallback(
@@ -516,6 +542,10 @@ public final class WazeDirectChannel {
         if (suspended) return;
         rearmRouteTerminal("car_app_session_connected");
         setHandshakeAvailable("session_ready:" + startReason);
+        if (routeTiming != null) {
+            routeTiming.markSessionReady(SystemClock.elapsedRealtime());
+            log(routeTiming.directLine("session_ready"));
+        }
         fetchTemplate(expectedGeneration);
     }
 
@@ -801,7 +831,7 @@ public final class WazeDirectChannel {
         }
         navigationFrame = next;
         recordDirectActivity("frame:" + reason);
-        emitFrame(reason);
+        emitFrame(reason, true);
     }
 
     private DirectTbtFrame frameFromStep(
@@ -832,13 +862,20 @@ public final class WazeDirectChannel {
     }
 
     private void emitFrame(String reason) {
+        emitFrame(reason, false);
+    }
+
+    private void emitFrame(String reason, boolean routeFrame) {
         alert = alert.withRouteNative(
                 shouldUseRouteNativeDuringAlert(
                         navigationFrame, navigationDistanceKnown, alert));
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
         int callbackGeneration = sessionGeneration;
+        WazeRouteTiming.Frame timing = routeTiming == null || !routeFrame
+                ? null : routeTiming.beginFrame(SystemClock.elapsedRealtime(), reason);
+        if (timing != null) timing.markListenerHandoff(SystemClock.elapsedRealtime());
         callback(() -> listener.onFrame(
-                OWNER_PACKAGE, callbackGeneration, frame, reason));
+                OWNER_PACKAGE, callbackGeneration, frame, reason, timing));
     }
 
     static boolean shouldUseRouteNativeDuringAlert(
@@ -1287,7 +1324,7 @@ public final class WazeDirectChannel {
         void onNavigationStarted(String ownerPackage, int sessionGeneration, String reason);
 
         void onFrame(String ownerPackage, int sessionGeneration,
-                DirectTbtFrame frame, String reason);
+                DirectTbtFrame frame, String reason, WazeRouteTiming.Frame timing);
 
         void onAlertCleared(String ownerPackage, int sessionGeneration,
                 DirectTbtFrame frame, String reason);

@@ -14,18 +14,22 @@ import java.nio.file.Paths;
 
 public final class VehicleTbtPublisherContractTest {
     @Test
-    public void publisherKeepsVerifiedDirectSdkAndAmapPlanes() throws IOException {
+    public void publisherKeepsVerifiedProxyAndAmapPlanes() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        String proxy = source(
+                "app/src/main/java/com/bydhud/app/InstrumentNavigationProxyService.java");
 
-        assertTrue(source.contains("FID_NAV_STATUS = 1_138_753_594"));
-        assertTrue(source.contains("FID_SIMPLE_ICON = 1_139_806_224"));
-        assertTrue(source.contains("FID_DISTANCE = 1_139_806_232"));
-        assertTrue(source.contains("FID_ROAD = 1_140_461_576"));
-        assertTrue(source.contains("setInt(FID_NAV_STATUS, status, trace)"));
-        assertTrue(source.contains("sendAutoNaviStatus"));
-        assertTrue(source.contains("sendSimpleGuidanceInfo"));
-        assertTrue(source.contains("sendNextPathName"));
-        assertFalse(source.contains("sendLaneGuidanceInfo"));
+        assertTrue(proxy.contains("FID_NAV_STATUS = 1_138_753_594"));
+        assertTrue(proxy.contains("FID_SIMPLE_ICON = 1_139_806_224"));
+        assertTrue(proxy.contains("FID_DISTANCE = 1_139_806_232"));
+        assertTrue(proxy.contains("FID_ROAD = 1_140_461_576"));
+        assertTrue(source.contains("instrument.sendNavigationStatus"));
+        assertTrue(source.contains("instrument.sendGuidance"));
+        assertTrue(proxy.contains("sendAutoNaviStatus"));
+        assertTrue(proxy.contains("sendSimpleGuidanceInfo"));
+        assertTrue(proxy.contains("sendNextPathName"));
+        assertFalse(proxy.contains("sendLaneGuidanceInfo"));
+        assertFalse(source.contains("InstrumentApi.open"));
         assertTrue(source.contains("AUTONAVI_STANDARD_BROADCAST_SEND"));
         assertTrue(source.contains("KEY_TYPE\", 10001"));
         assertTrue(source.contains("KEY_TYPE\", 10019"));
@@ -33,6 +37,16 @@ public final class VehicleTbtPublisherContractTest {
         assertTrue(source.contains("frame.getAmapBroadcastManeuver()"));
         assertTrue(source.contains("frame.getRoundaboutExitNumber()"));
         assertTrue(source.contains("NEXT_ROAD_NAME"));
+        assertTrue(source.contains("addUnavailableListener"));
+        assertTrue(source.contains("tbt_proxy_unavailable preserve_amap_fallback"));
+        assertTrue(source.contains("tbt_proxy_unavailable fallback_terminal"));
+    }
+
+    @Test
+    public void instrumentFailurePreservesOnlyAnActiveExactAmapFallback() {
+        assertTrue(VehicleTbtPublisher.shouldPreserveAmapFallbackForTest(true, true));
+        assertFalse(VehicleTbtPublisher.shouldPreserveAmapFallbackForTest(true, false));
+        assertFalse(VehicleTbtPublisher.shouldPreserveAmapFallbackForTest(false, true));
     }
 
     @Test
@@ -103,6 +117,16 @@ public final class VehicleTbtPublisherContractTest {
                 androidx.car.app.navigation.model.Maneuver.TYPE_ROUNDABOUT_ENTER_CCW));
         assertEquals(12, WazeDirectChannel.mapWazeToAmapBroadcastForTest(
                 androidx.car.app.navigation.model.Maneuver.TYPE_ROUNDABOUT_EXIT_CCW));
+    }
+
+    @Test
+    public void manualStraightDashedComboKeepsItsVerifiedDistinctTbtSymbol() {
+        VehicleTbtPublisher.ManualMapping mapping =
+                VehicleTbtPublisher.manualMappingForTest(20, 11);
+
+        assertEquals(12, mapping.instrumentId);
+        assertEquals(20, mapping.amapManeuver);
+        assertTrue(mapping.amapSupported);
     }
 
     private static String source(String relativePath) throws IOException {

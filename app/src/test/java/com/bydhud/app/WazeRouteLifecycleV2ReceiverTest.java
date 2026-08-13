@@ -34,6 +34,11 @@ public final class WazeRouteLifecycleV2ReceiverTest {
         assertTrue(v2.contains("enqueue(appContext, goAsync(), \"v2\""));
         assertTrue(v2.contains("packageInfo.getLongVersionCode()"));
         assertTrue(v2.contains("packageInfo.lastUpdateTime"));
+        assertTrue(v2.contains("receiverEntryElapsedMs"));
+        assertTrue(v2.contains("new WazeRouteTiming"));
+        assertTrue(legacy.contains("EVENT_PENDING"));
+        assertTrue(legacy.contains("timing.markTrustStart"));
+        assertTrue(legacy.contains("timing.markDeliveryStart"));
     }
 
     private static String source(String name) throws IOException {

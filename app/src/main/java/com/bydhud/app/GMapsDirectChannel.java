@@ -64,6 +64,7 @@ final class GMapsDirectChannel {
     private boolean connected;
     private boolean navigating;
     private boolean terminalLatched;
+    private boolean firstStructuredFrame;
     private volatile long sessionGeneration;
     private volatile String channelId = "";
     private long lastSequence = -1L;
@@ -127,9 +128,14 @@ final class GMapsDirectChannel {
         return running;
     }
 
+    boolean isNavigating() {
+        return navigating;
+    }
+
     private boolean handleMessage(Message message) {
+        long handlerEntryElapsedMs = SystemClock.elapsedRealtime();
         return runMessageBoundary(
-                () -> handleMessageSafely(message),
+                () -> handleMessageSafely(message, handlerEntryElapsedMs),
                 error -> listener.onLog("message rejected reason=exception error="
                         + error.getClass().getSimpleName()));
     }
@@ -157,20 +163,42 @@ final class GMapsDirectChannel {
         };
     }
 
-    private boolean handleMessageSafely(Message message) {
+    private boolean handleMessageSafely(Message message, long handlerEntryElapsedMs) {
         if (!running || message == null) return true;
         Bundle data = message.getData();
         int protocol = data == null ? -1 : data.getInt("protocolVersion", -1);
         String incomingChannelId = data == null ? "" : safe(data.getString("channelId"));
-        if (!acceptsProtocolMessageForTest(protocol, channelId, incomingChannelId)) {
-            listener.onLog("message rejected reason=protocol what="
-                    + (message == null ? -1 : message.what));
+        long bridgeElapsedMs = data == null
+                ? -1L : data.getLong("bridgeElapsedMs", -1L);
+        long sourceElapsedMs = data == null
+                ? -1L : data.getLong("sourceElapsedMs", -1L);
+        long messageSession = data == null
+                ? -1L : data.getLong("sessionGeneration", -1L);
+        long sequence = data == null ? -1L : data.getLong("sequence", -1L);
+        long timingSessionGeneration = timingSessionGenerationForTest(
+                message.what, sessionGeneration);
+        GMapsTimingDiagnostics.Frame timing = GMapsTimingDiagnostics.frame(
+                protocol,
+                incomingChannelId.isEmpty() ? channelId : incomingChannelId,
+                message.what,
+                timingSessionGeneration,
+                messageSession,
+                sequence,
+                bridgeElapsedMs,
+                sourceElapsedMs,
+                handlerEntryElapsedMs);
+        boolean accepted = acceptsProtocolMessageForTest(protocol, channelId, incomingChannelId);
+        timing = timing.withProtocolValidated(SystemClock.elapsedRealtime(), accepted);
+        if (!accepted) {
+            listener.onLog("gmaps_timing " + timing.protocolLine(false));
             return true;
         }
         switch (message.what) {
             case MESSAGE_HELLO:
                 connected = true;
                 handler.removeCallbacks(registrationRetry);
+                listener.onLog("gmaps_timing " + timing.protocolLine(true)
+                        + " control=hello");
                 listener.onHandshakeAvailable(OWNER_PACKAGE, sessionGeneration, "hello");
                 listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "hello");
                 return true;
@@ -180,13 +208,17 @@ final class GMapsDirectChannel {
                 navigating = true;
                 terminalLatched = false;
                 resetSession();
+                listener.onLog("gmaps_timing " + timing.protocolLine(true)
+                        + " control=start");
                 listener.onNavigationStarted(OWNER_PACKAGE, sessionGeneration, "start");
                 listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "start");
                 return true;
             case MESSAGE_FRAME:
-                handleFrame(data);
+                handleFrame(data, timing);
                 return true;
             case MESSAGE_STOP:
+                listener.onLog("gmaps_timing " + timing.protocolLine(true)
+                        + " control=stop");
                 finishNavigation("stop");
                 return true;
             case MESSAGE_MANEUVER_BITMAP:
@@ -208,7 +240,13 @@ final class GMapsDirectChannel {
         return incoming.isEmpty() || safe(expectedChannelId).equals(incoming);
     }
 
-    private void handleFrame(Bundle data) {
+    static long timingSessionGenerationForTest(
+            int messageWhat, long currentSessionGeneration) {
+        return messageWhat == MESSAGE_START
+                ? currentSessionGeneration + 1L : currentSessionGeneration;
+    }
+
+    private void handleFrame(Bundle data, GMapsTimingDiagnostics.Frame timing) {
         byte[] payload = data.getByteArray("payload");
         long sequence = data.getLong("sequence", -1L);
         String frameCase = safe(data.getString("case"));
@@ -233,8 +271,24 @@ final class GMapsDirectChannel {
             return;
         }
 
+        Map<String, Object> summary;
+        long parseStartElapsedMs = SystemClock.elapsedRealtime();
         try {
-            Map<String, Object> summary = GmapsWireParser.summarize(payload);
+            summary = GmapsWireParser.summarize(payload);
+        } catch (Exception error) {
+            long parseEndElapsedMs = SystemClock.elapsedRealtime();
+            timing = timing.withParse(parseStartElapsedMs, parseEndElapsedMs);
+            listener.onLog("gmaps_timing " + timing.protocolLine(true)
+                    + " parse=failed parseDurationMs="
+                    + GMapsTimingDiagnostics.duration(
+                    parseStartElapsedMs, parseEndElapsedMs));
+            listener.onLog("frame rejected reason=parse sequence=" + sequence
+                    + " error=" + error.getClass().getSimpleName());
+            return;
+        }
+        long parseEndElapsedMs = SystemClock.elapsedRealtime();
+        timing = timing.withParse(parseStartElapsedMs, parseEndElapsedMs);
+        try {
             String shape = stringValue(summary.get("shape"));
             if ("navigation_terminal".equals(shape)) {
                 finishNavigation("terminal-shape");
@@ -281,31 +335,37 @@ final class GMapsDirectChannel {
                     DirectTbtFrame.AlertOverlay.inactive(),
                     tripMetrics).withVehicleTbt(
                     mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber);
+            boolean firstFrame = !firstStructuredFrame;
             if (!navigating) {
                 navigating = true;
                 listener.onNavigationStarted(OWNER_PACKAGE, sessionGeneration, "first-frame");
             }
             connected = true;
             listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "frame");
+            firstStructuredFrame = true;
+            timing = timing.withListenerHandoff(SystemClock.elapsedRealtime(), firstFrame);
             int laneCount = summary.get("lanes") instanceof List
                     ? ((List<?>) summary.get("lanes")).size() : 0;
-            listener.onLog("frame sequence=" + sequence
-                    + " maneuver=" + mapping.maneuverName
-                    + " wire=" + wireValue
-                    + " intermediate=" + mapping.intermediate
-                    + " source=" + mapping.fallbackSource
-                    + " native=" + mapping.nativeManeuver
-                    + " distanceM=" + distance
-                    + " nextStopSeconds="
-                    + tripMetrics.getNextStop().getRemainingTimeSeconds()
-                    + " wholeRouteSeconds="
-                    + tripMetrics.getWholeRoute().getRemainingTimeSeconds()
-                    + " lanesParsed=" + laneCount
-                    + " lanesMapped=" + lanes.size()
-                    + " bitmap=" + bitmapSelection.selected);
+            if (timing.shouldLogAtHandoff(
+                    HudPrefs.isDetailedDebugArtifactsEnabled(context))) {
+                listener.onLog("frame sequence=" + sequence
+                        + " maneuver=" + mapping.maneuverName
+                        + " wire=" + wireValue
+                        + " intermediate=" + mapping.intermediate
+                        + " source=" + mapping.fallbackSource
+                        + " native=" + mapping.nativeManeuver
+                        + " distanceM=" + distance
+                        + " nextStopSeconds="
+                        + tripMetrics.getNextStop().getRemainingTimeSeconds()
+                        + " wholeRouteSeconds="
+                        + tripMetrics.getWholeRoute().getRemainingTimeSeconds()
+                        + " lanesParsed=" + laneCount
+                        + " lanesMapped=" + lanes.size()
+                        + " bitmap=" + bitmapSelection.selected);
+            }
             logBitmapSelection(bitmapSelection);
             listener.onFrame(OWNER_PACKAGE, sessionGeneration,
-                    currentFrame, "frame-" + sequence, bitmapSelection);
+                    currentFrame, "frame-" + sequence, bitmapSelection, timing);
         } catch (Exception error) {
             listener.onLog("frame rejected reason=parse sequence=" + sequence
                     + " error=" + error.getClass().getSimpleName());
@@ -364,7 +424,7 @@ final class GMapsDirectChannel {
             logBitmapSelection(bitmapSelection);
             listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "maneuver-bitmap");
             listener.onFrame(OWNER_PACKAGE, sessionGeneration,
-                    currentFrame, "maneuver-bitmap", bitmapSelection);
+                    currentFrame, "maneuver-bitmap", bitmapSelection, null);
         }
     }
 
@@ -386,6 +446,7 @@ final class GMapsDirectChannel {
         currentFallbackPng = new byte[0];
         lastBitmapDiagnosticKey = "";
         currentFrame = null;
+        firstStructuredFrame = false;
         maneuverBitmaps.clear();
         maneuverMap.reset();
     }
@@ -407,6 +468,8 @@ final class GMapsDirectChannel {
     }
 
     private boolean sendRegistration(String action, boolean includeClient, int protocol) {
+        long beforeElapsedMs = SystemClock.elapsedRealtime();
+        boolean sent = false;
         try {
             Intent intent = new Intent(action);
             intent.setComponent(new ComponentName(PACKAGE_NAME, RECEIVER));
@@ -420,11 +483,17 @@ final class GMapsDirectChannel {
                 intent.putExtra(EXTRA_CLIENT, inbound);
             }
             context.sendOrderedBroadcast(intent, null);
+            sent = true;
             return true;
         } catch (Throwable error) {
             listener.onLog("registration failed action=" + action
                     + " error=" + error.getClass().getSimpleName());
             return false;
+        } finally {
+            listener.onLog("gmaps_timing "
+                    + GMapsTimingDiagnostics.registrationLine(
+                    action, channelId, sessionGeneration, beforeElapsedMs,
+                    SystemClock.elapsedRealtime(), sent));
         }
     }
 
@@ -770,7 +839,8 @@ final class GMapsDirectChannel {
         void onHandshakeUnavailable(String ownerPackage, long sessionGeneration, String reason);
         void onNavigationStarted(String ownerPackage, long sessionGeneration, String reason);
         void onFrame(String ownerPackage, long sessionGeneration,
-                DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection);
+                DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection,
+                GMapsTimingDiagnostics.Frame timing);
         void onSpeedLimit(String ownerPackage, long sessionGeneration,
                 int displayValue, int kph, String unit, long eventElapsedMs);
         void onNavigationEnded(String ownerPackage, long routeGeneration,

@@ -268,7 +268,7 @@ BYD HUD does not automatically send crashes, ANRs, sessions, breadcrumbs, traces
 
 ## Manual HUD testing
 
-The `Manual` tab is a diagnostic tool. It can send individual text, distance, lane, PNG, and native-arrow values without starting a route. It is useful for confirming vehicle glyph mappings and should not be used as a navigation source.
+The `Manual` tab is a diagnostic tool. It can send individual text, distance, lane, PNG, and native-arrow values without starting a route. Every valid edit updates the canonical snapshot; rapid edits are coalesced so the latest state is published to the RoadInfo HUD and dashboard TBT paths. It is useful for confirming vehicle glyph mappings and should not be used as a navigation source.
 
 <p align="center"><img src="docs/screenshots/en/manual.png" alt="Manual HUD payload testing" width="100%"></p>
 
@@ -292,11 +292,14 @@ The `Manual` tab is a diagnostic tool. It can send individual text, distance, la
 6. Return to `Apps`, enable `HUD` for Google Maps or Waze, and start navigation.
 7. For a compatible navigator, the direct channel starts automatically. A legacy input starts only if its capture settings, permissions, and services were enabled separately. The Waze screen-capture channel is off by default and no longer supported by the developer.
 
+When the existing ADB RSA key is authorized, BYD HUD starts its private shell-UID Instrument/TBT wrapper immediately with the persistent runtime. It does not wait for route start and does not add a separate UI status. Without authorized ADB/RSA, direct RoadInfo SOME/IP HUD output remains available, but shell-UID Instrument/TBT card compatibility is unavailable. Protocol `30011`, the stock AMap adapter, and RoadInfo publication remain independent planes.
+
 ### What requires ADB
 
 | Function | Without ADB | With authorized ADB |
 | --- | --- | --- |
 | Compatible direct navigator -> SOME/IP -> HUD | Works | Works |
+| Dashboard TBT card through Instrument/FID | Unavailable on tested firmware | Available through the startup shell wrapper |
 | App UI and navigation options | Works | Works |
 | Automatic permission repair | Limited | Available |
 | Public day-based log storage | Limited by Android permissions | Available |

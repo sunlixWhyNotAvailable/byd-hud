@@ -408,6 +408,290 @@ final class LocalAdbBridge {
         if (!isAllowedRuntimeShellCommand(safeCommand)) {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
+        return runTrustedRuntimeShellCommand(context, safeCommand);
+    }
+
+    static ShellResult launchInstrumentProxy(
+            Context context, String apkPath, long generation, String nonce,
+            int appUid, String launchToken, int appVersionCode)
+            throws IOException {
+        String command = instrumentProxyLaunchCommand(
+                apkPath, generation, nonce, appUid, launchToken, appVersionCode);
+        return runTrustedRuntimeShellCommand(context, command);
+    }
+
+    static int instrumentProxyPid(ShellResult launchResult) {
+        if (launchResult == null || !launchResult.success()) return -1;
+        String output = launchResult.output == null ? "" : launchResult.output.trim();
+        for (String value : output.split("\\s+")) {
+            if (!value.matches("[0-9]{1,10}")) continue;
+            try {
+                int pid = Integer.parseInt(value);
+                if (pid > 0) return pid;
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    static ShellResult stopInstrumentProxy(
+            Context context, InstrumentProxyStore.Identity expected) throws IOException {
+        if (expected == null || !expected.isValid()) return new ShellResult("", 0, "");
+        String output;
+        ShellResult lookup;
+        if (expected.pid > 0) {
+            output = Integer.toString(expected.pid);
+            lookup = new ShellResult(output, 0, "");
+        } else {
+            lookup = runTrustedRuntimeShellCommand(
+                    context, "pidof " + expected.processName);
+            if (lookup.exitCode == 126) return lookup;
+            output = lookup.output.trim();
+            if (output.isEmpty()) return new ShellResult("", 0, lookup.raw);
+        }
+        StringBuilder command = new StringBuilder("kill -9");
+        for (String value : output.split("\\s+")) {
+            if (!value.matches("[0-9]{1,10}")) {
+                throw new IOException("Unexpected Instrument proxy pid: " + value);
+            }
+            ShellResult status = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/status");
+            if (!status.success()) {
+                ShellResult recheck = runTrustedRuntimeShellCommand(
+                        context, "pidof " + expected.processName);
+                if (recheck.exitCode == 126) return recheck;
+                if (!containsPid(recheck.output, value)) continue;
+            }
+            ShellResult cmdline = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/cmdline");
+            if (!cmdline.success()) {
+                ShellResult recheck = runTrustedRuntimeShellCommand(
+                        context, "pidof " + expected.processName);
+                if (recheck.exitCode == 126) return recheck;
+                if (!containsPid(recheck.output, value)) continue;
+            }
+            ShellResult stat = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/stat");
+            if (!stat.success()) {
+                ShellResult recheck = runTrustedRuntimeShellCommand(
+                        context, "pidof " + expected.processName);
+                if (recheck.exitCode == 126) return recheck;
+                if (!containsPid(recheck.output, value)) continue;
+            }
+            int pid = Integer.parseInt(value);
+            InstrumentProcessIdentity identity = InstrumentProcessIdentity.parse(
+                    status.output, cmdline.output, stat.output);
+            if (!status.success() || !cmdline.success() || !stat.success()
+                    || !identity.isVerifiable()) {
+                throw new IOException("Unable to verify Instrument proxy identity pid="
+                        + value + " name=" + identity.name
+                        + " uid=" + identity.uidSummary
+                        + " startTicks=" + identity.startTimeTicks
+                        + " cmdline=" + identity.sanitizedCmdline());
+            }
+            if (!identity.matches(expected, pid)) {
+                AppEventLogger.event(context,
+                        "instrument_proxy cleanup_identity_not_owned pid=" + pid
+                                + " name=" + identity.name
+                                + " uid=" + identity.uidSummary.replaceAll("\\s+", ",")
+                                + " startTicks=" + identity.startTimeTicks
+                                + " generation=" + expected.generation);
+                continue;
+            }
+            AppEventLogger.event(context, "instrument_proxy cleanup_identity pid=" + pid
+                    + " name=" + identity.name
+                    + " uid=" + identity.uidSummary.replaceAll("\\s+", ",")
+                    + " startTicks=" + identity.startTimeTicks
+                    + " generation=" + expected.generation);
+            command.append(' ').append(value);
+        }
+        if ("kill -9".contentEquals(command)) return new ShellResult("", 0, lookup.raw);
+        ShellResult killed = runTrustedRuntimeShellCommand(context, command.toString());
+        if (killed.success() || killed.exitCode == 126) return killed;
+        ShellResult recheck = runTrustedRuntimeShellCommand(
+                context, "pidof " + expected.processName);
+        return recheck.output.trim().isEmpty()
+                ? new ShellResult("", 0, killed.raw + recheck.raw)
+                : killed;
+    }
+
+    static ShellResult stopLegacyInstrumentProxy(Context context, int appUid)
+            throws IOException {
+        String processName = InstrumentProxyContract.legacyProcessName(appUid);
+        ShellResult lookup = runTrustedRuntimeShellCommand(context, "pidof " + processName);
+        if (lookup.exitCode == 126) return lookup;
+        if (lookup.output.trim().isEmpty()) {
+            return new ShellResult("", 0, lookup.raw);
+        }
+        StringBuilder command = new StringBuilder("kill -9");
+        for (String value : lookup.output.trim().split("\\s+")) {
+            if (!value.matches("[0-9]{1,10}")) {
+                throw new IOException("Unexpected legacy Instrument proxy pid: " + value);
+            }
+            ShellResult status = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/status");
+            ShellResult cmdline = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/cmdline");
+            InstrumentProcessIdentity identity = InstrumentProcessIdentity.parse(
+                    status.output, cmdline.output, "");
+            if (!status.success() || !cmdline.success()
+                    || !identity.matchesLegacy(processName)) {
+                throw new IOException("Refusing unexpected legacy Instrument proxy identity pid="
+                        + value + " name=" + identity.name
+                        + " uid=" + identity.uidSummary
+                        + " cmdline=" + identity.sanitizedCmdline());
+            }
+            command.append(' ').append(value);
+        }
+        return "kill -9".contentEquals(command)
+                ? new ShellResult("", 0, lookup.raw)
+                : runTrustedRuntimeShellCommand(context, command.toString());
+    }
+
+    private static boolean containsPid(String output, String expectedPid) {
+        String safeOutput = output == null ? "" : output.trim();
+        for (String value : safeOutput.split("\\s+")) {
+            if (expectedPid.equals(value)) return true;
+        }
+        return false;
+    }
+
+    static boolean hasExpectedInstrumentProxyIdentityForTest(
+            String status, String processName) {
+        return hasExpectedInstrumentProxyIdentity(status, processName);
+    }
+
+    private static boolean hasExpectedInstrumentProxyIdentity(
+            String status, String processName) {
+        String safeStatus = status == null ? "" : status;
+        String safeName = processName == null ? "" : processName.trim();
+        if (!safeName.matches("bydh[0-9]{5,10}")) return false;
+        boolean nameMatches = Pattern.compile(
+                "(?m)^Name:\\s*" + Pattern.quote(safeName) + "\\s*$")
+                .matcher(safeStatus).find();
+        boolean uidMatches = Pattern.compile(
+                "(?m)^Uid:\\s*2000(?:\\s+2000){3}\\s*$")
+                .matcher(safeStatus).find();
+        return nameMatches && uidMatches;
+    }
+
+    static boolean hasExpectedInstrumentProxyIdentityForTest(
+            String status, String cmdline, String stat,
+            InstrumentProxyStore.Identity expected, int actualPid) {
+        return InstrumentProcessIdentity.parse(status, cmdline, stat)
+                .matches(expected, actualPid);
+    }
+
+    static boolean hasExpectedLegacyInstrumentProxyIdentityForTest(
+            String status, String cmdline, String processName) {
+        return InstrumentProcessIdentity.parse(status, cmdline, "")
+                .matchesLegacy(processName);
+    }
+
+    private static final class InstrumentProcessIdentity {
+        final String name;
+        final String uidSummary;
+        final boolean shellUid;
+        final String cmdline;
+        final long startTimeTicks;
+
+        private InstrumentProcessIdentity(String name, String uidSummary,
+                boolean shellUid, String cmdline, long startTimeTicks) {
+            this.name = name;
+            this.uidSummary = uidSummary;
+            this.shellUid = shellUid;
+            this.cmdline = cmdline;
+            this.startTimeTicks = startTimeTicks;
+        }
+
+        static InstrumentProcessIdentity parse(
+                String status, String rawCmdline, String stat) {
+            String safeStatus = status == null ? "" : status;
+            String name = capture(safeStatus, "(?m)^Name:\\s*([^\\r\\n]+)$");
+            String uid = capture(safeStatus, "(?m)^Uid:\\s*([^\\r\\n]+)$");
+            boolean shellUid = uid.matches("2000(?:\\s+2000){3}");
+            String cmdline = rawCmdline == null ? ""
+                    : rawCmdline.replace('\0', ' ').trim().replaceAll("\\s+", " ");
+            return new InstrumentProcessIdentity(name, uid, shellUid, cmdline,
+                    InstrumentProxyContract.processStartTimeTicks(stat));
+        }
+
+        boolean matches(InstrumentProxyStore.Identity expected, int actualPid) {
+            if (expected == null || !expected.isValid() || !shellUid) return false;
+            if (expected.pid > 0 && expected.pid != actualPid) return false;
+            if (!cmdline.equals(expected.processName)
+                    && !cmdline.startsWith(expected.processName + " ")) return false;
+            return expected.startTimeTicks <= 0L
+                    || expected.startTimeTicks == startTimeTicks;
+        }
+
+        boolean isVerifiable() {
+            return !uidSummary.isEmpty() && !cmdline.isEmpty() && startTimeTicks > 0L;
+        }
+
+        boolean matchesLegacy(String processName) {
+            String expected = processName == null ? "" : processName.trim();
+            return expected.matches("bydh[0-9]{5,10}")
+                    && shellUid
+                    && cmdline.equals(expected);
+        }
+
+        String sanitizedCmdline() {
+            String sanitized = cmdline.replaceAll(
+                    "--nonce=[0-9a-f]{32}", "--nonce=<redacted>");
+            return sanitized.length() <= 180 ? sanitized : sanitized.substring(0, 180);
+        }
+
+        private static String capture(String value, String pattern) {
+            java.util.regex.Matcher matcher = Pattern.compile(pattern).matcher(value);
+            return matcher.find() ? matcher.group(1).trim() : "";
+        }
+    }
+
+    static String instrumentProxyLaunchCommandForTest(
+            String apkPath, long generation, String nonce, int appUid,
+            String launchToken, int appVersionCode) {
+        return instrumentProxyLaunchCommand(
+                apkPath, generation, nonce, appUid, launchToken, appVersionCode);
+    }
+
+    private static String instrumentProxyLaunchCommand(
+            String apkPath, long generation, String nonce, int appUid,
+            String launchToken, int appVersionCode) {
+        String safePath = apkPath == null ? "" : apkPath.trim();
+        String safeNonce = nonce == null ? "" : nonce.trim();
+        String safeToken = launchToken == null ? "" : launchToken.trim();
+        if (safePath.contains("..")
+                || !safePath.matches("/data/app/[A-Za-z0-9_./+=:~-]{1,500}/base\\.apk")
+                || generation <= 0L
+                || !safeNonce.matches("[0-9a-f]{32}")
+                || appUid < 10_000
+                || !InstrumentProxyContract.validLaunchToken(safeToken)
+                || appVersionCode <= 0) {
+            throw new SecurityException("Invalid Instrument proxy launch parameters");
+        }
+        String classPath = "/system/framework/services.jar:"
+                + "/system/framework/dilink-services.jar:" + safePath;
+        String libraryPath = "/system/lib64:/product/lib64:"
+                + safePath + "!/lib/arm64-v8a";
+        String processName = InstrumentProxyContract.processName(appUid, safeToken);
+        return "nohup /system/bin/app_process"
+                + " -Djava.class.path=" + classPath
+                + " -Djava.library.path=" + libraryPath
+                + " /system/bin"
+                + " --nice-name=" + processName
+                + " com.bydhud.app.InstrumentProxyEntryPoint"
+                + " --generation=" + generation
+                + " --nonce=" + safeNonce
+                + " --app-uid=" + appUid
+                + " --launch-token=" + safeToken
+                + " --version-code=" + appVersionCode
+                + " >/dev/null 2>&1 </dev/null & echo $!";
+    }
+
+    private static ShellResult runTrustedRuntimeShellCommand(
+            Context context, String safeCommand) throws IOException {
         Context appContext = context.getApplicationContext();
         synchronized (RUNTIME_CONNECTION_LOCK) {
             try {

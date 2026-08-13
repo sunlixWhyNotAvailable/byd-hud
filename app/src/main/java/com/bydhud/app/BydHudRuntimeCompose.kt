@@ -459,6 +459,8 @@ private const val SWITCH_CENTER_BEFORE_ACTION_MS = 120L
 //guards stalled switch actions so controls never stay blocked indefinitely.
 private const val SWITCH_PENDING_TIMEOUT_MS = 2_000L
 
+private const val FOREGROUND_UI_REFRESH_REQUEST_MS = 30_000L
+
 private const val PROJECT_REPOSITORY_URL = "https://github.com/sunlixWhyNotAvailable/byd-hud"
 
 //tracks switch transition intent so success can complete and failure can roll back.
@@ -558,7 +560,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         mutableStateOf<StorageShareDestination?>(null)
     }
     var logcatBusy by remember { mutableStateOf(false) }
-    var lastAppsScanRevision by remember { mutableStateOf(activity.composeAppsScanRevision()) }
     var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
@@ -580,6 +581,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     val latestAppInForeground by rememberUpdatedState(appInForeground)
     val latestShowSetupDialog by rememberUpdatedState(showSetupDialog)
     val latestShowUpdateDialog by rememberUpdatedState(showUpdateDialog)
+    val latestSelectedTab by rememberUpdatedState(selectedTab)
     val palette = remember(snapshot.darkTheme) {
         if (snapshot.darkTheme) darkPalette() else lightPalette()
     }
@@ -602,9 +604,19 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun refresh() {
         val refreshed = activity.composeSnapshot()
-        snapshot = refreshed
-        liveHudStatus = refreshed.hudStatus
-        lastAppsScanRevision = activity.composeAppsScanRevision()
+        if (snapshot != refreshed) snapshot = refreshed
+        if (liveHudStatus != refreshed.hudStatus) liveHudStatus = refreshed.hudStatus
+    }
+
+    fun requestTabStateRefresh(tab: RuntimeTab, reason: String) {
+        when (tab) {
+            RuntimeTab.Apps,
+            RuntimeTab.Logs -> activity.composeRequestRuntimeUiStateRefresh(true, reason)
+            RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
+            RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(reason)
+            RuntimeTab.Options,
+            RuntimeTab.Manual -> Unit
+        }
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -826,16 +838,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     }
 
     LaunchedEffect(selectedTab) {
-        activity.composeReportAppsTabSelected(selectedTab == RuntimeTab.Apps)
-        if (selectedTab == RuntimeTab.Apps) {
-            lastAppsScanRevision = activity.composeAppsScanRevision()
-            activity.composeRefreshApps()
-            refresh()
-        }
-        if (selectedTab == RuntimeTab.Storage) {
-            activity.composeRequestStorageRefresh(false)
-            refresh()
-        }
+        val reason = "tab-${selectedTab.name.lowercase(Locale.ROOT)}"
+        requestTabStateRefresh(selectedTab, reason)
     }
 
     DisposableEffect(activity) {
@@ -844,7 +848,14 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         val observer = LifecycleEventObserver { _, event ->
             //guard auto-check so background launches do not show update UI over a hidden app.
             when (event) {
-                Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_RESUME -> {
+                    appInForeground = true
+                    refresh()
+                    requestTabStateRefresh(
+                        latestSelectedTab,
+                        "activity-resume-${latestSelectedTab.name.lowercase(Locale.ROOT)}"
+                    )
+                }
                 Lifecycle.Event.ON_PAUSE,
                 Lifecycle.Event.ON_STOP,
                 Lifecycle.Event.ON_DESTROY -> appInForeground = false
@@ -886,24 +897,34 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
-    LaunchedEffect(selectedTab, appInForeground) {
-        if (selectedTab != RuntimeTab.Apps || !appInForeground) {
+    LaunchedEffect(appInForeground) {
+        if (!appInForeground) {
             return@LaunchedEffect
         }
+        refresh()
+        var lastUiRevision = activity.composeUiStateRevision()
+        var lastBackgroundRequestAt = SystemClock.elapsedRealtime()
         while (true) {
             delay(1000L)
-            if (snapshot.navigatorAssets.any {
+            val assetStateChanging = snapshot.navigatorAssets.any {
                     it.state == NavigatorAssetManager.DOWNLOADING
                             || it.state == NavigatorAssetManager.VERIFYING
                             || it.state == NavigatorAssetManager.INSTALL_REQUESTED
                             || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
-                }) {
-                refresh()
             }
-            val scanRevision = activity.composeAppsScanRevision()
-            if (scanRevision != lastAppsScanRevision) {
-                lastAppsScanRevision = scanRevision
+            val patchWasBusy = snapshot.patchOperation.busy
+            val uiRevision = activity.composeUiStateRevision()
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastBackgroundRequestAt >= FOREGROUND_UI_REFRESH_REQUEST_MS) {
+                activity.composeRequestRuntimeUiStateRefresh(false, "foreground-periodic")
+                lastBackgroundRequestAt = now
+            }
+            if (assetStateChanging || patchWasBusy || uiRevision != lastUiRevision) {
                 refresh()
+                lastUiRevision = activity.composeUiStateRevision()
+            }
+            if (patchWasBusy && !snapshot.patchOperation.busy) {
+                activity.composeRequestPatchUiStateRefresh("patch-operation-finished")
             }
             val deliveryStatus = activity.composeHudDeliveryStatus()
             val nextHudStatus = if (deliveryStatus == "idle" && !snapshot.captureReady) {
@@ -949,7 +970,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         storageDeleteStep = 0
         storageDeleteTotal = 0
         selectedStorageDays = emptyList()
-        activity.composeRequestStorageRefresh(true)
         refresh()
     }
 

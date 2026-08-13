@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -98,6 +99,22 @@ public final class NavHudRuntimeContractTest {
         assertTrue(NavHudLiveSender.acceptsWazeTeardownForTest(8, 9));
         assertTrue(NavHudLiveSender.acceptsWazeTeardownForTest(8, 8));
         assertFalse(NavHudLiveSender.acceptsWazeTeardownForTest(8, 10));
+    }
+
+    @Test
+    public void DelayedHudClearMustBelongToTheCurrentSenderGeneration() {
+        assertTrue(NavHudLiveSender.acceptsHudStopCallbackForTest(8L, 8L));
+        assertFalse(NavHudLiveSender.acceptsHudStopCallbackForTest(8L, 9L));
+        assertEquals(9L, NavHudLiveSender.nextObserverLifecycleTokenForTest(8L));
+        assertFalse(NavHudLiveSender.acceptsHudStopCallbackForTest(
+                8L, NavHudLiveSender.nextObserverLifecycleTokenForTest(8L)));
+    }
+
+    @Test
+    public void UnsupportedManualTbtMappingIsBlankButVerifiedMappingIsPreserved() {
+        assertEquals(11, NavHudLiveSender.manualTbtManeuverForTest(11));
+        assertEquals(99, NavHudLiveSender.manualTbtManeuverForTest(4));
+        assertEquals(99, NavHudLiveSender.manualTbtManeuverForTest(50));
     }
 
     @Test

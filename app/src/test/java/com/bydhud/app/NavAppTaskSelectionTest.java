@@ -40,6 +40,16 @@ public final class NavAppTaskSelectionTest {
         assertTrue(failed == NavAppTaskScanner.preferredSnapshotForTest(null, failed));
     }
 
+    @Test
+    public void completedBackgroundScanReplacesStaleActivityErrorBeforeUiOpens() {
+        assertEquals("", MainActivity.appScanStatusForTest(
+                false, "failed: stale", snapshot("task", "ok")));
+        assertEquals("adb unavailable", MainActivity.appScanStatusForTest(
+                false, "failed: stale", snapshot("process", "adb unavailable")));
+        assertEquals("scanning", MainActivity.appScanStatusForTest(
+                true, "scanning", snapshot("task", "ok")));
+    }
+
     private static NavAppTaskScanner.Snapshot snapshot(String source, String status) {
         return new NavAppTaskScanner.Snapshot(
                 Collections.<NavAppTaskScanner.Row>emptyList(),

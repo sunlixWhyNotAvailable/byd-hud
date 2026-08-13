@@ -22,4 +22,11 @@ public final class HudOutputCoordinatorRecoveryPolicyTest {
         assertEquals(5_000L, HudOutputCoordinator.protocolRetryDelayMs(3));
         assertEquals(5_000L, HudOutputCoordinator.protocolRetryDelayMs(99));
     }
+
+    @Test
+    public void bindDeadlineIsBoundedAndDoesNotDependOnRetryCount() {
+        assertFalse(HudOutputCoordinator.bindDeadlineReachedForTest(0L, 10_000L));
+        assertFalse(HudOutputCoordinator.bindDeadlineReachedForTest(7_000L, 6_999L));
+        assertTrue(HudOutputCoordinator.bindDeadlineReachedForTest(7_000L, 7_000L));
+    }
 }

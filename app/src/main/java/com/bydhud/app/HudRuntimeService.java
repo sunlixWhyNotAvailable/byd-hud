@@ -34,7 +34,9 @@ public final class HudRuntimeService extends Service {
             boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(HudRuntimeService.this);
             HudRuntimeState.markHeartbeat(HudRuntimeService.this,
                     activeWork ? "periodic" : "idle-periodic");
-            requestBackgroundAppScan();
+            InstrumentProxyManager.get(HudRuntimeService.this)
+                    .ensureStarted("runtime-heartbeat");
+            requestRuntimeUiRefresh(false, "runtime-heartbeat");
             heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
         }
     };
@@ -60,6 +62,7 @@ public final class HudRuntimeService extends Service {
     static void stopPersistent(Context context, String reason) {
         Context appContext = context.getApplicationContext();
         HudRuntimeWatchdog.cancel(appContext);
+        InstrumentProxyManager.get(appContext).shutdown("runtime-stop:" + reason);
         appContext.stopService(new Intent(appContext, HudRuntimeService.class));
         HudPrefs.setRuntimeServiceRunning(appContext, false);
         HudRuntimeState.markStopped(appContext, "stop:" + reason);
@@ -75,6 +78,7 @@ public final class HudRuntimeService extends Service {
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markStarted(this, "onCreate");
         scheduleHeartbeat();
+        requestInitialUiRefresh("runtime-create");
         log("runtime foreground active version=" + BuildConfig.VERSION_NAME
                 + "/" + BuildConfig.VERSION_CODE
                 + " logDir=" + AppEventLogger.logDir(this).getAbsolutePath());
@@ -109,6 +113,7 @@ public final class HudRuntimeService extends Service {
         }
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
+        InstrumentProxyManager.get(this).ensureStarted("runtime-service:" + reason);
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         updateNotification(activeWork ? "Runtime active" : "Runtime idle");
         String hudPackage = NavCapturePrefs.getHudPackage(this);
@@ -157,6 +162,7 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        InstrumentProxyManager.get(this).shutdown("runtime-destroyed");
         HudPrefs.setRuntimeServiceRunning(this, false);
         HudRuntimeState.markStopped(this, "destroyed");
         log("runtime destroyed");
@@ -229,15 +235,12 @@ public final class HudRuntimeService extends Service {
         heartbeatHandler.postDelayed(heartbeatRunnable, HEARTBEAT_INTERVAL_MS);
     }
 
-    private void requestBackgroundAppScan() {
-        new Thread(() -> {
-            NavAppTaskScanner.Snapshot scan =
-                    NavAppTaskScanner.get(this).forceScanIfIdle();
-            if (scan != null) {
-                AppEventLogger.event(this, "apps_background_refresh completed revision="
-                        + NavAppTaskScanner.get(this).revision());
-            }
-        }, "bydhud-background-app-scan").start();
+    private void requestInitialUiRefresh(String reason) {
+        MainActivity.requestInitialUiStateRefresh(this, reason);
+    }
+
+    private void requestRuntimeUiRefresh(boolean force, String reason) {
+        MainActivity.requestRuntimeUiStateRefresh(this, force, reason);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

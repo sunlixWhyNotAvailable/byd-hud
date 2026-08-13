@@ -399,17 +399,23 @@ final class NavigationLogStorage {
         }
         Context app = context.getApplicationContext();
         Thread worker = new Thread(() -> {
+            boolean changed = false;
             try {
                 List<File> tombstones = new ArrayList<>();
                 for (File root : rootFiles(accessibleRootsLocked(app))) {
                     tombstones.addAll(findRetiredTombstones(root));
                 }
+                changed = !tombstones.isEmpty();
                 for (File tombstone : tombstones) {
                     deleteRecursively(tombstone, tombstone.getParentFile(), null);
                 }
             } finally {
                 synchronized (TOMBSTONE_CLEANUP_LOCK) {
                     tombstoneCleanupRunning = false;
+                }
+                if (changed) {
+                    MainActivity.requestStorageRefreshAfterMutation(
+                            app, "retired-day-cleanup");
                 }
             }
         }, "BydHudTombstoneCleanup");
@@ -862,45 +868,52 @@ final class NavigationLogStorage {
         if (beforeBytes <= request.maxBytes) {
             return;
         }
-        RetentionStats stats = new RetentionStats(
-                request.context, beforeBytes, request.maxBytes);
-        WazeCropCapture.RetentionState liveCrop = WazeCropCapture.currentRetentionState();
-        String activeDay = activeNavCaptureDay();
-        String activeLogcatDay = LogcatRecorder.retentionActiveStartDay();
-        String activeSessionDay = liveCrop.active ? liveCrop.day : request.activeDay;
-        String activeSessionDir = liveCrop.active
-                ? WAZE_CROP_DIR
-                : request.activeSessionDir;
-        String activeSessionName = liveCrop.active
-                ? liveCrop.sessionName
-                : request.activeSessionName;
-        String preserveScreenshotName = liveCrop.active
-                ? liveCrop.preserveScreenshotName
-                : request.preserveScreenshotName;
-        runNavCaptureRetention(
-                roots,
-                activeDay,
-                activeLogcatDay,
-                activeSessionDay,
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
-                activeDirectSessionsSnapshot(),
-                request.maxBytes,
-                stats);
-        RetentionOutcome outcome = new RetentionOutcome(
-                beforeBytes,
-                Math.max(0L, beforeBytes - stats.deletedBytes),
-                stats);
-        logRetention(request.context, "retention_start reason=" + request.reason
-                + " bytes=" + outcome.beforeBytes
-                + " maxBytes=" + request.maxBytes);
-        logRetention(request.context, "retention_end reason=" + request.reason
-                + " files=" + outcome.stats.deletedFiles
-                + " bytesDeleted=" + outcome.stats.deletedBytes
-                + " beforeBytes=" + outcome.beforeBytes
-                + " afterBytes=" + outcome.afterBytes
-                + " elapsedMs=" + outcome.stats.elapsedMs());
+        try {
+            RetentionStats stats = new RetentionStats(
+                    request.context, beforeBytes, request.maxBytes);
+            WazeCropCapture.RetentionState liveCrop = WazeCropCapture.currentRetentionState();
+            String activeDay = activeNavCaptureDay();
+            String activeLogcatDay = LogcatRecorder.retentionActiveStartDay();
+            String activeSessionDay = liveCrop.active ? liveCrop.day : request.activeDay;
+            String activeSessionDir = liveCrop.active
+                    ? WAZE_CROP_DIR
+                    : request.activeSessionDir;
+            String activeSessionName = liveCrop.active
+                    ? liveCrop.sessionName
+                    : request.activeSessionName;
+            String preserveScreenshotName = liveCrop.active
+                    ? liveCrop.preserveScreenshotName
+                    : request.preserveScreenshotName;
+            runNavCaptureRetention(
+                    roots,
+                    activeDay,
+                    activeLogcatDay,
+                    activeSessionDay,
+                    activeSessionDir,
+                    activeSessionName,
+                    preserveScreenshotName,
+                    activeDirectSessionsSnapshot(),
+                    request.maxBytes,
+                    stats);
+            RetentionOutcome outcome = new RetentionOutcome(
+                    beforeBytes,
+                    Math.max(0L, beforeBytes - stats.deletedBytes),
+                    stats);
+            logRetention(request.context, "retention_start reason=" + request.reason
+                    + " bytes=" + outcome.beforeBytes
+                    + " maxBytes=" + request.maxBytes);
+            logRetention(request.context, "retention_end reason=" + request.reason
+                    + " files=" + outcome.stats.deletedFiles
+                    + " bytesDeleted=" + outcome.stats.deletedBytes
+                    + " beforeBytes=" + outcome.beforeBytes
+                    + " afterBytes=" + outcome.afterBytes
+                    + " elapsedMs=" + outcome.stats.elapsedMs());
+        } finally {
+            if (request.onComplete == null) {
+                MainActivity.requestStorageRefreshAfterMutation(
+                        request.context, "retention-" + request.reason);
+            }
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

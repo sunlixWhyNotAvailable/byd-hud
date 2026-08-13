@@ -31,8 +31,10 @@ public final class ManualTbtRuntimeContractTest {
 
         assertTrue(source.contains("manualTbtGeneration++"));
         assertTrue(source.contains("MANUAL_TBT_OWNER, generation, true, true"));
-        assertTrue(source.contains("manualTbtDashboardPending = true"));
-        assertTrue(source.contains("manual-frame:dashboard-ready"));
+        assertFalse(source.contains("manualTbtDashboardPending"));
+        assertFalse(source.contains("manual-frame:dashboard-ready"));
+        assertTrue(source.contains("pendingManualPublishState = copy"));
+        assertTrue(source.contains("drainManualPublish"));
         assertTrue(source.contains("tbtPublisher.publishManualFrame("));
         assertTrue(source.contains("effectiveManualState(state)"));
         assertTrue(source.contains("hudOutput.ensureBound(\"manual-start\")"));
@@ -66,11 +68,14 @@ public final class ManualTbtRuntimeContractTest {
     @Test
     public void diagnosticsCoverAllTbtPlanes() throws IOException {
         String publisher = source("app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        String proxy = source(
+                "app/src/main/java/com/bydhud/app/InstrumentNavigationProxyService.java");
         String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
 
         assertTrue(publisher.contains("\"dashboard_30011\""));
         assertTrue(publisher.contains("\"instrument_fid\""));
-        assertTrue(publisher.contains("\"instrument_sdk\""));
+        assertTrue(proxy.contains("\"instrument_sdk:sendAutoNaviStatus\""));
+        assertTrue(publisher.contains("\"instrument_proxy\""));
         assertTrue(publisher.contains("\"amap_broadcast\""));
         assertTrue(publisher.contains("TbtTxLog.record"));
         assertTrue(sender.contains("recordDeferredLifecycle("));
@@ -85,6 +90,50 @@ public final class ManualTbtRuntimeContractTest {
         assertTrue(main.contains("sender.stopManual(stopReason, false, () ->"));
         assertTrue(main.contains("if (!sender.isRunning()) hudOutput.shutdown(reason)"));
         assertTrue(sender.contains("active || stopInProgress || manualTbtActive"));
+    }
+
+    @Test
+    public void manualEditsUseCanonicalRoadAndRejectIncompleteNumbers() throws IOException {
+        String main = source("app/src/main/java/com/bydhud/app/MainActivity.java");
+
+        assertTrue(main.contains("state.roadName = combo.roadLabel()"));
+        assertTrue(main.contains("parseIntOrNull"));
+        assertTrue(main.contains("distanceEdit == null\n"
+                + "                ? clamp(state.distanceToIntersection, 0, 99999)"));
+        assertTrue(main.contains("laneCountEdit == null\n"
+                + "                ? clamp(state.numOfLanes, 0, 8)"));
+        assertTrue(main.contains("numeric fields are incomplete"));
+        assertTrue(main.contains("raw apply waiting: numeric fields are incomplete"));
+    }
+
+    @Test
+    public void hudStopUsesSenderGenerationGuardBeforeCompletingDemotion() throws IOException {
+        String main = source("app/src/main/java/com/bydhud/app/MainActivity.java");
+        String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
+
+        assertTrue(main.contains("demoteHudToTbtObserver("));
+        assertTrue(main.contains("demoteHudToObserver"));
+        assertFalse(main.contains("stop(normalized, \"ui-log-only\", true)"));
+        assertTrue(sender.contains("pendingHudDemotionObserverPackage"));
+        assertTrue(sender.contains("completeHudDemotionObserverRefresh()"));
+        assertTrue(sender.contains("nextObserverLifecycleTokenForTest"));
+        assertTrue(sender.contains("acceptsHudStopCallbackForTest"));
+        assertTrue(sender.contains("stale waze HUD clear callback ignored"));
+        assertTrue(sender.contains("stale gmaps HUD clear callback ignored"));
+        assertTrue(sender.contains("manualPublishScheduled"));
+    }
+
+    @Test
+    public void tbtRetentionUsesLiveChannelsInsteadOfCachedFrames() throws IOException {
+        String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
+        int start = sender.indexOf("private boolean shouldRetainRouteForTbt");
+        int end = sender.indexOf("static boolean shouldRetainTbtRouteOnHudSwitchForTest", start);
+        String policy = sender.substring(start, end);
+
+        assertTrue(policy.contains("wazeDirectChannel.isActive()"));
+        assertTrue(policy.contains("gmapsDirectChannel.isRunning()"));
+        assertFalse(policy.contains("latestWazeClusterFrame"));
+        assertFalse(policy.contains("latestGMapsDirectFrame"));
     }
 
     private static String source(String relativePath) throws IOException {

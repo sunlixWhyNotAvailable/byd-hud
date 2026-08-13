@@ -3,8 +3,6 @@ package com.bydhud.app;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Handler;
-import android.os.Looper;
 import android.os.SystemClock;
 
 import java.util.concurrent.Callable;
@@ -13,6 +11,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,17 +26,22 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
     private static final long TRUST_TIMEOUT_MS = 2_000L;
 
     private static final class AsyncRuntime {
-        static final Handler WATCHDOG = new Handler(Looper.getMainLooper());
+        static final ScheduledExecutorService WATCHDOG =
+                Executors.newSingleThreadScheduledExecutor(
+                        runnable -> namedThread(runnable, "bydhud-waze-watchdog"));
         static final ExecutorService EVENTS = Executors.newSingleThreadExecutor(
                 runnable -> namedThread(runnable, "bydhud-waze-events"));
         static final ExecutorService TRUST = Executors.newSingleThreadExecutor(
                 runnable -> namedThread(runnable, "bydhud-waze-trust"));
+        static final java.util.concurrent.atomic.AtomicInteger EVENT_PENDING =
+                new java.util.concurrent.atomic.AtomicInteger();
     }
 
     private static final class AsyncCompletion implements Runnable {
         private final PendingResult pendingResult;
         private final long deadlineElapsedMs;
         private final AtomicBoolean open = new AtomicBoolean(true);
+        private volatile ScheduledFuture<?> watchdog;
 
         AsyncCompletion(PendingResult pendingResult) {
             this.pendingResult = pendingResult;
@@ -52,8 +57,14 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
 
         void finish() {
             if (!open.compareAndSet(true, false)) return;
-            AsyncRuntime.WATCHDOG.removeCallbacks(this);
+            ScheduledFuture<?> current = watchdog;
+            if (current != null) current.cancel(false);
             pendingResult.finish();
+        }
+
+        void scheduleWatchdog() {
+            watchdog = AsyncRuntime.WATCHDOG.schedule(
+                    this, RECEIVER_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         }
 
         @Override
@@ -144,30 +155,71 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
 
     static void enqueue(Context context, PendingResult pendingResult, String channel,
             Callable<Boolean> trustCheck, Runnable delivery) {
+        enqueue(context, pendingResult, channel, trustCheck, delivery, null);
+    }
+
+    static void enqueue(Context context, PendingResult pendingResult, String channel,
+            Callable<Boolean> trustCheck, Runnable delivery, WazeRouteTiming timing) {
         Context appContext = context.getApplicationContext();
         AsyncCompletion completion = new AsyncCompletion(pendingResult);
-        AsyncRuntime.WATCHDOG.postDelayed(completion, RECEIVER_TIMEOUT_MS);
+        completion.scheduleWatchdog();
+        int queueDepthAtEnqueue = AsyncRuntime.EVENT_PENDING.getAndIncrement();
+        if (timing != null) {
+            timing.markPreEnqueue(SystemClock.elapsedRealtime(), queueDepthAtEnqueue);
+        }
         try {
             AsyncRuntime.EVENTS.execute(() -> {
+                String outcome = "executor_completed_without_delivery";
                 try {
-                    if (!completion.isOpen()) return;
-                    String trustDecision = awaitTrust(trustCheck);
-                    if (!completion.isOpen()) return;
+                    if (timing != null) {
+                        timing.markExecutorStart(
+                                SystemClock.elapsedRealtime(), AsyncRuntime.EVENT_PENDING.get());
+                    }
+                    if (!completion.isOpen()) {
+                        outcome = "completion_closed_before_trust";
+                        return;
+                    }
+                    if (timing != null) timing.markTrustStart(SystemClock.elapsedRealtime());
+                    final String trustDecision;
+                    try {
+                        trustDecision = awaitTrust(trustCheck);
+                    } finally {
+                        if (timing != null) timing.markTrustEnd(SystemClock.elapsedRealtime());
+                    }
+                    if (!completion.isOpen()) {
+                        outcome = "completion_closed_after_trust_" + trustDecision;
+                        return;
+                    }
                     if (!"trusted".equals(trustDecision)) {
+                        outcome = "trust_" + trustDecision;
                         log(appContext, channel + " ignored reason=" + trustDecision);
                         return;
                     }
-                    delivery.run();
+                    if (timing != null) timing.markDeliveryStart(SystemClock.elapsedRealtime());
+                    try {
+                        delivery.run();
+                        outcome = "delivered";
+                    } catch (RuntimeException failure) {
+                        if (timing != null) timing.cancelDirectCorrelation();
+                        throw failure;
+                    } finally {
+                        if (timing != null) timing.markDeliveryEnd(SystemClock.elapsedRealtime());
+                    }
                 } catch (RuntimeException failure) {
+                    outcome = "delivery_failed_" + failure.getClass().getSimpleName();
                     if (completion.isOpen()) {
                         log(appContext, channel + " ignored reason=delivery_failed"
                                 + " type=" + failure.getClass().getSimpleName());
                     }
                 } finally {
+                    AsyncRuntime.EVENT_PENDING.decrementAndGet();
+                    if (timing != null) log(appContext, timing.finish(outcome));
                     completion.finish();
                 }
             });
         } catch (RejectedExecutionException rejected) {
+            AsyncRuntime.EVENT_PENDING.decrementAndGet();
+            if (timing != null) log(appContext, timing.finish("executor_rejected"));
             log(appContext, channel + " ignored reason=executor_rejected");
             completion.finish();
         }
@@ -217,6 +269,13 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
     static void handleRoute(Context context, boolean navigating, int reasonCode,
             boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
             int bridgeCapabilities, String prefix) {
+        handleRoute(context, navigating, reasonCode, reasonAvailable, eventElapsedMs,
+                bridgeGeneration, bridgeCapabilities, prefix, null);
+    }
+
+    static void handleRoute(Context context, boolean navigating, int reasonCode,
+            boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
+            int bridgeCapabilities, String prefix, WazeRouteTiming timing) {
         long receivedElapsedMs = SystemClock.elapsedRealtime();
         WazeRouteLifecycleStore.RecordResult result = WazeRouteLifecycleStore.recordBridge(
                 context, navigating, reasonCode, reasonAvailable, eventElapsedMs,
@@ -234,7 +293,10 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
                 + " latencyMs=" + Math.max(0L, receivedElapsedMs - eventElapsedMs)
                 + " bridgeGeneration=" + bridgeGeneration
                 + " bridgeCapabilities=" + bridgeCapabilities);
-        if (result.accepted) dispatchAccepted(context, eventElapsedMs, result);
+        if (result.accepted) {
+            if (timing != null) timing.markAcceptedRouteState(result.snapshot.active);
+            dispatchAccepted(context, eventElapsedMs, result);
+        }
     }
 
     static void dispatchAccepted(Context context, long eventElapsedMs,

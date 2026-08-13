@@ -20,7 +20,8 @@ final class GMapsDirectManeuverMap {
         switch (name) {
             case "DEPART":
                 clearRoundaboutSequence();
-                return result(wireValue, name, 0, SOURCE_BLANK);
+                // DEPART is blank on RoadInfo, but the dashboard contract uses AMap 20.
+                return result(wireValue, name, 20, SOURCE_BLANK);
             case "NAME_CHANGE":
             case "STRAIGHT":
             case "FERRY_BOAT":

@@ -6,12 +6,15 @@ import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Process;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 import android.view.accessibility.AccessibilityWindowInfo;
 
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
 //anchors the NavAccessibilityService android entry point so lifecycle recovery stays separate from business logic.
 public final class NavAccessibilityService extends AccessibilityService {
@@ -29,18 +32,22 @@ public final class NavAccessibilityService extends AccessibilityService {
     private static volatile String lastRuntimeDetail = "never connected";
 
     private final Object captureQueueLock = new Object();
-    private final HandlerThread captureThread = new HandlerThread("BydHudAccessibilityCapture");
+    private final HandlerThread captureThread = new HandlerThread(
+            "BydHudAccessibilityCapture", Process.THREAD_PRIORITY_BACKGROUND);
     private Handler captureHandler;
     private String pendingPackageName;
     private String pendingSource;
+    private NavCaptureIngressPolicy.Mode pendingMode = NavCaptureIngressPolicy.Mode.OFF;
     private boolean captureScheduled;
     private long lastCaptureElapsedMs;
+    private final Set<String> observedThisProcess = new HashSet<>();
 
     @Override
     public void onCreate() {
         super.onCreate();
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
+        NavCaptureIngressPolicy.refreshPreferencesAsync(this);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -65,16 +72,29 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveWindowCapture(Context context, String packageName, String reason) {
-        if (HudPrefs.isUserShutdownActive(context)) {
-            return;
-        }
         NavAccessibilityService service = activeService;
         if (service == null) {
             AppEventLogger.event(context, "accessibility_active_scan skipped no-service reason="
                     + safe(reason));
             return;
         }
-        service.postCaptureActiveWindow(packageName, "active-" + safe(reason));
+        NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
+        if (mode != NavCaptureIngressPolicy.Mode.OFF) {
+            service.postCaptureActiveWindow(packageName, "active-" + safe(reason), mode);
+        }
+    }
+
+    static void cancelPendingCapture(String packageName) {
+        NavAccessibilityService service = activeService;
+        if (service == null) return;
+        String normalized = safe(packageName).toLowerCase(java.util.Locale.ROOT);
+        synchronized (service.captureQueueLock) {
+            if (!normalized.equals(safe(service.pendingPackageName)
+                    .toLowerCase(java.util.Locale.ROOT))) return;
+            service.pendingPackageName = null;
+            service.pendingSource = null;
+            service.pendingMode = NavCaptureIngressPolicy.Mode.OFF;
+        }
     }
 
     static void suspendForUserShutdown(Context context, String reason) {
@@ -89,6 +109,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (service.captureQueueLock) {
             service.pendingPackageName = null;
             service.pendingSource = null;
+            service.pendingMode = NavCaptureIngressPolicy.Mode.OFF;
             service.captureScheduled = false;
         }
         AppEventLogger.event(context, "accessibility_service suspended reason=" + safe(reason));
@@ -103,25 +124,30 @@ public final class NavAccessibilityService extends AccessibilityService {
         lastConnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "connected";
         AppEventLogger.event(this, "accessibility_service connected");
+        NavCaptureIngressPolicy.refreshPreferencesAsync(this);
     }
 
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (event == null || HudPrefs.isUserShutdownActive(this)) {
-            return;
+        if (event == null) return;
+        String packageName = safe(event.getPackageName());
+        if (packageName.isEmpty()) return;
+        boolean newlyObserved;
+        synchronized (observedThisProcess) {
+            newlyObserved = observedThisProcess.size() < 128
+                    && observedThisProcess.add(packageName);
         }
-        String packageName = String.valueOf(event.getPackageName());
-        NavCapturePrefs.addObservedPackage(this, packageName);
-        if (!NavCapturePrefs.isCaptureEnabled(this, packageName)) {
-            return;
-        }
+        if (newlyObserved) postObservedPackage(packageName);
+        NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
+        if (mode == NavCaptureIngressPolicy.Mode.OFF) return;
         long now = SystemClock.elapsedRealtime();
         if (now - lastCaptureElapsedMs < THROTTLE_MS) {
             return;
         }
         lastCaptureElapsedMs = now;
-        postCaptureActiveWindow(packageName, "eventType=" + event.getEventType());
+        postCaptureActiveWindow(packageName,
+                "eventType=" + event.getEventType(), mode);
     }
 
     @Override
@@ -137,6 +163,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (captureQueueLock) {
             pendingPackageName = null;
             pendingSource = null;
+            pendingMode = NavCaptureIngressPolicy.Mode.OFF;
             captureScheduled = false;
         }
         captureThread.quitSafely();
@@ -148,14 +175,16 @@ public final class NavAccessibilityService extends AccessibilityService {
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onInterrupt() {
-        NavCaptureStore.rawEvent(this, "accessibility_interrupt", "", "service interrupted");
+        Handler handler = captureHandler;
+        if (handler != null) {
+            handler.post(() -> NavCaptureStore.rawEvent(
+                    this, "accessibility_interrupt", "", "service interrupted"));
+        }
     }
 
     //guard active-window traversal so accessibility node trees are captured by one serialized path.
-    private void postCaptureActiveWindow(String packageName, String source) {
-        if (HudPrefs.isUserShutdownActive(this)) {
-            return;
-        }
+    private void postCaptureActiveWindow(String packageName, String source,
+            NavCaptureIngressPolicy.Mode mode) {
         Handler handler = captureHandler;
         if (handler == null) {
             return;
@@ -163,6 +192,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (captureQueueLock) {
             pendingPackageName = packageName;
             pendingSource = source;
+            pendingMode = mode;
             if (captureScheduled) {
                 return;
             }
@@ -175,32 +205,45 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
-    private void drainLatestCapture() {
-        while (activeService == this && !HudPrefs.isUserShutdownActive(this)) {
-            String packageName;
-            String source;
-            synchronized (captureQueueLock) {
-                packageName = pendingPackageName;
-                source = pendingSource;
-                pendingPackageName = null;
-                pendingSource = null;
-                if (packageName == null) {
-                    captureScheduled = false;
-                    return;
-                }
-            }
-            captureActiveWindow(packageName, source);
-        }
-        synchronized (captureQueueLock) {
-            captureScheduled = false;
+    private void postObservedPackage(String packageName) {
+        Handler handler = captureHandler;
+        if (handler != null) {
+            handler.post(() -> NavCapturePrefs.addObservedPackageFast(this, packageName));
         }
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void captureActiveWindow(String packageName, String source) {
-        if (HudPrefs.isUserShutdownActive(this)) {
-            return;
+    private void drainLatestCapture() {
+        String packageName;
+        String source;
+        NavCaptureIngressPolicy.Mode mode;
+        synchronized (captureQueueLock) {
+            packageName = pendingPackageName;
+            source = pendingSource;
+            mode = pendingMode;
+            pendingPackageName = null;
+            pendingSource = null;
+            pendingMode = NavCaptureIngressPolicy.Mode.OFF;
+            if (packageName == null || activeService != this) {
+                captureScheduled = false;
+                return;
+            }
         }
+        captureActiveWindow(packageName, source, mode);
+        Handler handler = captureHandler;
+        synchronized (captureQueueLock) {
+            if (pendingPackageName == null || handler == null) {
+                captureScheduled = false;
+                return;
+            }
+        }
+        handler.postDelayed(this::drainLatestCapture, THROTTLE_MS);
+    }
+
+    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    private void captureActiveWindow(String packageName, String source,
+            NavCaptureIngressPolicy.Mode requestedMode) {
+        NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
+        if (mode == NavCaptureIngressPolicy.Mode.OFF || requestedMode == null) return;
         try {
             lastEventElapsedMs = SystemClock.elapsedRealtime();
             runtimeCrashed = false;
@@ -209,9 +252,13 @@ public final class NavAccessibilityService extends AccessibilityService {
             if (WAZE_PACKAGE.equals(packageName)) {
                 wazeNodes = captureWazeRouteNodesAcrossWindows(source);
                 if (wazeNodes.hasRouteEvidence) {
-                    publishAccessibilityPayload(packageName, wazeNodes.payload);
+                    publishAccessibilityPayload(packageName, wazeNodes.payload,
+                            mode == NavCaptureIngressPolicy.Mode.FALLBACK);
                 }
+                if (mode == NavCaptureIngressPolicy.Mode.DISCOVERY) return;
             }
+            if (NavCaptureIngressPolicy.mode(packageName)
+                    != NavCaptureIngressPolicy.Mode.FALLBACK) return;
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root == null) {
                 NavCaptureStore.rawEvent(this, "accessibility", packageName,
@@ -231,7 +278,8 @@ public final class NavAccessibilityService extends AccessibilityService {
                 builder.append("; nodes=").append(state.nodes);
                 builder.append("; truncated=").append(state.truncated ? "true" : "false");
                 String payload = capPayload(builder.toString());
-                boolean feedLiveParser = wazeNodes == null || !wazeNodes.hasRouteEvidence;
+                boolean feedLiveParser = mode == NavCaptureIngressPolicy.Mode.FALLBACK
+                        && (wazeNodes == null || !wazeNodes.hasRouteEvidence);
                 NavRouteEvidencePolicy.RawRouteState rawState =
                         publishAccessibilityPayload(packageName, payload, feedLiveParser);
                 if (wazeNodes != null && wazeNodes.hasRouteEvidence) {
@@ -263,7 +311,8 @@ public final class NavAccessibilityService extends AccessibilityService {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavRouteEvidencePolicy.RawRouteState publishAccessibilityPayload(
             String packageName, String payload, boolean feedLiveParser) {
-        if (HudPrefs.isUserShutdownActive(this)) {
+        if (NavCaptureIngressPolicy.mode(packageName)
+                == NavCaptureIngressPolicy.Mode.OFF) {
             return NavRouteEvidencePolicy.RawRouteState.UNKNOWN;
         }
         NavCaptureStore.rawEvent(this, "accessibility", packageName, payload);

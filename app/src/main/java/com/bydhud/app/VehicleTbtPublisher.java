@@ -2,14 +2,10 @@ package com.bydhud.app;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
-import android.content.ContextWrapper;
 import android.content.Intent;
-import android.content.pm.PackageManager;
+import android.os.Handler;
 import android.util.Log;
 
-import java.lang.reflect.Constructor;
-import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
@@ -31,13 +27,9 @@ final class VehicleTbtPublisher {
     private static final int FID_DUAL_ICON = 1_139_806_256;
     private static final int FID_DISTANCE = 1_139_806_232;
     private static final int FID_ROAD = 1_140_461_576;
-    private static final String INSTRUMENT_CLASS =
-            "android.hardware.bydauto.instrument.BYDAutoInstrumentDevice";
-    private static final String EVENT_VALUE_CLASS =
-            "android.hardware.bydauto.BYDAutoEventValue";
-
     private final Context context;
-    private final InstrumentApi instrument;
+    private final Handler ownerHandler;
+    private final InstrumentProxyManager instrument;
     private final AtomicLong transactionSequence = new AtomicLong();
     private volatile String ownerPackage = "";
     private volatile long ownerGeneration = Long.MIN_VALUE;
@@ -48,10 +40,22 @@ final class VehicleTbtPublisher {
     private String teardownOwner = "";
     private long teardownGeneration = Long.MIN_VALUE;
     private String teardownReason = "";
+    private boolean hasInstrumentStatus;
+    private int lastInstrumentStatus;
+    private boolean hasInstrumentGuidance;
+    private int lastInstrumentIcon;
+    private int lastInstrumentDistance = -1;
+    private String lastInstrumentRoad = "";
+    private boolean lastGuidanceHasAmapFallback;
 
-    VehicleTbtPublisher(Context context) {
+    VehicleTbtPublisher(Context context, Handler ownerHandler) {
         this.context = context.getApplicationContext();
-        this.instrument = InstrumentApi.open(this.context);
+        this.ownerHandler = ownerHandler;
+        this.instrument = InstrumentProxyManager.get(this.context);
+        this.instrument.addReadyListener(
+                () -> this.ownerHandler.post(this::replayInstrumentState));
+        this.instrument.addUnavailableListener(reason -> this.ownerHandler.post(
+                () -> handleInstrumentUnavailable(reason)));
     }
 
     void beginRoute(String packageName, long generation, boolean switchDashboard) {
@@ -139,27 +143,21 @@ final class VehicleTbtPublisher {
         }
         if (!routeActive || !matches(packageName, generation)) return;
         Trace trace = trace(packageName, generation, reason, frame, null);
-        sendDirectFrame(frame, trace);
-        sendSdkFrame(frame, trace);
+        lastGuidanceHasAmapFallback = true;
+        sendInstrumentFrame(frame, trace);
         sendAmapFrame(frame, trace);
     }
 
     void publishManualFrame(String packageName, long generation,
             HudState state, String reason) {
         if (state == null || !routeActive || !matches(packageName, generation)) return;
-        ManualMapping mapping = manualMappingForTest(state.maneuverId);
+        ManualMapping mapping = manualMappingForTest(
+                state.turnBitmapId, state.maneuverId);
         Trace trace = trace(packageName, generation, reason, null, state);
         int distance = Math.max(0, state.distanceToIntersection);
         String road = safe(state.roadName);
-        setInt(FID_SIMPLE_ICON, mapping.instrumentId, trace);
-        setInt(FID_DUAL_ICON, mapping.instrumentId, trace);
-        setInt(FID_DISTANCE, distance, trace);
-        setBytes(FID_ROAD, road.getBytes(StandardCharsets.UTF_16LE), trace);
-        invokeSdk(instrument == null ? null : instrument.simple,
-                "sendSimpleGuidanceInfo", trace,
-                ints(mapping.instrumentId, distance), mapping.instrumentId, distance);
-        invokeSdk(instrument == null ? null : instrument.next,
-                "sendNextPathName", trace, road.getBytes(StandardCharsets.UTF_8), road);
+        lastGuidanceHasAmapFallback = mapping.amapSupported;
+        sendInstrumentGuidance(mapping.instrumentId, distance, road, trace);
         if (mapping.amapSupported) {
             sendAmapFrame(mapping.amapManeuver, mapping.roundaboutExit,
                     distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace);
@@ -199,8 +197,8 @@ final class VehicleTbtPublisher {
         long endedGeneration = ownerGeneration;
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
         ++routeToken;
-        clearDirectFrame(trace);
-        clearSdkFrame(trace);
+        lastGuidanceHasAmapFallback = false;
+        sendInstrumentGuidance(0, -1, "", trace);
         sendAmapTerminal(trace);
         if (emitIdle) sendStatus(STATUS_IDLE, trace);
         record(trace, "lifecycle", emitIdle ? "end_idle" : "end",
@@ -339,6 +337,13 @@ final class VehicleTbtPublisher {
         return new ManualMapping(instrumentId, amap, 0, amap > 0);
     }
 
+    static ManualMapping manualMappingForTest(int sourceId, int nativeId) {
+        if (sourceId == 20 && nativeId == 11) {
+            return new ManualMapping(12, 20, 0, true);
+        }
+        return manualMappingForTest(nativeId);
+    }
+
     static boolean shouldDispatchDashboardForTest(
             boolean routeActive, String owner, long generation,
             String currentOwner, long currentGeneration, long token,
@@ -394,43 +399,34 @@ final class VehicleTbtPublisher {
     }
 
     private void sendStatus(int status, Trace trace) {
-        setInt(FID_NAV_STATUS, status, trace);
-        invokeSdk(instrument == null ? null : instrument.status,
-                "sendAutoNaviStatus", trace, ints(status), status);
+        hasInstrumentStatus = true;
+        lastInstrumentStatus = status;
+        instrument.sendNavigationStatus(status,
+                result -> ownerHandler.post(() -> recordInstrumentResult(
+                        result, trace, status, 0, -1, "")));
         log("tbt_status=" + status);
     }
 
-    private void sendDirectFrame(DirectTbtFrame frame, Trace trace) {
+    private void sendInstrumentFrame(DirectTbtFrame frame, Trace trace) {
         int icon = instrumentManeuverForAmap(frame.getAmapManeuver());
         int distance = Math.max(0, frame.getDistanceMeters());
-        setInt(FID_SIMPLE_ICON, icon, trace);
-        setInt(FID_DUAL_ICON, icon, trace);
-        setInt(FID_DISTANCE, distance, trace);
-        setBytes(FID_ROAD, roadTextForTest(frame).getBytes(StandardCharsets.UTF_16LE), trace);
+        sendInstrumentGuidance(icon, distance, roadTextForTest(frame), trace);
     }
 
-    private void clearDirectFrame(Trace trace) {
-        setInt(FID_SIMPLE_ICON, 0, trace);
-        setInt(FID_DUAL_ICON, 0, trace);
-        setInt(FID_DISTANCE, -1, trace);
-        setBytes(FID_ROAD, new byte[0], trace);
-    }
-
-    private void sendSdkFrame(DirectTbtFrame frame, Trace trace) {
-        int icon = instrumentManeuverForAmap(frame.getAmapManeuver());
-        int distance = Math.max(0, frame.getDistanceMeters());
-        invokeSdk(instrument == null ? null : instrument.simple,
-                "sendSimpleGuidanceInfo", trace, ints(icon, distance), icon, distance);
-        String road = roadTextForTest(frame);
-        invokeSdk(instrument == null ? null : instrument.next,
-                "sendNextPathName", trace, road.getBytes(StandardCharsets.UTF_8), road);
-    }
-
-    private void clearSdkFrame(Trace trace) {
-        invokeSdk(instrument == null ? null : instrument.simple,
-                "sendSimpleGuidanceInfo", trace, ints(0, -1), 0, -1);
-        invokeSdk(instrument == null ? null : instrument.next,
-                "sendNextPathName", trace, new byte[0], "");
+    private void sendInstrumentGuidance(
+            int icon, int distance, String road, Trace trace) {
+        hasInstrumentGuidance = true;
+        lastInstrumentIcon = Math.max(0, Math.min(49, icon));
+        lastInstrumentDistance = Math.max(-1, Math.min(2_000_000, distance));
+        String normalizedRoad = safe(road);
+        lastInstrumentRoad = normalizedRoad.length() <= 512
+                ? normalizedRoad : normalizedRoad.substring(0, 512);
+        int sentIcon = lastInstrumentIcon;
+        int sentDistance = lastInstrumentDistance;
+        String sentRoad = lastInstrumentRoad;
+        instrument.sendGuidance(sentIcon, sentDistance, sentRoad,
+                result -> ownerHandler.post(() -> recordInstrumentResult(
+                        result, trace, 0, sentIcon, sentDistance, sentRoad)));
     }
 
     private void sendAmapFrame(DirectTbtFrame frame, Trace trace) {
@@ -509,60 +505,124 @@ final class VehicleTbtPublisher {
         return value > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
     }
 
-    private void setInt(int featureId, int value, Trace trace) {
-        invokeDirect(featureId, value, null, trace);
+    private void replayInstrumentState() {
+        if (!hasInstrumentStatus && !hasInstrumentGuidance) return;
+        String owner = ownerPackage.isEmpty() ? teardownOwner : ownerPackage;
+        long generation = ownerGeneration == Long.MIN_VALUE
+                ? teardownGeneration : ownerGeneration;
+        String source = sourceForOwner(owner);
+        Trace trace = new Trace(source, safe(owner), generation,
+                "tbt-" + transactionSequence.incrementAndGet(),
+                "proxy-ready-replay", lastInstrumentIcon, 0, 0,
+                lastInstrumentDistance, lastInstrumentRoad,
+                DirectTbtFrame.TravelMetrics.unavailable(),
+                DirectTbtFrame.TravelMetrics.unavailable());
+        if (hasInstrumentStatus) {
+            int status = lastInstrumentStatus;
+            instrument.sendNavigationStatus(status,
+                    result -> ownerHandler.post(() -> recordInstrumentResult(
+                            result, trace, status, 0, -1, "")));
+        }
+        if (hasInstrumentGuidance) {
+            int icon = lastInstrumentIcon;
+            int distance = lastInstrumentDistance;
+            String road = lastInstrumentRoad;
+            instrument.sendGuidance(icon, distance, road,
+                    result -> ownerHandler.post(() -> recordInstrumentResult(
+                            result, trace, 0, icon, distance, road)));
+        }
+        log("tbt_proxy_replay status="
+                + (hasInstrumentStatus ? lastInstrumentStatus : -1)
+                + " icon=" + (hasInstrumentGuidance ? lastInstrumentIcon : -1));
     }
 
-    private void setBytes(int featureId, byte[] value, Trace trace) {
-        invokeDirect(featureId, 0, value, trace);
-    }
-
-    private void invokeDirect(int featureId, int intValue, byte[] bytes, Trace trace) {
-        long startedAt = System.nanoTime();
-        byte[] arguments = bytes == null ? ints(featureId, intValue) : withInt(featureId, bytes);
-        if (instrument == null || instrument.writer == null) {
-            record(trace, "instrument_fid", "set", String.valueOf(featureId),
-                    arguments, -1, elapsedMs(startedAt), "unavailable");
+    private void handleInstrumentUnavailable(String reason) {
+        if (!hasInstrumentStatus && !hasInstrumentGuidance) return;
+        String owner = ownerPackage.isEmpty() ? teardownOwner : ownerPackage;
+        long generation = ownerGeneration == Long.MIN_VALUE
+                ? teardownGeneration : ownerGeneration;
+        Trace trace = new Trace(sourceForOwner(owner), safe(owner), generation,
+                "tbt-" + transactionSequence.incrementAndGet(),
+                "proxy-unavailable:" + safe(reason), lastInstrumentIcon, 0, 0,
+                lastInstrumentDistance, lastInstrumentRoad,
+                DirectTbtFrame.TravelMetrics.unavailable(),
+                DirectTbtFrame.TravelMetrics.unavailable());
+        if (shouldPreserveAmapFallbackForTest(
+                routeActive, lastGuidanceHasAmapFallback)) {
+            record(trace, "instrument_proxy", "unavailable", "preserve_amap_fallback",
+                    null, -1, 0L, safe(reason));
+            log("tbt_proxy_unavailable preserve_amap_fallback reason=" + safe(reason));
             return;
         }
-        try {
-            Object eventValue = instrument.writer.constructor.newInstance();
-            if (bytes == null) instrument.writer.intField.setInt(eventValue, intValue);
-            else instrument.writer.bytesField.set(eventValue, bytes);
-            Object result = instrument.writer.set.invoke(
-                    instrument.writer.device, new int[]{featureId}, eventValue);
-            int resultCode = resultCode(result);
-            record(trace, "instrument_fid", "set", String.valueOf(featureId),
-                    arguments, resultCode, elapsedMs(startedAt),
-                    success(result) ? "" : "call returned failure");
-            if (!success(result)) log("tbt_fid_failed fid=" + featureId);
-        } catch (Throwable error) {
-            record(trace, "instrument_fid", "set", String.valueOf(featureId),
-                    arguments, -1, elapsedMs(startedAt), describe(error));
-            log("tbt_fid_exception fid=" + featureId + " type="
-                    + error.getClass().getSimpleName());
+        sendAmapTerminal(trace);
+        record(trace, "instrument_proxy", "unavailable", "fallback_terminal",
+                null, -1, 0L, safe(reason));
+        log("tbt_proxy_unavailable fallback_terminal reason=" + safe(reason));
+    }
+
+    static boolean shouldPreserveAmapFallbackForTest(
+            boolean activeRoute, boolean exactAmapFramePublished) {
+        return activeRoute && exactAmapFramePublished;
+    }
+
+    private void recordInstrumentResult(
+            InstrumentProxyManager.Result result, Trace trace,
+            int status, int icon, int distance, String road) {
+        if (result == null || !result.available || result.operations.isEmpty()) {
+            String error = result == null ? "no result"
+                    : result.error.isEmpty() ? "proxy unavailable" : result.error;
+            record(trace, "instrument_proxy", "invoke",
+                    status > 0 ? "navigation_status" : "guidance",
+                    status > 0 ? ints(status) : guidanceBytes(icon, distance, road),
+                    -1, 0L, error);
+            return;
+        }
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            String name = operation.name;
+            int separator = name.indexOf(':');
+            String plane = separator > 0 ? name.substring(0, separator) : "instrument_proxy";
+            String target = separator > 0 ? name.substring(separator + 1) : name;
+            byte[] arguments = instrumentArguments(
+                    plane, target, status, icon, distance, road);
+            String error = operation.error.isEmpty() ? result.error : operation.error;
+            record(trace, plane, "instrument_fid".equals(plane) ? "set" : "invoke",
+                    target, arguments, operation.result, operation.durationMs, error);
         }
     }
 
-    private void invokeSdk(Method method, String target, Trace trace,
-            byte[] arguments, Object... args) {
-        long startedAt = System.nanoTime();
-        if (method == null || instrument == null || instrument.device == null) {
-            record(trace, "instrument_sdk", "invoke", target,
-                    arguments, -1, elapsedMs(startedAt), "unavailable");
-            return;
+    private static byte[] instrumentArguments(
+            String plane, String target, int status,
+            int icon, int distance, String road) {
+        if ("instrument_fid".equals(plane)) {
+            int featureId;
+            try {
+                featureId = Integer.parseInt(target);
+            } catch (NumberFormatException ignored) {
+                return new byte[0];
+            }
+            if (featureId == FID_NAV_STATUS) return ints(featureId, status);
+            if (featureId == FID_SIMPLE_ICON || featureId == FID_DUAL_ICON) {
+                return ints(featureId, icon);
+            }
+            if (featureId == FID_DISTANCE) return ints(featureId, distance);
+            if (featureId == FID_ROAD) {
+                return withInt(featureId, safe(road).getBytes(StandardCharsets.UTF_16LE));
+            }
+            return ints(featureId);
         }
-        try {
-            Object result = method.invoke(instrument.device, args);
-            record(trace, "instrument_sdk", "invoke", target,
-                    arguments, resultCode(result), elapsedMs(startedAt),
-                    success(result) ? "" : "call returned failure");
-            if (!success(result)) Log.w(TAG, "TBT SDK call returned failure: " + method.getName());
-        } catch (Throwable error) {
-            record(trace, "instrument_sdk", "invoke", target,
-                    arguments, -1, elapsedMs(startedAt), describe(error));
-            Log.w(TAG, "TBT SDK call failed: " + method.getName(), error);
+        if ("sendAutoNaviStatus".equals(target)) return ints(status);
+        if ("sendSimpleGuidanceInfo".equals(target)) return ints(icon, distance);
+        if ("sendNextPathName".equals(target)) {
+            return safe(road).getBytes(StandardCharsets.UTF_8);
         }
+        return new byte[0];
+    }
+
+    private static byte[] guidanceBytes(int icon, int distance, String road) {
+        byte[] text = safe(road).getBytes(StandardCharsets.UTF_8);
+        ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES * 3 + text.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        return buffer.putInt(icon).putInt(distance).putInt(text.length).put(text).array();
     }
 
     private void sendAmap(Intent intent, String operation, Trace trace, byte[] arguments) {
@@ -578,32 +638,20 @@ final class VehicleTbtPublisher {
         }
     }
 
-    private static boolean success(Object result) {
-        if (result instanceof Number) return ((Number) result).intValue() == 0;
-        if (result instanceof Boolean) return (Boolean) result;
-        return true;
-    }
-
-    private static int resultCode(Object result) {
-        if (result instanceof Number) return ((Number) result).intValue();
-        if (result instanceof Boolean) return (Boolean) result ? 0 : -1;
-        return 0;
-    }
-
     private Trace trace(String owner, long generation, String reason,
             DirectTbtFrame frame, HudState manualState) {
-        String source = MANUAL_OWNER.equals(owner) ? "manual"
-                : WazeDirectChannel.OWNER_PACKAGE.equals(owner) ? "waze_direct"
-                : GMapsDirectChannel.OWNER_PACKAGE.equals(owner) ? "gmaps_direct"
-                : "vehicle_tbt";
+        String source = sourceForOwner(owner);
+        ManualMapping manualMapping = manualState == null ? null
+                : manualMappingForTest(
+                        manualState.turnBitmapId, manualState.maneuverId);
         int nativeId = manualState != null
-                ? manualMappingForTest(manualState.maneuverId).instrumentId
+                ? manualMapping.instrumentId
                 : frame == null ? 0 : instrumentManeuverForAmap(frame.getAmapManeuver());
         int amapIcon = manualState != null
-                ? manualMappingForTest(manualState.maneuverId).amapManeuver
+                ? manualMapping.amapManeuver
                 : frame == null ? 0 : frame.getAmapBroadcastManeuver();
         int roundaboutExit = manualState != null
-                ? manualMappingForTest(manualState.maneuverId).roundaboutExit
+                ? manualMapping.roundaboutExit
                 : frame == null ? 0 : frame.getRoundaboutExitNumber();
         int distance = manualState != null ? manualState.distanceToIntersection
                 : frame == null ? -1 : frame.getDistanceMeters();
@@ -618,6 +666,13 @@ final class VehicleTbtPublisher {
         return new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
                 nativeId, amapIcon, roundaboutExit, distance, safe(road), route, next);
+    }
+
+    private static String sourceForOwner(String owner) {
+        return MANUAL_OWNER.equals(owner) ? "manual"
+                : WazeDirectChannel.OWNER_PACKAGE.equals(owner) ? "waze_direct"
+                : GMapsDirectChannel.OWNER_PACKAGE.equals(owner) ? "gmaps_direct"
+                : "vehicle_tbt";
     }
 
     private void record(Trace trace, String plane, String operation, String target,
@@ -742,96 +797,4 @@ final class VehicleTbtPublisher {
         }
     }
 
-    private static final class InstrumentApi {
-        final Object device;
-        final Method status;
-        final Method simple;
-        final Method next;
-        final DirectWriter writer;
-
-        private InstrumentApi(Object device, Method status, Method simple, Method next,
-                DirectWriter writer) {
-            this.device = device;
-            this.status = status;
-            this.simple = simple;
-            this.next = next;
-            this.writer = writer;
-        }
-
-        static InstrumentApi open(Context context) {
-            try {
-                Class<?> instrumentClass = Class.forName(INSTRUMENT_CLASS);
-                Class<?> eventClass = Class.forName(EVENT_VALUE_CLASS);
-                Method getInstance = instrumentClass.getMethod("getInstance", Context.class);
-                Object device = getInstance.invoke(null, new BydPermissionContext(context));
-                Method status = instrumentClass.getMethod("sendAutoNaviStatus", int.class);
-                Method simple = instrumentClass.getMethod(
-                        "sendSimpleGuidanceInfo", int.class, int.class);
-                Method next = instrumentClass.getMethod("sendNextPathName", String.class);
-                Method set = instrumentClass.getMethod("set", int[].class, eventClass);
-                Constructor<?> constructor = eventClass.getConstructor();
-                Field intField = eventClass.getField("intValue");
-                Field bytesField = eventClass.getField("bufferDataValue");
-                return new InstrumentApi(device, status, simple, next,
-                        new DirectWriter(device, set, constructor, intField, bytesField));
-            } catch (Throwable error) {
-                Log.i(TAG, "BYD Instrument API unavailable: "
-                        + error.getClass().getSimpleName());
-                return null;
-            }
-        }
-
-        private static Method findMethod(Class<?> type, String name, Class<?>... parameters) {
-            try {
-                return type.getMethod(name, parameters);
-            } catch (NoSuchMethodException ignored) {
-                return null;
-            }
-        }
-    }
-
-    private static final class DirectWriter {
-        final Object device;
-        final Method set;
-        final Constructor<?> constructor;
-        final Field intField;
-        final Field bytesField;
-
-        DirectWriter(Object device, Method set, Constructor<?> constructor,
-                Field intField, Field bytesField) {
-            this.device = device;
-            this.set = set;
-            this.constructor = constructor;
-            this.intField = intField;
-            this.bytesField = bytesField;
-        }
-    }
-
-    private static final class BydPermissionContext extends ContextWrapper {
-        BydPermissionContext(Context base) {
-            super(base);
-        }
-
-        @Override public int checkCallingOrSelfPermission(String permission) {
-            return PackageManager.PERMISSION_GRANTED;
-        }
-
-        @Override public int checkCallingPermission(String permission) {
-            return PackageManager.PERMISSION_GRANTED;
-        }
-
-        @Override public int checkPermission(String permission, int pid, int uid) {
-            return PackageManager.PERMISSION_GRANTED;
-        }
-
-        @Override public void enforceCallingOrSelfPermission(String permission, String message) {
-        }
-
-        @Override public void enforceCallingPermission(String permission, String message) {
-        }
-
-        @Override public void enforcePermission(
-                String permission, int pid, int uid, String message) {
-        }
-    }
 }

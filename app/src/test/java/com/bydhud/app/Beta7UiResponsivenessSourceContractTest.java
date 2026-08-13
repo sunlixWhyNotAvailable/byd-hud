@@ -13,32 +13,110 @@ import java.nio.file.Paths;
 
 public final class Beta7UiResponsivenessSourceContractTest {
     @Test
-    public void packageAndPermissionLookupsUseBoundedInvalidatedCaches() throws IOException {
+    public void expensiveUiStateUsesSharedCachesAndResumeRevalidatesAfterRendering()
+            throws IOException {
         String source = source("MainActivity.java");
         String onResume = between(source, "protected void onResume()", "protected void onPause()");
-        String appScan = between(source, "private void scheduleAppScan()", "private Map<String, String> scanInstalledAppVersions");
+        String runtimeScan = between(source, "static void requestRuntimeUiStateRefresh(",
+                "static void requestPatchUiStateRefresh(");
+        String patchScan = between(source, "static void requestPatchUiStateRefresh(",
+                "private static Map<String, String> scanInstalledAppVersions");
 
-        assertTrue(source.contains("NAV_RUNTIME_PERMISSION_CACHE_MS = 750L"));
-        assertTrue(source.contains("appLabelCache"));
-        assertTrue(source.contains("installedPackageCache"));
-        assertTrue(onResume.contains("invalidatePackageMetadataCache();"));
-        assertTrue(appScan.contains("invalidatePackageMetadataCache();"));
-        assertTrue(occurrences(source, "invalidateNavRuntimePermissionStatus();") >= 2);
+        assertTrue(source.contains("private static volatile StorageCacheState storageCacheState"));
+        assertTrue(source.contains("private static final Map<String, String> APP_LABEL_CACHE"));
+        assertTrue(source.contains("private static final Map<String, Boolean> INSTALLED_PACKAGE_CACHE"));
+        assertTrue(source.contains("private static volatile NavRuntimePermissionStatus"));
+        assertFalse(onResume.contains("invalidatePackageMetadataCache();"));
+        assertFalse(onResume.contains("invalidateNavRuntimePermissionStatus();"));
+        assertTrue(onResume.indexOf("invalidateComposeSnapshot();")
+                < onResume.indexOf("requestRuntimeUiStateRefresh("));
+        assertTrue(onResume.contains("invalidateComposeSnapshot();"));
+        assertTrue(runtimeScan.contains("NavRuntimePermissionStatus.check(appContext)"));
+        assertFalse(runtimeScan.contains("requestStorageRefresh("));
+        assertFalse(runtimeScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
+        assertFalse(runtimeScan.contains("scanNavigatorPatchRows(appContext)"));
+        assertTrue(patchScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
+        assertTrue(patchScan.contains("scanNavigatorPatchRows(appContext)"));
     }
 
     @Test
-    public void appsPollingAndRowsAreForegroundGatedAndVirtualized() throws IOException {
+    public void bootstrapRefreshesAllDomainsWhileHeartbeatRefreshesRuntimeOnly()
+            throws IOException {
+        String activity = source("MainActivity.java");
+        String bootstrap = between(activity, "static void requestInitialUiStateRefresh(",
+                "static void requestStorageRefreshAfterMutation(");
+        String service = source("HudRuntimeService.java");
+        String onCreate = between(service, "public void onCreate()", "public int onStartCommand(");
+        String heartbeat = between(service, "private final Runnable heartbeatRunnable",
+                "static void startPersistent(");
+        String compose = source("BydHudRuntimeCompose.kt");
+        String polling = between(compose,
+                "LaunchedEffect(appInForeground)",
+                "LaunchedEffect(storageDeleteBusy, storageDeleteQueue)");
+
+        assertTrue(bootstrap.contains("requestStorageRefresh(context, false"));
+        assertTrue(bootstrap.contains("requestRuntimeUiStateRefresh(context, false"));
+        assertTrue(bootstrap.contains("requestPatchUiStateRefresh(context, false"));
+        assertTrue(onCreate.contains("requestInitialUiRefresh(\"runtime-create\")"));
+        assertTrue(heartbeat.contains("requestRuntimeUiRefresh(false, \"runtime-heartbeat\")"));
+        assertFalse(heartbeat.contains("requestInitialUiRefresh"));
+        assertTrue(polling.indexOf("refresh()") < polling.indexOf("while (true)"));
+        assertTrue(polling.contains("FOREGROUND_UI_REFRESH_REQUEST_MS"));
+        assertTrue(polling.contains(
+                "composeRequestRuntimeUiStateRefresh(false, \"foreground-periodic\")"));
+        assertFalse(polling.contains("composeRequestStorageRefresh"));
+    }
+
+    @Test
+    public void allTabsAreCacheFirstWhileAppRowsStayVirtualized() throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
         String apps = between(source, "private fun AppsTab(", "private fun AppRow(");
+        String tabEffect = between(source, "LaunchedEffect(selectedTab)",
+                "DisposableEffect(activity)");
+        String refresh = between(source, "fun refresh()", "fun runAction(");
+        String tabRefresh = between(source, "fun requestTabStateRefresh(", "fun runAction(");
+        String lifecycle = between(source, "DisposableEffect(activity)",
+                "LaunchedEffect(appInForeground)");
 
-        assertTrue(source.contains("LaunchedEffect(selectedTab, appInForeground)"));
-        assertTrue(source.contains("selectedTab != RuntimeTab.Apps || !appInForeground"));
+        assertTrue(source.contains("LaunchedEffect(appInForeground)"));
+        assertFalse(source.contains("selectedTab != RuntimeTab.Apps || !appInForeground"));
+        assertFalse(tabEffect.contains("refresh()"));
+        assertTrue(tabEffect.contains("requestTabStateRefresh(selectedTab, reason)"));
+        assertFalse(tabEffect.contains("composeRequestUiStateRefresh("));
+        assertTrue(tabRefresh.contains("composeRequestRuntimeUiStateRefresh(true, reason)"));
+        assertTrue(tabRefresh.contains("composeRequestStorageRefresh(false)"));
+        assertTrue(tabRefresh.contains("composeRequestPatchUiStateRefresh(reason)"));
+        assertTrue(lifecycle.contains("requestTabStateRefresh("));
+        assertTrue(lifecycle.contains("latestSelectedTab"));
+        assertTrue(refresh.contains("if (snapshot != refreshed) snapshot = refreshed"));
         assertTrue(apps.contains("count = snapshot.supportedApps.size"));
         assertTrue(apps.contains("snapshot.supportedApps[index].packageName"));
         assertTrue(apps.contains("count = snapshot.allApps.size"));
         assertTrue(apps.contains("snapshot.allApps[index].packageName"));
         assertFalse(apps.contains("supportedApps.forEachIndexed"));
         assertFalse(apps.contains("allApps.forEachIndexed"));
+    }
+
+    @Test
+    public void storageMutationsRefreshSharedCacheWithoutAnActivityTabDependency()
+            throws IOException {
+        String activity = source("MainActivity.java");
+        String share = between(activity, "public String composeShareStorageDays(",
+                "public ComposeStorageShareSummary composeDescribeStorageShareDays");
+        String sentryShare = between(activity,
+                "public ComposeSentryUploadResult composeUploadStorageDaysToSentry(",
+                "public String composeShareVehicleConfiguration()");
+        String storage = source("NavigationLogStorage.java");
+        String retention = between(storage, "private static void runScheduledRetention(",
+                "private static void runNavCaptureRetention(");
+
+        assertTrue(activity.contains("requestStorageRefreshAfterMutation(this, \"delete\")"));
+        assertTrue(share.contains("requestStorageRefreshAfterMutation(this, \"share\")"));
+        assertTrue(sentryShare.contains(
+                "requestStorageRefreshAfterMutation(this, \"sentry-share\")"));
+        assertTrue(storage.contains("app, \"retired-day-cleanup\")"));
+        assertTrue(retention.contains("request.onComplete == null"));
+        assertTrue(retention.contains("requestStorageRefreshAfterMutation("));
     }
 
     @Test
@@ -51,6 +129,17 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(source.contains("val shareCopy = remember(copy.language)"));
         assertTrue(source.contains("VISUAL_PRESS_BEFORE_ACTION_MS = 90L"));
         assertTrue(source.contains("SWITCH_CENTER_BEFORE_ACTION_MS = 120L"));
+    }
+
+    @Test
+    public void activityDestructionDetachesUiWithoutStoppingGlobalRuntime()
+            throws IOException {
+        String source = source("MainActivity.java");
+        String destroy = between(source, "protected void onDestroy()", "public void onBackPressed()");
+
+        assertTrue(destroy.contains("NavAppDisplayController.get(this).setListener(null)"));
+        assertTrue(destroy.contains("destroy without explicit exit: keep sender state"));
+        assertFalse(destroy.contains("stopImmediately("));
     }
 
     @Test

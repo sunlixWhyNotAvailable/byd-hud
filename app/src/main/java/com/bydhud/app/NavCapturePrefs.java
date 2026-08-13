@@ -18,6 +18,7 @@ final class NavCapturePrefs {
     private static final String KEY_HUD_PACKAGE = "hud_package";
     private static final String KEY_LOG_ONLY_PACKAGES = "log_only_packages";
     private static final String KEY_OBSERVED_PACKAGES = "observed_packages";
+    private static final Object OBSERVED_LOCK = new Object();
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavCapturePrefs() {
@@ -85,6 +86,31 @@ final class NavCapturePrefs {
         }
     }
 
+    static void addObservedPackageFast(Context context, String packageName) {
+        String normalized = normalizePackage(packageName);
+        if (normalized.isEmpty() || NavAppFilter.shouldHideFromCaptureList(normalized)) return;
+        synchronized (OBSERVED_LOCK) {
+            Set<String> stored = prefs(context).getStringSet(
+                    KEY_OBSERVED_PACKAGES, Collections.emptySet());
+            if (stored.contains(normalized)) return;
+            Set<String> packages = new HashSet<>(stored);
+            packages.add(normalized);
+            prefs(context).edit().putStringSet(KEY_OBSERVED_PACKAGES, packages).apply();
+        }
+    }
+
+    static IngressPreferences ingressPreferences(Context context) {
+        SharedPreferences preferences = prefs(context);
+        String hudPackage = normalizePackage(preferences.getString(KEY_HUD_PACKAGE, ""));
+        Set<String> logOnly = new HashSet<>();
+        for (String packageName : preferences.getStringSet(
+                KEY_LOG_ONLY_PACKAGES, Collections.emptySet())) {
+            String normalized = normalizePackage(packageName);
+            if (!normalized.isEmpty()) logOnly.add(normalized);
+        }
+        return new IngressPreferences(hudPackage, logOnly);
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void setCaptureEnabled(Context context, String packageName, boolean enabled) {
         setHudEnabled(context, packageName, enabled);
@@ -102,6 +128,7 @@ final class NavCapturePrefs {
             } else if (normalized.equals(normalizePackage(
                     prefs(context).getString(KEY_HUD_PACKAGE, "")))) {
                 prefs(context).edit().remove(KEY_HUD_PACKAGE).apply();
+                NavCaptureIngressPolicy.refreshPreferencesAsync(context);
             }
             return;
         }
@@ -117,6 +144,7 @@ final class NavCapturePrefs {
             }
         }
         editor.apply();
+        NavCaptureIngressPolicy.refreshPreferencesAsync(context);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -136,6 +164,7 @@ final class NavCapturePrefs {
             packages.remove(normalized);
         }
         editor.putStringSet(KEY_LOG_ONLY_PACKAGES, packages).apply();
+        NavCaptureIngressPolicy.refreshPreferencesAsync(context);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -186,6 +215,7 @@ final class NavCapturePrefs {
                 .remove(KEY_HUD_PACKAGE)
                 .putStringSet(KEY_LOG_ONLY_PACKAGES, logOnlyPackages)
                 .apply();
+        NavCaptureIngressPolicy.refreshPreferencesAsync(context);
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
@@ -217,5 +247,17 @@ final class NavCapturePrefs {
     private static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE);
+    }
+
+    static final class IngressPreferences {
+        final String hudPackage;
+        final Set<String> logOnlyPackages;
+
+        IngressPreferences(String hudPackage, Set<String> logOnlyPackages) {
+            this.hudPackage = normalizePackage(hudPackage);
+            this.logOnlyPackages = Collections.unmodifiableSet(
+                    new HashSet<>(logOnlyPackages == null
+                            ? Collections.emptySet() : logOnlyPackages));
+        }
     }
 }
