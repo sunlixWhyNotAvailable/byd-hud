@@ -52,6 +52,25 @@ public final class NavHudRuntimeContractTest {
     }
 
     @Test
+    public void DirectPromotionRequiresClaimedCurrentSessionAndHudPriorityForFocus() {
+        assertTrue(NavHudLiveSender.acceptsDirectPromotionForTest(
+                true, true, false, "com.waze", 8L, "com.waze", 8L));
+        assertTrue(NavHudLiveSender.acceptsDirectPromotionForTest(
+                true, true, false, GMapsDirectChannel.OWNER_PACKAGE, 9L,
+                GMapsDirectChannel.OWNER_PACKAGE, 9L));
+        assertFalse(NavHudLiveSender.acceptsDirectPromotionForTest(
+                false, true, false, "com.waze", 8L, "com.waze", 8L));
+        assertFalse(NavHudLiveSender.acceptsDirectPromotionForTest(
+                true, true, false, "com.waze", 9L, "com.waze", 8L));
+        assertFalse(NavHudLiveSender.acceptsDirectPromotionForTest(
+                true, true, true, "com.waze", 8L, "com.waze", 8L));
+
+        assertTrue(NavHudLiveSender.shouldRequestDashboardForDirectRouteForTest(true, true));
+        assertFalse(NavHudLiveSender.shouldRequestDashboardForDirectRouteForTest(false, true));
+        assertFalse(NavHudLiveSender.shouldRequestDashboardForDirectRouteForTest(true, false));
+    }
+
+    @Test
     public void HudSwitchRetainsOnlyAnActiveRouteWhenTbtWithoutHudIsEnabled() {
         assertTrue(NavHudLiveSender.shouldRetainTbtRouteOnHudSwitchForTest(
                 true, true, true));

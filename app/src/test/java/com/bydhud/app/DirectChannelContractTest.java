@@ -27,6 +27,45 @@ public final class DirectChannelContractTest {
     }
 
     @Test
+    public void promotionReplacesOnlyDormantCrossNavigatorOwnership() {
+        assertEquals(HudOutputCoordinator.DirectPromotionDecision.REPLACE_DORMANT,
+                HudOutputCoordinator.directPromotionDecision(
+                        false, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                        "com.waze", 8L));
+        assertEquals(HudOutputCoordinator.DirectPromotionDecision.REPLACE_DORMANT,
+                HudOutputCoordinator.directPromotionDecision(
+                        false, "com.waze", 8L,
+                        GMapsDirectChannel.OWNER_PACKAGE, 9L));
+        assertEquals(HudOutputCoordinator.DirectPromotionDecision.REJECT,
+                HudOutputCoordinator.directPromotionDecision(
+                        true, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                        "com.waze", 8L));
+        assertEquals(HudOutputCoordinator.DirectPromotionDecision.CLAIM,
+                HudOutputCoordinator.directPromotionDecision(
+                        false, "", Long.MIN_VALUE, "com.waze", 8L));
+    }
+
+    @Test
+    public void healthSignalsRequireExactOwnerAndSwitchClearsDormantPackage() {
+        assertFalse(HudOutputCoordinator.matchesDirectOwnerForTest(
+                "", Long.MIN_VALUE, GMapsDirectChannel.OWNER_PACKAGE, 7L));
+        assertFalse(HudOutputCoordinator.matchesDirectOwnerForTest(
+                GMapsDirectChannel.OWNER_PACKAGE, 7L, "com.waze", 8L));
+        assertTrue(HudOutputCoordinator.matchesDirectOwnerForTest(
+                GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 7L));
+
+        assertTrue(HudOutputCoordinator.shouldInvalidateDormantDirectOwnerForTest(
+                false, GMapsDirectChannel.OWNER_PACKAGE,
+                GMapsDirectChannel.OWNER_PACKAGE));
+        assertFalse(HudOutputCoordinator.shouldInvalidateDormantDirectOwnerForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE,
+                GMapsDirectChannel.OWNER_PACKAGE));
+        assertFalse(HudOutputCoordinator.shouldInvalidateDormantDirectOwnerForTest(
+                false, GMapsDirectChannel.OWNER_PACKAGE, "com.waze"));
+    }
+
+    @Test
     public void producerLossQueuesOneClearAndLeaseExpiresOnlyAtDeadline() {
         assertTrue(HudOutputCoordinator.shouldQueueDirectLossClear(true, true, false, false));
         assertFalse(HudOutputCoordinator.shouldQueueDirectLossClear(true, true, true, false));

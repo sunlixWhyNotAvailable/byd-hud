@@ -1327,7 +1327,8 @@ final class NavHudLiveSender {
         boolean hudOwner = isHudOutputOwner(ownerPackage);
         if (!manualTbtActive) {
             tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
-                    hudOwner && HudPrefs.isSwitchToTbtOnHudStartEnabled(context), hudOwner,
+                    shouldRequestDashboardForDirectRouteForTest(hudOwner,
+                            HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
                     "waze-navigation-started:" + safeReason(reason));
         } else {
             tbtPublisher.recordDeferredLifecycle(
@@ -1908,7 +1909,8 @@ final class NavHudLiveSender {
                 hudOwner, firstRouteEvidence,
                 isHudOutputOwner(tbtPublisher.ownerPackage()))) {
             tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
-                    hudOwner && HudPrefs.isSwitchToTbtOnHudStartEnabled(context), hudOwner,
+                    shouldRequestDashboardForDirectRouteForTest(hudOwner,
+                            HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
                     "waze-frame:" + safeReason(reason));
         }
         if (!manualTbtActive) {
@@ -2107,7 +2109,8 @@ final class NavHudLiveSender {
         boolean hudOwner = isHudOutputOwner(ownerPackage);
         if (!manualTbtActive) {
             tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
-                    hudOwner && HudPrefs.isSwitchToTbtOnHudStartEnabled(context), hudOwner,
+                    shouldRequestDashboardForDirectRouteForTest(hudOwner,
+                            HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
                     "gmaps-navigation-started:" + safeReason(reason));
         } else {
             tbtPublisher.recordDeferredLifecycle(
@@ -2166,7 +2169,8 @@ final class NavHudLiveSender {
                 hudOwner, firstRouteEvidence,
                 isHudOutputOwner(tbtPublisher.ownerPackage()))) {
             tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
-                    hudOwner && HudPrefs.isSwitchToTbtOnHudStartEnabled(context), hudOwner,
+                    shouldRequestDashboardForDirectRouteForTest(hudOwner,
+                            HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
                     "gmaps-frame:" + safeReason(reason));
         }
         if (!manualTbtActive) {
@@ -3935,11 +3939,14 @@ final class NavHudLiveSender {
                 == wazeDirectChannel.sessionGeneration()) {
             ensureWazeDirectSession("hud-promoted:" + safeReason(reason));
             int generation = wazeDirectChannel.sessionGeneration();
-            tbtPublisher.beginRoute(normalized, generation,
-                    HudPrefs.isSwitchToTbtOnHudStartEnabled(context), true);
-            republishLatestDirectFrame(normalized, "hud-promoted:" + safeReason(reason));
-            maybeLaunchWazeSurface("hud-promoted:" + safeReason(reason));
-            log("waze existing direct route promoted to HUD");
+            promoteExistingDirectRouteForHud(normalized, generation, reason, () -> {
+                tbtPublisher.beginRoute(normalized, generation,
+                        HudPrefs.isSwitchToTbtOnHudStartEnabled(context), true);
+                republishLatestDirectFrame(
+                        normalized, "hud-promoted:" + safeReason(reason));
+                maybeLaunchWazeSurface("hud-promoted:" + safeReason(reason));
+                log("waze existing direct route promoted to HUD");
+            });
             return true;
         }
         if (GMapsDirectChannel.PACKAGE_NAME.equals(normalized)
@@ -3949,14 +3956,51 @@ final class NavHudLiveSender {
                 == gmapsDirectChannel.sessionGeneration()) {
             ensureGMapsDirectSession("hud-promoted:" + safeReason(reason));
             long generation = gmapsDirectChannel.sessionGeneration();
-            tbtPublisher.beginRoute(normalized, generation,
-                    HudPrefs.isSwitchToTbtOnHudStartEnabled(context), true);
-            republishLatestDirectFrame(normalized, "hud-promoted:" + safeReason(reason));
-            scheduleGMapsDirectTimeout();
-            log("gmaps existing direct route promoted to HUD");
+            promoteExistingDirectRouteForHud(normalized, generation, reason, () -> {
+                tbtPublisher.beginRoute(normalized, generation,
+                        HudPrefs.isSwitchToTbtOnHudStartEnabled(context), true);
+                republishLatestDirectFrame(
+                        normalized, "hud-promoted:" + safeReason(reason));
+                scheduleGMapsDirectTimeout();
+                log("gmaps existing direct route promoted to HUD");
+            });
             return true;
         }
         return false;
+    }
+
+    private void promoteExistingDirectRouteForHud(String ownerPackage,
+            long sessionGeneration, String reason, Runnable publishCachedFrame) {
+        hudOutput.claimDirectOwnerForPromotion(
+                ownerPackage, sessionGeneration,
+                "hud-promoted:" + safeReason(reason),
+                claimed -> handler.post(() -> {
+                    if (!acceptsDirectPromotionForTest(
+                            claimed, active,
+                            sourceSwitchInProgress || stopInProgress || runtimeReinitInProgress,
+                            activePackage,
+                            directSessionGeneration(ownerPackage),
+                            ownerPackage, sessionGeneration)) {
+                        log("direct route promotion rejected or stale package="
+                                + ownerPackage + " session=" + sessionGeneration
+                                + " claimed=" + claimed);
+                        return;
+                    }
+                    publishCachedFrame.run();
+                }));
+    }
+
+    static boolean acceptsDirectPromotionForTest(boolean claimed, boolean active,
+            boolean transitionInProgress, String activePackage, long activeSessionGeneration,
+            String ownerPackage, long ownerSessionGeneration) {
+        return claimed && active && !transitionInProgress
+                && normalizePackage(ownerPackage).equals(normalizePackage(activePackage))
+                && activeSessionGeneration == ownerSessionGeneration;
+    }
+
+    static boolean shouldRequestDashboardForDirectRouteForTest(
+            boolean hudOwner, boolean switchDashboardEnabled) {
+        return hudOwner && switchDashboardEnabled;
     }
 
     private long directSessionGeneration(String packageName) {

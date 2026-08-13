@@ -239,6 +239,25 @@ final class HudOutputCoordinator {
         });
     }
 
+    void claimDirectOwnerForPromotion(String ownerPackage, long ownerSessionGeneration,
+            String reason, Consumer<Boolean> completion) {
+        worker.post(() -> {
+            DirectPromotionDecision decision = directPromotionDecision(
+                    directSelectedOnWorker(), directOwnerPackage,
+                    directOwnerSessionGeneration, ownerPackage, ownerSessionGeneration);
+            if (decision == DirectPromotionDecision.REPLACE_DORMANT) {
+                invalidateDirectOwnerOnWorker("promotion:" + reason);
+            }
+            boolean claimed = decision != DirectPromotionDecision.REJECT
+                    && claimDirectOwner(ownerPackage, ownerSessionGeneration);
+            log("direct promotion owner=" + safe(ownerPackage)
+                    + " session=" + ownerSessionGeneration
+                    + " decision=" + decision
+                    + " reason=" + safe(reason));
+            runCompletion(completion, claimed);
+        });
+    }
+
     void clearDirectAlertAndRepublish(String ownerPackage, long ownerSessionGeneration,
             DirectTbtFrame frame, String reason, long receivedAtMs) {
         worker.post(() -> {
@@ -318,9 +337,7 @@ final class HudOutputCoordinator {
     void endNavigationOutput(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs, Runnable firstClearCompletion) {
         worker.post(() -> {
-            boolean directSelected = directEnabled
-                    || activeSource == Source.DIRECT
-                    || pendingSource == Source.DIRECT;
+            boolean directSelected = directSelectedOnWorker();
             if (directSelected) {
                 endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
                         detectedAtMs, firstClearCompletion, true);
@@ -330,6 +347,8 @@ final class HudOutputCoordinator {
                     || activeSource == Source.LEGACY
                     || pendingSource == Source.LEGACY;
             if (!legacySelected) {
+                invalidateDormantDirectOwnerOnWorker(
+                        ownerPackage, ownerSessionGeneration, "navigation-end:" + reason);
                 reconcile(reason, detectedAtMs, firstClearCompletion);
                 return;
             }
@@ -343,6 +362,14 @@ final class HudOutputCoordinator {
     private void endDirectOutputOnWorker(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs, Runnable firstClearCompletion,
             boolean administrativeStop) {
+        if (!directSelectedOnWorker()) {
+            invalidateDormantDirectOwnerOnWorker(
+                    ownerPackage, ownerSessionGeneration, "end:" + reason);
+            logAsync("direct end ignored reason=" + safe(reason)
+                    + " detectedAtElapsedMs=" + detectedAtMs);
+            reconcile(reason, detectedAtMs, firstClearCompletion);
+            return;
+        }
         if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) {
             logAsync("direct end rejected owner=" + safe(ownerPackage)
                     + " session=" + ownerSessionGeneration
@@ -357,15 +384,6 @@ final class HudOutputCoordinator {
             }
             logAsync("direct administrative stop continuing with current output reason="
                     + safe(reason));
-        }
-        boolean directSelected = directEnabled
-                || activeSource == Source.DIRECT
-                || pendingSource == Source.DIRECT;
-        if (!directSelected) {
-            logAsync("direct end ignored reason=" + safe(reason)
-                    + " detectedAtElapsedMs=" + detectedAtMs);
-            reconcile(reason, detectedAtMs, firstClearCompletion);
-            return;
         }
         long now = SystemClock.elapsedRealtime();
         logAsync("direct end accepted reason=" + safe(reason)
@@ -392,7 +410,7 @@ final class HudOutputCoordinator {
 
     void renewDirectLease(String ownerPackage, long ownerSessionGeneration, String reason) {
         worker.post(() -> {
-            if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) return;
+            if (!matchesDirectOwner(ownerPackage, ownerSessionGeneration)) return;
             renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
         });
     }
@@ -1040,6 +1058,14 @@ final class HudOutputCoordinator {
         }
     }
 
+    private static void runCompletion(Consumer<Boolean> completion, boolean result) {
+        if (completion == null) return;
+        try {
+            completion.accept(result);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
     private static Runnable chainCompletions(Runnable first, Runnable second) {
         if (first == null) return second;
         if (second == null) return first;
@@ -1319,6 +1345,23 @@ final class HudOutputCoordinator {
                 : DirectOwnerDecision.ADVANCE;
     }
 
+    static DirectPromotionDecision directPromotionDecision(
+            boolean directSelected, String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        DirectOwnerDecision ownerDecision = directOwnerDecision(
+                currentOwner, currentGeneration, incomingOwner, incomingGeneration);
+        if (ownerDecision != DirectOwnerDecision.REJECT) {
+            return DirectPromotionDecision.CLAIM;
+        }
+        String current = safe(currentOwner);
+        String incoming = safe(incomingOwner);
+        if (!directSelected && !current.isEmpty() && !incoming.isEmpty()
+                && incomingGeneration >= 0L && !current.equals(incoming)) {
+            return DirectPromotionDecision.REPLACE_DORMANT;
+        }
+        return DirectPromotionDecision.REJECT;
+    }
+
     static boolean shouldClearForAdministrativeStopForTest(
             String currentOwner, String requestedOwner) {
         String current = safe(currentOwner);
@@ -1331,10 +1374,32 @@ final class HudOutputCoordinator {
         ADVANCE
     }
 
+    enum DirectPromotionDecision {
+        REJECT,
+        CLAIM,
+        REPLACE_DORMANT
+    }
+
     private boolean matchesDirectOwner(String ownerPackage, long ownerSessionGeneration) {
-        return !directOwnerPackage.isEmpty()
-                && directOwnerPackage.equals(safe(ownerPackage))
-                && directOwnerSessionGeneration == ownerSessionGeneration;
+        return matchesDirectOwnerForTest(
+                directOwnerPackage, directOwnerSessionGeneration,
+                ownerPackage, ownerSessionGeneration);
+    }
+
+    static boolean matchesDirectOwnerForTest(
+            String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        String current = safe(currentOwner);
+        return !current.isEmpty()
+                && current.equals(safe(incomingOwner))
+                && currentGeneration == incomingGeneration;
+    }
+
+    static boolean shouldInvalidateDormantDirectOwnerForTest(
+            boolean directSelected, String currentOwner, String requestedOwner) {
+        String current = safe(currentOwner);
+        return !directSelected && !current.isEmpty()
+                && current.equals(safe(requestedOwner));
     }
 
     private void renewDirectLeaseOnWorker(String ownerPackage,
@@ -1366,7 +1431,7 @@ final class HudOutputCoordinator {
 
     private void clearDirectFrameForLossOnWorker(String ownerPackage,
             long ownerSessionGeneration, String reason, long detectedAtMs) {
-        if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)
+        if (!matchesDirectOwner(ownerPackage, ownerSessionGeneration)
                 || !directSelectedOnWorker()) {
             return;
         }
@@ -1444,6 +1509,14 @@ final class HudOutputCoordinator {
         directLossClearSent = false;
         resetDirectTransportTiming();
         log("direct owner invalidated reason=" + safe(reason));
+    }
+
+    private void invalidateDormantDirectOwnerOnWorker(String ownerPackage,
+            long ownerSessionGeneration, String reason) {
+        if (shouldInvalidateDormantDirectOwnerForTest(
+                directSelectedOnWorker(), directOwnerPackage, ownerPackage)) {
+            invalidateDirectOwnerOnWorker("dormant:" + reason);
+        }
     }
 
     private void resetDirectTransportTiming() {
