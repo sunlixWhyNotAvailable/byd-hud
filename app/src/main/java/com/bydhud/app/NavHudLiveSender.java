@@ -60,6 +60,16 @@ final class NavHudLiveSender {
         return instance;
     }
 
+    static void onOutputPreferenceChanged(String key) {
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        if (current != null) {
+            current.handler.post(() -> current.logChangedOutputPreferences(key));
+        }
+    }
+
     static void onWazeRouteLifecycleEvent(Context context, boolean routeActive,
             boolean terminal, long eventElapsedMs, boolean changed, String reason) {
         onWazeRouteLifecycleEvent(
@@ -183,6 +193,7 @@ final class NavHudLiveSender {
                     "manual-start:" + safeReason(reason));
             log("manual tbt start generation=" + manualTbtGeneration
                     + " reason=" + safeReason(reason));
+            logRouteStartOutputPreferences("manual", generation, reason);
         }
         publishManualOnWorker(state, reason);
         hudOutput.setManualEnabled(true, "manual-start:" + safeReason(reason));
@@ -435,6 +446,10 @@ final class NavHudLiveSender {
     private boolean gmapsDirectRegistrationSuppressed;
     private volatile DirectSessionLog wazeDirectSession;
     private volatile DirectSessionLog gmapsDirectSession;
+    private HudOutputPreferenceSnapshot lastOutputPreferenceSnapshot;
+    private long lastManualOutputPreferenceGeneration = Long.MIN_VALUE;
+    private long lastWazeOutputPreferenceGeneration = Long.MIN_VALUE;
+    private long lastGMapsOutputPreferenceGeneration = Long.MIN_VALUE;
     private Boolean cachedWazeBridgeSupported;
     private long cachedWazeVersionCode = Long.MIN_VALUE;
     private long cachedWazeLastUpdateTime = Long.MIN_VALUE;
@@ -1288,6 +1303,7 @@ final class NavHudLiveSender {
         if (!isCurrentWazeDirectCallback(ownerPackage, sessionGeneration)) {
             return;
         }
+        logRouteStartOutputPreferences("waze", sessionGeneration, reason);
         boolean newRoute = !wazeDirectNavigating;
         if (newRoute) {
             ++tbtLifecycleToken;
@@ -2071,6 +2087,7 @@ final class NavHudLiveSender {
     private void onGMapsDirectNavigationStarted(String ownerPackage,
             long sessionGeneration, String reason) {
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        logRouteStartOutputPreferences("gmaps", sessionGeneration, reason);
         ++tbtLifecycleToken;
         gmapsTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
         if (shouldClearGMapsSpeedLimitOnDirectStart(reason)) {
@@ -2949,6 +2966,56 @@ final class NavHudLiveSender {
     private void eventWazeDirectSession(String event, String detail) {
         DirectSessionLog session = wazeDirectSession;
         if (session != null) session.event(event, normalizeString(detail));
+    }
+
+    private void logRouteStartOutputPreferences(
+            String source, long generation, String reason) {
+        if (!claimOutputPreferenceRouteStart(source, generation)) return;
+        emitOutputPreferences(
+                source, generation, "route-start:" + safeReason(reason),
+                HudOutputPreferenceSnapshot.capture(context));
+    }
+
+    private boolean claimOutputPreferenceRouteStart(String source, long generation) {
+        if ("manual".equals(source)) {
+            if (lastManualOutputPreferenceGeneration == generation) return false;
+            lastManualOutputPreferenceGeneration = generation;
+            return true;
+        }
+        if ("waze".equals(source)) {
+            if (lastWazeOutputPreferenceGeneration == generation) return false;
+            lastWazeOutputPreferenceGeneration = generation;
+            return true;
+        }
+        if (lastGMapsOutputPreferenceGeneration == generation) return false;
+        lastGMapsOutputPreferenceGeneration = generation;
+        return true;
+    }
+
+    private void logChangedOutputPreferences(String key) {
+        HudOutputPreferenceSnapshot snapshot = HudOutputPreferenceSnapshot.capture(context);
+        if (snapshot.equals(lastOutputPreferenceSnapshot)) return;
+        emitOutputPreferences(
+                "preferences", 0L, "changed:" + safeReason(key), snapshot);
+    }
+
+    private void emitOutputPreferences(
+            String source, long generation, String trigger,
+            HudOutputPreferenceSnapshot snapshot) {
+        lastOutputPreferenceSnapshot = snapshot;
+        String detail = "source=" + source
+                + " generation=" + generation
+                + " trigger=" + trigger
+                + " " + snapshot.compact();
+        log("output_preferences " + detail);
+        if ("waze".equals(source)) {
+            eventWazeDirectSession("output_preferences", detail);
+        } else if ("gmaps".equals(source)) {
+            eventGMapsDirectSession("output_preferences", detail);
+        } else if ("preferences".equals(source)) {
+            eventWazeDirectSession("output_preferences", detail);
+            eventGMapsDirectSession("output_preferences", detail);
+        }
     }
 
     private void ensureWazeDirectSession(String reason) {

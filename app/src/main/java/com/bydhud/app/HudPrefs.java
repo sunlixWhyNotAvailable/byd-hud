@@ -87,7 +87,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setSmallDistanceClampEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_SMALL_DISTANCE_CLAMP, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SMALL_DISTANCE_CLAMP);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -108,7 +108,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setPngOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_PNG, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_PNG);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -119,7 +119,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setNativeOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_NATIVE, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_NATIVE);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -130,7 +130,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setLaneOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_LANES, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_LANES);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -141,7 +141,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setDistanceOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_DISTANCE, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_DISTANCE);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -152,7 +152,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setStreetOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_STREET, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_STREET);
     }
 
     static boolean isTextDirectionOutputEnabled(Context context) {
@@ -161,7 +161,7 @@ final class HudPrefs {
 
     static void setTextDirectionOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_TEXT_DIRECTION, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_TEXT_DIRECTION);
     }
 
     static boolean isWazeAlertsEnabled(Context context) {
@@ -170,6 +170,7 @@ final class HudPrefs {
 
     static void setWazeAlertsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_WAZE_ALERTS, enabled).apply();
+        markOutputOptionChanged(KEY_WAZE_ALERTS);
     }
 
     static boolean isWholeRouteMetricsEnabled(Context context) {
@@ -202,7 +203,7 @@ final class HudPrefs {
     static void setRouteMetricsMode(Context context, int mode) {
         prefs(context).edit().putInt(KEY_ROUTE_METRICS_MODE,
                 clamp(mode, ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_ROUTE_METRICS_MODE);
     }
 
     static boolean isEtaOutputEnabled(Context context) {
@@ -211,7 +212,7 @@ final class HudPrefs {
 
     static void setEtaOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_ETA, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_ETA);
     }
 
     static boolean isRemainingTimeOutputEnabled(Context context) {
@@ -220,7 +221,7 @@ final class HudPrefs {
 
     static void setRemainingTimeOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_REMAINING_TIME, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_REMAINING_TIME);
     }
 
     static boolean isRemainingDistanceOutputEnabled(Context context) {
@@ -229,7 +230,7 @@ final class HudPrefs {
 
     static void setRemainingDistanceOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_REMAINING_DISTANCE, enabled).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_OUTPUT_REMAINING_DISTANCE);
     }
 
     static int speedLimitMode(Context context) {
@@ -240,7 +241,7 @@ final class HudPrefs {
     static void setSpeedLimitMode(Context context, int mode) {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_MODE,
                 normalizeSpeedLimitMode(mode)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SPEED_LIMIT_MODE);
     }
 
     static int speedLimitFreeFallback(Context context) {
@@ -252,7 +253,7 @@ final class HudPrefs {
     static void setSpeedLimitFreeFallback(Context context, int mode) {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_FREE_FALLBACK,
                 clamp(mode, SPEED_LIMIT_FALLBACK_OFF, SPEED_LIMIT_FALLBACK_LANES)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SPEED_LIMIT_FREE_FALLBACK);
     }
 
     static int speedLimitOverlaySeconds(Context context) {
@@ -262,7 +263,7 @@ final class HudPrefs {
     static void setSpeedLimitOverlaySeconds(Context context, int seconds) {
         prefs(context).edit().putInt(
                 KEY_SPEED_LIMIT_OVERLAY_SECONDS, clamp(seconds, 1, 10)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SPEED_LIMIT_OVERLAY_SECONDS);
     }
 
     static int speedLimitCompositePlacement(Context context) {
@@ -274,7 +275,7 @@ final class HudPrefs {
     static void setSpeedLimitCompositePlacement(Context context, int placement) {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_COMPOSITE_PLACEMENT,
                 normalizeSpeedLimitCompositePlacement(placement)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SPEED_LIMIT_COMPOSITE_PLACEMENT);
     }
 
     static int speedLimitManeuverOverlaySize(Context context) {
@@ -285,7 +286,7 @@ final class HudPrefs {
     static void setSpeedLimitManeuverOverlaySize(Context context, int size) {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_MANEUVER_OVERLAY_SIZE,
                 normalizeSpeedLimitManeuverOverlaySize(size)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SPEED_LIMIT_MANEUVER_OVERLAY_SIZE);
     }
 
     static int speedLimitLaneOverlaySize(Context context) {
@@ -296,7 +297,7 @@ final class HudPrefs {
     static void setSpeedLimitLaneOverlaySize(Context context, int size) {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE,
                 normalizeSpeedLimitLaneOverlaySize(size)).apply();
-        outputOptionsRevision++;
+        markOutputOptionChanged(KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE);
     }
 
     static int normalizeSpeedLimitMode(int mode) {
@@ -372,6 +373,11 @@ final class HudPrefs {
 
     static int outputOptionsRevision() {
         return outputOptionsRevision;
+    }
+
+    private static void markOutputOptionChanged(String key) {
+        outputOptionsRevision++;
+        NavHudLiveSender.onOutputPreferenceChanged(key);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
