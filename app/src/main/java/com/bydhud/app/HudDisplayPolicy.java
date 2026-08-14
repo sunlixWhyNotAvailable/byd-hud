@@ -21,6 +21,13 @@ final class HudDisplayPolicy {
         return rawDistanceMeters;
     }
 
+    static DirectTbtFrame applyActiveFrame(
+            DirectTbtFrame rawFrame, boolean clampSmallDistance) {
+        if (rawFrame == null) return null;
+        return rawFrame.withDistanceMeters(displayDistanceMeters(
+                rawFrame.getDistanceMeters(), clampSmallDistance));
+    }
+
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static HudState apply(HudState rawState, boolean clampSmallDistance) {
         if (rawState == null) {

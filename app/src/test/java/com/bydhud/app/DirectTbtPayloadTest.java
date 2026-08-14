@@ -160,6 +160,18 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void activeAlertKeepsItsOwnDistanceAfterManeuverClamp() {
+        DirectTbtFrame frame = HudDisplayPolicy.applyActiveFrame(
+                frame(11, 9, 10, DirectTbtFrame.AlertOverlay.active(
+                        7, 25, "Camera", new byte[]{8, 9})), true);
+        DirectTbtPayload.Options options = new DirectTbtPayload.Options(
+                true, true, true, true, true, true, true);
+
+        assertEquals(11, frame.getDistanceMeters());
+        assertEquals(25, DirectTbtPayload.prepare(frame, options).distanceMeters());
+    }
+
+    @Test
     public void selectedTripMetricsPrefixUsesStableOrderAndFormatting() {
         long nextArrival = localTime(12, 20);
         long wholeArrival = localTime(13, 40);

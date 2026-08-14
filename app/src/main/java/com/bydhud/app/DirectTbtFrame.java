@@ -202,6 +202,15 @@ public final class DirectTbtFrame {
                 amapBroadcastManeuver, roundaboutExitNumber);
     }
 
+    DirectTbtFrame withDistanceMeters(int value) {
+        int normalized = Math.max(0, value);
+        if (normalized == distanceMeters) return this;
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                normalized, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
+    }
+
     DirectTbtFrame withVehicleTbt(int broadcastManeuver, int exitNumber) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,

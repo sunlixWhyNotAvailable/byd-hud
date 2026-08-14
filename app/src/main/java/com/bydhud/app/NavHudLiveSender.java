@@ -1893,6 +1893,8 @@ final class NavHudLiveSender {
                 "direct:" + safeReason(reason), now);
         DirectTbtFrame outputFrame = applySpeedLimitOverlay(
                 ownerPackage, frame, now);
+        int sourceDistanceMeters = outputFrame.getDistanceMeters();
+        outputFrame = effectiveDirectFrame(outputFrame);
         long tbtDispatchElapsedMs = WazeRouteTiming.UNSET;
         long hudDispatchElapsedMs = WazeRouteTiming.UNSET;
         boolean tbtDispatched = false;
@@ -1931,7 +1933,8 @@ final class NavHudLiveSender {
                     "waze-frame:" + safeReason(reason));
         }
         long receivedWallClockMs = System.currentTimeMillis();
-        logWazeDirectFrame(outputFrame, reason, now, receivedWallClockMs,
+        logWazeDirectFrame(outputFrame, sourceDistanceMeters,
+                reason, now, receivedWallClockMs,
                 DirectTbtPayload.Options.from(context));
         if (!isHudOutputOwner(ownerPackage)) {
             if (timing != null && firstTbtDispatch) {
@@ -1981,7 +1984,8 @@ final class NavHudLiveSender {
                 tbtDispatched, hudDispatched));
     }
 
-    private void logWazeDirectFrame(DirectTbtFrame frame, String reason,
+    private void logWazeDirectFrame(DirectTbtFrame frame,
+                                    int sourceDistanceMeters, String reason,
                                     long receivedAtMs,
                                     long receivedWallClockMs,
                                     DirectTbtPayload.Options options) {
@@ -2006,7 +2010,7 @@ final class NavHudLiveSender {
                 + " rawType=" + frame.getRawManeuverType()
                 + " amap=" + frame.getAmapManeuver()
                 + " byd=" + frame.getBydManeuver()
-                + " distanceM=" + frame.getDistanceMeters()
+                + " distanceM=" + sourceDistanceMeters
                 + " road=\"" + normalizeString(frame.getRoadText()) + "\""
                 + " cue=\"" + normalizeString(frame.getCueText()) + "\""
                 + " maneuverBytes=" + maneuver.length
@@ -2159,6 +2163,8 @@ final class NavHudLiveSender {
                 GMapsDirectChannel.PACKAGE_NAME, "gmaps_direct", safeReason(reason), now);
         DirectTbtFrame outputFrame = applySpeedLimitOverlay(
                 ownerPackage, frame, now);
+        int sourceDistanceMeters = outputFrame.getDistanceMeters();
+        outputFrame = effectiveDirectFrame(outputFrame);
         boolean firstRouteEvidence = gmapsTbtRouteStartedAtMs <= 0L;
         if (firstRouteEvidence) gmapsTbtRouteStartedAtMs = now;
         advanceTbtLifecycleForFirstFrame();
@@ -2186,7 +2192,7 @@ final class NavHudLiveSender {
                     ownerPackage, sessionGeneration, outputFrame,
                     "gmaps-frame:" + safeReason(reason));
         }
-        logGMapsDirectFrame(outputFrame, reason, now);
+        logGMapsDirectFrame(outputFrame, sourceDistanceMeters, reason, now);
         if (!isHudOutputOwner(ownerPackage)) {
             logGMapsDirectTiming(timing, callbackEntryElapsedMs,
                     tbtDispatchElapsedMs, hudDispatchElapsedMs,
@@ -2225,7 +2231,8 @@ final class NavHudLiveSender {
                 hudDispatchElapsedMs, tbtDispatched, hudDispatched));
     }
 
-    private void logGMapsDirectFrame(DirectTbtFrame frame, String reason, long receivedAtMs) {
+    private void logGMapsDirectFrame(DirectTbtFrame frame,
+            int sourceDistanceMeters, String reason, long receivedAtMs) {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame, DirectTbtPayload.Options.from(context));
         String raw = "reason=" + safeReason(reason)
@@ -2233,7 +2240,7 @@ final class NavHudLiveSender {
                 + " rawType=" + frame.getRawManeuverType()
                 + " amap=" + frame.getAmapManeuver()
                 + " byd=" + frame.getBydManeuver()
-                + " distanceM=" + frame.getDistanceMeters()
+                + " distanceM=" + sourceDistanceMeters
                 + " road=\"" + normalizeString(frame.getRoadText()) + "\""
                 + " cue=\"" + normalizeString(frame.getCueText()) + "\""
                 + " maneuverBytes=" + frame.getManeuverPng().length
@@ -2427,6 +2434,11 @@ final class NavHudLiveSender {
         }
     }
 
+    private DirectTbtFrame effectiveDirectFrame(DirectTbtFrame frame) {
+        return HudDisplayPolicy.applyActiveFrame(
+                frame, HudPrefs.isSmallDistanceClampEnabled(context));
+    }
+
     private void selectRemainingTbtRoute(String endedPackage, String reason) {
         if (tbtPublisher.isRouteActive()) return;
         String ended = normalizePackage(endedPackage);
@@ -2453,8 +2465,8 @@ final class NavHudLiveSender {
                     "restore:" + safeReason(reason));
             if (wazeFrame != null) {
                 tbtPublisher.publishFrame(next, generation,
-                        applySpeedLimitOverlay(next, wazeFrame,
-                                SystemClock.elapsedRealtime()),
+                        effectiveDirectFrame(applySpeedLimitOverlay(
+                                next, wazeFrame, SystemClock.elapsedRealtime())),
                         "restore:" + safeReason(reason));
             }
         } else if (GMapsDirectChannel.PACKAGE_NAME.equals(next)) {
@@ -2465,8 +2477,9 @@ final class NavHudLiveSender {
             if (latestGMapsDirectFrame != null
                     && latestGMapsDirectFrameSessionGeneration == generation) {
                 tbtPublisher.publishFrame(next, generation,
-                        applySpeedLimitOverlay(next, latestGMapsDirectFrame,
-                                SystemClock.elapsedRealtime()),
+                        effectiveDirectFrame(applySpeedLimitOverlay(
+                                next, latestGMapsDirectFrame,
+                                SystemClock.elapsedRealtime())),
                         "restore:" + safeReason(reason));
             }
         }
