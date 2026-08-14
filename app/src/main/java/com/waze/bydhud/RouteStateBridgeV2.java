@@ -3,8 +3,11 @@ package com.waze.bydhud;
 import android.app.Activity;
 import android.app.Application;
 import android.app.PendingIntent;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
@@ -13,9 +16,12 @@ import android.util.Log;
 
 /** Runtime payload injected into locally patched Waze builds. */
 public final class RouteStateBridgeV2
+        extends BroadcastReceiver
         implements Application.ActivityLifecycleCallbacks, Runnable {
     public static final String ACTION =
             "com.bydhud.app.action.WAZE_NAVIGATION_STATE_V2";
+    public static final String REQUEST_ACTION =
+            "com.waze.bydhud.action.REQUEST_NAVIGATION_STATE_V2";
     public static final String EXTRA_PROTOCOL = "protocol_version";
     public static final String EXTRA_NAVIGATING = "navigating";
     public static final String EXTRA_REASON_CODE = "reason_code";
@@ -26,6 +32,7 @@ public final class RouteStateBridgeV2
     public static final String EXTRA_SPEED_UNIT = "speed_unit";
     public static final String EXTRA_ELAPSED_MS = "event_elapsed_ms";
     public static final String EXTRA_IDENTITY = "waze_identity";
+    public static final String EXTRA_REQUEST_IDENTITY = "bydhud_identity";
     public static final int PROTOCOL_VERSION = 2;
     public static final int CAP_SPEED_LIMIT_HEARTBEAT = 1;
 
@@ -37,6 +44,7 @@ public final class RouteStateBridgeV2
     private static final Handler MAIN_HANDLER = new Handler(Looper.getMainLooper());
     private static Context appContext;
     private static boolean callbacksRegistered;
+    private static boolean requestReceiverRegistered;
     private static boolean lastNavigating;
     private static int lastReasonCode;
     private static boolean statePublished;
@@ -53,6 +61,20 @@ public final class RouteStateBridgeV2
             ((Application) appContext).registerActivityLifecycleCallbacks(ACTIVITY_CALLBACKS);
             callbacksRegistered = true;
         }
+        if (!requestReceiverRegistered) {
+            try {
+                IntentFilter filter = new IntentFilter(REQUEST_ACTION);
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                    appContext.registerReceiver(
+                            ACTIVITY_CALLBACKS, filter, Context.RECEIVER_EXPORTED);
+                } else {
+                    appContext.registerReceiver(ACTIVITY_CALLBACKS, filter);
+                }
+                requestReceiverRegistered = true;
+            } catch (Throwable error) {
+                Log.e(TAG, "state-request receiver registration failed", error);
+            }
+        }
     }
 
     public static synchronized void emit(boolean navigating, int reasonCode) {
@@ -65,6 +87,52 @@ public final class RouteStateBridgeV2
             lastSpeedLimit = Integer.MIN_VALUE;
             lastSpeedUnit = "";
         }
+        if (sendRouteState(context, navigating, reasonCode, "")) {
+            lastNavigating = navigating;
+            lastReasonCode = reasonCode;
+            statePublished = true;
+        }
+    }
+
+    public static synchronized void emit(boolean navigating) {
+        emit(navigating, -1);
+    }
+
+    @Override
+    public void onReceive(Context context, Intent intent) {
+        if (intent == null || !REQUEST_ACTION.equals(intent.getAction())) return;
+        PendingIntent identity;
+        int protocol;
+        try {
+            identity = intent.getParcelableExtra(EXTRA_REQUEST_IDENTITY);
+            protocol = intent.getIntExtra(EXTRA_PROTOCOL, -1);
+        } catch (RuntimeException malformed) {
+            Log.w(TAG, "STATE_REQUEST_IGNORED|reason=malformed");
+            return;
+        }
+        if (identity == null
+                || !matchesStateRequest(identity.getCreatorPackage(), protocol)) {
+            Log.w(TAG, "STATE_REQUEST_IGNORED|reason=untrusted");
+            return;
+        }
+        resendCurrentState();
+    }
+
+    public static boolean matchesStateRequest(String creatorPackage, int protocol) {
+        return protocol == PROTOCOL_VERSION && BYD_HUD_PACKAGE.equals(creatorPackage);
+    }
+
+    private static synchronized void resendCurrentState() {
+        Context context = appContext;
+        if (context == null || !statePublished) {
+            Log.i(TAG, "STATE_REQUEST_IGNORED|reason=no_state");
+            return;
+        }
+        sendRouteState(context, lastNavigating, lastReasonCode, "state_snapshot");
+    }
+
+    private static boolean sendRouteState(Context context, boolean navigating,
+            int reasonCode, String eventType) {
         try {
             Intent identityIntent = new Intent("com.waze.bydhud.IDENTITY")
                     .setPackage(context.getPackageName());
@@ -81,19 +149,16 @@ public final class RouteStateBridgeV2
                     .putExtra(EXTRA_BRIDGE_CAPABILITIES, CAP_SPEED_LIMIT_HEARTBEAT)
                     .putExtra(EXTRA_ELAPSED_MS, SystemClock.elapsedRealtime())
                     .putExtra(EXTRA_IDENTITY, identity);
+            if (!eventType.isEmpty()) event.putExtra(EXTRA_EVENT_TYPE, eventType);
             context.sendBroadcast(event);
-            lastNavigating = navigating;
-            lastReasonCode = reasonCode;
-            statePublished = true;
-            Log.i(TAG, "STATE|navigating=" + navigating + "|reason=" + reasonCode
+            Log.i(TAG, (eventType.isEmpty() ? "STATE" : "STATE_SNAPSHOT")
+                    + "|navigating=" + navigating + "|reason=" + reasonCode
                     + "|generation=" + BRIDGE_GENERATION);
+            return true;
         } catch (Throwable error) {
             Log.e(TAG, "broadcast send failed", error);
+            return false;
         }
-    }
-
-    public static synchronized void emit(boolean navigating) {
-        emit(navigating, -1);
     }
 
     public static synchronized void emitSpeedLimit(int limit, String unit) {

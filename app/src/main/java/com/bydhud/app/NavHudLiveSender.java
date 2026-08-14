@@ -35,6 +35,7 @@ final class NavHudLiveSender {
     private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
     private static final long DASHBOARD_WATCHDOG_INTERVAL_MS = 5000L;
     private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
+    private static final long WAZE_ROUTE_STATE_REQUEST_INTERVAL_MS = 5000L;
     private static final long WAZE_SPEED_LIMIT_EXPIRY_MS = 60_000L;
     static final int WAZE_CAP_SPEED_LIMIT_HEARTBEAT = 1;
     private static final long WAZE_SURFACE_READY_TIMEOUT_MS = 5000L;
@@ -401,6 +402,7 @@ final class NavHudLiveSender {
     private boolean wazeFallbackReadinessCheckInFlight;
     private int wazeFallbackReadinessGeneration;
     private long lastWazeFallbackReadinessCheckMs;
+    private long lastWazeRouteStateRequestMs;
     private boolean wazeSurfaceLaunchPending;
     private volatile boolean wazeSurfaceActive;
     private boolean wazeSurfaceVisible;
@@ -1237,6 +1239,7 @@ final class NavHudLiveSender {
                 HudOutputCoordinator.Source.NONE,
                 "waze-wait-route:" + safeReason(reason));
         log("waze source=waiting_route_lifecycle reason=" + safeReason(reason));
+        requestWazeRouteStateSnapshot("wait-route:" + safeReason(reason), false);
     }
 
     private void onWazeDirectHandshakeAvailable(String ownerPackage,
@@ -1425,6 +1428,7 @@ final class NavHudLiveSender {
         log("waze app foreground elapsedMs=" + eventElapsedMs
                 + " bridgeGeneration=" + bridgeGeneration
                 + " surfaceVisible=" + WazeSurfaceActivity.isVisible());
+        requestWazeRouteStateSnapshot("app-foreground", true);
         if (!shouldUseWazeSurface() || WazeSurfaceActivity.isVisible()) return;
         requestWazeSurfaceActivity("waze-app-foreground", true);
     }
@@ -3218,6 +3222,9 @@ final class NavHudLiveSender {
         boolean ownsHud = isHudOutputOwner(packageName);
         if (WAZE_PACKAGE.equals(packageName)) {
             boolean routeActive = WazeRouteLifecycleStore.isRouteActive(context);
+            if (wantsObserver && !ownsHud && !routeActive) {
+                requestWazeRouteStateSnapshot("tbt-observer", false);
+            }
             if (shouldStartTbtObserverForTest(
                     true, wantsObserver, ownsHud, routeActive,
                     tbtWazeObserver, wazeDirectChannel.isActive())) {
@@ -3335,6 +3342,29 @@ final class NavHudLiveSender {
 
     void refreshTbtObservers() {
         handler.post(this::refreshTbtObserversOnMain);
+    }
+
+    private void requestWazeRouteStateSnapshot(String reason, boolean force) {
+        boolean hudEnabled = NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE);
+        boolean tbtEnabled = shouldObserveTbtWithoutHud(context, WAZE_PACKAGE);
+        if (!shouldRequestWazeRouteStateForTest(
+                HudPrefs.isUserShutdownActive(context), HudPrefs.isBootEnabled(context),
+                hudEnabled, tbtEnabled)) {
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (!force && lastWazeRouteStateRequestMs > 0L
+                && now - lastWazeRouteStateRequestMs
+                < WAZE_ROUTE_STATE_REQUEST_INTERVAL_MS) {
+            return;
+        }
+        lastWazeRouteStateRequestMs = now;
+        WazeRouteLifecycleV2Receiver.requestCurrentState(context, reason);
+    }
+
+    static boolean shouldRequestWazeRouteStateForTest(boolean userShutdown,
+            boolean bootEnabled, boolean hudEnabled, boolean tbtEnabled) {
+        return !userShutdown && bootEnabled && (hudEnabled || tbtEnabled);
     }
 
     private void confirmTbtTeardown(String packageName, long lifecycleToken) {

@@ -58,6 +58,20 @@ public final class WazeLifecyclePolicyTest {
     }
 
     @Test
+    public void stateRecoveryRequiresAnEnabledRuntimeConsumer() {
+        assertTrue(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                false, true, true, false));
+        assertTrue(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                false, true, false, true));
+        assertFalse(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                true, true, true, true));
+        assertFalse(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                false, false, true, true));
+        assertFalse(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                false, true, false, false));
+    }
+
+    @Test
     public void lifecycleRestartPolicyCoversAllStates() {
         boolean[][] cases = {
                 {false, false, false, true},

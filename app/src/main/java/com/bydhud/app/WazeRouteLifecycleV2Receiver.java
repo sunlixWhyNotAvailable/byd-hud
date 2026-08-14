@@ -12,7 +12,10 @@ import android.os.SystemClock;
 /** Receives lifecycle protocol v2 from Waze builds signed by the local patcher key. */
 public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static final String ACTION = "com.bydhud.app.action.WAZE_NAVIGATION_STATE_V2";
+    static final String REQUEST_ACTION =
+            "com.waze.bydhud.action.REQUEST_NAVIGATION_STATE_V2";
     static final String EXTRA_IDENTITY = "waze_identity";
+    static final String EXTRA_REQUEST_IDENTITY = "bydhud_identity";
     static final String EXTRA_EVENT_TYPE = "event_type";
     static final String EXTRA_SPEED_LIMIT = "speed_limit";
     static final String EXTRA_SPEED_UNIT = "speed_unit";
@@ -21,6 +24,42 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     private static long trustedVersionCode = Long.MIN_VALUE;
     private static long trustedUpdateMs = Long.MIN_VALUE;
     private static int trustedUid = -1;
+
+    static boolean requestCurrentState(Context context, String reason) {
+        if (context == null) return false;
+        Context appContext = context.getApplicationContext();
+        if (!NavigatorPatchStore.isInstalledWazeLifecycleV2(appContext)) {
+            WazeRouteLifecycleReceiver.log(appContext,
+                    "v2 state request skipped reason=untrusted_waze trigger="
+                            + cleanReason(reason));
+            return false;
+        }
+        try {
+            Intent identityIntent = new Intent(
+                    "com.bydhud.app.action.WAZE_STATE_REQUEST_IDENTITY")
+                    .setPackage(appContext.getPackageName());
+            int pendingFlags = PendingIntent.FLAG_UPDATE_CURRENT
+                    | PendingIntent.FLAG_IMMUTABLE;
+            PendingIntent identity = PendingIntent.getBroadcast(
+                    appContext, 5, identityIntent, pendingFlags);
+            Intent request = new Intent(REQUEST_ACTION)
+                    .setPackage(WazeRouteLifecycleStore.WAZE_PACKAGE)
+                    .addFlags(Intent.FLAG_RECEIVER_REGISTERED_ONLY
+                            | Intent.FLAG_RECEIVER_FOREGROUND)
+                    .putExtra(WazeRouteLifecycleStore.EXTRA_PROTOCOL_VERSION,
+                            PROTOCOL_VERSION)
+                    .putExtra(EXTRA_REQUEST_IDENTITY, identity);
+            appContext.sendBroadcast(request);
+            WazeRouteLifecycleReceiver.log(appContext,
+                    "v2 state request sent trigger=" + cleanReason(reason));
+            return true;
+        } catch (RuntimeException error) {
+            WazeRouteLifecycleReceiver.log(appContext,
+                    "v2 state request failed error=" + error.getClass().getSimpleName()
+                            + " trigger=" + cleanReason(reason));
+            return false;
+        }
+    }
 
     @Override
     public void onReceive(Context context, Intent intent) {
@@ -172,5 +211,10 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
             int installedUid) {
         return WazeRouteLifecycleStore.WAZE_PACKAGE.equals(creatorPackage)
                 && creatorUid == installedUid;
+    }
+
+    private static String cleanReason(String reason) {
+        if (reason == null) return "";
+        return reason.replace('\n', '_').replace('\r', '_');
     }
 }
