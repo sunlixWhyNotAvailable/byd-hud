@@ -244,6 +244,20 @@ public final class NavInfoLogger {
         if (!(viewValue instanceof ImageView) || maneuverValue == null) return;
         final ImageView view = (ImageView) viewValue;
         final String maneuver = enumName(readField(maneuverValue, "a"));
+        captureManeuverViewValue(view, maneuver);
+    }
+
+    /** Captures the 26.30 post-body Optional<Lbqmm> value via Lbqmm.a.name(). */
+    public static void captureManeuverViewV26(Object viewValue, Object optionalValue) {
+        if (!(viewValue instanceof ImageView) || optionalValue == null) return;
+        Object maneuverValue = readField(optionalValue, "a");
+        if (maneuverValue == null) return;
+        final ImageView view = (ImageView) viewValue;
+        final String maneuver = enumName(readField(maneuverValue, "a"));
+        captureManeuverViewValue(view, maneuver);
+    }
+
+    private static void captureManeuverViewValue(final ImageView view, String maneuver) {
         final RouteSnapshot snapshot = routeSnapshot();
         final long epoch = snapshot.epoch;
         if (!snapshot.active) return;

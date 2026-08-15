@@ -814,6 +814,18 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
+    fun runLogcatPhase(phaseId: String) {
+        if (logcatBusy) return
+        logcatBusy = true
+        updateScope.launch {
+            withContext(Dispatchers.IO) {
+                activity.composeStartLogcatPhase(phaseId)
+            }
+            logcatBusy = false
+            refresh()
+        }
+    }
+
     fun beginConfigurationShare(destination: StorageShareDestination) {
         if (configurationShareBusy) return
         configurationShareVisible = false
@@ -1168,6 +1180,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         logcatBusy = logcatBusy,
                         onStartLogcat = { runLogcatAction(true) },
                         onStopLogcat = { runLogcatAction(false) },
+                        onStartPhase = ::runLogcatPhase,
                         onShareConfiguration = {
                             if (!configurationShareBusy
                                 && activity.composeTryStartBlockingUiFlow("configuration-share")) {
@@ -3253,8 +3266,18 @@ private fun LogsTab(
     logcatBusy: Boolean,
     onStartLogcat: () -> Unit,
     onStopLogcat: () -> Unit,
+    onStartPhase: (String) -> Unit,
     onShareConfiguration: () -> Unit
 ) {
+    val phaseRunning = snapshot.logcatStatus.contains("phase=")
+    val idlePhase = if (copy.language == Language.Ua) "Спокій 10 с" else "Idle 10 s"
+    val interaction1 = if (copy.language == Language.Ua) "Взаємодія 1 · 24 с" else "Interaction 1 · 24 s"
+    val interaction2 = if (copy.language == Language.Ua) "Взаємодія 2 · 24 с" else "Interaction 2 · 24 s"
+    val privacy = if (copy.language == Language.Ua) {
+        "Запис містить системні логи. Перевірте файли перед поширенням; автоматичного завантаження немає."
+    } else {
+        "The capture contains system logs. Review it before sharing; nothing is uploaded automatically."
+    }
     LazyPageSurface(copy.logs, copy.logsHint, palette) {
         item(key = "log-status") {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -3306,6 +3329,31 @@ private fun LogsTab(
                         onClick = onShareConfiguration
                     )
                 }
+                Row(
+                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        idlePhase to LogcatRecorder.PHASE_IDLE,
+                        interaction1 to LogcatRecorder.PHASE_INTERACTION_1,
+                        interaction2 to LogcatRecorder.PHASE_INTERACTION_2
+                    ).forEach { (label, phase) ->
+                        HudButton(
+                            label,
+                            palette,
+                            primary = false,
+                            enabled = snapshot.logcatRecording && !logcatBusy && !phaseRunning,
+                            width = 0.dp,
+                            modifier = Modifier.weight(1f)
+                        ) { onStartPhase(phase) }
+                    }
+                }
+                Text(
+                    privacy,
+                    color = palette.muted,
+                    fontSize = 12.sp,
+                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp)
+                )
                 }
                 Section(copy.applicationState, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
                     CodeBlock(snapshot.applicationState, palette, compact = true, modifier = Modifier.padding(14.dp))
@@ -5827,16 +5875,16 @@ private fun enCopy() = Copy(
     sendMain = "Send to main",
     startAppFirst = "Start app first",
     noBackgroundApps = "Supported apps are not duplicated here. This list shows only current non-system background apps.",
-    logsHint = "Capture logs and navigation artifact paths.",
-    logcatRecorder = "Logcat recorder",
+    logsHint = "Capture bounded full-system diagnostics and navigation artifact paths.",
+    logcatRecorder = "System recorder",
     recorderStatus = "Recorder status",
     waiting = "waiting",
     logcatWaiting = "Waiting to record",
     logcatRecording = "Recording log",
     logcatSaving = "Saving log",
     logcatSaved = "Log saved",
-    startLogcat = "Record Logcat",
-    stopLogcat = "Stop Logcat",
+    startLogcat = "Start system capture",
+    stopLogcat = "Stop capture",
     shareConfiguration = "Share configuration",
     applicationState = "Application state",
     navigationLogs = "Navigation logs",
@@ -6049,16 +6097,16 @@ private fun uaCopy() = enCopy().copy(
     sendMain = "На основний екран",
     startAppFirst = "Спочатку запусти",
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
-    logsHint = "Збір логів і шляхів до навігаційних логів.",
-    logcatRecorder = "Запис logcat",
+    logsHint = "Збір обмеженої повносистемної діагностики та шляхів до навігаційних логів.",
+    logcatRecorder = "Системний рекордер",
     recorderStatus = "Стан запису",
     waiting = "очікування",
     logcatWaiting = "Очікування запису",
     logcatRecording = "Йде запис логу",
     logcatSaving = "Збереження логу",
     logcatSaved = "Лог збережено",
-    startLogcat = "Записати Logcat",
-    stopLogcat = "Зупинити logcat",
+    startLogcat = "Почати системний запис",
+    stopLogcat = "Зупинити запис",
     shareConfiguration = "Поділитись конф-єю",
     applicationState = "Стан застосунку",
     navigationLogs = "Навігаційні логи",

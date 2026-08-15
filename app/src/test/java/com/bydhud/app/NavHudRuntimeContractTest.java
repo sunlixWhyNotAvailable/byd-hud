@@ -136,6 +136,29 @@ public final class NavHudRuntimeContractTest {
     }
 
     @Test
+    public void PackageReinitTerminatesTheSelectedOrObservedDirectOwnerBeforeReset()
+            throws IOException {
+        assertEquals("com.waze", NavHudLiveSender.packageReinitOutputOwnerForTest(
+                true, "com.waze", true, GMapsDirectChannel.PACKAGE_NAME));
+        assertEquals("com.waze", NavHudLiveSender.packageReinitOutputOwnerForTest(
+                false, "", true, "com.waze"));
+        assertEquals("", NavHudLiveSender.packageReinitOutputOwnerForTest(
+                false, "", false, "com.waze"));
+
+        String sender = source("NavHudLiveSender.java");
+        int resetStart = sender.indexOf("private void resetRuntimeAfterPackageReplace");
+        int resetEnd = sender.indexOf("\n    //updates shared state here", resetStart);
+        assertTrue(resetStart >= 0 && resetEnd > resetStart);
+        String reset = sender.substring(resetStart, resetEnd);
+        assertTrue(reset.indexOf("hudOutput.endNavigationOutput")
+                < reset.indexOf("completeRuntimeResetAfterPackageReplace"));
+        assertTrue(reset.indexOf("tbtPublisher.endRoute")
+                < reset.indexOf("wazeDirectChannel.hardStop"));
+        assertTrue(reset.indexOf("wazeDirectChannel.hardStop")
+                < reset.indexOf("hudOutput.resetTransport"));
+    }
+
+    @Test
     public void UnsupportedManualTbtMappingIsBlankButVerifiedMappingIsPreserved() {
         assertEquals(11, NavHudLiveSender.manualTbtManeuverForTest(11));
         assertEquals(99, NavHudLiveSender.manualTbtManeuverForTest(4));

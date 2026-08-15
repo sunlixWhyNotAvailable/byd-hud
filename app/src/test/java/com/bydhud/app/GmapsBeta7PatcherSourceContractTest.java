@@ -39,6 +39,8 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(hooks.contains("new Hook(\"session_stop\", \"Lbqny;\", \"sa\""));
         assertTrue(hooks.contains("new Marker(\"method\", \"Lbqoa;\", \"a\", \"V\")"));
         assertTrue(hooks.contains("Collections.singletonList(\"Lbqmm;\")"));
+        assertTrue(hooks.contains("\"captureManeuverViewV26\""));
+        assertTrue(hooks.contains("\"captureManeuverView\",\n                    new Marker"));
         assertTrue(hooks.contains("HookPlacement.POST_BODY_BEFORE_RETURN_VOID"));
 
         assertTrue(profile.contains("\"26.30\", HOOKS_2630, \"Lbimf;\", \"rI\""));
@@ -178,6 +180,25 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(unit.contains("toUpperCase(java.util.Locale.US)"));
         assertTrue(unit.contains("\"US\".equals(country) || \"MM\".equals(country)"));
         assertTrue(unit.contains("|| \"LR\".equals(country) || \"GB\".equals(country)"));
+    }
+
+    @Test
+    public void loggerUsesCanonical2630ManeuverExtractor() throws IOException {
+        String source = sourcePath(
+                "app/src/main/java/com/bydhud/gmapsdiag/NavInfoLogger.java");
+        String capture = between(source,
+                "public static void captureManeuverViewV26(",
+                "private static void captureManeuverViewValue(");
+        assertTrue(capture.contains("readField(optionalValue, \"a\")"));
+        assertTrue(capture.contains("readField(maneuverValue, \"a\")"));
+        assertTrue(source.contains("((Enum<?>) value).name()"));
+        String patcher = sourcePath(
+                "app/src/main/java/com/bydhud/gmapsdiag/patcher/GmapsDiagnosticPatcher.java");
+        assertTrue(patcher.contains(
+                "Optional.a -> Lbqmm.a -> enum.name"));
+        assertTrue(patcher.contains("countLegacyLoggerCalls"));
+        assertTrue(patcher.contains("legacy maneuver hook count is not exactly one"));
+        assertTrue(patcher.contains("value.put(\"extractor\""));
     }
 
     @Test

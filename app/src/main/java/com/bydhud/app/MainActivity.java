@@ -596,10 +596,11 @@ public final class MainActivity extends ComponentActivity {
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startLogcatRecording() {
         setLogcatRecorderStatus(LogcatRecorder.STATUS_RECORDING);
-        LogcatRecorder.Result result = LogcatRecorder.start(this);
-        appendStatus("logcat start " + result.detail
-                + " file=" + filePath(result.file));
-        refreshLogcatControls();
+        if (logcatStartButton != null) logcatStartButton.setEnabled(false);
+        Thread worker = new Thread(() -> reportLogcatResult(
+                "start", LogcatRecorder.start(this)), "BydHudRecorderStart");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -611,9 +612,15 @@ public final class MainActivity extends ComponentActivity {
         if (logcatStopButton != null) {
             logcatStopButton.setEnabled(false);
         }
+        Thread worker = new Thread(() -> reportLogcatResult(
+                "stop", LogcatRecorder.stop(this)), "BydHudRecorderStop");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void reportLogcatResult(String action, LogcatRecorder.Result result) {
         handler.post(() -> {
-            LogcatRecorder.Result result = LogcatRecorder.stop(this);
-            appendStatus("logcat stop " + result.detail
+            appendStatus("system recorder " + action + " " + result.detail
                     + " file=" + filePath(result.file));
             refreshLogcatControls();
         });
@@ -645,9 +652,9 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String logPathsText() {
-        return "Logcat:\n"
+        return "System recorder:\n"
                 + NavigationLogStorage.publicLogcatPath()
-                + "\nFiles: logcat_*.txt"
+                + "\nFiles: system_*/manifest.json, logcat-*.log, snapshots"
                 + "\n\nDaily logs:\n"
                 + NavigationLogStorage.publicLogsPath()
                 + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, "
@@ -1900,12 +1907,16 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStartLogcat() {
-        startLogcatRecording();
+        reportLogcatResult("start", LogcatRecorder.start(this));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStopLogcat() {
-        stopLogcatRecording();
+        reportLogcatResult("stop", LogcatRecorder.stop(this));
+    }
+
+    public void composeStartLogcatPhase(String phaseId) {
+        reportLogcatResult("phase", LogcatRecorder.startPresetPhase(this, phaseId));
     }
 
     //stops all active runtime work after explicit user shutdown so auto-start stays blocked until the next manual open.

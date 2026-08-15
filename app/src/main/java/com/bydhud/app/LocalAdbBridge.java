@@ -74,6 +74,11 @@ final class LocalAdbBridge {
             "rm "
                     + CAPTURE_SHELL_ROOT
                     + CAPTURE_SESSION_PATH);
+    private static final Pattern DIAGNOSTIC_LOGCAT_COMMAND = Pattern.compile(
+            "logcat -b all -v threadtime -T '[0-9]{2}-[0-9]{2} "
+                    + "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}' -d");
+    private static final Pattern DIAGNOSTIC_PROC_STAT_COMMAND = Pattern.compile(
+            "cat /proc/[0-9]{1,10}/stat");
     private static final Pattern VEHICLE_CONFIG_PROPERTY_COMMAND = Pattern.compile(
             "getprop (?:ro\\.(?:build\\.(?:fingerprint|display\\.id)|product\\."
                     + "(?:brand|device|manufacturer|model|name)|hardware|board\\.platform|"
@@ -409,6 +414,19 @@ final class LocalAdbBridge {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
         return runTrustedRuntimeShellCommand(context, safeCommand);
+    }
+
+    static ShellResult runDiagnosticShellCommand(Context context, String command)
+            throws IOException {
+        String safeCommand = command == null ? "" : command.trim();
+        if (!isAllowedDiagnosticShellCommand(safeCommand)) {
+            throw new SecurityException("ADB diagnostic command is not allowed: " + safeCommand);
+        }
+        return runTrustedRuntimeShellCommand(context, safeCommand);
+    }
+
+    static boolean isAllowedDiagnosticShellCommandForTest(String command) {
+        return isAllowedDiagnosticShellCommand(command == null ? "" : command.trim());
     }
 
     static ShellResult launchInstrumentProxy(
@@ -781,6 +799,29 @@ final class LocalAdbBridge {
                 || MOVE_STACK_COMMAND.matcher(command).matches()
                 || WAZE_SCREENSHOT_COMMAND.matcher(command).matches()
                 || APP_LOCAL_RM_COMMAND.matcher(command).matches();
+    }
+
+    private static boolean isAllowedDiagnosticShellCommand(String command) {
+        if (DIAGNOSTIC_LOGCAT_COMMAND.matcher(command).matches()
+                || DIAGNOSTIC_PROC_STAT_COMMAND.matcher(command).matches()) {
+            return true;
+        }
+        switch (command) {
+            case "logcat -g -b all":
+            case "dumpsys gfxinfo com.bydhud.app reset":
+            case "dumpsys gfxinfo com.bydhud.app framestats":
+            case "dumpsys accessibility":
+            case "dumpsys activity activities":
+            case "dumpsys window windows":
+            case "dumpsys cpuinfo":
+            case "dumpsys thermalservice":
+            case "dumpsys meminfo com.bydhud.app":
+            case "dumpsys package com.bydhud.app":
+            case "cat /proc/loadavg":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static boolean isVehicleConfigurationCommand(String command) {

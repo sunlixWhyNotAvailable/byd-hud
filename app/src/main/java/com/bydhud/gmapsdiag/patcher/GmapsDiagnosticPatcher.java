@@ -70,6 +70,9 @@ public final class GmapsDiagnosticPatcher {
                     + "TurnCardStepManeuverImageView;";
     private static final String AUDIO_METHOD = "g";
     private static final String AUDIO_BUILDER = "Landroid/media/AudioAttributes$Builder;";
+    private static final String MANEUVER_EXTRACTOR_V25 = "maneuver.a -> enum.name";
+    private static final String MANEUVER_EXTRACTOR_V26 =
+            "Optional.a -> Lbqmm.a -> enum.name";
     private static final List<Hook> HOOKS_2516 = Arrays.asList(
             new Hook("nav_payload", "Lbpix;", "b",
                     Collections.singletonList("Lclca;"), "V",
@@ -133,9 +136,10 @@ public final class GmapsDiagnosticPatcher {
                     new Marker("method", "Lbqoa;", "a", "V")),
             new Hook("maneuver_bitmap", MANEUVER_VIEW_CLASS, "setManeuver",
                     Collections.singletonList("Lbqmm;"), "V",
-                    "captureManeuverView", Arrays.asList(
+                    "captureManeuverViewV26", Arrays.asList(
                             "Ljava/lang/Object;", "Ljava/lang/Object;"), 2,
                     HookPlacement.POST_BODY_BEFORE_RETURN_VOID,
+                    "captureManeuverView",
                     new Marker("method", MANEUVER_VIEW_CLASS, "a", "V"))
     );
     private static final Profile PROFILE_2516 = new Profile(
@@ -487,6 +491,8 @@ public final class GmapsDiagnosticPatcher {
             Map<String, Object> inputManeuverReport = new LinkedHashMap<>();
             inputManeuverReport.put("targetCount", inputManeuver.targetCount);
             inputManeuverReport.put("hookCallCount", inputManeuver.hookCallCount);
+            inputManeuverReport.put("legacyHookCallCount",
+                    inputManeuver.legacyHookCallCount);
             inputManeuverReport.put("normalReturnIndex", inputManeuver.normalReturnIndex);
             inputManeuverReport.put("guard", inputManeuver.guard);
             report.put("inputManeuverBitmap", inputManeuverReport);
@@ -563,6 +569,7 @@ public final class GmapsDiagnosticPatcher {
         report.put("apk", apk.getAbsolutePath());
         report.put("classification", inspection.classification());
         report.put("targetProfile", inspection.profile.id);
+        report.put("maneuverExtractor", maneuverExtractor(inspection.profile));
         report.put("dexCount", inspection.dexEntries.size());
         report.put("loggerClassCount", inspection.loggerClassCount);
         report.put("loggerDexEntry", inspection.loggerDexEntry);
@@ -578,12 +585,16 @@ public final class GmapsDiagnosticPatcher {
             Map<String, Object> value = new LinkedHashMap<>();
             value.put("targetCount", result.targetCount);
             value.put("hookCallCount", result.hookCallCount);
+            value.put("legacyHookCallCount", result.legacyHookCallCount);
             value.put("returnVoidCount", result.returnVoidCount);
             value.put("insertedCallCount", result.insertedCallCount);
             value.put("normalReturnIndex", result.normalReturnIndex);
             value.put("placement", hook.placement.name());
             value.put("dexEntry", result.dexEntry);
             value.put("guard", result.guard);
+            if ("maneuver_bitmap".equals(hook.id)) {
+                value.put("extractor", maneuverExtractor(inspection.profile));
+            }
             hooks.put(hook.id, value);
         }
         report.put("hooks", hooks);
@@ -620,6 +631,11 @@ public final class GmapsDiagnosticPatcher {
         gmsCore.put("state", inspection.gmsCoreState);
         report.put("gmsCoreDialog", gmsCore);
         return report;
+    }
+
+    private static String maneuverExtractor(Profile profile) {
+        return "26.30".equals(profile.id)
+                ? MANEUVER_EXTRACTOR_V26 : MANEUVER_EXTRACTOR_V25;
     }
 
     private static Inspection inspect(File apk) throws IOException {
@@ -714,9 +730,12 @@ public final class GmapsDiagnosticPatcher {
                                 continue;
                             }
                             result.hookCallCount += countLoggerCalls(implementation, hook);
+                            result.legacyHookCallCount += countLegacyLoggerCalls(
+                                    implementation, hook);
                             result.returnVoidCount = countReturnVoid(implementation);
                             result.normalReturnIndex = normalReturnVoidIndex(implementation);
-                            result.insertedCallCount = result.hookCallCount;
+                            result.insertedCallCount = result.hookCallCount
+                                    + result.legacyHookCallCount;
                             result.guard = verifyHookImplementation(implementation, hook);
                             inspection.hooksByDex.computeIfAbsent(
                                     entry.getName(), unused -> new ArrayList<>()).add(hook);
@@ -790,13 +809,19 @@ public final class GmapsDiagnosticPatcher {
         String markers = verifyMarkers(implementation, hook);
         if (!"ok".equals(markers)) return markers;
         if (hook.placement != HookPlacement.POST_BODY_BEFORE_RETURN_VOID) return "ok";
-        if (countLoggerCalls(implementation, hook) == 0) return "ok";
+        int canonicalCount = countLoggerCalls(implementation, hook);
+        int legacyCount = countLegacyLoggerCalls(implementation, hook);
+        if (canonicalCount == 0 && legacyCount == 0) return "ok";
+        if (canonicalCount + legacyCount != 1) {
+            return "post-body logger call is duplicated";
+        }
         List<? extends Instruction> instructions = toInstructionList(implementation);
         int returnIndex = normalReturnVoidIndex(instructions);
         if (returnIndex < 0) return "post-body normal return-void is missing or ambiguous";
         int loggerIndex = -1;
         for (int i = 0; i < instructions.size(); i++) {
-            if (isLoggerCall(instructions.get(i), hook)) {
+            if (isLoggerCall(instructions.get(i), hook)
+                    || isLegacyLoggerCall(instructions.get(i), hook)) {
                 if (loggerIndex >= 0) return "post-body logger call is duplicated";
                 loggerIndex = i;
             }
@@ -851,6 +876,29 @@ public final class GmapsDiagnosticPatcher {
                     && "V".equals(method.getReturnType())) count++;
         }
         return count;
+    }
+
+    private static int countLegacyLoggerCalls(
+            MethodImplementation implementation, Hook hook) {
+        if (hook.legacyLoggerMethod == null) return 0;
+        int count = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (isLegacyLoggerCall(instruction, hook)) count++;
+        }
+        return count;
+    }
+
+    private static boolean isLegacyLoggerCall(Instruction instruction, Hook hook) {
+        if (hook.legacyLoggerMethod == null || !(instruction instanceof ReferenceInstruction)) {
+            return false;
+        }
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        if (!(reference instanceof MethodReference)) return false;
+        MethodReference method = (MethodReference) reference;
+        return LOGGER_CLASS.equals(method.getDefiningClass())
+                && hook.legacyLoggerMethod.equals(method.getName())
+                && hook.loggerParameters.equals(toStrings(method.getParameterTypes()))
+                && "V".equals(method.getReturnType());
     }
 
     private static List<ClassDef> relocateDex(
@@ -1283,14 +1331,18 @@ public final class GmapsDiagnosticPatcher {
                     if (!targetHook.matches(method)) return method;
                     targetCount.incrementAndGet();
                     MethodImplementation source = method.getImplementation();
-                    if (source == null || countLoggerCalls(source, targetHook) != 1) {
+                    if (source == null
+                            || countLoggerCalls(source, targetHook)
+                            + countLegacyLoggerCalls(source, targetHook) != 1) {
                         throw new IllegalStateException(
                                 "legacy maneuver hook count is not exactly one");
                     }
                     MutableMethodImplementation mutable =
                             new MutableMethodImplementation(source);
                     for (int i = mutable.getInstructions().size() - 1; i >= 0; i--) {
-                        if (isLoggerCall(mutable.getInstructions().get(i), targetHook)) {
+                        if (isLoggerCall(mutable.getInstructions().get(i), targetHook)
+                                || isLegacyLoggerCall(
+                                mutable.getInstructions().get(i), targetHook)) {
                             mutable.removeInstruction(i);
                         }
                     }
@@ -2025,15 +2077,22 @@ public final class GmapsDiagnosticPatcher {
             boolean legacyManeuverHook = false;
             for (Hook hook : profile.hooks) {
                 HookResult result = results.get(hook.id);
-                if ("maneuver_bitmap".equals(hook.id) && !"ok".equals(result.guard)) {
+                if ("maneuver_bitmap".equals(hook.id)
+                        && result.legacyHookCallCount > 0) {
                     legacyManeuverHook = true;
                 }
                 boolean acceptedBridgeGuard = "ok".equals(result.guard)
                         || ("maneuver_bitmap".equals(hook.id)
                         && result.guard.startsWith("post-body logger call"));
+                boolean canonicalBridge = result.hookCallCount == 1
+                        && result.legacyHookCallCount == 0;
+                boolean legacyBridge = "maneuver_bitmap".equals(hook.id)
+                        && result.hookCallCount == 0
+                        && result.legacyHookCallCount == 1;
                 stock &= result.targetCount == 1 && result.hookCallCount == 0
+                        && result.legacyHookCallCount == 0
                         && "ok".equals(result.guard);
-                bridge &= result.targetCount == 1 && result.hookCallCount == 1
+                bridge &= result.targetCount == 1 && (canonicalBridge || legacyBridge)
                         && acceptedBridgeGuard
                         && result.normalReturnIndex >= 0;
             }
@@ -2126,7 +2185,9 @@ public final class GmapsDiagnosticPatcher {
                     || speedHookCount != 1
                     || !loggerStateReplay || !loggerHeartbeat || !loggerBitmapGeneration
                     || !loggerRouteGeneration || maneuver == null
-                    || !"ok".equals(maneuver.guard)) {
+                    || !"ok".equals(maneuver.guard)
+                    || maneuver.hookCallCount != 1
+                    || maneuver.legacyHookCallCount != 0) {
                 throw new IOException("APK direct classification=" + directClassification()
                         + "; expected v3 logger bridge with speed hook: " + details());
             }
@@ -2317,6 +2378,7 @@ public final class GmapsDiagnosticPatcher {
     private static final class HookResult {
         int targetCount;
         int hookCallCount;
+        int legacyHookCallCount;
         int returnVoidCount;
         int insertedCallCount;
         int normalReturnIndex = -1;
@@ -2337,6 +2399,7 @@ public final class GmapsDiagnosticPatcher {
         final String returnType;
         final String loggerMethod;
         final List<String> loggerParameters;
+        final String legacyLoggerMethod;
         final int argumentWords;
         final HookPlacement placement;
         final List<Marker> markers;
@@ -2353,6 +2416,15 @@ public final class GmapsDiagnosticPatcher {
                 String id, String owner, String method, List<String> parameters,
                 String returnType, String loggerMethod, List<String> loggerParameters,
                 int argumentWords, HookPlacement placement, Marker... markers) {
+            this(id, owner, method, parameters, returnType, loggerMethod, loggerParameters,
+                    argumentWords, placement, null, markers);
+        }
+
+        Hook(
+                String id, String owner, String method, List<String> parameters,
+                String returnType, String loggerMethod, List<String> loggerParameters,
+                int argumentWords, HookPlacement placement, String legacyLoggerMethod,
+                Marker... markers) {
             this.id = id;
             this.owner = owner;
             this.method = method;
@@ -2360,6 +2432,7 @@ public final class GmapsDiagnosticPatcher {
             this.returnType = returnType;
             this.loggerMethod = loggerMethod;
             this.loggerParameters = loggerParameters;
+            this.legacyLoggerMethod = legacyLoggerMethod;
             this.argumentWords = argumentWords;
             this.placement = placement;
             this.markers = Arrays.asList(markers);

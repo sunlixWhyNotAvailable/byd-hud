@@ -180,8 +180,9 @@ public final class DirectTbtPayload {
 
     public static byte[] buildClear() {
         ByteArrayOutputStream inner = new ByteArrayOutputStream();
-        writeVarintField(inner, 16, 1);
+        writeVarintField(inner, 2, 2);
         writeVarintField(inner, 6, 255);
+        writeVarintField(inner, 16, 1);
         return wrap(inner.toByteArray());
     }
 

@@ -3486,7 +3486,7 @@ final class NavHudLiveSender {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     boolean isRunning() {
-        return active || stopInProgress || manualTbtActive;
+        return active || stopInProgress || runtimeReinitInProgress || manualTbtActive;
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -4441,6 +4441,12 @@ final class NavHudLiveSender {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopOnMain(String reason, boolean clearHud) {
+        if (runtimeReinitInProgress) {
+            pendingReinitStartPackage = "";
+            pendingReinitStartReason = reason;
+            log("package reinit will complete without restart reason=" + safeReason(reason));
+            return;
+        }
         if (sourceSwitchInProgress) {
             pendingSourceSwitchPackage = "";
             pendingSourceSwitchReason = reason;
@@ -4473,12 +4479,6 @@ final class NavHudLiveSender {
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
         handler.removeCallbacks(arrivalRouteEndStop);
-        if (runtimeReinitInProgress) {
-            runtimeReinitInProgress = false;
-            pendingReinitStartPackage = "";
-            pendingReinitStartReason = "";
-            log("package reinit cancelled reason=" + reason);
-        }
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
@@ -4932,7 +4932,49 @@ final class NavHudLiveSender {
         pendingReinitStartReason = reason;
         sendLoopScheduled = false;
         routeHealthScheduled = false;
+        String hudOwner = packageReinitOutputOwnerForTest(
+                active, activePackage, tbtPublisher.isRouteActive(),
+                tbtPublisher.ownerPackage());
+        long hudGeneration = directSessionGeneration(hudOwner);
+        String tbtOwner = tbtPublisher.isRouteActive()
+                ? tbtPublisher.ownerPackage() : "";
+        long tbtGeneration = tbtPublisher.ownerGeneration();
+        long teardownToken = ++tbtLifecycleToken;
         active = false;
+        updateCaptureIngressPolicy();
+        if (isDirectNavigator(hudOwner)) {
+            hudOutput.endNavigationOutput(
+                    hudOwner, hudGeneration,
+                    "package-replaced-reinit", SystemClock.elapsedRealtime(),
+                    () -> handler.post(() -> completeRuntimeResetAfterPackageReplace(
+                            packageName, reason, tbtOwner, tbtGeneration, teardownToken)));
+            return;
+        }
+        completeRuntimeResetAfterPackageReplace(
+                packageName, reason, tbtOwner, tbtGeneration, teardownToken);
+    }
+
+    static String packageReinitOutputOwnerForTest(boolean active, String activePackage,
+            boolean tbtRouteActive, String tbtOwner) {
+        String selected = normalizePackage(activePackage);
+        if (active && isDirectNavigator(selected)) return selected;
+        String observed = normalizePackage(tbtOwner);
+        return tbtRouteActive && isDirectNavigator(observed) ? observed : "";
+    }
+
+    private void completeRuntimeResetAfterPackageReplace(String packageName, String reason,
+            String tbtOwner, long tbtGeneration, long teardownToken) {
+        if (!runtimeReinitInProgress) return;
+        if (acceptsHudStopCallbackForTest(teardownToken, tbtLifecycleToken)) {
+            tbtPublisher.endRoute(
+                    tbtOwner, tbtGeneration, "package-replaced-reinit");
+            if (!tbtPublisher.isRouteActive() && isDirectNavigator(tbtOwner)) {
+                confirmTbtTeardown(tbtOwner, teardownToken);
+            }
+        } else {
+            log("stale package-reinit terminal callback ignored token="
+                    + teardownToken + " current=" + tbtLifecycleToken);
+        }
         activePackage = "";
         closeWazeSurface("package-replaced-reinit");
         endWazeDirectSession("package-replaced-reinit");

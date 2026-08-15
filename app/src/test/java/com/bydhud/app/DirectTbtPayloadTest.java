@@ -29,8 +29,8 @@ public final class DirectTbtPayloadTest {
     @Test
     public void clearWireBytesStayStable() {
         assertArrayEquals(new byte[]{
-                        0x0a, 0x06, (byte) 0x80, 0x01, 0x01,
-                        0x30, (byte) 0xff, 0x01},
+                        0x0a, 0x08, 0x10, 0x02, 0x30, (byte) 0xff,
+                        0x01, (byte) 0x80, 0x01, 0x01},
                 DirectTbtPayload.buildClear());
     }
 

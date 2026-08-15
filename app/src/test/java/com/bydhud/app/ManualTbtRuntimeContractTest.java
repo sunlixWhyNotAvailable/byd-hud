@@ -89,7 +89,8 @@ public final class ManualTbtRuntimeContractTest {
 
         assertTrue(main.contains("sender.stopManual(stopReason, false, () ->"));
         assertTrue(main.contains("if (!sender.isRunning()) hudOutput.shutdown(reason)"));
-        assertTrue(sender.contains("active || stopInProgress || manualTbtActive"));
+        assertTrue(sender.contains(
+                "active || stopInProgress || runtimeReinitInProgress || manualTbtActive"));
     }
 
     @Test
