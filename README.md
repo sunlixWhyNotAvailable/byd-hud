@@ -208,12 +208,12 @@ Official Google Maps package `com.google.android.apps.maps`, bundles with OBB ex
 ### How patching works
 
 1. Select the installed navigator or optionally choose a downloaded version.
-2. Press `Check` to inspect its package name, signer, splits, and exact DEX structures.
+2. Press `Check` to inspect its package name, APK signature integrity, split topology, and exact DEX structures.
 3. Review the component status pills. Waze reports the direct channel, stable session, and Waze alerts separately; Google Maps reports the direct channel, audio channel, and PiP separately.
 4. Press `Patch` and confirm the warning.
 5. BYD HUD repeats all structural checks, patches only known targets, signs the complete package set with a key generated on this tablet, and asks Android to install it.
 
-For Waze, the direct-channel layer is mandatory; stable-session and alert support remain optional. For Google Maps, Direct, Audio, and PiP are independent components, so any structurally compatible component can be applied, including a PiP-only patch. The Google Maps PiP component disables navigation picture-in-picture without changing activity resize support. The Waze stable-session layer covers route lifecycle, direct speed limits, and cluster trip metrics. The Waze alert hook is currently limited to the structurally compatible Waze 5.20.0.1 layout.
+For Waze, the direct-channel layer is mandatory; stable-session and alert support remain optional. For Google Maps, Direct, Audio, and PiP are independent components, so any structurally compatible component can be applied, including a PiP-only patch. The Direct operation also places rendered-maneuver capture after the stock setter and suppresses the unsupported GmsCore battery dialog while retaining the non-UI GmsCore checks. The Google Maps PiP component disables navigation picture-in-picture without changing activity resize support. The Waze stable-session layer covers route lifecycle, direct speed limits, and cluster trip metrics. The Waze alert hook is currently limited to the structurally compatible Waze 5.20.0.1 layout.
 
 ### Signing and app data
 
@@ -221,7 +221,8 @@ For Waze, the direct-channel layer is mandatory; stable-session and alert suppor
 - A later compatible patch signed by the same key can normally update in place.
 - An incompatible existing signer can require uninstalling the navigator first, which removes that navigator's local data.
 - Clearing BYD HUD data or uninstalling BYD HUD also removes its local signing key.
-- Unknown publisher signatures are rejected.
+- The source publisher is not a patch or runtime eligibility rule; compatibility is determined structurally.
+- A compatible patched APK may be shared, but Android can require uninstall/reinstall when its signer differs from the installed copy.
 
 Back up important navigator data and sign in to its account before patching. The patcher never sends selected APKs to a server. The separate download actions on the `Apps` tab retrieve only the three fixed, pinned navigator assets documented above; patching a user-selected source still operates locally.
 

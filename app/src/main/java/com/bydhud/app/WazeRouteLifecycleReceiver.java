@@ -5,16 +5,12 @@ import android.content.Context;
 import android.content.Intent;
 import android.os.SystemClock;
 
-import java.util.concurrent.Callable;
-import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 // Receives authenticated route transitions from the patched Waze process.
@@ -23,16 +19,12 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
     private static final String EXTRA_SPEED_LIMIT = "speed_limit";
     private static final String EXTRA_SPEED_UNIT = "speed_unit";
     private static final long RECEIVER_TIMEOUT_MS = 8_000L;
-    private static final long TRUST_TIMEOUT_MS = 2_000L;
-
     private static final class AsyncRuntime {
         static final ScheduledExecutorService WATCHDOG =
                 Executors.newSingleThreadScheduledExecutor(
                         runnable -> namedThread(runnable, "bydhud-waze-watchdog"));
         static final ExecutorService EVENTS = Executors.newSingleThreadExecutor(
                 runnable -> namedThread(runnable, "bydhud-waze-events"));
-        static final ExecutorService TRUST = Executors.newSingleThreadExecutor(
-                runnable -> namedThread(runnable, "bydhud-waze-trust"));
         static final java.util.concurrent.atomic.AtomicInteger EVENT_PENDING =
                 new java.util.concurrent.atomic.AtomicInteger();
     }
@@ -149,17 +141,16 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
             return;
         }
 
-        enqueue(appContext, goAsync(), "v1",
-                () -> WazeRouteLifecycleStore.isBridgeSupported(appContext), delivery);
+        enqueue(appContext, goAsync(), "v1", delivery);
     }
 
     static void enqueue(Context context, PendingResult pendingResult, String channel,
-            Callable<Boolean> trustCheck, Runnable delivery) {
-        enqueue(context, pendingResult, channel, trustCheck, delivery, null);
+            Runnable delivery) {
+        enqueue(context, pendingResult, channel, delivery, null);
     }
 
     static void enqueue(Context context, PendingResult pendingResult, String channel,
-            Callable<Boolean> trustCheck, Runnable delivery, WazeRouteTiming timing) {
+            Runnable delivery, WazeRouteTiming timing) {
         Context appContext = context.getApplicationContext();
         AsyncCompletion completion = new AsyncCompletion(pendingResult);
         completion.scheduleWatchdog();
@@ -176,23 +167,7 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
                                 SystemClock.elapsedRealtime(), AsyncRuntime.EVENT_PENDING.get());
                     }
                     if (!completion.isOpen()) {
-                        outcome = "completion_closed_before_trust";
-                        return;
-                    }
-                    if (timing != null) timing.markTrustStart(SystemClock.elapsedRealtime());
-                    final String trustDecision;
-                    try {
-                        trustDecision = awaitTrust(trustCheck);
-                    } finally {
-                        if (timing != null) timing.markTrustEnd(SystemClock.elapsedRealtime());
-                    }
-                    if (!completion.isOpen()) {
-                        outcome = "completion_closed_after_trust_" + trustDecision;
-                        return;
-                    }
-                    if (!"trusted".equals(trustDecision)) {
-                        outcome = "trust_" + trustDecision;
-                        log(appContext, channel + " ignored reason=" + trustDecision);
+                        outcome = "completion_closed_before_delivery";
                         return;
                     }
                     if (timing != null) timing.markDeliveryStart(SystemClock.elapsedRealtime());
@@ -222,28 +197,6 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
             if (timing != null) log(appContext, timing.finish("executor_rejected"));
             log(appContext, channel + " ignored reason=executor_rejected");
             completion.finish();
-        }
-    }
-
-    private static String awaitTrust(Callable<Boolean> trustCheck) {
-        final Future<Boolean> future;
-        try {
-            future = AsyncRuntime.TRUST.submit(trustCheck);
-        } catch (RejectedExecutionException rejected) {
-            return "trust_rejected";
-        }
-        try {
-            return Boolean.TRUE.equals(future.get(TRUST_TIMEOUT_MS, TimeUnit.MILLISECONDS))
-                    ? "trusted" : "untrusted_identity";
-        } catch (TimeoutException timeout) {
-            future.cancel(true);
-            return "trust_timeout";
-        } catch (InterruptedException interrupted) {
-            future.cancel(true);
-            Thread.currentThread().interrupt();
-            return "trust_interrupted";
-        } catch (ExecutionException failure) {
-            return "trust_failed";
         }
     }
 

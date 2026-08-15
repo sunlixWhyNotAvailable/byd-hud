@@ -22,6 +22,7 @@ final class WazeRouteLifecycleStore {
     static final String EXTRA_BRIDGE_CAPABILITIES = "bridge_capabilities";
     static final String EXTRA_EVENT_ELAPSED_MS = "event_elapsed_ms";
     static final int PROTOCOL_VERSION = 1;
+    static final int V2_PROTOCOL_VERSION = 2;
     static final int REASON_UNAVAILABLE = -1;
 
     private static final String PREFS_NAME = "waze_route_lifecycle";
@@ -111,21 +112,41 @@ final class WazeRouteLifecycleStore {
                     return true;
                 }
             }
-            if (NavigatorPatchStore.isInstalledWazeLifecycleV2(context)) {
-                cacheBridgeSupport(versionCode, updateMs);
-                return true;
-            }
             ApplicationInfo info = packageInfo.applicationInfo;
             Bundle metadata = info == null ? null : info.metaData;
-            boolean supported = metadata != null
-                    && metadata.getInt(CAPABILITY_META_DATA, 0) == PROTOCOL_VERSION
-                    && context.getPackageManager().checkPermission(
+            int declaredProtocol = metadata == null
+                    ? 0 : metadata.getInt(CAPABILITY_META_DATA, 0);
+            boolean permissionGranted = context.getPackageManager().checkPermission(
                     PERMISSION, WAZE_PACKAGE) == PackageManager.PERMISSION_GRANTED;
+            boolean supported = isBridgeCapabilitySupportedForTest(
+                    declaredProtocol, permissionGranted);
             if (supported) cacheBridgeSupport(versionCode, updateMs);
             return supported;
         } catch (PackageManager.NameNotFoundException ignored) {
             return false;
         }
+    }
+
+    /** Records a validated V2 identity so startup capability checks can use the
+     * observed structural channel even when the installed build has no legacy
+     * signature permission. */
+    static void noteV2BridgeObserved(Context context) {
+        if (context == null) return;
+        try {
+            PackageInfo packageInfo = context.getPackageManager().getPackageInfo(
+                    WAZE_PACKAGE, 0);
+            cacheBridgeSupport(packageInfo.getLongVersionCode(), packageInfo.lastUpdateTime);
+        } catch (PackageManager.NameNotFoundException ignored) {
+            // The identity fence already failed if Waze is not installed.
+        }
+    }
+
+    /** V2 is structural; legacy V1 still relies on its signature permission. */
+    static boolean isBridgeCapabilitySupportedForTest(
+        int declaredProtocol, boolean permissionGranted) {
+        return declaredProtocol == V2_PROTOCOL_VERSION
+                || permissionGranted
+                && (declaredProtocol == PROTOCOL_VERSION || declaredProtocol == 0);
     }
 
     private static void cacheBridgeSupport(long versionCode, long updateMs) {

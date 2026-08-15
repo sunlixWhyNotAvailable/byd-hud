@@ -6,6 +6,12 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+
 /** Behavioral guards for route ownership, observer lifecycle and teardown tokens. */
 public final class NavHudRuntimeContractTest {
     @Test
@@ -169,6 +175,17 @@ public final class NavHudRuntimeContractTest {
     }
 
     @Test
+    public void NewGMapsRouteClearsPriorSpeedEvenWhenFrameArrivesBeforeStart() {
+        assertTrue(NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart("start"));
+        assertTrue(NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart(
+                "frame-missed-start"));
+        assertFalse(NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart(
+                "first-frame"));
+        assertFalse(NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart(
+                "start-replay"));
+    }
+
+    @Test
     public void TbtRuntimeKeepsGMapsRegistrationAliveWithoutWazeEarlyBind() {
         assertTrue(HudRuntimeSupervisor.shouldKeepTbtRuntimeForTest(
                 true, true, false, false, false));
@@ -234,5 +251,85 @@ public final class NavHudRuntimeContractTest {
                 "", "com.waze"));
         assertFalse(HudOutputCoordinator.shouldClearForAdministrativeStopForTest(
                 GMapsDirectChannel.PACKAGE_NAME, "com.waze"));
+    }
+
+    @Test
+    public void DirectLifecycleMatrixKeepsRouteEvidenceAndRoadInfoOwnershipSeparate()
+            throws IOException {
+        // Route-before-app and route-during-startup both use the same bridge snapshot gate.
+        assertTrue(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                false, true, true, false));
+        assertTrue(NavHudLiveSender.shouldRequestWazeRouteStateForTest(
+                false, true, false, true));
+
+        // HUD OFF retains an active direct route for TBT; HUD ON can promote that route.
+        assertTrue(NavHudLiveSender.shouldRetainTbtRouteOnHudSwitchForTest(
+                true, true, true));
+        assertTrue(NavHudLiveSender.acceptsDirectPromotionForTest(
+                true, true, false, "com.waze", 7L, "com.waze", 7L));
+        assertTrue(NavHudLiveSender.acceptsDirectPromotionForTest(
+                true, true, false, GMapsDirectChannel.PACKAGE_NAME, 8L,
+                GMapsDirectChannel.PACKAGE_NAME, 8L));
+
+        // Waze<->GMaps transfer keeps the explicitly selected RoadInfo source when it lives;
+        // a non-selected terminal callback may only restore the surviving TBT route.
+        assertEquals("com.waze", NavHudLiveSender.selectRemainingTbtOwnerForTest(
+                GMapsDirectChannel.PACKAGE_NAME, true, false, "com.waze", 10L, 20L));
+        assertEquals(GMapsDirectChannel.PACKAGE_NAME,
+                NavHudLiveSender.selectRemainingTbtOwnerForTest(
+                        "com.waze", false, true, GMapsDirectChannel.PACKAGE_NAME, 10L, 20L));
+        assertEquals("", NavHudLiveSender.selectRemainingTbtOwnerForTest(
+                "com.waze", false, false, GMapsDirectChannel.PACKAGE_NAME, 10L, 20L));
+
+        // A stale teardown/session callback is rejected in both observer and owner paths.
+        assertFalse(NavHudLiveSender.acceptsGMapsTeardownForTest(false, 8L, 9L));
+        assertFalse(NavHudLiveSender.acceptsGMapsTeardownForTest(true, 8L, 8L));
+
+        String sender = source("NavHudLiveSender.java");
+        int methodStart = sender.indexOf(
+                "private boolean ensureGMapsRegisteredWhenTransportReady");
+        int methodEnd = sender.indexOf("\n    private static String laneDirections", methodStart);
+        assertTrue(methodStart >= 0 && methodEnd > methodStart);
+        String registration = sender.substring(methodStart, methodEnd);
+        assertFalse(registration.contains("hudOutput.isBound"));
+        assertTrue(registration.contains("gmapsDirectChannel.ensureRegistered(reason)"));
+    }
+
+    @Test
+    public void ProducerReplacementClearPrecedesTheCurrentGenerationGate()
+            throws IOException {
+        String sender = source("NavHudLiveSender.java");
+        int methodStart = sender.indexOf(
+                "private void onGMapsDirectHandshakeAvailable");
+        int methodEnd = sender.indexOf(
+                "\n    private void onGMapsDirectHandshakeUnavailable", methodStart);
+        assertTrue(methodStart >= 0 && methodEnd > methodStart);
+        String handshake = sender.substring(methodStart, methodEnd);
+
+        int replacementClear = handshake.indexOf("clearDirectFrameForSupersedingSession");
+        int currentGenerationGate = handshake.indexOf("isCurrentGMapsDirectCallback");
+        assertTrue(replacementClear >= 0);
+        assertTrue(currentGenerationGate > replacementClear);
+        assertFalse(handshake.contains("renewDirectLease"));
+
+        int routeStart = sender.indexOf("private void onGMapsDirectNavigationStarted");
+        int routeStartEnd = sender.indexOf("\n    private void onGMapsDirectFrame", routeStart);
+        assertTrue(routeStart >= 0 && routeStartEnd > routeStart);
+        String start = sender.substring(routeStart, routeStartEnd);
+        int routeClear = start.indexOf("clearDirectFrameForSupersedingSession");
+        int routeCurrentGate = start.indexOf("isCurrentGMapsDirectCallback");
+        assertTrue(routeClear >= 0);
+        assertTrue(routeCurrentGate > routeClear);
+    }
+
+    private static String source(String name) throws IOException {
+        Path root = Paths.get(System.getProperty("user.dir"));
+        Path file = root.resolve("app/src/main/java/com/bydhud/app/")
+                .resolve(name).normalize();
+        if (!Files.isRegularFile(file)) {
+            file = root.resolve("src/main/java/com/bydhud/app/")
+                    .resolve(name).normalize();
+        }
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
     }
 }

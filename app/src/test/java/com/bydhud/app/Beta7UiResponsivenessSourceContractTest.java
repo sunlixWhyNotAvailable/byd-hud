@@ -354,6 +354,59 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(source.contains("Waze falls back to an available next-stop value"));
     }
 
+    @Test
+    public void hudPillUsesDeliveryEvidenceInsteadOfCapturePermissions() throws IOException {
+        String activity = source("MainActivity.java");
+        String hudStatus = between(activity, "private String hudStatus(",
+                "private String composeApplicationState(");
+        String composeStatus = between(activity, "public String composeHudDeliveryStatus()",
+                "private void invalidateComposeSnapshot()");
+        String composePolling = between(source("BydHudRuntimeCompose.kt"),
+                "LaunchedEffect(appInForeground)",
+                "LaunchedEffect(storageDeleteBusy, storageDeleteQueue)");
+
+        assertTrue(hudStatus.contains("HudDeliveryStatus.uiStatus()"));
+        assertFalse(hudStatus.contains("readyForCapture()"));
+        assertTrue(composeStatus.contains("HudDeliveryStatus.uiStatus()"));
+        assertFalse(composePolling.contains("captureReady"));
+        assertTrue(source("HudDeliveryStatus.java").contains("static String uiStatus()"));
+    }
+
+    @Test
+    public void switchRowsExposeOneMergedSwitchSemanticsNode() throws IOException {
+        String source = source("BydHudRuntimeCompose.kt");
+        String switchRow = between(source, "private fun SwitchRow(",
+                "private fun UpdateCheckLine(");
+        String compact = between(source, "private fun CompactSwitchBox(",
+                "private fun HudSwitch(");
+        String hudSwitch = between(source, "private fun HudSwitch(",
+                "private fun Segmented(");
+        String blocker = between(source, "private fun ModalInputBlocker()", "private fun RuntimeApp(");
+
+        assertTrue(switchRow.contains("toggleable("));
+        assertTrue(switchRow.contains("role = Role.Switch"));
+        assertTrue(switchRow.contains("semantics(mergeDescendants = true)"));
+        assertTrue(compact.contains("toggleable("));
+        assertTrue(compact.contains("role = Role.Switch"));
+        assertTrue(compact.contains("semantics(mergeDescendants = true)"));
+        assertTrue(hudSwitch.contains("toggleable("));
+        assertTrue(hudSwitch.contains("role = Role.Switch"));
+        assertTrue(hudSwitch.contains("clearAndSetSemantics {}"));
+        assertTrue(blocker.contains("clearAndSetSemantics {}"));
+    }
+
+    @Test
+    public void patchWarningDescribesStructuralCompatibilityAndInstallRisk() throws IOException {
+        String source = source("BydHudRuntimeCompose.kt");
+
+        assertTrue(source.contains("exact DEX structure"));
+        assertTrue(source.contains("a repository signer is not required"));
+        assertTrue(source.contains("A signer mismatch may require removing the installed app"));
+        assertTrue(source.contains("точною DEX-структурою"));
+        assertFalse(source.contains("Only known original, project, or confirmed device-local patch signers are accepted"));
+        assertFalse(source.contains("Приймаються лише відомі оригінальні, проєктні або підтверджені локальні ключі патчу цього пристрою"));
+    }
+
     private static String source(String fileName) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/" + fileName);

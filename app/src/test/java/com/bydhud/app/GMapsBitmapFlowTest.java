@@ -74,6 +74,45 @@ public final class GMapsBitmapFlowTest {
     }
 
     @Test
+    public void renderGenerationRejectsStaleProducerFramesEvenWithNewerClock() {
+        byte[] oldPng = png(36, 36, 21);
+        byte[] newPng = png(36, 36, 22);
+        GMapsDirectChannel.ManeuverBitmap current =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", oldPng, 36, 36, 1_001L,
+                        7L, 12L);
+        GMapsDirectChannel.ManeuverBitmap stale =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", newPng, 36, 36, 9_999L,
+                        7L, 11L);
+        GMapsDirectChannel.ManeuverBitmap restart =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", newPng, 36, 36, 1L,
+                        8L, 1L);
+
+        assertFalse(stale.isNewerThan(current));
+        assertTrue(restart.isNewerThan(current));
+    }
+
+    @Test
+    public void legacyV3BitmapUsesBoundedTimestampWatermark() {
+        GMapsDirectChannel.ManeuverBitmap current =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", png(36, 36, 31), 36, 36, 2_000L,
+                        40L, 9L, 7L);
+        GMapsDirectChannel.ManeuverBitmap newerClock =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", png(36, 36, 32), 36, 36, 2_001L,
+                        1L, 1L, -1L);
+        GMapsDirectChannel.ManeuverBitmap staleClock =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", png(36, 36, 33), 36, 36, 1_999L,
+                        99L, 99L, -1L);
+        assertTrue(newerClock.isNewerThan(current, false));
+        assertFalse(staleClock.isNewerThan(current, false));
+    }
+
+    @Test
     public void txDiagnosticUsesFinalPreparedBitmapAndRequiresSuccessfulSend() {
         byte[] google = png(36, 36, 5);
         byte[] fallback = png(72, 72, 6);

@@ -28,17 +28,26 @@ public final class WazeRouteLifecycleV2ReceiverTest {
         String v2 = source("WazeRouteLifecycleV2Receiver.java");
 
         assertTrue(legacy.contains("RECEIVER_TIMEOUT_MS = 8_000L"));
-        assertTrue(legacy.contains("TRUST_TIMEOUT_MS = 2_000L"));
+        assertFalse(legacy.contains("TRUST_TIMEOUT_MS"));
         assertTrue(legacy.contains("Executors.newSingleThreadExecutor"));
         assertTrue(legacy.contains("enqueue(appContext, goAsync(), \"v1\""));
         assertTrue(v2.contains("enqueue(appContext, goAsync(), \"v2\""));
-        assertTrue(v2.contains("packageInfo.getLongVersionCode()"));
-        assertTrue(v2.contains("packageInfo.lastUpdateTime"));
+        assertTrue(v2.contains("getApplicationInfo("));
+        assertTrue(v2.contains("matchesIdentityMetadata"));
+        assertFalse(v2.contains("getLongVersionCode()"));
+        assertFalse(v2.contains("lastUpdateTime"));
+        int capabilityIndex = v2.indexOf("noteV2BridgeObserved(appContext)");
+        int enqueueIndex = v2.indexOf("enqueue(appContext, goAsync(), \"v2\"");
+        assertTrue(capabilityIndex >= 0 && enqueueIndex > capabilityIndex);
         assertTrue(v2.contains("receiverEntryElapsedMs"));
         assertTrue(v2.contains("new WazeRouteTiming"));
         assertTrue(legacy.contains("EVENT_PENDING"));
-        assertTrue(legacy.contains("timing.markTrustStart"));
+        assertFalse(legacy.contains("markTrustStart"));
+        assertFalse(legacy.contains("awaitTrust"));
+        assertTrue(v2.contains("trustedIdentity(appContext, identity)"));
         assertTrue(legacy.contains("timing.markDeliveryStart"));
+        assertFalse(v2.contains("NavigatorPatchStore.isInstalledWazeLifecycleV2"));
+        assertTrue(v2.contains("getApplicationInfo("));
     }
 
     @Test
@@ -53,7 +62,7 @@ public final class WazeRouteLifecycleV2ReceiverTest {
         assertTrue(bridge.contains("matchesStateRequest(identity.getCreatorPackage(), protocol)"));
         assertTrue(bridge.contains("state_snapshot"));
         assertTrue(bridge.contains("if (context == null || !statePublished)"));
-        assertTrue(receiver.contains("NavigatorPatchStore.isInstalledWazeLifecycleV2"));
+        assertFalse(receiver.contains("NavigatorPatchStore.isInstalledWazeLifecycleV2"));
         assertTrue(receiver.contains("Intent.FLAG_RECEIVER_REGISTERED_ONLY"));
         assertTrue(receiver.contains(".setPackage(WazeRouteLifecycleStore.WAZE_PACKAGE)"));
         assertTrue(sender.contains(

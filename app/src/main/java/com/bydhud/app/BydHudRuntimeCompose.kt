@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -77,6 +78,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
@@ -527,6 +531,7 @@ private fun ModalInputBlocker() {
                 indication = null,
                 onClick = {}
             )
+            .clearAndSetSemantics {}
     )
 }
 
@@ -927,13 +932,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 activity.composeRequestPatchUiStateRefresh("patch-operation-finished")
             }
             val deliveryStatus = activity.composeHudDeliveryStatus()
-            val nextHudStatus = if (deliveryStatus == "idle" && !snapshot.captureReady) {
-                "failed"
-            } else {
-                deliveryStatus
-            }
-            if (liveHudStatus != nextHudStatus) {
-                liveHudStatus = nextHudStatus
+            if (liveHudStatus != deliveryStatus) {
+                liveHudStatus = deliveryStatus
             }
         }
     }
@@ -4929,8 +4929,52 @@ private fun SwitchRow(
     enabled: Boolean = true,
     onChecked: (Boolean) -> Unit
 ) {
-    SettingRow(title, hint, palette, enabled = enabled) {
-        HudSwitch(checked, onChecked, palette, enabled = enabled)
+    val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
+    val rowEnabled = enabled && switchControl.value?.pending != true
+    val press = rememberPressFeedback(rowEnabled)
+    val visualClick = rememberVisualFirstClick {
+        switchControl.value?.trigger?.invoke()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 14.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(pressBackground(Color.Transparent, palette, press.pressed))
+            .then(press.modifier)
+            .toggleable(
+                value = checked,
+                enabled = rowEnabled,
+                role = Role.Switch,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onValueChange = { visualClick() }
+            )
+            .semantics(mergeDescendants = true) {},
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
+            )
+            if (hint.isNotBlank()) {
+                Text(
+                    hint,
+                    color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
+                    fontSize = 13.sp
+                )
+            }
+        }
+        HudSwitch(
+            checked,
+            onChecked,
+            palette,
+            enabled = enabled,
+            externalControl = switchControl
+        )
     }
 }
 
@@ -5192,11 +5236,15 @@ private fun CompactSwitchBox(
             .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
             .background(pressBackground(palette.panelAlt, palette, press.pressed))
             .then(press.modifier)
-            .clickable(
+            .toggleable(
+                value = checked,
                 enabled = rowEnabled,
+                role = Role.Switch,
                 interactionSource = press.interactionSource,
-                indication = null
-            ) { visualClick() }
+                indication = null,
+                onValueChange = { visualClick() }
+            )
+            .semantics(mergeDescendants = true) {}
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -5287,11 +5335,15 @@ private fun HudSwitch(
                 )
             )
             .then(press.modifier)
-            .clickable(
+            .toggleable(
+                value = trackChecked,
                 enabled = enabled && !isPending,
+                role = Role.Switch,
                 interactionSource = press.interactionSource,
-                indication = null
-            ) { triggerToggle() }
+                indication = null,
+                onValueChange = { triggerToggle() }
+            )
+            .then(if (externalControl != null) Modifier.clearAndSetSemantics {} else Modifier)
             .padding(0.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -5823,7 +5875,7 @@ private fun enCopy() = Copy(
     patchTab = "APPLICATION PATCH",
     patchHint = "Patch navigation apps to enable direct HUD output.",
     patchWarning = "Warning",
-    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components are patched locally and verified before Android asks you to install the result. Only known original, project, or confirmed device-local patch signers are accepted. Report unsupported versions for analysis:",
+    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components are patched locally and verified before Android asks you to install the result. Patch eligibility uses package, archive topology, manifest, and exact DEX structure; a repository signer is not required. A signer mismatch may require removing the installed app and can lose local data. Report unsupported versions for analysis:",
     patchRiskWarning = "Proceed at your own risk. App developer is not responsible for any data loss or errors.",
     availableNavigators = "Available navigation apps",
     noSupportedNavigators = "No supported navigation apps",
@@ -6045,7 +6097,7 @@ private fun uaCopy() = enCopy().copy(
     patchTab = "ПАТЧ ЗАСТОСУНКУ",
     patchHint = "Патч навігатора для підтримки прямого каналу виводу на HUD.",
     patchWarning = "Попередження",
-    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Приймаються лише відомі оригінальні, проєктні або підтверджені локальні ключі патчу цього пристрою. Повідомляйте про непідтримувані версії для аналізу:",
+    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Сумісність визначається package, структурою архіву, manifest і точною DEX-структурою; ключ репозиторію не потрібен. Невідповідність підпису може вимагати видалення встановленого застосунку та призвести до втрати локальних даних. Повідомляйте про непідтримувані версії для аналізу:",
     patchRiskWarning = "Дійте на власний ризик. Розробник застосунку не несе відповідальності за втрату даних та помилки.",
     availableNavigators = "Доступні навігатори",
     noSupportedNavigators = "Немає підтримуваних навігаторів",

@@ -2,8 +2,8 @@ package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNotNull;
 
 import org.junit.Test;
 
@@ -15,6 +15,66 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicReference;
 
 public final class DirectChannelContractTest {
+    @Test
+    public void producerEpochChangeIsAcceptedOnlyThroughHello() {
+        assertTrue(GMapsDirectChannel.acceptsProducerEpochForTest(
+                1, 4L, 5L));
+        assertFalse(GMapsDirectChannel.acceptsProducerEpochForTest(
+                3, 4L, 5L));
+        assertTrue(GMapsDirectChannel.acceptsProducerEpochForTest(
+                3, 4L, 4L));
+        assertFalse(GMapsDirectChannel.acceptsProducerEpochForTest(
+                3, 4L, -1L));
+        assertTrue(GMapsDirectChannel.acceptsProducerEpochForTest(
+                1, 4L, 6L));
+        assertFalse(GMapsDirectChannel.acceptsProducerEpochForTest(
+                1, 4L, 3L));
+        assertFalse(GMapsDirectChannel.acceptsProducerEpochForTest(
+                1, 4L, -1L));
+    }
+
+    @Test
+    public void helloLivenessRequiresCurrentActiveRoute() {
+        assertTrue(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                false, false, true, true, 9L, 9L));
+        assertTrue(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                false, false, true, true, -1L, 9L));
+        assertFalse(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                true, false, false, true, 9L, 9L));
+        assertFalse(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                false, true, true, true, 8L, 9L));
+        assertFalse(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                false, false, false, true, 9L, 9L));
+        assertFalse(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                false, false, true, false, 9L, 9L));
+        assertFalse(GMapsDirectChannel.acceptsHelloLivenessForTest(
+                false, false, true, true, 10L, 9L));
+    }
+
+    @Test
+    public void routeGenerationRejectsStaleTerminalEventsButAllowsMissedStartFrame() {
+        assertFalse(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                4, 9L, 8L, true));
+        assertTrue(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                4, 9L, 10L, true));
+        assertFalse(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                6, 9L, 8L, true));
+        assertTrue(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                3, 9L, 10L, true));
+        assertTrue(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                2, -1L, 3L, false));
+        assertFalse(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                4, -1L, 3L, false));
+    }
+
+    @Test
+    public void newerTerminalStopCanAdvanceObservedRouteFence() {
+        assertTrue(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                4, 9L, 10L, true));
+        assertTrue(GMapsDirectChannel.acceptsRouteGenerationForTest(
+                2, 10L, 10L, true));
+    }
+
     @Test
     public void terminalOrLossGenerationSupersedesOwnerAndRejectsOldCallbacks() {
         assertEquals(HudOutputCoordinator.DirectOwnerDecision.ADVANCE,
@@ -75,6 +135,33 @@ public final class DirectChannelContractTest {
     }
 
     @Test
+    public void producerReplacementClearsOnlyTheOlderSelectedOwnerSession() {
+        assertTrue(HudOutputCoordinator.shouldClearForSupersedingDirectSession(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(HudOutputCoordinator.shouldClearForSupersedingDirectSession(
+                false, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(HudOutputCoordinator.shouldClearForSupersedingDirectSession(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(HudOutputCoordinator.shouldClearForSupersedingDirectSession(
+                true, "com.waze", 7L, GMapsDirectChannel.OWNER_PACKAGE, 8L));
+
+        assertTrue(HudOutputCoordinator.shouldPreservePendingLossClearOnAdvance(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(HudOutputCoordinator.shouldPreservePendingLossClearOnAdvance(
+                false, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(HudOutputCoordinator.shouldPreservePendingLossClearOnAdvance(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(HudOutputCoordinator.shouldPreservePendingLossClearOnAdvance(
+                true, "com.waze", 7L, GMapsDirectChannel.OWNER_PACKAGE, 8L));
+    }
+
+    @Test
     public void gmapsMapsSupportedDirectLanes() {
         List<Object> raw = Arrays.asList(
                 lane(arrow(1, 0, true)),
@@ -114,6 +201,16 @@ public final class DirectChannelContractTest {
 
         assertTrue(handled);
         assertNotNull(captured.get());
+    }
+
+    @Test
+    public void maneuverBitmapIsRoadInfoVisualOnly() {
+        assertFalse(NavHudLiveSender.shouldDispatchSemanticTbtForDirectReason(
+                "maneuver-bitmap"));
+        assertFalse(NavHudLiveSender.shouldDispatchSemanticTbtForDirectReason(
+                " MANEUVER-BITMAP "));
+        assertTrue(NavHudLiveSender.shouldDispatchSemanticTbtForDirectReason(
+                "frame"));
     }
 
     private static Map<String, Object> lane(Map<String, Object> arrow) {

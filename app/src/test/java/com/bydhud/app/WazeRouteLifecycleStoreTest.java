@@ -6,6 +6,24 @@ import org.junit.Test;
 
 public final class WazeRouteLifecycleStoreTest {
     @Test
+    public void V2StructuralCapabilityDoesNotRequireLegacySignaturePermission() {
+        assertEquals(true, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                WazeRouteLifecycleStore.V2_PROTOCOL_VERSION, false));
+        assertEquals(true, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                WazeRouteLifecycleStore.V2_PROTOCOL_VERSION, true));
+        assertEquals(true, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                0, true));
+        assertEquals(false, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                0, false));
+        assertEquals(true, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                1, true));
+        assertEquals(false, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                1, false));
+        assertEquals(false, WazeRouteLifecycleStore.isBridgeCapabilitySupportedForTest(
+                3, true));
+    }
+
+    @Test
     public void acceptsOnlyNewDeviceElapsedTimestamps() {
         assertEquals("accept", WazeRouteLifecycleStore.eventDecision(0L, 100L, 200L));
         assertEquals("accept", WazeRouteLifecycleStore.eventDecision(100L, 101L, 200L));

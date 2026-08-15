@@ -40,4 +40,12 @@ final class HudDeliveryStatus {
     static boolean hasTransportFailure() {
         return transportFailed;
     }
+
+    // Maps delivery evidence to the HUD pill without coupling it to permission or capture state.
+    static String uiStatus() {
+        if (transportFailed) {
+            return "failed";
+        }
+        return isRunning() ? "running" : "idle";
+    }
 }

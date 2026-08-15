@@ -65,6 +65,25 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
+    public void sameOwnerNewGenerationClearsOldGuidanceBeforeItsFirstFrame() {
+        assertTrue(VehicleTbtPublisher.shouldClearGuidanceForGenerationReplacementForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(VehicleTbtPublisher.shouldClearGuidanceForGenerationReplacementForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 7L));
+        assertFalse(VehicleTbtPublisher.shouldClearGuidanceForGenerationReplacementForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 7L));
+        assertFalse(VehicleTbtPublisher.shouldClearGuidanceForGenerationReplacementForTest(
+                false, GMapsDirectChannel.OWNER_PACKAGE, 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(VehicleTbtPublisher.shouldClearGuidanceForGenerationReplacementForTest(
+                true, "com.waze", 7L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+    }
+
+    @Test
     public void verifiedAmapMappingFeedsInstrumentNamespaceWithoutInventingExitNumbers() {
         int[] expected = {
                 0, 0, 1, 2, 3, 5, 7, 8, 9, 11, 45, 13, 24, 46, 47, 48, 49,

@@ -39,6 +39,7 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(hooks.contains("new Hook(\"session_stop\", \"Lbqny;\", \"sa\""));
         assertTrue(hooks.contains("new Marker(\"method\", \"Lbqoa;\", \"a\", \"V\")"));
         assertTrue(hooks.contains("Collections.singletonList(\"Lbqmm;\")"));
+        assertTrue(hooks.contains("HookPlacement.POST_BODY_BEFORE_RETURN_VOID"));
 
         assertTrue(profile.contains("\"26.30\", HOOKS_2630, \"Lbimf;\", \"rI\""));
         assertTrue(profile.contains("Collections.singletonList(\"Lbqiy;\")"));
@@ -101,6 +102,15 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(source.contains("String audioClassification()"));
         assertTrue(source.contains("return \"PATCHABLE_STOCK\""));
         assertTrue(source.contains("return \"MESSENGER_BRIDGE_POC\""));
+        assertTrue(source.contains("return \"MESSENGER_BRIDGE_UPGRADEABLE\""));
+        assertTrue(source.contains("CAP_ROUTE_GENERATION"));
+        assertTrue(source.contains("rewriteExistingBridgeDex"));
+        assertTrue(source.contains("legacy maneuver hook count is not exactly one"));
+        assertTrue(source.contains("post-body normal return-void is missing or ambiguous"));
+        assertTrue(source.contains("loggerIndex != returnIndex - 1"));
+        assertTrue(source.contains("rewriteGmsCoreDialogDex"));
+        assertTrue(source.contains("ALREADY_SUPPRESSED"));
+        assertTrue(source.contains("UI_SUPPRESSED") || source.contains("ACTIVE"));
         assertTrue(source.contains("return \"MESSENGER_BRIDGE_NAV_AUDIO\""));
         assertTrue(source.contains("return \"NAVIGATION_AUDIO\""));
         assertTrue(source.contains("report.put(\"targetProfile\", inspection.profile.id)"));
@@ -152,6 +162,18 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(capture.contains("SPEED_LIMIT_FAILED|profile=26.30"));
         assertTrue(source.contains(
                 "private static Object invokeObject(Object target, String name)"));
+
+        String loggerSource = sourcePath(
+                "app/src/main/java/com/bydhud/gmapsdiag/NavInfoLogger.java");
+        assertTrue(loggerSource.contains(
+                "PROCESS_EPOCH = SystemClock.elapsedRealtimeNanos()"));
+        assertTrue(loggerSource.contains(
+                "data.putLong(\"producerEpoch\", PROCESS_EPOCH)"));
+        assertTrue(loggerSource.contains("CAP_ROUTE_GENERATION"));
+        assertTrue(loggerSource.contains("data.putLong(\"routeGeneration\", epoch)"));
+        assertTrue(loggerSource.contains("data.putLong(\"stateEpoch\", epoch)"));
+        assertTrue(!loggerSource.contains(
+                "data.putLong(\"producerEpoch\", STATE_EPOCH.get())"));
 
         assertTrue(unit.contains("toUpperCase(java.util.Locale.US)"));
         assertTrue(unit.contains("\"US\".equals(country) || \"MM\".equals(country)"));

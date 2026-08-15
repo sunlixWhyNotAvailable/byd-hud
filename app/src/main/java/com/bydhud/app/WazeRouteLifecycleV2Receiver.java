@@ -4,12 +4,10 @@ import android.app.PendingIntent;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.content.pm.ApplicationInfo;
-import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.SystemClock;
 
-/** Receives lifecycle protocol v2 from Waze builds signed by the local patcher key. */
+/** Receives lifecycle protocol v2 from a structurally compatible installed Waze build. */
 public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static final String ACTION = "com.bydhud.app.action.WAZE_NAVIGATION_STATE_V2";
     static final String REQUEST_ACTION =
@@ -19,21 +17,10 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static final String EXTRA_EVENT_TYPE = "event_type";
     static final String EXTRA_SPEED_LIMIT = "speed_limit";
     static final String EXTRA_SPEED_UNIT = "speed_unit";
-    static final int PROTOCOL_VERSION = 2;
-    private static final Object TRUST_CACHE_LOCK = new Object();
-    private static long trustedVersionCode = Long.MIN_VALUE;
-    private static long trustedUpdateMs = Long.MIN_VALUE;
-    private static int trustedUid = -1;
-
+    static final int PROTOCOL_VERSION = WazeRouteLifecycleStore.V2_PROTOCOL_VERSION;
     static boolean requestCurrentState(Context context, String reason) {
         if (context == null) return false;
         Context appContext = context.getApplicationContext();
-        if (!NavigatorPatchStore.isInstalledWazeLifecycleV2(appContext)) {
-            WazeRouteLifecycleReceiver.log(appContext,
-                    "v2 state request skipped reason=untrusted_waze trigger="
-                            + cleanReason(reason));
-            return false;
-        }
         try {
             Intent identityIntent = new Intent(
                     "com.bydhud.app.action.WAZE_STATE_REQUEST_IDENTITY")
@@ -157,8 +144,15 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
             return;
         }
 
-        WazeRouteLifecycleReceiver.enqueue(appContext, goAsync(), "v2",
-                () -> trustedIdentity(appContext, identity), delivery, timing);
+        // Keep only the protocol-bound caller identity fence; no signer/catalog trust
+        // decision is performed on the event executor or on the direct route path.
+        if (!trustedIdentity(appContext, identity)) {
+            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=untrusted_identity");
+            return;
+        }
+        WazeRouteLifecycleStore.noteV2BridgeObserved(appContext);
+        NavHudLiveSender.noteWazeV2BridgeObserved(appContext);
+        WazeRouteLifecycleReceiver.enqueue(appContext, goAsync(), "v2", delivery, timing);
     }
 
     private static void handleForeground(Context context, long eventElapsedMs,
@@ -177,31 +171,10 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static boolean trustedIdentity(Context context, PendingIntent identity) {
         if (identity == null) return false;
         try {
-            PackageInfo packageInfo = context.getPackageManager().getPackageInfo(
-                    WazeRouteLifecycleStore.WAZE_PACKAGE, 0);
-            ApplicationInfo applicationInfo = packageInfo.applicationInfo;
-            int installedUid = applicationInfo != null
-                    ? applicationInfo.uid
-                    : context.getPackageManager().getApplicationInfo(
+            int installedUid = context.getPackageManager().getApplicationInfo(
                     WazeRouteLifecycleStore.WAZE_PACKAGE, 0).uid;
-            if (!matchesIdentityMetadata(identity.getCreatorPackage(), identity.getCreatorUid(),
-                    installedUid)) return false;
-            long versionCode = packageInfo.getLongVersionCode();
-            long updateMs = packageInfo.lastUpdateTime;
-            synchronized (TRUST_CACHE_LOCK) {
-                if (trustedVersionCode == versionCode
-                        && trustedUpdateMs == updateMs
-                        && trustedUid == installedUid) {
-                    return true;
-                }
-            }
-            if (!NavigatorPatchStore.isInstalledWazeLifecycleV2(context)) return false;
-            synchronized (TRUST_CACHE_LOCK) {
-                trustedVersionCode = versionCode;
-                trustedUpdateMs = updateMs;
-                trustedUid = installedUid;
-            }
-            return true;
+            return matchesIdentityMetadata(identity.getCreatorPackage(),
+                    identity.getCreatorUid(), installedUid);
         } catch (PackageManager.NameNotFoundException | RuntimeException ignored) {
             return false;
         }

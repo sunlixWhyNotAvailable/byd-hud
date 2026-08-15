@@ -154,7 +154,7 @@ final class NavigatorAssetManager {
                 "4.95.0.3",
                 1023098L,
                 "com.waze",
-                NavigatorPatchTrustPolicy.WAZE_STOCK_SIGNER,
+                NavigatorAssetSignerCatalog.WAZE_STOCK_SIGNER,
                 "D7C8C50780AB3E8F7A63F96F9B4F3D426C8DBD04B3C87FE5095D213375A5B6A6",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/waze-4.95.0.3-stock-direct.apk",
@@ -167,7 +167,7 @@ final class NavigatorAssetManager {
                 "5.20.0.1",
                 1030706L,
                 "com.waze",
-                NavigatorPatchTrustPolicy.WAZE_PROJECT_SIGNER,
+                NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
                 "3156C81BBAF3C80F0D731963DBAEB98EC22634CC61100EF835B9FCEE9204639E",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/waze-5.20.0.1-direct.apk",
@@ -180,7 +180,7 @@ final class NavigatorAssetManager {
                 "25.16.03.747108139",
                 1068022637L,
                 "app.revanced.android.apps.maps",
-                NavigatorPatchTrustPolicy.GMAPS_PROJECT_SIGNER,
+                NavigatorAssetSignerCatalog.GMAPS_PROJECT_SIGNER,
                 "33E8BE8187F87F720A8D08D6C8653DAB58F4AAC80C61988AAC8F384A9295CD35",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/google-maps-revanced-25.16.03.747108139-direct.apk",
@@ -459,17 +459,6 @@ final class NavigatorAssetManager {
         for (Asset asset : ASSETS) {
             matchesInstalled(context, asset);
         }
-    }
-
-    static boolean isInstalledCanonicalWazeCached(Context context) {
-        for (Asset asset : ASSETS) {
-            if (asset.profile != NavigatorPatchStore.Profile.WAZE
-                    || !NavigatorPatchTrustPolicy.WAZE_PROJECT_SIGNER.equals(
-                    asset.signerSha256)) continue;
-            reconcileCatalogRevision(context, asset);
-            return matchesInstalledCached(context, asset);
-        }
-        return false;
     }
 
     private static void reconcileInstall(Context context, Asset asset) {

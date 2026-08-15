@@ -46,10 +46,17 @@ final class GMapsDirectChannel {
     private static final int MESSAGE_STOP = 4;
     private static final int MESSAGE_MANEUVER_BITMAP = 5;
     private static final int MESSAGE_SPEED_LIMIT = 6;
+    private static final int MESSAGE_HEARTBEAT = 7;
+    private static final int CAP_STATE_REPLAY = 1;
+    private static final int CAP_HEARTBEAT = 1 << 1;
+    private static final int CAP_BITMAP_GENERATION = 1 << 2;
+    private static final int CAP_ROUTE_GENERATION = 1 << 3;
     private static final int MAX_FRAME_BYTES = 512 * 1024;
     private static final int MAX_BITMAP_DIMENSION = 256;
     static final int MAX_MANEUVER_BITMAP_CACHE = 64;
     private static final long REGISTER_RETRY_MS = 5000L;
+    private static final long PRODUCER_LEASE_MS = 5000L;
+    private static final long LEASE_CHECK_MS = 2000L;
 
     private final Context context;
     private final Listener listener;
@@ -59,6 +66,7 @@ final class GMapsDirectChannel {
     private final GMapsDirectManeuverMap maneuverMap = new GMapsDirectManeuverMap();
     private final Map<String, ManeuverBitmap> maneuverBitmaps = newManeuverBitmapCache();
     private final Runnable registrationRetry = this::retryRegistration;
+    private final Runnable leaseCheck = this::checkProducerLease;
 
     private boolean running;
     private boolean connected;
@@ -66,6 +74,15 @@ final class GMapsDirectChannel {
     private boolean terminalLatched;
     private boolean firstStructuredFrame;
     private volatile long sessionGeneration;
+    private long registrationNonce;
+    private long producerEpoch = -1L;
+    private long producerRouteGeneration = -1L;
+    private long activeRouteGeneration = -1L;
+    private long terminalRouteGeneration = -1L;
+    private long lastHeartbeatElapsedMs;
+    private boolean heartbeatCapable;
+    private boolean generationAwareProducer;
+    private boolean routeGenerationCapable;
     private volatile String channelId = "";
     private long lastSequence = -1L;
     private long currentStructuredFrameAtMs;
@@ -88,19 +105,27 @@ final class GMapsDirectChannel {
             sessionGeneration++;
             running = true;
             connected = false;
+            producerEpoch = -1L;
+            producerRouteGeneration = -1L;
+            activeRouteGeneration = -1L;
+            terminalRouteGeneration = -1L;
+            heartbeatCapable = false;
+            generationAwareProducer = false;
+            routeGenerationCapable = false;
+            lastHeartbeatElapsedMs = 0L;
             navigating = false;
             terminalLatched = false;
             resetSession();
             registerClient("start:" + safe(reason));
+            handler.removeCallbacks(leaseCheck);
+            handler.postDelayed(leaseCheck, LEASE_CHECK_MS);
         });
     }
 
     void ensureRegistered(String reason) {
         handler.post(() -> {
             if (!running) return;
-            sessionGeneration++;
             connected = false;
-            resetSession();
             registerClient("retry:" + safe(reason));
         });
     }
@@ -115,6 +140,7 @@ final class GMapsDirectChannel {
             navigating = false;
             terminalLatched = false;
             handler.removeCallbacks(registrationRetry);
+            handler.removeCallbacks(leaseCheck);
             resetSession();
             listener.onLog("stopped reason=" + safe(reason));
         });
@@ -175,6 +201,13 @@ final class GMapsDirectChannel {
         long messageSession = data == null
                 ? -1L : data.getLong("sessionGeneration", -1L);
         long sequence = data == null ? -1L : data.getLong("sequence", -1L);
+        long incomingProducerEpoch = data == null
+                ? -1L : data.getLong("producerEpoch", -1L);
+        long incomingRouteGeneration = routeGeneration(data);
+        boolean routeActivePresent = data != null && data.containsKey("routeActive");
+        boolean advertisedRouteActive = !routeActivePresent
+                || data.getBoolean("routeActive", false);
+        int advertisedCapabilities = data == null ? 0 : data.getInt("capabilities", 0);
         long timingSessionGeneration = timingSessionGenerationForTest(
                 message.what, sessionGeneration);
         GMapsTimingDiagnostics.Frame timing = GMapsTimingDiagnostics.frame(
@@ -193,20 +226,164 @@ final class GMapsDirectChannel {
             listener.onLog("gmaps_timing " + timing.protocolLine(false));
             return true;
         }
+        boolean routeGenerationRequired = message.what == MESSAGE_HELLO
+                ? (advertisedCapabilities & CAP_ROUTE_GENERATION) != 0
+                : routeGenerationCapable;
+        if (routeGenerationRequired && incomingRouteGeneration < 0L) {
+            listener.onLog("message ignored reason=missing-route-generation what="
+                    + message.what);
+            return true;
+        }
+        boolean producerEpochChanged = incomingProducerEpoch >= 0L && producerEpoch >= 0L
+                && incomingProducerEpoch != producerEpoch;
+        if (!acceptsProducerEpochForTest(
+                message.what, producerEpoch, incomingProducerEpoch)) {
+            listener.onLog("message ignored reason=stale-producer-epoch incoming="
+                    + incomingProducerEpoch + " current=" + producerEpoch);
+            return true;
+        }
         switch (message.what) {
             case MESSAGE_HELLO:
+                boolean hadActiveRoute = navigating || currentFrame != null;
+                // A producer that was previously unknown may identify itself while
+                // an old route is retained; treat that as a replacement. Initial
+                // no-route registration remains a normal HELLO.
+                producerEpochChanged = producerEpochChanged
+                        || (producerEpoch < 0L && incomingProducerEpoch >= 0L
+                        && hadActiveRoute);
+                boolean staleHelloRoute = !producerEpochChanged && incomingRouteGeneration >= 0L
+                        && producerRouteGeneration >= 0L
+                        && incomingRouteGeneration < producerRouteGeneration;
+                if (staleHelloRoute) {
+                    listener.onLog("message ignored reason=stale-hello-route-generation incoming="
+                            + incomingRouteGeneration + " current=" + producerRouteGeneration);
+                }
+                if (producerEpochChanged) {
+                    if (hadActiveRoute && advertisedRouteActive) {
+                        finishNavigation("hello-producer-replaced");
+                    } else if (hadActiveRoute) {
+                        finishNavigation("hello-inactive");
+                    }
+                    if (!hadActiveRoute) sessionGeneration++;
+                    navigating = false;
+                    terminalLatched = false;
+                    activeRouteGeneration = -1L;
+                    terminalRouteGeneration = -1L;
+                    resetSession();
+                }
+                if (!producerEpochChanged && !staleHelloRoute
+                        && !advertisedRouteActive && hadActiveRoute) {
+                    finishNavigation("hello-inactive");
+                }
+                if (!producerEpochChanged && !staleHelloRoute
+                        && advertisedRouteActive && hadActiveRoute) {
+                    // Re-registration replay must refresh the current owner without
+                    // changing the route callback generation.
+                    lastSequence = -1L;
+                    firstStructuredFrame = false;
+                }
                 connected = true;
+                producerEpoch = incomingProducerEpoch;
+                if (!staleHelloRoute && incomingRouteGeneration >= 0L) {
+                    producerRouteGeneration = incomingRouteGeneration;
+                    if (!advertisedRouteActive) terminalRouteGeneration = incomingRouteGeneration;
+                }
+                int capabilities = data.getInt("capabilities", 0);
+                heartbeatCapable = (capabilities & CAP_HEARTBEAT) != 0;
+                generationAwareProducer = (capabilities & CAP_BITMAP_GENERATION) != 0;
+                routeGenerationCapable = (capabilities & CAP_ROUTE_GENERATION) != 0;
+                lastHeartbeatElapsedMs = SystemClock.elapsedRealtime();
                 handler.removeCallbacks(registrationRetry);
+                String helloReason = producerEpochChanged
+                        ? "hello-producer-replaced" : (staleHelloRoute
+                        ? "hello-stale-route" : "hello");
                 listener.onLog("gmaps_timing " + timing.protocolLine(true)
                         + " control=hello");
-                listener.onHandshakeAvailable(OWNER_PACKAGE, sessionGeneration, "hello");
-                listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "hello");
+                listener.onHandshakeAvailable(OWNER_PACKAGE, sessionGeneration, helloReason);
+                if (acceptsHelloLivenessForTest(
+                        producerEpochChanged, staleHelloRoute, navigating,
+                        advertisedRouteActive, incomingRouteGeneration, activeRouteGeneration)) {
+                    listener.onLiveness(OWNER_PACKAGE, sessionGeneration, helloReason);
+                }
+                return true;
+            case MESSAGE_HEARTBEAT:
+                boolean staleHeartbeatRoute = incomingRouteGeneration >= 0L
+                        && producerRouteGeneration >= 0L
+                        && incomingRouteGeneration < producerRouteGeneration;
+                connected = true;
+                lastHeartbeatElapsedMs = SystemClock.elapsedRealtime();
+                if (staleHeartbeatRoute) {
+                    listener.onLog("heartbeat ignored reason=stale-route-generation incoming="
+                            + incomingRouteGeneration + " current=" + producerRouteGeneration);
+                } else if (incomingRouteGeneration >= 0L) {
+                    producerRouteGeneration = Math.max(
+                            producerRouteGeneration, incomingRouteGeneration);
+                }
+                if (!staleHeartbeatRoute && routeActivePresent
+                        && !advertisedRouteActive && (navigating || currentFrame != null)) {
+                    if (incomingRouteGeneration >= 0L && activeRouteGeneration >= 0L
+                            && incomingRouteGeneration < activeRouteGeneration) {
+                        listener.onLog("heartbeat ignored reason=stale-terminal-generation incoming="
+                                + incomingRouteGeneration + " current=" + activeRouteGeneration);
+                        return true;
+                    }
+                    finishNavigation("heartbeat-inactive");
+                    if (incomingRouteGeneration >= 0L) {
+                        terminalRouteGeneration = incomingRouteGeneration;
+                    }
+                }
+                if (!staleHeartbeatRoute && routeActivePresent && !advertisedRouteActive
+                        && incomingRouteGeneration >= 0L) {
+                    terminalRouteGeneration = Math.max(
+                            terminalRouteGeneration, incomingRouteGeneration);
+                }
+                boolean exactActiveRoute = navigating && advertisedRouteActive
+                        && (incomingRouteGeneration < 0L
+                        || incomingRouteGeneration == activeRouteGeneration);
+                if (exactActiveRoute) {
+                    listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "heartbeat");
+                }
                 return true;
             case MESSAGE_START:
+                if (incomingRouteGeneration >= 0L && producerRouteGeneration >= 0L
+                        && incomingRouteGeneration < producerRouteGeneration) {
+                    listener.onLog("message ignored reason=stale-route-generation incoming="
+                            + incomingRouteGeneration + " current=" + producerRouteGeneration);
+                    return true;
+                }
+                if (!navigating && incomingRouteGeneration >= 0L
+                        && terminalRouteGeneration >= 0L
+                        && incomingRouteGeneration <= terminalRouteGeneration) {
+                    listener.onLog("message ignored reason=terminal-route-generation incoming="
+                            + incomingRouteGeneration + " terminal=" + terminalRouteGeneration);
+                    return true;
+                }
+                if (incomingProducerEpoch >= 0L && producerEpoch < 0L) {
+                    producerEpoch = incomingProducerEpoch;
+                }
+                if (!acceptsRouteGenerationForTest(
+                        MESSAGE_START, activeRouteGeneration, incomingRouteGeneration, navigating)) {
+                    listener.onLog("message ignored reason=stale-route-generation incoming="
+                            + incomingRouteGeneration + " current=" + activeRouteGeneration);
+                    return true;
+                }
+                if (incomingRouteGeneration >= 0L) {
+                    producerRouteGeneration = Math.max(
+                            producerRouteGeneration, incomingRouteGeneration);
+                }
+                if (navigating && (incomingRouteGeneration < 0L
+                        || incomingRouteGeneration == activeRouteGeneration)) {
+                    connected = true;
+                    listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "start-replay");
+                    return true;
+                }
                 sessionGeneration++;
                 connected = true;
                 navigating = true;
                 terminalLatched = false;
+                activeRouteGeneration = incomingRouteGeneration >= 0L
+                        ? incomingRouteGeneration : producerRouteGeneration;
+                terminalRouteGeneration = -1L;
                 resetSession();
                 listener.onLog("gmaps_timing " + timing.protocolLine(true)
                         + " control=start");
@@ -214,9 +391,34 @@ final class GMapsDirectChannel {
                 listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "start");
                 return true;
             case MESSAGE_FRAME:
+                if (!acceptsFrameRoute(data)) return true;
                 handleFrame(data, timing);
                 return true;
             case MESSAGE_STOP:
+                if (!navigating && currentFrame == null) {
+                    if (incomingRouteGeneration >= 0L
+                            && (producerRouteGeneration < 0L
+                            || incomingRouteGeneration >= producerRouteGeneration)) {
+                        producerRouteGeneration = incomingRouteGeneration;
+                        terminalRouteGeneration = Math.max(
+                                terminalRouteGeneration, incomingRouteGeneration);
+                    }
+                    listener.onLog("message ignored reason=stop-without-active-route generation="
+                            + incomingRouteGeneration);
+                    return true;
+                }
+                if (incomingRouteGeneration >= 0L && activeRouteGeneration >= 0L
+                        && incomingRouteGeneration > activeRouteGeneration) {
+                    producerRouteGeneration = Math.max(
+                            producerRouteGeneration, incomingRouteGeneration);
+                    terminalRouteGeneration = incomingRouteGeneration;
+                }
+                if (!acceptsRouteGenerationForTest(
+                        MESSAGE_STOP, activeRouteGeneration, incomingRouteGeneration, navigating)) {
+                    listener.onLog("message ignored reason=stale-route-generation incoming="
+                            + incomingRouteGeneration + " current=" + activeRouteGeneration);
+                    return true;
+                }
                 listener.onLog("gmaps_timing " + timing.protocolLine(true)
                         + " control=stop");
                 finishNavigation("stop");
@@ -225,6 +427,12 @@ final class GMapsDirectChannel {
                 handleManeuverBitmap(data);
                 return true;
             case MESSAGE_SPEED_LIMIT:
+                if (!acceptsRouteGenerationForTest(
+                        MESSAGE_SPEED_LIMIT, activeRouteGeneration, incomingRouteGeneration, navigating)) {
+                    listener.onLog("speed limit ignored reason=stale-route-generation incoming="
+                            + incomingRouteGeneration + " current=" + activeRouteGeneration);
+                    return true;
+                }
                 handleSpeedLimit(data);
                 return true;
             default:
@@ -244,6 +452,91 @@ final class GMapsDirectChannel {
             int messageWhat, long currentSessionGeneration) {
         return messageWhat == MESSAGE_START
                 ? currentSessionGeneration + 1L : currentSessionGeneration;
+    }
+
+    static boolean acceptsProducerEpochForTest(
+            int messageWhat, long currentEpoch, long incomingEpoch) {
+        if (messageWhat != MESSAGE_HELLO) {
+            return currentEpoch < 0L || incomingEpoch == currentEpoch;
+        }
+        if (currentEpoch < 0L) return true;
+        return incomingEpoch >= currentEpoch;
+    }
+
+    static boolean acceptsHelloLivenessForTest(
+            boolean producerEpochChanged, boolean staleRoute, boolean navigating,
+            boolean advertisedActive, long incomingGeneration, long activeGeneration) {
+        return !producerEpochChanged && !staleRoute && navigating && advertisedActive
+                && (incomingGeneration < 0L || incomingGeneration == activeGeneration);
+    }
+
+    static long routeGenerationForTest(Bundle data) {
+        if (data == null) return -1L;
+        long route = data.getLong("routeGeneration", -1L);
+        return route >= 0L ? route : data.getLong("stateEpoch", -1L);
+    }
+
+    static boolean acceptsRouteGenerationForTest(
+            int messageWhat, long currentGeneration, long incomingGeneration,
+            boolean routeActive) {
+        if (incomingGeneration < 0L) {
+            return routeActive || messageWhat == MESSAGE_FRAME || messageWhat == MESSAGE_START;
+        }
+        if (currentGeneration < 0L) {
+            return messageWhat == MESSAGE_FRAME || messageWhat == MESSAGE_START;
+        }
+        if (incomingGeneration < currentGeneration) return false;
+        if (incomingGeneration > currentGeneration) {
+            return messageWhat == MESSAGE_FRAME || messageWhat == MESSAGE_START
+                    || (messageWhat == MESSAGE_STOP && routeActive);
+        }
+        return true;
+    }
+
+    private static long routeGeneration(Bundle data) {
+        return routeGenerationForTest(data);
+    }
+
+    private boolean acceptsFrameRoute(Bundle data) {
+        long incoming = routeGeneration(data);
+        if (incoming >= 0L && producerRouteGeneration >= 0L
+                && incoming < producerRouteGeneration) {
+            listener.onLog("frame ignored reason=stale-observed-route-generation incoming="
+                    + incoming + " observed=" + producerRouteGeneration);
+            return false;
+        }
+        if (!navigating && incoming >= 0L && terminalRouteGeneration >= 0L
+                && incoming <= terminalRouteGeneration) {
+            listener.onLog("frame ignored reason=terminal-route-generation incoming="
+                    + incoming + " terminal=" + terminalRouteGeneration);
+            return false;
+        }
+        if (!acceptsRouteGenerationForTest(
+                MESSAGE_FRAME, activeRouteGeneration, incoming, navigating)) {
+            listener.onLog("frame ignored reason=stale-route-generation incoming="
+                    + incoming + " current=" + activeRouteGeneration);
+            return false;
+        }
+        if (incoming >= 0L && (activeRouteGeneration < 0L
+                || incoming > activeRouteGeneration)) {
+            producerRouteGeneration = Math.max(producerRouteGeneration, incoming);
+            activeRouteGeneration = incoming;
+            sessionGeneration++;
+            navigating = true;
+            terminalLatched = false;
+            resetSession();
+            listener.onNavigationStarted(
+                    OWNER_PACKAGE, sessionGeneration, "frame-missed-start");
+        } else if (!navigating) {
+            sessionGeneration++;
+            navigating = true;
+            terminalLatched = false;
+            activeRouteGeneration = incoming >= 0L ? incoming : producerRouteGeneration;
+            resetSession();
+            listener.onNavigationStarted(
+                    OWNER_PACKAGE, sessionGeneration, "frame-missed-start");
+        }
+        return true;
     }
 
     private void handleFrame(Bundle data, GMapsTimingDiagnostics.Frame timing) {
@@ -375,14 +668,29 @@ final class GMapsDirectChannel {
     private void handleManeuverBitmap(Bundle data) {
         String maneuver = safe(data.getString("maneuver"));
         String viewId = safe(data.getString("viewId"));
+        long incomingProducerEpoch = data.getLong("producerEpoch", -1L);
+        long incomingRouteGeneration = routeGeneration(data);
+        long renderGeneration = data.getLong("renderGeneration", -1L);
         byte[] png = data.getByteArray("png");
         int width = data.getInt("width", 0);
         int height = data.getInt("height", 0);
+        boolean generationAware = generationAwareProducer;
+        boolean routeAccepted = routeGenerationCapable
+                ? incomingRouteGeneration >= 0L
+                    && activeRouteGeneration >= 0L
+                    && incomingRouteGeneration == activeRouteGeneration
+                : navigating;
+        boolean generationValid = !generationAware
+                || (incomingProducerEpoch >= 0L && renderGeneration > 0L);
         if (maneuver.isEmpty() || png == null || png.length == 0
                 || png.length > MAX_FRAME_BYTES || width <= 0 || height <= 0
                 || width > MAX_BITMAP_DIMENSION || height > MAX_BITMAP_DIMENSION
+                || !generationValid || !routeAccepted
                 || !validPngBounds(png, width, height)) {
             listener.onLog("maneuver bitmap rejected maneuver=" + maneuver
+                    + " producerEpoch=" + incomingProducerEpoch
+                    + " routeGeneration=" + incomingRouteGeneration
+                    + " renderGeneration=" + renderGeneration
                     + " width=" + width + " height=" + height
                     + " bytes=" + (png == null ? 0 : png.length));
             return;
@@ -391,8 +699,9 @@ final class GMapsDirectChannel {
         long sourceAtMs = data.getLong("bridgeElapsedMs", receivedAtMs);
         ManeuverBitmap previous = maneuverBitmaps.get(maneuver);
         ManeuverBitmap candidate = new ManeuverBitmap(
-                maneuver, viewId, png, width, height, sourceAtMs);
-        if (!candidate.isNewerThan(previous)) {
+                maneuver, viewId, png, width, height, sourceAtMs,
+                incomingProducerEpoch, renderGeneration, incomingRouteGeneration);
+        if (!candidate.isNewerThan(previous, generationAware)) {
             if (!Arrays.equals(previous.png, png)) {
                 listener.onLog("maneuver bitmap ignored reason=stale maneuver=" + maneuver
                         + " sourceElapsedMs=" + sourceAtMs
@@ -408,6 +717,8 @@ final class GMapsDirectChannel {
                 + " maneuver=" + maneuver
                 + " viewId=" + viewId
                 + " sha=" + candidate.sha
+                + " producerEpoch=" + incomingProducerEpoch
+                + " renderGeneration=" + renderGeneration
                 + " bytes=" + candidate.png.length
                 + " width=" + width
                 + " height=" + height
@@ -434,6 +745,10 @@ final class GMapsDirectChannel {
         long routeGeneration = sessionGeneration;
         long callbackGeneration = ++sessionGeneration;
         navigating = false;
+        if (terminalRouteGeneration < 0L) {
+            terminalRouteGeneration = activeRouteGeneration;
+        }
+        activeRouteGeneration = -1L;
         resetSession();
         listener.onNavigationEnded(
                 OWNER_PACKAGE, routeGeneration, callbackGeneration, reason);
@@ -467,6 +782,19 @@ final class GMapsDirectChannel {
         if (running && !connected) registerClient("periodic");
     }
 
+    private void checkProducerLease() {
+        if (!running) return;
+        long now = SystemClock.elapsedRealtime();
+        if (connected && heartbeatCapable
+                && now - lastHeartbeatElapsedMs > PRODUCER_LEASE_MS) {
+            connected = false;
+            listener.onLog("producer lease expired elapsedMs="
+                    + (now - lastHeartbeatElapsedMs));
+            registerClient("producer-lease-expired");
+        }
+        handler.postDelayed(leaseCheck, LEASE_CHECK_MS);
+    }
+
     private boolean sendRegistration(String action, boolean includeClient, int protocol) {
         long beforeElapsedMs = SystemClock.elapsedRealtime();
         boolean sent = false;
@@ -477,7 +805,7 @@ final class GMapsDirectChannel {
             intent.putExtra(EXTRA_IDENTITY, identity());
             if (includeClient) {
                 channelId = "byd_hud_" + sessionGeneration + "_"
-                        + SystemClock.elapsedRealtime();
+                        + (++registrationNonce) + "_" + SystemClock.elapsedRealtime();
                 intent.putExtra(EXTRA_CHANNEL_ID, channelId);
                 intent.putExtra(EXTRA_PROTOCOL, protocol);
                 intent.putExtra(EXTRA_CLIENT, inbound);
@@ -686,16 +1014,36 @@ final class GMapsDirectChannel {
         final int width;
         final int height;
         final long sourceAtMs;
+        final long producerEpoch;
+        final long renderGeneration;
+        final long routeGeneration;
         final String sha;
 
         ManeuverBitmap(String maneuver, String viewId, byte[] png,
                 int width, int height, long sourceAtMs) {
+            this(maneuver, viewId, png, width, height, sourceAtMs, 0L,
+                    Math.max(0L, sourceAtMs), -1L);
+        }
+
+        ManeuverBitmap(String maneuver, String viewId, byte[] png,
+                int width, int height, long sourceAtMs,
+                long producerEpoch, long renderGeneration) {
+            this(maneuver, viewId, png, width, height, sourceAtMs,
+                    producerEpoch, renderGeneration, -1L);
+        }
+
+        ManeuverBitmap(String maneuver, String viewId, byte[] png,
+                int width, int height, long sourceAtMs,
+                long producerEpoch, long renderGeneration, long routeGeneration) {
             this.maneuver = safe(maneuver);
             this.viewId = safe(viewId);
             this.png = png == null ? new byte[0] : png.clone();
             this.width = Math.max(0, width);
             this.height = Math.max(0, height);
             this.sourceAtMs = sourceAtMs;
+            this.producerEpoch = producerEpoch;
+            this.renderGeneration = renderGeneration;
+            this.routeGeneration = routeGeneration;
             this.sha = DirectTbtPayload.shortSha256(this.png);
         }
 
@@ -704,7 +1052,16 @@ final class GMapsDirectChannel {
         }
 
         boolean isNewerThan(ManeuverBitmap previous) {
-            return previous == null || sourceAtMs > previous.sourceAtMs;
+            return previous == null
+                    || producerEpoch > previous.producerEpoch
+                    || (producerEpoch == previous.producerEpoch
+                    && renderGeneration > previous.renderGeneration);
+        }
+
+        boolean isNewerThan(ManeuverBitmap previous, boolean generationAware) {
+            if (previous == null) return true;
+            if (!generationAware) return sourceAtMs > previous.sourceAtMs;
+            return isNewerThan(previous);
         }
     }
 

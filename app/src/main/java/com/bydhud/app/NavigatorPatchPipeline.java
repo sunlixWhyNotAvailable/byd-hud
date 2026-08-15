@@ -35,6 +35,7 @@ final class NavigatorPatchPipeline {
     private static final long MAX_DEX_BYTES = 64L * 1024L * 1024L;
     private static final String GMAPS_PATCHABLE = "PATCHABLE_STOCK";
     private static final String GMAPS_DIRECT = "MESSENGER_BRIDGE_POC";
+    private static final String GMAPS_DIRECT_UPGRADEABLE = "MESSENGER_BRIDGE_UPGRADEABLE";
     private static final String GMAPS_AUDIO = "NAVIGATION_AUDIO";
     private static final String GMAPS_PIP_PATCHABLE = "PATCHABLE_STOCK";
     private static final String GMAPS_PIP_PATCHED = "PICTURE_IN_PICTURE_DISABLED";
@@ -121,7 +122,6 @@ final class NavigatorPatchPipeline {
             copyUri(context, uri, input);
             NavigatorApkSet.SetInfo set = NavigatorApkSet.materializeSource(
                     context, expectedProfile, input, setDirectory);
-            requireTrustedSource(context, expectedProfile, set);
             NavigatorPatchStore.Profile profile = expectedProfile;
             PackageInfo installed = installedInfo(context, profile.packageName);
             if (installed != null && set.versionCode < installed.getLongVersionCode()) {
@@ -151,7 +151,6 @@ final class NavigatorPatchPipeline {
         File setDirectory = temporaryDirectory(context, profile.id + "-scan-");
         try {
             NavigatorApkSet.SetInfo set = materializeCurrentSource(context, profile, setDirectory);
-            requireTrustedSource(context, profile, set);
             NavigatorPatchStore.transition(
                     context, profile, NavigatorPatchStore.VERIFYING, "Verifying APK");
             ScanResult preflight = metadata(set, profile);
@@ -196,7 +195,6 @@ final class NavigatorPatchPipeline {
             File source = new File(transaction, "source-set");
             File patched = new File(transaction, "patched-set");
             NavigatorApkSet.SetInfo sourceSet = materializeCurrentSource(context, profile, source);
-            requireTrustedSource(context, profile, sourceSet);
             String initialFingerprint = initialInstalled == null ? ""
                     : NavigatorPatchStore.selectedUri(context, profile).isEmpty()
                     ? sourceSet.fingerprint
@@ -214,7 +212,13 @@ final class NavigatorPatchPipeline {
                 throw new IOException("APK changed after compatibility check");
             }
             // Recheck the staged source immediately before creating a destructive transaction.
-            requireTrustedSource(context, profile, sourceSet);
+            // Package, signer integrity, split topology and DEX compatibility are verified by
+            // NavigatorApkSet and inspectComponents. Signer provenance is not patch eligibility.
+            NavigatorApkSet.SetInfo recheckedSource = NavigatorApkSet.readDirectory(
+                    context, profile, source);
+            if (!sourceSet.fingerprint.equals(recheckedSource.fingerprint)) {
+                throw new IOException("APK changed after compatibility check");
+            }
             if (!NavigatorPatchStore.isPatchEnabled(
                     profile, input.directState, input.optionalState, input.alertState)) {
                 throw new IOException("No compatible patch is available: " + input.reason);
@@ -302,7 +306,6 @@ final class NavigatorPatchPipeline {
         try {
             NavigatorApkSet.SetInfo set = NavigatorApkSet.materializeInstalled(
                     context, profile, setDirectory);
-            requireTrustedSource(context, profile, set);
             ScanResult metadata = metadata(set, profile);
             return inspectComponents(context, set, metadata);
         } finally {
@@ -313,7 +316,6 @@ final class NavigatorPatchPipeline {
     static ScanResult verifyRecoverySource(Context context,
             NavigatorPatchStore.Profile profile, File source) throws Exception {
         NavigatorApkSet.SetInfo set = NavigatorApkSet.readDirectory(context, profile, source);
-        requireTrustedSource(context, profile, set);
         return new ScanResult(profile, set.fingerprint, set.versionName,
                 set.versionCode, set.signerSha256,
                 NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED,
@@ -344,25 +346,6 @@ final class NavigatorPatchPipeline {
             }
         }
         return NavigatorApkSet.materializeInstalled(context, profile, outputDirectory);
-    }
-
-    private static void requireTrustedSource(Context context,
-            NavigatorPatchStore.Profile profile, NavigatorApkSet.SetInfo set)
-            throws Exception {
-        boolean localSigner = NavigatorSigningKey.certificateMatchesLocalIfPresent(
-                set.signerSha256);
-        boolean verifiedPatchMarker = false;
-        if (localSigner) {
-            ScanResult markerScan = inspectComponents(context, set, metadata(set, profile));
-            verifiedPatchMarker = profile == NavigatorPatchStore.Profile.WAZE
-                    ? NavigatorPatchStore.PATCHED.equals(markerScan.directState)
-                    : NavigatorPatchStore.PATCHED.equals(markerScan.directState)
-                    || NavigatorPatchStore.PATCHED.equals(markerScan.optionalState)
-                    || NavigatorPatchStore.PATCHED.equals(markerScan.alertState);
-        }
-        NavigatorPatchTrustPolicy.require(profile, set.signerSha256,
-                set.versionName, set.versionCode, set.fingerprint,
-                verifiedPatchMarker, localSigner);
     }
 
     private static ScanResult metadata(NavigatorApkSet.SetInfo set,
@@ -408,7 +391,9 @@ final class NavigatorPatchPipeline {
                         ? GmapsDiagnosticPatcher.inspectAudioClassification(member.file)
                         : "UNSUPPORTED";
                 String memberPip = inspectGmapsPip(context, member, validatedProfile);
-                if (GMAPS_PATCHABLE.equals(memberDirect) || GMAPS_DIRECT.equals(memberDirect)) {
+                if (GMAPS_PATCHABLE.equals(memberDirect)
+                        || GMAPS_DIRECT.equals(memberDirect)
+                        || GMAPS_DIRECT_UPGRADEABLE.equals(memberDirect)) {
                     direct = memberDirect;
                     directTargets++;
                 }
@@ -422,7 +407,9 @@ final class NavigatorPatchPipeline {
                     pipTargets++;
                 }
             }
-            String directState = directTargets == 1 && GMAPS_PATCHABLE.equals(direct)
+            String directState = directTargets == 1
+                    && (GMAPS_PATCHABLE.equals(direct)
+                    || GMAPS_DIRECT_UPGRADEABLE.equals(direct))
                     ? NavigatorPatchStore.PATCHABLE
                     : directTargets == 1 && GMAPS_DIRECT.equals(direct)
                     ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.FAILED;
@@ -513,12 +500,12 @@ final class NavigatorPatchPipeline {
                     ? GmapsDiagnosticPatcher.inspectAudioClassification(member.file)
                     : "UNSUPPORTED";
             String pip = inspectGmapsPip(context, member, validatedProfile);
-            if (GMAPS_PATCHABLE.equals(direct)) {
+            if (GMAPS_PATCHABLE.equals(direct)
+                    || GMAPS_DIRECT_UPGRADEABLE.equals(direct)) {
                 if (directMember != null) throw new IOException("Multiple Google Maps direct targets");
                 directMember = outputMember(outputDirectory, member.installName);
             } else if (GMAPS_DIRECT.equals(direct)) {
                 if (directMember != null) throw new IOException("Multiple Google Maps direct targets");
-                directMember = null;
             }
             if (GMAPS_PATCHABLE.equals(audio)) {
                 if (audioMember != null) throw new IOException("Multiple Google Maps audio targets");

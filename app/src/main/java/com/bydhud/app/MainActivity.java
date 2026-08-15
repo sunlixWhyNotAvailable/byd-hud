@@ -805,7 +805,7 @@ public final class MainActivity extends ComponentActivity {
                 permissionStatus.readyForCapture(),
                 permissionStatus.summary(),
                 LocalAdbBridge.adbKeyFingerprint(this),
-                hudStatus(permissionStatus),
+                hudStatus(),
                 hudPackage,
                 formatCapturePackages(logOnlyPackages),
                 formatCapturePackages(observedPackages),
@@ -1141,17 +1141,8 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String hudStatus(NavRuntimePermissionStatus permissionStatus) {
-        if (HudDeliveryStatus.hasTransportFailure()) {
-            return "failed";
-        }
-        if (HudDeliveryStatus.isRunning()) {
-            return "running";
-        }
-        if (!permissionStatus.readyForCapture()) {
-            return "failed";
-        }
-        return "idle";
+    private String hudStatus() {
+        return HudDeliveryStatus.uiStatus();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1550,10 +1541,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public String composeHudDeliveryStatus() {
-        if (HudDeliveryStatus.hasTransportFailure()) {
-            return "failed";
-        }
-        return HudDeliveryStatus.isRunning() ? "running" : "idle";
+        return HudDeliveryStatus.uiStatus();
     }
 
     private void invalidateComposeSnapshot() {

@@ -71,6 +71,36 @@ final class NavHudLiveSender {
         }
     }
 
+    /** A validated V2 identity is a structural capability signal, not a signer
+     * decision; refresh this sender's startup capability cache before dispatch. */
+    static void noteWazeV2BridgeObserved(Context context) {
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        if (current != null) {
+            current.handler.post(current::markWazeBridgeSupportedFromV2);
+        }
+    }
+
+    private void markWazeBridgeSupportedFromV2() {
+        long versionCode = Long.MIN_VALUE;
+        long lastUpdateTime = Long.MIN_VALUE;
+        try {
+            PackageInfo packageInfo = context.getPackageManager().getPackageInfo(WAZE_PACKAGE, 0);
+            versionCode = packageInfo.getLongVersionCode();
+            lastUpdateTime = packageInfo.lastUpdateTime;
+        } catch (Throwable error) {
+            log("waze v2 capability metadata unavailable error="
+                    + error.getClass().getSimpleName());
+        }
+        cachedWazeVersionCode = versionCode;
+        cachedWazeLastUpdateTime = lastUpdateTime;
+        cachedWazeBridgeSupported = true;
+        log("waze v2 structural capability observed versionCode=" + versionCode
+                + " lastUpdateTime=" + lastUpdateTime);
+    }
+
     static void onWazeRouteLifecycleEvent(Context context, boolean routeActive,
             boolean terminal, long eventElapsedMs, boolean changed, String reason) {
         onWazeRouteLifecycleEvent(
@@ -884,16 +914,8 @@ final class NavHudLiveSender {
                     @Override
                     public void onNavigationStarted(String ownerPackage,
                             long sessionGeneration, String reason) {
-                        handler.post(() -> {
-                            if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) {
-                                return;
-                            }
-                            ensureGMapsDirectSession(
-                                    "navigation-started:" + safeReason(reason));
-                            eventGMapsDirectSession("navigation_started", reason);
-                            onGMapsDirectNavigationStarted(
-                                    ownerPackage, sessionGeneration, reason);
-                        });
+                        handler.post(() -> onGMapsDirectNavigationStarted(
+                                ownerPackage, sessionGeneration, reason));
                     }
 
                     @Override
@@ -1909,32 +1931,37 @@ final class NavHudLiveSender {
         if (firstRouteEvidence) wazeTbtRouteStartedAtMs = now;
         advanceTbtLifecycleForFirstFrame();
         boolean hudOwner = isHudOutputOwner(ownerPackage);
-        if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest(
-                tbtPublisher.isRouteActive(),
-                ownerPackage.equals(tbtPublisher.ownerPackage()),
-                hudOwner, firstRouteEvidence,
-                isHudOutputOwner(tbtPublisher.ownerPackage()))) {
-            tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
-                    shouldRequestDashboardForDirectRouteForTest(hudOwner,
-                            HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
-                    "waze-frame:" + safeReason(reason));
-        }
-        if (!manualTbtActive) {
-            tbtPublisher.updateOwnerHudPriority(
-                    ownerPackage, sessionGeneration, hudOwner);
-            tbtPublisher.publishFrame(
-                    ownerPackage, sessionGeneration, outputFrame,
-                    "waze-frame:" + safeReason(reason));
-            tbtDispatched = true;
-            tbtDispatchElapsedMs = SystemClock.elapsedRealtime();
-            if (timing != null) {
-                firstTbtDispatch = timing.markFirstTbtDispatch(
-                        tbtDispatchElapsedMs);
+        boolean semanticTbt = shouldDispatchSemanticTbtForDirectReason(reason);
+        if (semanticTbt) {
+            if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest(
+                    tbtPublisher.isRouteActive(),
+                    ownerPackage.equals(tbtPublisher.ownerPackage()),
+                    hudOwner, firstRouteEvidence,
+                    isHudOutputOwner(tbtPublisher.ownerPackage()))) {
+                tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
+                        shouldRequestDashboardForDirectRouteForTest(hudOwner,
+                                HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
+                        "waze-frame:" + safeReason(reason));
+            }
+            if (!manualTbtActive) {
+                tbtPublisher.updateOwnerHudPriority(
+                        ownerPackage, sessionGeneration, hudOwner);
+                tbtPublisher.publishFrame(
+                        ownerPackage, sessionGeneration, outputFrame,
+                        "waze-frame:" + safeReason(reason));
+                tbtDispatched = true;
+                tbtDispatchElapsedMs = SystemClock.elapsedRealtime();
+                if (timing != null) {
+                    firstTbtDispatch = timing.markFirstTbtDispatch(
+                            tbtDispatchElapsedMs);
+                }
+            } else {
+                tbtPublisher.recordDeferredFrame(
+                        ownerPackage, sessionGeneration, outputFrame,
+                        "waze-frame:" + safeReason(reason));
             }
         } else {
-            tbtPublisher.recordDeferredFrame(
-                    ownerPackage, sessionGeneration, outputFrame,
-                    "waze-frame:" + safeReason(reason));
+            log("waze visual-only frame reason=" + safeReason(reason));
         }
         long receivedWallClockMs = System.currentTimeMillis();
         logWazeDirectFrame(outputFrame, sourceDistanceMeters,
@@ -2057,13 +2084,15 @@ final class NavHudLiveSender {
 
     private void onGMapsDirectHandshakeAvailable(String ownerPackage,
             long sessionGeneration, String reason) {
+        if ("hello-producer-replaced".equals(reason)) {
+            hudOutput.clearDirectFrameForSupersedingSession(
+                    ownerPackage, sessionGeneration,
+                    "gmaps-producer-replaced", SystemClock.elapsedRealtime());
+        }
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
         gmapsDirectHandshakeAvailable = true;
         updateCaptureIngressPolicy();
         gmapsDirectTimeoutSessionGeneration = sessionGeneration;
-        if (isHudOutputOwner(ownerPackage)) {
-            hudOutput.renewDirectLease(ownerPackage, sessionGeneration, reason);
-        }
         log("gmaps direct handshake available reason=" + safeReason(reason));
     }
 
@@ -2096,7 +2125,13 @@ final class NavHudLiveSender {
 
     private void onGMapsDirectNavigationStarted(String ownerPackage,
             long sessionGeneration, String reason) {
+        hudOutput.clearDirectFrameForSupersedingSession(
+                ownerPackage, sessionGeneration,
+                "gmaps-route-superseded:" + safeReason(reason),
+                SystemClock.elapsedRealtime());
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        ensureGMapsDirectSession("navigation-started:" + safeReason(reason));
+        eventGMapsDirectSession("navigation_started", reason);
         logRouteStartOutputPreferences("gmaps", sessionGeneration, reason);
         ++tbtLifecycleToken;
         gmapsTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
@@ -2173,28 +2208,33 @@ final class NavHudLiveSender {
         if (firstRouteEvidence) gmapsTbtRouteStartedAtMs = now;
         advanceTbtLifecycleForFirstFrame();
         boolean hudOwner = isHudOutputOwner(ownerPackage);
-        if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest(
-                tbtPublisher.isRouteActive(),
-                ownerPackage.equals(tbtPublisher.ownerPackage()),
-                hudOwner, firstRouteEvidence,
-                isHudOutputOwner(tbtPublisher.ownerPackage()))) {
-            tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
-                    shouldRequestDashboardForDirectRouteForTest(hudOwner,
-                            HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
-                    "gmaps-frame:" + safeReason(reason));
-        }
-        if (!manualTbtActive) {
-            tbtPublisher.updateOwnerHudPriority(
-                    ownerPackage, sessionGeneration, hudOwner);
-            tbtPublisher.publishFrame(
-                    ownerPackage, sessionGeneration, outputFrame,
-                    "gmaps-frame:" + safeReason(reason));
-            tbtDispatched = true;
-            tbtDispatchElapsedMs = SystemClock.elapsedRealtime();
+        boolean semanticTbt = shouldDispatchSemanticTbtForDirectReason(reason);
+        if (semanticTbt) {
+            if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest(
+                    tbtPublisher.isRouteActive(),
+                    ownerPackage.equals(tbtPublisher.ownerPackage()),
+                    hudOwner, firstRouteEvidence,
+                    isHudOutputOwner(tbtPublisher.ownerPackage()))) {
+                tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
+                        shouldRequestDashboardForDirectRouteForTest(hudOwner,
+                                HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
+                        "gmaps-frame:" + safeReason(reason));
+            }
+            if (!manualTbtActive) {
+                tbtPublisher.updateOwnerHudPriority(
+                        ownerPackage, sessionGeneration, hudOwner);
+                tbtPublisher.publishFrame(
+                        ownerPackage, sessionGeneration, outputFrame,
+                        "gmaps-frame:" + safeReason(reason));
+                tbtDispatched = true;
+                tbtDispatchElapsedMs = SystemClock.elapsedRealtime();
+            } else {
+                tbtPublisher.recordDeferredFrame(
+                        ownerPackage, sessionGeneration, outputFrame,
+                        "gmaps-frame:" + safeReason(reason));
+            }
         } else {
-            tbtPublisher.recordDeferredFrame(
-                    ownerPackage, sessionGeneration, outputFrame,
-                    "gmaps-frame:" + safeReason(reason));
+            log("gmaps visual-only frame reason=" + safeReason(reason));
         }
         logGMapsDirectFrame(outputFrame, sourceDistanceMeters, reason, now);
         if (!isHudOutputOwner(ownerPackage)) {
@@ -2641,6 +2681,7 @@ final class NavHudLiveSender {
         gmapsLegacyUnavailableLogged = false;
         gmapsDirectRouteEnded = false;
         gmapsDirectRegistrationSuppressed = false;
+        gmapsTbtRouteStartedAtMs = 0L;
         lastGMapsDirectRegistrationProbeMs = 0L;
         latestGMapsDirectFrame = null;
         latestGMapsDirectFrameReason = "";
@@ -2710,7 +2751,7 @@ final class NavHudLiveSender {
     }
 
     static boolean shouldClearGMapsSpeedLimitOnDirectStart(String reason) {
-        return "start".equals(reason);
+        return "start".equals(reason) || "frame-missed-start".equals(reason);
     }
 
     private void eventGMapsDirectSession(String event, String detail) {
@@ -2732,16 +2773,11 @@ final class NavHudLiveSender {
     }
 
     private boolean ensureGMapsRegisteredWhenTransportReady(String reason) {
-        if (!hudOutput.isBound()) {
-            if (!gmapsDirectRegistrationSuppressed) {
-                gmapsDirectRegistrationSuppressed = true;
-                log("gmaps direct registration suppressed transport=offline reason="
-                        + safeReason(reason));
-            }
-            return false;
-        }
+        // GMaps direct IPC is an app-to-app channel.  SOME/IP/HUD binding must
+        // not gate producer liveness or re-registration while HUD output is off
+        // or temporarily unavailable.
         if (gmapsDirectRegistrationSuppressed) {
-            log("gmaps direct registration resumed transport=online reason="
+            log("gmaps direct registration resumed reason="
                     + safeReason(reason));
             gmapsDirectRegistrationSuppressed = false;
         }
@@ -3430,6 +3466,16 @@ final class NavHudLiveSender {
             boolean firstRouteEvidence, boolean currentHasHud) {
         return !routeActive || samePackage || incomingHasHud
                 || firstRouteEvidence && !currentHasHud;
+    }
+
+    /** Rendered maneuver bitmap updates affect RoadInfo only, never semantic TBT. */
+    static boolean shouldDispatchSemanticTbtForDirectReason(String reason) {
+        return !"maneuver-bitmap".equals(normalizeDirectReasonForTest(reason));
+    }
+
+    private static String normalizeDirectReasonForTest(String reason) {
+        if (reason == null) return "";
+        return reason.trim().toLowerCase(Locale.ROOT);
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.

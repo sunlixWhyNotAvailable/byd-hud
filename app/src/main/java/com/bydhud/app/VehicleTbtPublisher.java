@@ -83,9 +83,16 @@ final class VehicleTbtPublisher {
             return;
         }
         if (routeActive && owner.equals(ownerPackage)) {
-            boolean generationChanged = generation != ownerGeneration;
+            boolean generationChanged = shouldClearGuidanceForGenerationReplacementForTest(
+                    routeActive, ownerPackage, ownerGeneration, owner, generation);
             boolean gainedHudPriority = !ownerHasHudPriority && hasHudPriority;
             if (generationChanged) {
+                Trace replaced = trace(
+                        ownerPackage, ownerGeneration,
+                        "route-generation-replaced", null, null);
+                lastGuidanceHasAmapFallback = false;
+                sendInstrumentGuidance(0, -1, "", replaced);
+                sendAmapTerminal(replaced);
                 ownerGeneration = generation;
                 ++routeToken;
                 log("tbt_route_generation owner=" + owner + " generation=" + generation);
@@ -235,6 +242,14 @@ final class VehicleTbtPublisher {
     static boolean shouldReplaceOwnerForTest(
             boolean currentHasHudPriority, boolean nextHasHudPriority) {
         return !currentHasHudPriority || nextHasHudPriority;
+    }
+
+    static boolean shouldClearGuidanceForGenerationReplacementForTest(
+            boolean active, String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        return active
+                && safe(currentOwner).equals(safe(incomingOwner))
+                && incomingGeneration > currentGeneration;
     }
 
     void sendTeardownStatus() {

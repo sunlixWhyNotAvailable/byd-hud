@@ -421,6 +421,21 @@ final class HudOutputCoordinator {
                 ownerPackage, ownerSessionGeneration, reason, detectedAtMs));
     }
 
+    void clearDirectFrameForSupersedingSession(String ownerPackage,
+            long newSessionGeneration, String reason, long detectedAtMs) {
+        worker.post(() -> {
+            String owner = safe(ownerPackage);
+            long previousSessionGeneration = directOwnerSessionGeneration;
+            if (!shouldClearForSupersedingDirectSession(
+                    directSelectedOnWorker(), directOwnerPackage,
+                    previousSessionGeneration, owner, newSessionGeneration)) {
+                return;
+            }
+            clearDirectFrameForLossOnWorker(
+                    owner, previousSessionGeneration, reason, detectedAtMs);
+        });
+    }
+
     void resetTransport(String reason) {
         worker.post(() -> {
             Runnable interruptedCompletion = takePendingClearCompletions();
@@ -1303,9 +1318,12 @@ final class HudOutputCoordinator {
             return false;
         }
         if (decision == DirectOwnerDecision.ADVANCE) {
+            boolean preservePendingLossClear = shouldPreservePendingLossClearOnAdvance(
+                    directLossClearPending, directOwnerPackage,
+                    directOwnerSessionGeneration, owner, ownerSessionGeneration);
             worker.removeCallbacks(directLeaseExpiry);
             directLeaseDeadlineMs = 0L;
-            directLossClearPending = false;
+            directLossClearPending = preservePendingLossClear;
             directLossClearSent = false;
             directFrame = null;
             preparedDirectFrame = null;
@@ -1343,6 +1361,14 @@ final class HudOutputCoordinator {
         return incomingGeneration == currentGeneration
                 ? DirectOwnerDecision.ACCEPT
                 : DirectOwnerDecision.ADVANCE;
+    }
+
+    static boolean shouldPreservePendingLossClearOnAdvance(boolean clearPending,
+            String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        return clearPending
+                && safe(currentOwner).equals(safe(incomingOwner))
+                && incomingGeneration > currentGeneration;
     }
 
     static DirectPromotionDecision directPromotionDecision(
@@ -1467,6 +1493,14 @@ final class HudOutputCoordinator {
     static boolean shouldQueueDirectLossClear(boolean ownerAccepted, boolean directSelected,
             boolean clearSent, boolean clearPending) {
         return ownerAccepted && directSelected && !clearSent && !clearPending;
+    }
+
+    static boolean shouldClearForSupersedingDirectSession(boolean directSelected,
+            String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        return directSelected
+                && safe(currentOwner).equals(safe(incomingOwner))
+                && incomingGeneration > currentGeneration;
     }
 
     static boolean isDirectLeaseExpired(long deadlineMs, long nowMs) {
