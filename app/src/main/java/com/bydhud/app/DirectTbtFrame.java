@@ -211,6 +211,14 @@ public final class DirectTbtFrame {
                 amapBroadcastManeuver, roundaboutExitNumber);
     }
 
+    DirectTbtFrame withNavigationText(String road, String cue) {
+        if (road.equals(roadText) && cue.equals(cueText)) return this;
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, road, cue, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
+    }
+
     DirectTbtFrame withVehicleTbt(int broadcastManeuver, int exitNumber) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,

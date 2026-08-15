@@ -21,6 +21,10 @@ public final class Beta7UiResponsivenessSourceContractTest {
                 "static void requestPatchUiStateRefresh(");
         String patchScan = between(source, "static void requestPatchUiStateRefresh(",
                 "private static Map<String, String> scanInstalledAppVersions");
+        String assetScan = between(source, "static void requestNavigatorAssetUiStateRefresh(",
+                "private static Map<String, String> scanInstalledAppVersions");
+        String composeSnapshot = between(source, "public ComposeSnapshot composeSnapshot()",
+                "public void composeStartNavigatorAssetDownload(");
 
         assertTrue(source.contains("private static volatile StorageCacheState storageCacheState"));
         assertTrue(source.contains("private static final Map<String, String> APP_LABEL_CACHE"));
@@ -36,7 +40,17 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertFalse(runtimeScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
         assertFalse(runtimeScan.contains("scanNavigatorPatchRows(appContext)"));
         assertTrue(patchScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
+        assertTrue(patchScan.contains(
+                "navigatorAssetSnapshots = NavigatorAssetManager.snapshots(appContext, false)"));
         assertTrue(patchScan.contains("scanNavigatorPatchRows(appContext)"));
+        assertTrue(assetScan.contains(
+                "NavigatorAssetManager.snapshots(appContext, false)"));
+        assertFalse(assetScan.contains("NavigatorAssetManager.reconcile(appContext)"));
+        assertFalse(assetScan.contains("refreshInstalledMatches(appContext)"));
+        assertFalse(assetScan.contains("scanNavigatorPatchRows(appContext)"));
+        assertTrue(assetScan.contains("publishSharedUiStateChange()"));
+        assertTrue(composeSnapshot.contains("localizedNavigatorAssetSnapshots(uaLanguage)"));
+        assertFalse(composeSnapshot.contains("NavigatorAssetManager.snapshots("));
     }
 
     @Test
@@ -60,10 +74,14 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(onCreate.contains("requestInitialUiRefresh(\"runtime-create\")"));
         assertTrue(heartbeat.contains("requestRuntimeUiRefresh(false, \"runtime-heartbeat\")"));
         assertFalse(heartbeat.contains("requestInitialUiRefresh"));
-        assertTrue(polling.indexOf("refresh()") < polling.indexOf("while (true)"));
+        assertFalse(polling.contains("refresh()"));
         assertTrue(polling.contains("FOREGROUND_UI_REFRESH_REQUEST_MS"));
         assertTrue(polling.contains(
                 "composeRequestRuntimeUiStateRefresh(false, \"foreground-periodic\")"));
+        assertTrue(polling.contains("composeRequestNavigatorAssetUiStateRefresh("));
+        assertTrue(polling.contains("foreground-asset-periodic"));
+        assertTrue(polling.contains("assetCacheMissing"));
+        assertTrue(polling.contains("foreground-asset-bootstrap"));
         assertFalse(polling.contains("composeRequestStorageRefresh"));
     }
 
@@ -77,6 +95,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
         String tabRefresh = between(source, "fun requestTabStateRefresh(", "fun runAction(");
         String lifecycle = between(source, "DisposableEffect(activity)",
                 "LaunchedEffect(appInForeground)");
+        String lifecycleObserver = between(lifecycle, "val observer =", "activity.lifecycle.addObserver");
 
         assertTrue(source.contains("LaunchedEffect(appInForeground)"));
         assertFalse(source.contains("selectedTab != RuntimeTab.Apps || !appInForeground"));
@@ -86,8 +105,13 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(tabRefresh.contains("composeRequestRuntimeUiStateRefresh(true, reason)"));
         assertTrue(tabRefresh.contains("composeRequestStorageRefresh(false)"));
         assertTrue(tabRefresh.contains("composeRequestPatchUiStateRefresh(reason)"));
-        assertTrue(lifecycle.contains("requestTabStateRefresh("));
-        assertTrue(lifecycle.contains("latestSelectedTab"));
+        assertFalse(lifecycleObserver.contains("refresh()"));
+        assertTrue(lifecycleObserver.contains("RuntimeTab.Storage"));
+        assertTrue(lifecycleObserver.contains("composeRequestStorageRefresh(false)"));
+        assertTrue(lifecycleObserver.contains("composeRequestPatchUiStateRefresh("));
+        assertTrue(lifecycleObserver.contains("false,"));
+        assertFalse(lifecycleObserver.contains("requestTabStateRefresh("));
+        assertTrue(lifecycleObserver.contains("latestSelectedTab"));
         assertTrue(refresh.contains("if (snapshot != refreshed) snapshot = refreshed"));
         assertTrue(apps.contains("count = snapshot.supportedApps.size"));
         assertTrue(apps.contains("snapshot.supportedApps[index].packageName"));

@@ -11,10 +11,12 @@ public final class HudOutputPreferenceSnapshotTest {
         DirectTbtPayload.Options options = options();
 
         HudOutputPreferenceSnapshot snapshot =
-                HudOutputPreferenceSnapshot.from(options, true);
+                HudOutputPreferenceSnapshot.from(
+                        options, true, HudPrefs.TRANSLITERATION_UNIVERSAL);
 
         assertEquals(
                 "png=1 native=0 lanes=1 distance=0 street=1 textDirection=0"
+                        + " textTransliteration=2"
                         + " clampSmallDistance=1 wazeAlerts=1 routeMetrics=2 eta=1"
                         + " remainingTime=0 remainingDistance=1 speedLimitMode=4"
                         + " speedFreeFallback=2 speedOverlaySeconds=7 speedPlacement=3"
@@ -30,10 +32,14 @@ public final class HudOutputPreferenceSnapshotTest {
                 HudOutputPreferenceSnapshot.from(options(), true);
         HudOutputPreferenceSnapshot disabled =
                 HudOutputPreferenceSnapshot.from(options(), false);
+        HudOutputPreferenceSnapshot ukrainian =
+                HudOutputPreferenceSnapshot.from(
+                        options(), true, HudPrefs.TRANSLITERATION_UKRAINIAN);
 
         assertEquals(enabled, enabledAgain);
         assertEquals(enabled.hashCode(), enabledAgain.hashCode());
         assertNotEquals(enabled, disabled);
+        assertNotEquals(enabled, ukrainian);
     }
 
     private static DirectTbtPayload.Options options() {

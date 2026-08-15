@@ -51,6 +51,8 @@ final class LocalAdbBridge {
     private static final long POST_GRANT_POLL_TIMEOUT_MS = 30000L;
     private static final long POST_GRANT_POLL_INTERVAL_MS = 250L;
     private static final long ACCESSIBILITY_REBIND_STEP_DELAY_MS = 300L;
+    private static final int MAX_DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
+    private static final int DIAGNOSTIC_OUTPUT_TAIL_BYTES = 64;
     private static final String KEY_DIR = "adb_keys";
     private static volatile boolean permissionGrantInProgress;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
@@ -422,11 +424,20 @@ final class LocalAdbBridge {
         if (!isAllowedDiagnosticShellCommand(safeCommand)) {
             throw new SecurityException("ADB diagnostic command is not allowed: " + safeCommand);
         }
-        return runTrustedRuntimeShellCommand(context, safeCommand);
+        return runTrustedRuntimeShellCommand(
+                context, safeCommand, MAX_DIAGNOSTIC_OUTPUT_BYTES);
     }
 
     static boolean isAllowedDiagnosticShellCommandForTest(String command) {
         return isAllowedDiagnosticShellCommand(command == null ? "" : command.trim());
+    }
+
+    static ShellResult boundedDiagnosticOutputForTest(String raw, int maxBytes)
+            throws IOException {
+        OutputAccumulator output = new OutputAccumulator(maxBytes);
+        output.append((raw == null ? "" : raw).getBytes(StandardCharsets.UTF_8));
+        ShellCapture capture = output.capture();
+        return ShellResult.parse(capture.raw, capture.truncated, capture.droppedBytes);
     }
 
     static ShellResult launchInstrumentProxy(
@@ -710,6 +721,11 @@ final class LocalAdbBridge {
 
     private static ShellResult runTrustedRuntimeShellCommand(
             Context context, String safeCommand) throws IOException {
+        return runTrustedRuntimeShellCommand(context, safeCommand, 0);
+    }
+
+    private static ShellResult runTrustedRuntimeShellCommand(
+            Context context, String safeCommand, int maxOutputBytes) throws IOException {
         Context appContext = context.getApplicationContext();
         synchronized (RUNTIME_CONNECTION_LOCK) {
             try {
@@ -717,7 +733,7 @@ final class LocalAdbBridge {
                 if (connection == null) {
                     return unauthorizedRuntimeShellResult();
                 }
-                ShellResult result = connection.shellWithExit(safeCommand);
+                ShellResult result = connection.shellWithExit(safeCommand, maxOutputBytes);
                 runtimeLastUsedMs = android.os.SystemClock.elapsedRealtime();
                 return result;
             } catch (IOException e) {
@@ -727,7 +743,7 @@ final class LocalAdbBridge {
                     if (connection == null) {
                         return unauthorizedRuntimeShellResult();
                     }
-                    ShellResult result = connection.shellWithExit(safeCommand);
+                    ShellResult result = connection.shellWithExit(safeCommand, maxOutputBytes);
                     runtimeLastUsedMs = android.os.SystemClock.elapsedRealtime();
                     return result;
                 } catch (IOException retry) {
@@ -1202,16 +1218,21 @@ final class LocalAdbBridge {
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         ShellResult shellWithExit(String command) throws IOException {
+            return shellWithExit(command, 0);
+        }
+
+        //keeps diagnostic output bounded while retaining the shell exit marker at the tail.
+        ShellResult shellWithExit(String command, int maxOutputBytes) throws IOException {
             String wrapped = command + "; echo " + EXIT_MARKER + "$?";
-            String output = shell(wrapped);
-            return ShellResult.parse(output);
+            ShellCapture capture = shell(wrapped, maxOutputBytes);
+            return ShellResult.parse(capture.raw, capture.truncated, capture.droppedBytes);
         }
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
-        private String shell(String command) throws IOException {
+        private ShellCapture shell(String command, int maxOutputBytes) throws IOException {
             int localId = nextLocalId++;
             int remoteId = 0;
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            OutputAccumulator output = new OutputAccumulator(maxOutputBytes);
             AdbPacket.write(out, AdbPacket.A_OPEN, localId, 0, nulPayload("shell:" + command));
             while (true) {
                 AdbPacket packet = AdbPacket.read(in);
@@ -1225,14 +1246,14 @@ final class LocalAdbBridge {
                     if (remoteId == 0) {
                         remoteId = packet.arg0;
                     }
-                    output.write(packet.payload, 0, packet.payload.length);
+                    output.append(packet.payload);
                     AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
                 } else if (packet.command == AdbPacket.A_CLSE) {
                     if (remoteId == 0) {
                         remoteId = packet.arg0;
                     }
                     AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
-                    return output.toString("UTF-8");
+                    return output.capture();
                 }
             }
         }
@@ -1252,17 +1273,99 @@ final class LocalAdbBridge {
         }
     }
 
+    private static final class ShellCapture {
+        final String raw;
+        final boolean truncated;
+        final long droppedBytes;
+
+        ShellCapture(String raw, boolean truncated, long droppedBytes) {
+            this.raw = raw == null ? "" : raw;
+            this.truncated = truncated;
+            this.droppedBytes = Math.max(0L, droppedBytes);
+        }
+    }
+
+    private static final class OutputAccumulator {
+        private final int maxBytes;
+        private final int prefixLimit;
+        private final int tailLimit;
+        private final ByteArrayOutputStream prefix = new ByteArrayOutputStream();
+        private final ByteArrayOutputStream tail = new ByteArrayOutputStream();
+        private long totalBytes;
+
+        OutputAccumulator(int maxBytes) {
+            this.maxBytes = Math.max(0, maxBytes);
+            tailLimit = Math.min(DIAGNOSTIC_OUTPUT_TAIL_BYTES, this.maxBytes);
+            prefixLimit = this.maxBytes == 0
+                    ? 0
+                    : this.maxBytes - tailLimit;
+        }
+
+        void append(byte[] bytes) {
+            if (bytes == null || bytes.length == 0) return;
+            totalBytes += bytes.length;
+            if (maxBytes == 0) {
+                prefix.write(bytes, 0, bytes.length);
+                return;
+            }
+            int remaining = prefixLimit - prefix.size();
+            if (remaining > 0) {
+                int keep = Math.min(remaining, bytes.length);
+                prefix.write(bytes, 0, keep);
+                if (keep == bytes.length) return;
+                appendTail(bytes, keep, bytes.length - keep);
+                return;
+            }
+            appendTail(bytes, 0, bytes.length);
+        }
+
+        private void appendTail(byte[] bytes, int offset, int length) {
+            int newLength = Math.min(length, tailLimit);
+            byte[] old = tail.toByteArray();
+            int oldLength = Math.min(old.length, tailLimit - newLength);
+            tail.reset();
+            if (oldLength > 0) {
+                tail.write(old, old.length - oldLength, oldLength);
+            }
+            if (newLength > 0) {
+                tail.write(bytes, offset + length - newLength, newLength);
+            }
+        }
+
+        ShellCapture capture() throws IOException {
+            ByteArrayOutputStream raw = new ByteArrayOutputStream(
+                    prefix.size() + tail.size());
+            raw.write(prefix.toByteArray());
+            raw.write(tail.toByteArray());
+            if (maxBytes == 0 || totalBytes <= maxBytes) {
+                return new ShellCapture(raw.toString("UTF-8"), false, 0L);
+            }
+            long dropped = Math.max(0L, totalBytes - prefix.size() - tail.size());
+            return new ShellCapture(raw.toString("UTF-8"), true, dropped);
+        }
+    }
+
     //defines the ShellResult module boundary so related behavior stays readable inside one unit.
     static final class ShellResult {
         final String output;
         final int exitCode;
         final String raw;
+        final boolean truncated;
+        final long droppedBytes;
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         private ShellResult(String output, int exitCode, String raw) {
+            this(output, exitCode, raw, false, 0L);
+        }
+
+        private ShellResult(
+                String output, int exitCode, String raw,
+                boolean truncated, long droppedBytes) {
             this.output = output == null ? "" : output;
             this.exitCode = exitCode;
             this.raw = raw == null ? "" : raw;
+            this.truncated = truncated;
+            this.droppedBytes = Math.max(0L, droppedBytes);
         }
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1276,15 +1379,21 @@ final class LocalAdbBridge {
             if (trimmed.length() > 160) {
                 trimmed = trimmed.substring(0, 160) + "...";
             }
-            return "exit=" + exitCode + " output=" + trimmed;
+            return "exit=" + exitCode + " output=" + trimmed
+                    + (truncated ? " truncatedBytes=" + droppedBytes : "");
         }
 
         //parses source data here so downstream HUD code receives normalized navigation fields.
         static ShellResult parse(String raw) {
+            return parse(raw, false, 0L);
+        }
+
+        static ShellResult parse(String raw, boolean truncated, long droppedBytes) {
             String safeRaw = raw == null ? "" : raw;
             int markerIndex = safeRaw.lastIndexOf(EXIT_MARKER);
             if (markerIndex < 0) {
-                return new ShellResult(safeRaw.trim(), -1, safeRaw);
+                return new ShellResult(safeRaw.trim(), -1, safeRaw,
+                        truncated, droppedBytes);
             }
             int codeStart = markerIndex + EXIT_MARKER.length();
             int codeEnd = codeStart;
@@ -1299,7 +1408,7 @@ final class LocalAdbBridge {
                 exitCode = -1;
             }
             String output = safeRaw.substring(0, markerIndex).trim();
-            return new ShellResult(output, exitCode, safeRaw);
+            return new ShellResult(output, exitCode, safeRaw, truncated, droppedBytes);
         }
     }
 

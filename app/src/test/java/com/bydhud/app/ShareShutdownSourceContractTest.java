@@ -90,6 +90,42 @@ public final class ShareShutdownSourceContractTest {
     }
 
     @Test
+    public void shutdownAndExitWaitsForRecorderWithoutBlockingMain() throws IOException {
+        String source = source("MainActivity.java");
+        String shutdown = between(source,
+                "private void shutdownAndExit(",
+                "private void finishAfterStop(");
+        String exit = between(source,
+                "private void exitAndFinish()",
+                "//stops runtime-owned work");
+
+        assertTrue(source.contains("private void stopRecorderAsync(String action,"));
+        assertTrue(shutdown.contains("stopRecorderAsync(\"shutdown\", () ->"));
+        assertTrue(exit.contains("stopRecorderAsync(\"exit\", () ->"));
+        assertTrue(shutdown.contains("if (exitRequested)"));
+        assertTrue(exit.contains("if (exitRequested)"));
+        assertFalse(shutdown.contains("LogcatRecorder.stop(this)"));
+        assertFalse(exit.contains("LogcatRecorder.stop(this)"));
+    }
+
+    @Test
+    public void storageRetirementStopsRecorderBeforeDeletingItsDay() throws IOException {
+        String source = source("MainActivity.java");
+        String method = between(source,
+                "public ComposeDeleteDayResult composeDeleteStorageDay(",
+                "//Runs one retained batch");
+
+        assertTrue(method.contains("LogcatRecorder.hasSessionForDay(day)"));
+        assertTrue(method.contains("LogcatRecorder.stopAsync(this"));
+        assertTrue(method.contains("boolean logcatUsesDay"));
+        assertTrue(method.contains("boolean restartLogcat"));
+        assertTrue(method.indexOf("logcatStop.await")
+                < method.indexOf("NavigationLogStorage.retireStorageDay"));
+        assertTrue(method.contains("logcat did not stop; deletion aborted"));
+        assertTrue(method.contains("if (restartLogcat && logcatStopped)"));
+    }
+
+    @Test
     public void wazeRouteGenerationDoesNotInvalidateBoundCarHost() throws IOException {
         String source = source("WazeDirectChannel.java");
         String terminal = between(source,

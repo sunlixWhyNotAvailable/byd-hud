@@ -48,6 +48,7 @@ import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
@@ -62,6 +63,9 @@ public final class MainActivity extends ComponentActivity {
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
     private static final long RUNTIME_UI_REFRESH_INTERVAL_MS = 30000L;
+    private static final long PATCH_UI_REFRESH_INTERVAL_MS = 1000L;
+    private static final long ASSET_UI_REFRESH_INTERVAL_MS = 1000L;
+    private static final long LOGCAT_STOP_TIMEOUT_MS = 90000L;
     private static final boolean BACKGROUND_MODE = true;
     private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
     private static final String GMAPS_REVANCED_PACKAGE = "app.revanced.android.apps.maps";
@@ -81,8 +85,10 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicBoolean STORAGE_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean APP_SCAN_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicLong UI_STATE_REVISION = new AtomicLong();
+    private static final Object PATCH_REFRESH_GATE_LOCK = new Object();
     private static final Object PACKAGE_METADATA_CACHE_LOCK = new Object();
     private static final Map<String, String> APP_LABEL_CACHE = new HashMap<>();
     private static final Map<String, Boolean> INSTALLED_PACKAGE_CACHE = new HashMap<>();
@@ -91,11 +97,15 @@ public final class MainActivity extends ComponentActivity {
     private static volatile Map<String, String> appVersionNames = Collections.emptyMap();
     private static volatile List<ComposeNavigatorPatchRow> navigatorPatchRows =
             Collections.emptyList();
+    private static volatile List<NavigatorAssetManager.AssetSnapshot> navigatorAssetSnapshots =
+            Collections.emptyList();
     private static volatile boolean navigatorPatchRowsReady;
     private static volatile boolean appScanCacheAvailable;
     private static volatile String appScanStatus = "";
     private static volatile NavRuntimePermissionStatus cachedNavRuntimePermissionStatus;
     private static volatile long lastRuntimeUiRefreshAtMs;
+    private static volatile long lastPatchUiRefreshAtMs;
+    private static volatile long lastAssetUiRefreshAtMs;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HudState state = new HudState();
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
@@ -787,6 +797,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isLaneOutputEnabled(this),
                 HudPrefs.isDistanceOutputEnabled(this),
                 HudPrefs.isStreetOutputEnabled(this),
+                HudPrefs.transliterationMode(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
                 HudPrefs.isTbtWithoutHudOutputEnabled(this),
@@ -847,12 +858,26 @@ public final class MainActivity extends ComponentActivity {
                 supportedRows,
                 allRows,
                 patchRows,
-                NavigatorAssetManager.snapshots(this, uaLanguage),
+                localizedNavigatorAssetSnapshots(uaLanguage),
                 composePatchOperation());
+    }
+
+    private static List<NavigatorAssetManager.AssetSnapshot> localizedNavigatorAssetSnapshots(
+            boolean ukrainian) {
+        List<NavigatorAssetManager.AssetSnapshot> cached = navigatorAssetSnapshots;
+        if (cached.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<NavigatorAssetManager.AssetSnapshot> localized = new ArrayList<>(cached.size());
+        for (NavigatorAssetManager.AssetSnapshot asset : cached) {
+            localized.add(asset.localized(ukrainian));
+        }
+        return Collections.unmodifiableList(localized);
     }
 
     public void composeStartNavigatorAssetDownload(String assetId) throws Exception {
         NavigatorAssetManager.startDownload(this, assetId);
+        requestPatchUiStateRefresh(this, true, "asset-download-start");
         refreshControls();
     }
 
@@ -864,11 +889,13 @@ public final class MainActivity extends ComponentActivity {
     public void composeInstallNavigatorAsset(String assetId, boolean destructiveApproved)
             throws Exception {
         NavigatorAssetManager.install(this, assetId, destructiveApproved);
+        requestPatchUiStateRefresh(this, true, "asset-install");
         refreshControls();
     }
 
     public void composeRestoreNavigatorAsset(String assetId) throws Exception {
         NavigatorAssetManager.restore(this, assetId);
+        requestPatchUiStateRefresh(this, true, "asset-restore");
         refreshControls();
     }
 
@@ -1275,6 +1302,10 @@ public final class MainActivity extends ComponentActivity {
         setStreetOutputEnabled(enabled);
     }
 
+    public void composeSetTransliterationMode(int mode) {
+        setTransliterationMode(mode);
+    }
+
     public void composeSetTextDirectionOutputEnabled(boolean enabled) {
         setTextDirectionOutputEnabled(enabled);
     }
@@ -1413,10 +1444,11 @@ public final class MainActivity extends ComponentActivity {
         boolean active = NavigationLogStorage.isActiveNavCaptureDay(day);
         WazeCropCapture crop = WazeCropCapture.get(this);
         boolean restartCrop = active && crop.isRunning();
-        boolean restartLogcat = active
-                && LogcatRecorder.isRecording()
+        boolean restartLogcat = LogcatRecorder.isRecording()
                 && day.equals(LogcatRecorder.activeStartDay());
+        boolean logcatUsesDay = LogcatRecorder.hasSessionForDay(day);
         boolean cropRebaseStarted = false;
+        boolean logcatStopped = false;
         if (active) {
             cropRebaseStarted = crop.beginStorageDayRebase("storage-day-rebase");
             if (!cropRebaseStarted) {
@@ -1426,8 +1458,27 @@ public final class MainActivity extends ComponentActivity {
                         day, false, false, "crop worker did not stop; deletion aborted");
             }
         }
-        if (restartLogcat) {
-            LogcatRecorder.stop(this);
+        if (logcatUsesDay) {
+            CountDownLatch logcatStop = new CountDownLatch(1);
+            LogcatRecorder.stopAsync(this, logcatStop::countDown);
+            try {
+                if (!logcatStop.await(LOGCAT_STOP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                        || LogcatRecorder.hasSessionForDay(day)) {
+                    if (cropRebaseStarted) {
+                        crop.finishStorageDayRebase(restartCrop, "storage-day-rebase-stop-failed");
+                    }
+                    return new ComposeDeleteDayResult(
+                            day, false, false, "logcat did not stop; deletion aborted");
+                }
+                logcatStopped = true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                if (cropRebaseStarted) {
+                    crop.finishStorageDayRebase(restartCrop, "storage-day-rebase-stop-interrupted");
+                }
+                return new ComposeDeleteDayResult(
+                        day, false, false, "logcat stop wait interrupted; deletion aborted");
+            }
         }
 
         NavigationLogStorage.DayRetirement retirement;
@@ -1438,7 +1489,7 @@ public final class MainActivity extends ComponentActivity {
             if (cropRebaseStarted) {
                 crop.finishStorageDayRebase(restartCrop, "storage-day-rebase");
             }
-            if (restartLogcat) {
+            if (restartLogcat && logcatStopped) {
                 logcatRestart = LogcatRecorder.restartAfterRebase(this);
             }
         }
@@ -1537,6 +1588,14 @@ public final class MainActivity extends ComponentActivity {
         requestPatchUiStateRefresh(this, true, reason);
     }
 
+    public void composeRequestPatchUiStateRefresh(boolean force, String reason) {
+        requestPatchUiStateRefresh(this, force, reason);
+    }
+
+    public void composeRequestNavigatorAssetUiStateRefresh(String reason) {
+        requestNavigatorAssetUiStateRefresh(this, reason);
+    }
+
     static String appScanStatusForTest(boolean scanInProgress, String localStatus,
             NavAppTaskScanner.Snapshot snapshot) {
         String safeLocal = localStatus == null ? "" : localStatus;
@@ -1558,7 +1617,7 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
-    private static void publishSharedUiStateChange() {
+    static void publishSharedUiStateChange() {
         UI_STATE_REVISION.incrementAndGet();
         MainActivity activity = RESUMED_ACTIVITY.get();
         if (activity != null && !activity.destroyed) {
@@ -1642,14 +1701,22 @@ public final class MainActivity extends ComponentActivity {
 
     static void requestPatchUiStateRefresh(Context context, boolean force, String reason) {
         Context appContext = context.getApplicationContext();
-        if (!force && navigatorPatchRowsReady) {
+        long now = SystemClock.elapsedRealtime();
+        boolean cacheFresh = navigatorPatchRowsReady
+                && lastPatchUiRefreshAtMs > 0L
+                && now - lastPatchUiRefreshAtMs < PATCH_UI_REFRESH_INTERVAL_MS;
+        if (!force && cacheFresh) {
             return;
         }
-        if (!PATCH_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
-            if (force) {
-                PATCH_FORCE_REFRESH_PENDING.set(true);
+        synchronized (PATCH_REFRESH_GATE_LOCK) {
+            if (ASSET_REFRESH_IN_PROGRESS.get()
+                    || !PATCH_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+                if (force) {
+                    PATCH_FORCE_REFRESH_PENDING.set(true);
+                }
+                return;
             }
-            return;
+            lastPatchUiRefreshAtMs = now;
         }
         new Thread(() -> {
             try {
@@ -1660,6 +1727,7 @@ public final class MainActivity extends ComponentActivity {
                 NavigatorPackageInstaller.reconcile(appContext);
                 NavigatorAssetManager.reconcile(appContext);
                 NavigatorAssetManager.refreshInstalledMatches(appContext);
+                navigatorAssetSnapshots = NavigatorAssetManager.snapshots(appContext, false);
                 navigatorPatchRows = scanNavigatorPatchRows(appContext);
                 navigatorPatchRowsReady = true;
                 AppEventLogger.event(appContext, "ui_patch_refresh reason=" + reason
@@ -1675,6 +1743,42 @@ public final class MainActivity extends ComponentActivity {
                 }
             }
         }, "BydHudPatchState").start();
+    }
+
+    static void requestNavigatorAssetUiStateRefresh(Context context, String reason) {
+        Context appContext = context.getApplicationContext();
+        long now = SystemClock.elapsedRealtime();
+        if (lastAssetUiRefreshAtMs > 0L
+                && now - lastAssetUiRefreshAtMs < ASSET_UI_REFRESH_INTERVAL_MS) {
+            return;
+        }
+        synchronized (PATCH_REFRESH_GATE_LOCK) {
+            if (PATCH_REFRESH_IN_PROGRESS.get()
+                    || !ASSET_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+                return;
+            }
+            lastAssetUiRefreshAtMs = now;
+        }
+        new Thread(() -> {
+            try {
+                List<NavigatorAssetManager.AssetSnapshot> next =
+                        NavigatorAssetManager.snapshots(appContext, false);
+                if (!next.equals(navigatorAssetSnapshots)) {
+                    navigatorAssetSnapshots = next;
+                    AppEventLogger.event(appContext,
+                            "ui_asset_refresh reason=" + reason);
+                }
+                publishSharedUiStateChange();
+            } catch (RuntimeException e) {
+                AppEventLogger.event(appContext, "ui_asset_refresh failed reason=" + reason
+                        + " error=" + e.getClass().getSimpleName());
+            } finally {
+                ASSET_REFRESH_IN_PROGRESS.set(false);
+                if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                    requestPatchUiStateRefresh(appContext, true, "pending-force");
+                }
+            }
+        }, "BydHudAssetState").start();
     }
 
     private static Map<String, String> scanInstalledAppVersions(
@@ -2011,6 +2115,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean laneOutputEnabled;
         public final boolean distanceOutputEnabled;
         public final boolean streetOutputEnabled;
+        public final int transliterationMode;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
         public final boolean tbtWithoutHudOutputEnabled;
@@ -2078,6 +2183,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean detailedDebugArtifactsEnabled,
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
+                int transliterationMode,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
                 boolean tbtWithoutHudOutputEnabled,
                 boolean switchToTbtOnHudStartEnabled,
@@ -2118,6 +2224,7 @@ public final class MainActivity extends ComponentActivity {
             this.laneOutputEnabled = laneOutputEnabled;
             this.distanceOutputEnabled = distanceOutputEnabled;
             this.streetOutputEnabled = streetOutputEnabled;
+            this.transliterationMode = HudPrefs.normalizeTransliterationMode(transliterationMode);
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
             this.tbtWithoutHudOutputEnabled = tbtWithoutHudOutputEnabled;
@@ -2207,6 +2314,7 @@ public final class MainActivity extends ComponentActivity {
                     && laneOutputEnabled == other.laneOutputEnabled
                     && distanceOutputEnabled == other.distanceOutputEnabled
                     && streetOutputEnabled == other.streetOutputEnabled
+                    && transliterationMode == other.transliterationMode
                     && textDirectionOutputEnabled == other.textDirectionOutputEnabled
                     && wazeAlertsEnabled == other.wazeAlertsEnabled
                     && tbtWithoutHudOutputEnabled == other.tbtWithoutHudOutputEnabled
@@ -2276,7 +2384,8 @@ public final class MainActivity extends ComponentActivity {
             return Objects.hash(
                     uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
                     pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
-                    distanceOutputEnabled, streetOutputEnabled, textDirectionOutputEnabled,
+                    distanceOutputEnabled, streetOutputEnabled, transliterationMode,
+                    textDirectionOutputEnabled,
                     wazeAlertsEnabled, tbtWithoutHudOutputEnabled,
                     switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
@@ -3218,6 +3327,18 @@ public final class MainActivity extends ComponentActivity {
     private void cancelPendingHudCallbacks() {
     }
 
+    private void stopRecorderAsync(String action, Runnable continuation) {
+        boolean hadSession = !LogcatRecorder.activeStartDay().isEmpty();
+        LogcatRecorder.stopAsync(this, () -> {
+            if (hadSession) {
+                appendStatus("logcat saved on " + action + " " + LogcatRecorder.statusText());
+            }
+            if (continuation != null) {
+                continuation.run();
+            }
+        });
+    }
+
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelRunnable(Runnable runnable) {
         if (runnable != null) {
@@ -3227,20 +3348,23 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void exitAndFinish() {
+        if (exitRequested) {
+            return;
+        }
         appendStatus("exit requested");
         exitRequested = true;
         cancelActiveAdbAuthorization("exit", false);
-        if (LogcatRecorder.isRecording()) {
-            LogcatRecorder.Result result = LogcatRecorder.stop(this);
-            appendStatus("logcat saved on exit " + result.detail
-                    + " file=" + filePath(result.file));
-        }
-        stopImmediately("exit", true, true);
-        finishAfterStop();
+        stopRecorderAsync("exit", () -> {
+            stopImmediately("exit", true, true);
+            finishAfterStop();
+        });
     }
 
     //stops runtime-owned work without deleting stored HUD/log selections.
     private void shutdownAndExit(String reason) {
+        if (exitRequested) {
+            return;
+        }
         String safeReason = reason == null ? "shutdown" : reason;
         appendStatus("shutdown requested reason=" + safeReason);
         exitRequested = true;
@@ -3264,20 +3388,16 @@ public final class MainActivity extends ComponentActivity {
 
         NavAppDisplayController.get(this).returnActiveDashboardToMain(safeReason);
 
-        if (LogcatRecorder.isRecording()) {
-            LogcatRecorder.Result result = LogcatRecorder.stop(this);
-            appendStatus("logcat saved on shutdown " + result.detail
-                    + " file=" + filePath(result.file));
-        }
+        stopRecorderAsync("shutdown", () -> {
+            manualModeEnabled = false;
+            HudRuntimeWatchdog.cancel(this);
+            HudRuntimeService.stopPersistent(this, safeReason);
+            HudPrefs.setRuntimeServiceRunning(this, false);
+            HudRuntimeState.markStopped(this, safeReason);
 
-        manualModeEnabled = false;
-        HudRuntimeWatchdog.cancel(this);
-        HudRuntimeService.stopPersistent(this, safeReason);
-        HudPrefs.setRuntimeServiceRunning(this, false);
-        HudRuntimeState.markStopped(this, safeReason);
-
-        stopImmediately(safeReason, true, true);
-        finishAfterStop();
+            stopImmediately(safeReason, true, true);
+            finishAfterStop();
+        });
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -3387,6 +3507,15 @@ public final class MainActivity extends ComponentActivity {
         cachedPayloadKey = "";
         appendStatus("Street output " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui output_street=" + enabled);
+        refreshControls();
+    }
+
+    private void setTransliterationMode(int mode) {
+        HudPrefs.setTransliterationMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.transliterationMode(this);
+        appendStatus("Text transliteration mode " + persisted);
+        AppEventLogger.event(this, "ui text_transliteration=" + persisted);
         refreshControls();
     }
 

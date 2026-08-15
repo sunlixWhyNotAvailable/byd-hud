@@ -56,6 +56,27 @@ public final class SystemDiagnosticRecorderPolicyTest {
         assertTrue(source.contains("dumpsys gfxinfo com.bydhud.app framestats"));
     }
 
+    @Test
+    public void DiagnosticOutputIsBoundedBeforeMaterializationAndKeepsExitMarker()
+            throws IOException {
+        StringBuilder raw = new StringBuilder();
+        for (int i = 0; i < 256; i++) raw.append("0123456789");
+        raw.append("__BYDHUD_EXIT__:0");
+        LocalAdbBridge.ShellResult result =
+                LocalAdbBridge.boundedDiagnosticOutputForTest(raw.toString(), 32);
+        assertTrue(result.success());
+        assertTrue(result.truncated);
+        assertTrue(result.droppedBytes > 0L);
+        assertTrue(result.raw.getBytes(StandardCharsets.UTF_8).length <= 32);
+        assertTrue(result.output.endsWith("0123456789"));
+
+        String source = source("LocalAdbBridge.java");
+        assertTrue(source.contains("MAX_DIAGNOSTIC_OUTPUT_BYTES"));
+        assertTrue(source.contains("OutputAccumulator"));
+        assertTrue(source.contains("shellWithExit(safeCommand, maxOutputBytes)"));
+        assertTrue(source.contains("truncatedBytes="));
+    }
+
     private static String source(String name) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/")

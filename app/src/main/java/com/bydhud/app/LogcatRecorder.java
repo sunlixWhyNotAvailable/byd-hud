@@ -8,6 +8,8 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
 
@@ -66,8 +68,10 @@ final class LogcatRecorder {
                 thread.setDaemon(true);
                 return thread;
             });
+    private static volatile Handler mainHandler;
 
     private static volatile Session activeSession;
+    private static volatile Session finalizingSession;
     private static volatile String activeStartDay = "";
     private static File lastSavedFile;
     private static String lastStatus = STATUS_WAITING;
@@ -85,7 +89,13 @@ final class LogcatRecorder {
     }
 
     static synchronized String activeStartDay() {
-        return activeSession == null ? "" : activeStartDay;
+        return activeSession != null || finalizingSession != null ? activeStartDay : "";
+    }
+
+    static synchronized boolean hasSessionForDay(String day) {
+        String safeDay = day == null ? "" : day.trim();
+        return !safeDay.isEmpty() && safeDay.equals(activeStartDay())
+                && (activeSession != null || finalizingSession != null);
     }
 
     static String retentionActiveStartDay() {
@@ -94,10 +104,11 @@ final class LogcatRecorder {
 
     static synchronized String statusText() {
         StringBuilder text = new StringBuilder(lastStatus);
-        File file = activeSession == null ? lastSavedFile : activeSession.manifestFile;
+        Session session = activeSession != null ? activeSession : finalizingSession;
+        File file = session == null ? lastSavedFile : session.manifestFile;
         if (file != null) text.append('\n').append(file.getAbsolutePath());
-        if (activeSession != null && activeSession.activePhase != null) {
-            text.append('\n').append("phase=").append(activeSession.activePhase.id);
+        if (session != null && session.activePhase != null) {
+            text.append('\n').append("phase=").append(session.activePhase.id);
         }
         if (!lastDetail.isEmpty()) text.append('\n').append(lastDetail);
         return text.toString();
@@ -107,9 +118,14 @@ final class LogcatRecorder {
         Context appContext = context.getApplicationContext();
         Session session;
         synchronized (LogcatRecorder.class) {
-            if (activeSession != null) {
+            if (activeSession != null || finalizingSession != null) {
+                Session current = activeSession != null ? activeSession : finalizingSession;
+                if (finalizingSession != null) {
+                    lastStatus = STATUS_SAVING;
+                    return Result.pending(current.manifestFile, "finalization in progress");
+                }
                 lastStatus = STATUS_RECORDING;
-                return Result.recording(activeSession.manifestFile, "already recording");
+                return Result.recording(current.manifestFile, "already recording");
             }
             String day = NavCaptureStore.todayDir();
             String captureId = timestampForFile();
@@ -122,11 +138,26 @@ final class LogcatRecorder {
             lastStatus = STATUS_RECORDING;
             lastDetail = "starting full-system capture";
         }
-        Throwable failure = await(WORKER.submit(() -> begin(session)), 90_000L);
+        Future<?> future = WORKER.submit(() -> runBegin(session));
+        Throwable failure = await(future, 90_000L);
+        if (failure instanceof TimeoutException) {
+            return Result.pending(session.manifestFile, "start still running");
+        }
         if (failure != null) {
-            fail(session, "start failed: " + failure.getClass().getSimpleName()
-                    + ": " + safe(failure.getMessage()));
-            return Result.failed(session.manifestFile, lastDetail);
+            return Result.failed(session.manifestFile,
+                    "start failed: " + failure.getClass().getSimpleName()
+                            + ": " + safe(failure.getMessage()));
+        }
+        synchronized (LogcatRecorder.class) {
+            if (session.failed) {
+                return Result.failed(session.manifestFile, session.failureDetail);
+            }
+            if (session.finalized) {
+                return Result.saved(session.manifestFile, "already stopped");
+            }
+            if (session.stopRequested || activeSession != session) {
+                return Result.pending(session.manifestFile, "stop requested");
+            }
         }
         return Result.recording(session.manifestFile, session.mode);
     }
@@ -137,27 +168,67 @@ final class LogcatRecorder {
 
     static Result stop(Context context) {
         Session session;
+        Future<?> future;
         synchronized (LogcatRecorder.class) {
             session = activeSession;
             if (session == null) {
+                if (finalizingSession != null) {
+                    return Result.pending(finalizingSession.manifestFile,
+                            "finalization in progress");
+                }
                 lastStatus = lastSavedFile == null ? STATUS_WAITING : STATUS_SAVED;
                 return Result.saved(lastSavedFile,
                         lastSavedFile == null ? "not recording" : "already stopped");
             }
             activeSession = null;
+            finalizingSession = session;
+            session.stopRequested = true;
             lastStatus = STATUS_SAVING;
             lastDetail = "finalizing system capture";
             if (session.pollFuture != null) session.pollFuture.cancel(false);
             if (session.phaseFuture != null) session.phaseFuture.cancel(false);
+            future = ensureFinishLocked(session);
         }
-        Throwable failure = await(WORKER.submit(() -> finish(session)), 90_000L);
+        Throwable failure = await(future, 90_000L);
+        if (failure instanceof TimeoutException) {
+            return Result.pending(session.manifestFile, "finalization still running");
+        }
         if (failure != null) {
-            fail(session, "stop failed: " + failure.getClass().getSimpleName()
-                    + ": " + safe(failure.getMessage()));
-            return Result.failed(session.manifestFile, lastDetail);
+            return Result.failed(session.manifestFile,
+                    "stop failed: " + failure.getClass().getSimpleName()
+                            + ": " + safe(failure.getMessage()));
         }
         synchronized (LogcatRecorder.class) {
+            if (session.failed) {
+                return Result.failed(session.manifestFile, session.failureDetail);
+            }
             return Result.saved(lastSavedFile, lastDetail);
+        }
+    }
+
+    static void stopAsync(Context context, Runnable completion) {
+        Session session;
+        synchronized (LogcatRecorder.class) {
+            session = activeSession;
+            if (session == null) {
+                session = finalizingSession;
+                if (session == null) {
+                    postCompletion(completion);
+                    return;
+                }
+                addCompletionLocked(session, completion);
+                ensureFinishLocked(session);
+                return;
+            }
+            activeSession = null;
+            finalizingSession = session;
+            session.stopRequested = true;
+            lastStatus = STATUS_SAVING;
+            lastDetail = "finalizing system capture";
+            if (session.pollFuture != null) session.pollFuture.cancel(false);
+            if (session.phaseFuture != null) session.phaseFuture.cancel(false);
+            addCompletionLocked(session, completion);
+            ensureFinishLocked(session);
         }
     }
 
@@ -192,6 +263,83 @@ final class LogcatRecorder {
 
     static String fullLogcatCommandForTest(long cursorMs) {
         return fullLogcatCommand(cursorMs);
+    }
+
+    private static void runBegin(Session session) {
+        try {
+            begin(session);
+        } catch (Exception error) {
+            fail(session, "start failed: " + error.getClass().getSimpleName()
+                    + ": " + safe(error.getMessage()));
+        }
+    }
+
+    private static Future<?> ensureFinishLocked(Session session) {
+        Future<?> future = session.finishFuture;
+        if (future == null) {
+            future = WORKER.submit(() -> runFinish(session));
+            session.finishFuture = future;
+        }
+        return future;
+    }
+
+    private static void runFinish(Session session) {
+        try {
+            finish(session);
+        } catch (Exception error) {
+            fail(session, "stop failed: " + error.getClass().getSimpleName()
+                    + ": " + safe(error.getMessage()));
+        }
+    }
+
+    private static void addCompletionLocked(Session session, Runnable completion) {
+        if (completion != null) session.completions.add(completion);
+    }
+
+    private static void postCompletion(Runnable completion) {
+        if (completion == null) return;
+        Handler handler = mainHandler();
+        if (handler == null) return;
+        handler.post(() -> {
+            try {
+                completion.run();
+            } catch (RuntimeException error) {
+                Log.w(TAG, "recorder completion failed", error);
+            }
+        });
+    }
+
+    private static Handler mainHandler() {
+        Handler cached = mainHandler;
+        if (cached != null) return cached;
+        try {
+            Looper looper = Looper.getMainLooper();
+            if (looper == null) return null;
+            cached = new Handler(looper);
+            mainHandler = cached;
+            return cached;
+        } catch (RuntimeException error) {
+            Log.w(TAG, "main handler unavailable", error);
+            return null;
+        }
+    }
+
+    private static List<Runnable> takeCompletionsLocked(Session session) {
+        List<Runnable> completions = new ArrayList<>(session.completions);
+        session.completions.clear();
+        return completions;
+    }
+
+    private static void postCompletions(List<Runnable> completions) {
+        for (Runnable completion : completions) postCompletion(completion);
+    }
+
+    private static void publishUiState() {
+        try {
+            MainActivity.publishSharedUiStateChange();
+        } catch (RuntimeException error) {
+            Log.w(TAG, "shared UI state publish failed", error);
+        }
     }
 
     private static void begin(Session session) {
@@ -244,9 +392,13 @@ final class LogcatRecorder {
             session.pollFuture = WORKER.scheduleWithFixedDelay(
                     () -> pollSafely(session), POLL_INTERVAL_MS, POLL_INTERVAL_MS,
                     TimeUnit.MILLISECONDS);
+            if (session.stopRequested) {
+                session.pollFuture.cancel(false);
+            }
             updateDetail(session, "mode=" + session.mode + " capture=" + session.captureId);
             AppEventLogger.event(session.context,
                     "system_recorder_start id=" + session.captureId + " mode=" + session.mode);
+            publishUiState();
         } catch (Exception error) {
             throw new IllegalStateException(error);
         }
@@ -254,6 +406,9 @@ final class LogcatRecorder {
 
     private static void finish(Session session) {
         try {
+            synchronized (LogcatRecorder.class) {
+                if (session.finalized || session.failed) return;
+            }
             if (session.activePhase != null) finishPhase(session, "recorder-stop");
             poll(session);
             captureSnapshot(session, "after", fullSnapshotCommands());
@@ -273,13 +428,20 @@ final class LogcatRecorder {
             session.manifest.put("phases", session.phases);
             session.manifest.put("runtimeEnd", runtimeIdentity(session.context));
             writeManifest(session);
+            List<Runnable> completions;
             synchronized (LogcatRecorder.class) {
+                session.finalized = true;
+                if (activeSession == session) activeSession = null;
+                if (finalizingSession == session) finalizingSession = null;
                 activeStartDay = "";
                 lastSavedFile = session.manifestFile;
                 lastStatus = STATUS_SAVED;
                 lastDetail = "mode=" + session.mode + " bytes=" + session.totalBytes
                         + (session.truncated ? " truncated" : "");
+                completions = takeCompletionsLocked(session);
             }
+            publishUiState();
+            postCompletions(completions);
             AppEventLogger.event(session.context,
                     "system_recorder_saved id=" + session.captureId
                             + " bytes=" + session.totalBytes
@@ -319,6 +481,10 @@ final class LogcatRecorder {
                         session.context, fullLogcatCommand(cursorMs));
                 if (result.success()) {
                     output = result.output;
+                    if (result.truncated) {
+                        session.truncated = true;
+                        session.droppedBytes += result.droppedBytes;
+                    }
                 } else {
                     session.mode = "app_uid_fallback";
                     session.fallbackReason = "ADB lost: " + result.shortDetail();
@@ -417,7 +583,11 @@ final class LogcatRecorder {
             writeManifest(session);
             session.phaseFuture = WORKER.schedule(
                     () -> finishPhaseSafely(session), durationMs, TimeUnit.MILLISECONDS);
+            publishUiState();
         } catch (Exception error) {
+            session.activePhase = null;
+            session.phaseFuture = null;
+            publishUiState();
             throw new IllegalStateException(error);
         }
     }
@@ -433,28 +603,41 @@ final class LogcatRecorder {
     private static void finishPhase(Session session, String outcome) throws Exception {
         Phase phase = session.activePhase;
         if (phase == null) return;
+        Exception failure = null;
         phase.endedWallMs = System.currentTimeMillis();
         phase.endedElapsedMs = SystemClock.elapsedRealtime();
-        captureSnapshot(session, "phase-" + phase.id + "-after", phaseAfterCommands());
-        JSONObject record = new JSONObject();
-        record.put("id", phase.id);
-        record.put("plannedDurationMs", phase.durationMs);
-        record.put("actualDurationMs", Math.max(0L,
-                phase.endedElapsedMs - phase.startedElapsedMs));
-        record.put("startedAt", timestampForLine(phase.startedWallMs));
-        record.put("endedAt", timestampForLine(phase.endedWallMs));
-        record.put("outcome", outcome);
-        session.phases.put(record);
-        writeLog(session, "=== PHASE END " + phase.id + " outcome=" + outcome + " "
-                + timestampForLine(phase.endedWallMs) + " ===\n");
-        AppEventLogger.event(session.context,
-                "system_recorder_phase_end id=" + session.captureId
-                        + " phase=" + phase.id + " outcome=" + outcome
-                        + " durationMs=" + (phase.endedElapsedMs - phase.startedElapsedMs));
-        session.activePhase = null;
-        session.phaseFuture = null;
-        updateDetail(session, "phase saved=" + phase.id);
-        writeManifest(session);
+        try {
+            captureSnapshot(session, "phase-" + phase.id + "-after", phaseAfterCommands());
+            JSONObject record = new JSONObject();
+            record.put("id", phase.id);
+            record.put("plannedDurationMs", phase.durationMs);
+            record.put("actualDurationMs", Math.max(0L,
+                    phase.endedElapsedMs - phase.startedElapsedMs));
+            record.put("startedAt", timestampForLine(phase.startedWallMs));
+            record.put("endedAt", timestampForLine(phase.endedWallMs));
+            record.put("outcome", outcome);
+            session.phases.put(record);
+            writeLog(session, "=== PHASE END " + phase.id + " outcome=" + outcome + " "
+                    + timestampForLine(phase.endedWallMs) + " ===\n");
+            AppEventLogger.event(session.context,
+                    "system_recorder_phase_end id=" + session.captureId
+                            + " phase=" + phase.id + " outcome=" + outcome
+                            + " durationMs=" + (phase.endedElapsedMs - phase.startedElapsedMs));
+        } catch (Exception error) {
+            failure = error;
+        } finally {
+            session.activePhase = null;
+            session.phaseFuture = null;
+            try {
+                writeManifest(session);
+            } catch (Exception error) {
+                if (failure == null) failure = error;
+            }
+            updateDetail(session, (failure == null ? "phase saved=" : "phase failed=")
+                    + phase.id);
+            publishUiState();
+        }
+        if (failure != null) throw failure;
     }
 
     private static void captureSnapshot(Session session, String label, List<String> commands)
@@ -477,6 +660,12 @@ final class LogcatRecorder {
                             LocalAdbBridge.runDiagnosticShellCommand(session.context, command);
                     output.append("exit=").append(result.exitCode).append('\n')
                             .append(result.output).append('\n');
+                    if (result.truncated) {
+                        session.truncated = true;
+                        session.droppedBytes += result.droppedBytes;
+                        output.append("truncated=true droppedBytes=")
+                                .append(result.droppedBytes).append('\n');
+                    }
                 } catch (Exception error) {
                     output.append("unavailable: ").append(error.getClass().getSimpleName())
                             .append(": ").append(safe(error.getMessage())).append('\n');
@@ -710,6 +899,10 @@ final class LogcatRecorder {
     }
 
     private static void fail(Session session, String detail) {
+        synchronized (LogcatRecorder.class) {
+            if (session.finalized) return;
+            session.finalized = true;
+        }
         Log.e(TAG, detail);
         try {
             finalizeSegment(session);
@@ -719,13 +912,20 @@ final class LogcatRecorder {
         } catch (Exception ignored) {
             Log.e(TAG, "Unable to finalize failed capture", ignored);
         }
+        List<Runnable> completions;
         synchronized (LogcatRecorder.class) {
             if (activeSession == session) activeSession = null;
+            if (finalizingSession == session) finalizingSession = null;
             activeStartDay = "";
             lastSavedFile = session.manifestFile;
             lastStatus = STATUS_WAITING;
             lastDetail = detail;
+            session.failed = true;
+            session.failureDetail = detail;
+            completions = takeCompletionsLocked(session);
         }
+        publishUiState();
+        postCompletions(completions);
         AppEventLogger.event(session.context,
                 "system_recorder_failed id=" + session.captureId + " error=" + detail);
     }
@@ -740,7 +940,6 @@ final class LogcatRecorder {
         } catch (ExecutionException error) {
             return error.getCause() == null ? error : error.getCause();
         } catch (TimeoutException error) {
-            future.cancel(true);
             return error;
         }
     }
@@ -796,6 +995,10 @@ final class LogcatRecorder {
         static Result failed(File file, String detail) {
             return new Result(false, false, file, detail);
         }
+
+        static Result pending(File file, String detail) {
+            return new Result(false, false, file, detail);
+        }
     }
 
     private static final class Session {
@@ -810,6 +1013,12 @@ final class LogcatRecorder {
         volatile Phase activePhase;
         volatile ScheduledFuture<?> pollFuture;
         volatile ScheduledFuture<?> phaseFuture;
+        volatile Future<?> finishFuture;
+        volatile boolean stopRequested;
+        volatile boolean finalized;
+        volatile boolean failed;
+        String failureDetail = "";
+        final List<Runnable> completions = new ArrayList<>();
         Set<String> previousPollLines = new LinkedHashSet<>();
         FileOutputStream segmentOut;
         File segmentPart;

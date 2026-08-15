@@ -67,7 +67,7 @@ final class NavHudLiveSender {
             current = instance;
         }
         if (current != null) {
-            current.handler.post(() -> current.logChangedOutputPreferences(key));
+            current.handler.post(() -> current.onOutputPreferenceChangedOnMain(key));
         }
     }
 
@@ -237,6 +237,7 @@ final class NavHudLiveSender {
             startManualOnWorker(state, reason);
             return;
         }
+        latestManualSourceState = state.copy();
         latestManualTbtState = effectiveManualState(state);
         tbtPublisher.publishManualFrame(
                 MANUAL_TBT_OWNER, manualTbtGeneration,
@@ -245,7 +246,9 @@ final class NavHudLiveSender {
         log("manual tbt frame generation=" + manualTbtGeneration
                 + " native=" + latestManualTbtState.maneuverId
                 + " distanceM=" + latestManualTbtState.distanceToIntersection
-                + " road=\"" + normalizeString(latestManualTbtState.roadName) + "\""
+                + " textMode=" + HudPrefs.transliterationMode(context)
+                + " rawRoad=\"" + normalizeString(latestManualSourceState.roadName) + "\""
+                + " sentRoad=\"" + normalizeString(latestManualTbtState.roadName) + "\""
                 + " reason=" + safeReason(reason));
     }
 
@@ -279,6 +282,7 @@ final class NavHudLiveSender {
         if (!manualTbtActive) return;
         long generation = manualTbtGeneration;
         manualTbtActive = false;
+        latestManualSourceState = null;
         latestManualTbtState = null;
         ++tbtLifecycleToken;
         tbtPublisher.endManualRoute(
@@ -360,6 +364,7 @@ final class NavHudLiveSender {
     private boolean tbtGMapsObserver;
     private boolean manualTbtActive;
     private long manualTbtGeneration;
+    private HudState latestManualSourceState;
     private HudState latestManualTbtState;
     private final Object manualPublishLock = new Object();
     private HudState pendingManualPublishState;
@@ -821,6 +826,7 @@ final class NavHudLiveSender {
                             if (wazeSurfaceActive) return;
                             DirectTbtFrame outputFrame = applySpeedLimitOverlay(
                                     ownerPackage, frame, SystemClock.elapsedRealtime());
+                            outputFrame = effectiveDirectFrame(outputFrame);
                             if (isHudOutputOwner(ownerPackage)) {
                                 hudOutput.clearDirectAlertAndRepublish(
                                         ownerPackage, sessionGeneration, outputFrame, reason,
@@ -1049,6 +1055,7 @@ final class NavHudLiveSender {
                     } else {
                         outputFrame = applySpeedLimitOverlay(
                                 ownerPackage, outputFrame, SystemClock.elapsedRealtime());
+                        outputFrame = effectiveDirectFrame(outputFrame);
                         hudOutput.clearDirectAlertAndRepublish(
                                 ownerPackage, wazeDirectChannel.sessionGeneration(), outputFrame,
                                 "surface:" + safeReason(reason),
@@ -1964,7 +1971,7 @@ final class NavHudLiveSender {
             log("waze visual-only frame reason=" + safeReason(reason));
         }
         long receivedWallClockMs = System.currentTimeMillis();
-        logWazeDirectFrame(outputFrame, sourceDistanceMeters,
+        logWazeDirectFrame(frame, outputFrame, sourceDistanceMeters,
                 reason, now, receivedWallClockMs,
                 DirectTbtPayload.Options.from(context));
         if (!isHudOutputOwner(ownerPackage)) {
@@ -2015,7 +2022,7 @@ final class NavHudLiveSender {
                 tbtDispatched, hudDispatched));
     }
 
-    private void logWazeDirectFrame(DirectTbtFrame frame,
+    private void logWazeDirectFrame(DirectTbtFrame rawFrame, DirectTbtFrame frame,
                                     int sourceDistanceMeters, String reason,
                                     long receivedAtMs,
                                     long receivedWallClockMs,
@@ -2042,8 +2049,11 @@ final class NavHudLiveSender {
                 + " amap=" + frame.getAmapManeuver()
                 + " byd=" + frame.getBydManeuver()
                 + " distanceM=" + sourceDistanceMeters
-                + " road=\"" + normalizeString(frame.getRoadText()) + "\""
-                + " cue=\"" + normalizeString(frame.getCueText()) + "\""
+                + " textMode=" + HudPrefs.transliterationMode(context)
+                + " rawRoad=\"" + normalizeString(rawFrame.getRoadText()) + "\""
+                + " rawCue=\"" + normalizeString(rawFrame.getCueText()) + "\""
+                + " sentRoad=\"" + normalizeString(frame.getRoadText()) + "\""
+                + " sentCue=\"" + normalizeString(frame.getCueText()) + "\""
                 + " maneuverBytes=" + maneuver.length
                 + " maneuverArtifact=\"" + maneuverArtifact + "\""
                 + " laneCount=" + frame.getLanes().size()
@@ -2236,7 +2246,7 @@ final class NavHudLiveSender {
         } else {
             log("gmaps visual-only frame reason=" + safeReason(reason));
         }
-        logGMapsDirectFrame(outputFrame, sourceDistanceMeters, reason, now);
+        logGMapsDirectFrame(frame, outputFrame, sourceDistanceMeters, reason, now);
         if (!isHudOutputOwner(ownerPackage)) {
             logGMapsDirectTiming(timing, callbackEntryElapsedMs,
                     tbtDispatchElapsedMs, hudDispatchElapsedMs,
@@ -2275,7 +2285,7 @@ final class NavHudLiveSender {
                 hudDispatchElapsedMs, tbtDispatched, hudDispatched));
     }
 
-    private void logGMapsDirectFrame(DirectTbtFrame frame,
+    private void logGMapsDirectFrame(DirectTbtFrame rawFrame, DirectTbtFrame frame,
             int sourceDistanceMeters, String reason, long receivedAtMs) {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame, DirectTbtPayload.Options.from(context));
@@ -2285,8 +2295,11 @@ final class NavHudLiveSender {
                 + " amap=" + frame.getAmapManeuver()
                 + " byd=" + frame.getBydManeuver()
                 + " distanceM=" + sourceDistanceMeters
-                + " road=\"" + normalizeString(frame.getRoadText()) + "\""
-                + " cue=\"" + normalizeString(frame.getCueText()) + "\""
+                + " textMode=" + HudPrefs.transliterationMode(context)
+                + " rawRoad=\"" + normalizeString(rawFrame.getRoadText()) + "\""
+                + " rawCue=\"" + normalizeString(rawFrame.getCueText()) + "\""
+                + " sentRoad=\"" + normalizeString(frame.getRoadText()) + "\""
+                + " sentCue=\"" + normalizeString(frame.getCueText()) + "\""
                 + " maneuverBytes=" + frame.getManeuverPng().length
                 + " laneCount=" + frame.getLanes().size()
                 + " laneDirections=\"" + laneDirections(frame) + "\""
@@ -2479,8 +2492,10 @@ final class NavHudLiveSender {
     }
 
     private DirectTbtFrame effectiveDirectFrame(DirectTbtFrame frame) {
-        return HudDisplayPolicy.applyActiveFrame(
+        DirectTbtFrame effective = HudDisplayPolicy.applyActiveFrame(
                 frame, HudPrefs.isSmallDistanceClampEnabled(context));
+        return HudTextTransliterator.transformFrame(
+                effective, HudPrefs.transliterationMode(context));
     }
 
     private void selectRemainingTbtRoute(String endedPackage, String reason) {
@@ -3054,6 +3069,49 @@ final class NavHudLiveSender {
         if (snapshot.equals(lastOutputPreferenceSnapshot)) return;
         emitOutputPreferences(
                 "preferences", 0L, "changed:" + safeReason(key), snapshot);
+    }
+
+    private void onOutputPreferenceChangedOnMain(String key) {
+        logChangedOutputPreferences(key);
+        if (!HudPrefs.KEY_TEXT_TRANSLITERATION.equals(key)) return;
+
+        String reason = "text-transliteration-mode-changed";
+        String republished = "none";
+        if (manualTbtActive && latestManualSourceState != null) {
+            publishManualOnWorker(latestManualSourceState.copy(), reason);
+            republished = "manual";
+        } else {
+            String owner = normalizePackage(activePackage);
+            if (!isHudOutputOwner(owner) || !hasLatestDirectFrame(owner)) {
+                owner = normalizePackage(tbtPublisher.ownerPackage());
+            }
+            if (hasLatestDirectFrame(owner)) {
+                republishLatestDirectFrame(owner, reason);
+                republished = owner;
+            } else if (active && latestState != null) {
+                sendLatestIfReady(reason);
+                HudState sent = latestState.copy();
+                HudOutputPreferences.apply(context, sent);
+                log("legacy text projection textMode="
+                        + HudPrefs.transliterationMode(context)
+                        + " rawRoad=\"" + normalizeString(latestState.roadName) + "\""
+                        + " sentRoad=\"" + normalizeString(sent.roadName) + "\"");
+                republished = "legacy";
+            }
+        }
+        log("text transliteration changed mode=" + HudPrefs.transliterationMode(context)
+                + " republished=" + republished);
+    }
+
+    private boolean hasLatestDirectFrame(String ownerPackage) {
+        if (WAZE_PACKAGE.equals(ownerPackage)) {
+            return wazeDirectNavigating && !wazeDirectRouteEnded && (wazeSurfaceActive
+                    ? latestWazeSurfaceFrame != null : latestWazeClusterFrame != null);
+        }
+        return GMapsDirectChannel.PACKAGE_NAME.equals(ownerPackage)
+                && !gmapsDirectRouteEnded
+                && gmapsDirectChannel.isNavigating()
+                && latestGMapsDirectFrame != null;
     }
 
     private void emitOutputPreferences(

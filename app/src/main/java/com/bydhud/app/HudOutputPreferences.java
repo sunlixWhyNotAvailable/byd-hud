@@ -46,6 +46,8 @@ final class HudOutputPreferences {
                 : HudPrefs.isTextDirectionOutputEnabled(context) && nonBlank(direction)
                 ? direction
                 : "";
+        payloadState.roadName = HudTextTransliterator.transform(
+                payloadState.roadName, HudPrefs.transliterationMode(context));
     }
 
     private static boolean nonBlank(String value) {

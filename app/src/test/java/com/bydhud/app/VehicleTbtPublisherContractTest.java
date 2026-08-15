@@ -84,6 +84,49 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
+    public void sameOwnerNewGenerationReassertsActiveStatusAfterClearBeforePriorityHandling()
+            throws IOException {
+        String source = source(
+                "app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        int branchStart = source.indexOf("if (generationChanged) {");
+        int branchEnd = source.indexOf(
+                "            ownerHasHudPriority = hasHudPriority;", branchStart);
+        assertTrue(branchStart >= 0 && branchEnd > branchStart);
+        String branch = source.substring(branchStart, branchEnd);
+
+        int instrumentClear = branch.indexOf("sendInstrumentGuidance(0, -1, \"\", replaced)");
+        int amapClear = branch.indexOf("sendAmapTerminal(replaced)");
+        int ownerAdvance = branch.indexOf("ownerGeneration = generation;");
+        int tokenAdvance = branch.indexOf("++routeToken;");
+        int status = branch.indexOf("sendStatus(STATUS_ACTIVE, started)");
+        int lifecycle = branch.indexOf(
+                "record(started, \"lifecycle\", \"begin\", \"navigation\"");
+
+        assertTrue(instrumentClear >= 0);
+        assertTrue(amapClear > instrumentClear);
+        assertTrue(ownerAdvance > amapClear);
+        assertTrue(tokenAdvance > ownerAdvance);
+        assertTrue(status > tokenAdvance);
+        assertTrue(lifecycle > status);
+    }
+
+    @Test
+    public void duplicateGenerationDoesNotEnterReplacementStatusPath() throws IOException {
+        String source = source(
+                "app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        int branchStart = source.indexOf("if (generationChanged) {");
+        int branchEnd = source.indexOf(
+                "            ownerHasHudPriority = hasHudPriority;", branchStart);
+        assertTrue(branchStart >= 0 && branchEnd > branchStart);
+        String branch = source.substring(branchStart, branchEnd);
+
+        assertTrue(branch.contains("sendStatus(STATUS_ACTIVE, started)"));
+        assertFalse(VehicleTbtPublisher.shouldClearGuidanceForGenerationReplacementForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+    }
+
+    @Test
     public void verifiedAmapMappingFeedsInstrumentNamespaceWithoutInventingExitNumbers() {
         int[] expected = {
                 0, 0, 1, 2, 3, 5, 7, 8, 9, 11, 45, 13, 24, 46, 47, 48, 49,

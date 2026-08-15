@@ -345,6 +345,67 @@ public final class NavHudRuntimeContractTest {
         assertTrue(routeCurrentGate > routeClear);
     }
 
+    @Test
+    public void TextModeRepublishesOneProjectedFrameWithoutRouteLifecycleMutation()
+            throws IOException {
+        String sender = source("NavHudLiveSender.java");
+        int changeStart = sender.indexOf("private void onOutputPreferenceChangedOnMain");
+        int changeEnd = sender.indexOf("\n    private boolean hasLatestDirectFrame", changeStart);
+        assertTrue(changeStart >= 0 && changeEnd > changeStart);
+        String change = sender.substring(changeStart, changeEnd);
+        assertTrue(change.contains("HudPrefs.KEY_TEXT_TRANSLITERATION"));
+        assertTrue(change.contains("publishManualOnWorker"));
+        assertTrue(change.contains("republishLatestDirectFrame"));
+        assertTrue(change.contains("sendLatestIfReady"));
+        assertFalse(change.contains("endNavigationOutput"));
+        assertFalse(change.contains("selectNavigationSource"));
+        assertFalse(change.contains("resetTransport"));
+
+        int effectiveStart = sender.indexOf("private DirectTbtFrame effectiveDirectFrame");
+        int effectiveEnd = sender.indexOf("\n    private void selectRemainingTbtRoute", effectiveStart);
+        String effective = sender.substring(effectiveStart, effectiveEnd);
+        assertTrue(effective.contains("HudTextTransliterator.transformFrame"));
+
+        assertProjectedBeforeBothOutputs(sender, "private void onWazeDirectFrame",
+                "\n    private void logWazeDirectTiming");
+        assertProjectedBeforeBothOutputs(sender, "private void onGMapsDirectFrame",
+                "\n    private void logGMapsDirectTiming");
+        assertAlertClearsProjectBeforeRepublish(sender);
+        assertTrue(sender.contains("rawRoad=\\\""));
+        assertTrue(sender.contains("sentRoad=\\\""));
+    }
+
+    private static void assertProjectedBeforeBothOutputs(
+            String source, String methodMarker, String endMarker) {
+        int start = source.indexOf(methodMarker);
+        int end = source.indexOf(endMarker, start);
+        assertTrue(start >= 0 && end > start);
+        String method = source.substring(start, end);
+        int projected = method.indexOf("outputFrame = effectiveDirectFrame(outputFrame)");
+        int tbt = method.indexOf("tbtPublisher.publishFrame(");
+        int roadInfo = method.indexOf("hudOutput.publishDirect(");
+        assertTrue(projected >= 0);
+        assertTrue(tbt > projected);
+        assertTrue(roadInfo > tbt);
+    }
+
+    private static void assertAlertClearsProjectBeforeRepublish(String source) {
+        int searchFrom = 0;
+        int checked = 0;
+        while (true) {
+            int clear = source.indexOf("hudOutput.clearDirectAlertAndRepublish(", searchFrom);
+            if (clear < 0) break;
+            int alertCallback = source.lastIndexOf("public void onAlertCleared", clear);
+            int projection = source.lastIndexOf(
+                    "outputFrame = effectiveDirectFrame(outputFrame)", clear);
+            assertTrue(alertCallback >= 0);
+            assertTrue(projection > alertCallback);
+            checked++;
+            searchFrom = clear + 1;
+        }
+        assertEquals(2, checked);
+    }
+
     private static String source(String name) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/")

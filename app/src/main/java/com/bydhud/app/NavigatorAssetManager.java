@@ -90,6 +90,7 @@ final class NavigatorAssetManager {
     }
 
     static final class AssetSnapshot {
+        private final Asset asset;
         public final String id;
         public final String label;
         public final String versionName;
@@ -102,6 +103,7 @@ final class NavigatorAssetManager {
 
         AssetSnapshot(Asset asset, boolean ukrainian, String state, String progress,
                 String error, boolean installed) {
+            this.asset = asset;
             this.id = asset.id;
             this.label = asset.label(ukrainian);
             this.versionName = asset.versionName;
@@ -113,6 +115,10 @@ final class NavigatorAssetManager {
             this.downloadable = NOT_DOWNLOADED.equals(state) || ERROR.equals(state)
                     || (!installed && !DOWNLOADING.equals(state)
                     && !INSTALL_REQUESTED.equals(state) && !UNINSTALL_REQUESTED.equals(state));
+        }
+
+        AssetSnapshot localized(boolean ukrainian) {
+            return new AssetSnapshot(asset, ukrainian, state, progress, error, installed);
         }
 
         @Override

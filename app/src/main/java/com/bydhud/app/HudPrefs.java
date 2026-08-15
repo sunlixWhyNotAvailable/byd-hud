@@ -18,6 +18,7 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_DISTANCE = "output_distance";
     private static final String KEY_OUTPUT_STREET = "output_street";
     private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
+    static final String KEY_TEXT_TRANSLITERATION = "text_transliteration";
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
     private static final String KEY_WHOLE_ROUTE_METRICS = "whole_route_metrics";
     private static final String KEY_ROUTE_METRICS_MODE = "route_metrics_mode";
@@ -57,6 +58,9 @@ final class HudPrefs {
     static final int SPEED_LIMIT_COMPOSITE_LANES_ONLY = 1;
     static final int SPEED_LIMIT_COMPOSITE_FREE_OR_MANEUVER = 2;
     static final int SPEED_LIMIT_COMPOSITE_FREE_OR_LANES = 3;
+    static final int TRANSLITERATION_OFF = HudTextTransliterator.OFF;
+    static final int TRANSLITERATION_UKRAINIAN = HudTextTransliterator.UKRAINIAN;
+    static final int TRANSLITERATION_UNIVERSAL = HudTextTransliterator.UNIVERSAL;
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
@@ -153,6 +157,21 @@ final class HudPrefs {
     static void setStreetOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_STREET, enabled).apply();
         markOutputOptionChanged(KEY_OUTPUT_STREET);
+    }
+
+    static int transliterationMode(Context context) {
+        return normalizeTransliterationMode(
+                prefs(context).getInt(KEY_TEXT_TRANSLITERATION, TRANSLITERATION_OFF));
+    }
+
+    static void setTransliterationMode(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_TEXT_TRANSLITERATION,
+                normalizeTransliterationMode(mode)).apply();
+        markOutputOptionChanged(KEY_TEXT_TRANSLITERATION);
+    }
+
+    static int normalizeTransliterationMode(int mode) {
+        return clamp(mode, TRANSLITERATION_OFF, TRANSLITERATION_UNIVERSAL);
     }
 
     static boolean isTextDirectionOutputEnabled(Context context) {

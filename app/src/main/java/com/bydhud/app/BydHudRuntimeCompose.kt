@@ -265,6 +265,8 @@ private data class Copy(
     val distanceHint: String,
     val streetOutput: String,
     val streetHint: String,
+    val textTransliteration: String,
+    val textTransliterationHint: String,
     val textDirectionOutput: String,
     val textDirectionOutputHint: String,
     val showWazeAlerts: String,
@@ -867,11 +869,17 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             when (event) {
                 Lifecycle.Event.ON_RESUME -> {
                     appInForeground = true
-                    refresh()
-                    requestTabStateRefresh(
-                        latestSelectedTab,
-                        "activity-resume-${latestSelectedTab.name.lowercase(Locale.ROOT)}"
-                    )
+                    when (latestSelectedTab) {
+                        RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
+                        RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(
+                            false,
+                            "activity-resume-patch"
+                        )
+                        RuntimeTab.Apps,
+                        RuntimeTab.Logs,
+                        RuntimeTab.Options,
+                        RuntimeTab.Manual -> Unit
+                    }
                 }
                 Lifecycle.Event.ON_PAUSE,
                 Lifecycle.Event.ON_STOP,
@@ -918,8 +926,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (!appInForeground) {
             return@LaunchedEffect
         }
-        refresh()
-        var lastUiRevision = activity.composeUiStateRevision()
         var lastBackgroundRequestAt = SystemClock.elapsedRealtime()
         while (true) {
             delay(1000L)
@@ -930,18 +936,20 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
             }
             val patchWasBusy = snapshot.patchOperation.busy
-            val uiRevision = activity.composeUiStateRevision()
+            val assetCacheMissing = snapshot.navigatorAssets.isEmpty()
             val now = SystemClock.elapsedRealtime()
             if (now - lastBackgroundRequestAt >= FOREGROUND_UI_REFRESH_REQUEST_MS) {
                 activity.composeRequestRuntimeUiStateRefresh(false, "foreground-periodic")
+                if (assetCacheMissing) {
+                    activity.composeRequestPatchUiStateRefresh(
+                        false,
+                        "foreground-asset-bootstrap"
+                    )
+                }
                 lastBackgroundRequestAt = now
             }
-            if (assetStateChanging || patchWasBusy || uiRevision != lastUiRevision) {
-                refresh()
-                lastUiRevision = activity.composeUiStateRevision()
-            }
-            if (patchWasBusy && !snapshot.patchOperation.busy) {
-                activity.composeRequestPatchUiStateRefresh("patch-operation-finished")
+            if (assetStateChanging || patchWasBusy) {
+                activity.composeRequestNavigatorAssetUiStateRefresh("foreground-asset-periodic")
             }
             val deliveryStatus = activity.composeHudDeliveryStatus()
             if (liveHudStatus != deliveryStatus) {
@@ -1562,6 +1570,11 @@ private fun OptionsTab(
     } else {
         listOf("Off", "Next stop", "Entire route")
     }
+    val textTransliterationModes = if (ua) {
+        listOf("Вимкнено", "Українська", "Універсальна")
+    } else {
+        listOf("Off", "Ukrainian", "Universal")
+    }
     val speedLimitModes = if (ua) {
         listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний")
     } else {
@@ -1713,6 +1726,23 @@ private fun OptionsTab(
                 SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
                     runAction { activity.composeSetStreetOutputEnabled(it) }
                 }
+                Divider(palette)
+                SettingRow(
+                    title = copy.textTransliteration,
+                    hint = copy.textTransliterationHint,
+                    palette = palette,
+                    action = {
+                        HudDropdown(
+                            selectedIndex = snapshot.transliterationMode,
+                            options = textTransliterationModes,
+                            palette = palette,
+                            width = 190.dp,
+                            onSelected = { mode ->
+                                runAction { activity.composeSetTransliterationMode(mode) }
+                            }
+                        )
+                    }
+                )
                 Divider(palette)
                 SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
                     runAction { activity.composeSetDistanceOutputEnabled(it) }
@@ -5818,6 +5848,8 @@ private fun enCopy() = Copy(
     distanceHint = "Send distance-to-maneuver field in live navigation payload.",
     streetOutput = "Street output",
     streetHint = "Send next road or Waze street text when available.",
+    textTransliteration = "Text transliteration",
+    textTransliterationHint = "Convert Ukrainian Cyrillic or other scripts to Latin characters for street names and directions if the HUD does not display them correctly.",
     textDirectionOutput = "Text direction output",
     textDirectionOutputHint = "Send text direction in street output (\"Continue straight\") if no street text available. Street output has priority.",
     showWazeAlerts = "Show Waze alerts",
@@ -6041,6 +6073,8 @@ private fun uaCopy() = enCopy().copy(
     distanceHint = "Надсилати дистанцію до маневру в даних активної навігації.",
     streetOutput = "Вивід вулиці",
     streetHint = "Надсилати наступну дорогу або назву вулиці з Waze, коли вона доступна.",
+    textTransliteration = "Транслітерація тексту",
+    textTransliterationHint = "Перетворювати українську кирилицю або інші системи письма на латиницю для вулиць/напрямків, якщо HUD не відображає назви коректно.",
     textDirectionOutput = "Вивід напрямків текстом",
     textDirectionOutputHint = "Виводити у поле для вулиці текстові напрямки (\"Прямуйте далі\"), якщо відсутній текст вулиці. Вивід вулиці має пріоритет.",
     showWazeAlerts = "Показувати попередження Waze",

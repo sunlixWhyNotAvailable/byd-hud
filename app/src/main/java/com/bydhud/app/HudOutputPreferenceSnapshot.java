@@ -12,6 +12,7 @@ final class HudOutputPreferenceSnapshot {
     final boolean distance;
     final boolean street;
     final boolean textDirection;
+    final int textTransliterationMode;
     final boolean clampSmallDistance;
     final boolean wazeAlerts;
     final int routeMetricsMode;
@@ -26,13 +27,15 @@ final class HudOutputPreferenceSnapshot {
     final int speedLimitLaneOverlaySize;
 
     private HudOutputPreferenceSnapshot(
-            DirectTbtPayload.Options options, boolean wazeAlerts) {
+            DirectTbtPayload.Options options, boolean wazeAlerts,
+            int textTransliterationMode) {
         png = options.png;
         nativeManeuver = options.nativeManeuver;
         lanes = options.lanes;
         distance = options.distance;
         street = options.street;
         textDirection = options.textDirection;
+        this.textTransliterationMode = textTransliterationMode;
         clampSmallDistance = options.clampSmallDistance;
         this.wazeAlerts = wazeAlerts;
         routeMetricsMode = options.routeMetricsMode;
@@ -52,16 +55,24 @@ final class HudOutputPreferenceSnapshot {
             int before = HudPrefs.outputOptionsRevision();
             DirectTbtPayload.Options options = DirectTbtPayload.Options.from(context);
             boolean alerts = HudPrefs.isWazeAlertsEnabled(context);
+            int transliteration = HudPrefs.transliterationMode(context);
             if (before == HudPrefs.outputOptionsRevision()) {
-                return new HudOutputPreferenceSnapshot(options, alerts);
+                return new HudOutputPreferenceSnapshot(options, alerts, transliteration);
             }
         }
     }
 
     static HudOutputPreferenceSnapshot from(
             DirectTbtPayload.Options options, boolean wazeAlerts) {
+        return from(options, wazeAlerts, HudPrefs.TRANSLITERATION_OFF);
+    }
+
+    static HudOutputPreferenceSnapshot from(
+            DirectTbtPayload.Options options, boolean wazeAlerts,
+            int textTransliterationMode) {
         return new HudOutputPreferenceSnapshot(
-                Objects.requireNonNull(options, "options"), wazeAlerts);
+                Objects.requireNonNull(options, "options"), wazeAlerts,
+                textTransliterationMode);
     }
 
     String compact() {
@@ -71,6 +82,7 @@ final class HudOutputPreferenceSnapshot {
                 + " distance=" + bit(distance)
                 + " street=" + bit(street)
                 + " textDirection=" + bit(textDirection)
+                + " textTransliteration=" + textTransliterationMode
                 + " clampSmallDistance=" + bit(clampSmallDistance)
                 + " wazeAlerts=" + bit(wazeAlerts)
                 + " routeMetrics=" + routeMetricsMode
@@ -96,6 +108,7 @@ final class HudOutputPreferenceSnapshot {
                 && distance == other.distance
                 && street == other.street
                 && textDirection == other.textDirection
+                && textTransliterationMode == other.textTransliterationMode
                 && clampSmallDistance == other.clampSmallDistance
                 && wazeAlerts == other.wazeAlerts
                 && routeMetricsMode == other.routeMetricsMode
@@ -114,7 +127,7 @@ final class HudOutputPreferenceSnapshot {
     public int hashCode() {
         return Objects.hash(
                 png, nativeManeuver, lanes, distance, street, textDirection,
-                clampSmallDistance, wazeAlerts, routeMetricsMode, eta,
+                textTransliterationMode, clampSmallDistance, wazeAlerts, routeMetricsMode, eta,
                 remainingTime, remainingDistance, speedLimitMode,
                 speedLimitFreeFallback, speedLimitOverlaySeconds,
                 speedLimitCompositePlacement, speedLimitManeuverOverlaySize,

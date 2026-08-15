@@ -95,6 +95,10 @@ final class VehicleTbtPublisher {
                 sendAmapTerminal(replaced);
                 ownerGeneration = generation;
                 ++routeToken;
+                Trace started = trace(owner, generation, reason, null, null);
+                sendStatus(STATUS_ACTIVE, started);
+                record(started, "lifecycle", "begin", "navigation",
+                        null, 0, 0L, "");
                 log("tbt_route_generation owner=" + owner + " generation=" + generation);
             }
             ownerHasHudPriority = hasHudPriority;
