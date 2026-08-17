@@ -26,12 +26,30 @@ public final class InstrumentProxyContractTest {
     @Test
     public void guidanceContractIsBounded() {
         assertTrue(InstrumentProxyContract.validGuidance(0, -1, ""));
+        assertTrue(InstrumentProxyContract.validGuidance(0, -1, " "));
         assertTrue(InstrumentProxyContract.validGuidance(49, 2_000_000, "Road"));
         assertFalse(InstrumentProxyContract.validGuidance(-1, 10, "Road"));
         assertFalse(InstrumentProxyContract.validGuidance(50, 10, "Road"));
         assertFalse(InstrumentProxyContract.validGuidance(12, -2, "Road"));
         assertFalse(InstrumentProxyContract.validGuidance(
                 12, 10, new String(new char[513]).replace('\0', 'x')));
+        StringBuilder oversizedWhitespace = new StringBuilder(513);
+        for (int index = 0; index < 513; index++) oversizedWhitespace.append(' ');
+        assertFalse(InstrumentProxyContract.validGuidance(
+                12, 10, oversizedWhitespace.toString()));
+    }
+
+    @Test
+    public void activeRoadWhitespaceSurvivesManagerAndServiceHandoff() throws IOException {
+        String manager = source(
+                "app/src/main/java/com/bydhud/app/InstrumentProxyManager.java");
+        String service = source(
+                "app/src/main/java/com/bydhud/app/InstrumentNavigationProxyService.java");
+
+        assertTrue(manager.contains("icon, distanceMeters, preserveText(road), callback"));
+        assertTrue(service.contains("String roadText = road == null ? \"\" : road;"));
+        assertTrue(service.contains("roadText.getBytes(StandardCharsets.UTF_16LE)"));
+        assertTrue(service.contains("current == null ? null : current.next, roadText"));
     }
 
     @Test

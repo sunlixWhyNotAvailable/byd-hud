@@ -559,6 +559,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var selectedTab by rememberSaveable { mutableStateOf(initialTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
@@ -635,10 +636,10 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
 
     fun requestTabStateRefresh(tab: RuntimeTab, reason: String) {
         when (tab) {
-            RuntimeTab.Apps,
-            RuntimeTab.Logs -> activity.composeRequestRuntimeUiStateRefresh(true, reason)
+            RuntimeTab.Apps -> activity.composeRequestRuntimeUiStateRefresh(false, reason)
             RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
             RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(reason)
+            RuntimeTab.Logs,
             RuntimeTab.Options,
             RuntimeTab.Manual -> Unit
         }
@@ -867,6 +868,19 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     LaunchedEffect(selectedTab) {
         val reason = "tab-${selectedTab.name.lowercase(Locale.ROOT)}"
         requestTabStateRefresh(selectedTab, reason)
+    }
+
+    LaunchedEffect(snapshot.shareLaunchId, snapshot.shareLaunchDays) {
+        val launchId = snapshot.shareLaunchId
+        if (launchId <= handledStorageShareLaunchId || launchId == 0L) {
+            return@LaunchedEffect
+        }
+        val sharedDays = snapshot.shareLaunchDays.toSet()
+        if (sharedDays.isNotEmpty()) {
+            selectedStorageDays = selectedStorageDays.filterNot { it in sharedDays }
+        }
+        handledStorageShareLaunchId = launchId
+        activity.composeAcknowledgeShareLaunch(launchId)
     }
 
     DisposableEffect(activity) {
@@ -1683,59 +1697,51 @@ private fun OptionsTab(
     val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
             || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
 
-    LazyPageSurface(copy.main, copy.mainHint, palette) {
-        item(key = "runtime-permissions") {
-            Section(copy.permissionsRuntime, palette) {
-                SettingRow(
-                title = copy.adbPermissions,
-                hint = copy.adbHint,
-                palette = palette,
-                action = { HudButton(copy.grantAdb, palette, primary = true, width = 190.dp) { runAction { activity.composeGrantAdb() } } }
-                )
-                Divider(palette)
-                SettingRow(
-                title = copy.backgroundApps,
-                hint = copy.backgroundHint,
-                palette = palette,
-                action = { HudButton(copy.disableBgApps, palette, width = 190.dp, onClick = onDisableBgApps) }
-                )
-                Divider(palette)
+    LazyPageSurface(copy.main, copy.mainHint, palette, itemSpacing = 0.dp) {
+        optionsSection("runtime-permissions", copy.permissionsRuntime, palette) {
+            row("adb-permissions") {
+                SettingRow(copy.adbPermissions, copy.adbHint, palette) {
+                    HudButton(copy.grantAdb, palette, primary = true, width = 190.dp) {
+                        runAction { activity.composeGrantAdb() }
+                    }
+                }
+            }
+            row("background-apps") {
+                SettingRow(copy.backgroundApps, copy.backgroundHint, palette) {
+                    HudButton(copy.disableBgApps, palette, width = 190.dp, onClick = onDisableBgApps)
+                }
+            }
+            row("boot-runtime") {
                 SwitchRow(copy.bootRuntime, copy.bootRuntimeHint, snapshot.bootEnabled, palette) {
                     runAction { activity.composeSetBootEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("diagnostic-artifacts") {
                 SwitchRow(
-                copy.saveScreenshotsLogs,
-                copy.saveScreenshotsLogsHint,
-                snapshot.detailedDebugArtifactsEnabled,
-                palette
+                    copy.saveScreenshotsLogs,
+                    copy.saveScreenshotsLogsHint,
+                    snapshot.detailedDebugArtifactsEnabled,
+                    palette
                 ) {
                     runAction { activity.composeSetDetailedDebugArtifactsEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("check-for-updates") {
                 UpdateCheckLine(
-                title = copy.checkForUpdates,
-                hint = copy.checkForUpdatesHint,
-                buttonText = copy.checkForUpdatesButton,
-                checked = autoUpdateCheckEnabled,
-                onCheckedChange = onAutoUpdateCheckChange,
-                onCheckClick = onManualUpdateCheck,
-                palette = palette
+                    title = copy.checkForUpdates,
+                    hint = copy.checkForUpdatesHint,
+                    buttonText = copy.checkForUpdatesButton,
+                    checked = autoUpdateCheckEnabled,
+                    onCheckedChange = onAutoUpdateCheckChange,
+                    onCheckClick = onManualUpdateCheck,
+                    palette = palette
                 )
-                Divider(palette)
-                SwitchRow(
-                copy.betaTesting,
-                copy.betaTestingHint,
-                betaChannelEnabled,
-                palette,
-                onChecked = onBetaChannelChange
-                )
-                Divider(palette)
-                SettingRow(
-                title = copy.shutdown,
-                hint = copy.shutdownHint,
-                palette = palette,
-                action = {
+            }
+            row("beta-testing") {
+                SwitchRow(copy.betaTesting, copy.betaTestingHint, betaChannelEnabled, palette, onChecked = onBetaChannelChange)
+            }
+            row("shutdown") {
+                SettingRow(copy.shutdown, copy.shutdownHint, palette) {
                     HudIconButton(
                         icon = R.drawable.ic_shutdown,
                         contentDescription = copy.shutdown,
@@ -1743,9 +1749,9 @@ private fun OptionsTab(
                         tint = palette.red,
                         onClick = onShutdownClick
                     )
-                    }
-                )
-                Divider(palette)
+                }
+            }
+            row("screen-capture-channel") {
                 SwitchRow(
                     copy.screenCaptureChannel,
                     copy.screenCaptureChannelHint,
@@ -1756,290 +1762,215 @@ private fun OptionsTab(
                 }
             }
         }
-
-        item(key = "basic-navigation") {
-            Section(copy.basicNavigationOutput, palette) {
+        optionsSection("basic-navigation", copy.basicNavigationOutput, palette) {
+            row("png-output") {
                 SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
                     runAction { activity.composeSetPngOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("native-output") {
                 SwitchRow(copy.nativeOutput, copy.nativeHint, snapshot.nativeOutputEnabled, palette) {
                     runAction { activity.composeSetNativeOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("lane-output") {
                 SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette) {
                     runAction { activity.composeSetLaneOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("street-output") {
                 SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
                     runAction { activity.composeSetStreetOutputEnabled(it) }
                 }
-                Divider(palette)
-                SettingRow(
-                    title = copy.textTransliteration,
-                    hint = copy.textTransliterationHint,
-                    palette = palette,
-                    action = {
-                        HudDropdown(
-                            selectedIndex = snapshot.transliterationMode,
-                            options = textTransliterationModes,
-                            palette = palette,
-                            width = 190.dp,
-                            onSelected = { mode ->
-                                runAction { activity.composeSetTransliterationMode(mode) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
+            }
+            row("text-transliteration") {
+                SettingRow(copy.textTransliteration, copy.textTransliterationHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.transliterationMode,
+                        options = textTransliterationModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetTransliterationMode(mode) } }
+                    )
+                }
+            }
+            row("distance-output") {
                 SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
                     runAction { activity.composeSetDistanceOutputEnabled(it) }
                 }
             }
         }
-
-        item(key = "route-eta") {
-            Section(if (ua) "ЕТА маршруту" else "Route ETA", palette) {
-                SettingRow(
-                    title = routeMetricsTitle,
-                    hint = routeMetricsHint,
-                    palette = palette,
-                    action = {
-                        HudDropdown(
-                            selectedIndex = snapshot.routeMetricsMode,
-                            options = routeMetricModes,
-                            palette = palette,
-                            width = 190.dp,
-                            onSelected = { mode ->
-                                runAction { activity.composeSetRouteMetricsMode(mode) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
-                SwitchRow(
-                    copy.showEta,
-                    copy.showEtaHint,
-                    snapshot.etaOutputEnabled,
-                    palette,
-                    enabled = snapshot.routeMetricsMode != 0
-                ) {
+        optionsSection("route-eta", if (ua) "ЕТА маршруту" else "Route ETA", palette) {
+            row("route-metrics-mode") {
+                SettingRow(routeMetricsTitle, routeMetricsHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.routeMetricsMode,
+                        options = routeMetricModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetRouteMetricsMode(mode) } }
+                    )
+                }
+            }
+            row("eta-output") {
+                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
                     runAction { activity.composeSetEtaOutputEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                    copy.showRemainingTime,
-                    copy.showRemainingTimeHint,
-                    snapshot.remainingTimeOutputEnabled,
-                    palette,
-                    enabled = snapshot.routeMetricsMode != 0
-                ) {
+            }
+            row("remaining-time-output") {
+                SwitchRow(copy.showRemainingTime, copy.showRemainingTimeHint, snapshot.remainingTimeOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
                     runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                    copy.showRemainingDistance,
-                    copy.showRemainingDistanceHint,
-                    snapshot.remainingDistanceOutputEnabled,
-                    palette,
-                    enabled = snapshot.routeMetricsMode != 0
-                ) {
+            }
+            row("remaining-distance-output") {
+                SwitchRow(copy.showRemainingDistance, copy.showRemainingDistanceHint, snapshot.remainingDistanceOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
                     runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
                 }
             }
         }
-
-        item(key = "speed-limit") {
-            Section(if (ua) "Обмеження швидкості" else "Speed limit", palette) {
+        optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", palette) {
+            row("speed-limit-mode") {
+                SettingRow(if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode", speedLimitModeHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.speedLimitMode,
+                        options = speedLimitModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetSpeedLimitMode(mode) } }
+                    )
+                }
+            }
+            row("speed-limit-fallback") {
                 SettingRow(
-                    title = if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode",
-                    hint = speedLimitModeHint,
-                    palette = palette,
-                    action = {
-                        HudDropdown(
-                            selectedIndex = snapshot.speedLimitMode,
-                            options = speedLimitModes,
-                            palette = palette,
-                            width = 190.dp,
-                            onSelected = { mode ->
-                                runAction { activity.composeSetSpeedLimitMode(mode) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
+                    if (ua) "Накладання у режимі «У вільному полі»" else "Overlay in \"In a free field\" mode",
+                    freeFallbackHint,
+                    palette,
+                    enabled = freeFallbackEnabled
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.speedLimitFreeFallback,
+                        options = speedLimitFallbackModes,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = freeFallbackEnabled,
+                        onSelected = { mode -> runAction { activity.composeSetSpeedLimitFreeFallback(mode) } }
+                    )
+                }
+            }
+            row("speed-limit-overlay-seconds") {
                 SettingRow(
-                    title = if (ua) "Накладання у режимі «У вільному полі»"
-                    else "Overlay in \"In a free field\" mode",
-                    hint = freeFallbackHint,
-                    palette = palette,
-                    enabled = freeFallbackEnabled,
-                    action = {
-                        HudDropdown(
-                            selectedIndex = snapshot.speedLimitFreeFallback,
-                            options = speedLimitFallbackModes,
-                            palette = palette,
-                            width = 190.dp,
-                            enabled = freeFallbackEnabled,
-                            onSelected = { mode ->
-                                runAction { activity.composeSetSpeedLimitFreeFallback(mode) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
+                    if (ua) "Час показу при накладанні" else "Display time when overlapping",
+                    overlaySecondsHint,
+                    palette,
+                    enabled = overlaySecondsEnabled
+                ) {
+                    HudIntegerStepper(
+                        value = snapshot.speedLimitOverlaySeconds,
+                        palette = palette,
+                        enabled = overlaySecondsEnabled,
+                        onValueChange = { seconds -> runAction { activity.composeSetSpeedLimitOverlaySeconds(seconds) } }
+                    )
+                }
+            }
+            row("speed-limit-composite-placement") {
                 SettingRow(
-                    title = if (ua) "Час показу при накладанні" else "Display time when overlapping",
-                    hint = overlaySecondsHint,
-                    palette = palette,
-                    enabled = overlaySecondsEnabled,
-                    action = {
-                        HudIntegerStepper(
-                            value = snapshot.speedLimitOverlaySeconds,
-                            palette = palette,
-                            enabled = overlaySecondsEnabled,
-                            onValueChange = { seconds ->
-                                runAction { activity.composeSetSpeedLimitOverlaySeconds(seconds) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
+                    if (ua) "Поле для виводу у композитному режимі" else "Composite output field",
+                    compositePlacementHint,
+                    palette,
+                    enabled = compositeEnabled
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.speedLimitCompositePlacement,
+                        options = speedLimitCompositePlacementModes,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = compositeEnabled,
+                        onSelected = { placement -> runAction { activity.composeSetSpeedLimitCompositePlacement(placement) } }
+                    )
+                }
+            }
+            row("speed-limit-maneuver-size") {
                 SettingRow(
-                    title = if (ua) "Поле для виводу у композитному режимі"
-                    else "Composite output field",
-                    hint = compositePlacementHint,
-                    palette = palette,
-                    enabled = compositeEnabled,
-                    action = {
-                        HudDropdown(
-                            selectedIndex = snapshot.speedLimitCompositePlacement,
-                            options = speedLimitCompositePlacementModes,
-                            palette = palette,
-                            width = 190.dp,
-                            enabled = compositeEnabled,
-                            onSelected = { placement ->
-                                runAction { activity.composeSetSpeedLimitCompositePlacement(placement) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
+                    if (ua) "Розмір знаку у полі маневру" else "Sign size in maneuver field",
+                    compositeManeuverSizeHint,
+                    palette,
+                    enabled = compositeEnabled
+                ) {
+                    HudIntegerStepper(
+                        value = snapshot.speedLimitManeuverOverlaySize,
+                        palette = palette,
+                        enabled = compositeEnabled,
+                        maxValue = 103,
+                        fallbackValue = 64,
+                        onValueChange = { size -> runAction { activity.composeSetSpeedLimitManeuverOverlaySize(size) } }
+                    )
+                }
+            }
+            row("speed-limit-lane-size") {
                 SettingRow(
-                    title = if (ua) "Розмір знаку у полі маневру"
-                    else "Sign size in maneuver field",
-                    hint = compositeManeuverSizeHint,
-                    palette = palette,
-                    enabled = compositeEnabled,
-                    action = {
-                        HudIntegerStepper(
-                            value = snapshot.speedLimitManeuverOverlaySize,
-                            palette = palette,
-                            enabled = compositeEnabled,
-                            maxValue = 103,
-                            fallbackValue = 64,
-                            onValueChange = { size ->
-                                runAction { activity.composeSetSpeedLimitManeuverOverlaySize(size) }
-                            }
-                        )
-                    }
-                )
-                Divider(palette)
-                SettingRow(
-                    title = if (ua) "Розмір знаку у полі для смуг"
-                    else "Sign size in lane field",
-                    hint = compositeLaneSizeHint,
-                    palette = palette,
-                    enabled = compositeEnabled,
-                    action = {
-                        HudIntegerStepper(
-                            value = snapshot.speedLimitLaneOverlaySize,
-                            palette = palette,
-                            enabled = compositeEnabled,
-                            maxValue = 36,
-                            fallbackValue = 36,
-                            onValueChange = { size ->
-                                runAction { activity.composeSetSpeedLimitLaneOverlaySize(size) }
-                            }
-                        )
-                    }
-                )
+                    if (ua) "Розмір знаку у полі для смуг" else "Sign size in lane field",
+                    compositeLaneSizeHint,
+                    palette,
+                    enabled = compositeEnabled
+                ) {
+                    HudIntegerStepper(
+                        value = snapshot.speedLimitLaneOverlaySize,
+                        palette = palette,
+                        enabled = compositeEnabled,
+                        maxValue = 36,
+                        fallbackValue = 36,
+                        onValueChange = { size -> runAction { activity.composeSetSpeedLimitLaneOverlaySize(size) } }
+                    )
+                }
             }
         }
-
-        item(key = "waze-features") {
-            Section(copy.wazeFeatures, palette) {
+        optionsSection("waze-features", copy.wazeFeatures, palette) {
+            row("waze-alerts") {
                 SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
                     runAction { activity.composeSetWazeAlertsEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                    copy.customSurface,
-                    copy.customSurfaceHint,
-                    snapshot.wazeCustomSurfaceEnabled,
-                    palette
-                ) {
+            }
+            row("waze-custom-surface") {
+                SwitchRow(copy.customSurface, copy.customSurfaceHint, snapshot.wazeCustomSurfaceEnabled, palette) {
                     runAction { activity.composeSetWazeCustomSurfaceEnabled(it) }
                 }
             }
         }
-
-        item(key = "extra-navigation") {
-            Section(copy.extraNavigationOptions, palette) {
-                SwitchRow(
-                    copy.tbtWithoutHudOutput,
-                    copy.tbtWithoutHudOutputHint,
-                    snapshot.tbtWithoutHudOutputEnabled,
-                    palette
-                ) {
+        optionsSection("extra-navigation", copy.extraNavigationOptions, palette) {
+            row("tbt-without-hud") {
+                SwitchRow(copy.tbtWithoutHudOutput, copy.tbtWithoutHudOutputHint, snapshot.tbtWithoutHudOutputEnabled, palette) {
                     runAction { activity.composeSetTbtWithoutHudOutputEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                    copy.switchToTbtOnHudStart,
-                    copy.switchToTbtOnHudStartHint,
-                    snapshot.switchToTbtOnHudStartEnabled,
-                    palette
-                ) {
+            }
+            row("switch-to-tbt-on-hud-start") {
+                SwitchRow(copy.switchToTbtOnHudStart, copy.switchToTbtOnHudStartHint, snapshot.switchToTbtOnHudStartEnabled, palette) {
                     runAction { activity.composeSetSwitchToTbtOnHudStartEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                copy.textDirectionOutput,
-                copy.textDirectionOutputHint,
-                snapshot.textDirectionOutputEnabled,
-                palette
-                ) {
+            }
+            row("text-direction") {
+                SwitchRow(copy.textDirectionOutput, copy.textDirectionOutputHint, snapshot.textDirectionOutputEnabled, palette) {
                     runAction { activity.composeSetTextDirectionOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("small-distance-clamp") {
                 SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
                     runAction { activity.composeSetSmallDistanceClamp(it) }
                 }
-                Divider(palette)
+            }
+            row("roundabout-left") {
                 SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
                     runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
                 }
             }
         }
-
-        item(key = "dashboard-control") {
-            Section(copy.dashboardControl, palette) {
-                SwitchRow(
-                    copy.fullscreenDashboard,
-                    copy.fullscreenDashboardHint,
-                    snapshot.fullscreenDashboardEnabled,
-                    palette
-                ) {
+        optionsSection("dashboard-control", copy.dashboardControl, palette) {
+            row("fullscreen-dashboard") {
+                SwitchRow(copy.fullscreenDashboard, copy.fullscreenDashboardHint, snapshot.fullscreenDashboardEnabled, palette) {
                     runAction { activity.composeSetFullscreenDashboardEnabled(it) }
                 }
-                Divider(palette)
-                DashboardHeightRow(
-                    copy.dashboardHeight,
-                    copy.dashboardHeightHint,
-                    snapshot.dashboardHeightPercent,
-                    palette
-                ) {
+            }
+            row("dashboard-height") {
+                DashboardHeightRow(copy.dashboardHeight, copy.dashboardHeightHint, snapshot.dashboardHeightPercent, palette) {
                     runAction { activity.composeSetDashboardHeightPercent(it) }
                 }
             }
@@ -4871,6 +4802,59 @@ private fun PageSurfaceHeader(
             Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
         headerAction?.invoke()
+    }
+}
+
+private data class OptionsRowSpec(
+    val key: String,
+    val content: @Composable () -> Unit
+)
+
+private class OptionsSectionScope {
+    val rows = mutableListOf<OptionsRowSpec>()
+
+    fun row(key: String, content: @Composable () -> Unit) {
+        rows += OptionsRowSpec(key, content)
+    }
+}
+
+private fun LazyListScope.optionsSection(
+    sectionKey: String,
+    title: String,
+    palette: Palette,
+    gapBefore: Dp = 10.dp,
+    content: OptionsSectionScope.() -> Unit
+) {
+    val scope = OptionsSectionScope().apply(content)
+    item(key = "$sectionKey:gap", contentType = "options-gap") {
+        Spacer(Modifier.height(gapBefore))
+    }
+    item(key = "$sectionKey:header", contentType = "options-header") {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            Text(title.uppercase(), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+    }
+    scope.rows.forEachIndexed { index, row ->
+        item(key = "$sectionKey:${row.key}", contentType = "options-row") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .appSectionSegmentFrame(
+                        palette,
+                        palette.panel,
+                        top = false,
+                        bottom = index == scope.rows.lastIndex
+                    )
+            ) {
+                if (index > 0) Divider(palette)
+                row.content()
+            }
+        }
     }
 }
 

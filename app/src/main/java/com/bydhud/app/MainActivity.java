@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.util.Log;
@@ -79,7 +80,10 @@ public final class MainActivity extends ComponentActivity {
     private static final String THEME_WARNING_TAG = "theme_warning";
     private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
     private static final AtomicBoolean SHARE_OPERATION = new AtomicBoolean(false);
-    private static final AtomicReference<File> PENDING_SHARE_FILE = new AtomicReference<>();
+    private static final AtomicReference<PendingShare> PENDING_SHARE = new AtomicReference<>();
+    private static final AtomicReference<ShareLaunchEvent> SHARE_LAUNCH_EVENT =
+            new AtomicReference<>(ShareLaunchEvent.empty());
+    private static final AtomicLong SHARE_LAUNCH_SEQUENCE = new AtomicLong();
     private static final AtomicReference<MainActivity> RESUMED_ACTIVITY = new AtomicReference<>();
     private static final AtomicBoolean STORAGE_SCAN_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean STORAGE_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
@@ -282,7 +286,7 @@ public final class MainActivity extends ComponentActivity {
         maybeStartPendingAdbAuthorization();
         refreshControls();
         invalidateComposeSnapshot();
-        requestRuntimeUiStateRefresh(this, true, "activity-resume");
+        requestRuntimeUiStateRefresh(this, false, "activity-resume");
         notifyPendingShare();
     }
 
@@ -787,6 +791,7 @@ public final class MainActivity extends ComponentActivity {
             }
         }
         StorageCacheState storage = storageCacheState;
+        ShareLaunchEvent shareLaunchEvent = SHARE_LAUNCH_EVENT.get();
         return new ComposeSnapshot(
                 HudPrefs.isUaLanguage(this),
                 HudPrefs.isDarkTheme(this),
@@ -859,7 +864,9 @@ public final class MainActivity extends ComponentActivity {
                 allRows,
                 patchRows,
                 localizedNavigatorAssetSnapshots(uaLanguage),
-                composePatchOperations());
+                composePatchOperations(),
+                shareLaunchEvent.id,
+                shareLaunchEvent.storageDays);
     }
 
     private static List<NavigatorAssetManager.AssetSnapshot> localizedNavigatorAssetSnapshots(
@@ -1631,6 +1638,21 @@ public final class MainActivity extends ComponentActivity {
         return HudDeliveryStatus.uiStatus();
     }
 
+    private static int lowerCurrentThreadPriority() {
+        int tid = Process.myTid();
+        int previous = Process.getThreadPriority(tid);
+        if (previous != Process.THREAD_PRIORITY_BACKGROUND) {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+        }
+        return previous;
+    }
+
+    private static void restoreCurrentThreadPriority(int previous) {
+        if (Process.getThreadPriority(Process.myTid()) != previous) {
+            Process.setThreadPriority(previous);
+        }
+    }
+
     private void invalidateComposeSnapshot() {
         Runnable listener = composeSnapshotInvalidationListener;
         if (listener != null) {
@@ -1740,6 +1762,7 @@ public final class MainActivity extends ComponentActivity {
             lastPatchUiRefreshAtMs = now;
         }
         new Thread(() -> {
+            int previousPriority = lowerCurrentThreadPriority();
             try {
                 NavAppTaskScanner.Snapshot scan =
                         NavAppTaskScanner.get(appContext).currentSnapshot();
@@ -1763,10 +1786,14 @@ public final class MainActivity extends ComponentActivity {
                 AppEventLogger.event(appContext, "ui_patch_refresh failed reason=" + reason
                         + " error=" + e.getClass().getSimpleName());
             } finally {
-                PATCH_REFRESH_IN_PROGRESS.set(false);
-                publishSharedUiStateChange();
-                if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
-                    requestPatchUiStateRefresh(appContext, true, "pending-force");
+                try {
+                    PATCH_REFRESH_IN_PROGRESS.set(false);
+                    publishSharedUiStateChange();
+                    if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                        requestPatchUiStateRefresh(appContext, true, "pending-force");
+                    }
+                } finally {
+                    restoreCurrentThreadPriority(previousPriority);
                 }
             }
         }, "BydHudPatchState").start();
@@ -1787,6 +1814,7 @@ public final class MainActivity extends ComponentActivity {
             lastAssetUiRefreshAtMs = now;
         }
         new Thread(() -> {
+            int previousPriority = lowerCurrentThreadPriority();
             try {
                 List<NavigatorAssetManager.AssetSnapshot> next =
                         NavigatorAssetManager.snapshots(appContext, false);
@@ -1794,15 +1822,19 @@ public final class MainActivity extends ComponentActivity {
                     navigatorAssetSnapshots = next;
                     AppEventLogger.event(appContext,
                             "ui_asset_refresh reason=" + reason);
+                    publishSharedUiStateChange();
                 }
-                publishSharedUiStateChange();
             } catch (RuntimeException e) {
                 AppEventLogger.event(appContext, "ui_asset_refresh failed reason=" + reason
                         + " error=" + e.getClass().getSimpleName());
             } finally {
-                ASSET_REFRESH_IN_PROGRESS.set(false);
-                if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
-                    requestPatchUiStateRefresh(appContext, true, "pending-force");
+                try {
+                    ASSET_REFRESH_IN_PROGRESS.set(false);
+                    if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                        requestPatchUiStateRefresh(appContext, true, "pending-force");
+                    }
+                } finally {
+                    restoreCurrentThreadPriority(previousPriority);
                 }
             }
         }, "BydHudAssetState").start();
@@ -1899,13 +1931,13 @@ public final class MainActivity extends ComponentActivity {
         if (!SHARE_OPERATION.compareAndSet(false, true)) {
             return "failed: share already running";
         }
+        List<String> selectedDays = immutableStorageDays(days);
         try {
-            LogShareZip.Result result = LogShareZip.create(this, days);
+            LogShareZip.Result result = LogShareZip.create(this, selectedDays);
             if (!result.ok || result.file == null) {
                 return "failed: " + result.detail;
             }
-            PENDING_SHARE_FILE.set(result.file);
-            notifyPendingShare();
+            queuePendingShare(result.file, selectedDays);
             return "ready " + result.file.getName() + " " + result.detail;
         } finally {
             SHARE_OPERATION.set(false);
@@ -1957,8 +1989,7 @@ public final class MainActivity extends ComponentActivity {
             if (!result.ok || result.file == null) {
                 return "failed: " + result.detail;
             }
-            PENDING_SHARE_FILE.set(result.file);
-            notifyPendingShare();
+            queuePendingShare(result.file, Collections.emptyList());
             return "ready " + result.file.getName() + " " + result.detail;
         } finally {
             SHARE_OPERATION.set(false);
@@ -1993,10 +2024,28 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    private static List<String> immutableStorageDays(List<String> days) {
+        if (days == null || days.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return Collections.unmodifiableList(new ArrayList<>(days));
+    }
+
+    private static void queuePendingShare(File file, List<String> storageDays) {
+        if (file == null) {
+            return;
+        }
+        PENDING_SHARE.set(new PendingShare(
+                file,
+                SHARE_LAUNCH_SEQUENCE.incrementAndGet(),
+                immutableStorageDays(storageDays)));
+        notifyPendingShare();
+    }
+
     //Delivers a completed archive to the current Activity after recreation or foreground return.
     private void deliverPendingShare() {
-        File file = PENDING_SHARE_FILE.get();
-        if (file == null) {
+        PendingShare pending = PENDING_SHARE.get();
+        if (pending == null) {
             return;
         }
         MainActivity current = RESUMED_ACTIVITY.get();
@@ -2006,27 +2055,38 @@ public final class MainActivity extends ComponentActivity {
             }
             return;
         }
-        if (!file.isFile()) {
-            PENDING_SHARE_FILE.compareAndSet(file, null);
+        if (!pending.file.isFile()) {
+            PENDING_SHARE.compareAndSet(pending, null);
             return;
         }
         try {
             android.net.Uri uri = FileProvider.getUriForFile(
                     this,
                     getPackageName() + ".fileprovider",
-                    file);
+                    pending.file);
             Intent send = new Intent(Intent.ACTION_SEND)
                     .setType("application/zip")
                     .putExtra(Intent.EXTRA_STREAM, uri)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            send.setClipData(ClipData.newRawUri(file.getName(), uri));
+            send.setClipData(ClipData.newRawUri(pending.file.getName(), uri));
             startActivity(Intent.createChooser(send, null));
-            PENDING_SHARE_FILE.compareAndSet(file, null);
+            PENDING_SHARE.compareAndSet(pending, null);
+            SHARE_LAUNCH_EVENT.set(new ShareLaunchEvent(
+                    pending.launchId, pending.storageDays));
+            publishSharedUiStateChange();
         } catch (RuntimeException e) {
-            PENDING_SHARE_FILE.compareAndSet(file, null);
+            PENDING_SHARE.compareAndSet(pending, null);
             AppEventLogger.event(this, "share_chooser_failed error="
                     + e.getClass().getSimpleName() + " "
                     + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
+        }
+    }
+
+    public void composeAcknowledgeShareLaunch(long launchId) {
+        ShareLaunchEvent current = SHARE_LAUNCH_EVENT.get();
+        if (current.id == launchId && launchId != 0L
+                && SHARE_LAUNCH_EVENT.compareAndSet(current, ShareLaunchEvent.empty())) {
+            publishSharedUiStateChange();
         }
     }
 
@@ -2128,6 +2188,32 @@ public final class MainActivity extends ComponentActivity {
         return Math.max(min, Math.min(max, value));
     }
 
+    private static final class PendingShare {
+        final File file;
+        final long launchId;
+        final List<String> storageDays;
+
+        PendingShare(File file, long launchId, List<String> storageDays) {
+            this.file = file;
+            this.launchId = launchId;
+            this.storageDays = immutableStorageDays(storageDays);
+        }
+    }
+
+    public static final class ShareLaunchEvent {
+        public final long id;
+        public final List<String> storageDays;
+
+        ShareLaunchEvent(long id, List<String> storageDays) {
+            this.id = Math.max(0L, id);
+            this.storageDays = immutableStorageDays(storageDays);
+        }
+
+        static ShareLaunchEvent empty() {
+            return new ShareLaunchEvent(0L, Collections.emptyList());
+        }
+    }
+
     //models ComposeSnapshot data here so transport and parser layers share a stable contract.
     public static final class ComposeSnapshot {
         public final boolean uaLanguage;
@@ -2203,6 +2289,8 @@ public final class MainActivity extends ComponentActivity {
         public final List<NavigatorAssetManager.AssetSnapshot> navigatorAssets;
         public final List<ComposePatchOperation> patchOperations;
         public final ComposePatchOperation patchOperation;
+        public final long shareLaunchId;
+        public final List<String> shareLaunchDays;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
@@ -2239,7 +2327,8 @@ public final class MainActivity extends ComponentActivity {
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
                 List<ComposeNavigatorPatchRow> patchRows,
                 List<NavigatorAssetManager.AssetSnapshot> navigatorAssets,
-                List<ComposePatchOperation> patchOperations) {
+                List<ComposePatchOperation> patchOperations,
+                long shareLaunchId, List<String> shareLaunchDays) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
@@ -2324,6 +2413,9 @@ public final class MainActivity extends ComponentActivity {
             this.patchOperation = this.patchOperations.isEmpty()
                     ? ComposePatchOperation.idle()
                     : this.patchOperations.get(this.patchOperations.size() - 1);
+            this.shareLaunchId = Math.max(0L, shareLaunchId);
+            this.shareLaunchDays = shareLaunchDays == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(shareLaunchDays));
         }
 
         @Override
@@ -2402,7 +2494,9 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(allApps, other.allApps)
                     && Objects.equals(patchRows, other.patchRows)
                     && Objects.equals(navigatorAssets, other.navigatorAssets)
-                    && Objects.equals(patchOperations, other.patchOperations);
+                    && Objects.equals(patchOperations, other.patchOperations)
+                    && shareLaunchId == other.shareLaunchId
+                    && Objects.equals(shareLaunchDays, other.shareLaunchDays);
         }
 
         @Override
@@ -2430,7 +2524,8 @@ public final class MainActivity extends ComponentActivity {
                     appScanCacheAvailable, appScanStatus, storageLimitGb,
                     navCaptureFolderPaths, storageCalculating, storageCacheAvailable,
                     storageScanError, storageSessionCount, navCaptureFolderBytes, storageDays,
-                    supportedApps, allApps, patchRows, navigatorAssets, patchOperations);
+                    supportedApps, allApps, patchRows, navigatorAssets, patchOperations,
+                    shareLaunchId, shareLaunchDays);
         }
     }
 

@@ -402,8 +402,10 @@ final class VehicleTbtPublisher {
 
     static String roadTextForTest(DirectTbtFrame frame) {
         if (frame == null) return "";
-        String road = safe(frame.getRoadText());
-        return road.isEmpty() ? safe(frame.getCueText()) : road;
+        String road = preserveText(frame.getRoadText());
+        if (!road.isEmpty()) return road;
+        String cue = preserveText(frame.getCueText());
+        return cue.isEmpty() ? " " : cue;
     }
 
     private boolean matches(String packageName, long generation) {
@@ -480,7 +482,7 @@ final class VehicleTbtPublisher {
         hasInstrumentGuidance = true;
         int nextIcon = Math.max(0, Math.min(49, icon));
         int nextDistance = Math.max(-1, Math.min(2_000_000, distance));
-        String normalizedRoad = safe(road);
+        String normalizedRoad = preserveText(road);
         String nextRoad = normalizedRoad.length() <= 512
                 ? normalizedRoad : normalizedRoad.substring(0, 512);
         if (deduplicate && hasLastInstrumentSemantic
@@ -518,7 +520,9 @@ final class VehicleTbtPublisher {
             boolean deduplicate) {
         DirectTbtFrame.TravelMetrics selected = metrics == null
                 ? DirectTbtFrame.TravelMetrics.unavailable() : metrics;
-        String semanticKey = amapSemanticKey(amapIcon, roundaboutExit, distance, road, selected);
+        String nextRoad = preserveText(road);
+        String semanticKey = amapSemanticKey(amapIcon, roundaboutExit, distance,
+                nextRoad, selected);
         if (deduplicate && hasLastAmapSemantic && semanticKey.equals(lastAmapSemanticKey)) {
             record(trace, "amap_broadcast", "dedup", "guidance", new byte[0], 0, 0L, "");
             return;
@@ -535,11 +539,11 @@ final class VehicleTbtPublisher {
         intent.putExtra("NEW_ICON", amapIcon);
         intent.putExtra("ROUNG_ABOUT_NUM", roundaboutExit);
         intent.putExtra("SEG_REMAIN_DIS", distance);
-        intent.putExtra("NEXT_ROAD_NAME", safe(road));
+        intent.putExtra("NEXT_ROAD_NAME", nextRoad);
         intent.putExtra("ROUTE_REMAIN_DIS", toInt(selected.getRemainingDistanceMeters(), -1));
         intent.putExtra("ROUTE_REMAIN_TIME", toInt(selected.getRemainingTimeSeconds(), -1));
         if (sendAmap(intent, "frame", trace, amapBytes(
-                10001, amapIcon, roundaboutExit, distance, road,
+                10001, amapIcon, roundaboutExit, distance, nextRoad,
                 toInt(selected.getRemainingDistanceMeters(), -1),
                 toInt(selected.getRemainingTimeSeconds(), -1)))) {
             hasLastAmapSemantic = true;
@@ -589,7 +593,7 @@ final class VehicleTbtPublisher {
 
     private static String amapSemanticKey(int icon, int exit, int distance,
             String road, DirectTbtFrame.TravelMetrics metrics) {
-        return icon + "|" + exit + "|" + distance + "|" + safe(road)
+        return icon + "|" + exit + "|" + distance + "|" + preserveText(road)
                 + "|" + metrics.getRemainingDistanceMeters()
                 + "|" + metrics.getRemainingTimeSeconds();
     }
@@ -710,20 +714,20 @@ final class VehicleTbtPublisher {
             }
             if (featureId == FID_DISTANCE) return ints(featureId, distance);
             if (featureId == FID_ROAD) {
-                return withInt(featureId, safe(road).getBytes(StandardCharsets.UTF_16LE));
+                return withInt(featureId, preserveText(road).getBytes(StandardCharsets.UTF_16LE));
             }
             return ints(featureId);
         }
         if ("sendAutoNaviStatus".equals(target)) return ints(status);
         if ("sendSimpleGuidanceInfo".equals(target)) return ints(icon, distance);
         if ("sendNextPathName".equals(target)) {
-            return safe(road).getBytes(StandardCharsets.UTF_8);
+            return preserveText(road).getBytes(StandardCharsets.UTF_8);
         }
         return new byte[0];
     }
 
     private static byte[] guidanceBytes(int icon, int distance, String road) {
-        byte[] text = safe(road).getBytes(StandardCharsets.UTF_8);
+        byte[] text = preserveText(road).getBytes(StandardCharsets.UTF_8);
         ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES * 3 + text.length)
                 .order(ByteOrder.LITTLE_ENDIAN);
         return buffer.putInt(icon).putInt(distance).putInt(text.length).put(text).array();
@@ -765,7 +769,7 @@ final class VehicleTbtPublisher {
                 : frame == null ? 0 : frame.getRoundaboutExitNumber();
         int distance = manualState != null ? manualState.distanceToIntersection
                 : frame == null ? -1 : frame.getDistanceMeters();
-        String road = manualState != null ? manualState.roadName
+        String road = manualState != null ? safe(manualState.roadName)
                 : frame == null ? "" : roadTextForTest(frame);
         DirectTbtFrame.TravelMetrics route = frame == null
                 ? DirectTbtFrame.TravelMetrics.unavailable()
@@ -776,7 +780,7 @@ final class VehicleTbtPublisher {
         return new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
                 nativeId, intermediateAmapIcon, amapIcon, roundaboutExit,
-                distance, safe(road), route, next);
+                distance, preserveText(road), route, next);
     }
 
     private static String sourceForOwner(String owner) {
@@ -832,7 +836,7 @@ final class VehicleTbtPublisher {
 
     private static byte[] amapBytes(int keyType, int icon, int exit, int distance,
             String road, int remainingDistance, int remainingTime) {
-        byte[] text = safe(road).getBytes(StandardCharsets.UTF_8);
+        byte[] text = preserveText(road).getBytes(StandardCharsets.UTF_8);
         ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES * 7 + text.length)
                 .order(ByteOrder.LITTLE_ENDIAN);
         return buffer.putInt(keyType).putInt(icon).putInt(exit).putInt(distance)
@@ -858,6 +862,10 @@ final class VehicleTbtPublisher {
 
     private static String safe(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String preserveText(String value) {
+        return value == null ? "" : value;
     }
 
     static final class ManualMapping {

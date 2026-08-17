@@ -53,6 +53,33 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
+    public void activeRoadUsesCueFallbackAndOneSpaceOnlyWhenBothTextsAreEmpty() {
+        assertEquals("Road", VehicleTbtPublisher.roadTextForTest(
+                DirectTbtFrame.empty().withNavigationText("Road", "Cue")));
+        assertEquals("Cue", VehicleTbtPublisher.roadTextForTest(
+                DirectTbtFrame.empty().withNavigationText("", "Cue")));
+        assertEquals(" ", VehicleTbtPublisher.roadTextForTest(
+                DirectTbtFrame.empty().withNavigationText("", "")));
+        assertEquals("  ", VehicleTbtPublisher.roadTextForTest(
+                DirectTbtFrame.empty().withNavigationText("  ", "Cue")));
+        assertEquals("  ", VehicleTbtPublisher.roadTextForTest(
+                DirectTbtFrame.empty().withNavigationText("", "  ")));
+        assertEquals("", VehicleTbtPublisher.roadTextForTest(null));
+    }
+
+    @Test
+    public void activeRoadPayloadAndTraceKeepExactWhitespace() throws IOException {
+        String source = source("app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+
+        assertTrue(source.contains("String normalizedRoad = preserveText(road);"));
+        assertTrue(source.contains("String nextRoad = preserveText(road);"));
+        assertFalse(source.contains("activeRoadText("));
+        assertTrue(source.contains("preserveText(road).getBytes(StandardCharsets.UTF_16LE)"));
+        assertTrue(source.contains("preserveText(road).getBytes(StandardCharsets.UTF_8)"));
+        assertTrue(source.contains("distance, preserveText(road), route, next"));
+    }
+
+    @Test
     public void status4RequiresCompletedRouteTeardownAndDoesNotRepeat() {
         assertTrue(VehicleTbtPublisher.STATUS_TEARDOWN == 4);
         assertTrue(NavAppTaskScanner.isTeardownPositiveForTest(true, false, false));

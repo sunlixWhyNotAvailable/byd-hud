@@ -180,8 +180,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     public Bundle sendGuidance(long requestGeneration, int icon,
             int distanceMeters, String road) {
         enforceSession(requestGeneration);
-        String safeRoad = road == null ? "" : road.trim();
-        if (!InstrumentProxyContract.validGuidance(icon, distanceMeters, safeRoad)) {
+        String roadText = road == null ? "" : road;
+        if (!InstrumentProxyContract.validGuidance(icon, distanceMeters, roadText)) {
             throw new IllegalArgumentException("invalid guidance frame");
         }
         synchronized (operationLock) {
@@ -197,7 +197,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     operations.add(setInt(FID_DUAL_ICON, icon));
                     operations.add(setInt(FID_DISTANCE, distanceMeters));
                     operations.add(setBytes(FID_ROAD,
-                            safeRoad.getBytes(StandardCharsets.UTF_16LE)));
+                            roadText.getBytes(StandardCharsets.UTF_16LE)));
                     fidSucceeded = succeeded(operations, first, 4);
                 }
                 if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_SDK)) {
@@ -205,7 +205,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     operations.add(invoke("instrument_sdk:sendSimpleGuidanceInfo",
                             current == null ? null : current.simple, icon, distanceMeters));
                     operations.add(invoke("instrument_sdk:sendNextPathName",
-                            current == null ? null : current.next, safeRoad));
+                            current == null ? null : current.next, roadText));
                     sdkSucceeded = succeeded(operations, first, 2);
                 }
                 return finishOperations(operations, fidSucceeded || sdkSucceeded);

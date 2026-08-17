@@ -5,6 +5,7 @@ import android.content.res.AssetFileDescriptor;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.net.Uri;
+import android.os.Process;
 
 import com.android.apksig.ApkSigner;
 import com.android.apksig.ApkVerifier;
@@ -133,6 +134,21 @@ final class NavigatorPatchPipeline {
     private NavigatorPatchPipeline() {
     }
 
+    private static int lowerCurrentThreadPriority() {
+        int tid = Process.myTid();
+        int previous = Process.getThreadPriority(tid);
+        if (previous != Process.THREAD_PRIORITY_BACKGROUND) {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
+        }
+        return previous;
+    }
+
+    private static void restoreCurrentThreadPriority(int previous) {
+        if (Process.getThreadPriority(Process.myTid()) != previous) {
+            Process.setThreadPriority(previous);
+        }
+    }
+
     static boolean cancel(Context context, NavigatorPatchStore.Profile profile) {
         if (!NavigatorPatchStore.requestCancel(context, profile)) return false;
         Thread worker = ACTIVE.get(profile);
@@ -237,17 +253,17 @@ final class NavigatorPatchPipeline {
     }
 
     static ScanResult scan(Context context, NavigatorPatchStore.Profile profile) throws Exception {
-        register(profile);
+        int previousPriority = lowerCurrentThreadPriority();
+        File setDirectory = null;
+        boolean registered = false;
+        boolean claimed = false;
         try {
+            register(profile);
+            registered = true;
             NavigatorPatchStore.claim(
                     context, profile, NavigatorPatchStore.OP_CHECK,
                     NavigatorPatchStore.COPYING, "Copying APK");
-        } catch (Exception error) {
-            unregister(profile);
-            throw error;
-        }
-        File setDirectory = null;
-        try {
+            claimed = true;
             setDirectory = temporaryDirectory(context, profile.id + "-scan-");
             checkCancelled(context, profile);
             NavigatorApkSet.SetInfo set = materializeCurrentSource(context, profile, setDirectory);
@@ -264,33 +280,39 @@ final class NavigatorPatchPipeline {
                     "Compatibility check completed");
             return result;
         } catch (Exception error) {
-            if (NavigatorPatchStore.isCancellationRequested(context, profile)
-                    || error instanceof OperationCancelledException
-                    || Thread.currentThread().isInterrupted()) {
-                NavigatorPatchStore.markCancelled(context, profile, "Check cancelled");
-            } else {
-                saveFailure(context, profile, error);
+            if (claimed) {
+                if (NavigatorPatchStore.isCancellationRequested(context, profile)
+                        || error instanceof OperationCancelledException
+                        || Thread.currentThread().isInterrupted()) {
+                    NavigatorPatchStore.markCancelled(context, profile, "Check cancelled");
+                } else {
+                    saveFailure(context, profile, error);
+                }
             }
             throw error;
         } finally {
-            deleteTree(setDirectory);
-            unregister(profile);
+            try {
+                deleteTree(setDirectory);
+                if (registered) unregister(profile);
+            } finally {
+                restoreCurrentThreadPriority(previousPriority);
+            }
         }
     }
 
     static PreparedPatch prepare(Context context, NavigatorPatchStore.Profile profile)
             throws Exception {
-        register(profile);
+        int previousPriority = lowerCurrentThreadPriority();
+        File transaction = null;
+        boolean registered = false;
+        boolean claimed = false;
         try {
+            register(profile);
+            registered = true;
             NavigatorPatchStore.claim(
                     context, profile, NavigatorPatchStore.OP_PATCH,
                     NavigatorPatchStore.COPYING, "Copying APK");
-        } catch (Exception error) {
-            unregister(profile);
-            throw error;
-        }
-        File transaction = null;
-        try {
+            claimed = true;
             checkCancelled(context, profile);
             PackageInfo initialInstalled = installedInfo(context, profile.packageName);
             long initialUpdateTime = initialInstalled == null
@@ -444,18 +466,25 @@ final class NavigatorPatchPipeline {
                     initialUpdateTime, initialVersionCode, initialSigner,
                     initialFingerprint);
         } catch (Exception error) {
-            if (NavigatorPatchStore.isCancellationRequested(context, profile)
-                    || error instanceof OperationCancelledException
-                    || Thread.currentThread().isInterrupted()) {
-                NavigatorPatchStore.markCancelled(context, profile, "Patch preparation cancelled");
-            } else {
-                NavigatorPatchStore.transition(
-                        context, profile, NavigatorPatchStore.FAILED, error.getMessage());
+            if (claimed) {
+                if (NavigatorPatchStore.isCancellationRequested(context, profile)
+                        || error instanceof OperationCancelledException
+                        || Thread.currentThread().isInterrupted()) {
+                    NavigatorPatchStore.markCancelled(context, profile,
+                            "Patch preparation cancelled");
+                } else {
+                    NavigatorPatchStore.transition(
+                            context, profile, NavigatorPatchStore.FAILED, error.getMessage());
+                }
             }
             deleteTree(transaction);
             throw error;
         } finally {
-            unregister(profile);
+            try {
+                if (registered) unregister(profile);
+            } finally {
+                restoreCurrentThreadPriority(previousPriority);
+            }
         }
     }
 

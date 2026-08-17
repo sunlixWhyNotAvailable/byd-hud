@@ -240,7 +240,7 @@ final class InstrumentProxyManager {
         boolean deferredPath;
         synchronized (callLock) {
             PendingGuidance next = new PendingGuidance(
-                    icon, distanceMeters, safe(road), callback);
+                    icon, distanceMeters, preserveText(road), callback);
             deferredPath = guidanceBarrierActive;
             if (deferredPath) {
                 superseded = deferredGuidance;
@@ -1046,6 +1046,10 @@ final class InstrumentProxyManager {
 
     private static String safe(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String preserveText(String value) {
+        return value == null ? "" : value;
     }
 
     interface ResultCallback {

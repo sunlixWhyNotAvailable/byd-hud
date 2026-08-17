@@ -102,7 +102,11 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertFalse(tabEffect.contains("refresh()"));
         assertTrue(tabEffect.contains("requestTabStateRefresh(selectedTab, reason)"));
         assertFalse(tabEffect.contains("composeRequestUiStateRefresh("));
-        assertTrue(tabRefresh.contains("composeRequestRuntimeUiStateRefresh(true, reason)"));
+        assertTrue(tabRefresh.contains("composeRequestRuntimeUiStateRefresh(false, reason)"));
+        assertTrue(tabRefresh.contains("RuntimeTab.Logs,"));
+        assertTrue(tabRefresh.contains("RuntimeTab.Options,"));
+        assertTrue(tabRefresh.contains("RuntimeTab.Manual -> Unit"));
+        assertFalse(tabRefresh.contains("RuntimeTab.Logs -> activity.composeRequestRuntimeUiStateRefresh"));
         assertTrue(tabRefresh.contains("composeRequestStorageRefresh(false)"));
         assertTrue(tabRefresh.contains("composeRequestPatchUiStateRefresh(reason)"));
         assertFalse(lifecycleObserver.contains("refresh()"));

@@ -15,7 +15,7 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     @Test
     public void compositeControlsMatchAcceptedLabelsRangesAndOrder() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
-        String options = between(source, "private fun OptionsTab(", "private fun AppsTab(");
+        String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
 
         assertTrue(options.contains("\"У вільному полі\", \"Композитний\""));
         assertTrue(options.contains("\"In a free field\", \"Composite\""));
@@ -29,8 +29,10 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(options.contains("\"Sign size in maneuver field\""));
         assertTrue(options.contains("\"Розмір знаку у полі для смуг\""));
         assertTrue(options.contains("\"Sign size in lane field\""));
-        assertTrue(options.contains("maxValue = 103,\n                            fallbackValue = 64"));
-        assertTrue(options.contains("maxValue = 36,\n                            fallbackValue = 36"));
+        assertTrue(options.contains("maxValue = 103"));
+        assertTrue(options.contains("fallbackValue = 64"));
+        assertTrue(options.contains("maxValue = 36"));
+        assertTrue(options.contains("fallbackValue = 36"));
 
         assertTrue(options.contains("val freeFallbackEnabled = snapshot.speedLimitMode == 3"));
         assertTrue(options.contains("val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE"));
@@ -38,13 +40,13 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(options.contains("(freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)"));
 
         assertOrdered(options,
-                "item(key = \"runtime-permissions\")",
-                "item(key = \"basic-navigation\")",
-                "item(key = \"route-eta\")",
-                "item(key = \"speed-limit\")",
-                "item(key = \"waze-features\")",
-                "item(key = \"extra-navigation\")",
-                "item(key = \"dashboard-control\")");
+                "optionsSection(\"runtime-permissions\"",
+                "optionsSection(\"basic-navigation\"",
+                "optionsSection(\"route-eta\"",
+                "optionsSection(\"speed-limit\"",
+                "optionsSection(\"waze-features\"",
+                "optionsSection(\"extra-navigation\"",
+                "optionsSection(\"dashboard-control\"");
     }
 
     @Test

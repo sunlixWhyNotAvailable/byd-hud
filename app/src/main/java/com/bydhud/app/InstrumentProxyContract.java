@@ -192,7 +192,7 @@ final class InstrumentProxyContract {
     static boolean validGuidance(int icon, int distanceMeters, String road) {
         return icon >= 0 && icon <= 49
                 && distanceMeters >= -1 && distanceMeters <= 2_000_000
-                && safe(road).length() <= 512;
+                && preserveText(road).length() <= 512;
     }
 
     static boolean requiredOperationsSucceeded(
@@ -225,5 +225,9 @@ final class InstrumentProxyContract {
 
     private static String safe(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private static String preserveText(String value) {
+        return value == null ? "" : value;
     }
 }
