@@ -449,6 +449,21 @@ private data class ShareCopy(
     val configurationFailure: String
 )
 
+private data class OperationCardSpec(
+    val key: String,
+    val title: String,
+    val phase: String,
+    val detail: String,
+    val startedAt: Long,
+    val busy: Boolean,
+    val stopEnabled: Boolean,
+    val closeEnabled: Boolean,
+    val failed: Boolean,
+    val success: Boolean,
+    val onStop: () -> Unit,
+    val onClose: () -> Unit
+)
+
 //defines PressFeedback UI/state support so Compose code can keep rendering intent explicit.
 private data class PressFeedback(
     val interactionSource: MutableInteractionSource,
@@ -557,6 +572,9 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     }
     var storageShareDestination by remember { mutableStateOf<StorageShareDestination?>(null) }
     var storageSharePhase by remember { mutableStateOf<LogShareZip.Phase?>(null) }
+    var storageShareStartedAt by rememberSaveable { mutableStateOf(0L) }
+    var storageShareTerminalPhase by rememberSaveable { mutableStateOf("") }
+    var storageShareTerminalDetail by rememberSaveable { mutableStateOf("") }
     var sentryUploadPhase by remember { mutableStateOf<SentryUploadPhase?>(null) }
     var sentryUploadEventId by remember { mutableStateOf("") }
     var sentryUploadError by remember { mutableStateOf("") }
@@ -579,7 +597,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var pendingPatchFileConfirmProfile by rememberSaveable { mutableStateOf("") }
     var pendingPatchFilePickerProfile by rememberSaveable { mutableStateOf("") }
     var patchSourceError by rememberSaveable { mutableStateOf("") }
-    var patchActionPending by remember { mutableStateOf(false) }
+    var patchActionPendingProfiles by remember { mutableStateOf(emptySet<String>()) }
     var pendingNavigatorAssetId by rememberSaveable { mutableStateOf("") }
     var navigatorAssetActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
@@ -603,8 +621,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         configurationShareVisible || configurationShareBusy
             || (sentryUploadPhase != null && sentryUploadingConfiguration) -> "configuration-share"
         pendingNavigatorAssetId.isNotEmpty() || navigatorAssetActionPending -> "navigator-asset"
-        pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty() -> "patch"
-        pendingPatchProfile.isNotEmpty() || patchActionPending || snapshot.patchOperation.busy -> "patch"
+        pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty()
+            || pendingPatchProfile.isNotEmpty() -> "patch"
         else -> ""
     }
 
@@ -696,7 +714,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         val profileId = pendingPatchFilePickerProfile
         pendingPatchFilePickerProfile = ""
         if (uri == null) {
-            patchActionPending = false
+            patchActionPendingProfiles = patchActionPendingProfiles - profileId
             return@rememberLauncherForActivityResult
         }
         if (profileId.isEmpty()) return@rememberLauncherForActivityResult
@@ -705,7 +723,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 val displayName = withContext(Dispatchers.IO) {
                     activity.composePatchSourceDisplayName(uri)
                 }
-                patchActionPending = true
+                patchActionPendingProfiles = patchActionPendingProfiles + profileId
                 withContext(Dispatchers.IO) {
                     activity.composeSelectPatchSource(profileId, uri, displayName)
                 }
@@ -717,7 +735,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     message.ifEmpty { copy.patchSelectionErrorText }
                 }
             } finally {
-                patchActionPending = false
+                patchActionPendingProfiles = patchActionPendingProfiles - profileId
             }
             refresh()
         }
@@ -777,6 +795,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
             return
         }
+        storageShareTerminalPhase = ""
+        storageShareTerminalDetail = ""
         storageShareDays = days
         storageShareBusy = true
         storageShareDestination = null
@@ -810,18 +830,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         updateScope.launch {
             withContext(Dispatchers.IO) {
                 if (start) activity.composeStartLogcat() else activity.composeStopLogcat()
-            }
-            logcatBusy = false
-            refresh()
-        }
-    }
-
-    fun runLogcatPhase(phaseId: String) {
-        if (logcatBusy) return
-        logcatBusy = true
-        updateScope.launch {
-            withContext(Dispatchers.IO) {
-                activity.composeStartLogcatPhase(phaseId)
             }
             logcatBusy = false
             refresh()
@@ -935,7 +943,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             || it.state == NavigatorAssetManager.INSTALL_REQUESTED
                             || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
             }
-            val patchWasBusy = snapshot.patchOperation.busy
+            val patchWasBusy = snapshot.patchOperations.any { it.busy }
             val assetCacheMissing = snapshot.navigatorAssets.isEmpty()
             val now = SystemClock.elapsedRealtime()
             if (now - lastBackgroundRequestAt >= FOREGROUND_UI_REFRESH_REQUEST_MS) {
@@ -1037,10 +1045,18 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 activity.composeAppendStatus("Storage share: $detail")
             }
         } catch (cancelled: CancellationException) {
+            storageShareTerminalPhase = "CANCELLED"
+            storageShareTerminalDetail = if (copy.language == Language.Ua) {
+                "Операцію скасовано"
+            } else {
+                "Operation cancelled"
+            }
             activity.composeAppendStatus("Storage share cancelled")
             throw cancelled
         } catch (error: Exception) {
             val detail = error.message ?: error.javaClass.simpleName
+            storageShareTerminalPhase = "FAILED"
+            storageShareTerminalDetail = detail
             if (destination == StorageShareDestination.Sentry) {
                 sentryUploadError = detail
                 sentryUploadPhase = SentryUploadPhase.Failure
@@ -1188,7 +1204,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         logcatBusy = logcatBusy,
                         onStartLogcat = { runLogcatAction(true) },
                         onStopLogcat = { runLogcatAction(false) },
-                        onStartPhase = ::runLogcatPhase,
                         onShareConfiguration = {
                             if (!configurationShareBusy
                                 && activity.composeTryStartBlockingUiFlow("configuration-share")) {
@@ -1200,16 +1215,18 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         copy = copy,
                         palette = palette,
                         snapshot = snapshot,
-                        actionPending = patchActionPending,
+                        actionPendingProfiles = patchActionPendingProfiles,
                         onSelectFile = { profileId ->
-                            if (!patchActionPending) pendingPatchFileConfirmProfile = profileId
+                            if (!patchActionPendingProfiles.contains(profileId)) {
+                                pendingPatchFileConfirmProfile = profileId
+                            }
                         },
                         onClear = { profileId ->
                             runAction { activity.composeClearPatchSource(profileId) }
                         },
                         onCheck = { profileId ->
-                            if (!patchActionPending) {
-                                patchActionPending = true
+                            if (!patchActionPendingProfiles.contains(profileId)) {
+                                patchActionPendingProfiles = patchActionPendingProfiles + profileId
                                 updateScope.launch {
                                     try {
                                         withContext(Dispatchers.IO) {
@@ -1218,7 +1235,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                                     } catch (error: Exception) {
                                         activity.composeAppendStatus("Patch check failed: ${error.message}")
                                     } finally {
-                                        patchActionPending = false
+                                        patchActionPendingProfiles =
+                                            patchActionPendingProfiles - profileId
                                     }
                                     refresh()
                                 }
@@ -1236,8 +1254,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         onRestore = { profileId ->
                             if (!activity.composeCanInstallNavigatorApks()) {
                                 activity.composeOpenNavigatorInstallPermission()
-                            } else if (!patchActionPending) {
-                                patchActionPending = true
+                            } else if (!patchActionPendingProfiles.contains(profileId)) {
+                                patchActionPendingProfiles = patchActionPendingProfiles + profileId
                                 updateScope.launch {
                                     try {
                                         withContext(Dispatchers.IO) {
@@ -1246,7 +1264,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                                     } catch (error: Exception) {
                                         activity.composeAppendStatus("Restore failed: ${error.message}")
                                     } finally {
-                                        patchActionPending = false
+                                        patchActionPendingProfiles =
+                                            patchActionPendingProfiles - profileId
                                     }
                                     refresh()
                                 }
@@ -1259,6 +1278,50 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
 
             BottomTabs(copy, palette, selectedTab) { selectedTab = it }
         }
+
+        OperationProgressStack(
+            copy = copy,
+            shareCopy = shareCopy,
+            palette = palette,
+            patchOperations = snapshot.patchOperations,
+            storageSharePhase = storageSharePhase,
+            storageShareTerminalPhase = storageShareTerminalPhase,
+            storageShareTerminalDetail = storageShareTerminalDetail,
+            storageShareStartedAt = storageShareStartedAt,
+            onCancelShare = {
+                storageShareTerminalPhase = "CANCELLED"
+                storageShareTerminalDetail = if (copy.language == Language.Ua) {
+                    "Операцію скасовано"
+                } else {
+                    "Operation cancelled"
+                }
+                storageShareBusy = false
+                if (sentryUploadPhase == SentryUploadPhase.Preparing) {
+                    sentryUploadPhase = null
+                }
+            },
+            onCloseShare = {
+                storageShareTerminalPhase = ""
+                storageShareTerminalDetail = ""
+                storageShareStartedAt = 0L
+            },
+            onCancelPatch = { profileId ->
+                updateScope.launch {
+                    withContext(Dispatchers.IO) {
+                        activity.composeCancelNavigatorPatch(profileId)
+                    }
+                    refresh()
+                }
+            },
+            onDismissPatch = { profileId ->
+                updateScope.launch {
+                    withContext(Dispatchers.IO) {
+                        activity.composeDismissNavigatorPatch(profileId)
+                    }
+                    refresh()
+                }
+            }
+        )
 
         if (showSetupDialog) {
             SetupReminderOverlay(
@@ -1308,11 +1371,11 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 navigator = row?.label ?: pendingPatchProfile,
                 destructive = pendingPatchDestructive,
                 onConfirm = {
-                    if (!patchActionPending) {
+                    if (!patchActionPendingProfiles.contains(pendingPatchProfile)) {
                         val profileId = pendingPatchProfile
                         val destructiveApproved = pendingPatchDestructive
                         pendingPatchProfile = ""
-                        patchActionPending = true
+                        patchActionPendingProfiles = patchActionPendingProfiles + profileId
                         updateScope.launch {
                             try {
                                 withContext(Dispatchers.IO) {
@@ -1324,7 +1387,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             } catch (error: Exception) {
                                 activity.composeAppendStatus("Patch failed: ${error.message}")
                             } finally {
-                                patchActionPending = false
+                                patchActionPendingProfiles =
+                                    patchActionPendingProfiles - profileId
                             }
                             refresh()
                         }
@@ -1394,10 +1458,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             )
         }
 
-        if (snapshot.patchOperation.busy) {
-            PatchProgressOverlay(copy, palette, snapshot.patchOperation)
-        }
-
         if (pendingStorageDeleteDays.isNotEmpty()) {
             StorageDeleteConfirmOverlay(
                 copy = copy,
@@ -1422,12 +1482,16 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     sentryUploadPhase = SentryUploadPhase.Preparing
                     storageShareDestination = StorageShareDestination.Sentry
                     storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
+                    storageShareStartedAt = System.currentTimeMillis()
+                    storageShareTerminalPhase = ""
                     storageShareBusy = true
                 },
                 onAnotherApp = {
                     storageShareSummary = null
                     storageShareDestination = StorageShareDestination.Android
                     storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
+                    storageShareStartedAt = System.currentTimeMillis()
+                    storageShareTerminalPhase = ""
                     storageShareBusy = true
                 },
                 onCancel = {
@@ -1435,22 +1499,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     storageShareDays = emptyList()
                 }
             )
-        }
-
-        storageSharePhase?.let { phase ->
-            if (storageShareBusy && storageShareDestination != null) {
-                StorageShareProgressOverlay(
-                    copy = shareCopy,
-                    palette = palette,
-                    phase = phase,
-                    onCancel = {
-                        storageShareBusy = false
-                        if (sentryUploadPhase == SentryUploadPhase.Preparing) {
-                            sentryUploadPhase = null
-                        }
-                    }
-                )
-            }
         }
 
         sentryUploadPhase?.let { phase ->
@@ -2460,49 +2508,162 @@ private fun StorageShareDestinationOverlay(
 }
 
 @Composable
-private fun StorageShareProgressOverlay(
+private fun OperationProgressStack(
+    copy: Copy,
+    shareCopy: ShareCopy,
+    palette: Palette,
+    patchOperations: List<MainActivity.ComposePatchOperation>,
+    storageSharePhase: LogShareZip.Phase?,
+    storageShareTerminalPhase: String,
+    storageShareTerminalDetail: String,
+    storageShareStartedAt: Long,
+    onCancelShare: () -> Unit,
+    onCloseShare: () -> Unit,
+    onCancelPatch: (String) -> Unit,
+    onDismissPatch: (String) -> Unit
+) {
+    val cards = buildList {
+        if (storageShareTerminalPhase.isNotEmpty()) {
+            add(OperationCardSpec(
+                key = "share",
+                title = shareCopy.shareLogsTitle,
+                phase = if (storageShareTerminalPhase == "CANCELLED") {
+                    if (copy.language == Language.Ua) "Скасовано" else "Cancelled"
+                } else {
+                    shareCopy.failure
+                },
+                detail = storageShareTerminalDetail,
+                startedAt = storageShareStartedAt,
+                busy = false,
+                stopEnabled = false,
+                closeEnabled = true,
+                failed = storageShareTerminalPhase == "FAILED",
+                success = false,
+                onStop = {},
+                onClose = onCloseShare
+            ))
+        } else if (storageSharePhase != null) {
+            val phaseText = when (storageSharePhase) {
+                LogShareZip.Phase.WAITING_FOR_WRITES -> shareCopy.waitingForWrites
+                LogShareZip.Phase.COPYING -> shareCopy.copying
+                LogShareZip.Phase.ARCHIVING -> shareCopy.archiving
+            }
+            add(OperationCardSpec(
+                key = "share",
+                title = shareCopy.shareLogsTitle,
+                phase = phaseText,
+                detail = "",
+                startedAt = storageShareStartedAt,
+                busy = true,
+                stopEnabled = true,
+                closeEnabled = false,
+                failed = false,
+                success = false,
+                onStop = onCancelShare,
+                onClose = {}
+            ))
+        }
+        patchOperations.filter { it.kind.isNotEmpty() && it.phase != "IDLE" }.forEach { operation ->
+            val navigator = if (operation.profileId == "waze") "Waze" else "Google Maps"
+            val phase = patchStepLabel(operation, copy.language).let { label ->
+                if (operation.progress in 1..99) "$label · ${operation.progress}%" else label
+            }
+            add(OperationCardSpec(
+                key = "patch-${operation.profileId}",
+                title = "$navigator · ${patchProgressTitle(operation, copy)}",
+                phase = phase,
+                detail = operation.error.ifEmpty { operation.detail },
+                startedAt = operation.startedAt,
+                busy = operation.busy,
+                stopEnabled = operation.cancelAllowed,
+                closeEnabled = operation.phase == "FAILED" || operation.phase == "CANCELLED",
+                failed = operation.phase == "FAILED" || operation.recoveryRequired,
+                success = operation.phase == "VERIFIED",
+                onStop = { onCancelPatch(operation.profileId) },
+                onClose = { onDismissPatch(operation.profileId) }
+            ))
+        }
+    }.sortedByDescending { it.startedAt }.take(3)
+
+    if (cards.isEmpty()) return
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
+        Column(
+            modifier = Modifier.padding(end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            cards.forEach { card ->
+                OperationProgressCard(card, shareCopy, palette, copy.language)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OperationProgressCard(
+    card: OperationCardSpec,
     copy: ShareCopy,
     palette: Palette,
-    phase: LogShareZip.Phase,
-    onCancel: () -> Unit
+    language: Language
 ) {
-    val phaseText = when (phase) {
-        LogShareZip.Phase.WAITING_FOR_WRITES -> copy.waitingForWrites
-        LogShareZip.Phase.COPYING -> copy.copying
-        LogShareZip.Phase.ARCHIVING -> copy.archiving
-    }
-    Box(
-        modifier = Modifier.fillMaxSize(),
-        contentAlignment = Alignment.BottomEnd
+    Column(
+        modifier = Modifier
+            .width(460.dp)
+            .height(170.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.surface)
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        Column(
-            modifier = Modifier
-                .padding(24.dp)
-                .width(460.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.surface)
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
+        Text(
+            card.title,
+            color = palette.text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(
-                copy.shareLogsTitle,
-                color = palette.text,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                LoadingSpinner(palette)
-                Spacer(Modifier.width(14.dp))
+            if (card.busy) LoadingSpinner(palette)
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
-                    phaseText,
-                    color = palette.text,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold
+                    card.phase,
+                    color = when {
+                        card.failed -> palette.red
+                        card.success -> palette.green
+                        else -> palette.text
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
                 )
+                if (card.detail.isNotEmpty()) {
+                    Text(
+                        card.detail,
+                        color = palette.muted,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
             }
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                HudButton(copy.cancel, palette, width = 138.dp, onClick = onCancel)
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            if (card.busy) {
+                HudButton(
+                    if (language == Language.Ua) "Зупинити" else "Stop",
+                    palette,
+                    enabled = card.stopEnabled,
+                    width = 138.dp,
+                    onClick = card.onStop
+                )
+            } else if (card.closeEnabled) {
+                HudButton(copy.close, palette, width = 138.dp, onClick = card.onClose)
             }
         }
     }
@@ -3296,13 +3457,8 @@ private fun LogsTab(
     logcatBusy: Boolean,
     onStartLogcat: () -> Unit,
     onStopLogcat: () -> Unit,
-    onStartPhase: (String) -> Unit,
     onShareConfiguration: () -> Unit
 ) {
-    val phaseRunning = snapshot.logcatStatus.contains("phase=")
-    val idlePhase = if (copy.language == Language.Ua) "Спокій 10 с" else "Idle 10 s"
-    val interaction1 = if (copy.language == Language.Ua) "Взаємодія 1 · 24 с" else "Interaction 1 · 24 s"
-    val interaction2 = if (copy.language == Language.Ua) "Взаємодія 2 · 24 с" else "Interaction 2 · 24 s"
     val privacy = if (copy.language == Language.Ua) {
         "Запис містить системні логи. Перевірте файли перед поширенням; автоматичного завантаження немає."
     } else {
@@ -3358,25 +3514,6 @@ private fun LogsTab(
                         modifier = Modifier.weight(1f),
                         onClick = onShareConfiguration
                     )
-                }
-                Row(
-                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 10.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    listOf(
-                        idlePhase to LogcatRecorder.PHASE_IDLE,
-                        interaction1 to LogcatRecorder.PHASE_INTERACTION_1,
-                        interaction2 to LogcatRecorder.PHASE_INTERACTION_2
-                    ).forEach { (label, phase) ->
-                        HudButton(
-                            label,
-                            palette,
-                            primary = false,
-                            enabled = snapshot.logcatRecording && !logcatBusy && !phaseRunning,
-                            width = 0.dp,
-                            modifier = Modifier.weight(1f)
-                        ) { onStartPhase(phase) }
-                    }
                 }
                 Text(
                     privacy,
@@ -3610,14 +3747,13 @@ private fun PatchTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
-    actionPending: Boolean,
+    actionPendingProfiles: Set<String>,
     onSelectFile: (String) -> Unit,
     onClear: (String) -> Unit,
     onCheck: (String) -> Unit,
     onPatch: (String) -> Unit,
     onRestore: (String) -> Unit
 ) {
-    val busy = actionPending || snapshot.patchOperation.busy
     LazyPageSurface(copy.patchTab, copy.patchHint, palette) {
         item(key = "patch-warning") {
             Section(copy.patchWarning, palette) {
@@ -3647,6 +3783,12 @@ private fun PatchTab(
                     }
                 } else {
                     snapshot.patchRows.forEach { row ->
+                        val operation = snapshot.patchOperations.firstOrNull {
+                            it.profileId == row.profileId
+                        }
+                        val busy = actionPendingProfiles.contains(row.profileId)
+                                || operation?.busy == true
+                                || operation?.recoveryRequired == true
                         Divider(palette)
                         Row(
                             modifier = Modifier
@@ -3694,6 +3836,9 @@ private fun PatchTab(
                             }
                             val componentStates = buildList {
                                 add(copy.patchDirectChannel to row.directState)
+                                if (row.gmsCoreLabel.isNotEmpty()) {
+                                    add(row.gmsCoreLabel to row.gmsCoreState)
+                                }
                                 add(patchOptionalLabel(row, copy.language) to row.optionalState)
                                 if (row.alertLabel.isNotEmpty()) {
                                     add(patchAlertLabel(row, copy.language, copy) to row.alertState)
@@ -3726,6 +3871,7 @@ private fun PatchTab(
                                             version = selectedPatchVersion(row),
                                             copy = copy,
                                             palette = palette,
+                                            enabled = !busy,
                                             onClear = { onClear(row.profileId) }
                                         )
                                     } else {
@@ -3760,8 +3906,8 @@ private fun PatchTab(
             }
         }
 
-        if (snapshot.patchOperation.recoveryRequired) {
-            item(key = "patch-recovery") {
+        snapshot.patchOperations.filter { it.recoveryRequired }.forEach { operation ->
+            item(key = "patch-recovery-${operation.profileId}") {
                 Section(copy.patchRecovery, palette) {
                     Row(
                         modifier = Modifier
@@ -3771,7 +3917,7 @@ private fun PatchTab(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Text(
-                            snapshot.patchOperation.detail,
+                            operation.detail,
                             color = palette.red,
                             fontSize = 14.sp,
                             modifier = Modifier.weight(1f)
@@ -3780,9 +3926,9 @@ private fun PatchTab(
                             copy.patchRestore,
                             palette,
                             primary = true,
-                            enabled = !busy,
+                            enabled = !actionPendingProfiles.contains(operation.profileId),
                             width = 190.dp,
-                            onClick = { onRestore(snapshot.patchOperation.profileId) }
+                            onClick = { onRestore(operation.profileId) }
                         )
                     }
                 }
@@ -3869,6 +4015,7 @@ private fun SelectedPatchFileField(
     version: String,
     copy: Copy,
     palette: Palette,
+    enabled: Boolean,
     onClear: () -> Unit
 ) {
     Row(
@@ -3895,6 +4042,7 @@ private fun SelectedPatchFileField(
             contentDescription = copy.patchClearSelection,
             palette = palette,
             tint = palette.muted,
+            enabled = enabled,
             modifier = Modifier.width(40.dp).height(44.dp),
             onClick = onClear
         )
@@ -4118,46 +4266,6 @@ private fun PatchConfirmOverlay(
     }
 }
 
-@Composable
-private fun PatchProgressOverlay(
-    copy: Copy,
-    palette: Palette,
-    operation: MainActivity.ComposePatchOperation
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
-        contentAlignment = Alignment.Center
-    ) {
-        ModalInputBlocker()
-        Column(
-            modifier = Modifier
-                .width(520.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.surface)
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
-                .padding(22.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            LoadingSpinner(palette)
-            Text(
-                patchProgressTitle(operation, copy),
-                color = palette.text,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                patchStepLabel(operation, copy.language),
-                color = palette.muted,
-                fontSize = 14.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-        }
-    }
-}
-
 private fun patchProgressTitle(
     operation: MainActivity.ComposePatchOperation,
     copy: Copy
@@ -4209,9 +4317,18 @@ private fun patchPhaseLabel(phase: String, language: Language): String {
             "REPACKING" -> "Перепакування APK"
             "SIGNING" -> "Підпис APK"
             "OUTPUT_VERIFY" -> "Перевірка результату"
+            "INSTALLED_VERIFY" -> "Перевірка встановленого APK"
+            "READY_TO_INSTALL" -> "Очікування черги встановлення"
+            "AWAITING_PERMISSION" -> "Очікування дозволу"
+            "CANCEL_REQUESTED" -> "Зупинка операції"
+            "INSTALL_PREPARING" -> "Підготовка системного інсталятора"
             "COMMITTING" -> "Передавання APK системному інсталятору"
             "UNINSTALL_REQUESTED" -> "Очікування видалення"
             "INSTALL_REQUESTED" -> "Очікування встановлення"
+            "RECOVERY_REQUIRED" -> "Потрібне відновлення"
+            "FAILED" -> "Помилка"
+            "CANCELLED" -> "Скасовано"
+            "VERIFIED" -> "Перевірено"
             else -> "Підготовка операції"
         }
     }
@@ -4223,9 +4340,18 @@ private fun patchPhaseLabel(phase: String, language: Language): String {
         "REPACKING" -> "Repacking APK"
         "SIGNING" -> "Signing APK"
         "OUTPUT_VERIFY" -> "Verifying result"
+        "INSTALLED_VERIFY" -> "Verifying installed APK"
+        "READY_TO_INSTALL" -> "Waiting in install queue"
+        "AWAITING_PERMISSION" -> "Waiting for permission"
+        "CANCEL_REQUESTED" -> "Stopping operation"
+        "INSTALL_PREPARING" -> "Preparing Android installer"
         "COMMITTING" -> "Submitting APK to Android installer"
         "UNINSTALL_REQUESTED" -> "Waiting for removal"
         "INSTALL_REQUESTED" -> "Waiting for installation"
+        "RECOVERY_REQUIRED" -> "Recovery required"
+        "FAILED" -> "Failed"
+        "CANCELLED" -> "Cancelled"
+        "VERIFIED" -> "Verified"
         else -> phase.lowercase(Locale.ROOT).replace('_', ' ')
     }
 }
@@ -5908,15 +6034,15 @@ private fun enCopy() = Copy(
     startAppFirst = "Start app first",
     noBackgroundApps = "Supported apps are not duplicated here. This list shows only current non-system background apps.",
     logsHint = "Capture bounded full-system diagnostics and navigation artifact paths.",
-    logcatRecorder = "System recorder",
+    logcatRecorder = "Logcat recorder",
     recorderStatus = "Recorder status",
     waiting = "waiting",
     logcatWaiting = "Waiting to record",
     logcatRecording = "Recording log",
     logcatSaving = "Saving log",
     logcatSaved = "Log saved",
-    startLogcat = "Start system capture",
-    stopLogcat = "Stop capture",
+    startLogcat = "Start Logcat",
+    stopLogcat = "Stop Logcat",
     shareConfiguration = "Share configuration",
     applicationState = "Application state",
     navigationLogs = "Navigation logs",
@@ -6132,15 +6258,15 @@ private fun uaCopy() = enCopy().copy(
     startAppFirst = "Спочатку запусти",
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
     logsHint = "Збір обмеженої повносистемної діагностики та шляхів до навігаційних логів.",
-    logcatRecorder = "Системний рекордер",
+    logcatRecorder = "Запис logcat",
     recorderStatus = "Стан запису",
     waiting = "очікування",
     logcatWaiting = "Очікування запису",
     logcatRecording = "Йде запис логу",
     logcatSaving = "Збереження логу",
     logcatSaved = "Лог збережено",
-    startLogcat = "Почати системний запис",
-    stopLogcat = "Зупинити запис",
+    startLogcat = "Почати Logcat",
+    stopLogcat = "Зупинити Logcat",
     shareConfiguration = "Поділитись конф-єю",
     applicationState = "Стан застосунку",
     navigationLogs = "Навігаційні логи",

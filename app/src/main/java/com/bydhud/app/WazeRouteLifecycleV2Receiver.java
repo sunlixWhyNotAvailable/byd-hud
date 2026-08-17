@@ -137,7 +137,7 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
                         receiverEntryElapsedMs, navigating);
                 delivery = () -> WazeRouteLifecycleReceiver.handleRoute(
                         appContext, navigating, reasonCode, reasonAvailable, eventElapsedMs,
-                        bridgeGeneration, bridgeCapabilities, "v2 ", timing);
+                        bridgeGeneration, bridgeCapabilities, "v2 ", timing, eventType);
             }
         } catch (RuntimeException malformed) {
             WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=malformed_extras");

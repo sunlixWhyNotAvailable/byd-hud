@@ -1,6 +1,5 @@
 package com.bydhud.app;
 
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -30,13 +29,26 @@ public final class SystemDiagnosticRecorderPolicyTest {
     }
 
     @Test
-    public void PresetPhasesStayMatchedToTheDiagnosticProtocol() {
-        assertEquals(10_000L, LogcatRecorder.presetDurationMs(LogcatRecorder.PHASE_IDLE));
-        assertEquals(24_000L,
-                LogcatRecorder.presetDurationMs(LogcatRecorder.PHASE_INTERACTION_1));
-        assertEquals(24_000L,
-                LogcatRecorder.presetDurationMs(LogcatRecorder.PHASE_INTERACTION_2));
-        assertEquals(-1L, LogcatRecorder.presetDurationMs("arbitrary"));
+    public void OrdinaryStartStopOwnsMetricsAndPresetUiIsAbsent() throws IOException {
+        String recorder = source("LogcatRecorder.java");
+        String compose = source("BydHudRuntimeCompose.kt");
+        String activity = source("MainActivity.java");
+        assertTrue(recorder.contains(
+                "captureSnapshot(session, \"before\", fullSnapshotCommands(true))"));
+        assertTrue(recorder.contains(
+                "captureSnapshot(session, \"after\", fullSnapshotCommands(false))"));
+        assertTrue(recorder.contains("dumpsys gfxinfo com.bydhud.app reset"));
+        assertTrue(recorder.contains("dumpsys gfxinfo com.bydhud.app framestats"));
+        assertFalse(recorder.contains("startPresetPhase"));
+        assertFalse(recorder.contains("PHASE_INTERACTION"));
+        assertFalse(compose.contains("onStartPhase"));
+        assertFalse(activity.contains("composeStartLogcatPhase"));
+        assertTrue(activity.contains("button(\"Start Logcat\""));
+        assertFalse(activity.contains("button(\"Record Logcat\""));
+        assertTrue(compose.contains("startLogcat = \"Start Logcat\""));
+        assertTrue(compose.contains("stopLogcat = \"Stop Logcat\""));
+        assertTrue(compose.contains("startLogcat = \"Почати Logcat\""));
+        assertTrue(compose.contains("stopLogcat = \"Зупинити Logcat\""));
     }
 
     @Test

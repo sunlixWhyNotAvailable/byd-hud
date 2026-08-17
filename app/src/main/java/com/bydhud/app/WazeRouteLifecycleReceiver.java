@@ -134,7 +134,7 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
                         WazeRouteLifecycleStore.EXTRA_REASON_CODE,
                         WazeRouteLifecycleStore.REASON_UNAVAILABLE);
                 delivery = () -> handleRoute(appContext, navigating, reasonCode, reasonAvailable,
-                        eventElapsedMs, bridgeGeneration, bridgeCapabilities, "");
+                        eventElapsedMs, bridgeGeneration, bridgeCapabilities, "", null, eventType);
             }
         } catch (RuntimeException malformed) {
             log(context, "ignored reason=malformed_extras");
@@ -223,17 +223,26 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
             boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
             int bridgeCapabilities, String prefix) {
         handleRoute(context, navigating, reasonCode, reasonAvailable, eventElapsedMs,
-                bridgeGeneration, bridgeCapabilities, prefix, null);
+                bridgeGeneration, bridgeCapabilities, prefix, null, "");
     }
 
     static void handleRoute(Context context, boolean navigating, int reasonCode,
             boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
             int bridgeCapabilities, String prefix, WazeRouteTiming timing) {
+        handleRoute(context, navigating, reasonCode, reasonAvailable, eventElapsedMs,
+                bridgeGeneration, bridgeCapabilities, prefix, timing, "");
+    }
+
+    static void handleRoute(Context context, boolean navigating, int reasonCode,
+            boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
+            int bridgeCapabilities, String prefix, WazeRouteTiming timing,
+            String eventType) {
         long receivedElapsedMs = SystemClock.elapsedRealtime();
         WazeRouteLifecycleStore.RecordResult result = WazeRouteLifecycleStore.recordBridge(
                 context, navigating, reasonCode, reasonAvailable, eventElapsedMs,
-                bridgeGeneration, bridgeCapabilities);
+                bridgeGeneration, bridgeCapabilities, eventType);
         log(context, prefix + "event navigating=" + navigating
+                + " eventType=" + (eventType == null ? "" : eventType)
                 + " reasonCode=" + reasonCode
                 + " reasonName=" + result.reasonName
                 + " routeActive=" + result.snapshot.active

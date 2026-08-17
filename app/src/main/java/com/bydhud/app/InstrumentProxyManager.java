@@ -14,6 +14,7 @@ import androidx.core.content.ContextCompat;
 
 import java.io.IOException;
 import java.security.SecureRandom;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -62,8 +63,14 @@ final class InstrumentProxyManager {
     private long activeOperationId;
     private long activeOperationGeneration;
     private ResultCallback activeOperationCallback;
+    private boolean activeOperationTerminal;
     private PendingGuidance pendingGuidance;
+    private PendingGuidance deferredGuidance;
     private boolean guidanceScheduled;
+    private boolean guidanceBarrierActive;
+    private boolean terminalClearInFlight;
+    private long guidanceBarrierToken;
+    private final List<ResultCallback> terminalClearCallbacks = new ArrayList<>();
     private final AtomicLong generationCounter = new AtomicLong(System.currentTimeMillis());
     private final AtomicLong operationCounter = new AtomicLong();
     private final SecureRandom random = new SecureRandom();
@@ -230,29 +237,136 @@ final class InstrumentProxyManager {
         }
         PendingGuidance superseded;
         ExecutorService executor = null;
+        boolean deferredPath;
+        synchronized (callLock) {
+            PendingGuidance next = new PendingGuidance(
+                    icon, distanceMeters, safe(road), callback);
+            deferredPath = guidanceBarrierActive;
+            if (deferredPath) {
+                superseded = deferredGuidance;
+                deferredGuidance = next;
+            } else {
+                superseded = pendingGuidance;
+                pendingGuidance = next;
+                if (!guidanceScheduled) {
+                    guidanceScheduled = true;
+                    executor = calls;
+                }
+            }
+        }
+        if (superseded != null) {
+            deliver(superseded.callback, Result.unavailable(
+                    deferredPath
+                            ? "coalesced during terminal clear"
+                            : "coalesced by newer frame"));
+        }
+        if (executor != null && !enqueueCall(executor, this::drainGuidance)) {
+            failPendingGuidance("proxy call worker unavailable");
+        }
+    }
+
+    /** Clears Instrument guidance and fences the next normal frame behind that clear. */
+    void sendTerminalGuidanceClear(ResultCallback callback) {
+        PendingGuidance superseded;
+        PendingGuidance deferredSuperseded = null;
+        ExecutorService executor = null;
+        long barrierToken = 0L;
+        long expectedEpoch = 0L;
         synchronized (callLock) {
             superseded = pendingGuidance;
-            pendingGuidance = new PendingGuidance(
-                    icon, distanceMeters, safe(road), callback);
-            if (!guidanceScheduled) {
-                guidanceScheduled = true;
+            pendingGuidance = null;
+            guidanceScheduled = false;
+            if (guidanceBarrierActive) {
+                // A second terminal is still the final frame.  Drop the frame
+                // deferred behind the first clear instead of replaying it after
+                // the joined terminal callbacks complete.
+                if (shouldDropDeferredGuidanceForDuplicateTerminalForTest(
+                        true, deferredGuidance != null)) {
+                    deferredSuperseded = deferredGuidance;
+                    deferredGuidance = null;
+                }
+                if (callback != null) terminalClearCallbacks.add(callback);
+            } else {
+                guidanceBarrierActive = true;
+                terminalClearInFlight = false;
+                barrierToken = ++guidanceBarrierToken;
+                expectedEpoch = callEpoch;
+                terminalClearCallbacks.clear();
+                if (callback != null) terminalClearCallbacks.add(callback);
                 executor = calls;
             }
         }
         if (superseded != null) {
-            deliver(superseded.callback, Result.unavailable("coalesced by newer frame"));
+            deliver(superseded.callback,
+                    Result.unavailable("superseded by terminal clear"));
         }
-        if (executor != null && !enqueueCall(executor, this::drainGuidance)) {
-            PendingGuidance failed;
-            synchronized (callLock) {
-                failed = pendingGuidance;
-                pendingGuidance = null;
-                guidanceScheduled = false;
+        if (deferredSuperseded != null) {
+            deliver(deferredSuperseded.callback,
+                    Result.unavailable("superseded by duplicate terminal clear"));
+        }
+        if (executor == null) return;
+        final long requestToken = barrierToken;
+        final long requestEpoch = expectedEpoch;
+        if (!enqueueCall(executor,
+                () -> executeTerminalGuidanceClear(requestToken, requestEpoch))) {
+            finishTerminalGuidanceClear(requestToken,
+                    Result.unavailable("proxy call worker unavailable"));
+        }
+    }
+
+    static boolean shouldDropDeferredGuidanceForDuplicateTerminalForTest(
+            boolean barrierActive, boolean deferredPresent) {
+        return barrierActive && deferredPresent;
+    }
+
+    private void executeTerminalGuidanceClear(long requestToken, long requestEpoch) {
+        synchronized (callLock) {
+            if (!guidanceBarrierActive || requestToken != guidanceBarrierToken
+                    || requestEpoch != callEpoch) {
+                return;
             }
-            if (failed != null) {
-                deliver(failed.callback, Result.unavailable("proxy call worker unavailable"));
+            terminalClearInFlight = true;
+        }
+        executeCall("terminal_guidance_clear",
+                result -> finishTerminalGuidanceClear(requestToken, result),
+                (current, currentGeneration) -> current.sendGuidance(
+                        currentGeneration, 0, -1, ""));
+    }
+
+    private void finishTerminalGuidanceClear(long requestToken, Result result) {
+        List<ResultCallback> callbacks;
+        ExecutorService executor = null;
+        PendingGuidance deferred;
+        synchronized (callLock) {
+            if (!guidanceBarrierActive || requestToken != guidanceBarrierToken) return;
+            guidanceBarrierActive = false;
+            terminalClearInFlight = false;
+            callbacks = new ArrayList<>(terminalClearCallbacks);
+            terminalClearCallbacks.clear();
+            deferred = deferredGuidance;
+            deferredGuidance = null;
+            if (deferred != null) {
+                pendingGuidance = deferred;
+                guidanceScheduled = true;
+                executor = calls;
             }
         }
+        if (deferred != null && !enqueueCall(executor, this::drainGuidance)) {
+            failPendingGuidance("proxy call worker unavailable");
+        }
+        for (ResultCallback terminalCallback : callbacks) {
+            deliver(terminalCallback, result);
+        }
+    }
+
+    private void failPendingGuidance(String reason) {
+        PendingGuidance failed;
+        synchronized (callLock) {
+            failed = pendingGuidance;
+            pendingGuidance = null;
+            guidanceScheduled = false;
+        }
+        if (failed != null) deliver(failed.callback, Result.unavailable(reason));
     }
 
     private void drainGuidance() {
@@ -316,6 +430,7 @@ final class InstrumentProxyManager {
             activeOperationId = operationId;
             activeOperationGeneration = currentGeneration;
             activeOperationCallback = callback;
+            activeOperationTerminal = "terminal_guidance_clear".equals(operation);
         }
         worker.schedule(
                 () -> handleCallTimeout(operationId, currentGeneration,
@@ -335,6 +450,7 @@ final class InstrumentProxyManager {
                 activeOperationId = 0L;
                 activeOperationGeneration = 0L;
                 activeOperationCallback = null;
+                activeOperationTerminal = false;
             }
         }
         if (currentResult) deliver(callback, result);
@@ -387,6 +503,11 @@ final class InstrumentProxyManager {
         ExecutorService previous;
         ResultCallback activeCallback;
         PendingGuidance pending;
+        PendingGuidance deferred;
+        List<ResultCallback> resetTerminalCallbacks = null;
+        boolean activeTerminal;
+        boolean scheduleDeferred = false;
+        ExecutorService deferredExecutor = null;
         synchronized (callLock) {
             previous = calls;
             callEpoch++;
@@ -394,17 +515,45 @@ final class InstrumentProxyManager {
             activeOperationId = 0L;
             activeOperationGeneration = 0L;
             activeCallback = activeOperationCallback;
+            activeTerminal = activeOperationTerminal && activeCallback != null;
             activeOperationCallback = null;
+            activeOperationTerminal = false;
             pending = pendingGuidance;
             pendingGuidance = null;
             guidanceScheduled = false;
+            if (guidanceBarrierActive) {
+                resetTerminalCallbacks = new ArrayList<>(terminalClearCallbacks);
+                terminalClearCallbacks.clear();
+                guidanceBarrierActive = false;
+                terminalClearInFlight = false;
+                guidanceBarrierToken++;
+                deferred = deferredGuidance;
+                deferredGuidance = null;
+                if (deferred != null) {
+                    pendingGuidance = deferred;
+                    guidanceScheduled = true;
+                    deferredExecutor = calls;
+                    scheduleDeferred = true;
+                }
+            } else {
+                deferred = null;
+            }
         }
         previous.shutdownNow();
-        if (activeCallback != null) {
+        if (activeCallback != null && !activeTerminal) {
             deliver(activeCallback, Result.unavailable("proxy reset: " + safe(reason)));
         }
         if (pending != null) {
             deliver(pending.callback, Result.unavailable("proxy reset: " + safe(reason)));
+        }
+        if (resetTerminalCallbacks != null) {
+            Result reset = Result.unavailable("proxy reset: " + safe(reason));
+            for (ResultCallback terminalCallback : resetTerminalCallbacks) {
+                deliver(terminalCallback, reset);
+            }
+        }
+        if (scheduleDeferred && !enqueueCall(deferredExecutor, this::drainGuidance)) {
+            failPendingGuidance("proxy call worker unavailable");
         }
     }
 

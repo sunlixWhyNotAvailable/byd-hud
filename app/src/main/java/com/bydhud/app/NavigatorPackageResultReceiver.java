@@ -62,11 +62,11 @@ public final class NavigatorPackageResultReceiver extends BroadcastReceiver {
         if (profile == null) return;
         if (NavigatorPackageInstaller.OP_UNINSTALL.equals(operation)
                 || NavigatorPackageInstaller.OP_UNINSTALL_RESTORE.equals(operation)) {
-            NavigatorPackageInstaller.abandonPreparedSession(context);
+            NavigatorPackageInstaller.abandonPreparedSession(context, profile);
         }
         boolean restore = NavigatorPackageInstaller.OP_UNINSTALL_RESTORE.equals(operation)
                 || NavigatorPackageInstaller.OP_INSTALL_RESTORE.equals(operation);
-        boolean destructive = NavigatorPatchStore.operation(context).destructive;
+        boolean destructive = NavigatorPatchStore.operation(context, profile).destructive;
         boolean missing = !NavigatorPackageInstaller.isInstalled(
                 context, profile.packageName);
         NavigatorPatchStore.transition(context, profile,
@@ -74,5 +74,8 @@ public final class NavigatorPackageResultReceiver extends BroadcastReceiver {
                         ? NavigatorPatchStore.RECOVERY_REQUIRED
                         : NavigatorPatchStore.FAILED,
                 message == null ? "Package operation failed" : message);
+        NavigatorPatchStore.releaseInstall(context, profile);
+        MainActivity.requestPatchUiStateRefresh(context, true, "patch-failed");
+        NavigatorPackageInstaller.drainInstallQueue(context);
     }
 }

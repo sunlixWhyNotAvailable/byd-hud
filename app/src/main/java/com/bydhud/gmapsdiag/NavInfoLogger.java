@@ -7,6 +7,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Rect;
 import android.graphics.drawable.Drawable;
+import android.content.res.Resources;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.Message;
@@ -63,6 +64,9 @@ public final class NavInfoLogger {
     private static final AtomicReference<Event> LATEST_FRAME = new AtomicReference<>();
     private static final AtomicReference<Event> LAST_FRAME_FOR_REPLAY =
             new AtomicReference<>();
+    private static final AtomicReference<Event> PENDING_FRAME_FOR_REPLAY =
+            new AtomicReference<>();
+    private static final ThreadLocal<ModelToken> FRAME_MODEL = new ThreadLocal<>();
 
     private static volatile Messenger client;
     private static volatile IBinder clientBinder;
@@ -75,6 +79,8 @@ public final class NavInfoLogger {
     private static int lastManeuverHeight;
     private static long lastManeuverSourceElapsedMs;
     private static long lastManeuverRenderGeneration;
+    private static long lastManeuverSourceSequence = -1L;
+    private static volatile Context applicationContext;
     private static volatile boolean routeActive;
     private static final Map<ImageView, PendingCapture> PENDING_CAPTURES =
             new WeakHashMap<>();
@@ -146,6 +152,7 @@ public final class NavInfoLogger {
             Log.w(TAG, "REGISTER_IGNORED|reason=null_context_or_intent");
             return;
         }
+        applicationContext = context.getApplicationContext();
         try {
             String action = intent.getAction();
             boolean unregister = ACTION_UNREGISTER.equals(action);
@@ -194,14 +201,16 @@ public final class NavInfoLogger {
         long eventSequence = -1L;
         synchronized (STATE_LOCK) {
             if (!routeActive) return;
+            ModelToken model = FRAME_MODEL.get();
+            FRAME_MODEL.remove();
             Event event = new Event(
                     NEXT_SEQUENCE.incrementAndGet(), SystemClock.elapsedRealtime(),
-                    STATE_EPOCH.get(), message);
+                    STATE_EPOCH.get(), message, model);
             eventSequence = event.sequence;
-            // Replay and live coalescing must observe the same route snapshot. In
-            // particular, an old producer log may not overwrite a newer route's
-            // cached frame after STOP/START resets the transient state.
-            LAST_FRAME_FOR_REPLAY.set(event);
+            // Keep the latest event for a client which registers after the producer
+            // emitted it. Replay is published by the single worker only after its
+            // optional model bitmap and ordered FRAME are ready.
+            PENDING_FRAME_FOR_REPLAY.set(event);
             if (noClient()) return;
             synchronized (FRAME_SIGNAL) {
                 replaced = LATEST_FRAME.getAndSet(event);
@@ -222,6 +231,35 @@ public final class NavInfoLogger {
             epoch = STATE_EPOCH.get();
         }
         sendControl(MESSAGE_START, "start", className(session), epoch, true);
+    }
+
+    /** Clears the model token at the 26.30 producer-frame boundary. */
+    public static void beginFrameCaptureV26() {
+        FRAME_MODEL.remove();
+    }
+
+    /** Captures the background-live 26.30 step model before payload production. */
+    public static void captureManeuverModelV26(Object value) {
+        if (value == null) return;
+        RouteSnapshot snapshot = routeSnapshot();
+        if (!snapshot.active) return;
+        try {
+            // Lbqmu.b[0] -> bqmn.c -> bqmn.b[index] -> bqmq.i (Lbqmm).
+            Object root = requiredField(value, "b");
+            Object bqmn = elementAt(root, 0);
+            int index = intField(bqmn, "c");
+            Object bqmq = elementAt(requiredField(bqmn, "b"), index);
+            Object model = requiredField(bqmq, "i");
+            String maneuver = enumName(readField(model, "a"));
+            if (model == null || maneuver.isEmpty() || "UNKNOWN".equals(maneuver)) return;
+            FRAME_MODEL.set(new ModelToken(model, maneuver, snapshot.epoch,
+                    NEXT_RENDER_GENERATION.incrementAndGet()));
+        } catch (Throwable error) {
+            FRAME_MODEL.remove();
+            Log.w(TAG, "MANEUVER_MODEL_FAILED|profile=26.30|type="
+                    + error.getClass().getSimpleName()
+                    + "|message=" + clean(error.getMessage()));
+        }
     }
 
     public static void sessionOutputChanged(boolean enabled) {
@@ -436,7 +474,7 @@ public final class NavInfoLogger {
             data.putInt("capabilities", capabilities());
             data.putBoolean("routeActive", snapshot.active);
             delivered = sendTo(candidate, MESSAGE_HELLO, data);
-            if (delivered) replayCurrentStateLocked(snapshot, candidate);
+            if (delivered) delivered = replayCurrentStateLocked(snapshot, candidate);
             if (delivered) {
                 // Publish before releasing STATE_LOCK so STOP/START cannot land
                 // between replay and the first post-registration control event.
@@ -446,6 +484,13 @@ public final class NavInfoLogger {
                         clientBinder = binder;
                         clientDeathRecipient = deathRecipient;
                         published = true;
+                        Event pending = PENDING_FRAME_FOR_REPLAY.get();
+                        if (pending != null && pending.epoch == snapshot.epoch) {
+                            synchronized (FRAME_SIGNAL) {
+                                LATEST_FRAME.set(pending);
+                                FRAME_SIGNAL.notifyAll();
+                            }
+                        }
                     }
                 }
             }
@@ -530,21 +575,21 @@ public final class NavInfoLogger {
             if (png.length == 0 || png.length > MAX_FRAME_BYTES) {
                 throw new IllegalStateException("png_size=" + png.length);
             }
-            final Bundle data;
+            String viewId = resourceName(view);
+            rememberBitmap(maneuver, viewId, png, width, height,
+                    SystemClock.elapsedRealtime(), renderGeneration, epoch, -1L);
+            boolean delivered;
             synchronized (STATE_LOCK) {
                 if (epoch != STATE_EPOCH.get() || !routeActive) return;
-                data = baseBundle(epoch, true);
-            }
-            data.putString("maneuver", maneuver);
-            data.putString("viewId", resourceName(view));
-            data.putInt("width", width);
-            data.putInt("height", height);
-            data.putLong("renderGeneration", renderGeneration);
-            data.putByteArray("png", png);
-            boolean delivered = send(MESSAGE_MANEUVER_BITMAP, data);
-            if (delivered || routeActive) {
-                rememberBitmap(maneuver, resourceName(view), png, width, height,
-                        SystemClock.elapsedRealtime(), renderGeneration, epoch);
+                Bundle data = baseBundle(epoch, true);
+                data.putString("maneuver", maneuver);
+                data.putString("viewId", viewId);
+                data.putInt("width", width);
+                data.putInt("height", height);
+                data.putLong("renderGeneration", renderGeneration);
+                data.putLong("sourceSequence", -1L);
+                data.putByteArray("png", png);
+                delivered = sendTo(client, MESSAGE_MANEUVER_BITMAP, data);
             }
             Log.i(TAG, "MANEUVER_BITMAP|maneuver=" + maneuver
                     + "|renderGeneration=" + renderGeneration
@@ -561,7 +606,8 @@ public final class NavInfoLogger {
     }
 
     private static void rememberBitmap(String maneuver, String viewId, byte[] png,
-            int width, int height, long sourceElapsedMs, long renderGeneration, long epoch) {
+            int width, int height, long sourceElapsedMs, long renderGeneration, long epoch,
+            long sourceSequence) {
         synchronized (BITMAP_LOCK) {
             if (epoch != STATE_EPOCH.get()) return;
             lastManeuverName = maneuver;
@@ -571,20 +617,141 @@ public final class NavInfoLogger {
             lastManeuverHeight = height;
             lastManeuverSourceElapsedMs = sourceElapsedMs;
             lastManeuverRenderGeneration = renderGeneration;
+            lastManeuverSourceSequence = sourceSequence;
         }
     }
 
     private static void write(Event event) throws Exception {
-        sendFrameEvent(event);
+        if (!isCurrentEvent(event)) return;
+        boolean modelReady = true;
+        if (event.model != null) {
+            try {
+                modelReady = renderModelBitmap(event);
+                if (!modelReady) {
+                    invalidateBitmap(event.model.maneuver);
+                    Log.w(TAG, "MANEUVER_MODEL_FALLBACK|sequence=" + event.sequence
+                            + "|maneuver=" + event.model.maneuver);
+                }
+            } catch (Throwable error) {
+                modelReady = false;
+                invalidateBitmap(event.model.maneuver);
+                Log.w(TAG, "MANEUVER_MODEL_FALLBACK|sequence=" + event.sequence
+                        + "|type=" + error.getClass().getSimpleName()
+                        + "|message=" + clean(error.getMessage()));
+            }
+        }
+        if (!isCurrentEvent(event)) return;
+        if (!modelReady && noClient()) {
+            requeueForRetry(event);
+            return;
+        }
+        synchronized (STATE_LOCK) {
+            if (!isCurrentEvent(event)) return;
+            Messenger target = client;
+            boolean bitmapRequired = modelReady && event.model != null;
+            if (!sendMatchingBitmap(event, target, bitmapRequired)) {
+                requeueForRetry(event);
+                return;
+            }
+            if (!sendFrameEvent(event, target)) {
+                requeueForRetry(event);
+                return;
+            }
+            LAST_FRAME_FOR_REPLAY.set(event);
+            PENDING_FRAME_FOR_REPLAY.compareAndSet(event, null);
+        }
     }
 
-    private static void sendFrameEvent(Event event) throws Exception {
-        sendFrameEvent(event, client);
+    private static void requeueForRetry(Event event) {
+        if (event == null || event.epoch != STATE_EPOCH.get() || !routeActive) return;
+        PENDING_FRAME_FOR_REPLAY.compareAndSet(null, event);
     }
 
-    private static void sendFrameEvent(Event event, Messenger target) throws Exception {
+    private static boolean isCurrentEvent(Event event) {
+        if (event == null || !routeActive || event.epoch != STATE_EPOCH.get()) return false;
+        Event pending = LATEST_FRAME.get();
+        return pending == null || pending.sequence <= event.sequence;
+    }
+
+    private static boolean renderModelBitmap(Event event) throws Exception {
+        ModelToken model = event.model;
+        if (model.epoch != STATE_EPOCH.get() || !isCurrentEvent(event)) return false;
+        Context context = applicationContext;
+        if (context == null) throw new IllegalStateException("application_context_missing");
+        ClassLoader loader = model.value.getClass().getClassLoader();
+        Class<?> renderer = Class.forName("bqyl", true, loader);
+        Method render = null;
+        for (Method candidate : renderer.getDeclaredMethods()) {
+            Class<?>[] parameters = candidate.getParameterTypes();
+            if (!"c".equals(candidate.getName()) || parameters.length != 3
+                    || !Resources.class.equals(parameters[0])
+                    || !parameters[1].isAssignableFrom(model.value.getClass())
+                    || !int.class.equals(parameters[2])) continue;
+            render = candidate;
+            break;
+        }
+        if (render == null) throw new NoSuchMethodException("bqyl.c(Resources,Lbqmm,int)");
+        render.setAccessible(true);
+        Object rendered = render.invoke(null, context.getResources(), model.value, -1);
+        Bitmap bitmap = rendered instanceof Bitmap ? (Bitmap) rendered : null;
+        if (rendered instanceof Drawable) bitmap = drawableBitmap((Drawable) rendered);
+        if (bitmap == null) throw new IllegalStateException("renderer_returned_no_bitmap");
+        try {
+            byte[] png = toPng(bitmap);
+            if (png.length == 0 || png.length > MAX_FRAME_BYTES) {
+                throw new IllegalStateException("png_size=" + png.length);
+            }
+            if (!isCurrentEvent(event)) return false;
+            rememberBitmap(model.maneuver, "bqyl", png,
+                    bitmap.getWidth(), bitmap.getHeight(), SystemClock.elapsedRealtime(),
+                    model.renderGeneration, event.epoch, event.sequence);
+            return true;
+        } finally {
+            if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle();
+        }
+    }
+
+    private static Bitmap drawableBitmap(Drawable drawable) {
+        int sourceWidth = drawable.getIntrinsicWidth() > 0 ? drawable.getIntrinsicWidth() : 1;
+        int sourceHeight = drawable.getIntrinsicHeight() > 0 ? drawable.getIntrinsicHeight() : 1;
+        float scale = Math.min(1f, MAX_BITMAP_DIMENSION_PX
+                / (float) Math.max(sourceWidth, sourceHeight));
+        int width = Math.max(1, Math.round(sourceWidth * scale));
+        int height = Math.max(1, Math.round(sourceHeight * scale));
+        Bitmap bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+        Rect oldBounds = new Rect(drawable.getBounds());
+        drawable.setBounds(0, 0, width, height);
+        drawable.draw(new Canvas(bitmap));
+        drawable.setBounds(oldBounds);
+        return bitmap;
+    }
+
+    private static byte[] toPng(Bitmap bitmap) throws Exception {
+        ByteArrayOutputStream output = new ByteArrayOutputStream();
+        if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, output)) {
+            throw new IllegalStateException("png_encode_failed");
+        }
+        return output.toByteArray();
+    }
+
+    private static void invalidateBitmap(String maneuver) {
+        synchronized (BITMAP_LOCK) {
+            if (maneuver == null || maneuver.equals(lastManeuverName)) {
+                lastManeuverName = "";
+                lastManeuverViewId = "";
+                lastManeuverPng = null;
+                lastManeuverSourceSequence = -1L;
+            }
+        }
+    }
+
+    private static boolean sendFrameEvent(Event event) throws Exception {
+        return sendFrameEvent(event, client);
+    }
+
+    private static boolean sendFrameEvent(Event event, Messenger target) throws Exception {
         if (target == null || event == null || !routeActive
-                || event.epoch != STATE_EPOCH.get()) return;
+                || event.epoch != STATE_EPOCH.get()) return false;
         Object message = event.message;
         Object payload = readField(message, "c");
         Object caseValue = readField(message, "b");
@@ -592,9 +759,9 @@ public final class NavInfoLogger {
         if (bytes.length > MAX_FRAME_BYTES) {
             Log.w(TAG, "FRAME_DROPPED|seq=" + event.sequence + "|reason=too_large|bytes="
                     + bytes.length);
-            return;
+            return false;
         }
-        if (event.epoch != STATE_EPOCH.get()) return;
+        if (event.epoch != STATE_EPOCH.get()) return false;
         Bundle data = baseBundle(event.epoch, true);
         data.putLong("sequence", event.sequence);
         data.putLong("sourceElapsedMs", event.elapsedMs);
@@ -603,9 +770,13 @@ public final class NavInfoLogger {
         data.putString("payloadClass", className(payload));
         data.putByteArray("payload", bytes);
         boolean delivered = send(target, MESSAGE_FRAME, data);
+        if (!delivered && target == client) {
+            clearClient("frame_send_failed", target.getBinder());
+        }
         Log.d(TAG, "FRAME|seq=" + event.sequence + "|case="
                 + clean(String.valueOf(caseValue)) + "|bytes=" + bytes.length
                 + "|delivered=" + delivered);
+        return delivered;
     }
 
     private static void replayCurrentState() {
@@ -618,46 +789,60 @@ public final class NavInfoLogger {
         replayCurrentStateLocked(snapshot, client);
     }
 
-    private static void replayCurrentStateLocked(RouteSnapshot snapshot, Messenger target) {
-            final long epoch = snapshot.epoch;
-            if (!snapshot.active) return;
-            Event replayEvent = LAST_FRAME_FOR_REPLAY.get();
-            Bundle start = baseBundle(epoch, true);
-            start.putString("event", "replay-start");
-            start.putString("argumentClass", "replay");
-            sendTo(target, MESSAGE_START, start);
-            try {
-                if (replayEvent != null && replayEvent.epoch == epoch) {
-                    sendFrameEvent(replayEvent, target);
-                }
-            } catch (Throwable error) {
-                Log.w(TAG, "REPLAY_FRAME_FAILED|type=" + error.getClass().getSimpleName());
+    private static boolean replayCurrentStateLocked(RouteSnapshot snapshot, Messenger target) {
+        final long epoch = snapshot.epoch;
+        if (!snapshot.active) return true;
+        Bundle start = baseBundle(epoch, true);
+        start.putString("event", "replay-start");
+        start.putString("argumentClass", "replay");
+        if (!sendTo(target, MESSAGE_START, start)) return false;
+        Event replayEvent = LAST_FRAME_FOR_REPLAY.get();
+        if (replayEvent == null || replayEvent.epoch != epoch) return true;
+        if (!sendMatchingBitmap(replayEvent, target, false)) return false;
+        try {
+            if (!sendFrameEvent(replayEvent, target)) return false;
+        } catch (Throwable error) {
+            Log.w(TAG, "REPLAY_FRAME_FAILED|type=" + error.getClass().getSimpleName());
+            return false;
+        }
+        synchronized (SPEED_LOCK) {
+            if (lastSpeedLimit != Integer.MIN_VALUE
+                    && epoch == STATE_EPOCH.get() && routeActive) {
+                Bundle speed = baseBundle(epoch, true);
+                speed.putInt("speedLimit", lastSpeedLimit);
+                speed.putInt("speedLimitKph", lastSpeedLimitKph);
+                speed.putString("speedUnit", lastSpeedUnit);
+                if (!sendTo(target, MESSAGE_SPEED_LIMIT, speed)) return false;
             }
-            synchronized (BITMAP_LOCK) {
-                if (lastManeuverPng != null && lastManeuverPng.length > 0
-                        && epoch == STATE_EPOCH.get() && routeActive) {
-                    Bundle bitmap = baseBundle(epoch, true);
+        }
+        return true;
+    }
+
+    private static boolean sendMatchingBitmap(
+            Event event, Messenger target, boolean required) {
+        synchronized (BITMAP_LOCK) {
+            boolean maneuverMatches = event.model == null
+                    || event.model.maneuver.equals(lastManeuverName);
+            boolean sequenceMatches = lastManeuverSourceSequence < 0L
+                    || lastManeuverSourceSequence == event.sequence;
+            if (lastManeuverPng != null && lastManeuverPng.length > 0
+                    && maneuverMatches && sequenceMatches
+                    && event.epoch == STATE_EPOCH.get() && routeActive) {
+                Bundle bitmap = baseBundle(event.epoch, true);
                 bitmap.putString("maneuver", lastManeuverName);
                 bitmap.putString("viewId", lastManeuverViewId);
                 bitmap.putInt("width", lastManeuverWidth);
                 bitmap.putInt("height", lastManeuverHeight);
                 bitmap.putLong("bridgeElapsedMs", lastManeuverSourceElapsedMs);
                 bitmap.putLong("renderGeneration", lastManeuverRenderGeneration);
+                bitmap.putLong("sourceSequence", lastManeuverSourceSequence);
                 bitmap.putByteArray("png", lastManeuverPng.clone());
-                    sendTo(target, MESSAGE_MANEUVER_BITMAP, bitmap);
-                }
+                if (!sendTo(target, MESSAGE_MANEUVER_BITMAP, bitmap)) return false;
+                return true;
             }
-            synchronized (SPEED_LOCK) {
-                if (lastSpeedLimit != Integer.MIN_VALUE
-                        && epoch == STATE_EPOCH.get() && routeActive) {
-                    Bundle speed = baseBundle(epoch, true);
-                speed.putInt("speedLimit", lastSpeedLimit);
-                speed.putInt("speedLimitKph", lastSpeedLimitKph);
-                speed.putString("speedUnit", lastSpeedUnit);
-                    sendTo(target, MESSAGE_SPEED_LIMIT, speed);
-                }
-            }
+            return !required;
         }
+    }
 
     private static void sendControl(int what, String event, String argumentClass) {
         sendControl(what, event, argumentClass, STATE_EPOCH.get(), routeActive);
@@ -736,6 +921,8 @@ public final class NavInfoLogger {
         STATE_EPOCH.incrementAndGet();
         LATEST_FRAME.set(null);
         LAST_FRAME_FOR_REPLAY.set(null);
+        PENDING_FRAME_FOR_REPLAY.set(null);
+        FRAME_MODEL.remove();
         routeActive = false;
         synchronized (BITMAP_LOCK) {
             lastManeuverName = "";
@@ -745,6 +932,7 @@ public final class NavInfoLogger {
             lastManeuverHeight = 0;
             lastManeuverSourceElapsedMs = 0L;
             lastManeuverRenderGeneration = 0L;
+            lastManeuverSourceSequence = -1L;
             PENDING_CAPTURES.clear();
         }
         synchronized (SPEED_LOCK) {
@@ -849,6 +1037,17 @@ public final class NavInfoLogger {
             }
         }
         throw new NoSuchFieldException(target.getClass().getName() + "." + name);
+    }
+
+    private static Object elementAt(Object value, int index) throws Exception {
+        if (value == null || index < 0) throw new IndexOutOfBoundsException("index=" + index);
+        if (value.getClass().isArray()) {
+            int length = java.lang.reflect.Array.getLength(value);
+            if (index >= length) throw new IndexOutOfBoundsException("index=" + index);
+            return java.lang.reflect.Array.get(value, index);
+        }
+        if (value instanceof List) return ((List<?>) value).get(index);
+        throw new IllegalStateException("not an indexed model container");
     }
 
     private static int intField(Object target, String name) throws Exception {
@@ -962,12 +1161,28 @@ public final class NavInfoLogger {
         final long elapsedMs;
         final long epoch;
         final Object message;
+        final ModelToken model;
 
-        Event(long sequence, long elapsedMs, long epoch, Object message) {
+        Event(long sequence, long elapsedMs, long epoch, Object message, ModelToken model) {
             this.sequence = sequence;
             this.elapsedMs = elapsedMs;
             this.epoch = epoch;
             this.message = message;
+            this.model = model;
+        }
+    }
+
+    private static final class ModelToken {
+        final Object value;
+        final String maneuver;
+        final long epoch;
+        final long renderGeneration;
+
+        ModelToken(Object value, String maneuver, long epoch, long renderGeneration) {
+            this.value = value;
+            this.maneuver = maneuver;
+            this.epoch = epoch;
+            this.renderGeneration = renderGeneration;
         }
     }
 

@@ -74,6 +74,21 @@ public final class GMapsBitmapFlowTest {
     }
 
     @Test
+    public void preFrameBitmapOnlyMatchesItsOrderedFrame() {
+        byte[] google = png(36, 36, 15);
+        byte[] fallback = png(72, 72, 16);
+        GMapsDirectChannel.ManeuverBitmap future =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "bqyl", google, 36, 36, 1_000L,
+                        7L, 1L, 3L, 9L);
+
+        assertEquals("fallback", GMapsDirectChannel.BitmapSelection.select(
+                8L, "DEPART", future, fallback, 1_000L, "matched").selected);
+        assertEquals("google", GMapsDirectChannel.BitmapSelection.select(
+                9L, "DEPART", future, fallback, 1_000L, "matched").selected);
+    }
+
+    @Test
     public void renderGenerationRejectsStaleProducerFramesEvenWithNewerClock() {
         byte[] oldPng = png(36, 36, 21);
         byte[] newPng = png(36, 36, 22);

@@ -72,7 +72,9 @@ public final class GmapsDiagnosticPatcher {
     private static final String AUDIO_BUILDER = "Landroid/media/AudioAttributes$Builder;";
     private static final String MANEUVER_EXTRACTOR_V25 = "maneuver.a -> enum.name";
     private static final String MANEUVER_EXTRACTOR_V26 =
-            "Optional.a -> Lbqmm.a -> enum.name";
+            "Lbqmu.b[0] -> bqmn.c -> bqmn.b[index] -> bqmq.i; "
+                    + "Optional.a -> Lbqmm.a -> enum.name; "
+                    + "bqyl.c(Resources,Lbqmm,-1)";
     private static final List<Hook> HOOKS_2516 = Arrays.asList(
             new Hook("nav_payload", "Lbpix;", "b",
                     Collections.singletonList("Lclca;"), "V",
@@ -87,6 +89,8 @@ public final class GmapsDiagnosticPatcher {
             new Hook("session_output", "Lbhiy;", "sO",
                     Collections.singletonList("Z"), "V",
                     "sessionOutputChanged", Collections.singletonList("Z"), 1,
+                    false,
+                    HookPlacement.PRE_BODY,
                     new Marker("method", "Ljava/util/concurrent/atomic/AtomicBoolean;",
                             "compareAndSet", "Z")),
             new Hook("session_stop", "Lbhiy;", "t",
@@ -121,6 +125,8 @@ public final class GmapsDiagnosticPatcher {
             new Hook("session_output", "Lbqny;", "c",
                     Collections.singletonList("Z"), "V",
                     "sessionOutputChanged", Collections.singletonList("Z"), 1,
+                    false,
+                    HookPlacement.PRE_BODY,
                     new Marker("method", "Ljava/util/concurrent/atomic/AtomicBoolean;",
                             "compareAndSet", "Z")),
             new Hook("session_stop", "Lbqny;", "sa",
@@ -134,10 +140,17 @@ public final class GmapsDiagnosticPatcher {
                     new Marker("method", "Landroid/content/Intent;", "getAction",
                             "Ljava/lang/String;"),
                     new Marker("method", "Lbqoa;", "a", "V")),
+            new Hook("maneuver_model", "Lbqkz;", "b",
+                    Collections.singletonList("Ljava/lang/Object;"), "Ljava/lang/Object;",
+                    "captureManeuverModelV26", Collections.singletonList(
+                            "Ljava/lang/Object;"), 1,
+                    HookPlacement.PRE_BODY,
+                    new Marker("field", "Lbqmu;", "b", "")),
             new Hook("maneuver_bitmap", MANEUVER_VIEW_CLASS, "setManeuver",
                     Collections.singletonList("Lbqmm;"), "V",
                     "captureManeuverViewV26", Arrays.asList(
                             "Ljava/lang/Object;", "Ljava/lang/Object;"), 2,
+                    false,
                     HookPlacement.POST_BODY_BEFORE_RETURN_VOID,
                     "captureManeuverView",
                     new Marker("method", MANEUVER_VIEW_CLASS, "a", "V"))
@@ -180,12 +193,40 @@ public final class GmapsDiagnosticPatcher {
 
     public static String inspectDirectClassification(File apk) throws IOException {
         requireFile(apk, "APK");
-        return inspect(apk).directClassification();
+        try {
+            return inspect(apk).directClassification();
+        } catch (IOException error) {
+            if (error.getMessage() != null
+                    && error.getMessage().startsWith("unsupported GMaps target profile")) {
+                return "UNSUPPORTED";
+            }
+            throw error;
+        }
     }
 
     public static String inspectAudioClassification(File apk) throws IOException {
         requireFile(apk, "APK");
-        return inspect(apk).audioClassification();
+        try {
+            return inspect(apk).audioClassification();
+        } catch (IOException error) {
+            if (error.getMessage() != null
+                    && error.getMessage().startsWith("unsupported GMaps target profile")) {
+                return "UNSUPPORTED";
+            }
+            throw error;
+        }
+    }
+
+    public static String inspectGmsCoreClassification(File apk) throws IOException {
+        requireFile(apk, "APK");
+        return inspectGmsCoreOnly(apk, null).state;
+    }
+
+    public static String inspectGmsCoreClassification(File apk, String validatedProfile)
+            throws IOException {
+        requireFile(apk, "APK");
+        requireKnownProfile(validatedProfile);
+        return inspectGmsCoreOnly(apk, validatedProfile).state;
     }
 
     public static String inspectProfileIdIfPresent(File apk) throws IOException {
@@ -220,6 +261,61 @@ public final class GmapsDiagnosticPatcher {
         patchAudio(input, output, reportFile);
     }
 
+    public static void patchGmsCore(
+            File input, File output, File reportFile) throws Exception {
+        requireFile(input, "GMaps APK");
+        GmsCoreInspection before = inspectGmsCoreOnly(input, null);
+        if (before.targetCount != 1 || !"ACTIVE".equals(before.state)) {
+            throw new IOException("GmsCore component input state=" + before.state);
+        }
+        File work = new File(output.getAbsoluteFile().getParentFile(), "gms-core-dex-work");
+        deleteTree(work);
+        if (!work.mkdirs()) throw new IOException("cannot create " + work);
+        Map<String, File> replacements = new LinkedHashMap<>();
+        File temporary = new File(output.getAbsolutePath() + ".tmp");
+        try {
+            try (ZipFile zip = new ZipFile(input)) {
+                byte[] source = readEntry(zip, before.dexEntry);
+                File rewritten = new File(work, before.dexEntry);
+                File parent = rewritten.getParentFile();
+                if (parent != null && !parent.exists() && !parent.mkdirs()) {
+                    throw new IOException("cannot create " + parent);
+                }
+                rewriteGmsCoreDialogDex(source, rewritten, before.profile);
+                replacements.put(before.dexEntry, rewritten);
+            }
+            repack(input, temporary, replacements, null, null);
+            // Verify the fully repacked archive before replacing an existing
+            // output. A failed patch therefore cannot taint the destination.
+            GmsCoreInspection after = inspectGmsCoreOnly(temporary, before.profile.id);
+            if (!isGmsCoreSuppressed(after.state)) {
+                throw new IOException("GmsCore component post-verification state="
+                        + after.state);
+            }
+            Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
+            Map<String, Object> report = new LinkedHashMap<>();
+            report.put("operation", "patch-gms-core");
+            report.put("inputSha256", sha256(input));
+            report.put("outputSha256", sha256(output));
+            report.put("inputState", before.state);
+            report.put("outputState", after.state);
+            report.put("targetProfile", after.profile.id);
+            report.put("dexEntry", after.dexEntry);
+            writeJson(reportFile, report);
+        } finally {
+            deleteTree(work);
+            deleteTree(temporary);
+        }
+    }
+
+    public static void verifyGmsCore(File apk) throws IOException {
+        requireFile(apk, "GMaps APK");
+        GmsCoreInspection inspection = inspectGmsCoreOnly(apk, null);
+        if (inspection.targetCount != 1 || !isGmsCoreSuppressed(inspection.state)) {
+            throw new IOException("GmsCore component state=" + inspection.state);
+        }
+    }
+
     public static void patchPictureInPicture(
             File input, File output, File reportFile) throws Exception {
         requireFile(input, "GMaps APK");
@@ -234,22 +330,22 @@ public final class GmapsDiagnosticPatcher {
         if (!GmapsPipManifestPatcher.PATCHABLE.equals(before.classification)) {
             throw new IOException("PiP manifest classification=" + before.classification);
         }
-        File work = new File(output.getParentFile(), "pip-manifest-work");
+        File work = new File(output.getAbsoluteFile().getParentFile(), "pip-manifest-work");
         deleteTree(work);
         if (!work.mkdirs()) throw new IOException("cannot create " + work);
         File manifest = new File(work, "AndroidManifest.xml");
+        File temporary = new File(output.getAbsolutePath() + ".tmp");
         try {
             byte[] sourceManifest = readManifestEntry(input);
             Files.write(manifest.toPath(), GmapsPipManifestPatcher.patch(sourceManifest));
-            File temporary = new File(output.getAbsolutePath() + ".tmp");
             Map<String, File> replacements = Collections.singletonMap(
                     "AndroidManifest.xml", manifest);
             repack(input, temporary, replacements, null, null);
-            Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
-            GmapsPipManifestPatcher.Result after = inspectPipManifest(output);
+            GmapsPipManifestPatcher.Result after = inspectPipManifest(temporary);
             if (!GmapsPipManifestPatcher.PATCHED.equals(after.classification)) {
                 throw new IOException("PiP manifest post-verification failed");
             }
+            Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
             Map<String, Object> report = new LinkedHashMap<>();
             report.put("operation", "patch-pip");
             report.put("inputSha256", sha256(input));
@@ -265,6 +361,7 @@ public final class GmapsDiagnosticPatcher {
             writeJson(reportFile, report);
         } finally {
             deleteTree(work);
+            deleteTree(temporary);
         }
     }
 
@@ -284,6 +381,14 @@ public final class GmapsDiagnosticPatcher {
         }
         if ("verify-audio".equals(args[0]) && args.length == 3) {
             verifyAudio(new File(args[1]), new File(args[2]));
+            return;
+        }
+        if ("patch-gms-core".equals(args[0]) && args.length == 4) {
+            patchGmsCore(new File(args[1]), new File(args[2]), new File(args[3]));
+            return;
+        }
+        if ("verify-gms-core".equals(args[0]) && args.length == 2) {
+            verifyGmsCore(new File(args[1]));
             return;
         }
         if ("patch-pip".equals(args[0]) && args.length == 4) {
@@ -306,6 +411,8 @@ public final class GmapsDiagnosticPatcher {
                         + "or verify <apk> <report.json> "
                         + "or patch-audio <input.apk> <unsigned.apk> <report.json> "
                         + "or verify-audio <apk> <report.json> "
+                        + "or patch-gms-core <input.apk> <unsigned.apk> <report.json> "
+                        + "or verify-gms-core <apk> "
                         + "or patch-pip <input.apk> <unsigned.apk> <report.json> "
                         + "or verify-pip <apk> <report.json>");
     }
@@ -346,16 +453,19 @@ public final class GmapsDiagnosticPatcher {
                 ? before.loggerDexEntry : nextDexEntry(before.dexEntries);
         Map<String, File> replacements = new HashMap<>();
         List<ClassDef> relocatedClasses = new ArrayList<>();
-        File work = new File(output.getParentFile(), "dex-work");
+        File work = new File(output.getAbsoluteFile().getParentFile(), "dex-work");
         deleteTree(work);
         if (!work.mkdirs()) throw new IOException("cannot create " + work);
+        File temporary = new File(output.getAbsolutePath() + ".tmp");
 
+        try {
         try (ZipFile zip = new ZipFile(input)) {
             if (upgradeExistingBridge) {
                 for (String dexEntry : before.dexEntries) {
                     byte[] source = readEntry(zip, dexEntry);
                     boolean dexChanged = false;
-                    if (containsHookTarget(source, before.profile, "maneuver_bitmap")) {
+                    if (containsHookTarget(source, before.profile, "maneuver_bitmap")
+                            || containsHookTarget(source, before.profile, "maneuver_model")) {
                         File hookInput = new File(work, "upgrade-hook-" + dexEntry);
                         File parentDir = hookInput.getParentFile();
                         if (parentDir != null && !parentDir.exists() && !parentDir.mkdirs()) {
@@ -363,17 +473,6 @@ public final class GmapsDiagnosticPatcher {
                         }
                         rewriteExistingBridgeDex(source, hookInput, before.profile);
                         source = Files.readAllBytes(hookInput.toPath());
-                        dexChanged = true;
-                    }
-                    if (dexEntry.equals(before.gmsCoreDexEntry)
-                            && "ACTIVE".equals(before.gmsCoreState)) {
-                        File gmsCoreInput = new File(work, "upgrade-gms-core-" + dexEntry);
-                        File parentDir = gmsCoreInput.getParentFile();
-                        if (parentDir != null && !parentDir.exists() && !parentDir.mkdirs()) {
-                            throw new IOException("cannot create " + parentDir);
-                        }
-                        rewriteGmsCoreDialogDex(source, gmsCoreInput, before.profile);
-                        source = Files.readAllBytes(gmsCoreInput.toPath());
                         dexChanged = true;
                     }
                     if (dexEntry.equals(before.loggerDexEntry)) {
@@ -403,17 +502,6 @@ public final class GmapsDiagnosticPatcher {
             boolean gateRewritten = false;
             for (Map.Entry<String, List<Hook>> entry : before.hooksByDex.entrySet()) {
                 byte[] source = readEntry(zip, entry.getKey());
-                if (entry.getKey().equals(before.gmsCoreDexEntry)
-                        && "ACTIVE".equals(before.gmsCoreState)) {
-                    File gmsCoreInput = new File(work, "gms-core-" + entry.getKey());
-                    File gmsCoreParent = gmsCoreInput.getParentFile();
-                    if (gmsCoreParent != null && !gmsCoreParent.exists()
-                            && !gmsCoreParent.mkdirs()) {
-                        throw new IOException("cannot create " + gmsCoreParent);
-                    }
-                    rewriteGmsCoreDialogDex(source, gmsCoreInput, before.profile);
-                    source = Files.readAllBytes(gmsCoreInput.toPath());
-                }
                 File rewritten = new File(work, entry.getKey());
                 File parent = rewritten.getParentFile();
                 if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -424,20 +512,6 @@ public final class GmapsDiagnosticPatcher {
                         source, rewritten, entry.getValue(), before.profile, containsGate));
                 gateRewritten |= containsGate;
                 replacements.put(entry.getKey(), rewritten);
-            }
-            if (before.gmsCoreDexEntry.isEmpty()) {
-                throw new IOException("GmsCore dialog target is missing");
-            }
-            if (!replacements.containsKey(before.gmsCoreDexEntry)
-                    && "ACTIVE".equals(before.gmsCoreState)) {
-                byte[] source = readEntry(zip, before.gmsCoreDexEntry);
-                File rewritten = new File(work, before.gmsCoreDexEntry);
-                File parent = rewritten.getParentFile();
-                if (parent != null && !parent.exists() && !parent.mkdirs()) {
-                    throw new IOException("cannot create " + parent);
-                }
-                rewriteGmsCoreDialogDex(source, rewritten, before.profile);
-                replacements.put(before.gmsCoreDexEntry, rewritten);
             }
             if (!gateRewritten) {
                 byte[] source = readEntry(zip, before.gateDexEntry);
@@ -459,13 +533,14 @@ public final class GmapsDiagnosticPatcher {
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
             throw new IOException("cannot create " + parent);
         }
-        File temporary = new File(output.getAbsolutePath() + ".tmp");
         repack(input, temporary, replacements, upgradeExistingBridge ? null : loggerEntry,
                 combinedLoggerBytes);
-        Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
 
-        Inspection after = inspect(output);
+        // Verify the complete repacked archive before replacing an existing
+        // destination; failed DEX/manifest mutations leave it untouched.
+        Inspection after = inspect(temporary);
         after.requirePatched();
+        Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
         Map<String, Object> report = baseReport("patch", input, after);
         report.put("inputSha256", sha256(input));
         report.put("outputSha256", sha256(output));
@@ -487,6 +562,9 @@ public final class GmapsDiagnosticPatcher {
         inputLoggerCapabilities.put("routeGeneration", before.loggerRouteGeneration);
         report.put("inputLoggerCapabilities", inputLoggerCapabilities);
         HookResult inputManeuver = before.results.get("maneuver_bitmap");
+        if (inputManeuver == null || "26.30".equals(before.profile.id)) {
+            inputManeuver = before.results.get("maneuver_model");
+        }
         if (inputManeuver != null) {
             Map<String, Object> inputManeuverReport = new LinkedHashMap<>();
             inputManeuverReport.put("targetCount", inputManeuver.targetCount);
@@ -497,9 +575,23 @@ public final class GmapsDiagnosticPatcher {
             inputManeuverReport.put("guard", inputManeuver.guard);
             report.put("inputManeuverBitmap", inputManeuverReport);
         }
+        if ("26.30".equals(before.profile.id)) {
+            HookResult inputView = before.results.get("maneuver_bitmap");
+            if (inputView != null) {
+                Map<String, Object> inputViewReport = new LinkedHashMap<>();
+                inputViewReport.put("targetCount", inputView.targetCount);
+                inputViewReport.put("hookCallCount", inputView.hookCallCount);
+                inputViewReport.put("legacyHookCallCount", inputView.legacyHookCallCount);
+                inputViewReport.put("guard", inputView.guard);
+                report.put("inputLegacyManeuverView", inputViewReport);
+            }
+        }
         report.put("outputBytes", output.length());
         writeJson(reportFile, report);
-        deleteTree(work);
+        } finally {
+            deleteTree(work);
+            deleteTree(temporary);
+        }
     }
 
     private static void verify(File apk, File reportFile) throws Exception {
@@ -516,10 +608,12 @@ public final class GmapsDiagnosticPatcher {
         requireFile(input, "direct GMaps APK");
         Inspection before = inspect(input);
         before.requireAudioPatchable();
-        File work = new File(output.getParentFile(), "audio-dex-work");
+        File work = new File(output.getAbsoluteFile().getParentFile(), "audio-dex-work");
         deleteTree(work);
         if (!work.mkdirs()) throw new IOException("cannot create " + work);
         Map<String, File> replacements = new LinkedHashMap<>();
+        File temporary = new File(output.getAbsolutePath() + ".tmp");
+        try {
         try (ZipFile zip = new ZipFile(input)) {
             List<String> dexEntries = new ArrayList<>();
             dexEntries.add(before.audioDexEntry);
@@ -539,17 +633,19 @@ public final class GmapsDiagnosticPatcher {
                 replacements.put(dexEntry, rewritten);
             }
         }
-        File temporary = new File(output.getAbsolutePath() + ".tmp");
         repack(input, temporary, replacements, null, null);
-        Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        Inspection after = inspect(output);
+        Inspection after = inspect(temporary);
         after.requireAudioPatched();
+        Files.move(temporary.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
         Map<String, Object> report = baseReport("patch-audio", output, after);
         report.put("inputSha256", sha256(input));
         report.put("outputSha256", sha256(output));
         report.put("modifiedDexEntries", new ArrayList<>(replacements.keySet()));
         writeJson(reportFile, report);
-        deleteTree(work);
+        } finally {
+            deleteTree(work);
+            deleteTree(temporary);
+        }
     }
 
     private static void verifyAudio(File apk, File reportFile) throws Exception {
@@ -592,7 +688,8 @@ public final class GmapsDiagnosticPatcher {
             value.put("placement", hook.placement.name());
             value.put("dexEntry", result.dexEntry);
             value.put("guard", result.guard);
-            if ("maneuver_bitmap".equals(hook.id)) {
+            if ("maneuver_bitmap".equals(hook.id)
+                    || "maneuver_model".equals(hook.id)) {
                 value.put("extractor", maneuverExtractor(inspection.profile));
             }
             hooks.put(hook.id, value);
@@ -630,6 +727,31 @@ public final class GmapsDiagnosticPatcher {
                 + inspection.profile.gmsCoreMethod);
         gmsCore.put("state", inspection.gmsCoreState);
         report.put("gmsCoreDialog", gmsCore);
+        Map<String, Object> components = new LinkedHashMap<>();
+        String direct = inspection.directClassification();
+        String audio = inspection.audioClassification();
+        String pip = "UNSUPPORTED";
+        try {
+            pip = inspectPipManifest(apk).classification;
+        } catch (IOException ignored) {
+            // Component reports stay truthful when a caller verifies DEX only.
+        }
+        components.put("direct", direct);
+        components.put("gmsCore", inspection.gmsCoreState);
+        components.put("audio", audio);
+        components.put("pip", pip);
+        report.put("components", components);
+        // Release readiness is deliberately strict: Direct must be the
+        // canonical POC, while QoL requires patched navigation audio, a
+        // suppressed GmsCore dialog and PiP-off. Partial/no-switch builds stay
+        // truthful without claiming a releasable candidate.
+        boolean directReady = "MESSENGER_BRIDGE_POC".equals(direct);
+        boolean qolReady = "NAVIGATION_AUDIO".equals(audio)
+                && isGmsCoreSuppressed(inspection.gmsCoreState)
+                && GmapsPipManifestPatcher.PATCHED.equals(pip);
+        report.put("directReady", directReady);
+        report.put("qolReady", qolReady);
+        report.put("releaseReady", directReady && qolReady);
         return report;
     }
 
@@ -733,7 +855,9 @@ public final class GmapsDiagnosticPatcher {
                             result.legacyHookCallCount += countLegacyLoggerCalls(
                                     implementation, hook);
                             result.returnVoidCount = countReturnVoid(implementation);
-                            result.normalReturnIndex = normalReturnVoidIndex(implementation);
+                            result.normalReturnIndex = hook.placement
+                                    == HookPlacement.POST_BODY_BEFORE_RETURN_VOID
+                                    ? normalReturnVoidIndex(implementation) : -1;
                             result.insertedCallCount = result.hookCallCount
                                     + result.legacyHookCallCount;
                             result.guard = verifyHookImplementation(implementation, hook);
@@ -749,6 +873,48 @@ public final class GmapsDiagnosticPatcher {
 
     private static Profile detectProfile(File apk) throws IOException {
         return detectProfile(apk, true);
+    }
+
+    private static GmsCoreInspection inspectGmsCoreOnly(
+            File apk, String validatedProfile) throws IOException {
+        List<Profile> candidates = new ArrayList<>();
+        if (validatedProfile != null && !validatedProfile.isEmpty()) {
+            requireKnownProfile(validatedProfile);
+            for (Profile profile : PROFILES) {
+                if (profile.id.equals(validatedProfile)) candidates.add(profile);
+            }
+        } else {
+            candidates.addAll(PROFILES);
+        }
+        Profile selected = null;
+        String dexEntry = "";
+        String state = "NOT_PRESENT";
+        int targets = 0;
+        try (ZipFile zip = new ZipFile(apk)) {
+            List<? extends ZipEntry> entries = Collections.list(zip.entries());
+            entries.sort(Comparator.comparing(ZipEntry::getName));
+            for (ZipEntry entry : entries) {
+                if (!isDexEntry(entry.getName())) continue;
+                DexBackedDexFile dex = readDex(readEntry(zip, entry.getName()));
+                for (ClassDef classDef : dex.getClasses()) {
+                    for (Profile profile : candidates) {
+                        if (!profile.gmsCoreOwner.equals(classDef.getType())) continue;
+                        for (Method method : classDef.getMethods()) {
+                            if (!matchesGmsCoreDialog(method, profile)) continue;
+                            targets++;
+                            selected = profile;
+                            dexEntry = entry.getName();
+                            state = inspectGmsCoreState(method.getImplementation(), profile);
+                        }
+                    }
+                }
+            }
+        }
+        if (targets == 0) return new GmsCoreInspection(null, "", 0, "NOT_PRESENT");
+        if (targets != 1 || selected == null) {
+            return new GmsCoreInspection(null, dexEntry, targets, "UNSUPPORTED");
+        }
+        return new GmsCoreInspection(selected, dexEntry, targets, state);
     }
 
     private static Profile detectProfile(File apk, boolean required) throws IOException {
@@ -915,7 +1081,7 @@ public final class GmapsDiagnosticPatcher {
                     for (Hook hook : hooks) {
                         if (hook.matches(method)) {
                             counts.get(hook.id).incrementAndGet();
-                            return inject(method, hook);
+                            return hook.mandatory ? inject(method, hook) : method;
                         }
                     }
                     if (patchGate && matchesProducerGate(method, profile)) {
@@ -950,8 +1116,12 @@ public final class GmapsDiagnosticPatcher {
         DexPool.writeTo(output.getAbsolutePath(),
                 new ImmutableDexFile(Opcodes.forApi(35), retained));
         for (Hook hook : hooks) {
-            if (counts.get(hook.id).get() != 1) {
+            int count = counts.get(hook.id).get();
+            if (hook.mandatory && count != 1) {
                 throw new IOException(hook.id + " rewrite count=" + counts.get(hook.id).get());
+            }
+            if (!hook.mandatory && count > 1) {
+                throw new IOException(hook.id + " optional target count=" + count);
             }
         }
         if (patchGate && gateCount.get() != 1) {
@@ -1316,43 +1486,68 @@ public final class GmapsDiagnosticPatcher {
         AtomicInteger targetCount = new AtomicInteger();
         AtomicInteger rewrittenCount = new AtomicInteger();
         Hook maneuver = null;
+        Hook model = null;
         for (Hook hook : profile.hooks) {
             if ("maneuver_bitmap".equals(hook.id)) {
                 maneuver = hook;
-                break;
+            } else if ("maneuver_model".equals(hook.id)) {
+                model = hook;
             }
         }
-        if (maneuver == null) throw new IOException("maneuver hook profile is missing");
+        if (maneuver == null || ("26.30".equals(profile.id) && model == null)) {
+            throw new IOException("maneuver hook profile is missing");
+        }
         final Hook targetHook = maneuver;
+        final Hook modelHook = model;
         DexRewriter rewriter = new DexRewriter(new RewriterModule() {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
-                    if (!targetHook.matches(method)) return method;
-                    targetCount.incrementAndGet();
-                    MethodImplementation source = method.getImplementation();
-                    if (source == null
-                            || countLoggerCalls(source, targetHook)
-                            + countLegacyLoggerCalls(source, targetHook) != 1) {
-                        throw new IllegalStateException(
-                                "legacy maneuver hook count is not exactly one");
-                    }
-                    MutableMethodImplementation mutable =
-                            new MutableMethodImplementation(source);
-                    for (int i = mutable.getInstructions().size() - 1; i >= 0; i--) {
-                        if (isLoggerCall(mutable.getInstructions().get(i), targetHook)
-                                || isLegacyLoggerCall(
-                                mutable.getInstructions().get(i), targetHook)) {
-                            mutable.removeInstruction(i);
+                    if (targetHook.matches(method)) {
+                        targetCount.incrementAndGet();
+                        MethodImplementation source = method.getImplementation();
+                        if (source == null
+                                || countLoggerCalls(source, targetHook)
+                                + countLegacyLoggerCalls(source, targetHook) != 1) {
+                            throw new IllegalStateException(
+                                    "legacy maneuver hook count is not exactly one");
                         }
+                        MutableMethodImplementation mutable =
+                                new MutableMethodImplementation(source);
+                        for (int i = mutable.getInstructions().size() - 1; i >= 0; i--) {
+                            if (isLoggerCall(mutable.getInstructions().get(i), targetHook)
+                                    || isLegacyLoggerCall(
+                                    mutable.getInstructions().get(i), targetHook)) {
+                                mutable.removeInstruction(i);
+                            }
+                        }
+                        rewrittenCount.incrementAndGet();
+                        Method stripped = new ImmutableMethod(
+                                method.getDefiningClass(), method.getName(), method.getParameters(),
+                                method.getReturnType(), method.getAccessFlags(),
+                                method.getAnnotations(), method.getHiddenApiRestrictions(), mutable);
+                        // 25.16 keeps the verified post-body producer. Strip the old
+                        // logger first, then reinject exactly one canonical call.
+                        return "25.16".equals(profile.id) ? inject(stripped, targetHook) : stripped;
                     }
-                    Method stripped = new ImmutableMethod(
-                            method.getDefiningClass(), method.getName(), method.getParameters(),
-                            method.getReturnType(), method.getAccessFlags(), method.getAnnotations(),
-                            method.getHiddenApiRestrictions(), mutable);
-                    Method patched = inject(stripped, targetHook);
-                    rewrittenCount.incrementAndGet();
-                    return patched;
+                    if (modelHook != null && modelHook.matches(method)) {
+                        targetCount.incrementAndGet();
+                        MethodImplementation source = method.getImplementation();
+                        if (source == null) throw new IllegalStateException(
+                                "maneuver model hook has no implementation");
+                        if (countLoggerCalls(source, modelHook)
+                                + countLegacyLoggerCalls(source, modelHook) != 0) {
+                            if (countLoggerCalls(source, modelHook) == 1) {
+                                rewrittenCount.incrementAndGet();
+                                return method;
+                            }
+                            throw new IllegalStateException(
+                                    "maneuver model hook count is not exactly one");
+                        }
+                        rewrittenCount.incrementAndGet();
+                        return inject(method, modelHook);
+                    }
+                    return method;
                 };
             }
         });
@@ -1361,7 +1556,7 @@ public final class GmapsDiagnosticPatcher {
         for (ClassDef classDef : rewritten.getClasses()) classes.add(classDef);
         DexPool.writeTo(output.getAbsolutePath(),
                 new ImmutableDexFile(Opcodes.forApi(35), classes));
-        if (targetCount.get() != 1 || rewrittenCount.get() != 1) {
+        if (targetCount.get() < 1 || rewrittenCount.get() < 1) {
             throw new IOException("legacy maneuver rewrite count=" + targetCount.get()
                     + "/" + rewrittenCount.get());
         }
@@ -1454,12 +1649,27 @@ public final class GmapsDiagnosticPatcher {
         MutableMethodImplementation mutable = new MutableMethodImplementation(source);
         GateLocation location = findStockGate(mutable.getInstructions(), profile);
         if (location == null) throw new IllegalStateException("producer gate not found");
+        if ("26.30".equals(profile.id)) {
+            ImmutableMethodReference beginFrame = new ImmutableMethodReference(
+                    LOGGER_CLASS, "beginFrameCaptureV26", Collections.emptyList(), "V");
+            mutable.addInstruction(Math.max(0, location.branchIndex - 2),
+                    new BuilderInstruction35c(Opcode.INVOKE_STATIC, 0,
+                            0, 0, 0, 0, 0, beginFrame));
+            // The insertion shifts the original gate. Recompute the branch so
+            // the no-client result is consumed after the stock isEmpty result:
+            // beginFrame/isEmpty/MOVE_RESULT/noClient/MOVE_RESULT/IF_NEZ.
+            location = findStockGate(mutable.getInstructions(), profile);
+            if (location == null) {
+                throw new IllegalStateException("producer gate moved after frame capture");
+            }
+        }
+        int bridgeInsertIndex = location.branchIndex;
         ImmutableMethodReference noClient = new ImmutableMethodReference(
                 LOGGER_CLASS, "noClient", Collections.emptyList(), "Z");
-        mutable.addInstruction(location.branchIndex,
+        mutable.addInstruction(bridgeInsertIndex,
                 new BuilderInstruction35c(Opcode.INVOKE_STATIC, 0,
-                        0, 0, 0, 0, 0, noClient));
-        mutable.addInstruction(location.branchIndex + 1,
+                            0, 0, 0, 0, 0, noClient));
+        mutable.addInstruction(bridgeInsertIndex + 1,
                 new BuilderInstruction11x(Opcode.MOVE_RESULT, location.register));
         SpeedLocation speed = findSpeedState(mutable.getInstructions(), profile);
         if (speed == null || speed.hooked) {
@@ -1477,6 +1687,10 @@ public final class GmapsDiagnosticPatcher {
                 || !"ok".equals(speedAfter.guard) || speedAfter.stateCount != 1
                 || speedAfter.hookCount != 1) {
             throw new IllegalStateException("producer gate post-patch verification failed");
+        }
+        if ("26.30".equals(profile.id)
+                && !hasCanonicalFrameGate(mutable.getInstructions(), profile)) {
+            throw new IllegalStateException("26.30 frame gate ordering verification failed");
         }
         return new ImmutableMethod(
                 method.getDefiningClass(), method.getName(), method.getParameters(),
@@ -1573,6 +1787,22 @@ public final class GmapsDiagnosticPatcher {
                 && "noClient".equals(method.getName())
                 && method.getParameterTypes().isEmpty()
                 && "Z".equals(method.getReturnType());
+    }
+
+    private static boolean hasCanonicalFrameGate(
+            List<? extends Instruction> instructions, Profile profile) {
+        if (!"26.30".equals(profile.id)) return true;
+        for (int i = 0; i + 5 < instructions.size(); i++) {
+            Instruction begin = instructions.get(i);
+            if (!isMethod(begin, LOGGER_CLASS, "beginFrameCaptureV26",
+                    Collections.emptyList(), "V")) continue;
+            GateLocation gate = gateAt(instructions, i + 1, profile);
+            if (gate == null || !gate.bridgeGuarded) continue;
+            // gateAt() proves the exact isEmpty/MOVE_RESULT/noClient/
+            // MOVE_RESULT/IF_NEZ sequence immediately following beginFrame.
+            return true;
+        }
+        return false;
     }
 
     private static SpeedScan scanSpeedState(
@@ -2076,8 +2306,16 @@ public final class GmapsDiagnosticPatcher {
             boolean bridge = loggerClassCount == 1;
             boolean legacyManeuverHook = false;
             for (Hook hook : profile.hooks) {
+                if (!hook.mandatory) {
+                    HookResult optional = results.get(hook.id);
+                    if ("maneuver_bitmap".equals(hook.id) && optional != null
+                            && optional.hookCallCount + optional.legacyHookCallCount > 0) {
+                        legacyManeuverHook = true;
+                    }
+                    continue;
+                }
                 HookResult result = results.get(hook.id);
-                if ("maneuver_bitmap".equals(hook.id)
+                if ("maneuver_model".equals(hook.id)
                         && result.legacyHookCallCount > 0) {
                     legacyManeuverHook = true;
                 }
@@ -2089,12 +2327,19 @@ public final class GmapsDiagnosticPatcher {
                 boolean legacyBridge = "maneuver_bitmap".equals(hook.id)
                         && result.hookCallCount == 0
                         && result.legacyHookCallCount == 1;
+                boolean modelUpgradeBridge = "maneuver_model".equals(hook.id)
+                        && result.hookCallCount == 0 && result.legacyHookCallCount == 0
+                        && results.get("maneuver_bitmap") != null
+                        && results.get("maneuver_bitmap").hookCallCount
+                        + results.get("maneuver_bitmap").legacyHookCallCount == 1;
                 stock &= result.targetCount == 1 && result.hookCallCount == 0
                         && result.legacyHookCallCount == 0
+                        && placementSatisfied(result, hook)
                         && "ok".equals(result.guard);
-                bridge &= result.targetCount == 1 && (canonicalBridge || legacyBridge)
+                bridge &= result.targetCount == 1
+                        && (canonicalBridge || legacyBridge || modelUpgradeBridge)
                         && acceptedBridgeGuard
-                        && result.normalReturnIndex >= 0;
+                        && placementSatisfied(result, hook);
             }
             stock &= gateTargetCount == 1 && stockGateCount == 1
                     && gateBypassCount == 0 && gateBridgeCount == 0
@@ -2106,28 +2351,42 @@ public final class GmapsDiagnosticPatcher {
                     && speedStateCount == 1 && speedHookCount <= 1;
             Hook maneuver = null;
             for (Hook hook : profile.hooks) {
-                if ("maneuver_bitmap".equals(hook.id)) {
+                if (("26.30".equals(profile.id) && "maneuver_model".equals(hook.id))
+                        || (!"26.30".equals(profile.id)
+                        && "maneuver_bitmap".equals(hook.id))) {
                     maneuver = hook;
                     break;
                 }
             }
             if (maneuver != null) {
                 HookResult result = results.get(maneuver.id);
-                bridge &= result.insertedCallCount == 1
-                        && result.normalReturnIndex >= 0
-                        && maneuver.placement == HookPlacement.POST_BODY_BEFORE_RETURN_VOID;
+                boolean exactModelUpgrade = "26.30".equals(profile.id)
+                        && result.hookCallCount == 0
+                        && result.legacyHookCallCount == 0;
+                if (exactModelUpgrade) {
+                    HookResult legacy = results.get("maneuver_bitmap");
+                    exactModelUpgrade = legacy != null
+                            && legacy.targetCount == 1
+                            && legacy.hookCallCount + legacy.legacyHookCallCount == 1;
+                }
+                bridge &= (result.insertedCallCount == 1 || exactModelUpgrade)
+                        && placementSatisfied(result, maneuver);
             }
             if (stock) return "PATCHABLE_STOCK";
             if (bridge) {
                 boolean currentLogger = loggerStateReplay && loggerHeartbeat
                         && loggerBitmapGeneration && loggerRouteGeneration;
-                if (legacyManeuverHook || !currentLogger
-                        || !isGmsCoreSuppressed(gmsCoreState)) {
+                if (legacyManeuverHook || !currentLogger) {
                     return "MESSENGER_BRIDGE_UPGRADEABLE";
                 }
                 return "MESSENGER_BRIDGE_POC";
             }
             return "UNSUPPORTED";
+        }
+
+        private static boolean placementSatisfied(HookResult result, Hook hook) {
+            return hook.placement == HookPlacement.PRE_BODY
+                    || result.normalReturnIndex >= 0;
         }
 
         boolean isUpgradeableBridge() {
@@ -2141,11 +2400,6 @@ public final class GmapsDiagnosticPatcher {
             if (!("PATCHABLE_STOCK".equals(direct) || isUpgradeableBridge())) {
                 throw new IOException("input direct classification=" + direct
                         + "; expected PATCHABLE_STOCK or upgradeable bridge: " + details());
-            }
-            if (gmsCoreTargetCount != 1
-                    || !("ACTIVE".equals(gmsCoreState)
-                    || isGmsCoreSuppressed(gmsCoreState))) {
-                throw new IOException("GmsCore dialog input state=" + details());
             }
         }
 
@@ -2172,33 +2426,34 @@ public final class GmapsDiagnosticPatcher {
                 throw new IOException("input direct classification=" + directClassification()
                         + "; expected PATCHABLE_STOCK: " + details());
             }
-            if (gmsCoreTargetCount != 1
-                    || !("ACTIVE".equals(gmsCoreState)
-                    || isGmsCoreSuppressed(gmsCoreState))) {
-                throw new IOException("GmsCore dialog input state=" + details());
-            }
         }
 
         void requirePatched() throws IOException {
-            HookResult maneuver = results.get("maneuver_bitmap");
+            String maneuverId = "26.30".equals(profile.id)
+                    ? "maneuver_model" : "maneuver_bitmap";
+            HookResult maneuver = results.get(maneuverId);
+            Hook maneuverHook = null;
+            for (Hook hook : profile.hooks) {
+                if (maneuverId.equals(hook.id)) {
+                    maneuverHook = hook;
+                    break;
+                }
+            }
             if (!"MESSENGER_BRIDGE_POC".equals(directClassification())
                     || speedHookCount != 1
                     || !loggerStateReplay || !loggerHeartbeat || !loggerBitmapGeneration
                     || !loggerRouteGeneration || maneuver == null
+                    || maneuverHook == null || !placementSatisfied(maneuver, maneuverHook)
                     || !"ok".equals(maneuver.guard)
                     || maneuver.hookCallCount != 1
                     || maneuver.legacyHookCallCount != 0) {
                 throw new IOException("APK direct classification=" + directClassification()
                         + "; expected v3 logger bridge with speed hook: " + details());
             }
-            if (gmsCoreTargetCount != 1 || !isGmsCoreSuppressed(gmsCoreState)) {
-                throw new IOException("GmsCore dialog output state=" + details());
-            }
         }
 
         void requireAudioPatchable() throws IOException {
-            if (!isBridgeShape()
-                    || !"PATCHABLE_STOCK".equals(audioClassification())) {
+            if (!"PATCHABLE_STOCK".equals(audioClassification())) {
                 throw new IOException("input component classification="
                         + directClassification() + "/" + audioClassification()
                         + "; expected MESSENGER_BRIDGE_POC/PATCHABLE_STOCK: "
@@ -2207,8 +2462,7 @@ public final class GmapsDiagnosticPatcher {
         }
 
         void requireAudioPatched() throws IOException {
-            if (!isBridgeShape()
-                    || !"NAVIGATION_AUDIO".equals(audioClassification())) {
+            if (!"NAVIGATION_AUDIO".equals(audioClassification())) {
                 throw new IOException("APK component classification="
                         + directClassification() + "/" + audioClassification()
                         + "; expected MESSENGER_BRIDGE_POC/NAVIGATION_AUDIO: "
@@ -2247,10 +2501,19 @@ public final class GmapsDiagnosticPatcher {
             return value.toString();
         }
 
-        private boolean isBridgeShape() {
-            String direct = directClassification();
-            return "MESSENGER_BRIDGE_POC".equals(direct)
-                    || "MESSENGER_BRIDGE_UPGRADEABLE".equals(direct);
+    }
+
+    private static final class GmsCoreInspection {
+        final Profile profile;
+        final String dexEntry;
+        final int targetCount;
+        final String state;
+
+        GmsCoreInspection(Profile profile, String dexEntry, int targetCount, String state) {
+            this.profile = profile;
+            this.dexEntry = dexEntry;
+            this.targetCount = targetCount;
+            this.state = state;
         }
     }
 
@@ -2401,6 +2664,7 @@ public final class GmapsDiagnosticPatcher {
         final List<String> loggerParameters;
         final String legacyLoggerMethod;
         final int argumentWords;
+        final boolean mandatory;
         final HookPlacement placement;
         final List<Marker> markers;
 
@@ -2409,7 +2673,7 @@ public final class GmapsDiagnosticPatcher {
                 String returnType, String loggerMethod, List<String> loggerParameters,
                 int argumentWords, Marker... markers) {
             this(id, owner, method, parameters, returnType, loggerMethod, loggerParameters,
-                    argumentWords, HookPlacement.PRE_BODY, markers);
+                    argumentWords, true, HookPlacement.PRE_BODY, null, markers);
         }
 
         Hook(
@@ -2417,7 +2681,16 @@ public final class GmapsDiagnosticPatcher {
                 String returnType, String loggerMethod, List<String> loggerParameters,
                 int argumentWords, HookPlacement placement, Marker... markers) {
             this(id, owner, method, parameters, returnType, loggerMethod, loggerParameters,
-                    argumentWords, placement, null, markers);
+                    argumentWords, true, placement, null, markers);
+        }
+
+        Hook(
+                String id, String owner, String method, List<String> parameters,
+                String returnType, String loggerMethod, List<String> loggerParameters,
+                int argumentWords, boolean mandatory, HookPlacement placement,
+                Marker... markers) {
+            this(id, owner, method, parameters, returnType, loggerMethod, loggerParameters,
+                    argumentWords, mandatory, placement, null, markers);
         }
 
         Hook(
@@ -2425,6 +2698,15 @@ public final class GmapsDiagnosticPatcher {
                 String returnType, String loggerMethod, List<String> loggerParameters,
                 int argumentWords, HookPlacement placement, String legacyLoggerMethod,
                 Marker... markers) {
+            this(id, owner, method, parameters, returnType, loggerMethod, loggerParameters,
+                    argumentWords, true, placement, legacyLoggerMethod, markers);
+        }
+
+        Hook(
+                String id, String owner, String method, List<String> parameters,
+                String returnType, String loggerMethod, List<String> loggerParameters,
+                int argumentWords, boolean mandatory, HookPlacement placement,
+                String legacyLoggerMethod, Marker... markers) {
             this.id = id;
             this.owner = owner;
             this.method = method;
@@ -2434,6 +2716,7 @@ public final class GmapsDiagnosticPatcher {
             this.loggerParameters = loggerParameters;
             this.legacyLoggerMethod = legacyLoggerMethod;
             this.argumentWords = argumentWords;
+            this.mandatory = mandatory;
             this.placement = placement;
             this.markers = Arrays.asList(markers);
         }

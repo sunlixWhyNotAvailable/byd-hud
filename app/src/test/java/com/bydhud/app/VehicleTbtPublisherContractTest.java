@@ -25,6 +25,7 @@ public final class VehicleTbtPublisherContractTest {
         assertTrue(proxy.contains("FID_ROAD = 1_140_461_576"));
         assertTrue(source.contains("instrument.sendNavigationStatus"));
         assertTrue(source.contains("instrument.sendGuidance"));
+        assertTrue(source.contains("instrument.sendTerminalGuidanceClear"));
         assertTrue(proxy.contains("sendAutoNaviStatus"));
         assertTrue(proxy.contains("sendSimpleGuidanceInfo"));
         assertTrue(proxy.contains("sendNextPathName"));
@@ -35,6 +36,8 @@ public final class VehicleTbtPublisherContractTest {
         assertTrue(source.contains("KEY_TYPE\", 10019"));
         assertTrue(source.contains("NEW_ICON"));
         assertTrue(source.contains("frame.getAmapBroadcastManeuver()"));
+        assertTrue(source.contains("frame.getAmapManeuver()"));
+        assertTrue(source.contains("intermediateAmapIcon"));
         assertTrue(source.contains("frame.getRoundaboutExitNumber()"));
         assertTrue(source.contains("NEXT_ROAD_NAME"));
         assertTrue(source.contains("addUnavailableListener"));
@@ -84,6 +87,22 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
+    public void sameOwnerLowerGenerationIsIgnoredBeforePriorityMutation() {
+        assertTrue(VehicleTbtPublisher.shouldIgnoreOwnerGenerationForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 7L));
+        assertFalse(VehicleTbtPublisher.shouldIgnoreOwnerGenerationForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 8L));
+        assertFalse(VehicleTbtPublisher.shouldIgnoreOwnerGenerationForTest(
+                true, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 9L));
+        assertFalse(VehicleTbtPublisher.shouldIgnoreOwnerGenerationForTest(
+                false, GMapsDirectChannel.OWNER_PACKAGE, 8L,
+                GMapsDirectChannel.OWNER_PACKAGE, 7L));
+    }
+
+    @Test
     public void sameOwnerNewGenerationReassertsActiveStatusAfterClearBeforePriorityHandling()
             throws IOException {
         String source = source(
@@ -94,7 +113,7 @@ public final class VehicleTbtPublisherContractTest {
         assertTrue(branchStart >= 0 && branchEnd > branchStart);
         String branch = source.substring(branchStart, branchEnd);
 
-        int instrumentClear = branch.indexOf("sendInstrumentGuidance(0, -1, \"\", replaced)");
+        int instrumentClear = branch.indexOf("sendTerminalGuidanceClear(replaced)");
         int amapClear = branch.indexOf("sendAmapTerminal(replaced)");
         int ownerAdvance = branch.indexOf("ownerGeneration = generation;");
         int tokenAdvance = branch.indexOf("++routeToken;");
@@ -137,6 +156,20 @@ public final class VehicleTbtPublisherContractTest {
                     expected[amap], VehicleTbtPublisher.instrumentManeuverForAmap(amap));
         }
         assertEquals(0, VehicleTbtPublisher.instrumentManeuverForAmap(-1));
+    }
+
+    @Test
+    public void finalAmapRoundaboutIconAndExitResolveExhaustively() {
+        for (int exit = 1; exit <= 10; exit++) {
+            assertEquals(24 + exit,
+                    VehicleTbtPublisher.instrumentManeuverForAmap(11, exit));
+            assertEquals(34 + exit,
+                    VehicleTbtPublisher.instrumentManeuverForAmap(17, exit));
+        }
+        assertEquals(13, VehicleTbtPublisher.instrumentManeuverForAmap(11, 0));
+        assertEquals(14, VehicleTbtPublisher.instrumentManeuverForAmap(17, 0));
+        assertEquals(13, VehicleTbtPublisher.instrumentManeuverForAmap(11, 11));
+        assertEquals(14, VehicleTbtPublisher.instrumentManeuverForAmap(17, -1));
     }
 
     @Test

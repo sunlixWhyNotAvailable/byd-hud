@@ -267,6 +267,30 @@ public final class NavHudRuntimeContractTest {
     }
 
     @Test
+    public void FinalClearReleasesTbtAfterFirstRoadInfoSuccess() throws IOException {
+        String coordinator = source("HudOutputCoordinator.java");
+        int stopStart = coordinator.indexOf("private void beginFinalStop(");
+        int stopEnd = coordinator.indexOf("\n    private void abortFinalClearAfterTimeout", stopStart);
+        assertTrue(stopStart >= 0 && stopEnd > stopStart);
+        String stop = coordinator.substring(stopStart, stopEnd);
+        int firstClear = stop.indexOf("if (clearedAtMs >= 0L)");
+        assertTrue(firstClear >= 0);
+        assertTrue(stop.indexOf("releaseFinalClearCompletionOnce();", firstClear)
+                > firstClear);
+        assertTrue(stop.indexOf("if (frame < FINAL_CLEAR_COUNT)", firstClear)
+                > firstClear);
+        assertTrue(stop.lastIndexOf("releaseFinalClearCompletionOnce();")
+                > stop.lastIndexOf("stopServiceAndUnbind(reason)"));
+
+        int abortStart = coordinator.indexOf("private void abortFinalClearAfterTimeout");
+        int abortEnd = coordinator.indexOf("\n    static boolean finalClearTimedOutForTest", abortStart);
+        assertTrue(abortStart >= 0 && abortEnd > abortStart);
+        String abort = coordinator.substring(abortStart, abortEnd);
+        assertTrue(abort.indexOf("stopServiceAndUnbind")
+                < abort.indexOf("releaseFinalClearCompletionOnce"));
+    }
+
+    @Test
     public void AdministrativeStopCannotClearAnotherDirectOwner() {
         assertTrue(HudOutputCoordinator.shouldClearForAdministrativeStopForTest(
                 "com.waze", "com.waze"));

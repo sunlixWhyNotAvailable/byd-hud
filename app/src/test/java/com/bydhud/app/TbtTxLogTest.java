@@ -18,6 +18,7 @@ public final class TbtTxLogTest {
                 .operation("set")
                 .target("F3")
                 .nativeId(7)
+                .intermediateAmapIcon(11)
                 .amapIcon(8)
                 .roundaboutExit(3)
                 .distanceMeters(420L)
@@ -40,6 +41,7 @@ public final class TbtTxLogTest {
         assertTrue(json.contains("\"owner\":\"com.waze\""));
         assertTrue(json.contains("\"plane\":\"instrument_fid\""));
         assertTrue(json.contains("\"nativeId\":7"));
+        assertTrue(json.contains("\"intermediateAmapIcon\":11"));
         assertTrue(json.contains("\"amapIcon\":8"));
         assertTrue(json.contains("\"roundaboutExit\":3"));
         assertTrue(json.contains("\"distanceMeters\":420"));
@@ -90,6 +92,7 @@ public final class TbtTxLogTest {
                 .operation("set")
                 .target("F3")
                 .nativeId(7)
+                .intermediateAmapIcon(11)
                 .amapIcon(8)
                 .distanceMeters(420L)
                 .road("Main Street")

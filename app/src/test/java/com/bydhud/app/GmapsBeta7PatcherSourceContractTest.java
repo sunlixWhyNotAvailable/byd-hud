@@ -36,9 +36,14 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(hooks.contains("new Hook(\"session_start\", \"Lbqny;\", \"d\""));
         assertTrue(hooks.contains("Collections.singletonList(\"Lbrgx;\")"));
         assertTrue(hooks.contains("new Hook(\"session_output\", \"Lbqny;\", \"c\""));
+        assertTrue(source.contains("new Hook(\"session_output\", \"Lbhiy;\", \"sO\""));
+        assertTrue(hooks.contains("false,\n                    HookPlacement.PRE_BODY"));
         assertTrue(hooks.contains("new Hook(\"session_stop\", \"Lbqny;\", \"sa\""));
         assertTrue(hooks.contains("new Marker(\"method\", \"Lbqoa;\", \"a\", \"V\")"));
         assertTrue(hooks.contains("Collections.singletonList(\"Lbqmm;\")"));
+        assertTrue(hooks.contains("new Hook(\"maneuver_model\", \"Lbqkz;\", \"b\""));
+        assertTrue(hooks.contains("captureManeuverModelV26"));
+        assertTrue(hooks.contains("HookPlacement.PRE_BODY"));
         assertTrue(hooks.contains("\"captureManeuverViewV26\""));
         assertTrue(hooks.contains("\"captureManeuverView\",\n                    new Marker"));
         assertTrue(hooks.contains("HookPlacement.POST_BODY_BEFORE_RETURN_VOID"));
@@ -111,11 +116,18 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(source.contains("post-body normal return-void is missing or ambiguous"));
         assertTrue(source.contains("loggerIndex != returnIndex - 1"));
         assertTrue(source.contains("rewriteGmsCoreDialogDex"));
+        assertTrue(source.contains("inspectGmsCoreClassification(File apk)"));
+        assertTrue(source.contains("patchGmsCore("));
+        assertTrue(source.contains("verifyGmsCore(File apk)"));
         assertTrue(source.contains("ALREADY_SUPPRESSED"));
         assertTrue(source.contains("UI_SUPPRESSED") || source.contains("ACTIVE"));
         assertTrue(source.contains("return \"MESSENGER_BRIDGE_NAV_AUDIO\""));
         assertTrue(source.contains("return \"NAVIGATION_AUDIO\""));
         assertTrue(source.contains("report.put(\"targetProfile\", inspection.profile.id)"));
+        assertTrue(source.contains("components.put(\"direct\", direct)"));
+        assertTrue(source.contains("report.put(\"releaseReady\", directReady && qolReady)"));
+        assertTrue(source.contains("boolean directReady = \"MESSENGER_BRIDGE_POC\".equals(direct)"));
+        assertTrue(source.contains("GmapsPipManifestPatcher.PATCHED.equals(pip)"));
     }
 
     @Test
@@ -138,6 +150,39 @@ public final class GmapsBeta7PatcherSourceContractTest {
                 "rewriteNavigationAudioDex("));
         assertTrue(patchAudio.contains(
                 "report.put(\"modifiedDexEntries\", new ArrayList<>(replacements.keySet()))"));
+    }
+
+    @Test
+    public void reviewFixesKeepPlacementUpgradeGateOrderAndAtomicOutputs() throws IOException {
+        String source = sourcePath(
+                "app/src/main/java/com/bydhud/gmapsdiag/patcher/GmapsDiagnosticPatcher.java");
+        assertTrue(source.contains("hook.placement\n                                    == HookPlacement.POST_BODY_BEFORE_RETURN_VOID"));
+        assertTrue(source.contains("private static boolean placementSatisfied(HookResult result, Hook hook)"));
+        assertTrue(source.contains("legacy.targetCount == 1"));
+        assertTrue(source.contains("legacy.hookCallCount + legacy.legacyHookCallCount == 1"));
+        assertTrue(source.contains("report.put(\"inputLegacyManeuverView\""));
+        assertTrue(source.contains("return \"25.16\".equals(profile.id) ? inject(stripped, targetHook) : stripped"));
+        assertTrue(source.contains("location = findStockGate(mutable.getInstructions(), profile)"));
+        assertTrue(source.contains("producer gate moved after frame capture"));
+        assertTrue(source.contains("hasCanonicalFrameGate(mutable.getInstructions(), profile)"));
+        assertTrue(source.contains("beginFrameCaptureV26"));
+        assertTrue(source.contains("Inspection after = inspect(temporary)"));
+        assertTrue(source.contains("GmsCoreInspection after = inspectGmsCoreOnly(temporary"));
+        assertTrue(source.contains("deleteTree(temporary)"));
+
+        String build = sourcePath("../gmaps-direct/build_gmaps_prod.ps1");
+        assertTrue(build.contains("\"-PinputApk=$signingInput\" \"-PoutputApk=$audioUnsigned\""));
+        assertTrue(build.contains("verifyGmapsGmsCore"));
+        assertTrue(build.contains("$gmsCoreInputState -eq \"ACTIVE\""));
+        assertTrue(build.contains("GmsCore dialog is already suppressed."));
+        assertTrue(build.contains("$components.direct -ne \"MESSENGER_BRIDGE_POC\""));
+        assertTrue(build.contains("PICTURE_IN_PICTURE_DISABLED"));
+        assertTrue(build.contains("PSObject.Properties[\"maneuver_model\"]"));
+        String beta = sourcePath("../gmaps-direct/build_gmaps_2630_prod.ps1");
+        assertTrue(beta.contains("pip-off-beta7-r4"));
+        assertTrue(beta.contains("background model producer"));
+        assertTrue(beta.contains("$builtReport.releaseReady -ne $true"));
+        assertTrue(beta.contains("MapsActivity supportsPictureInPicture=false"));
     }
 
     @Test
@@ -202,6 +247,52 @@ public final class GmapsBeta7PatcherSourceContractTest {
     }
 
     @Test
+    public void backgroundModelCaptureIsOrderedBeforeFrame() throws IOException {
+        String logger = sourcePath(
+                "app/src/main/java/com/bydhud/gmapsdiag/NavInfoLogger.java");
+        assertTrue(logger.contains("public static void beginFrameCaptureV26()"));
+        assertTrue(logger.contains("public static void captureManeuverModelV26(Object value)"));
+        assertTrue(logger.contains("Lbqmu.b[0] -> bqmn.c -> bqmn.b[index] -> bqmq.i"));
+        assertTrue(logger.contains("Class.forName(\"bqyl\""));
+        assertTrue(logger.contains("context.getResources(), model.value, -1"));
+        assertTrue(logger.contains("model.renderGeneration, event.epoch, event.sequence)"));
+        assertTrue(logger.contains("private static void requeueForRetry(Event event)"));
+        assertTrue(logger.contains("lastManeuverSourceSequence < 0L"));
+        assertTrue(logger.contains("if (bitmap != null && !bitmap.isRecycled()) bitmap.recycle()"));
+        assertTrue(logger.contains("synchronized (STATE_LOCK) {\n"
+                + "            if (!isCurrentEvent(event)) return;\n"
+                + "            Messenger target = client;"));
+        assertTrue(logger.contains("LAST_FRAME_FOR_REPLAY.set(event);\n"
+                + "            PENDING_FRAME_FOR_REPLAY.compareAndSet(event, null);"));
+        assertTrue(logger.indexOf("renderModelBitmap(event)")
+                < logger.indexOf("sendMatchingBitmap(event, target, bitmapRequired)"));
+        assertTrue(logger.indexOf("sendMatchingBitmap(event, target, bitmapRequired)")
+                < logger.indexOf("sendFrameEvent(event, target)"));
+        int replayStart = logger.indexOf("start.putString(\"event\", \"replay-start\")");
+        int replayReadyGuard = logger.indexOf(
+                "if (replayEvent == null || replayEvent.epoch != epoch) return true;");
+        assertTrue(replayStart >= 0 && replayReadyGuard > replayStart);
+    }
+
+    @Test
+    public void legacyViewBitmapUsesOneClientSnapshot() throws IOException {
+        String logger = sourcePath(
+                "app/src/main/java/com/bydhud/gmapsdiag/NavInfoLogger.java");
+        String capture = between(logger,
+                "private static void captureRenderedManeuver(",
+                "private static void rememberBitmap(");
+
+        assertTrue(capture.indexOf("rememberBitmap(maneuver, viewId")
+                < capture.indexOf("synchronized (STATE_LOCK)"));
+        assertTrue(capture.indexOf("synchronized (STATE_LOCK)")
+                < capture.indexOf("sendTo(client, MESSAGE_MANEUVER_BITMAP, data)"));
+        assertTrue(logger.contains(
+                "boolean bitmapRequired = modelReady && event.model != null;"));
+        assertTrue(logger.contains(
+                "sendMatchingBitmap(event, target, bitmapRequired)"));
+    }
+
+    @Test
     public void loggerRegistrationFailsClosedOnMalformedExtras() throws IOException {
         String source = sourcePath(
                 "app/src/main/java/com/bydhud/gmapsdiag/NavInfoLogger.java");
@@ -220,10 +311,16 @@ public final class GmapsBeta7PatcherSourceContractTest {
 
     private static String sourcePath(String relativePath) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
-        Path file = root.resolve(relativePath);
-        if (!Files.isRegularFile(file) && relativePath.startsWith("app/")) {
-            file = root.resolve(relativePath.substring("app/".length()));
+        Path file = null;
+        for (Path base = root; base != null && file == null; base = base.getParent()) {
+            Path candidate = base.resolve(relativePath).normalize();
+            if (Files.isRegularFile(candidate)) file = candidate;
+            if (file == null && relativePath.startsWith("app/")) {
+                candidate = base.resolve(relativePath.substring("app/".length())).normalize();
+                if (Files.isRegularFile(candidate)) file = candidate;
+            }
         }
+        if (file == null) throw new IOException("Source file not found: " + relativePath);
         return new String(Files.readAllBytes(file), StandardCharsets.UTF_8)
                 .replace("\r\n", "\n")
                 .replace('\r', '\n');

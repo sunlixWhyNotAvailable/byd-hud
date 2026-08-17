@@ -859,7 +859,7 @@ public final class MainActivity extends ComponentActivity {
                 allRows,
                 patchRows,
                 localizedNavigatorAssetSnapshots(uaLanguage),
-                composePatchOperation());
+                composePatchOperations());
     }
 
     private static List<NavigatorAssetManager.AssetSnapshot> localizedNavigatorAssetSnapshots(
@@ -979,6 +979,20 @@ public final class MainActivity extends ComponentActivity {
         requestPatchUiStateRefresh(this, true, "patch-restore");
     }
 
+    public boolean composeCancelNavigatorPatch(String profileId) {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        boolean cancelled = profile != null && NavigatorPatchPipeline.cancel(this, profile);
+        if (cancelled) requestPatchUiStateRefresh(this, true, "patch-cancel");
+        return cancelled;
+    }
+
+    public boolean composeDismissNavigatorPatch(String profileId) {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        boolean dismissed = profile != null && NavigatorPatchPipeline.dismiss(this, profile);
+        if (dismissed) requestPatchUiStateRefresh(this, true, "patch-dismiss");
+        return dismissed;
+    }
+
     public boolean composeCanInstallNavigatorApks() {
         return NavigatorPackageInstaller.canInstall(this);
     }
@@ -1095,12 +1109,19 @@ public final class MainActivity extends ComponentActivity {
         return navigatorPatchRows;
     }
 
-    private ComposePatchOperation composePatchOperation() {
-        NavigatorPatchStore.OperationSnapshot value = NavigatorPatchStore.operation(this);
-        return new ComposePatchOperation(
-                value.profile == null ? "" : value.profile.id,
-                value.kind, value.phase, value.detail, value.destructive,
-                value.busy(), NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase));
+    private List<ComposePatchOperation> composePatchOperations() {
+        List<ComposePatchOperation> result = new ArrayList<>();
+        for (NavigatorPatchStore.OperationSnapshot value : NavigatorPatchStore.operations(this)) {
+            if (value == null || value.profile == null || value.kind.isEmpty()) continue;
+            result.add(new ComposePatchOperation(
+                    value.profile.id, value.kind, value.phase, value.detail,
+                    value.operationToken, value.startedAt, value.progress, value.error,
+                    value.readyAt, value.destructive, value.busy(),
+                    NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase),
+                    NavigatorPatchStore.canCancel(value), value.terminal()));
+        }
+        result.sort((left, right) -> Long.compare(left.startedAt, right.startedAt));
+        return Collections.unmodifiableList(result);
     }
 
     //keeps Google Maps variants as one UI target while leaving parser package support unchanged.
@@ -1730,6 +1751,12 @@ public final class MainActivity extends ComponentActivity {
                 navigatorAssetSnapshots = NavigatorAssetManager.snapshots(appContext, false);
                 navigatorPatchRows = scanNavigatorPatchRows(appContext);
                 navigatorPatchRowsReady = true;
+                for (NavigatorPatchStore.OperationSnapshot operation
+                        : NavigatorPatchStore.operations(appContext)) {
+                    if (NavigatorPatchStore.VERIFIED.equals(operation.phase)) {
+                        NavigatorPatchPipeline.dismiss(appContext, operation.profile);
+                    }
+                }
                 AppEventLogger.event(appContext, "ui_patch_refresh reason=" + reason
                         + " rows=" + navigatorPatchRows.size());
             } catch (RuntimeException e) {
@@ -1844,7 +1871,8 @@ public final class MainActivity extends ComponentActivity {
                     profile.id, value.label, profile.packageName,
                     value.installedVersion, value.installed,
                     value.externalSource, value.sourceName, value.sourceVersion,
-                    value.directState, value.optionalState, profile.optionalLabel,
+                    value.directState, value.gmsCoreState, profile.gmsCoreLabel,
+                    value.optionalState, profile.optionalLabel,
                     value.alertState, profile.alertLabel,
                     value.reason, value.patchEnabled));
         }
@@ -2019,10 +2047,6 @@ public final class MainActivity extends ComponentActivity {
         reportLogcatResult("stop", LogcatRecorder.stop(this));
     }
 
-    public void composeStartLogcatPhase(String phaseId) {
-        reportLogcatResult("phase", LogcatRecorder.startPresetPhase(this, phaseId));
-    }
-
     //stops all active runtime work after explicit user shutdown so auto-start stays blocked until the next manual open.
     public void composeShutdownAndExit() {
         shutdownAndExit("ui-shutdown");
@@ -2177,6 +2201,7 @@ public final class MainActivity extends ComponentActivity {
         public final List<ComposeAppRow> allApps;
         public final List<ComposeNavigatorPatchRow> patchRows;
         public final List<NavigatorAssetManager.AssetSnapshot> navigatorAssets;
+        public final List<ComposePatchOperation> patchOperations;
         public final ComposePatchOperation patchOperation;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
@@ -2214,7 +2239,7 @@ public final class MainActivity extends ComponentActivity {
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
                 List<ComposeNavigatorPatchRow> patchRows,
                 List<NavigatorAssetManager.AssetSnapshot> navigatorAssets,
-                ComposePatchOperation patchOperation) {
+                List<ComposePatchOperation> patchOperations) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
@@ -2294,10 +2319,11 @@ public final class MainActivity extends ComponentActivity {
                     : Collections.unmodifiableList(new ArrayList<>(patchRows));
             this.navigatorAssets = navigatorAssets == null ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(navigatorAssets));
-            this.patchOperation = patchOperation == null
-                    ? new ComposePatchOperation("", "", NavigatorPatchStore.IDLE,
-                    "", false, false, false)
-                    : patchOperation;
+            this.patchOperations = patchOperations == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(patchOperations));
+            this.patchOperation = this.patchOperations.isEmpty()
+                    ? ComposePatchOperation.idle()
+                    : this.patchOperations.get(this.patchOperations.size() - 1);
         }
 
         @Override
@@ -2376,7 +2402,7 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(allApps, other.allApps)
                     && Objects.equals(patchRows, other.patchRows)
                     && Objects.equals(navigatorAssets, other.navigatorAssets)
-                    && Objects.equals(patchOperation, other.patchOperation);
+                    && Objects.equals(patchOperations, other.patchOperations);
         }
 
         @Override
@@ -2404,7 +2430,7 @@ public final class MainActivity extends ComponentActivity {
                     appScanCacheAvailable, appScanStatus, storageLimitGb,
                     navCaptureFolderPaths, storageCalculating, storageCacheAvailable,
                     storageScanError, storageSessionCount, navCaptureFolderBytes, storageDays,
-                    supportedApps, allApps, patchRows, navigatorAssets, patchOperation);
+                    supportedApps, allApps, patchRows, navigatorAssets, patchOperations);
         }
     }
 
@@ -2532,6 +2558,8 @@ public final class MainActivity extends ComponentActivity {
         public final String sourceName;
         public final String sourceVersion;
         public final String directState;
+        public final String gmsCoreState;
+        public final String gmsCoreLabel;
         public final String optionalState;
         public final String optionalLabel;
         public final String alertState;
@@ -2542,6 +2570,18 @@ public final class MainActivity extends ComponentActivity {
         ComposeNavigatorPatchRow(String profileId, String label, String packageName,
                 String installedVersion, boolean installed, boolean externalSource,
                 String sourceName, String sourceVersion, String directState,
+                String optionalState, String optionalLabel, String alertState,
+                String alertLabel, String reason, boolean patchEnabled) {
+            this(profileId, label, packageName, installedVersion, installed, externalSource,
+                    sourceName, sourceVersion, directState, NavigatorPatchStore.NOT_CHECKED,
+                    "", optionalState, optionalLabel, alertState, alertLabel, reason,
+                    patchEnabled);
+        }
+
+        ComposeNavigatorPatchRow(String profileId, String label, String packageName,
+                String installedVersion, boolean installed, boolean externalSource,
+                String sourceName, String sourceVersion, String directState,
+                String gmsCoreState, String gmsCoreLabel,
                 String optionalState, String optionalLabel, String alertState,
                 String alertLabel, String reason,
                 boolean patchEnabled) {
@@ -2554,6 +2594,8 @@ public final class MainActivity extends ComponentActivity {
             this.sourceName = sourceName == null ? "" : sourceName;
             this.sourceVersion = sourceVersion == null ? "" : sourceVersion;
             this.directState = directState == null ? NavigatorPatchStore.NOT_CHECKED : directState;
+            this.gmsCoreState = gmsCoreState == null ? NavigatorPatchStore.NOT_CHECKED : gmsCoreState;
+            this.gmsCoreLabel = gmsCoreLabel == null ? "" : gmsCoreLabel;
             this.optionalState = optionalState == null ? NavigatorPatchStore.NOT_CHECKED : optionalState;
             this.optionalLabel = optionalLabel == null ? "" : optionalLabel;
             this.alertState = alertState == null ? NavigatorPatchStore.NOT_CHECKED : alertState;
@@ -2576,6 +2618,8 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(sourceName, other.sourceName)
                     && Objects.equals(sourceVersion, other.sourceVersion)
                     && Objects.equals(directState, other.directState)
+                    && Objects.equals(gmsCoreState, other.gmsCoreState)
+                    && Objects.equals(gmsCoreLabel, other.gmsCoreLabel)
                     && Objects.equals(optionalState, other.optionalState)
                     && Objects.equals(optionalLabel, other.optionalLabel)
                     && Objects.equals(alertState, other.alertState)
@@ -2586,8 +2630,9 @@ public final class MainActivity extends ComponentActivity {
         @Override
         public int hashCode() {
             return Objects.hash(profileId, label, packageName, installedVersion, installed,
-                    externalSource, sourceName, sourceVersion, directState, optionalState,
-                    optionalLabel, alertState, alertLabel, reason, patchEnabled);
+                    externalSource, sourceName, sourceVersion, directState, gmsCoreState,
+                    gmsCoreLabel, optionalState, optionalLabel, alertState, alertLabel,
+                    reason, patchEnabled);
         }
     }
 
@@ -2625,19 +2670,40 @@ public final class MainActivity extends ComponentActivity {
         public final String kind;
         public final String phase;
         public final String detail;
+        public final String operationToken;
+        public final long startedAt;
+        public final int progress;
+        public final String error;
+        public final long readyAt;
         public final boolean destructive;
         public final boolean busy;
         public final boolean recoveryRequired;
+        public final boolean cancelAllowed;
+        public final boolean terminal;
 
         ComposePatchOperation(String profileId, String kind, String phase, String detail,
-                boolean destructive, boolean busy, boolean recoveryRequired) {
+                String operationToken, long startedAt, int progress, String error, long readyAt,
+                boolean destructive, boolean busy, boolean recoveryRequired,
+                boolean cancelAllowed, boolean terminal) {
             this.profileId = profileId == null ? "" : profileId;
             this.kind = kind == null ? "" : kind;
             this.phase = phase == null ? NavigatorPatchStore.IDLE : phase;
             this.detail = detail == null ? "" : detail;
+            this.operationToken = operationToken == null ? "" : operationToken;
+            this.startedAt = startedAt;
+            this.progress = Math.max(0, Math.min(100, progress));
+            this.error = error == null ? "" : error;
+            this.readyAt = readyAt;
             this.destructive = destructive;
             this.busy = busy;
             this.recoveryRequired = recoveryRequired;
+            this.cancelAllowed = cancelAllowed;
+            this.terminal = terminal;
+        }
+
+        static ComposePatchOperation idle() {
+            return new ComposePatchOperation("", "", NavigatorPatchStore.IDLE, "",
+                    "", 0L, 0, "", 0L, false, false, false, false, true);
         }
 
         @Override
@@ -2645,18 +2711,24 @@ public final class MainActivity extends ComponentActivity {
             if (this == value) return true;
             if (!(value instanceof ComposePatchOperation)) return false;
             ComposePatchOperation other = (ComposePatchOperation) value;
-            return destructive == other.destructive && busy == other.busy
+            return startedAt == other.startedAt && progress == other.progress
+                    && readyAt == other.readyAt
+                    && destructive == other.destructive && busy == other.busy
                     && recoveryRequired == other.recoveryRequired
+                    && cancelAllowed == other.cancelAllowed && terminal == other.terminal
                     && Objects.equals(profileId, other.profileId)
                     && Objects.equals(kind, other.kind)
                     && Objects.equals(phase, other.phase)
-                    && Objects.equals(detail, other.detail);
+                    && Objects.equals(detail, other.detail)
+                    && Objects.equals(operationToken, other.operationToken)
+                    && Objects.equals(error, other.error);
         }
 
         @Override
         public int hashCode() {
-            return Objects.hash(profileId, kind, phase, detail, destructive, busy,
-                    recoveryRequired);
+            return Objects.hash(profileId, kind, phase, detail, operationToken, startedAt,
+                    progress, error, readyAt, destructive, busy, recoveryRequired,
+                    cancelAllowed, terminal);
         }
     }
 
@@ -3777,9 +3849,9 @@ public final class MainActivity extends ComponentActivity {
             case "Status Log":
                 return "Журнал стану";
             case "Start Logcat":
-                return "Старт Logcat";
+                return "Почати Logcat";
             case "Stop Logcat":
-                return "Стоп Logcat";
+                return "Зупинити Logcat";
             case "Clear Logcat":
                 return "Очистити Logcat";
             case "Manual HUD Output":
@@ -3927,9 +3999,9 @@ public final class MainActivity extends ComponentActivity {
                 return "Navigation Logs";
             case "Журнал стану":
                 return "Status Log";
-            case "Старт Logcat":
+            case "Почати Logcat":
                 return "Start Logcat";
-            case "Стоп Logcat":
+            case "Зупинити Logcat":
                 return "Stop Logcat";
             case "Очистити Logcat":
                 return "Clear Logcat";

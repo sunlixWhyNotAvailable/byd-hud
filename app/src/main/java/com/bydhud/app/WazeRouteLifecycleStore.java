@@ -21,6 +21,7 @@ final class WazeRouteLifecycleStore {
     static final String EXTRA_BRIDGE_GENERATION = "bridge_generation";
     static final String EXTRA_BRIDGE_CAPABILITIES = "bridge_capabilities";
     static final String EXTRA_EVENT_ELAPSED_MS = "event_elapsed_ms";
+    static final String EXTRA_EVENT_TYPE = "event_type";
     static final int PROTOCOL_VERSION = 1;
     static final int V2_PROTOCOL_VERSION = 2;
     static final int REASON_UNAVAILABLE = -1;
@@ -34,6 +35,8 @@ final class WazeRouteLifecycleStore {
     private static final String KEY_SPEED_BRIDGE_GENERATION = "speed_bridge_generation";
     private static final String KEY_PACKAGE_UPDATE_MS = "package_update_ms";
     private static final String KEY_BOOT_COUNT = "boot_count";
+    private static final String KEY_TERMINAL_BRIDGE_GENERATION = "terminal_bridge_generation";
+    private static final long NO_TERMINAL_FENCE = Long.MIN_VALUE;
     private static final Object LOCK = new Object();
     private static final Object BRIDGE_SUPPORT_LOCK = new Object();
     private static long cachedBridgeVersionCode = Long.MIN_VALUE;
@@ -46,6 +49,7 @@ final class WazeRouteLifecycleStore {
         final long packageUpdateMs;
         final long bridgeGeneration;
         final int bridgeCapabilities;
+        final long terminalBridgeGeneration;
 
         Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs) {
             this(active, eventElapsedMs, packageUpdateMs, 0L, 0);
@@ -53,11 +57,19 @@ final class WazeRouteLifecycleStore {
 
         Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs,
                 long bridgeGeneration, int bridgeCapabilities) {
+            this(active, eventElapsedMs, packageUpdateMs, bridgeGeneration,
+                    bridgeCapabilities, NO_TERMINAL_FENCE);
+        }
+
+        Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs,
+                long bridgeGeneration, int bridgeCapabilities,
+                long terminalBridgeGeneration) {
             this.active = active;
             this.eventElapsedMs = eventElapsedMs;
             this.packageUpdateMs = packageUpdateMs;
             this.bridgeGeneration = bridgeGeneration;
             this.bridgeCapabilities = bridgeCapabilities;
+            this.terminalBridgeGeneration = terminalBridgeGeneration;
         }
     }
 
@@ -176,8 +188,11 @@ final class WazeRouteLifecycleStore {
                 return new RecordResult(false, false, previous, decision,
                         false, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
             }
+            long terminalGeneration = !active
+                    ? bridgeGenerationForTerminal(previous, 0L) : NO_TERMINAL_FENCE;
             return commitLocked(context, previous, active, eventElapsedMs,
-                    0L, 0, !active, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
+                    active ? 0L : terminalGeneration, 0, !active, active,
+                    REASON_UNAVAILABLE, "LOCAL_DIRECT", "local");
         }
     }
 
@@ -190,23 +205,70 @@ final class WazeRouteLifecycleStore {
     static RecordResult recordBridge(Context context, boolean navigating, int reasonCode,
             boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
             int bridgeCapabilities) {
+        return recordBridge(context, navigating, reasonCode, reasonAvailable,
+                eventElapsedMs, bridgeGeneration, bridgeCapabilities, "");
+    }
+
+    static RecordResult recordBridge(Context context, boolean navigating, int reasonCode,
+            boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
+            int bridgeCapabilities, String eventType) {
         synchronized (LOCK) {
             long now = SystemClock.elapsedRealtime();
             Snapshot previous = validatedSnapshotLocked(context, now);
-            String decision = eventDecision(previous.eventElapsedMs, eventElapsedMs, now);
+            boolean snapshot = isStateSnapshot(eventType);
+            String decision = snapshot
+                    ? snapshotEventDecision(eventElapsedMs, now)
+                    : eventDecision(previous.eventElapsedMs, eventElapsedMs, now);
             String reasonName = reasonAvailable ? reasonName(reasonCode) : "UNAVAILABLE";
             if (!"accept".equals(decision)) {
                 return new RecordResult(false, false, previous, decision,
                         false, navigating, reasonCode, reasonName);
             }
-            boolean terminal = !navigating && reasonAvailable && isTerminalReason(reasonCode);
+            String generationDecision = bridgeGenerationDecision(previous, bridgeGeneration);
+            if (!"accept".equals(generationDecision)) {
+                return new RecordResult(false, false, previous, generationDecision,
+                        false, navigating, reasonCode, reasonName);
+            }
+            boolean terminal = !snapshot && !navigating && reasonAvailable
+                    && isTerminalReason(reasonCode);
+            if (snapshot) {
+                String snapshotDecision = snapshotDecision(previous, navigating, bridgeGeneration);
+                if (!"accept".equals(snapshotDecision)) {
+                    return new RecordResult(false, false, previous, snapshotDecision,
+                            false, navigating, reasonCode, reasonName);
+                }
+                boolean seed = shouldSeedSnapshot(previous, bridgeGeneration);
+                if (!seed) {
+                    return new RecordResult(true, false, previous,
+                            "snapshot_replay_noop", false, navigating, reasonCode, reasonName);
+                }
+                long seededGeneration = bridgeGeneration;
+                long fence = !navigating && seededGeneration != 0L
+                        ? seededGeneration
+                        : seededGeneration != previous.terminalBridgeGeneration
+                        ? NO_TERMINAL_FENCE : previous.terminalBridgeGeneration;
+                return commitLocked(context, previous, navigating,
+                        previous.eventElapsedMs, seededGeneration, bridgeCapabilities,
+                        false, navigating, reasonCode, reasonName, eventType,
+                        fence, true);
+            }
+            if (navigating && terminalFenceBlocks(previous, bridgeGeneration,
+                    reasonAvailable, reasonCode)) {
+                return new RecordResult(false, false, previous, "terminal_fence",
+                        false, navigating, reasonCode, reasonName);
+            }
             boolean active = resolveBridgeActive(
                     previous.active, navigating, reasonAvailable, reasonCode);
-            long acceptedGeneration = active ? bridgeGeneration : 0L;
+            long acceptedGeneration = active
+                    ? bridgeGenerationForActive(previous, bridgeGeneration)
+                    : bridgeGenerationForTerminal(previous, bridgeGeneration);
             int acceptedCapabilities = active ? bridgeCapabilities : 0;
+            long resultingFence = terminalFenceAfterEvent(previous, navigating, terminal,
+                    acceptedGeneration, bridgeGeneration, reasonAvailable, reasonCode);
             return commitLocked(context, previous, active, eventElapsedMs,
                     acceptedGeneration, acceptedCapabilities,
-                    terminal, navigating, reasonCode, reasonName);
+                    terminal, navigating, reasonCode, reasonName, eventType,
+                    resultingFence, false);
         }
     }
 
@@ -236,10 +298,21 @@ final class WazeRouteLifecycleStore {
 
     private static RecordResult commitLocked(Context context, Snapshot previous, boolean active,
             long eventElapsedMs, long bridgeGeneration, int bridgeCapabilities,
-            boolean terminal, boolean rawNavigating, int reasonCode, String reasonName) {
+            boolean terminal, boolean rawNavigating, int reasonCode, String reasonName,
+            String eventType) {
+        return commitLocked(context, previous, active, eventElapsedMs, bridgeGeneration,
+                bridgeCapabilities, terminal, rawNavigating, reasonCode, reasonName,
+                eventType, terminal ? bridgeGeneration : NO_TERMINAL_FENCE, false);
+    }
+
+    private static RecordResult commitLocked(Context context, Snapshot previous, boolean active,
+            long eventElapsedMs, long bridgeGeneration, int bridgeCapabilities,
+            boolean terminal, boolean rawNavigating, int reasonCode, String reasonName,
+            String eventType, long terminalGeneration, boolean snapshotSeed) {
         long packageUpdateMs = installedPackageUpdateTime(context);
         Snapshot updated = new Snapshot(active, eventElapsedMs, packageUpdateMs,
-                bridgeGeneration, bridgeCapabilities);
+                bridgeGeneration, bridgeCapabilities,
+                terminalGeneration);
         SharedPreferences.Editor editor = prefs(context).edit()
                 .putBoolean(KEY_ACTIVE, active)
                 .putLong(KEY_EVENT_ELAPSED_MS, eventElapsedMs)
@@ -247,6 +320,11 @@ final class WazeRouteLifecycleStore {
                 .putInt(KEY_BRIDGE_CAPABILITIES, bridgeCapabilities)
                 .putLong(KEY_PACKAGE_UPDATE_MS, packageUpdateMs)
                 .putInt(KEY_BOOT_COUNT, bootCount(context));
+        if (terminalGeneration != NO_TERMINAL_FENCE) {
+            editor.putLong(KEY_TERMINAL_BRIDGE_GENERATION, terminalGeneration);
+        } else {
+            editor.remove(KEY_TERMINAL_BRIDGE_GENERATION);
+        }
         if (!active || previous.bridgeGeneration != bridgeGeneration) {
             editor.remove(KEY_SPEED_EVENT_ELAPSED_MS)
                     .remove(KEY_SPEED_BRIDGE_GENERATION);
@@ -256,9 +334,11 @@ final class WazeRouteLifecycleStore {
             return new RecordResult(false, false, previous, "commit_failed",
                     false, rawNavigating, reasonCode, reasonName);
         }
-        String state = previous.active == active ? "watermark" : "transition";
+        String state = snapshotSeed ? "snapshot_seed"
+                : previous.active == active ? "watermark" : "transition";
         return new RecordResult(true, previous.active != active, updated,
-                state + ":" + reasonName, terminal, rawNavigating, reasonCode, reasonName);
+                state + ":" + reasonName + ":event=" + safeEventType(eventType),
+                terminal, rawNavigating, reasonCode, reasonName);
     }
 
     static RecordResult recordLocalTerminal(Context context, long detectedAtMs) {
@@ -277,6 +357,89 @@ final class WazeRouteLifecycleStore {
         if (incomingElapsedMs > nowElapsedMs) return "future_timestamp";
         if (storedElapsedMs > 0L && incomingElapsedMs <= storedElapsedMs) return "stale_timestamp";
         return "accept";
+    }
+
+    static String snapshotEventDecision(long incomingElapsedMs, long nowElapsedMs) {
+        if (incomingElapsedMs <= 0L) return "invalid_timestamp";
+        return incomingElapsedMs > nowElapsedMs ? "future_timestamp" : "accept";
+    }
+
+    static boolean isStateSnapshot(String eventType) {
+        return "state_snapshot".equals(eventType);
+    }
+
+    static boolean shouldSeedSnapshot(Snapshot previous, long incomingGeneration) {
+        if (!hasBridgeIdentity(previous)) return true;
+        return incomingGeneration > knownBridgeGeneration(previous);
+    }
+
+    static String snapshotDecision(Snapshot previous, boolean navigating,
+            long incomingGeneration) {
+        if (previous.terminalBridgeGeneration != NO_TERMINAL_FENCE
+                && incomingGeneration == previous.terminalBridgeGeneration) {
+            return "terminal_fence";
+        }
+        long knownGeneration = knownBridgeGeneration(previous);
+        if (knownGeneration > 0L
+                && (incomingGeneration == 0L || incomingGeneration < knownGeneration)) {
+            return "generation_regression";
+        }
+        return "accept";
+    }
+
+    static String bridgeGenerationDecision(Snapshot previous, long incomingGeneration) {
+        long knownGeneration = knownBridgeGeneration(previous);
+        return knownGeneration > 0L && incomingGeneration > 0L
+                && incomingGeneration < knownGeneration
+                ? "generation_regression" : "accept";
+    }
+
+    static boolean terminalFenceBlocks(Snapshot previous, long incomingGeneration,
+            boolean reasonAvailable, int reasonCode) {
+        if (previous.terminalBridgeGeneration == NO_TERMINAL_FENCE) return false;
+        boolean explicitFreshReason = reasonAvailable && isTransitionReason(reasonCode);
+        boolean newGeneration = incomingGeneration != 0L
+                && incomingGeneration > previous.terminalBridgeGeneration;
+        return !explicitFreshReason && !newGeneration;
+    }
+
+    static long terminalFenceAfterEvent(Snapshot previous, boolean navigating,
+            boolean terminal, long acceptedGeneration, long incomingGeneration,
+            boolean reasonAvailable, int reasonCode) {
+        if (terminal) return acceptedGeneration;
+        if (previous.terminalBridgeGeneration == NO_TERMINAL_FENCE) return NO_TERMINAL_FENCE;
+        boolean explicitFreshReason = reasonAvailable && isTransitionReason(reasonCode);
+        boolean newGeneration = incomingGeneration != 0L
+                && incomingGeneration > previous.terminalBridgeGeneration;
+        return navigating && (explicitFreshReason || newGeneration)
+                ? NO_TERMINAL_FENCE : previous.terminalBridgeGeneration;
+    }
+
+    private static boolean hasBridgeIdentity(Snapshot snapshot) {
+        return snapshot.bridgeGeneration != 0L
+                || snapshot.eventElapsedMs > 0L
+                || snapshot.terminalBridgeGeneration != NO_TERMINAL_FENCE;
+    }
+
+    private static long knownBridgeGeneration(Snapshot snapshot) {
+        long known = Math.max(0L, snapshot.bridgeGeneration);
+        if (snapshot.terminalBridgeGeneration > known) {
+            known = snapshot.terminalBridgeGeneration;
+        }
+        return known;
+    }
+
+    private static long bridgeGenerationForTerminal(Snapshot previous, long incomingGeneration) {
+        return incomingGeneration != 0L ? incomingGeneration : previous.bridgeGeneration;
+    }
+
+    private static long bridgeGenerationForActive(Snapshot previous, long incomingGeneration) {
+        return incomingGeneration != 0L ? incomingGeneration : previous.bridgeGeneration;
+    }
+
+    private static String safeEventType(String eventType) {
+        if (eventType == null || eventType.isEmpty()) return "unspecified";
+        return eventType.replace(':', '_').replace('\n', '_').replace('\r', '_');
     }
 
     static String speedEventDecision(boolean routeActive, long routeGeneration,
@@ -337,10 +500,13 @@ final class WazeRouteLifecycleStore {
             preferences.edit().clear().commit();
             AppEventLogger.event(context, "waze_route_lifecycle invalidated reboot=" + rebooted
                     + " packageChanged=" + packageChanged);
-            return new Snapshot(false, 0L, currentPackageUpdateMs, 0L, 0);
+            return new Snapshot(false, 0L, currentPackageUpdateMs, 0L, 0,
+                    NO_TERMINAL_FENCE);
         }
+        long terminalGeneration = preferences.getLong(
+                KEY_TERMINAL_BRIDGE_GENERATION, NO_TERMINAL_FENCE);
         return new Snapshot(active, eventElapsedMs, currentPackageUpdateMs,
-                bridgeGeneration, bridgeCapabilities);
+                bridgeGeneration, bridgeCapabilities, terminalGeneration);
     }
 
     static boolean shouldInvalidateForBoot(

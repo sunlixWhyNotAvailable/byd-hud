@@ -34,10 +34,18 @@ public final class NavigatorPatchEligibilitySourceContractTest {
     }
 
     @Test
-    public void trustEraScanCacheIsInvalidated() throws Exception {
+    public void componentSchemaScanCacheIsInvalidated() throws Exception {
         String store = source("NavigatorPatchStore.java");
 
-        assertTrue(store.contains("SCAN_CACHE_REVISION = 6"));
+        assertTrue(store.contains("SCAN_CACHE_REVISION = 7"));
+    }
+
+    @Test
+    public void unchangedOutputCannotBecomeInstallReady() throws Exception {
+        String pipeline = source("NavigatorPatchPipeline.java");
+
+        assertTrue(pipeline.contains("if (!directApplied && !optionalApplied)"));
+        assertTrue(pipeline.contains("No patch component was applied"));
     }
 
     private static String source(String name) throws Exception {

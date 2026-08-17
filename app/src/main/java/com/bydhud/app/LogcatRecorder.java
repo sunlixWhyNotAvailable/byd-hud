@@ -46,10 +46,6 @@ final class LogcatRecorder {
     static final String STATUS_SAVING = "Збереження логу";
     static final String STATUS_SAVED = "Лог збережено";
 
-    static final String PHASE_IDLE = "idle";
-    static final String PHASE_INTERACTION_1 = "interaction-1";
-    static final String PHASE_INTERACTION_2 = "interaction-2";
-
     private static final String TAG = "BydHudLogcat";
     private static final long POLL_INTERVAL_MS = 2_000L;
     private static final long SEGMENT_BYTES = 16L * 1024L * 1024L;
@@ -84,10 +80,6 @@ final class LogcatRecorder {
         return activeSession != null;
     }
 
-    static synchronized boolean isPhaseActive() {
-        return activeSession != null && activeSession.activePhase != null;
-    }
-
     static synchronized String activeStartDay() {
         return activeSession != null || finalizingSession != null ? activeStartDay : "";
     }
@@ -107,9 +99,6 @@ final class LogcatRecorder {
         Session session = activeSession != null ? activeSession : finalizingSession;
         File file = session == null ? lastSavedFile : session.manifestFile;
         if (file != null) text.append('\n').append(file.getAbsolutePath());
-        if (session != null && session.activePhase != null) {
-            text.append('\n').append("phase=").append(session.activePhase.id);
-        }
         if (!lastDetail.isEmpty()) text.append('\n').append(lastDetail);
         return text.toString();
     }
@@ -186,7 +175,6 @@ final class LogcatRecorder {
             lastStatus = STATUS_SAVING;
             lastDetail = "finalizing system capture";
             if (session.pollFuture != null) session.pollFuture.cancel(false);
-            if (session.phaseFuture != null) session.phaseFuture.cancel(false);
             future = ensureFinishLocked(session);
         }
         Throwable failure = await(future, 90_000L);
@@ -226,39 +214,9 @@ final class LogcatRecorder {
             lastStatus = STATUS_SAVING;
             lastDetail = "finalizing system capture";
             if (session.pollFuture != null) session.pollFuture.cancel(false);
-            if (session.phaseFuture != null) session.phaseFuture.cancel(false);
             addCompletionLocked(session, completion);
             ensureFinishLocked(session);
         }
-    }
-
-    static Result startPresetPhase(Context context, String phaseId) {
-        Session session;
-        long durationMs = presetDurationMs(phaseId);
-        synchronized (LogcatRecorder.class) {
-            session = activeSession;
-            if (session == null) return Result.failed(lastSavedFile, "recorder is not running");
-            if (durationMs <= 0L) return Result.failed(session.manifestFile, "unknown phase");
-            if (session.activePhase != null) {
-                return Result.failed(session.manifestFile,
-                        "phase already active: " + session.activePhase.id);
-            }
-        }
-        Throwable failure = await(WORKER.submit(
-                () -> beginPhase(session, phaseId, durationMs)), 30_000L);
-        if (failure != null) {
-            return Result.failed(session.manifestFile,
-                    "phase failed: " + failure.getClass().getSimpleName());
-        }
-        return Result.recording(session.manifestFile,
-                "phase=" + phaseId + " durationMs=" + durationMs);
-    }
-
-    static long presetDurationMs(String phaseId) {
-        if (PHASE_IDLE.equals(phaseId)) return 10_000L;
-        if (PHASE_INTERACTION_1.equals(phaseId)
-                || PHASE_INTERACTION_2.equals(phaseId)) return 24_000L;
-        return -1L;
     }
 
     static String fullLogcatCommandForTest(long cursorMs) {
@@ -386,7 +344,7 @@ final class LogcatRecorder {
             session.manifest.put("adbProbe", adbProbe);
             writeLog(session, "=== BYD HUD system capture " + session.captureId + " ===\n"
                     + "mode=" + session.mode + " bufferClear=false\n");
-            captureSnapshot(session, "before", fullSnapshotCommands());
+            captureSnapshot(session, "before", fullSnapshotCommands(true));
             poll(session);
             writeManifest(session);
             session.pollFuture = WORKER.scheduleWithFixedDelay(
@@ -409,9 +367,8 @@ final class LogcatRecorder {
             synchronized (LogcatRecorder.class) {
                 if (session.finalized || session.failed) return;
             }
-            if (session.activePhase != null) finishPhase(session, "recorder-stop");
             poll(session);
-            captureSnapshot(session, "after", fullSnapshotCommands());
+            captureSnapshot(session, "after", fullSnapshotCommands(false));
             finalizeSegment(session);
             long endedWallMs = System.currentTimeMillis();
             session.manifest.put("status", "saved");
@@ -425,7 +382,6 @@ final class LogcatRecorder {
             session.manifest.put("bytes", session.totalBytes);
             session.manifest.put("droppedBytes", session.droppedBytes);
             session.manifest.put("truncated", session.truncated);
-            session.manifest.put("phases", session.phases);
             session.manifest.put("runtimeEnd", runtimeIdentity(session.context));
             writeManifest(session);
             List<Runnable> completions;
@@ -565,81 +521,6 @@ final class LogcatRecorder {
         return new String(bytes, 0, MAX_UID_POLL_BYTES, StandardCharsets.UTF_8);
     }
 
-    private static void beginPhase(Session session, String phaseId, long durationMs) {
-        if (!isCurrent(session) || session.activePhase != null) return;
-        try {
-            Phase phase = new Phase(phaseId, durationMs);
-            phase.startedWallMs = System.currentTimeMillis();
-            phase.startedElapsedMs = SystemClock.elapsedRealtime();
-            session.activePhase = phase;
-            AppEventLogger.event(session.context,
-                    "system_recorder_phase_start id=" + session.captureId
-                            + " phase=" + phase.id + " durationMs=" + durationMs);
-            writeLog(session, "\n=== PHASE START " + phase.id + " "
-                    + timestampForLine(phase.startedWallMs) + " ===\n");
-            captureSnapshot(session, "phase-" + phase.id + "-before",
-                    phaseBeforeCommands());
-            updateDetail(session, "phase=" + phase.id + " durationMs=" + durationMs);
-            writeManifest(session);
-            session.phaseFuture = WORKER.schedule(
-                    () -> finishPhaseSafely(session), durationMs, TimeUnit.MILLISECONDS);
-            publishUiState();
-        } catch (Exception error) {
-            session.activePhase = null;
-            session.phaseFuture = null;
-            publishUiState();
-            throw new IllegalStateException(error);
-        }
-    }
-
-    private static void finishPhaseSafely(Session session) {
-        try {
-            finishPhase(session, "complete");
-        } catch (Exception error) {
-            Log.e(TAG, "phase finish failed", error);
-        }
-    }
-
-    private static void finishPhase(Session session, String outcome) throws Exception {
-        Phase phase = session.activePhase;
-        if (phase == null) return;
-        Exception failure = null;
-        phase.endedWallMs = System.currentTimeMillis();
-        phase.endedElapsedMs = SystemClock.elapsedRealtime();
-        try {
-            captureSnapshot(session, "phase-" + phase.id + "-after", phaseAfterCommands());
-            JSONObject record = new JSONObject();
-            record.put("id", phase.id);
-            record.put("plannedDurationMs", phase.durationMs);
-            record.put("actualDurationMs", Math.max(0L,
-                    phase.endedElapsedMs - phase.startedElapsedMs));
-            record.put("startedAt", timestampForLine(phase.startedWallMs));
-            record.put("endedAt", timestampForLine(phase.endedWallMs));
-            record.put("outcome", outcome);
-            session.phases.put(record);
-            writeLog(session, "=== PHASE END " + phase.id + " outcome=" + outcome + " "
-                    + timestampForLine(phase.endedWallMs) + " ===\n");
-            AppEventLogger.event(session.context,
-                    "system_recorder_phase_end id=" + session.captureId
-                            + " phase=" + phase.id + " outcome=" + outcome
-                            + " durationMs=" + (phase.endedElapsedMs - phase.startedElapsedMs));
-        } catch (Exception error) {
-            failure = error;
-        } finally {
-            session.activePhase = null;
-            session.phaseFuture = null;
-            try {
-                writeManifest(session);
-            } catch (Exception error) {
-                if (failure == null) failure = error;
-            }
-            updateDetail(session, (failure == null ? "phase saved=" : "phase failed=")
-                    + phase.id);
-            publishUiState();
-        }
-        if (failure != null) throw failure;
-    }
-
     private static void captureSnapshot(Session session, String label, List<String> commands)
             throws IOException {
         File file = new File(session.directory, label + ".txt");
@@ -675,8 +556,11 @@ final class LogcatRecorder {
         writeFile(file, output.toString().getBytes(StandardCharsets.UTF_8));
     }
 
-    private static List<String> fullSnapshotCommands() {
+    private static List<String> fullSnapshotCommands(boolean before) {
         return Arrays.asList(
+                before
+                        ? "dumpsys gfxinfo com.bydhud.app reset"
+                        : "dumpsys gfxinfo com.bydhud.app framestats",
                 "dumpsys accessibility",
                 "dumpsys activity activities",
                 "dumpsys window windows",
@@ -686,24 +570,6 @@ final class LogcatRecorder {
                 "dumpsys meminfo com.bydhud.app",
                 "cat /proc/loadavg",
                 "cat /proc/" + android.os.Process.myPid() + "/stat");
-    }
-
-    private static List<String> phaseBeforeCommands() {
-        return Arrays.asList(
-                "dumpsys gfxinfo com.bydhud.app reset",
-                "dumpsys cpuinfo",
-                "dumpsys thermalservice",
-                "dumpsys meminfo com.bydhud.app",
-                "cat /proc/loadavg");
-    }
-
-    private static List<String> phaseAfterCommands() {
-        return Arrays.asList(
-                "dumpsys gfxinfo com.bydhud.app framestats",
-                "dumpsys cpuinfo",
-                "dumpsys thermalservice",
-                "dumpsys meminfo com.bydhud.app",
-                "cat /proc/loadavg");
     }
 
     private static JSONObject appIdentity(Context context) throws Exception {
@@ -844,7 +710,6 @@ final class LogcatRecorder {
             session.manifest.put("bytes", session.totalBytes);
             session.manifest.put("droppedBytes", session.droppedBytes);
             session.manifest.put("truncated", session.truncated);
-            session.manifest.put("phases", session.phases);
             File temporary = new File(session.directory, "manifest.json.tmp");
             writeFile(temporary,
                     session.manifest.toString(2).getBytes(StandardCharsets.UTF_8));
@@ -1008,11 +873,8 @@ final class LogcatRecorder {
         final File directory;
         final File manifestFile;
         final JSONObject manifest = new JSONObject();
-        final JSONArray phases = new JSONArray();
         final List<String> segmentNames = new ArrayList<>();
-        volatile Phase activePhase;
         volatile ScheduledFuture<?> pollFuture;
-        volatile ScheduledFuture<?> phaseFuture;
         volatile Future<?> finishFuture;
         volatile boolean stopRequested;
         volatile boolean finalized;
@@ -1043,20 +905,6 @@ final class LogcatRecorder {
             this.captureId = captureId;
             this.directory = directory;
             this.manifestFile = new File(directory, "manifest.json");
-        }
-    }
-
-    private static final class Phase {
-        final String id;
-        final long durationMs;
-        long startedWallMs;
-        long startedElapsedMs;
-        long endedWallMs;
-        long endedElapsedMs;
-
-        Phase(String id, long durationMs) {
-            this.id = id;
-            this.durationMs = durationMs;
         }
     }
 

@@ -47,6 +47,9 @@ final class VehicleTbtPublisher {
     private int lastInstrumentDistance = -1;
     private String lastInstrumentRoad = "";
     private boolean lastGuidanceHasAmapFallback;
+    private boolean hasLastInstrumentSemantic;
+    private boolean hasLastAmapSemantic;
+    private String lastAmapSemanticKey = "";
 
     VehicleTbtPublisher(Context context, Handler ownerHandler) {
         this.context = context.getApplicationContext();
@@ -83,6 +86,12 @@ final class VehicleTbtPublisher {
             return;
         }
         if (routeActive && owner.equals(ownerPackage)) {
+            if (shouldIgnoreOwnerGenerationForTest(
+                    routeActive, ownerPackage, ownerGeneration, owner, generation)) {
+                log("tbt_route_start ignored stale_generation owner=" + owner
+                        + " generation=" + generation + " current=" + ownerGeneration);
+                return;
+            }
             boolean generationChanged = shouldClearGuidanceForGenerationReplacementForTest(
                     routeActive, ownerPackage, ownerGeneration, owner, generation);
             boolean gainedHudPriority = !ownerHasHudPriority && hasHudPriority;
@@ -91,7 +100,7 @@ final class VehicleTbtPublisher {
                         ownerPackage, ownerGeneration,
                         "route-generation-replaced", null, null);
                 lastGuidanceHasAmapFallback = false;
-                sendInstrumentGuidance(0, -1, "", replaced);
+                sendTerminalGuidanceClear(replaced);
                 sendAmapTerminal(replaced);
                 ownerGeneration = generation;
                 ++routeToken;
@@ -124,6 +133,7 @@ final class VehicleTbtPublisher {
         ownerPackage = owner;
         ownerGeneration = generation;
         routeActive = true;
+        resetGuidanceDedup();
         teardownEligible = false;
         ownerHasHudPriority = hasHudPriority;
         ++routeToken;
@@ -168,10 +178,10 @@ final class VehicleTbtPublisher {
         int distance = Math.max(0, state.distanceToIntersection);
         String road = safe(state.roadName);
         lastGuidanceHasAmapFallback = mapping.amapSupported;
-        sendInstrumentGuidance(mapping.instrumentId, distance, road, trace);
+        sendInstrumentGuidance(mapping.instrumentId, distance, road, trace, true);
         if (mapping.amapSupported) {
             sendAmapFrame(mapping.amapManeuver, mapping.roundaboutExit,
-                    distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace);
+                    distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace, true);
         } else {
             record(trace, "amap_broadcast", "skip", "no_exact_mapping",
                     null, 0, 0L, "");
@@ -209,7 +219,7 @@ final class VehicleTbtPublisher {
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
         ++routeToken;
         lastGuidanceHasAmapFallback = false;
-        sendInstrumentGuidance(0, -1, "", trace);
+        sendTerminalGuidanceClear(trace);
         sendAmapTerminal(trace);
         if (emitIdle) sendStatus(STATUS_IDLE, trace);
         record(trace, "lifecycle", emitIdle ? "end_idle" : "end",
@@ -254,6 +264,14 @@ final class VehicleTbtPublisher {
         return active
                 && safe(currentOwner).equals(safe(incomingOwner))
                 && incomingGeneration > currentGeneration;
+    }
+
+    static boolean shouldIgnoreOwnerGenerationForTest(
+            boolean active, String currentOwner, long currentGeneration,
+            String incomingOwner, long incomingGeneration) {
+        return active
+                && safe(currentOwner).equals(safe(incomingOwner))
+                && incomingGeneration < currentGeneration;
     }
 
     void sendTeardownStatus() {
@@ -309,6 +327,15 @@ final class VehicleTbtPublisher {
             case 28: return 21;
             default: return 0;
         }
+    }
+
+    /** Resolves the Instrument symbol from the final serialized AMap icon and exit. */
+    static int instrumentManeuverForAmap(int amapIcon, int roundaboutExit) {
+        if (roundaboutExit >= 1 && roundaboutExit <= 10) {
+            if (amapIcon == 11) return 24 + roundaboutExit;
+            if (amapIcon == 17) return 34 + roundaboutExit;
+        }
+        return instrumentManeuverForAmap(amapIcon);
     }
 
     static ManualMapping manualMappingForTest(int nativeId) {
@@ -427,34 +454,75 @@ final class VehicleTbtPublisher {
     }
 
     private void sendInstrumentFrame(DirectTbtFrame frame, Trace trace) {
-        int icon = instrumentManeuverForAmap(frame.getAmapManeuver());
+        int icon = instrumentManeuverForAmap(
+                frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber());
         int distance = Math.max(0, frame.getDistanceMeters());
-        sendInstrumentGuidance(icon, distance, roadTextForTest(frame), trace);
+        sendInstrumentGuidance(icon, distance, roadTextForTest(frame), trace, true);
+    }
+
+    private void sendTerminalGuidanceClear(Trace trace) {
+        hasInstrumentGuidance = true;
+        lastInstrumentIcon = 0;
+        lastInstrumentDistance = -1;
+        lastInstrumentRoad = "";
+        instrument.sendTerminalGuidanceClear(
+                result -> ownerHandler.post(() -> recordInstrumentResult(
+                        result, trace, 0, 0, -1, "")));
     }
 
     private void sendInstrumentGuidance(
             int icon, int distance, String road, Trace trace) {
+        sendInstrumentGuidance(icon, distance, road, trace, false);
+    }
+
+    private void sendInstrumentGuidance(
+            int icon, int distance, String road, Trace trace, boolean deduplicate) {
         hasInstrumentGuidance = true;
-        lastInstrumentIcon = Math.max(0, Math.min(49, icon));
-        lastInstrumentDistance = Math.max(-1, Math.min(2_000_000, distance));
+        int nextIcon = Math.max(0, Math.min(49, icon));
+        int nextDistance = Math.max(-1, Math.min(2_000_000, distance));
         String normalizedRoad = safe(road);
-        lastInstrumentRoad = normalizedRoad.length() <= 512
+        String nextRoad = normalizedRoad.length() <= 512
                 ? normalizedRoad : normalizedRoad.substring(0, 512);
+        if (deduplicate && hasLastInstrumentSemantic
+                && lastInstrumentIcon == nextIcon
+                && lastInstrumentDistance == nextDistance
+                && lastInstrumentRoad.equals(nextRoad)) {
+            record(trace, "instrument", "dedup", "guidance", guidanceBytes(
+                    lastInstrumentIcon, lastInstrumentDistance, lastInstrumentRoad), 0, 0L, "");
+            return;
+        }
+        lastInstrumentIcon = nextIcon;
+        lastInstrumentDistance = nextDistance;
+        lastInstrumentRoad = nextRoad;
         int sentIcon = lastInstrumentIcon;
         int sentDistance = lastInstrumentDistance;
         String sentRoad = lastInstrumentRoad;
         instrument.sendGuidance(sentIcon, sentDistance, sentRoad,
                 result -> ownerHandler.post(() -> recordInstrumentResult(
                         result, trace, 0, sentIcon, sentDistance, sentRoad)));
+        hasLastInstrumentSemantic = true;
     }
 
     private void sendAmapFrame(DirectTbtFrame frame, Trace trace) {
         sendAmapFrame(frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber(),
-                frame.getDistanceMeters(), roadTextForTest(frame), selectMetrics(frame), trace);
+                frame.getDistanceMeters(), roadTextForTest(frame), selectMetrics(frame), trace, true);
     }
 
     private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
             String road, DirectTbtFrame.TravelMetrics metrics, Trace trace) {
+        sendAmapFrame(amapIcon, roundaboutExit, distance, road, metrics, trace, false);
+    }
+
+    private void sendAmapFrame(int amapIcon, int roundaboutExit, int distance,
+            String road, DirectTbtFrame.TravelMetrics metrics, Trace trace,
+            boolean deduplicate) {
+        DirectTbtFrame.TravelMetrics selected = metrics == null
+                ? DirectTbtFrame.TravelMetrics.unavailable() : metrics;
+        String semanticKey = amapSemanticKey(amapIcon, roundaboutExit, distance, road, selected);
+        if (deduplicate && hasLastAmapSemantic && semanticKey.equals(lastAmapSemanticKey)) {
+            record(trace, "amap_broadcast", "dedup", "guidance", new byte[0], 0, 0L, "");
+            return;
+        }
         Intent intent = new Intent(AMAP_ACTION);
         intent.setPackage(AMAP_PACKAGE);
         addStockAmapFlags(intent);
@@ -468,12 +536,15 @@ final class VehicleTbtPublisher {
         intent.putExtra("ROUNG_ABOUT_NUM", roundaboutExit);
         intent.putExtra("SEG_REMAIN_DIS", distance);
         intent.putExtra("NEXT_ROAD_NAME", safe(road));
-        intent.putExtra("ROUTE_REMAIN_DIS", toInt(metrics.getRemainingDistanceMeters(), -1));
-        intent.putExtra("ROUTE_REMAIN_TIME", toInt(metrics.getRemainingTimeSeconds(), -1));
-        sendAmap(intent, "frame", trace, amapBytes(
+        intent.putExtra("ROUTE_REMAIN_DIS", toInt(selected.getRemainingDistanceMeters(), -1));
+        intent.putExtra("ROUTE_REMAIN_TIME", toInt(selected.getRemainingTimeSeconds(), -1));
+        if (sendAmap(intent, "frame", trace, amapBytes(
                 10001, amapIcon, roundaboutExit, distance, road,
-                toInt(metrics.getRemainingDistanceMeters(), -1),
-                toInt(metrics.getRemainingTimeSeconds(), -1)));
+                toInt(selected.getRemainingDistanceMeters(), -1),
+                toInt(selected.getRemainingTimeSeconds(), -1)))) {
+            hasLastAmapSemantic = true;
+            lastAmapSemanticKey = semanticKey;
+        }
     }
 
     private void sendAmapTerminal(Trace trace) {
@@ -492,6 +563,7 @@ final class VehicleTbtPublisher {
         intent.putExtra("ROUTE_REMAIN_TIME", -1);
         sendAmap(intent, "terminal", trace,
                 amapBytes(10019, -1, 0, -1, "", -1, -1));
+        resetGuidanceDedup();
     }
 
     @SuppressLint("WrongConstant")
@@ -513,6 +585,19 @@ final class VehicleTbtPublisher {
                 ? whole.getRemainingDistanceMeters() : next.getRemainingDistanceMeters();
         return new DirectTbtFrame.TravelMetrics(
                 arrival, zoneOffset, remainingTime, remainingDistance);
+    }
+
+    private static String amapSemanticKey(int icon, int exit, int distance,
+            String road, DirectTbtFrame.TravelMetrics metrics) {
+        return icon + "|" + exit + "|" + distance + "|" + safe(road)
+                + "|" + metrics.getRemainingDistanceMeters()
+                + "|" + metrics.getRemainingTimeSeconds();
+    }
+
+    private void resetGuidanceDedup() {
+        hasLastInstrumentSemantic = false;
+        hasLastAmapSemantic = false;
+        lastAmapSemanticKey = "";
     }
 
     static DirectTbtFrame.TravelMetrics selectMetricsForTest(DirectTbtFrame frame) {
@@ -644,16 +729,18 @@ final class VehicleTbtPublisher {
         return buffer.putInt(icon).putInt(distance).putInt(text.length).put(text).array();
     }
 
-    private void sendAmap(Intent intent, String operation, Trace trace, byte[] arguments) {
+    private boolean sendAmap(Intent intent, String operation, Trace trace, byte[] arguments) {
         long startedAt = System.nanoTime();
         try {
             context.sendBroadcast(intent);
             record(trace, "amap_broadcast", operation, AMAP_ACTION,
                     arguments, 0, elapsedMs(startedAt), "");
+            return true;
         } catch (RuntimeException error) {
             record(trace, "amap_broadcast", operation, AMAP_ACTION,
                     arguments, -1, elapsedMs(startedAt), describe(error));
             Log.w(TAG, "TBT AMap broadcast failed: " + operation, error);
+            return false;
         }
     }
 
@@ -665,7 +752,11 @@ final class VehicleTbtPublisher {
                         manualState.turnBitmapId, manualState.maneuverId);
         int nativeId = manualState != null
                 ? manualMapping.instrumentId
-                : frame == null ? 0 : instrumentManeuverForAmap(frame.getAmapManeuver());
+                : frame == null ? 0 : instrumentManeuverForAmap(
+                        frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber());
+        int intermediateAmapIcon = manualState != null
+                ? manualMapping.amapManeuver
+                : frame == null ? 0 : frame.getAmapManeuver();
         int amapIcon = manualState != null
                 ? manualMapping.amapManeuver
                 : frame == null ? 0 : frame.getAmapBroadcastManeuver();
@@ -684,7 +775,8 @@ final class VehicleTbtPublisher {
                 : frame.getTripMetrics().getNextStop();
         return new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
-                nativeId, amapIcon, roundaboutExit, distance, safe(road), route, next);
+                nativeId, intermediateAmapIcon, amapIcon, roundaboutExit,
+                distance, safe(road), route, next);
     }
 
     private static String sourceForOwner(String owner) {
@@ -707,6 +799,7 @@ final class VehicleTbtPublisher {
                 .operation(operation)
                 .target(target)
                 .nativeId(trace.nativeId)
+                .intermediateAmapIcon(trace.intermediateAmapIcon)
                 .amapIcon(trace.amapIcon)
                 .roundaboutExit(trace.roundaboutExit)
                 .distanceMeters((long) trace.distanceMeters)
@@ -789,6 +882,7 @@ final class VehicleTbtPublisher {
         final String transactionId;
         final String reason;
         final int nativeId;
+        final int intermediateAmapIcon;
         final int amapIcon;
         final int roundaboutExit;
         final int distanceMeters;
@@ -801,12 +895,22 @@ final class VehicleTbtPublisher {
                 int distanceMeters, String road,
                 DirectTbtFrame.TravelMetrics route,
                 DirectTbtFrame.TravelMetrics next) {
+            this(source, owner, generation, transactionId, reason, nativeId, 0,
+                    amapIcon, roundaboutExit, distanceMeters, road, route, next);
+        }
+
+        Trace(String source, String owner, long generation, String transactionId,
+                String reason, int nativeId, int intermediateAmapIcon, int amapIcon,
+                int roundaboutExit, int distanceMeters, String road,
+                DirectTbtFrame.TravelMetrics route,
+                DirectTbtFrame.TravelMetrics next) {
             this.source = source;
             this.owner = owner;
             this.generation = generation;
             this.transactionId = transactionId;
             this.reason = reason;
             this.nativeId = nativeId;
+            this.intermediateAmapIcon = intermediateAmapIcon;
             this.amapIcon = amapIcon;
             this.roundaboutExit = roundaboutExit;
             this.distanceMeters = distanceMeters;

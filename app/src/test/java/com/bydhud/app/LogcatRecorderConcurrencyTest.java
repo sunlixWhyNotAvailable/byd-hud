@@ -37,17 +37,6 @@ public final class LogcatRecorderConcurrencyTest {
         assertTrue(source.contains("activeSession != null || finalizingSession != null"));
     }
 
-    @Test
-    public void PhaseCompletionClearsStateBeforePublishingUiRevision() throws IOException {
-        String source = source();
-        String phase = section(source, "private static void finishPhase(",
-                "private static void captureSnapshot(");
-        int clear = phase.indexOf("session.activePhase = null");
-        int publish = phase.indexOf("publishUiState()", clear);
-        assertTrue(clear >= 0);
-        assertTrue(publish > clear);
-    }
-
     private static String source() throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/LogcatRecorder.java");

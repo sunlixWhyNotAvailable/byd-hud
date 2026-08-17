@@ -9,6 +9,7 @@ import org.junit.Test;
 public final class NavigatorPatchPolicyTest {
     @Test
     public void gmapsUsesPipForTheThirdComponentPill() {
+        assertEquals("GmsCore", NavigatorPatchStore.Profile.GMAPS.gmsCoreLabel);
         assertEquals("Audio channel", NavigatorPatchStore.Profile.GMAPS.optionalLabel);
         assertEquals("PiP", NavigatorPatchStore.Profile.GMAPS.alertLabel);
     }
@@ -33,6 +34,12 @@ public final class NavigatorPatchPolicyTest {
                 NavigatorPatchStore.Profile.GMAPS, "PATCHABLE", "FAILED", "FAILED"));
         assertFalse(NavigatorPatchStore.isPatchEnabled(
                 NavigatorPatchStore.Profile.GMAPS, "PATCHED", "PATCHED", "PATCHED"));
+    }
+
+    @Test
+    public void gmapsAcceptsGmsCoreOnlyPatch() {
+        assertTrue(NavigatorPatchStore.isPatchEnabled(
+                NavigatorPatchStore.Profile.GMAPS, "FAILED", "PATCHABLE", "FAILED", "FAILED"));
     }
 
     @Test

@@ -101,6 +101,7 @@ final class HudOutputCoordinator {
     private Runnable pendingFinalClearCompletion;
     private Runnable pendingTransitionClearCompletion;
     private boolean pendingFinalClearSucceeded;
+    private boolean finalClearCompletionDispatched;
     private boolean finalClearInProgress;
     private long finalClearStartedAtMs;
 
@@ -543,6 +544,7 @@ final class HudOutputCoordinator {
         if (target == Source.NONE) {
             pendingFinalClearCompletion = clearCompletion;
             pendingFinalClearSucceeded = false;
+            finalClearCompletionDispatched = false;
             finalClearInProgress = previous != Source.NONE;
             finalClearStartedAtMs = finalClearInProgress
                     ? SystemClock.elapsedRealtime() : 0L;
@@ -925,7 +927,7 @@ final class HudOutputCoordinator {
             pendingFinalClearSucceeded = true;
             finalClearInProgress = false;
             finalClearStartedAtMs = 0L;
-            completeFinalClear();
+            releaseFinalClearCompletionOnce();
             stopServiceAndUnbind(reason);
             HudDeliveryStatus.reset();
             return;
@@ -973,6 +975,7 @@ final class HudOutputCoordinator {
                 previous, "final_clear");
         if (clearedAtMs >= 0L) {
             pendingFinalClearSucceeded = true;
+            releaseFinalClearCompletionOnce();
         }
         long remainingEndDetectedAtMs = endDetectedAtMs;
         if (clearedAtMs >= 0L && endDetectedAtMs > 0L) {
@@ -1007,7 +1010,7 @@ final class HudOutputCoordinator {
             pendingFinalClearSucceeded = false;
             stopServiceAndUnbind(reason);
             HudDeliveryStatus.reset();
-            completeFinalClear();
+            releaseFinalClearCompletionOnce();
         }, FINAL_STOP_DELAY_MS);
     }
 
@@ -1025,7 +1028,7 @@ final class HudOutputCoordinator {
         finalClearStartedAtMs = 0L;
         pendingFinalClearSucceeded = false;
         HudDeliveryStatus.reset();
-        completeFinalClear();
+        releaseFinalClearCompletionOnce();
     }
 
     static boolean finalClearTimedOutForTest(long startedAtMs, long nowMs) {
@@ -1102,12 +1105,19 @@ final class HudOutputCoordinator {
         runCompletion(completion);
     }
 
+    private void releaseFinalClearCompletionOnce() {
+        if (finalClearCompletionDispatched) return;
+        finalClearCompletionDispatched = true;
+        completeFinalClear();
+    }
+
     private Runnable takePendingClearCompletions() {
         Runnable completion = chainCompletions(
                 pendingFinalClearCompletion, pendingTransitionClearCompletion);
         pendingFinalClearCompletion = null;
         pendingTransitionClearCompletion = null;
         pendingFinalClearSucceeded = false;
+        finalClearCompletionDispatched = false;
         finalClearInProgress = false;
         finalClearStartedAtMs = 0L;
         return completion;

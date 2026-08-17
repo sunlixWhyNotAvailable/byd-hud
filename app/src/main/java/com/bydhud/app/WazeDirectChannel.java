@@ -111,6 +111,7 @@ public final class WazeDirectChannel {
     private boolean navigationActive;
     private boolean acceptedRouteFrame;
     private boolean terminalRouteLatched;
+    private long terminalBridgeGeneration;
     private boolean unavailableBindFailureReported;
     private String bindDeferredReason = "";
     private int routingSequence;
@@ -149,6 +150,38 @@ public final class WazeDirectChannel {
     public void start(String reason, Mode requestedMode) {
         Mode selected = requestedMode == null ? Mode.CLUSTER : requestedMode;
         runOnChannel(() -> startOnChannel(reason, selected));
+    }
+
+    /** Opens a terminal-fenced route only after the lifecycle consumer proves
+     * a fresh reason or a strictly newer bridge generation. */
+    void openFreshRouteForLifecycle(String reason, long bridgeGeneration,
+            boolean explicitFreshReason) {
+        runOnChannel(() -> {
+            if (!terminalRouteLatched) return;
+            if (!shouldAcceptFreshRouteProofForTest(
+                    true, terminalBridgeGeneration, bridgeGeneration,
+                    explicitFreshReason)) {
+                log("fresh route proof rejected reason=" + safeText(reason)
+                        + " bridgeGeneration=" + bridgeGeneration
+                        + " terminalBridgeGeneration=" + terminalBridgeGeneration);
+                return;
+            }
+            if (bridgeGeneration > terminalBridgeGeneration) {
+                terminalBridgeGeneration = bridgeGeneration;
+            }
+            rearmRouteTerminal("fresh_lifecycle:" + safeText(reason));
+        });
+    }
+
+    /** Applies a lifecycle terminal to callbacks that did not reach Waze's
+     * navigation host (for example an observer-only state transition). */
+    void noteRouteTerminalGeneration(String reason, long bridgeGeneration) {
+        runOnChannel(() -> {
+            if (bridgeGeneration > terminalBridgeGeneration) {
+                terminalBridgeGeneration = bridgeGeneration;
+            }
+            latchRouteTerminal("lifecycle:" + safeText(reason));
+        });
     }
 
     public void stop(String reason) {
@@ -282,7 +315,6 @@ public final class WazeDirectChannel {
         navigationDistanceKnown = false;
         alert = DirectTbtFrame.AlertOverlay.inactive();
         maneuverIcons.clear();
-        rearmRouteTerminal("channel_start");
     }
 
     private void suspendOnChannel(String reason) {
@@ -540,7 +572,6 @@ public final class WazeDirectChannel {
             throw new IllegalStateException("Unexpected app manager " + value);
         }
         if (suspended) return;
-        rearmRouteTerminal("car_app_session_connected");
         setHandshakeAvailable("session_ready:" + startReason);
         if (routeTiming != null) {
             routeTiming.markSessionReady(SystemClock.elapsedRealtime());
@@ -740,7 +771,13 @@ public final class WazeDirectChannel {
     }
 
     private void beginNavigation(String reason) {
-        if (suspended || navigationActive) return;
+        if (suspended || navigationActive || terminalRouteLatched) {
+            if (terminalRouteLatched) {
+                log("navigation start rejected by terminal latch reason="
+                        + safeText(reason));
+            }
+            return;
+        }
         navigationActive = true;
         maneuverIcons.clear();
         recordDirectActivity("navigation_started");
@@ -751,7 +788,6 @@ public final class WazeDirectChannel {
 
     private void explicitNavigationStarted() {
         if (suspended) return;
-        rearmRouteTerminal("waze_navigation_started");
         beginNavigation("waze_navigation_started");
     }
 
@@ -766,6 +802,13 @@ public final class WazeDirectChannel {
         if (terminalRouteLatched) return;
         terminalRouteLatched = true;
         log("route terminal latch set reason=" + reason);
+    }
+
+    static boolean shouldAcceptFreshRouteProofForTest(
+            boolean terminalLatched, long terminalBridgeGeneration,
+            long incomingBridgeGeneration, boolean explicitFreshReason) {
+        return !terminalLatched || explicitFreshReason
+                || incomingBridgeGeneration > terminalBridgeGeneration;
     }
 
     private void endNavigation(String reason) {

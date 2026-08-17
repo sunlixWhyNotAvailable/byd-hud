@@ -56,7 +56,8 @@ public final class ShareShutdownSourceContractTest {
         assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
         assertFalse(shareEffect.contains("NonCancellable"));
         assertTrue(shareEffect.contains("runInterruptible(Dispatchers.IO)"));
-        assertTrue(source.contains("StorageShareProgressOverlay("));
+        assertTrue(source.contains("OperationProgressStack("));
+        assertTrue(source.contains("storageShareTerminalPhase = \"CANCELLED\""));
         assertTrue(source.contains("waitingForWrites = \"Очікування записів\""));
         assertTrue(source.contains("archiving = \"Archiving\""));
         assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));

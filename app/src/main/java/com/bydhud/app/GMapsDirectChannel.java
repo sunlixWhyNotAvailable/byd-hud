@@ -671,6 +671,7 @@ final class GMapsDirectChannel {
         long incomingProducerEpoch = data.getLong("producerEpoch", -1L);
         long incomingRouteGeneration = routeGeneration(data);
         long renderGeneration = data.getLong("renderGeneration", -1L);
+        long sourceSequence = data.getLong("sourceSequence", -1L);
         byte[] png = data.getByteArray("png");
         int width = data.getInt("width", 0);
         int height = data.getInt("height", 0);
@@ -691,6 +692,7 @@ final class GMapsDirectChannel {
                     + " producerEpoch=" + incomingProducerEpoch
                     + " routeGeneration=" + incomingRouteGeneration
                     + " renderGeneration=" + renderGeneration
+                    + " sourceSequence=" + sourceSequence
                     + " width=" + width + " height=" + height
                     + " bytes=" + (png == null ? 0 : png.length));
             return;
@@ -700,7 +702,8 @@ final class GMapsDirectChannel {
         ManeuverBitmap previous = maneuverBitmaps.get(maneuver);
         ManeuverBitmap candidate = new ManeuverBitmap(
                 maneuver, viewId, png, width, height, sourceAtMs,
-                incomingProducerEpoch, renderGeneration, incomingRouteGeneration);
+                incomingProducerEpoch, renderGeneration, incomingRouteGeneration,
+                sourceSequence);
         if (!candidate.isNewerThan(previous, generationAware)) {
             if (!Arrays.equals(previous.png, png)) {
                 listener.onLog("maneuver bitmap ignored reason=stale maneuver=" + maneuver
@@ -710,7 +713,9 @@ final class GMapsDirectChannel {
             return;
         }
         maneuverBitmaps.put(maneuver, candidate);
-        boolean currentMatch = candidate.matches(currentManeuver) && currentFrame != null;
+        boolean ordered = sourceSequence < 0L || sourceSequence <= lastSequence;
+        boolean currentMatch = ordered && candidate.matches(currentManeuver)
+                && currentFrame != null;
         long frameDelayMs = currentStructuredFrameAtMs <= 0L
                 ? -1L : sourceAtMs - currentStructuredFrameAtMs;
         listener.onLog("bitmap_rx sequence=" + lastSequence
@@ -719,6 +724,7 @@ final class GMapsDirectChannel {
                 + " sha=" + candidate.sha
                 + " producerEpoch=" + incomingProducerEpoch
                 + " renderGeneration=" + renderGeneration
+                + " sourceSequence=" + sourceSequence
                 + " bytes=" + candidate.png.length
                 + " width=" + width
                 + " height=" + height
@@ -1017,24 +1023,33 @@ final class GMapsDirectChannel {
         final long producerEpoch;
         final long renderGeneration;
         final long routeGeneration;
+        final long sourceSequence;
         final String sha;
 
         ManeuverBitmap(String maneuver, String viewId, byte[] png,
                 int width, int height, long sourceAtMs) {
             this(maneuver, viewId, png, width, height, sourceAtMs, 0L,
-                    Math.max(0L, sourceAtMs), -1L);
+                    Math.max(0L, sourceAtMs), -1L, -1L);
         }
 
         ManeuverBitmap(String maneuver, String viewId, byte[] png,
                 int width, int height, long sourceAtMs,
                 long producerEpoch, long renderGeneration) {
             this(maneuver, viewId, png, width, height, sourceAtMs,
-                    producerEpoch, renderGeneration, -1L);
+                    producerEpoch, renderGeneration, -1L, -1L);
         }
 
         ManeuverBitmap(String maneuver, String viewId, byte[] png,
                 int width, int height, long sourceAtMs,
                 long producerEpoch, long renderGeneration, long routeGeneration) {
+            this(maneuver, viewId, png, width, height, sourceAtMs,
+                    producerEpoch, renderGeneration, routeGeneration, -1L);
+        }
+
+        ManeuverBitmap(String maneuver, String viewId, byte[] png,
+                int width, int height, long sourceAtMs,
+                long producerEpoch, long renderGeneration, long routeGeneration,
+                long sourceSequence) {
             this.maneuver = safe(maneuver);
             this.viewId = safe(viewId);
             this.png = png == null ? new byte[0] : png.clone();
@@ -1044,6 +1059,7 @@ final class GMapsDirectChannel {
             this.producerEpoch = producerEpoch;
             this.renderGeneration = renderGeneration;
             this.routeGeneration = routeGeneration;
+            this.sourceSequence = sourceSequence;
             this.sha = DirectTbtPayload.shortSha256(this.png);
         }
 
@@ -1060,6 +1076,10 @@ final class GMapsDirectChannel {
 
         boolean isNewerThan(ManeuverBitmap previous, boolean generationAware) {
             if (previous == null) return true;
+            if (sourceSequence >= 0L && previous.sourceSequence >= 0L
+                    && sourceSequence != previous.sourceSequence) {
+                return sourceSequence > previous.sourceSequence;
+            }
             if (!generationAware) return sourceAtMs > previous.sourceAtMs;
             return isNewerThan(previous);
         }
@@ -1102,7 +1122,9 @@ final class GMapsDirectChannel {
         static BitmapSelection select(long sequence, String maneuver,
                 ManeuverBitmap candidate, byte[] fallbackPng,
                 long structuredFrameAtMs, String googleReason) {
-            if (candidate != null && candidate.matches(maneuver)) {
+            if (candidate != null && candidate.matches(maneuver)
+                    && (candidate.sourceSequence < 0L
+                    || candidate.sourceSequence <= sequence)) {
                 return google(sequence, candidate, fallbackPng,
                         structuredFrameAtMs, googleReason);
             }

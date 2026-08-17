@@ -141,6 +141,7 @@ final class TbtTxLog {
                 && safe(left.operation).equals(safe(right.operation))
                 && safe(left.target).equals(safe(right.target))
                 && equal(left.nativeId, right.nativeId)
+                && equal(left.intermediateAmapIcon, right.intermediateAmapIcon)
                 && equal(left.amapIcon, right.amapIcon)
                 && equal(left.roundaboutExit, right.roundaboutExit)
                 && equal(left.distanceMeters, right.distanceMeters)
@@ -214,6 +215,7 @@ final class TbtTxLog {
 
     private static void appendSemanticFields(StringBuilder line, Entry entry) {
         appendNullableInt(line, "nativeId", entry.nativeId);
+        appendNullableInt(line, "intermediateAmapIcon", entry.intermediateAmapIcon);
         appendNullableInt(line, "amapIcon", entry.amapIcon);
         appendNullableInt(line, "roundaboutExit", entry.roundaboutExit);
         appendNullableLong(line, "distanceMeters", entry.distanceMeters);
@@ -280,6 +282,7 @@ final class TbtTxLog {
         final String operation;
         final String target;
         final Integer nativeId;
+        final Integer intermediateAmapIcon;
         final Integer amapIcon;
         final Integer roundaboutExit;
         final Long distanceMeters;
@@ -305,6 +308,7 @@ final class TbtTxLog {
             operation = safe(builder.operation);
             target = safe(builder.target);
             nativeId = builder.nativeId;
+            intermediateAmapIcon = builder.intermediateAmapIcon;
             amapIcon = builder.amapIcon;
             roundaboutExit = builder.roundaboutExit;
             distanceMeters = builder.distanceMeters;
@@ -340,6 +344,7 @@ final class TbtTxLog {
             private String operation = "";
             private String target = "";
             private Integer nativeId;
+            private Integer intermediateAmapIcon;
             private Integer amapIcon;
             private Integer roundaboutExit;
             private Long distanceMeters;
@@ -364,6 +369,7 @@ final class TbtTxLog {
             Builder operation(String value) { operation = value; return this; }
             Builder target(String value) { target = value; return this; }
             Builder nativeId(Integer value) { nativeId = value; return this; }
+            Builder intermediateAmapIcon(Integer value) { intermediateAmapIcon = value; return this; }
             Builder amapIcon(Integer value) { amapIcon = value; return this; }
             Builder roundaboutExit(Integer value) { roundaboutExit = value; return this; }
             Builder distanceMeters(Long value) { distanceMeters = value; return this; }

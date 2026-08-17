@@ -70,7 +70,8 @@ public final class ComposeSnapshotEqualityTest {
     private static MainActivity.ComposePatchOperation patchOperation() {
         return new MainActivity.ComposePatchOperation(
                 "waze", NavigatorPatchStore.OP_RECOVERY,
-                NavigatorPatchStore.RECOVERY_REQUIRED, "restore", true, false, true);
+                NavigatorPatchStore.RECOVERY_REQUIRED, "restore", "token", 42L,
+                75, "", 0L, true, false, true, false, true);
     }
 
     private static NavigatorAssetManager.AssetSnapshot assetSnapshot() {
@@ -108,10 +109,10 @@ public final class ComposeSnapshotEqualityTest {
                 arguments[index] = Collections.singletonList(patchRow());
             } else if (genericName.contains("AssetSnapshot")) {
                 arguments[index] = Collections.singletonList(assetSnapshot());
+            } else if (genericName.contains("ComposePatchOperation")) {
+                arguments[index] = Collections.singletonList(patchOperation());
             } else if (List.class.isAssignableFrom(type)) {
                 arguments[index] = Collections.singletonList("path");
-            } else if (type == MainActivity.ComposePatchOperation.class) {
-                arguments[index] = patchOperation();
             } else {
                 throw new AssertionError("Unhandled snapshot parameter: " + genericName);
             }
