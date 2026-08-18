@@ -8,10 +8,11 @@ import java.util.List;
 
 /** Fixed IPC and diagnostic contract shared by the app and its shell helper. */
 final class InstrumentProxyContract {
-    static final int PROTOCOL_VERSION = 2;
+    static final int PROTOCOL_VERSION = 3;
     static final int CAP_SYSTEM_CONTEXT = 1;
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;
+    static final int CAP_INSTRUMENT_LANES = 1 << 3;
     static final String ACTION_CONNECTED =
             "com.bydhud.app.action.INSTRUMENT_PROXY_CONNECTED";
     static final String EXTRA_GENERATION = "generation";
@@ -193,6 +194,30 @@ final class InstrumentProxyContract {
         return icon >= 0 && icon <= 49
                 && distanceMeters >= -1 && distanceMeters <= 2_000_000
                 && preserveText(road).length() <= 512;
+    }
+
+    static boolean validGuidance(int icon, int distanceMeters, String road,
+            int[] laneDirections, int[] laneRecommendations) {
+        return validGuidance(icon, distanceMeters, road)
+                && validLanes(laneDirections, laneRecommendations);
+    }
+
+    static boolean validLanes(int[] laneDirections, int[] laneRecommendations) {
+        if (laneDirections == null || laneRecommendations == null
+                || laneDirections.length != laneRecommendations.length
+                || laneDirections.length > HudLaneModel.MAX_LANES) {
+            return false;
+        }
+        for (int index = 0; index < laneDirections.length; index++) {
+            int direction = laneDirections[index];
+            int recommendation = laneRecommendations[index];
+            if (direction < 0 || direction >= 255
+                    || (recommendation != 255
+                    && (recommendation < 0 || recommendation >= 255))) {
+                return false;
+            }
+        }
+        return true;
     }
 
     static boolean requiredOperationsSucceeded(

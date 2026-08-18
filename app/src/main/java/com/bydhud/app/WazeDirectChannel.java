@@ -152,24 +152,13 @@ public final class WazeDirectChannel {
         runOnChannel(() -> startOnChannel(reason, selected));
     }
 
-    /** Opens a terminal-fenced route only after the lifecycle consumer proves
-     * a fresh reason or a strictly newer bridge generation. */
-    void openFreshRouteForLifecycle(String reason, long bridgeGeneration,
-            boolean explicitFreshReason) {
+    /** Applies the authoritative fresh-route decision already made by the lifecycle store. */
+    void openAcceptedFreshRoute(String reason, long bridgeGeneration) {
         runOnChannel(() -> {
-            if (!terminalRouteLatched) return;
-            if (!shouldAcceptFreshRouteProofForTest(
-                    true, terminalBridgeGeneration, bridgeGeneration,
-                    explicitFreshReason)) {
-                log("fresh route proof rejected reason=" + safeText(reason)
-                        + " bridgeGeneration=" + bridgeGeneration
-                        + " terminalBridgeGeneration=" + terminalBridgeGeneration);
-                return;
-            }
             if (bridgeGeneration > terminalBridgeGeneration) {
                 terminalBridgeGeneration = bridgeGeneration;
             }
-            rearmRouteTerminal("fresh_lifecycle:" + safeText(reason));
+            rearmRouteTerminal("accepted_fresh_route:" + safeText(reason));
         });
     }
 
@@ -802,13 +791,6 @@ public final class WazeDirectChannel {
         if (terminalRouteLatched) return;
         terminalRouteLatched = true;
         log("route terminal latch set reason=" + reason);
-    }
-
-    static boolean shouldAcceptFreshRouteProofForTest(
-            boolean terminalLatched, long terminalBridgeGeneration,
-            long incomingBridgeGeneration, boolean explicitFreshReason) {
-        return !terminalLatched || explicitFreshReason
-                || incomingBridgeGeneration > terminalBridgeGeneration;
     }
 
     private void endNavigation(String reason) {

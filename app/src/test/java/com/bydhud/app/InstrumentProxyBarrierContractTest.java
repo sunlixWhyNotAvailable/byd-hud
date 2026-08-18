@@ -36,7 +36,9 @@ public final class InstrumentProxyBarrierContractTest {
                 "finishTerminalGuidanceClear(requestToken,\n                    Result.unavailable"));
         assertTrue(source.contains("guidanceBarrierActive = false"));
         assertTrue(source.contains("if (deferred != null && !enqueueCall"));
-        assertTrue(source.contains("current.sendGuidance(\n                        currentGeneration, 0, -1, \"\")"));
+        assertTrue(source.contains("current.sendGuidance(\n"
+                + "                        currentGeneration, 0, -1, \"\", "
+                + "new int[0], new int[0])"));
     }
 
     @Test

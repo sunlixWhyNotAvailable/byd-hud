@@ -249,6 +249,8 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
                 + " terminal=" + result.terminal
                 + " accepted=" + result.accepted
                 + " changed=" + result.changed
+                + " freshRouteAccepted=" + result.freshRouteAccepted
+                + " supersedingInactive=" + result.supersedingInactive
                 + " decision=" + result.reason
                 + " senderElapsedMs=" + eventElapsedMs
                 + " receiverElapsedMs=" + receivedElapsedMs
@@ -263,10 +265,7 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
 
     static void dispatchAccepted(Context context, long eventElapsedMs,
             WazeRouteLifecycleStore.RecordResult result) {
-        NavHudLiveSender.onWazeRouteLifecycleEvent(
-                context.getApplicationContext(), result.snapshot.active, result.terminal,
-                eventElapsedMs, result.snapshot.bridgeGeneration,
-                result.snapshot.bridgeCapabilities, result.changed, result.reason);
+        NavHudLiveSender.onWazeRouteLifecycleEvent(eventElapsedMs, result);
         if (result.snapshot.active
                 && HudPrefs.isBootEnabled(context)
                 && !HudPrefs.isUserShutdownActive(context)

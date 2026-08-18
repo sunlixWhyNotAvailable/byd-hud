@@ -171,6 +171,8 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 
 The custom surface is route-scoped. Changing its switch during an active route does not hot-swap sessions. A five-second readiness failure keeps the standard Waze direct guidance active and suppresses another surface attempt until the next route. Returning to Waze during the same active route restores the surface; route-end reason codes close it only for terminal events. The Waze alert switch controls HUD alert output only; alerts supplied to the custom Waze surface remain visible there.
 
+The persisted Waze lifecycle store is the sole authority for reopening a terminal-fenced direct route. It retains an accepted inactive `NEW_DEST`, `NEW_ROUTE_RECEIVED`, or `NEW_ROUTE_REQUESTED` transition until the matching active event arrives, while stale or lower-generation events and same-generation replay snapshots cannot reopen the route. HUD toggles, dashboard placement, and Cluster/Surface callback-session fences remain independent from this lifecycle decision.
+
 ## Dashboard projection
 
 `Send to dashboard` moves a running application to the instrument cluster. `Send to main` returns it to the center display.
@@ -294,6 +296,8 @@ The `Manual` tab is a diagnostic tool. It can send individual text, distance, la
 7. For a compatible navigator, the direct channel starts automatically. A legacy input starts only if its capture settings, permissions, and services were enabled separately. The Waze screen-capture channel is off by default and no longer supported by the developer.
 
 When the existing ADB RSA key is authorized, BYD HUD starts its private shell-UID Instrument/TBT wrapper immediately with the persistent runtime. It does not wait for route start and does not add a separate UI status. Without authorized ADB/RSA, direct RoadInfo SOME/IP HUD output remains available, but shell-UID Instrument/TBT card compatibility is unavailable. Protocol `30011`, the stock AMap adapter, and RoadInfo publication remain independent planes.
+
+Instrument proxy protocol v3 carries validated lane direction/recommendation arrays with the existing maneuver guidance. When `Lane output` is enabled and the direct source supplies lanes, BYD HUD writes the same normalized lane state through BYD Setting fields and direct Instrument/FID lane fields; empty or terminal guidance clears those fields. A failed lane write leaves successful maneuver guidance valid and allows the next guidance frame to retry the combined payload. RoadInfo lane publication remains independent and does not require ADB.
 
 ### What requires ADB
 

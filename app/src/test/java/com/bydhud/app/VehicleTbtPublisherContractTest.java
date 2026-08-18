@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -11,6 +12,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
+import java.util.Collections;
 
 public final class VehicleTbtPublisherContractTest {
     @Test
@@ -29,7 +32,8 @@ public final class VehicleTbtPublisherContractTest {
         assertTrue(proxy.contains("sendAutoNaviStatus"));
         assertTrue(proxy.contains("sendSimpleGuidanceInfo"));
         assertTrue(proxy.contains("sendNextPathName"));
-        assertFalse(proxy.contains("sendLaneGuidanceInfo"));
+        assertTrue(proxy.contains("sendLaneGuidanceInfo"));
+        assertTrue(proxy.contains("CAP_INSTRUMENT_LANES"));
         assertFalse(source.contains("InstrumentApi.open"));
         assertTrue(source.contains("AUTONAVI_STANDARD_BROADCAST_SEND"));
         assertTrue(source.contains("KEY_TYPE\", 10001"));
@@ -43,6 +47,43 @@ public final class VehicleTbtPublisherContractTest {
         assertTrue(source.contains("addUnavailableListener"));
         assertTrue(source.contains("tbt_proxy_unavailable preserve_amap_fallback"));
         assertTrue(source.contains("tbt_proxy_unavailable fallback_terminal"));
+    }
+
+    @Test
+    public void normalizedAndManualLanesUseTheVerifiedBydDirectionPair() {
+        VehicleTbtPublisher.LanePayload direct =
+                VehicleTbtPublisher.lanePayloadForTest(Arrays.asList(
+                        new DirectTbtFrame.Lane(2, false, "left"),
+                        new DirectTbtFrame.Lane(9, true, "straight"),
+                        new DirectTbtFrame.Lane(3, false, "right")));
+        assertArrayEquals(new int[]{4, 0, 3}, direct.directions);
+        assertArrayEquals(new int[]{255, 0, 255}, direct.recommendations);
+
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 3;
+        manual.laneString = "L|S*|R";
+        VehicleTbtPublisher.LanePayload manualPayload =
+                VehicleTbtPublisher.lanePayloadForTest(manual);
+        assertArrayEquals(new int[]{1, 0, 3}, manualPayload.directions);
+        assertArrayEquals(new int[]{255, 0, 255}, manualPayload.recommendations);
+    }
+
+    @Test
+    public void failedLanePlaneInvalidatesGuidanceDedupWithoutFailingCoreGuidance() {
+        assertTrue(VehicleTbtPublisher.laneOperationsSucceededForTest(
+                Collections.singletonList(new InstrumentProxyContract.Operation(
+                        "instrument_fid:1139806224", 0, 0L, ""))));
+        assertTrue(VehicleTbtPublisher.laneOperationsSucceededForTest(Arrays.asList(
+                new InstrumentProxyContract.Operation(
+                        "setting_fid:1285554200", 0, 0L, ""),
+                new InstrumentProxyContract.Operation(
+                        "instrument_lane:sendLaneGuidanceInfo", 0, 0L, ""))));
+        assertFalse(VehicleTbtPublisher.laneOperationsSucceededForTest(Arrays.asList(
+                new InstrumentProxyContract.Operation(
+                        "setting_fid:1285554200", -1, 0L, "failed"),
+                new InstrumentProxyContract.Operation(
+                        "instrument_lane:sendLaneGuidanceInfo", 0, 0L, ""))));
     }
 
     @Test

@@ -73,6 +73,31 @@ public final class WazeRouteLifecycleV2ReceiverTest {
                 "requestWazeRouteStateSnapshot(\"tbt-observer\", false)"));
     }
 
+    @Test
+    public void acceptedFreshRouteDecisionStaysStructuredEndToEnd() throws IOException {
+        String store = source("WazeRouteLifecycleStore.java");
+        String receiver = source("WazeRouteLifecycleReceiver.java");
+        String sender = source("NavHudLiveSender.java");
+        String channel = source("WazeDirectChannel.java");
+
+        assertTrue(store.contains("KEY_PENDING_FRESH_ROUTE_GENERATION"));
+        assertTrue(store.contains("KEY_PENDING_FRESH_ROUTE_ELAPSED_MS"));
+        assertTrue(store.contains("KEY_PENDING_FRESH_ROUTE_REASON_CODE"));
+        assertTrue(store.contains("freshRouteAcceptedForEvent("));
+        assertTrue(store.contains("freshRouteAccepted, supersedingInactive"));
+        assertTrue(receiver.contains("freshRouteAccepted="));
+        assertTrue(receiver.contains("supersedingInactive="));
+        assertTrue(receiver.contains(
+                "NavHudLiveSender.onWazeRouteLifecycleEvent(eventElapsedMs, result)"));
+        assertTrue(sender.contains("WazeRouteLifecycleStore.RecordResult result"));
+        assertTrue(sender.contains("if (result.freshRouteAccepted)"));
+        assertTrue(sender.contains("wazeDirectChannel.openAcceptedFreshRoute"));
+        assertTrue(sender.contains("wazeSurfaceDirectChannel.openAcceptedFreshRoute"));
+        assertFalse(sender.contains("isExplicitFreshWazeLifecycleReasonForTest"));
+        assertTrue(channel.contains("void openAcceptedFreshRoute("));
+        assertFalse(channel.contains("shouldAcceptFreshRouteProofForTest"));
+    }
+
     private static String source(String name) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/").resolve(name).normalize();

@@ -66,7 +66,7 @@ public final class WazeSpeedLimitLifecycleSourceContractTest {
                 "private void onWazeDirectNavigationEnded(",
                 "private void onWazeRouteLifecycleEventOnMain(");
         String lifecycleTerminal = between(source,
-                "if (terminal) {",
+                "if (result.terminal) {",
                 "if (!routeActive) {");
 
         assertFalse(navigationStarted.contains("clearDirectSpeedLimit("));

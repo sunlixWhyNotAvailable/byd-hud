@@ -230,8 +230,10 @@ final class InstrumentProxyManager {
                         current.sendNavigationStatus(currentGeneration, status));
     }
 
-    void sendGuidance(int icon, int distanceMeters, String road, ResultCallback callback) {
-        if (!InstrumentProxyContract.validGuidance(icon, distanceMeters, road)) {
+    void sendGuidance(int icon, int distanceMeters, String road,
+            int[] laneDirections, int[] laneRecommendations, ResultCallback callback) {
+        if (!InstrumentProxyContract.validGuidance(
+                icon, distanceMeters, road, laneDirections, laneRecommendations)) {
             deliver(callback, Result.unavailable("invalid guidance frame"));
             return;
         }
@@ -240,7 +242,8 @@ final class InstrumentProxyManager {
         boolean deferredPath;
         synchronized (callLock) {
             PendingGuidance next = new PendingGuidance(
-                    icon, distanceMeters, preserveText(road), callback);
+                    icon, distanceMeters, preserveText(road),
+                    laneDirections, laneRecommendations, callback);
             deferredPath = guidanceBarrierActive;
             if (deferredPath) {
                 superseded = deferredGuidance;
@@ -330,7 +333,7 @@ final class InstrumentProxyManager {
         executeCall("terminal_guidance_clear",
                 result -> finishTerminalGuidanceClear(requestToken, result),
                 (current, currentGeneration) -> current.sendGuidance(
-                        currentGeneration, 0, -1, ""));
+                        currentGeneration, 0, -1, "", new int[0], new int[0]));
     }
 
     private void finishTerminalGuidanceClear(long requestToken, Result result) {
@@ -380,7 +383,8 @@ final class InstrumentProxyManager {
         executeCall("guidance", request.callback,
                 (current, currentGeneration) -> current.sendGuidance(
                         currentGeneration, request.icon,
-                        request.distanceMeters, request.road));
+                        request.distanceMeters, request.road,
+                        request.laneDirections, request.laneRecommendations));
     }
 
     private void submitCall(String operation, ResultCallback callback, RemoteCall remoteCall) {
@@ -1069,13 +1073,18 @@ final class InstrumentProxyManager {
         final int icon;
         final int distanceMeters;
         final String road;
+        final int[] laneDirections;
+        final int[] laneRecommendations;
         final ResultCallback callback;
 
         PendingGuidance(int icon, int distanceMeters,
-                String road, ResultCallback callback) {
+                String road, int[] laneDirections, int[] laneRecommendations,
+                ResultCallback callback) {
             this.icon = icon;
             this.distanceMeters = distanceMeters;
             this.road = road;
+            this.laneDirections = laneDirections.clone();
+            this.laneRecommendations = laneRecommendations.clone();
             this.callback = callback;
         }
     }

@@ -111,34 +111,6 @@ public final class WazeLifecyclePolicyTest {
     }
 
     @Test
-    public void freshLifecycleProofOpensFenceButSameGenerationSnapshotDoesNot() {
-        assertFalse(NavHudLiveSender.shouldOpenFreshWazeRouteForTest(
-                true, false, false));
-        assertTrue(NavHudLiveSender.shouldOpenFreshWazeRouteForTest(
-                true, true, false));
-        assertTrue(NavHudLiveSender.shouldOpenFreshWazeRouteForTest(
-                true, false, true));
-        assertTrue(NavHudLiveSender.isExplicitFreshWazeLifecycleReasonForTest(
-                "transition:NEW_ROUTE_RECEIVED:event=state"));
-        assertFalse(NavHudLiveSender.isExplicitFreshWazeLifecycleReasonForTest(
-                "snapshot_replay_noop:UNAVAILABLE:event=state_snapshot"));
-    }
-
-    @Test
-    public void directChannelFreshProofRequiresNewBridgeOrExplicitReason() {
-        assertFalse(WazeDirectChannel.shouldAcceptFreshRouteProofForTest(
-                true, 7L, 6L, false));
-        assertFalse(WazeDirectChannel.shouldAcceptFreshRouteProofForTest(
-                true, 7L, 0L, false));
-        assertTrue(WazeDirectChannel.shouldAcceptFreshRouteProofForTest(
-                true, 7L, 8L, false));
-        assertTrue(WazeDirectChannel.shouldAcceptFreshRouteProofForTest(
-                true, 7L, 7L, true));
-        assertTrue(WazeDirectChannel.shouldAcceptFreshRouteProofForTest(
-                false, 7L, 0L, false));
-    }
-
-    @Test
     public void legacySessionProofBlocksSameGenerationAndOpensOnlyNewSession() {
         assertFalse(NavHudLiveSender.shouldOpenLegacyRearmForTest(true, 5, 5));
         assertTrue(NavHudLiveSender.shouldOpenLegacyRearmForTest(true, 5, 6));
@@ -189,13 +161,23 @@ public final class WazeLifecyclePolicyTest {
         try {
             DirectSpeedLimitStore.update(WAZE, 50, 50, "km/h", 1L);
 
-            NavHudLiveSender.onWazeRouteLifecycleEvent(
-                    null, true, false, 2L, true, "test-start");
+            WazeRouteLifecycleStore.RecordResult start =
+                    new WazeRouteLifecycleStore.RecordResult(
+                            true, true,
+                            new WazeRouteLifecycleStore.Snapshot(true, 2L, 0L),
+                            "test-start", false, true,
+                            WazeRouteLifecycleStore.REASON_UNAVAILABLE, "LOCAL_DIRECT");
+            NavHudLiveSender.onWazeRouteLifecycleEvent(2L, start);
             assertTrue(DirectSpeedLimitStore.snapshot(WAZE).isActive());
             assertEquals(50, DirectSpeedLimitStore.snapshot(WAZE).getDisplayValue());
 
-            NavHudLiveSender.onWazeRouteLifecycleEvent(
-                    null, false, true, 3L, true, "test-terminal");
+            WazeRouteLifecycleStore.RecordResult terminal =
+                    new WazeRouteLifecycleStore.RecordResult(
+                            true, true,
+                            new WazeRouteLifecycleStore.Snapshot(false, 3L, 0L),
+                            "test-terminal", true, false,
+                            WazeRouteLifecycleStore.REASON_UNAVAILABLE, "LOCAL_DIRECT");
+            NavHudLiveSender.onWazeRouteLifecycleEvent(3L, terminal);
             assertFalse(DirectSpeedLimitStore.snapshot(WAZE).isActive());
         } finally {
             DirectSpeedLimitStore.clear(WAZE);

@@ -1,5 +1,6 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -37,6 +38,18 @@ public final class InstrumentProxyContractTest {
         for (int index = 0; index < 513; index++) oversizedWhitespace.append(' ');
         assertFalse(InstrumentProxyContract.validGuidance(
                 12, 10, oversizedWhitespace.toString()));
+        assertTrue(InstrumentProxyContract.validGuidance(
+                12, 10, "Road", new int[]{4, 0, 3}, new int[]{255, 0, 255}));
+        assertTrue(InstrumentProxyContract.validGuidance(
+                0, -1, "", new int[0], new int[0]));
+        assertFalse(InstrumentProxyContract.validGuidance(
+                12, 10, "Road", new int[]{4, 0}, new int[]{255}));
+        assertFalse(InstrumentProxyContract.validGuidance(
+                12, 10, "Road", new int[]{255}, new int[]{255}));
+        assertEquals(5, InstrumentNavigationProxyService.laneGuideValueForTest(4, 255));
+        assertEquals(5, InstrumentNavigationProxyService.laneGuideValueForTest(4, 4));
+        assertEquals(26, InstrumentNavigationProxyService.laneGuideValueForTest(0, 0));
+        assertEquals(53, InstrumentNavigationProxyService.laneGuideValueForTest(4, 0));
     }
 
     @Test
@@ -46,10 +59,17 @@ public final class InstrumentProxyContractTest {
         String service = source(
                 "app/src/main/java/com/bydhud/app/InstrumentNavigationProxyService.java");
 
-        assertTrue(manager.contains("icon, distanceMeters, preserveText(road), callback"));
+        assertTrue(manager.contains("icon, distanceMeters, preserveText(road),\n"
+                + "                    laneDirections, laneRecommendations, callback"));
         assertTrue(service.contains("String roadText = road == null ? \"\" : road;"));
         assertTrue(service.contains("roadText.getBytes(StandardCharsets.UTF_16LE)"));
         assertTrue(service.contains("current == null ? null : current.next, roadText"));
+        assertTrue(service.contains("setting_fid:"));
+        assertTrue(service.contains("instrument_lane:sendLaneGuidanceInfo"));
+        assertTrue(service.contains("intArrayValue"));
+        assertFalse(service.contains("optionalMethod(\n"
+                + "                        instrumentClass, \"sendLaneGuidanceInfo\""));
+        assertTrue(service.contains("directions.length == 0 ? -1"));
     }
 
     @Test

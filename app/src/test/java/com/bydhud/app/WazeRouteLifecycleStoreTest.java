@@ -137,4 +137,39 @@ public final class WazeRouteLifecycleStoreTest {
                 terminal, true, false, 8L, 8L, false,
                 WazeRouteLifecycleStore.REASON_UNAVAILABLE));
     }
+
+    @Test
+    public void inactiveTransitionProofOpensOnlyItsFollowingActiveRoute() {
+        WazeRouteLifecycleStore.Snapshot terminal = new WazeRouteLifecycleStore.Snapshot(
+                false, 100L, 0L, 7L, 0, 7L);
+        assertTrue(WazeRouteLifecycleStore.shouldRecordPendingFreshRoute(
+                false, false, true, 4, 8L));
+        assertFalse(WazeRouteLifecycleStore.shouldRecordPendingFreshRoute(
+                true, false, true, 4, 8L));
+        assertFalse(WazeRouteLifecycleStore.shouldRecordPendingFreshRoute(
+                false, false, false, 4, 8L));
+        assertFalse(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                terminal, false, true, false,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE, 101L, 7L));
+
+        WazeRouteLifecycleStore.Snapshot pending = new WazeRouteLifecycleStore.Snapshot(
+                false, 200L, 0L, 8L, 0, 7L, 8L, 200L, 4);
+        assertTrue(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                pending, false, true, false,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE, 201L, 8L));
+        assertFalse(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                pending, true, true, false,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE, 201L, 8L));
+        assertFalse(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                pending, false, true, false,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE, 200L, 8L));
+        assertFalse(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                pending, false, true, false,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE, 201L, 7L));
+        assertTrue(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                pending, false, true, true, 8, 201L, 8L));
+        assertTrue(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                pending, false, true, false,
+                WazeRouteLifecycleStore.REASON_UNAVAILABLE, 201L, 9L));
+    }
 }

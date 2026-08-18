@@ -11,14 +11,15 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
-/** Source contracts for the Waze terminal fence and explicit fresh-route opening. */
+/** Source contracts for the Waze terminal fence and accepted fresh-route opening. */
 public final class WazeDirectTerminalFenceContractTest {
     @Test
-    public void channelCallbacksCannotRearmTerminalWithoutLifecycleProof() throws IOException {
+    public void channelCallbacksCannotRearmTerminalWithoutStoreDecision() throws IOException {
         String source = source("WazeDirectChannel.java");
-        assertTrue(source.contains("void openFreshRouteForLifecycle("));
+        assertTrue(source.contains("void openAcceptedFreshRoute("));
         assertTrue(source.contains("void noteRouteTerminalGeneration("));
         assertTrue(source.contains("navigation start rejected by terminal latch"));
+        assertFalse(source.contains("shouldAcceptFreshRouteProofForTest"));
         assertFalse(source.contains("rearmRouteTerminal(\"channel_start\")"));
         assertFalse(source.contains("rearmRouteTerminal(\"car_app_session_connected\")"));
         assertFalse(source.contains("rearmRouteTerminal(\"waze_navigation_started\")"));
@@ -29,7 +30,12 @@ public final class WazeDirectTerminalFenceContractTest {
         String source = source("NavHudLiveSender.java");
         assertTrue(source.contains("wazeDirectRouteTerminalFence = true"));
         assertTrue(source.contains("wazeDirectChannel.noteRouteTerminalGeneration"));
-        assertTrue(source.contains("wazeDirectChannel.openFreshRouteForLifecycle"));
+        assertTrue(source.contains("wazeDirectChannel.openAcceptedFreshRoute"));
+        assertTrue(source.contains("wazeSurfaceDirectChannel.openAcceptedFreshRoute"));
+        assertTrue(source.contains("result.freshRouteAccepted"));
+        assertTrue(source.contains("result.supersedingInactive"));
+        assertFalse(source.contains("isExplicitFreshWazeLifecycleReasonForTest"));
+        assertFalse(source.contains("wazeDirectLifecycleBridgeGeneration"));
         assertTrue(source.contains("legacy-session-start:"));
         assertTrue(source.contains("shouldAcceptWazeFrameAfterTerminalForTest"));
         assertTrue(source.contains("surface_navigation_started"));
@@ -51,7 +57,7 @@ public final class WazeDirectTerminalFenceContractTest {
         assertTrue(hostBlock.contains("wazeLegacySurfaceSessionFloor"));
         assertFalse(hostBlock.contains("wazeDirectRouteTerminalFence = false"));
         assertTrue(hostBlock.indexOf("wazeLegacyDirectSessionFloor")
-                < hostBlock.indexOf("openFreshRouteForLifecycle"));
+                < hostBlock.indexOf("openAcceptedFreshRoute"));
         assertTrue(source.contains("openLegacyRearmIfFreshSession("));
         assertTrue(source.contains("surface_navigation_started"));
         assertTrue(source.contains("surface_frame"));

@@ -30,8 +30,21 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private static final int FID_DUAL_ICON = 1_139_806_256;
     private static final int FID_DISTANCE = 1_139_806_232;
     private static final int FID_ROAD = 1_140_461_576;
+    private static final int FID_LANE_COUNT = 427_827_416;
+    private static final int FID_LANE_GUIDE_BASE = 427_827_288;
+    private static final int FID_LANE_STATE_BASE = 427_827_296;
+    private static final int FID_LANE_VISIBLE_BASE = 427_827_300;
+    private static final int SETTING_LANE_DISTANCE = 1_285_554_184;
+    private static final int SETTING_LANE_COUNT = 1_285_554_200;
+    private static final int[] SETTING_LANE_STATES = {
+            1_285_554_208, 1_285_554_212, 1_285_554_216, 1_285_554_220,
+            1_285_554_224, 1_285_554_228, 1_285_554_232, 1_285_554_236,
+            1_285_554_260, 1_285_554_264, 1_285_554_268, 1_285_554_272
+    };
     private static final String INSTRUMENT_CLASS =
             "android.hardware.bydauto.instrument.BYDAutoInstrumentDevice";
+    private static final String SETTING_CLASS =
+            "android.hardware.bydauto.setting.BYDAutoSettingDevice";
     private static final String EVENT_VALUE_CLASS =
             "android.hardware.bydauto.BYDAutoEventValue";
     private static final String INSTRUMENT_COMMON_PERMISSION =
@@ -40,6 +53,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             "android.permission.BYDAUTO_INSTRUMENT_GET";
     private static final String INSTRUMENT_SET_PERMISSION =
             "android.permission.BYDAUTO_INSTRUMENT_SET";
+    private static final String SETTING_COMMON_PERMISSION =
+            "android.permission.BYDAUTO_SETTING_COMMON";
+    private static final String SETTING_GET_PERMISSION =
+            "android.permission.BYDAUTO_SETTING_GET";
+    private static final String SETTING_SET_PERMISSION =
+            "android.permission.BYDAUTO_SETTING_SET";
     private static final int VENDOR_READ_ERROR = -2_147_482_648;
     private static final int EVENT_VALUE_UNSET = -999_999_999;
     private final long generation;
@@ -89,6 +108,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 }
                 if (current != null && current.sdkCapable()) {
                     capabilities |= InstrumentProxyContract.CAP_INSTRUMENT_SDK;
+                }
+                if (current != null && current.laneCapable()) {
+                    capabilities |= InstrumentProxyContract.CAP_INSTRUMENT_LANES;
                 }
                 activeCapabilities = capabilities;
                 boolean ready = hasNavigationCapability(capabilities);
@@ -178,16 +200,20 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     @Override
     public Bundle sendGuidance(long requestGeneration, int icon,
-            int distanceMeters, String road) {
+            int distanceMeters, String road,
+            int[] laneDirections, int[] laneRecommendations) {
         enforceSession(requestGeneration);
         String roadText = road == null ? "" : road;
-        if (!InstrumentProxyContract.validGuidance(icon, distanceMeters, roadText)) {
+        if (!InstrumentProxyContract.validGuidance(
+                icon, distanceMeters, roadText, laneDirections, laneRecommendations)) {
             throw new IllegalArgumentException("invalid guidance frame");
         }
+        int[] directions = laneDirections.clone();
+        int[] recommendations = laneRecommendations.clone();
         synchronized (operationLock) {
             long identity = Binder.clearCallingIdentity();
             try {
-                List<InstrumentProxyContract.Operation> operations = new ArrayList<>(6);
+                List<InstrumentProxyContract.Operation> operations = new ArrayList<>(21);
                 InstrumentApi current = instrument();
                 boolean fidSucceeded = false;
                 boolean sdkSucceeded = false;
@@ -207,6 +233,10 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     operations.add(invoke("instrument_sdk:sendNextPathName",
                             current == null ? null : current.next, roadText));
                     sdkSucceeded = succeeded(operations, first, 2);
+                }
+                if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_LANES)) {
+                    addLaneOperations(operations, directions, recommendations,
+                            directions.length == 0 ? -1 : Math.max(0, distanceMeters));
                 }
                 return finishOperations(operations, fidSucceeded || sdkSucceeded);
             } finally {
@@ -240,6 +270,143 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     private InstrumentProxyContract.Operation setBytes(int featureId, byte[] bytes) {
         return setFeature(featureId, 0, bytes == null ? new byte[0] : bytes);
+    }
+
+    private void addLaneOperations(List<InstrumentProxyContract.Operation> operations,
+            int[] directions, int[] recommendations, int distanceMeters) {
+        InstrumentApi current = instrument();
+        if (current != null && current.settingWriter != null) {
+            operations.add(setSettingInt(SETTING_LANE_COUNT, directions.length));
+            for (int index = 0; index < SETTING_LANE_STATES.length; index++) {
+                operations.add(setSettingInt(SETTING_LANE_STATES[index],
+                        index < directions.length ? directions[index] : 255));
+            }
+            operations.add(setSettingInt(SETTING_LANE_DISTANCE, distanceMeters));
+        }
+
+        int[] featureIds = new int[25];
+        int[] values = new int[25];
+        featureIds[0] = FID_LANE_COUNT;
+        values[0] = directions.length;
+        for (int index = 0; index < HudLaneModel.MAX_LANES; index++) {
+            int offset = index * 16;
+            boolean present = index < directions.length;
+            int recommendation = present ? recommendations[index] : 255;
+            featureIds[index + 1] = FID_LANE_GUIDE_BASE + offset;
+            values[index + 1] = present
+                    ? laneGuideValue(directions[index], recommendation) : -1;
+            featureIds[index + 9] = FID_LANE_STATE_BASE + offset;
+            values[index + 9] = present
+                    ? recommendation == 255 ? 5 : 0 : 14;
+            featureIds[index + 17] = FID_LANE_VISIBLE_BASE + offset;
+            values[index + 17] = present ? 1 : -1;
+        }
+        operations.add(setInstrumentLaneBatch(featureIds, values));
+    }
+
+    private InstrumentProxyContract.Operation setSettingInt(int featureId, int value) {
+        long startedAt = SystemClock.elapsedRealtime();
+        InstrumentApi current = instrument();
+        DirectWriter writer = current == null ? null : current.settingWriter;
+        String name = "setting_fid:" + featureId;
+        if (writer == null) return operation(name, -1, startedAt, "unavailable");
+        try {
+            Object eventValue = writer.constructor.newInstance();
+            writer.intField.setInt(eventValue, value);
+            Object result = writer.set.invoke(writer.device, new int[]{featureId}, eventValue);
+            return operation(name, resultCode(result), startedAt,
+                    success(result) ? "" : "call returned failure");
+        } catch (Throwable error) {
+            return operation(name, -1, startedAt, describe(error));
+        }
+    }
+
+    private InstrumentProxyContract.Operation setInstrumentLaneBatch(
+            int[] featureIds, int[] values) {
+        long startedAt = SystemClock.elapsedRealtime();
+        InstrumentApi current = instrument();
+        DirectWriter writer = current == null ? null : current.writer;
+        String name = "instrument_lane:sendLaneGuidanceInfo";
+        if (writer == null || writer.intArrayField == null) {
+            return operation(name, -1, startedAt, "unavailable");
+        }
+        try {
+            Object eventValue = writer.constructor.newInstance();
+            writer.intArrayField.set(eventValue, values);
+            Object result = writer.set.invoke(writer.device, featureIds, eventValue);
+            return operation(name, resultCode(result), startedAt,
+                    success(result) ? "" : "call returned failure");
+        } catch (Throwable error) {
+            return operation(name, -1, startedAt, describe(error));
+        }
+    }
+
+    private static int laneGuideValue(int direction, int recommendation) {
+        if (isComplexLane(direction)) {
+            int complex = complexLaneGuide(direction, recommendation);
+            if (complex >= 0) return complex;
+        } else if (recommendation != 255 && recommendation != -1) {
+            return simpleFrontLane(recommendation);
+        }
+        return simpleBackLane(direction);
+    }
+
+    static int laneGuideValueForTest(int direction, int recommendation) {
+        return laneGuideValue(direction, recommendation);
+    }
+
+    private static boolean isComplexLane(int direction) {
+        switch (direction) {
+            case 2:
+            case 4:
+            case 6:
+            case 7:
+            case 9:
+            case 10:
+            case 11:
+            case 12:
+            case 16:
+            case 17:
+            case 18:
+            case 19:
+            case 20:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static int complexLaneGuide(int direction, int recommendation) {
+        switch (direction) {
+            case 2: return recommendation == 0 ? 51 : recommendation == 1 ? 52 : -1;
+            case 4: return recommendation == 0 ? 53 : recommendation == 3 ? 54 : -1;
+            case 6: return recommendation == 1 ? 55 : recommendation == 3 ? 56 : -1;
+            case 7: return recommendation == 0 ? 57
+                    : recommendation == 1 ? 58 : recommendation == 3 ? 59 : -1;
+            case 9: return recommendation == 0 ? 60 : recommendation == 5 ? 61 : -1;
+            case 10: return recommendation == 0 ? 62 : recommendation == 8 ? 63 : -1;
+            case 11: return recommendation == 1 ? 64 : recommendation == 5 ? 65 : -1;
+            case 12: return recommendation == 3 ? 66 : recommendation == 8 ? 67 : -1;
+            case 16: return recommendation == 0 ? 70
+                    : recommendation == 1 ? 71 : recommendation == 5 ? 72 : -1;
+            case 17: return recommendation == 3 ? 73 : recommendation == 5 ? 74 : -1;
+            case 18: return recommendation == 1 ? 75
+                    : recommendation == 3 ? 76 : recommendation == 5 ? 77 : -1;
+            case 19: return recommendation == 0 ? 78
+                    : recommendation == 3 ? 79 : recommendation == 5 ? 80 : -1;
+            case 20: return recommendation == 1 ? 81 : recommendation == 8 ? 82 : -1;
+            default: return -1;
+        }
+    }
+
+    private static int simpleBackLane(int direction) {
+        if (direction >= 0 && direction < 13) return direction + 1;
+        return direction >= 16 && direction < 255 ? direction : -1;
+    }
+
+    private static int simpleFrontLane(int direction) {
+        if (direction >= 0 && direction < 13) return direction + 26;
+        return direction >= 16 && direction < 255 ? direction + 25 : -1;
     }
 
     private InstrumentProxyContract.Operation setFeature(
@@ -407,19 +574,26 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         final Method next;
         final Method reader;
         final DirectWriter writer;
+        final DirectWriter settingWriter;
 
         private InstrumentApi(Object device, Method status, Method simple,
-                Method next, Method reader, DirectWriter writer) {
+                Method next, Method reader, DirectWriter writer,
+                DirectWriter settingWriter) {
             this.device = device;
             this.status = status;
             this.simple = simple;
             this.next = next;
             this.reader = reader;
             this.writer = writer;
+            this.settingWriter = settingWriter;
         }
 
         boolean sdkCapable() {
             return device != null && status != null && simple != null && next != null;
+        }
+
+        boolean laneCapable() {
+            return writer != null && writer.intArrayField != null;
         }
 
         Readiness probeFidReadiness() {
@@ -461,6 +635,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                         instrumentClass, "sendNextPathName", String.class);
                 Method reader = null;
                 DirectWriter writer = null;
+                DirectWriter settingWriter = null;
                 try {
                     Class<?> eventClass = Class.forName(EVENT_VALUE_CLASS);
                     reader = instrumentClass.getMethod("get", int[].class, Class.class);
@@ -468,13 +643,36 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     Constructor<?> constructor = eventClass.getConstructor();
                     Field intField = eventClass.getField("intValue");
                     Field bytesField = eventClass.getField("bufferDataValue");
+                    Field intArrayField;
+                    try {
+                        intArrayField = eventClass.getField("intArrayValue");
+                    } catch (NoSuchFieldException unavailable) {
+                        intArrayField = null;
+                    }
                     writer = new DirectWriter(
-                            device, set, constructor, intField, bytesField);
+                            device, set, constructor, intField, bytesField, intArrayField);
                 } catch (Throwable directUnavailable) {
                     Log.w(TAG, "Instrument direct FID API unavailable", directUnavailable);
                 }
+                if (writer != null && writer.intArrayField != null) {
+                    try {
+                        Class<?> eventClass = Class.forName(EVENT_VALUE_CLASS);
+                        Class<?> settingClass = Class.forName(SETTING_CLASS);
+                        Object settingDevice = settingClass
+                                .getMethod("getInstance", Context.class)
+                                .invoke(null, new BydPermissionContext(context));
+                        if (settingDevice != null) {
+                            settingWriter = new DirectWriter(settingDevice,
+                                    settingClass.getMethod("set", int[].class, eventClass),
+                                    writer.constructor, writer.intField,
+                                    writer.bytesField, writer.intArrayField);
+                        }
+                    } catch (Throwable laneUnavailable) {
+                        Log.w(TAG, "Setting lane FID API unavailable", laneUnavailable);
+                    }
+                }
                 return new InstrumentApi(device, status, simple, next, reader,
-                        writer);
+                        writer, settingWriter);
             } catch (Throwable error) {
                 Log.w(TAG, "Instrument API unavailable", error);
                 return null;
@@ -511,14 +709,16 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         final Constructor<?> constructor;
         final Field intField;
         final Field bytesField;
+        final Field intArrayField;
 
         DirectWriter(Object device, Method set, Constructor<?> constructor,
-                Field intField, Field bytesField) {
+                Field intField, Field bytesField, Field intArrayField) {
             this.device = device;
             this.set = set;
             this.constructor = constructor;
             this.intField = intField;
             this.bytesField = bytesField;
+            this.intArrayField = intArrayField;
         }
     }
 
@@ -528,46 +728,49 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
 
         @Override public int checkCallingOrSelfPermission(String permission) {
-            return isInstrumentPermission(permission)
+            return isBydPermission(permission)
                     ? PackageManager.PERMISSION_GRANTED
                     : super.checkCallingOrSelfPermission(permission);
         }
 
         @Override public int checkCallingPermission(String permission) {
-            return isInstrumentPermission(permission)
+            return isBydPermission(permission)
                     ? PackageManager.PERMISSION_GRANTED
                     : super.checkCallingPermission(permission);
         }
 
         @Override public int checkPermission(String permission, int pid, int uid) {
-            return isInstrumentPermission(permission)
+            return isBydPermission(permission)
                     ? PackageManager.PERMISSION_GRANTED
                     : super.checkPermission(permission, pid, uid);
         }
 
         @Override public void enforceCallingOrSelfPermission(String permission, String message) {
-            if (!isInstrumentPermission(permission)) {
+            if (!isBydPermission(permission)) {
                 super.enforceCallingOrSelfPermission(permission, message);
             }
         }
 
         @Override public void enforceCallingPermission(String permission, String message) {
-            if (!isInstrumentPermission(permission)) {
+            if (!isBydPermission(permission)) {
                 super.enforceCallingPermission(permission, message);
             }
         }
 
         @Override public void enforcePermission(
                 String permission, int pid, int uid, String message) {
-            if (!isInstrumentPermission(permission)) {
+            if (!isBydPermission(permission)) {
                 super.enforcePermission(permission, pid, uid, message);
             }
         }
 
-        private static boolean isInstrumentPermission(String permission) {
+        private static boolean isBydPermission(String permission) {
             return INSTRUMENT_COMMON_PERMISSION.equals(permission)
                     || INSTRUMENT_GET_PERMISSION.equals(permission)
-                    || INSTRUMENT_SET_PERMISSION.equals(permission);
+                    || INSTRUMENT_SET_PERMISSION.equals(permission)
+                    || SETTING_COMMON_PERMISSION.equals(permission)
+                    || SETTING_GET_PERMISSION.equals(permission)
+                    || SETTING_SET_PERMISSION.equals(permission);
         }
     }
 }

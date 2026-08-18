@@ -9,6 +9,8 @@ import android.util.Log;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 /** Publishes the normalized route frame to the dashboard TBT compatibility planes. */
@@ -46,6 +48,8 @@ final class VehicleTbtPublisher {
     private int lastInstrumentIcon;
     private int lastInstrumentDistance = -1;
     private String lastInstrumentRoad = "";
+    private int[] lastInstrumentLaneDirections = new int[0];
+    private int[] lastInstrumentLaneRecommendations = new int[0];
     private boolean lastGuidanceHasAmapFallback;
     private boolean hasLastInstrumentSemantic;
     private boolean hasLastAmapSemantic;
@@ -178,7 +182,8 @@ final class VehicleTbtPublisher {
         int distance = Math.max(0, state.distanceToIntersection);
         String road = safe(state.roadName);
         lastGuidanceHasAmapFallback = mapping.amapSupported;
-        sendInstrumentGuidance(mapping.instrumentId, distance, road, trace, true);
+        sendInstrumentGuidance(
+                mapping.instrumentId, distance, road, trace.lanes, trace, true);
         if (mapping.amapSupported) {
             sendAmapFrame(mapping.amapManeuver, mapping.roundaboutExit,
                     distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace, true);
@@ -459,7 +464,8 @@ final class VehicleTbtPublisher {
         int icon = instrumentManeuverForAmap(
                 frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber());
         int distance = Math.max(0, frame.getDistanceMeters());
-        sendInstrumentGuidance(icon, distance, roadTextForTest(frame), trace, true);
+        sendInstrumentGuidance(
+                icon, distance, roadTextForTest(frame), trace.lanes, trace, true);
     }
 
     private void sendTerminalGuidanceClear(Trace trace) {
@@ -467,41 +473,51 @@ final class VehicleTbtPublisher {
         lastInstrumentIcon = 0;
         lastInstrumentDistance = -1;
         lastInstrumentRoad = "";
+        lastInstrumentLaneDirections = new int[0];
+        lastInstrumentLaneRecommendations = new int[0];
         instrument.sendTerminalGuidanceClear(
                 result -> ownerHandler.post(() -> recordInstrumentResult(
                         result, trace, 0, 0, -1, "")));
     }
 
     private void sendInstrumentGuidance(
-            int icon, int distance, String road, Trace trace) {
-        sendInstrumentGuidance(icon, distance, road, trace, false);
-    }
-
-    private void sendInstrumentGuidance(
-            int icon, int distance, String road, Trace trace, boolean deduplicate) {
+            int icon, int distance, String road, LanePayload lanes,
+            Trace trace, boolean deduplicate) {
         hasInstrumentGuidance = true;
         int nextIcon = Math.max(0, Math.min(49, icon));
         int nextDistance = Math.max(-1, Math.min(2_000_000, distance));
         String normalizedRoad = preserveText(road);
         String nextRoad = normalizedRoad.length() <= 512
                 ? normalizedRoad : normalizedRoad.substring(0, 512);
+        LanePayload nextLanes = lanes == null ? LanePayload.EMPTY : lanes;
         if (deduplicate && hasLastInstrumentSemantic
                 && lastInstrumentIcon == nextIcon
                 && lastInstrumentDistance == nextDistance
-                && lastInstrumentRoad.equals(nextRoad)) {
+                && lastInstrumentRoad.equals(nextRoad)
+                && Arrays.equals(lastInstrumentLaneDirections, nextLanes.directions)
+                && Arrays.equals(lastInstrumentLaneRecommendations,
+                        nextLanes.recommendations)) {
             record(trace, "instrument", "dedup", "guidance", guidanceBytes(
-                    lastInstrumentIcon, lastInstrumentDistance, lastInstrumentRoad), 0, 0L, "");
+                    lastInstrumentIcon, lastInstrumentDistance, lastInstrumentRoad,
+                    nextLanes), 0, 0L, "");
             return;
         }
         lastInstrumentIcon = nextIcon;
         lastInstrumentDistance = nextDistance;
         lastInstrumentRoad = nextRoad;
+        lastInstrumentLaneDirections = nextLanes.directions.clone();
+        lastInstrumentLaneRecommendations = nextLanes.recommendations.clone();
         int sentIcon = lastInstrumentIcon;
         int sentDistance = lastInstrumentDistance;
         String sentRoad = lastInstrumentRoad;
-        instrument.sendGuidance(sentIcon, sentDistance, sentRoad,
-                result -> ownerHandler.post(() -> recordInstrumentResult(
-                        result, trace, 0, sentIcon, sentDistance, sentRoad)));
+        int[] sentLaneDirections = lastInstrumentLaneDirections.clone();
+        int[] sentLaneRecommendations = lastInstrumentLaneRecommendations.clone();
+        instrument.sendGuidance(
+                sentIcon, sentDistance, sentRoad,
+                sentLaneDirections, sentLaneRecommendations,
+                result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
+                        result, trace, sentIcon, sentDistance, sentRoad,
+                        sentLaneDirections, sentLaneRecommendations)));
         hasLastInstrumentSemantic = true;
     }
 
@@ -624,7 +640,9 @@ final class VehicleTbtPublisher {
                 "proxy-ready-replay", lastInstrumentIcon, 0, 0,
                 lastInstrumentDistance, lastInstrumentRoad,
                 DirectTbtFrame.TravelMetrics.unavailable(),
-                DirectTbtFrame.TravelMetrics.unavailable());
+                DirectTbtFrame.TravelMetrics.unavailable(),
+                new LanePayload(lastInstrumentLaneDirections,
+                        lastInstrumentLaneRecommendations));
         if (hasInstrumentStatus) {
             int status = lastInstrumentStatus;
             instrument.sendNavigationStatus(status,
@@ -635,9 +653,13 @@ final class VehicleTbtPublisher {
             int icon = lastInstrumentIcon;
             int distance = lastInstrumentDistance;
             String road = lastInstrumentRoad;
-            instrument.sendGuidance(icon, distance, road,
-                    result -> ownerHandler.post(() -> recordInstrumentResult(
-                            result, trace, 0, icon, distance, road)));
+            int[] laneDirections = lastInstrumentLaneDirections.clone();
+            int[] laneRecommendations = lastInstrumentLaneRecommendations.clone();
+            instrument.sendGuidance(
+                    icon, distance, road, laneDirections, laneRecommendations,
+                    result -> ownerHandler.post(() -> recordInstrumentGuidanceResult(
+                            result, trace, icon, distance, road,
+                            laneDirections, laneRecommendations)));
         }
         log("tbt_proxy_replay status="
                 + (hasInstrumentStatus ? lastInstrumentStatus : -1)
@@ -681,7 +703,8 @@ final class VehicleTbtPublisher {
                     : result.error.isEmpty() ? "proxy unavailable" : result.error;
             record(trace, "instrument_proxy", "invoke",
                     status > 0 ? "navigation_status" : "guidance",
-                    status > 0 ? ints(status) : guidanceBytes(icon, distance, road),
+                    status > 0 ? ints(status)
+                            : guidanceBytes(icon, distance, road, trace.lanes),
                     -1, 0L, error);
             return;
         }
@@ -691,16 +714,45 @@ final class VehicleTbtPublisher {
             String plane = separator > 0 ? name.substring(0, separator) : "instrument_proxy";
             String target = separator > 0 ? name.substring(separator + 1) : name;
             byte[] arguments = instrumentArguments(
-                    plane, target, status, icon, distance, road);
+                    plane, target, status, icon, distance, road, trace.lanes);
             String error = operation.error.isEmpty() ? result.error : operation.error;
             record(trace, plane, "instrument_fid".equals(plane) ? "set" : "invoke",
                     target, arguments, operation.result, operation.durationMs, error);
         }
     }
 
+    private void recordInstrumentGuidanceResult(
+            InstrumentProxyManager.Result result, Trace trace,
+            int icon, int distance, String road,
+            int[] laneDirections, int[] laneRecommendations) {
+        recordInstrumentResult(result, trace, 0, icon, distance, road);
+        if (laneOperationsSucceededForTest(result == null ? null : result.operations)) return;
+        if (lastInstrumentIcon == icon
+                && lastInstrumentDistance == distance
+                && lastInstrumentRoad.equals(road)
+                && Arrays.equals(lastInstrumentLaneDirections, laneDirections)
+                && Arrays.equals(lastInstrumentLaneRecommendations, laneRecommendations)) {
+            hasLastInstrumentSemantic = false;
+        }
+    }
+
+    static boolean laneOperationsSucceededForTest(
+            List<InstrumentProxyContract.Operation> operations) {
+        if (operations == null) return true;
+        for (InstrumentProxyContract.Operation operation : operations) {
+            if (operation == null) continue;
+            if (!operation.name.startsWith("setting_fid:")
+                    && !operation.name.startsWith("instrument_lane:")) {
+                continue;
+            }
+            if (operation.result != 0 || !operation.error.isEmpty()) return false;
+        }
+        return true;
+    }
+
     private static byte[] instrumentArguments(
             String plane, String target, int status,
-            int icon, int distance, String road) {
+            int icon, int distance, String road, LanePayload lanes) {
         if ("instrument_fid".equals(plane)) {
             int featureId;
             try {
@@ -723,6 +775,9 @@ final class VehicleTbtPublisher {
         if ("sendNextPathName".equals(target)) {
             return preserveText(road).getBytes(StandardCharsets.UTF_8);
         }
+        if ("sendLaneGuidanceInfo".equals(target)) {
+            return laneBytes(lanes, distance);
+        }
         return new byte[0];
     }
 
@@ -731,6 +786,26 @@ final class VehicleTbtPublisher {
         ByteBuffer buffer = ByteBuffer.allocate(Integer.BYTES * 3 + text.length)
                 .order(ByteOrder.LITTLE_ENDIAN);
         return buffer.putInt(icon).putInt(distance).putInt(text.length).put(text).array();
+    }
+
+    private static byte[] guidanceBytes(
+            int icon, int distance, String road, LanePayload lanes) {
+        byte[] guidance = guidanceBytes(icon, distance, road);
+        byte[] lane = laneBytes(lanes, distance);
+        ByteBuffer buffer = ByteBuffer.allocate(guidance.length + lane.length)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        return buffer.put(guidance).put(lane).array();
+    }
+
+    private static byte[] laneBytes(LanePayload lanes, int distance) {
+        LanePayload selected = lanes == null ? LanePayload.EMPTY : lanes;
+        int count = selected.directions.length;
+        ByteBuffer buffer = ByteBuffer.allocate((count * 2 + 2) * Integer.BYTES)
+                .order(ByteOrder.LITTLE_ENDIAN);
+        buffer.putInt(count).putInt(count == 0 ? -1 : Math.max(0, distance));
+        for (int value : selected.directions) buffer.putInt(value);
+        for (int value : selected.recommendations) buffer.putInt(value);
+        return buffer.array();
     }
 
     private boolean sendAmap(Intent intent, String operation, Trace trace, byte[] arguments) {
@@ -777,10 +852,16 @@ final class VehicleTbtPublisher {
         DirectTbtFrame.TravelMetrics next = frame == null
                 ? DirectTbtFrame.TravelMetrics.unavailable()
                 : frame.getTripMetrics().getNextStop();
+        LanePayload lanes = LanePayload.EMPTY;
+        if (HudPrefs.isLaneOutputEnabled(context)) {
+            lanes = manualState == null
+                    ? lanePayloadForTest(frame == null ? null : frame.getLanes())
+                    : lanePayloadForTest(manualState);
+        }
         return new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
                 nativeId, intermediateAmapIcon, amapIcon, roundaboutExit,
-                distance, preserveText(road), route, next);
+                distance, preserveText(road), route, next, lanes);
     }
 
     private static String sourceForOwner(String owner) {
@@ -868,6 +949,48 @@ final class VehicleTbtPublisher {
         return value == null ? "" : value;
     }
 
+    static LanePayload lanePayloadForTest(List<DirectTbtFrame.Lane> lanes) {
+        if (lanes == null || lanes.isEmpty()) return LanePayload.EMPTY;
+        int[] directions = new int[Math.min(HudLaneModel.MAX_LANES, lanes.size())];
+        int[] recommendations = new int[directions.length];
+        int count = 0;
+        for (DirectTbtFrame.Lane lane : lanes) {
+            if (lane == null || count >= directions.length) continue;
+            int direction = Math.max(0, Math.min(254, lane.getAmapCode()));
+            directions[count] = direction;
+            recommendations[count] = lane.isRecommended() ? direction : 255;
+            count++;
+        }
+        return count == 0 ? LanePayload.EMPTY : new LanePayload(
+                Arrays.copyOf(directions, count), Arrays.copyOf(recommendations, count));
+    }
+
+    static LanePayload lanePayloadForTest(HudState state) {
+        if (state == null || !state.includeLaneBitmap) return LanePayload.EMPTY;
+        HudLaneModel.LaneSpec[] lanes = HudLaneModel.parse(state);
+        int[] directions = new int[lanes.length];
+        int[] recommendations = new int[lanes.length];
+        for (int index = 0; index < lanes.length; index++) {
+            int direction = Math.max(0, Math.min(254, lanes[index].iconId));
+            directions[index] = direction;
+            recommendations[index] = lanes[index].recommended ? direction : 255;
+        }
+        return lanes.length == 0
+                ? LanePayload.EMPTY : new LanePayload(directions, recommendations);
+    }
+
+    static final class LanePayload {
+        static final LanePayload EMPTY = new LanePayload(new int[0], new int[0]);
+        final int[] directions;
+        final int[] recommendations;
+
+        LanePayload(int[] directions, int[] recommendations) {
+            this.directions = directions == null ? new int[0] : directions.clone();
+            this.recommendations = recommendations == null
+                    ? new int[0] : recommendations.clone();
+        }
+    }
+
     static final class ManualMapping {
         final int instrumentId;
         final int amapManeuver;
@@ -897,6 +1020,7 @@ final class VehicleTbtPublisher {
         final String road;
         final DirectTbtFrame.TravelMetrics route;
         final DirectTbtFrame.TravelMetrics next;
+        final LanePayload lanes;
 
         Trace(String source, String owner, long generation, String transactionId,
                 String reason, int nativeId, int amapIcon, int roundaboutExit,
@@ -904,7 +1028,17 @@ final class VehicleTbtPublisher {
                 DirectTbtFrame.TravelMetrics route,
                 DirectTbtFrame.TravelMetrics next) {
             this(source, owner, generation, transactionId, reason, nativeId, 0,
-                    amapIcon, roundaboutExit, distanceMeters, road, route, next);
+                    amapIcon, roundaboutExit, distanceMeters, road, route, next,
+                    LanePayload.EMPTY);
+        }
+
+        Trace(String source, String owner, long generation, String transactionId,
+                String reason, int nativeId, int amapIcon, int roundaboutExit,
+                int distanceMeters, String road,
+                DirectTbtFrame.TravelMetrics route,
+                DirectTbtFrame.TravelMetrics next, LanePayload lanes) {
+            this(source, owner, generation, transactionId, reason, nativeId, 0,
+                    amapIcon, roundaboutExit, distanceMeters, road, route, next, lanes);
         }
 
         Trace(String source, String owner, long generation, String transactionId,
@@ -912,6 +1046,16 @@ final class VehicleTbtPublisher {
                 int roundaboutExit, int distanceMeters, String road,
                 DirectTbtFrame.TravelMetrics route,
                 DirectTbtFrame.TravelMetrics next) {
+            this(source, owner, generation, transactionId, reason, nativeId,
+                    intermediateAmapIcon, amapIcon, roundaboutExit, distanceMeters,
+                    road, route, next, LanePayload.EMPTY);
+        }
+
+        Trace(String source, String owner, long generation, String transactionId,
+                String reason, int nativeId, int intermediateAmapIcon, int amapIcon,
+                int roundaboutExit, int distanceMeters, String road,
+                DirectTbtFrame.TravelMetrics route,
+                DirectTbtFrame.TravelMetrics next, LanePayload lanes) {
             this.source = source;
             this.owner = owner;
             this.generation = generation;
@@ -925,6 +1069,7 @@ final class VehicleTbtPublisher {
             this.road = road;
             this.route = route;
             this.next = next;
+            this.lanes = lanes == null ? LanePayload.EMPTY : lanes;
         }
     }
 

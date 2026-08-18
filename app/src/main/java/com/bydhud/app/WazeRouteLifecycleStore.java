@@ -36,6 +36,12 @@ final class WazeRouteLifecycleStore {
     private static final String KEY_PACKAGE_UPDATE_MS = "package_update_ms";
     private static final String KEY_BOOT_COUNT = "boot_count";
     private static final String KEY_TERMINAL_BRIDGE_GENERATION = "terminal_bridge_generation";
+    private static final String KEY_PENDING_FRESH_ROUTE_GENERATION =
+            "pending_fresh_route_generation";
+    private static final String KEY_PENDING_FRESH_ROUTE_ELAPSED_MS =
+            "pending_fresh_route_elapsed_ms";
+    private static final String KEY_PENDING_FRESH_ROUTE_REASON_CODE =
+            "pending_fresh_route_reason_code";
     private static final long NO_TERMINAL_FENCE = Long.MIN_VALUE;
     private static final Object LOCK = new Object();
     private static final Object BRIDGE_SUPPORT_LOCK = new Object();
@@ -50,6 +56,9 @@ final class WazeRouteLifecycleStore {
         final long bridgeGeneration;
         final int bridgeCapabilities;
         final long terminalBridgeGeneration;
+        final long pendingFreshRouteGeneration;
+        final long pendingFreshRouteElapsedMs;
+        final int pendingFreshRouteReasonCode;
 
         Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs) {
             this(active, eventElapsedMs, packageUpdateMs, 0L, 0);
@@ -64,12 +73,24 @@ final class WazeRouteLifecycleStore {
         Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs,
                 long bridgeGeneration, int bridgeCapabilities,
                 long terminalBridgeGeneration) {
+            this(active, eventElapsedMs, packageUpdateMs, bridgeGeneration,
+                    bridgeCapabilities, terminalBridgeGeneration, 0L, 0L,
+                    REASON_UNAVAILABLE);
+        }
+
+        Snapshot(boolean active, long eventElapsedMs, long packageUpdateMs,
+                long bridgeGeneration, int bridgeCapabilities,
+                long terminalBridgeGeneration, long pendingFreshRouteGeneration,
+                long pendingFreshRouteElapsedMs, int pendingFreshRouteReasonCode) {
             this.active = active;
             this.eventElapsedMs = eventElapsedMs;
             this.packageUpdateMs = packageUpdateMs;
             this.bridgeGeneration = bridgeGeneration;
             this.bridgeCapabilities = bridgeCapabilities;
             this.terminalBridgeGeneration = terminalBridgeGeneration;
+            this.pendingFreshRouteGeneration = pendingFreshRouteGeneration;
+            this.pendingFreshRouteElapsedMs = pendingFreshRouteElapsedMs;
+            this.pendingFreshRouteReasonCode = pendingFreshRouteReasonCode;
         }
     }
 
@@ -94,9 +115,18 @@ final class WazeRouteLifecycleStore {
         final boolean rawNavigating;
         final int reasonCode;
         final String reasonName;
+        final boolean freshRouteAccepted;
+        final boolean supersedingInactive;
 
         RecordResult(boolean accepted, boolean changed, Snapshot snapshot, String reason,
                 boolean terminal, boolean rawNavigating, int reasonCode, String reasonName) {
+            this(accepted, changed, snapshot, reason, terminal, rawNavigating,
+                    reasonCode, reasonName, false, false);
+        }
+
+        RecordResult(boolean accepted, boolean changed, Snapshot snapshot, String reason,
+                boolean terminal, boolean rawNavigating, int reasonCode, String reasonName,
+                boolean freshRouteAccepted, boolean supersedingInactive) {
             this.accepted = accepted;
             this.changed = changed;
             this.snapshot = snapshot;
@@ -105,6 +135,8 @@ final class WazeRouteLifecycleStore {
             this.rawNavigating = rawNavigating;
             this.reasonCode = reasonCode;
             this.reasonName = reasonName;
+            this.freshRouteAccepted = freshRouteAccepted;
+            this.supersedingInactive = supersedingInactive;
         }
     }
 
@@ -243,6 +275,10 @@ final class WazeRouteLifecycleStore {
                             "snapshot_replay_noop", false, navigating, reasonCode, reasonName);
                 }
                 long seededGeneration = bridgeGeneration;
+                boolean freshRouteAccepted = navigating
+                        && bridgeGeneration > knownBridgeGeneration(previous);
+                boolean supersedingInactive = !navigating
+                        && bridgeGeneration > knownBridgeGeneration(previous);
                 long fence = !navigating && seededGeneration != 0L
                         ? seededGeneration
                         : seededGeneration != previous.terminalBridgeGeneration
@@ -250,9 +286,14 @@ final class WazeRouteLifecycleStore {
                 return commitLocked(context, previous, navigating,
                         previous.eventElapsedMs, seededGeneration, bridgeCapabilities,
                         false, navigating, reasonCode, reasonName, eventType,
-                        fence, true);
+                        fence, true, freshRouteAccepted, supersedingInactive,
+                        0L, 0L, REASON_UNAVAILABLE);
             }
-            if (navigating && terminalFenceBlocks(previous, bridgeGeneration,
+            boolean freshRouteAccepted = freshRouteAcceptedForEvent(
+                    previous, false, navigating, reasonAvailable, reasonCode,
+                    eventElapsedMs, bridgeGeneration);
+            if (navigating && !freshRouteAccepted
+                    && terminalFenceBlocks(previous, bridgeGeneration,
                     reasonAvailable, reasonCode)) {
                 return new RecordResult(false, false, previous, "terminal_fence",
                         false, navigating, reasonCode, reasonName);
@@ -265,10 +306,31 @@ final class WazeRouteLifecycleStore {
             int acceptedCapabilities = active ? bridgeCapabilities : 0;
             long resultingFence = terminalFenceAfterEvent(previous, navigating, terminal,
                     acceptedGeneration, bridgeGeneration, reasonAvailable, reasonCode);
+            if (freshRouteAccepted && active) resultingFence = NO_TERMINAL_FENCE;
+
+            long pendingGeneration = previous.pendingFreshRouteGeneration;
+            long pendingElapsedMs = previous.pendingFreshRouteElapsedMs;
+            int pendingReasonCode = previous.pendingFreshRouteReasonCode;
+            if (terminal || freshRouteAccepted) {
+                pendingGeneration = 0L;
+                pendingElapsedMs = 0L;
+                pendingReasonCode = REASON_UNAVAILABLE;
+            } else if (shouldRecordPendingFreshRoute(
+                    false, navigating, reasonAvailable, reasonCode, bridgeGeneration)) {
+                pendingGeneration = bridgeGeneration;
+                pendingElapsedMs = eventElapsedMs;
+                pendingReasonCode = reasonCode;
+            } else if (pendingGeneration > 0L
+                    && bridgeGeneration > pendingGeneration) {
+                pendingGeneration = 0L;
+                pendingElapsedMs = 0L;
+                pendingReasonCode = REASON_UNAVAILABLE;
+            }
             return commitLocked(context, previous, active, eventElapsedMs,
                     acceptedGeneration, acceptedCapabilities,
                     terminal, navigating, reasonCode, reasonName, eventType,
-                    resultingFence, false);
+                    resultingFence, false, freshRouteAccepted, false,
+                    pendingGeneration, pendingElapsedMs, pendingReasonCode);
         }
     }
 
@@ -291,7 +353,9 @@ final class WazeRouteLifecycleStore {
                     .putInt(KEY_BRIDGE_CAPABILITIES, bridgeCapabilities)
                     .apply();
             Snapshot updated = new Snapshot(route.active, route.eventElapsedMs,
-                    route.packageUpdateMs, route.bridgeGeneration, bridgeCapabilities);
+                    route.packageUpdateMs, route.bridgeGeneration, bridgeCapabilities,
+                    route.terminalBridgeGeneration, route.pendingFreshRouteGeneration,
+                    route.pendingFreshRouteElapsedMs, route.pendingFreshRouteReasonCode);
             return new SpeedRecordResult(true, updated, "accept");
         }
     }
@@ -302,17 +366,25 @@ final class WazeRouteLifecycleStore {
             String eventType) {
         return commitLocked(context, previous, active, eventElapsedMs, bridgeGeneration,
                 bridgeCapabilities, terminal, rawNavigating, reasonCode, reasonName,
-                eventType, terminal ? bridgeGeneration : NO_TERMINAL_FENCE, false);
+                eventType, terminal ? bridgeGeneration : NO_TERMINAL_FENCE, false,
+                false, false,
+                terminal ? 0L : previous.pendingFreshRouteGeneration,
+                terminal ? 0L : previous.pendingFreshRouteElapsedMs,
+                terminal ? REASON_UNAVAILABLE : previous.pendingFreshRouteReasonCode);
     }
 
     private static RecordResult commitLocked(Context context, Snapshot previous, boolean active,
             long eventElapsedMs, long bridgeGeneration, int bridgeCapabilities,
             boolean terminal, boolean rawNavigating, int reasonCode, String reasonName,
-            String eventType, long terminalGeneration, boolean snapshotSeed) {
+            String eventType, long terminalGeneration, boolean snapshotSeed,
+            boolean freshRouteAccepted, boolean supersedingInactive,
+            long pendingFreshRouteGeneration, long pendingFreshRouteElapsedMs,
+            int pendingFreshRouteReasonCode) {
         long packageUpdateMs = installedPackageUpdateTime(context);
         Snapshot updated = new Snapshot(active, eventElapsedMs, packageUpdateMs,
                 bridgeGeneration, bridgeCapabilities,
-                terminalGeneration);
+                terminalGeneration, pendingFreshRouteGeneration,
+                pendingFreshRouteElapsedMs, pendingFreshRouteReasonCode);
         SharedPreferences.Editor editor = prefs(context).edit()
                 .putBoolean(KEY_ACTIVE, active)
                 .putLong(KEY_EVENT_ELAPSED_MS, eventElapsedMs)
@@ -324,6 +396,19 @@ final class WazeRouteLifecycleStore {
             editor.putLong(KEY_TERMINAL_BRIDGE_GENERATION, terminalGeneration);
         } else {
             editor.remove(KEY_TERMINAL_BRIDGE_GENERATION);
+        }
+        if (pendingFreshRouteGeneration > 0L && pendingFreshRouteElapsedMs > 0L
+                && isTransitionReason(pendingFreshRouteReasonCode)) {
+            editor.putLong(KEY_PENDING_FRESH_ROUTE_GENERATION,
+                            pendingFreshRouteGeneration)
+                    .putLong(KEY_PENDING_FRESH_ROUTE_ELAPSED_MS,
+                            pendingFreshRouteElapsedMs)
+                    .putInt(KEY_PENDING_FRESH_ROUTE_REASON_CODE,
+                            pendingFreshRouteReasonCode);
+        } else {
+            editor.remove(KEY_PENDING_FRESH_ROUTE_GENERATION)
+                    .remove(KEY_PENDING_FRESH_ROUTE_ELAPSED_MS)
+                    .remove(KEY_PENDING_FRESH_ROUTE_REASON_CODE);
         }
         if (!active || previous.bridgeGeneration != bridgeGeneration) {
             editor.remove(KEY_SPEED_EVENT_ELAPSED_MS)
@@ -338,7 +423,8 @@ final class WazeRouteLifecycleStore {
                 : previous.active == active ? "watermark" : "transition";
         return new RecordResult(true, previous.active != active, updated,
                 state + ":" + reasonName + ":event=" + safeEventType(eventType),
-                terminal, rawNavigating, reasonCode, reasonName);
+                terminal, rawNavigating, reasonCode, reasonName,
+                freshRouteAccepted, supersedingInactive);
     }
 
     static RecordResult recordLocalTerminal(Context context, long detectedAtMs) {
@@ -366,6 +452,33 @@ final class WazeRouteLifecycleStore {
 
     static boolean isStateSnapshot(String eventType) {
         return "state_snapshot".equals(eventType);
+    }
+
+    static boolean shouldRecordPendingFreshRoute(boolean snapshot, boolean navigating,
+            boolean reasonAvailable, int reasonCode, long bridgeGeneration) {
+        return !snapshot && !navigating && bridgeGeneration > 0L
+                && reasonAvailable && isTransitionReason(reasonCode);
+    }
+
+    static boolean pendingFreshRouteMatches(Snapshot previous, boolean snapshot,
+            boolean navigating, long eventElapsedMs, long bridgeGeneration) {
+        return previous != null && !snapshot && navigating
+                && previous.pendingFreshRouteGeneration > 0L
+                && bridgeGeneration == previous.pendingFreshRouteGeneration
+                && eventElapsedMs > previous.pendingFreshRouteElapsedMs;
+    }
+
+    static boolean freshRouteAcceptedForEvent(Snapshot previous, boolean snapshot,
+            boolean navigating, boolean reasonAvailable, int reasonCode,
+            long eventElapsedMs, long bridgeGeneration) {
+        if (!navigating) return false;
+        if (pendingFreshRouteMatches(
+                previous, snapshot, true, eventElapsedMs, bridgeGeneration)) {
+            return true;
+        }
+        if (!snapshot && reasonAvailable && isTransitionReason(reasonCode)) return true;
+        return bridgeGeneration > 0L
+                && bridgeGeneration > knownBridgeGeneration(previous);
     }
 
     static boolean shouldSeedSnapshot(Snapshot previous, long incomingGeneration) {
@@ -505,8 +618,21 @@ final class WazeRouteLifecycleStore {
         }
         long terminalGeneration = preferences.getLong(
                 KEY_TERMINAL_BRIDGE_GENERATION, NO_TERMINAL_FENCE);
+        long pendingGeneration = preferences.getLong(
+                KEY_PENDING_FRESH_ROUTE_GENERATION, 0L);
+        long pendingElapsedMs = preferences.getLong(
+                KEY_PENDING_FRESH_ROUTE_ELAPSED_MS, 0L);
+        int pendingReasonCode = preferences.getInt(
+                KEY_PENDING_FRESH_ROUTE_REASON_CODE, REASON_UNAVAILABLE);
+        if (pendingGeneration <= 0L || pendingElapsedMs <= 0L
+                || !isTransitionReason(pendingReasonCode)) {
+            pendingGeneration = 0L;
+            pendingElapsedMs = 0L;
+            pendingReasonCode = REASON_UNAVAILABLE;
+        }
         return new Snapshot(active, eventElapsedMs, currentPackageUpdateMs,
-                bridgeGeneration, bridgeCapabilities, terminalGeneration);
+                bridgeGeneration, bridgeCapabilities, terminalGeneration,
+                pendingGeneration, pendingElapsedMs, pendingReasonCode);
     }
 
     static boolean shouldInvalidateForBoot(
