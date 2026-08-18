@@ -378,7 +378,7 @@ For a permission, device, patcher, or startup problem, use `Logs -> Share config
 - Waze screen-capture output is off by default and no longer supported by the developer.
 - The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
 - Waze route metrics depend on destination estimates supplied by the supported project-patched Waze `5.20.0.1` session; an unavailable whole-route field falls back to the corresponding next-stop value.
-- Waze alerts still depend on Waze supplying an alert and are available only with the compatible Waze 5.20.0.1 build.
+- Waze alerts still depend on Waze supplying an alert and are available only with the compatible Waze `5.20.0.1` build.
 - Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure keeps the normal direct guidance active after five seconds.
 - Stock cluster firmware may add dark overlays to dashboard projection.
 - Unsupported multi-file packages and XAPK files with OBB data cannot be patched.
