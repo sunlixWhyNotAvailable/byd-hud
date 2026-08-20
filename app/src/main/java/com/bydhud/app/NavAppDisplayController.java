@@ -24,7 +24,6 @@ final class NavAppDisplayController {
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
     private static final int AUTO_CONTAINER_FULLSCREEN = 16;
-    private static final int AUTO_CONTAINER_OFF = 18;
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
     private static final long PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS = 10000L;
     private static final long DISPLAY_CONFIRM_INTERVAL_MS = 250L;
@@ -92,10 +91,14 @@ final class NavAppDisplayController {
     //keeps compositor policy pure so tests cannot accidentally require a vehicle connection.
     static int autoContainerValueForTest(
             boolean toDashboard, boolean fullscreen, boolean explicit) {
-        if (toDashboard) {
-            return explicit && fullscreen ? AUTO_CONTAINER_FULLSCREEN : 0;
-        }
-        return explicit ? AUTO_CONTAINER_OFF : 0;
+        return toDashboard && explicit && fullscreen ? AUTO_CONTAINER_FULLSCREEN : 0;
+    }
+
+    static boolean isUserRequestedReturnForTest(String reason) {
+        String normalized = safe(reason).toLowerCase(Locale.ROOT);
+        return normalized.contains("ui-independent-dashboard-explicit")
+                || normalized.contains("user-return")
+                || normalized.contains("explicit-return");
     }
 
     private final Context context;
@@ -359,21 +362,15 @@ final class NavAppDisplayController {
                         }
                     }
                     clearDashboardProjection("independent-dashboard-already-main:" + safe(reason));
-                    String layoutFailure = sendAutoContainerIfRequested(
-                            packageName,
-                            AUTO_CONTAINER_OFF,
-                            isExplicitCompositorReturn(reason),
-                            "already-main");
+                    requestTbtAfterReturnIfRequested(packageName, true, reason);
                     remember(new NavAppDisplayState(
                             packageName,
                             current.taskId,
                             current.displayId,
                             current.visible,
-                            autoContainerStatus(
-                                    surfaceReady
-                                            ? "independent dashboard already on main"
-                                            : "independent dashboard already on main; surface handoff failed",
-                                    layoutFailure)));
+                            surfaceReady
+                                    ? "independent dashboard already on main"
+                                    : "independent dashboard already on main; surface handoff failed"));
                     return;
                 }
                 ClusterProjectionService.returnToMain(
@@ -395,23 +392,24 @@ final class NavAppDisplayController {
                         activeDashboardPackage = "";
                     }
                 }
+                boolean projectionReleased = false;
                 if (onMain) {
                     clearDashboardProjection("independent-dashboard-return:" + safe(reason));
                     log(packageName, "dashboard_return_clear_after_confirm package=" + packageName);
+                    projectionReleased = waitForProjectionRelease(
+                            packageName, "independent-return-release");
                 } else {
                     log(packageName, "dashboard_return_main_failed package=" + packageName
                             + " task=" + confirmed.taskId
                             + " display=" + confirmed.displayId
                             + " reason=" + safe(reason));
                 }
-                String layoutFailure = sendAutoContainerIfRequested(
-                        packageName,
-                        AUTO_CONTAINER_OFF,
-                        onMain && isExplicitCompositorReturn(reason),
-                        "return-main");
+                requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason);
                 String returnStatus = onMain
                         ? surfaceReady
-                                ? "independent dashboard returned to main"
+                                ? projectionReleased
+                                        ? "independent dashboard returned to main"
+                                        : "independent dashboard returned to main; projection release pending"
                                 : "independent dashboard returned to main; surface handoff failed"
                         : "independent dashboard return failed display=" + confirmed.displayId;
                 remember(new NavAppDisplayState(
@@ -419,7 +417,7 @@ final class NavAppDisplayController {
                         confirmed.taskId,
                         confirmed.displayId,
                         confirmed.visible,
-                        autoContainerStatus(returnStatus, layoutFailure)));
+                        returnStatus));
                 return;
             }
             boolean alreadyProjected = isConfirmedProjectedDashboardDisplay(packageName, current);
@@ -558,12 +556,13 @@ final class NavAppDisplayController {
                 : safeBase + "; " + failure;
     }
 
-    private static boolean isExplicitCompositorReturn(String reason) {
-        String normalized = safe(reason).toLowerCase(Locale.ROOT);
-        return normalized.contains("ui-independent-dashboard-explicit")
-                || normalized.contains("shutdown")
-                || normalized.contains("user-return")
-                || normalized.contains("explicit-return");
+    private void requestTbtAfterReturnIfRequested(
+            String packageName, boolean onMain, String reason) {
+        if (!onMain || !isUserRequestedReturnForTest(reason)) return;
+        String normalized = normalizePackage(packageName);
+        if (!"com.waze".equals(normalized)
+                && !GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) return;
+        NavHudLiveSender.get(context).onDashboardReturnConfirmed(normalized, reason);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -836,6 +835,18 @@ final class NavAppDisplayController {
             last = checkDisplay(packageName, reason);
         }
         return last;
+    }
+
+    private boolean waitForProjectionRelease(String packageName, String reason) {
+        long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
+        while (ClusterProjectionService.isProjectedPackageCurrent(packageName)
+                && android.os.SystemClock.elapsedRealtime() < deadline) {
+            sleepDisplayConfirmInterval();
+        }
+        boolean released = !ClusterProjectionService.isProjectedPackageCurrent(packageName);
+        log(packageName, "dashboard_projection_release_confirmed=" + released
+                + " reason=" + safe(reason));
+        return released;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

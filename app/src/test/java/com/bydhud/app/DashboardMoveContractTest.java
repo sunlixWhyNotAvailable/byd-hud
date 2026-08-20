@@ -16,8 +16,38 @@ public final class DashboardMoveContractTest {
         assertEquals(16, NavAppDisplayController.autoContainerValueForTest(true, true, true));
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(true, false, true));
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(true, true, false));
-        assertEquals(18, NavAppDisplayController.autoContainerValueForTest(false, false, true));
+        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(false, false, true));
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(false, false, false));
+        assertTrue(NavAppDisplayController.isUserRequestedReturnForTest(
+                "ui-independent-dashboard-explicit"));
+        assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("shutdown"));
+        assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("hud-switch-to-gmaps"));
+    }
+
+    @Test
+    public void returnTbtReassertRequiresTheExactCurrentHudRoute() {
+        assertTrue(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
+                true, true, false, true, true,
+                "com.waze", "com.waze", 7L, 7L));
+        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
+                false, true, false, true, true,
+                "com.waze", "com.waze", 7L, 7L));
+        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
+                true, true, true, true, true,
+                "com.waze", "com.waze", 7L, 7L));
+        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
+                true, true, false, false, true,
+                "com.waze", "com.waze", 7L, 7L));
+        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
+                true, true, false, true, true,
+                "com.waze", "com.waze", 7L, 8L));
+        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
+                true, true, false, true, true,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME, 7L, 7L));
+        assertTrue(VehicleTbtPublisher.shouldReassertDashboardForTest(
+                true, true, "com.waze", 7L, "com.waze", 7L));
+        assertFalse(VehicleTbtPublisher.shouldReassertDashboardForTest(
+                true, false, "com.waze", 7L, "com.waze", 7L));
     }
 
     @Test
@@ -77,6 +107,12 @@ public final class DashboardMoveContractTest {
         assertFalse(source.contains("StockMapProtocol30011"));
         assertTrue(source.contains("dashboard_autocontainer_failed"));
         assertTrue(source.contains("sendAutoContainerIfRequested"));
+        assertFalse(source.contains("AUTO_CONTAINER_OFF"));
+        assertTrue(source.contains("onDashboardReturnConfirmed"));
+        int returnRelease = source.indexOf("projectionReleased = waitForProjectionRelease(");
+        int returnReassert = source.indexOf(
+                "requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason)");
+        assertTrue(returnRelease >= 0 && returnReassert > returnRelease);
         int senderStart = source.indexOf("private String sendAutoContainerIfRequested");
         int senderEnd = source.indexOf("private static String autoContainerStatus", senderStart);
         assertTrue(senderStart >= 0 && senderEnd > senderStart);

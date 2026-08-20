@@ -301,6 +301,29 @@ final class VehicleTbtPublisher {
         return ownerGeneration;
     }
 
+    void reassertDashboardForCurrentRoute(
+            String packageName, long generation, String reason) {
+        if (!shouldReassertDashboardForTest(
+                routeActive, ownerHasHudPriority,
+                packageName, generation, ownerPackage, ownerGeneration)) {
+            log("tbt_dashboard reassert skipped owner=" + safe(packageName)
+                    + " generation=" + generation);
+            return;
+        }
+        dispatchDashboard(
+                ownerPackage, ownerGeneration,
+                trace(ownerPackage, ownerGeneration, reason, null, null), null);
+    }
+
+    static boolean shouldReassertDashboardForTest(
+            boolean routeActive, boolean ownerHasHudPriority,
+            String packageName, long generation,
+            String currentOwner, long currentGeneration) {
+        return routeActive && ownerHasHudPriority
+                && safe(packageName).equals(safe(currentOwner))
+                && generation == currentGeneration;
+    }
+
     static int instrumentManeuverForAmap(int amapManeuver) {
         switch (amapManeuver) {
             case 2: return 1;
