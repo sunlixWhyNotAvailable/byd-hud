@@ -46,6 +46,15 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    buildTypes {
+        create("performance") {
+            initWith(getByName("release"))
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
+    }
 }
 
 kotlin {
@@ -80,4 +89,15 @@ val copyDebugApkToBuildOutputs by tasks.registering(Copy::class) {
 
 tasks.matching { it.name == "assembleDebug" }.configureEach {
     finalizedBy(copyDebugApkToBuildOutputs)
+}
+
+val copyPerformanceApkToBuildOutputs by tasks.registering(Copy::class) {
+    dependsOn("packagePerformance")
+    from(layout.buildDirectory.file("outputs/apk/performance/app-performance.apk"))
+    into(rootProject.layout.projectDirectory.dir("build_outputs"))
+    rename { "byd-hud-v${android.defaultConfig.versionName}-performance.apk" }
+}
+
+tasks.matching { it.name == "assemblePerformance" }.configureEach {
+    finalizedBy(copyPerformanceApkToBuildOutputs)
 }
