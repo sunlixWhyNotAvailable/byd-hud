@@ -30,7 +30,6 @@ android {
             "SENTRY_DSN",
             "\"https://4f2ef57219c6c022c2155b02c14ae05c@o4511845885149184.ingest.de.sentry.io/4511845917982800\""
         )
-        buildConfigField("boolean", "WAZE_FRAME_CAPTURE_BETA", "true")
     }
 
     lint {

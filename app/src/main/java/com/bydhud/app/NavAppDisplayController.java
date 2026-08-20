@@ -23,6 +23,8 @@ final class NavAppDisplayController {
     private static final String KEY_ACTIVE_UPDATED_MS = "active_updated_ms";
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
+    private static final int AUTO_CONTAINER_FULLSCREEN = 16;
+    private static final int AUTO_CONTAINER_OFF = 18;
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
     private static final long PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS = 10000L;
     private static final long DISPLAY_CONFIRM_INTERVAL_MS = 250L;
@@ -85,6 +87,15 @@ final class NavAppDisplayController {
     //parses source data here so downstream HUD code receives normalized navigation fields.
     static int parseDashboardDisplayIdForTest(String dumpsys) {
         return parseDashboardDisplayId(dumpsys);
+    }
+
+    //keeps compositor policy pure so tests cannot accidentally require a vehicle connection.
+    static int autoContainerValueForTest(
+            boolean toDashboard, boolean fullscreen, boolean explicit) {
+        if (toDashboard) {
+            return explicit && fullscreen ? AUTO_CONTAINER_FULLSCREEN : 0;
+        }
+        return explicit ? AUTO_CONTAINER_OFF : 0;
     }
 
     private final Context context;
@@ -313,6 +324,15 @@ final class NavAppDisplayController {
                         "independent dashboard failed: empty package"));
                 return;
             }
+            if (!preflightAuthorizedAdb(packageName, reason)) {
+                remember(new NavAppDisplayState(
+                        packageName,
+                        -1,
+                        NavAppDisplayState.DISPLAY_UNKNOWN,
+                        false,
+                        "independent dashboard failed: authorized ADB unavailable"));
+                return;
+            }
             NavAppDisplayState current = checkDisplay(
                     packageName,
                     toDashboard
@@ -339,14 +359,21 @@ final class NavAppDisplayController {
                         }
                     }
                     clearDashboardProjection("independent-dashboard-already-main:" + safe(reason));
+                    String layoutFailure = sendAutoContainerIfRequested(
+                            packageName,
+                            AUTO_CONTAINER_OFF,
+                            isExplicitCompositorReturn(reason),
+                            "already-main");
                     remember(new NavAppDisplayState(
                             packageName,
                             current.taskId,
                             current.displayId,
                             current.visible,
-                            surfaceReady
-                                    ? "independent dashboard already on main"
-                                    : "independent dashboard already on main; surface handoff failed"));
+                            autoContainerStatus(
+                                    surfaceReady
+                                            ? "independent dashboard already on main"
+                                            : "independent dashboard already on main; surface handoff failed",
+                                    layoutFailure)));
                     return;
                 }
                 ClusterProjectionService.returnToMain(
@@ -377,17 +404,22 @@ final class NavAppDisplayController {
                             + " display=" + confirmed.displayId
                             + " reason=" + safe(reason));
                 }
+                String layoutFailure = sendAutoContainerIfRequested(
+                        packageName,
+                        AUTO_CONTAINER_OFF,
+                        onMain && isExplicitCompositorReturn(reason),
+                        "return-main");
+                String returnStatus = onMain
+                        ? surfaceReady
+                                ? "independent dashboard returned to main"
+                                : "independent dashboard returned to main; surface handoff failed"
+                        : "independent dashboard return failed display=" + confirmed.displayId;
                 remember(new NavAppDisplayState(
                         packageName,
                         confirmed.taskId,
                         confirmed.displayId,
                         confirmed.visible,
-                        onMain
-                                ? surfaceReady
-                                        ? "independent dashboard returned to main"
-                                        : "independent dashboard returned to main; surface handoff failed"
-                                : "independent dashboard return failed display="
-                                        + confirmed.displayId));
+                        autoContainerStatus(returnStatus, layoutFailure)));
                 return;
             }
             boolean alreadyProjected = isConfirmedProjectedDashboardDisplay(packageName, current);
@@ -400,15 +432,6 @@ final class NavAppDisplayController {
                         "independent dashboard blocked: previous app not on main"));
                 return;
             }
-            int operation = fullscreen ? 4 : 3;
-            String protocolFailure = StockMapProtocol30011.dispatch(context, fullscreen);
-            if (protocolFailure.isEmpty()) {
-                log(packageName, "dashboard_protocol_30011_sent actionType=1 operation="
-                        + operation);
-            } else {
-                log(packageName, "dashboard_protocol_30011_failed actionType=1 operation="
-                        + operation + " detail=" + safe(protocolFailure));
-            }
             if (alreadyProjected) {
                 boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                         packageName, current.displayId, "dashboard-existing:" + safe(reason));
@@ -416,17 +439,21 @@ final class NavAppDisplayController {
                         packageName,
                         current,
                         "independent-dashboard-already-projected:" + safe(reason));
+                String layoutFailure = sendAutoContainerIfRequested(
+                        packageName,
+                        AUTO_CONTAINER_FULLSCREEN,
+                        fullscreen,
+                        "existing-dashboard");
                 remember(new NavAppDisplayState(
                         packageName,
                         current.taskId,
                         current.displayId,
                         current.visible,
-                        !surfaceReady
-                                ? "independent dashboard projection retained; surface handoff failed"
-                                : protocolFailure.isEmpty()
-                                        ? "independent dashboard layout updated on existing projection"
-                                        : "independent dashboard projection retained; layout command failed: "
-                                                + safe(protocolFailure)));
+                        autoContainerStatus(
+                                !surfaceReady
+                                        ? "independent dashboard projection retained; surface handoff failed"
+                                        : "independent dashboard projection retained",
+                                layoutFailure)));
                 return;
             }
             ClusterProjectionService.startProjection(context, packageName, safe(reason));
@@ -454,17 +481,21 @@ final class NavAppDisplayController {
                     "independent-dashboard-confirmed:" + safe(reason));
             boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                     packageName, confirmed.displayId, "dashboard-confirmed:" + safe(reason));
+            String layoutFailure = sendAutoContainerIfRequested(
+                    packageName,
+                    AUTO_CONTAINER_FULLSCREEN,
+                    fullscreen,
+                    "dashboard-confirmed");
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
                     confirmed.displayId,
                     confirmed.visible,
-                    !surfaceReady
-                            ? "independent dashboard projection confirmed; surface handoff failed"
-                            : protocolFailure.isEmpty()
-                                    ? "independent dashboard projection confirmed"
-                                    : "independent dashboard projection confirmed; layout command failed: "
-                                            + safe(protocolFailure)));
+                    autoContainerStatus(
+                            !surfaceReady
+                                    ? "independent dashboard projection confirmed; surface handoff failed"
+                                    : "independent dashboard projection confirmed",
+                            layoutFailure)));
         } catch (SecurityException e) {
             remember(new NavAppDisplayState(
                     packageName,
@@ -475,6 +506,64 @@ final class NavAppDisplayController {
         } finally {
             endMove(packageName);
         }
+    }
+
+    //rejects unauthorised ADB before projection or task state can be changed.
+    private boolean preflightAuthorizedAdb(String packageName, String reason) {
+        try {
+            LocalAdbBridge.ShellResult result = LocalAdbBridge.runRuntimeShellCommand(
+                    context, "id");
+            if (!result.success()) {
+                log(packageName, "dashboard_preflight_adb_failed reason=" + safe(reason)
+                        + " detail=" + result.shortDetail());
+                return false;
+            }
+            return true;
+        } catch (IOException | SecurityException e) {
+            log(packageName, "dashboard_preflight_adb_rejected reason=" + safe(reason)
+                    + " detail=" + safe(e.getMessage()));
+            return false;
+        }
+    }
+
+    //sends only explicit compositor transitions; ordinary task moves stay layout-neutral.
+    private String sendAutoContainerIfRequested(
+            String packageName, int value, boolean requested, String reason) {
+        if (!requested || value == 0) {
+            return "";
+        }
+        try {
+            LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(context, value);
+            if (result.success()) {
+                log(packageName, "dashboard_autocontainer_sent value=" + value
+                        + " reason=" + safe(reason));
+                return "";
+            }
+            String detail = result.shortDetail();
+            log(packageName, "dashboard_autocontainer_failed value=" + value
+                    + " reason=" + safe(reason) + " detail=" + detail);
+            return "layout command failed: " + safe(detail);
+        } catch (IOException | SecurityException e) {
+            String detail = safe(e.getMessage());
+            log(packageName, "dashboard_autocontainer_rejected value=" + value
+                    + " reason=" + safe(reason) + " detail=" + detail);
+            return "layout command failed: " + detail;
+        }
+    }
+
+    private static String autoContainerStatus(String base, String failure) {
+        String safeBase = base == null ? "" : base;
+        return failure == null || failure.isEmpty()
+                ? safeBase
+                : safeBase + "; " + failure;
+    }
+
+    private static boolean isExplicitCompositorReturn(String reason) {
+        String normalized = safe(reason).toLowerCase(Locale.ROOT);
+        return normalized.contains("ui-independent-dashboard-explicit")
+                || normalized.contains("shutdown")
+                || normalized.contains("user-return")
+                || normalized.contains("explicit-return");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -538,6 +627,14 @@ final class NavAppDisplayController {
                         NavAppDisplayState.DISPLAY_UNKNOWN,
                         false,
                         label + " failed: empty package"));
+            }
+            if (!preflightAuthorizedAdb(normalized, reason)) {
+                return remember(new NavAppDisplayState(
+                        normalized,
+                        -1,
+                        NavAppDisplayState.DISPLAY_UNKNOWN,
+                        false,
+                        label + " failed: authorized ADB unavailable"));
             }
             NavAppDisplayState current = checkDisplay(normalized, reason);
             if (current.taskId < 0) {
@@ -618,6 +715,11 @@ final class NavAppDisplayController {
                 return new NavAppDisplayState(normalized, taskId,
                         NavAppDisplayState.DISPLAY_UNKNOWN, false,
                         label + " failed: invalid target");
+            }
+            if (!preflightAuthorizedAdb(normalized, reason)) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                        label + " failed: authorized ADB unavailable");
             }
             NavAppDisplayState current = checkTaskId(normalized, taskId, reason);
             if (current == null) {

@@ -41,16 +41,6 @@ public final class WazeLifecyclePolicyTest {
     }
 
     @Test
-    public void freshWazeEvidenceStartsProbeBeforeItIsStored() {
-        assertTrue(NavHudLiveSender.shouldStartWazeBeforeFreshRouteEvidence(
-                true, WAZE, false, ""));
-        assertFalse(NavHudLiveSender.shouldStartWazeBeforeFreshRouteEvidence(
-                true, WAZE, true, WAZE));
-        assertFalse(NavHudLiveSender.shouldStartWazeBeforeFreshRouteEvidence(
-                false, WAZE, false, ""));
-    }
-
-    @Test
     public void bridgeStartsHostOnlyForPersistedActiveRoute() {
         assertFalse(NavHudLiveSender.shouldStartWazeDirectHost(true, false));
         assertTrue(NavHudLiveSender.shouldStartWazeDirectHost(true, true));

@@ -18,6 +18,9 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static final String EXTRA_SPEED_LIMIT = "speed_limit";
     static final String EXTRA_SPEED_UNIT = "speed_unit";
     static final int PROTOCOL_VERSION = WazeRouteLifecycleStore.V2_PROTOCOL_VERSION;
+    private static final Object IDENTITY_LOCK = new Object();
+    private static volatile int cachedWazeUid = -1;
+    private static volatile boolean wazeUidRefreshAttempted;
     static boolean requestCurrentState(Context context, String reason) {
         if (context == null) return false;
         Context appContext = context.getApplicationContext();
@@ -55,8 +58,18 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
         final Context appContext = context.getApplicationContext();
 
         final PendingIntent identity;
+        try {
+            identity = intent.getParcelableExtra(EXTRA_IDENTITY);
+        } catch (RuntimeException malformed) {
+            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=malformed_identity");
+            return;
+        }
+        if (!trustedIdentity(appContext, identity)) {
+            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=untrusted_identity");
+            return;
+        }
+
         final int protocol;
-        final String eventType;
         final long eventElapsedMs;
         final long bridgeGeneration;
         final int bridgeCapabilities;
@@ -66,10 +79,8 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
                 WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=missing_extras");
                 return;
             }
-            identity = intent.getParcelableExtra(EXTRA_IDENTITY);
             protocol = intent.getIntExtra(
                     WazeRouteLifecycleStore.EXTRA_PROTOCOL_VERSION, -1);
-            eventType = intent.getStringExtra(EXTRA_EVENT_TYPE);
             eventElapsedMs = intent.getLongExtra(
                     WazeRouteLifecycleStore.EXTRA_EVENT_ELAPSED_MS, 0L);
             bridgeGeneration = intent.getLongExtra(
@@ -90,6 +101,8 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
                     context, "v2 ignored reason=invalid_bridge_metadata");
             return;
         }
+
+        final String eventType = intent.getStringExtra(EXTRA_EVENT_TYPE);
 
         final Runnable delivery;
         final WazeRouteTiming timing;
@@ -144,12 +157,6 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
             return;
         }
 
-        // Keep only the protocol-bound caller identity fence; no signer/catalog trust
-        // decision is performed on the event executor or on the direct route path.
-        if (!trustedIdentity(appContext, identity)) {
-            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=untrusted_identity");
-            return;
-        }
         WazeRouteLifecycleStore.noteV2BridgeObserved(appContext);
         NavHudLiveSender.noteWazeV2BridgeObserved(appContext);
         WazeRouteLifecycleReceiver.enqueue(appContext, goAsync(), "v2", delivery, timing);
@@ -170,13 +177,46 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
 
     static boolean trustedIdentity(Context context, PendingIntent identity) {
         if (identity == null) return false;
+        int installedUid = cachedWazeUid(context);
+        if (matchesIdentityMetadata(identity.getCreatorPackage(),
+                identity.getCreatorUid(), installedUid)) {
+            return true;
+        }
+        synchronized (IDENTITY_LOCK) {
+            if (wazeUidRefreshAttempted) return false;
+            wazeUidRefreshAttempted = true;
+            installedUid = readInstalledWazeUid(context);
+            if (installedUid >= 0) cachedWazeUid = installedUid;
+        }
+        return matchesIdentityMetadata(identity.getCreatorPackage(),
+                identity.getCreatorUid(), installedUid);
+    }
+
+    private static int cachedWazeUid(Context context) {
+        int cached = cachedWazeUid;
+        if (cached >= 0) return cached;
+        synchronized (IDENTITY_LOCK) {
+            if (cachedWazeUid < 0) {
+                int loaded = readInstalledWazeUid(context);
+                if (loaded >= 0) cachedWazeUid = loaded;
+            }
+            return cachedWazeUid;
+        }
+    }
+
+    private static int readInstalledWazeUid(Context context) {
         try {
-            int installedUid = context.getPackageManager().getApplicationInfo(
+            return context.getPackageManager().getApplicationInfo(
                     WazeRouteLifecycleStore.WAZE_PACKAGE, 0).uid;
-            return matchesIdentityMetadata(identity.getCreatorPackage(),
-                    identity.getCreatorUid(), installedUid);
         } catch (PackageManager.NameNotFoundException | RuntimeException ignored) {
-            return false;
+            return -1;
+        }
+    }
+
+    static void resetIdentityCacheForTest() {
+        synchronized (IDENTITY_LOCK) {
+            cachedWazeUid = -1;
+            wazeUidRefreshAttempted = false;
         }
     }
 

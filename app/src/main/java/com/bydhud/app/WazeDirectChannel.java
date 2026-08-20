@@ -86,7 +86,7 @@ public final class WazeDirectChannel {
     private static final int MAX_ICON_DIMENSION_PX = 256;
     private static final Pattern ALERT_DISTANCE = Pattern.compile(
             "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)(?=$|\\s|[.,;:!?])",
-            Pattern.CASE_INSENSITIVE);
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
     private final Context context;
     private final Listener listener;
@@ -923,7 +923,7 @@ public final class WazeDirectChannel {
         if (suspended) return;
         String title = text(value.getTitle());
         String subtitle = text(value.getSubtitle());
-        int distanceMeters = parseDistance(title + " " + subtitle);
+        int distanceMeters = parseDistanceMeters(title + " " + subtitle);
         String displayText = subtitle.isEmpty() ? title : subtitle;
         byte[] icon = renderIcon(value.getIcon(), "alert");
         if (alert.isActive() && alert.getId() != value.getId()) {
@@ -1125,7 +1125,7 @@ public final class WazeDirectChannel {
         }
     }
 
-    private int parseDistance(String value) {
+    static int parseDistanceMeters(String value) {
         Matcher matcher = ALERT_DISTANCE.matcher(safeText(value));
         if (!matcher.find()) return 0;
         try {
@@ -1137,7 +1137,6 @@ public final class WazeDirectChannel {
             else if (unit.equals("ft")) number *= 0.3048d;
             return Math.max(0, (int) Math.round(number));
         } catch (RuntimeException e) {
-            log("alert distance parse failed: " + value);
             return 0;
         }
     }

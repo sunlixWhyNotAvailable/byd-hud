@@ -5,6 +5,9 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.util.Arrays;
+import java.util.List;
+
 public final class VehicleConfigurationPolicyTest {
     @Test
     public void archiveFiltersOnlyRelevantSystemFiles() {
@@ -94,5 +97,27 @@ public final class VehicleConfigurationPolicyTest {
         assertFalse(redacted.contains("secret-token"));
         assertTrue(redacted.contains("name=\"vin\" value=\"[REDACTED]\""));
         assertTrue(redacted.contains("key='token' data='[REDACTED]'"));
+    }
+
+    @Test
+    public void networkMaskingKeepsTopologyButRemovesStableIdentifiers() {
+        List<String> masked = VehicleConfigurationZip.maskNetworkAddressesForTest(Arrays.asList(
+                "wlan0 192.168.8.10/24 via 192.168.8.1 lladdr AA:BB:CC:DD:EE:FF",
+                "tcp [fe80::1234%wlan0]:443 192.168.8.10:52001",
+                "udp :::5353 11-22-33-44-55-66"));
+
+        String detail = masked.toString();
+        assertTrue(detail, masked.get(0).contains("wlan0 <IP_1>/24 via <IP_2>"));
+        assertTrue(detail, masked.get(0).contains("<MAC_1>"));
+        assertTrue(detail, masked.get(1).contains("[<IP_3>%wlan0]:443"));
+        assertTrue(detail, masked.get(1).contains("<IP_1>:52001"));
+        assertTrue(detail, masked.get(2).contains("<IP_4>:5353"));
+        assertTrue(detail, masked.get(2).contains("<MAC_2>"));
+        for (String value : masked) {
+            assertFalse(value.contains("192.168.8"));
+            assertFalse(value.contains("fe80::1234"));
+            assertFalse(value.contains("AA:BB:CC"));
+            assertFalse(value.contains("11-22-33"));
+        }
     }
 }

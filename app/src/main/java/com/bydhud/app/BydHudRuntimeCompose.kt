@@ -574,6 +574,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var storageShareDestination by remember { mutableStateOf<StorageShareDestination?>(null) }
     var storageSharePhase by remember { mutableStateOf<LogShareZip.Phase?>(null) }
     var storageShareStartedAt by rememberSaveable { mutableStateOf(0L) }
+    var storageShareOperationToken by rememberSaveable { mutableStateOf(0L) }
     var storageShareTerminalPhase by rememberSaveable { mutableStateOf("") }
     var storageShareTerminalDetail by rememberSaveable { mutableStateOf("") }
     var sentryUploadPhase by remember { mutableStateOf<SentryUploadPhase?>(null) }
@@ -1017,6 +1018,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
 
     LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination) {
         val destination = storageShareDestination
+        val operationToken = storageShareOperationToken
         if (!storageShareBusy || destination == null) {
             return@LaunchedEffect
         }
@@ -1027,7 +1029,10 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         activity.runOnUiThread { storageSharePhase = phase }
                     }
                     try {
-                        activity.composeUploadStorageDaysToSentry(storageShareDays) {
+                        activity.composeUploadStorageDaysToSentry(
+                            storageShareDays,
+                            operationToken
+                        ) {
                             activity.runOnUiThread {
                                 storageSharePhase = null
                                 sentryUploadPhase = SentryUploadPhase.Uploading
@@ -1051,7 +1056,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         activity.runOnUiThread { storageSharePhase = phase }
                     }
                     try {
-                        activity.composeShareStorageDays(storageShareDays)
+                        activity.composeShareStorageDays(storageShareDays, operationToken)
                     } finally {
                         LogShareZip.clearProgressListener()
                     }
@@ -1081,6 +1086,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             storageShareBusy = false
             storageShareDays = emptyList()
             storageShareDestination = null
+            storageShareOperationToken = 0L
             refresh()
         }
     }
@@ -1303,6 +1309,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             storageShareTerminalDetail = storageShareTerminalDetail,
             storageShareStartedAt = storageShareStartedAt,
             onCancelShare = {
+                activity.composeCancelStorageShareOperation(storageShareOperationToken)
                 storageShareTerminalPhase = "CANCELLED"
                 storageShareTerminalDetail = if (copy.language == Language.Ua) {
                     "Операцію скасовано"
@@ -1497,6 +1504,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     storageShareDestination = StorageShareDestination.Sentry
                     storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
                     storageShareStartedAt = System.currentTimeMillis()
+                    storageShareOperationToken = activity.composeBeginStorageShareOperation()
                     storageShareTerminalPhase = ""
                     storageShareBusy = true
                 },
@@ -1505,6 +1513,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     storageShareDestination = StorageShareDestination.Android
                     storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
                     storageShareStartedAt = System.currentTimeMillis()
+                    storageShareOperationToken = activity.composeBeginStorageShareOperation()
                     storageShareTerminalPhase = ""
                     storageShareBusy = true
                 },

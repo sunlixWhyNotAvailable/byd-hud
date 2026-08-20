@@ -207,6 +207,12 @@ final class NavigatorPatchPipeline {
         ACTIVE.remove(profile, Thread.currentThread());
     }
 
+    static boolean hasActiveWorker(NavigatorPatchStore.Profile profile) {
+        if (profile == null) return false;
+        Thread worker = ACTIVE.get(profile);
+        return worker != null && worker.isAlive();
+    }
+
     private static void checkCancelled(Context context, NavigatorPatchStore.Profile profile)
             throws OperationCancelledException {
         if (NavigatorPatchStore.isCancellationRequested(context, profile)) {

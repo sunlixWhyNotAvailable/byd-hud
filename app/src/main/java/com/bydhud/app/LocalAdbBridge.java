@@ -63,6 +63,8 @@ final class LocalAdbBridge {
     private static final String EXIT_MARKER = "__BYDHUD_EXIT__:";
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
+    private static final Pattern AUTO_CONTAINER_COMMAND = Pattern.compile(
+            "service call (?:auto_container|AutoContainer) 2 i32 1000 i32 (?:16|18) s16 '\"\"'");
     private static final String CAPTURE_SHELL_ROOT =
             "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD"
                     + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/BYD-HUD)";
@@ -292,6 +294,7 @@ final class LocalAdbBridge {
             }
 
             NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
+                    appContext,
                     normalizedPackage,
                     notification.output,
                     accessibility.output,
@@ -299,6 +302,9 @@ final class LocalAdbBridge {
                     grantAccessibilityService,
                     grantAccessibilityMaster,
                     grantDashboardOverlay);
+            if (!plan.isValid()) {
+                return Result.failed("ADB grant plan rejected: " + plan.error);
+            }
             for (String command : plan.shellCommands) {
                 AppEventLogger.event(appContext, "adb_bridge targeted_command " + command);
                 ShellResult result = connection.shellWithExit(command);
@@ -315,8 +321,13 @@ final class LocalAdbBridge {
                     grantStorageWrite,
                     authorizationPromptMode == AuthorizationPromptMode.FORCE);
             if (grantNotificationListener) {
+                String notificationCommand = notificationAllowListenerCommand(
+                        appContext, normalizedPackage);
+                if (notificationCommand.isEmpty()) {
+                    return Result.failed("Notification listener command plan rejected");
+                }
                 ShellResult notificationAllow = connection.shellWithExit(
-                        notificationAllowListenerCommand(normalizedPackage));
+                        notificationCommand);
                 if (notificationAllow.success()) {
                     AppEventLogger.event(appContext,
                             "adb_bridge notification_allow_listener success");
@@ -331,9 +342,7 @@ final class LocalAdbBridge {
                 NavNotificationListenerService.requestRuntimeRebind(appContext, "adb-grant");
             }
             Result accessibilityRebindResult = rebindAccessibilityRuntimeIfNeeded(
-                    connection,
-                    appContext,
-                    plan.accessibilityServicesValue);
+                    connection, appContext, normalizedPackage, accessibility.output);
             if (accessibilityRebindResult != null) {
                 return accessibilityRebindResult;
             }
@@ -416,6 +425,61 @@ final class LocalAdbBridge {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
         return runTrustedRuntimeShellCommand(context, safeCommand);
+    }
+
+    //keeps AutoContainer values behind the same authenticated allowlist as task moves.
+    static ShellResult runAutoContainer(Context context, int value) throws IOException {
+        if (value != 16 && value != 18) {
+            throw new SecurityException("Unsupported AutoContainer value: " + value);
+        }
+        ShellResult lowercase = normalizeAutoContainerResult(runRuntimeShellCommand(
+                context, autoContainerCommand("auto_container", value)));
+        if (lowercase.success() || !isUnknownServiceResult(lowercase)) {
+            return lowercase;
+        }
+        return normalizeAutoContainerResult(runRuntimeShellCommand(
+                context, autoContainerCommand("AutoContainer", value)));
+    }
+
+    //uses the proven service-call shape without accepting arbitrary shell text.
+    static String autoContainerCommandForTest(String service, int value) {
+        return autoContainerCommand(service, value);
+    }
+
+    private static String autoContainerCommand(String service, int value) {
+        if (!("auto_container".equals(service) || "AutoContainer".equals(service))
+                || (value != 16 && value != 18)) {
+            throw new IllegalArgumentException("Unsupported AutoContainer request");
+        }
+        return "service call " + service + " 2 i32 1000 i32 " + value + " s16 '\"\"'";
+    }
+
+    private static boolean isUnknownServiceResult(ShellResult result) {
+        if (result == null || result.success()) {
+            return false;
+        }
+        String detail = result.shortDetail().toLowerCase(java.util.Locale.ROOT);
+        return detail.contains("unknown service")
+                || detail.contains("service not found")
+                || detail.contains("can't find service")
+                || detail.contains("cannot find service")
+                || detail.contains("not found");
+    }
+
+    private static ShellResult normalizeAutoContainerResult(ShellResult result) {
+        if (result == null || !result.success()) return result;
+        if (isSuccessfulAutoContainerResponse(result.exitCode, result.output)) {
+            return result;
+        }
+        return new ShellResult(result.output, 1, result.raw,
+                result.truncated, result.droppedBytes);
+    }
+
+    static boolean isSuccessfulAutoContainerResponse(int exitCode, String output) {
+        if (exitCode != 0) return false;
+        String safe = output == null ? "" : output.toLowerCase(java.util.Locale.ROOT);
+        return !safe.contains("exception") && !safe.contains("does not exist")
+                && !safe.contains("not found") && !safe.contains("unknown service");
     }
 
     static ShellResult runDiagnosticShellCommand(Context context, String command)
@@ -766,7 +830,8 @@ final class LocalAdbBridge {
     private static Result rebindAccessibilityRuntimeIfNeeded(
             Connection connection,
             Context appContext,
-            String targetAccessibilityServicesValue) throws IOException, InterruptedException {
+            String packageName,
+            String currentAccessibilityServices) throws IOException, InterruptedException {
         ShellResult accessibilityDump = connection.shellWithExit("dumpsys accessibility");
         if (!accessibilityDump.success()) {
             AppEventLogger.event(appContext, "adb_bridge accessibility_dump_failed "
@@ -784,9 +849,12 @@ final class LocalAdbBridge {
                 + " enabled=" + accessibilityRuntime.accessibilityEnabledInDumpsys
                 + " bound=" + accessibilityRuntime.accessibilityBoundInDumpsys
                 + " crashed=" + accessibilityRuntime.accessibilityCrashedInDumpsys);
-        for (String command : NavPermissionGrantPlan.accessibilityRuntimeRebindCommands(
-                appContext.getPackageName(),
-                targetAccessibilityServicesValue)) {
+        List<String> commands = NavPermissionGrantPlan.accessibilityRuntimeRebindCommands(
+                appContext, packageName, currentAccessibilityServices);
+        if (commands.isEmpty()) {
+            return Result.failed("Accessibility runtime rebind plan rejected");
+        }
+        for (String command : commands) {
             ShellResult result = connection.shellWithExit(command);
             if (!result.success()) {
                 return Result.partial("Accessibility runtime rebind command failed: "
@@ -809,10 +877,12 @@ final class LocalAdbBridge {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isAllowedRuntimeShellCommand(String command) {
-        return "dumpsys display".equals(command)
+        return "id".equals(command)
+                || "dumpsys display".equals(command)
                 || "dumpsys activity activities".equals(command)
                 || isVehicleConfigurationCommand(command)
                 || MOVE_STACK_COMMAND.matcher(command).matches()
+                || AUTO_CONTAINER_COMMAND.matcher(command).matches()
                 || WAZE_SCREENSHOT_COMMAND.matcher(command).matches()
                 || APP_LOCAL_RM_COMMAND.matcher(command).matches();
     }
@@ -1062,7 +1132,26 @@ final class LocalAdbBridge {
                 false,
                 false,
                 false);
-        return "cmd notification allow_listener " + plan.notificationService;
+        return plan.isValid()
+                ? "cmd notification allow_listener '" + plan.notificationService + "'"
+                : "";
+    }
+
+    //uses the installed canonical notification component for the live grant path.
+    private static String notificationAllowListenerCommand(
+            Context context, String packageName) {
+        NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
+                context,
+                packageName,
+                "",
+                "",
+                false,
+                false,
+                false,
+                false);
+        return plan.isValid()
+                ? "cmd notification allow_listener '" + plan.notificationService + "'"
+                : "";
     }
 
     //defines the OpenResult module boundary so related behavior stays readable inside one unit.

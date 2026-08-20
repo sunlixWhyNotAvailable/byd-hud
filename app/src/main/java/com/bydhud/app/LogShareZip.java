@@ -474,13 +474,6 @@ final class LogShareZip {
     }
 
     static File writableShareDir(Context context) {
-        File external = context.getExternalCacheDir();
-        if (external != null) {
-            File dir = new File(external, SHARE_DIR);
-            if ((dir.isDirectory() || dir.mkdirs()) && dir.canWrite()) {
-                return dir;
-            }
-        }
         File dir = new File(context.getCacheDir(), SHARE_DIR);
         return (dir.isDirectory() || dir.mkdirs()) && dir.canWrite() ? dir : null;
     }

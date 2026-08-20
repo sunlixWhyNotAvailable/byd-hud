@@ -444,8 +444,9 @@ final class GMapsDirectChannel {
     static boolean acceptsProtocolMessageForTest(
             int protocol, String expectedChannelId, String incomingChannelId) {
         if (protocol != PROTOCOL_VERSION) return false;
+        String expected = safe(expectedChannelId);
         String incoming = safe(incomingChannelId);
-        return incoming.isEmpty() || safe(expectedChannelId).equals(incoming);
+        return !expected.isEmpty() && expected.equals(incoming);
     }
 
     static long timingSessionGenerationForTest(

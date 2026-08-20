@@ -45,6 +45,7 @@
         <activity
             android:name=".MainActivity"
             android:autoRemoveFromRecents="true"
+            android:configChanges="density|orientation|screenSize|smallestScreenSize|uiMode"
             android:excludeFromRecents="true"
             android:exported="true"
             android:launchMode="singleTask">

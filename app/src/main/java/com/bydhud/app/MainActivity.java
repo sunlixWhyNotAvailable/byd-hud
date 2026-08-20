@@ -80,6 +80,8 @@ public final class MainActivity extends ComponentActivity {
     private static final String THEME_WARNING_TAG = "theme_warning";
     private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
     private static final AtomicBoolean SHARE_OPERATION = new AtomicBoolean(false);
+    private static final AtomicLong STORAGE_SHARE_OPERATION_SEQUENCE = new AtomicLong();
+    private static final Object STORAGE_SHARE_COMPLETION_LOCK = new Object();
     private static final AtomicReference<PendingShare> PENDING_SHARE = new AtomicReference<>();
     private static final AtomicReference<ShareLaunchEvent> SHARE_LAUNCH_EVENT =
             new AtomicReference<>(ShareLaunchEvent.empty());
@@ -1927,7 +1929,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //Creates one bounded ZIP off the UI thread, then posts a read-only Android share chooser.
-    public String composeShareStorageDays(List<String> days) {
+    public String composeShareStorageDays(List<String> days, long operationToken) {
         if (!SHARE_OPERATION.compareAndSet(false, true)) {
             return "failed: share already running";
         }
@@ -1937,7 +1939,10 @@ public final class MainActivity extends ComponentActivity {
             if (!result.ok || result.file == null) {
                 return "failed: " + result.detail;
             }
-            queuePendingShare(result.file, selectedDays);
+            if (!queuePendingShareIfCurrent(operationToken, result.file, selectedDays)) {
+                LogShareZip.deleteArtifact(result.file);
+                return "cancelled";
+            }
             return "ready " + result.file.getName() + " " + result.detail;
         } finally {
             SHARE_OPERATION.set(false);
@@ -1953,12 +1958,13 @@ public final class MainActivity extends ComponentActivity {
 
     //Creates and uploads the same complete-day ZIP only after explicit in-app consent.
     public ComposeSentryUploadResult composeUploadStorageDaysToSentry(
-            List<String> days, Runnable uploadStarted) {
+            List<String> days, long operationToken, Runnable uploadStarted) {
         if (!SHARE_OPERATION.compareAndSet(false, true)) {
             return new ComposeSentryUploadResult(false, "", "share already running");
         }
+        List<String> submittedDays = immutableStorageDays(days);
         try {
-            LogShareZip.Result archive = LogShareZip.create(this, days);
+            LogShareZip.Result archive = LogShareZip.create(this, submittedDays);
             if (!archive.ok || archive.file == null) {
                 return new ComposeSentryUploadResult(false, "", archive.detail);
             }
@@ -1971,7 +1977,12 @@ public final class MainActivity extends ComponentActivity {
                 return new ComposeSentryUploadResult(false, "",
                         error.getClass().getSimpleName() + ": " + error.getMessage());
             }
-            SentryLogUploader.Result upload = SentryLogUploader.upload(this, archive.file, days);
+            SentryLogUploader.Result upload = SentryLogUploader.upload(
+                    this, archive.file, submittedDays);
+            if (upload.ok && !publishShareCompletionIfCurrent(
+                    operationToken, submittedDays)) {
+                return new ComposeSentryUploadResult(false, "", "cancelled");
+            }
             return new ComposeSentryUploadResult(upload.ok, upload.eventId, upload.detail);
         } finally {
             SHARE_OPERATION.set(false);
@@ -2031,6 +2042,45 @@ public final class MainActivity extends ComponentActivity {
         return Collections.unmodifiableList(new ArrayList<>(days));
     }
 
+    public long composeBeginStorageShareOperation() {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            return STORAGE_SHARE_OPERATION_SEQUENCE.incrementAndGet();
+        }
+    }
+
+    public void composeCancelStorageShareOperation(long operationToken) {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            if (operationToken != 0L
+                    && STORAGE_SHARE_OPERATION_SEQUENCE.get() == operationToken) {
+                STORAGE_SHARE_OPERATION_SEQUENCE.incrementAndGet();
+            }
+        }
+    }
+
+    private static boolean queuePendingShareIfCurrent(
+            long operationToken, File file, List<String> storageDays) {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            if (operationToken == 0L
+                    || STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken) {
+                return false;
+            }
+            queuePendingShare(file, storageDays);
+            return true;
+        }
+    }
+
+    private static boolean publishShareCompletionIfCurrent(
+            long operationToken, List<String> storageDays) {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            if (operationToken == 0L
+                    || STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken) {
+                return false;
+            }
+            publishShareCompletion(storageDays);
+            return true;
+        }
+    }
+
     private static void queuePendingShare(File file, List<String> storageDays) {
         if (file == null) {
             return;
@@ -2071,15 +2121,22 @@ public final class MainActivity extends ComponentActivity {
             send.setClipData(ClipData.newRawUri(pending.file.getName(), uri));
             startActivity(Intent.createChooser(send, null));
             PENDING_SHARE.compareAndSet(pending, null);
-            SHARE_LAUNCH_EVENT.set(new ShareLaunchEvent(
-                    pending.launchId, pending.storageDays));
-            publishSharedUiStateChange();
+            publishShareCompletion(pending.launchId, pending.storageDays);
         } catch (RuntimeException e) {
             PENDING_SHARE.compareAndSet(pending, null);
             AppEventLogger.event(this, "share_chooser_failed error="
                     + e.getClass().getSimpleName() + " "
                     + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
         }
+    }
+
+    private static void publishShareCompletion(List<String> storageDays) {
+        publishShareCompletion(SHARE_LAUNCH_SEQUENCE.incrementAndGet(), storageDays);
+    }
+
+    private static void publishShareCompletion(long eventId, List<String> storageDays) {
+        SHARE_LAUNCH_EVENT.set(new ShareLaunchEvent(eventId, storageDays));
+        publishSharedUiStateChange();
     }
 
     public void composeAcknowledgeShareLaunch(long launchId) {

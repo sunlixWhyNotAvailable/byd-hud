@@ -15,8 +15,9 @@ import java.nio.file.Paths;
 /** Behavioral guards for route ownership, observer lifecycle and teardown tokens. */
 public final class NavHudRuntimeContractTest {
     @Test
-    public void GmapsProtocolAcceptsLegacyV3AndFencesTokenizedV3() {
-        assertTrue(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "new", ""));
+    public void GmapsProtocolRequiresExactNonEmptyChannelToken() {
+        assertFalse(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "new", ""));
+        assertFalse(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "", ""));
         assertTrue(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "new", "new"));
         assertFalse(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "new", "old"));
         assertFalse(GMapsDirectChannel.acceptsProtocolMessageForTest(2, "new", "new"));

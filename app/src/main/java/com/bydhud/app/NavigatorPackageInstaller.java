@@ -363,6 +363,8 @@ final class NavigatorPackageInstaller {
     }
 
     private static void reconcileLocal(Context context, NavigatorPatchStore.Profile profile) {
+        //A same-process worker owns this operation; only an absent worker is a restart orphan.
+        if (NavigatorPatchPipeline.hasActiveWorker(profile)) return;
         NavigatorPatchStore.OperationSnapshot operation =
                 NavigatorPatchStore.operation(context, profile);
         if (operation.kind.isEmpty() || operation.terminal()) return;

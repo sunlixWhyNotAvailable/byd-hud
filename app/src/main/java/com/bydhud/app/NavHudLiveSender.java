@@ -408,6 +408,13 @@ final class NavHudLiveSender {
     }
 
     private void updateCaptureIngressPolicy() {
+        if (!wazeFallbackActive && WAZE_PACKAGE.equals(legacyFallbackOwnerPackage)) {
+            legacyFallbackOwnerPackage = "";
+        }
+        if (!gmapsDirectFallbackActive
+                && GMapsDirectChannel.PACKAGE_NAME.equals(legacyFallbackOwnerPackage)) {
+            legacyFallbackOwnerPackage = "";
+        }
         boolean wazeDirect = wazeDirectFrameReceived
                 || (wazeDirectHandshakeAvailable && !wazeFallbackActive);
         boolean gmapsDirect = gmapsDirectFrameReceived
@@ -447,6 +454,8 @@ final class NavHudLiveSender {
     private boolean stopInProgress;
     private String pendingStopStartPackage = "";
     private String pendingStopStartReason = "";
+    private Runnable pendingStopCompletion;
+    private boolean pendingForcedDirectTeardown;
     private String pendingHudDemotionObserverPackage = "";
     private long wazeTbtRouteStartedAtMs;
     private long gmapsTbtRouteStartedAtMs;
@@ -464,6 +473,8 @@ final class NavHudLiveSender {
     private boolean wazeDirectFrameDispatchScheduled;
     private final Runnable wazeDirectFrameDispatch = this::dispatchLatestWazeDirectFrame;
     private String activePackage = "";
+    //tracks the package currently allowed to publish legacy capture without owning Direct.
+    private String legacyFallbackOwnerPackage = "";
     private volatile boolean active;
     private boolean sendLoopScheduled;
     private boolean routeHealthScheduled;
@@ -644,6 +655,11 @@ final class NavHudLiveSender {
                 log("notification removed ignored: direct GMaps owns route lifecycle");
                 return;
             }
+            if (!isLegacyFallbackIngressOwner(packageName)) {
+                log("notification removed ignored: fallback owner changed package="
+                        + packageName);
+                return;
+            }
             if (hasOngoingGMapsNavigationNotification()) {
                 log("notification removed stop ignored: replacement GMaps notification active"
                         + " package=" + activePackage + " key=" + ongoingGMapsNotificationKey);
@@ -654,7 +670,7 @@ final class NavHudLiveSender {
             if (NavTextNormalizer.sourceApp(activePackage) == NavSnapshot.SourceApp.GOOGLE_MAPS
                     && (lastAccessibilityResultMs <= 0L
                     || now - lastAccessibilityResultMs > ACCESSIBILITY_NO_ROUTE_STOP_DELAY_MS)) {
-                forceClearNavigator(activePackage, "notification-removed", now);
+                forceClearLegacyFallback(activePackage, "notification-removed", now);
                 return;
             }
             if (NavRouteStateStore.get(context).isRouteActive(activePackage, now)) {
@@ -663,7 +679,7 @@ final class NavHudLiveSender {
                 scheduleRouteHealthLoop();
                 return;
             }
-            stopOnMain("notification-removed", true);
+            stopLegacyFallbackOnMain(activePackage, "notification-removed");
         }
     };
 
@@ -731,7 +747,7 @@ final class NavHudLiveSender {
                 log("route stale clear package=" + activePackage
                         + " ageMs=" + age
                         + " reason=" + routeStore.reason(activePackage));
-                stopOnMain("route-stale", true);
+                stopLegacyFallbackOnMain(activePackage, "route-stale");
                 return;
             }
             scheduleRouteHealthLoop();
@@ -748,6 +764,11 @@ final class NavHudLiveSender {
             if (!active || packageName.isEmpty() || !packageName.equals(activePackage)) {
                 return;
             }
+            if (!isLegacyFallbackIngressOwner(packageName)) {
+                log("accessibility no-route ignored: fallback owner changed package="
+                        + packageName);
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             if (NavTextNormalizer.sourceApp(activePackage) == NavSnapshot.SourceApp.GOOGLE_MAPS) {
                 if (GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
@@ -761,7 +782,7 @@ final class NavHudLiveSender {
                     scheduleRouteHealthLoop();
                     return;
                 }
-                forceClearNavigator(activePackage, "accessibility-route-ended", now);
+                forceClearLegacyFallback(activePackage, "accessibility-route-ended", now);
                 return;
             }
             if (WAZE_PACKAGE.equals(activePackage)) {
@@ -782,7 +803,7 @@ final class NavHudLiveSender {
                 scheduleRouteHealthLoop();
                 return;
             }
-            stopOnMain("accessibility-route-ended", true);
+            stopLegacyFallbackOnMain(activePackage, "accessibility-route-ended");
         }
     };
 
@@ -805,12 +826,16 @@ final class NavHudLiveSender {
                 log("arrival ignored: direct GMaps owns route lifecycle");
                 return;
             }
+            if (!isLegacyFallbackIngressOwner(packageName)) {
+                log("arrival ignored: fallback owner changed package=" + packageName);
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             NavRouteStateStore.get(context).clearRoute(packageName, "arrival-route-ended", now);
             if ("com.waze".equals(packageName)) {
                 WazeRouteTracker.get(context).onRouteEnded("arrival-route-ended", now);
             }
-            stopOnMain("arrival-route-ended", true);
+            stopLegacyFallbackOnMain(packageName, "arrival-route-ended");
         }
     };
 
@@ -2875,6 +2900,7 @@ final class NavHudLiveSender {
         }
         gmapsLegacyUnavailableLogged = false;
         gmapsDirectFallbackActive = true;
+        legacyFallbackOwnerPackage = GMapsDirectChannel.PACKAGE_NAME;
         updateCaptureIngressPolicy();
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.LEGACY,
@@ -3258,6 +3284,7 @@ final class NavHudLiveSender {
         }
         cancelWazeDirectColdTimeout();
         wazeFallbackActive = true;
+        legacyFallbackOwnerPackage = WAZE_PACKAGE;
         updateCaptureIngressPolicy();
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.LEGACY,
@@ -3439,36 +3466,6 @@ final class NavHudLiveSender {
         handler.removeCallbacks(wazeDirectProbeTimeout);
         wazeDirectProbeScheduled = false;
         wazeDirectProbeSessionGeneration = 0;
-    }
-
-    private void onWazeLegacyRouteEvidence(String reason) {
-        if (isWazeBridgeSupportedCached()) {
-            cancelWazeFallbackReadiness();
-            wazeFallbackActive = false;
-            updateCaptureIngressPolicy();
-            WazeCropCapture.get(context).stop("route-lifecycle-bridge");
-            return;
-        }
-        if (!active || !WAZE_PACKAGE.equals(activePackage)
-                || !WazeRouteTracker.get(context).isRouteActive(
-                SystemClock.elapsedRealtime())) {
-            return;
-        }
-        if (wazeDirectRouteTerminalFence) {
-            log("waze legacy route evidence blocked by terminal fence reason="
-                    + safeReason(reason));
-            return;
-        }
-        if (wazeDirectRouteEnded) {
-            wazeDirectRouteEnded = false;
-            log("waze route-end barrier cleared by legacy evidence reason="
-                    + safeReason(reason));
-        }
-        if (wazeFallbackActive) {
-            ensureWazeCropRunning(reason);
-        } else {
-            scheduleWazeDirectColdTimeout(reason);
-        }
     }
 
     private boolean rejectStaleWazeEvidence(String packageName, int routeGeneration,
@@ -3809,8 +3806,17 @@ final class NavHudLiveSender {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     void stop(String packageName, String reason, boolean clearHud) {
+        stop(packageName, reason, clearHud, null);
+    }
+
+    //keeps package-replace teardown fenced until the serialized sender stop has completed.
+    void stop(String packageName, String reason, boolean clearHud, Runnable completion) {
         final String normalized = normalizePackage(packageName);
         handler.post(() -> {
+            if ("package-replace-hard-reset".equals(
+                    NavTextNormalizer.lower(normalizeString(reason)))) {
+                pendingForcedDirectTeardown = true;
+            }
             if (sourceSwitchInProgress
                     && (normalized.isEmpty()
                     || normalized.equals(activePackage)
@@ -3818,25 +3824,37 @@ final class NavHudLiveSender {
                 pendingSourceSwitchPackage = "";
                 pendingSourceSwitchReason = reason;
                 log("source switch converted to stop reason=" + safeReason(reason));
+                if (completion != null) pendingStopCompletion = completion;
                 return;
             }
             if (stopInProgress) {
                 pendingStopStartPackage = "";
                 pendingStopStartReason = "";
                 log("stop already in progress reason=" + safeReason(reason));
+                if (completion != null) pendingStopCompletion = completion;
+                return;
+            }
+            if (runtimeReinitInProgress) {
+                if (completion != null) pendingStopCompletion = completion;
+                log("stop completion queued during package reinit reason="
+                        + safeReason(reason));
                 return;
             }
             if (!active && !normalized.isEmpty() && isTbtObserver(normalized)) {
                 stopTbtObserver(normalized, reason);
+                if (completion != null) completion.run();
                 return;
             }
             if (!normalized.isEmpty() && !normalized.equals(activePackage)) {
                 if (isTbtObserver(normalized)) {
                     stopTbtObserver(normalized, reason);
                 }
+                if (completion != null) completion.run();
                 return;
             }
+            if (completion != null) pendingStopCompletion = completion;
             stopOnMain(reason, clearHud);
+            if (!stopInProgress) finishStopCompletion();
         });
     }
 
@@ -3930,9 +3948,8 @@ final class NavHudLiveSender {
                     "waze_crop_visual",
                     safeReason,
                     now);
-            WazeRouteTracker.get(context).onVisualRouteEvidence(safeReason, now);
-            if (active && WAZE_PACKAGE.equals(activePackage)) {
-                onWazeLegacyRouteEvidence(safeReason);
+            if (wazeFallbackActive) {
+                WazeRouteTracker.get(context).onVisualRouteEvidence(safeReason, now);
             }
             log("waze visual route evidence reason=" + safeReason);
         });
@@ -4038,6 +4055,11 @@ final class NavHudLiveSender {
             if (!active || !WAZE_PACKAGE.equals(activePackage)) {
                 return;
             }
+            if (!wazeFallbackActive) {
+                log("waze crop unavailable ignored: direct Waze owns lifecycle reason="
+                        + safeReason);
+                return;
+            }
             long now = SystemClock.elapsedRealtime();
             if (!WazeVisualStatePolicy.shouldClearVisualWhenCropUnavailable(
                     true, safeReason, 0L)) {
@@ -4082,7 +4104,7 @@ final class NavHudLiveSender {
                 scheduleRouteHealthLoop();
                 return;
             }
-            forceClearNavigator(WAZE_PACKAGE, "waze-route-nodes-missing", now);
+            forceClearLegacyFallback(WAZE_PACKAGE, "waze-route-nodes-missing", now);
         });
     }
 
@@ -4295,7 +4317,8 @@ final class NavHudLiveSender {
         String nextPackage = pendingSourceSwitchPackage;
         String nextReason = pendingSourceSwitchReason;
         boolean retainRoute = retainRequested && shouldRetainRouteForTbt(previousPackage);
-        if (!retainRoute) {
+        boolean forceTeardown = pendingForcedDirectTeardown;
+        if (!retainRoute || forceTeardown) {
             ++tbtLifecycleToken;
             tbtPublisher.endRoute(
                     previousPackage, tbtGeneration, "source-switch:" + nextPackage);
@@ -4316,6 +4339,7 @@ final class NavHudLiveSender {
         } else {
             log("source switch completed as stop reason=" + safeReason(nextReason));
         }
+        finishStopCompletion();
     }
 
     private boolean shouldRetainRouteForTbt(String packageName) {
@@ -4439,6 +4463,100 @@ final class NavHudLiveSender {
                 || GMapsDirectChannel.PACKAGE_NAME.equals(normalized);
     }
 
+    //keeps framework fallback callbacks from becoming a second Direct lifecycle authority.
+    private boolean isLegacyFallbackIngressOwner(String packageName) {
+        String normalized = normalizePackage(packageName);
+        if (!active || !normalized.equals(activePackage)) return false;
+        if (WAZE_PACKAGE.equals(normalized)) return wazeFallbackActive;
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) {
+            return gmapsDirectFallbackActive;
+        }
+        return !isDirectNavigator(normalized)
+                && normalized.equals(legacyFallbackOwnerPackage);
+    }
+
+    static boolean shouldPublishLegacyFallbackForTest(
+            String incomingPackage, String activePackage, String legacyOwner,
+            boolean active, boolean wazeDirect, boolean wazeFallback,
+            boolean gmapsDirect, boolean gmapsFallback) {
+        String incoming = normalizePackage(incomingPackage);
+        String activeOwner = normalizePackage(activePackage);
+        if (!active || incoming.isEmpty() || !incoming.equals(activeOwner)) return false;
+        if (WAZE_PACKAGE.equals(incoming)) return wazeFallback && !wazeDirect;
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(incoming)) {
+            return gmapsFallback && !gmapsDirect;
+        }
+        return incoming.equals(normalizePackage(legacyOwner));
+    }
+
+    //selects only a legacy owner; it never starts, stops, registers, or rearms Direct.
+    private boolean prepareLegacyFallbackIngress(String packageName, String reason) {
+        String normalized = normalizePackage(packageName);
+        if (normalized.isEmpty()) return false;
+        if (isDirectNavigator(normalized)) {
+            if (!isLegacyFallbackIngressOwner(normalized)) {
+                log("fallback ingress cached only package=" + normalized
+                        + " reason=direct-owner-or-unavailable");
+                return false;
+            }
+            return true;
+        }
+        if (active && !normalized.equals(activePackage)) {
+            log("fallback ingress cached only package=" + normalized
+                    + " reason=other-owner=" + activePackage);
+            return false;
+        }
+        if (!active) {
+            active = true;
+            activePackage = normalized;
+            resetLatestPayload();
+            HudDeliveryStatus.reset();
+            updateCaptureIngressPolicy();
+            log("legacy fallback owner selected package=" + normalized
+                    + " reason=" + safeReason(reason));
+        }
+        legacyFallbackOwnerPackage = normalized;
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.LEGACY,
+                "legacy-fallback:" + normalized + ":" + safeReason(reason));
+        hudOutput.ensureBound("legacy-fallback:" + normalized);
+        return true;
+    }
+
+    //clears only legacy fallback output; a direct owner remains alive and eligible to recover.
+    private void stopLegacyFallbackOnMain(String packageName, String reason) {
+        String normalized = normalizePackage(packageName);
+        if (!isLegacyFallbackIngressOwner(normalized)) return;
+        if (WAZE_PACKAGE.equals(normalized)) {
+            wazeFallbackActive = false;
+            cancelWazeFallbackReadiness();
+            WazeCropCapture.get(context).stop("legacy-fallback-stop:" + safeReason(reason));
+        } else if (GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) {
+            gmapsDirectFallbackActive = false;
+        } else {
+            active = false;
+            activePackage = "";
+        }
+        legacyFallbackOwnerPackage = "";
+        resetLatestPayload();
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.NONE,
+                "legacy-fallback-stop:" + safeReason(reason));
+        updateCaptureIngressPolicy();
+        log("legacy fallback stopped package=" + normalized
+                + " reason=" + safeReason(reason));
+    }
+
+    private void forceClearLegacyFallback(String packageName, String reason, long now) {
+        String normalized = normalizePackage(packageName);
+        if (!isLegacyFallbackIngressOwner(normalized)) return;
+        NavRouteStateStore.get(context).markRouteEnded(normalized, reason, now);
+        if (WAZE_PACKAGE.equals(normalized)) {
+            WazeRouteTracker.get(context).onRouteEnded(reason, now);
+        }
+        stopLegacyFallbackOnMain(normalized, reason);
+    }
+
     private void stopDirectNavigator(String packageName, String reason) {
         if (WAZE_PACKAGE.equals(packageName)) {
             tbtWazeObserver = false;
@@ -4469,24 +4587,21 @@ final class NavHudLiveSender {
         }
         boolean hudEnabled = NavCapturePrefs.isHudEnabled(context, packageName);
         NavCaptureStore.snapshot(context, result.snapshot);
-        if (shouldStartWazeBeforeFreshRouteEvidence(
-                hudEnabled, packageName, active, activePackage)) {
-            startOnMain(packageName, "notification");
-        }
         long evidenceNow = SystemClock.elapsedRealtime();
         NavRouteStateStore.get(context).updateFromSnapshot(
                 result.snapshot, "notification", evidenceNow);
-        WazeRouteTracker.get(context).updateFromSnapshot(
-                result.snapshot, "notification", evidenceNow);
+        if (!WAZE_PACKAGE.equals(packageName) || wazeFallbackActive) {
+            WazeRouteTracker.get(context).updateFromSnapshot(
+                    result.snapshot, "notification", evidenceNow);
+        }
         if (!hudEnabled) {
             log("snapshot only package=" + packageName + " reason=" + result.reason);
             return;
         }
-        if (!active || !packageName.equals(activePackage)) {
-            startOnMain(packageName, "notification");
+        if (!prepareLegacyFallbackIngress(packageName, "notification")) {
+            return;
         }
-        if (WAZE_PACKAGE.equals(packageName)) {
-            onWazeLegacyRouteEvidence("notification");
+        if (WAZE_PACKAGE.equals(packageName) && wazeFallbackActive) {
             ensureWazeCropRunning("notification");
         }
         handler.removeCallbacks(notificationRemovedStop);
@@ -4556,7 +4671,8 @@ final class NavHudLiveSender {
         NavParserResult result =
                 NavParserDispatcher.parseAccessibility(packageName, payload, baseline);
         if (result == null) {
-            if (NavRouteEndPolicy.shouldScheduleNoRouteAccessibilityStop(
+            if (isLegacyFallbackIngressOwner(packageName)
+                    && NavRouteEndPolicy.shouldScheduleNoRouteAccessibilityStop(
                     active, packageName, activePackage, payload)) {
                 scheduleAccessibilityNoRouteStop(packageName, "accessibility-unparsed");
             }
@@ -4569,25 +4685,22 @@ final class NavHudLiveSender {
         }
         boolean hudEnabled = NavCapturePrefs.isHudEnabled(context, packageName);
         NavCaptureStore.snapshot(context, result.snapshot);
-        if (shouldStartWazeBeforeFreshRouteEvidence(
-                hudEnabled, packageName, active, activePackage)) {
-            startOnMain(packageName, "accessibility");
-        }
         long evidenceNow = SystemClock.elapsedRealtime();
         NavRouteStateStore.get(context).updateFromSnapshot(
                 result.snapshot, "accessibility", evidenceNow);
-        WazeRouteTracker.get(context).updateFromSnapshot(
-                result.snapshot, "accessibility", evidenceNow);
+        if (!WAZE_PACKAGE.equals(packageName) || wazeFallbackActive) {
+            WazeRouteTracker.get(context).updateFromSnapshot(
+                    result.snapshot, "accessibility", evidenceNow);
+        }
         if (!hudEnabled) {
             log("accessibility snapshot only package=" + packageName
                     + " reason=" + result.reason);
             return;
         }
-        if (!active || !packageName.equals(activePackage)) {
-            startOnMain(packageName, "accessibility");
+        if (!prepareLegacyFallbackIngress(packageName, "accessibility")) {
+            return;
         }
-        if (WAZE_PACKAGE.equals(packageName)) {
-            onWazeLegacyRouteEvidence("accessibility");
+        if (WAZE_PACKAGE.equals(packageName) && wazeFallbackActive) {
             ensureWazeCropRunning("accessibility");
         }
         handler.removeCallbacks(notificationRemovedStop);
@@ -4642,17 +4755,18 @@ final class NavHudLiveSender {
         NavCaptureStore.snapshot(context, result.snapshot);
         NavRouteStateStore.get(context).updateFromSnapshot(
                 result.snapshot, "visual", SystemClock.elapsedRealtime());
-        WazeRouteTracker.get(context).updateFromSnapshot(
-                result.snapshot, "visual", SystemClock.elapsedRealtime());
+        if (!WAZE_PACKAGE.equals(packageName) || wazeFallbackActive) {
+            WazeRouteTracker.get(context).updateFromSnapshot(
+                    result.snapshot, "visual", SystemClock.elapsedRealtime());
+        }
         if (!hudEnabled) {
             log("visual snapshot only package=" + packageName + " reason=" + result.reason);
             return;
         }
-        if (!active || !packageName.equals(activePackage)) {
-            startOnMain(packageName, "visual");
+        if (!prepareLegacyFallbackIngress(packageName, "visual")) {
+            return;
         }
-        if (WAZE_PACKAGE.equals(packageName)) {
-            onWazeLegacyRouteEvidence("visual");
+        if (WAZE_PACKAGE.equals(packageName) && wazeFallbackActive) {
             ensureWazeCropRunning("visual");
         }
         handler.removeCallbacks(notificationRemovedStop);
@@ -4785,7 +4899,10 @@ final class NavHudLiveSender {
         long wazeTbtGeneration = tbtOwnerGeneration(WAZE_PACKAGE, wazeGeneration);
         long gmapsTbtGeneration = tbtOwnerGeneration(
                 GMapsDirectChannel.PACKAGE_NAME, gmapsGeneration);
-        boolean retainTbtRoute = isDirectNavigator(packageName)
+        boolean forceTeardown = "package-replace-hard-reset".equals(
+                NavTextNormalizer.lower(normalizeString(reason)));
+        boolean retainTbtRoute = !forceTeardown
+                && isDirectNavigator(packageName)
                 && shouldRetainRouteForTbt(packageName);
         if (WAZE_PACKAGE.equals(packageName) && retainTbtRoute) {
             tbtWazeObserver = true;
@@ -4802,6 +4919,7 @@ final class NavHudLiveSender {
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
+        legacyFallbackOwnerPackage = "";
         updateCaptureIngressPolicy();
         stopInProgress = isDirectNavigator(packageName);
         if (WAZE_PACKAGE.equals(packageName)) {
@@ -4895,6 +5013,34 @@ final class NavHudLiveSender {
         if (!nextPackage.isEmpty()) {
             startOnMain(nextPackage, nextReason);
         }
+        finishStopCompletion();
+    }
+
+    private void finishStopCompletion() {
+        if (pendingForcedDirectTeardown) {
+            hardStopDirectNavigatorsForPackageReplace();
+            pendingForcedDirectTeardown = false;
+        }
+        Runnable completion = pendingStopCompletion;
+        pendingStopCompletion = null;
+        if (completion != null) completion.run();
+    }
+
+    private void hardStopDirectNavigatorsForPackageReplace() {
+        if (tbtPublisher.isRouteActive()) {
+            tbtPublisher.endRoute(
+                    tbtPublisher.ownerPackage(), tbtPublisher.ownerGeneration(),
+                    "package-replace-hard-reset");
+        }
+        stopDirectNavigator(WAZE_PACKAGE, "package-replace-hard-reset");
+        wazeDirectChannel.hardStop("package-replace-hard-reset");
+        wazeSurfaceDirectChannel.hardStop("package-replace-hard-reset");
+        stopDirectNavigator(
+                GMapsDirectChannel.PACKAGE_NAME, "package-replace-hard-reset");
+        active = false;
+        activePackage = "";
+        legacyFallbackOwnerPackage = "";
+        updateCaptureIngressPolicy();
     }
 
     private void completeHudDemotionObserverRefresh() {
@@ -4919,17 +5065,6 @@ final class NavHudLiveSender {
         log("route_store_clear package=" + packageName + " reason=" + normalizedReason);
     }
 
-    //keeps this HUD step isolated so cluster payload behavior stays predictable.
-    private void forceClearNavigator(String packageName, String reason, long now) {
-        NavRouteStateStore.get(context).markRouteEnded(packageName, reason, now);
-        if (WAZE_PACKAGE.equals(packageName)) {
-            WazeRouteTracker.get(context).onRouteEnded(reason, now);
-            WazeCropCapture.get(context).stop(reason);
-        }
-        log("route_clear package=" + packageName + " reason=" + reason);
-        stopOnMain(reason, true);
-    }
-
     //handles this branch here so source-specific edge cases stay out of the main flow.
     private void handleWazeNoRouteOrVisualUnavailable(
             String clearReason, String visualReason, long now) {
@@ -4949,7 +5084,8 @@ final class NavHudLiveSender {
                 return;
             }
         }
-        forceClearNavigator(WAZE_PACKAGE, clearReason + ":" + visualReason, now);
+        forceClearLegacyFallback(
+                WAZE_PACKAGE, clearReason + ":" + visualReason, now);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -5235,13 +5371,6 @@ final class NavHudLiveSender {
         return normalizePackage(packageName) + "\n" + normalizeString(notificationKey);
     }
 
-    static boolean shouldStartWazeBeforeFreshRouteEvidence(
-            boolean hudEnabled, String packageName, boolean active, String activePackage) {
-        return hudEnabled
-                && WAZE_PACKAGE.equals(normalizePackage(packageName))
-                && (!active || !WAZE_PACKAGE.equals(normalizePackage(activePackage)));
-    }
-
     //resets stale post-update state before the first new navigation session binds SOME/IP again.
     private void resetRuntimeAfterPackageReplace(String packageName, String reason) {
         handler.removeCallbacks(sendLoop);
@@ -5471,7 +5600,13 @@ final class NavHudLiveSender {
         pendingReinitStartReason = "";
         log("package reinit complete restartPackage=" + restartPackage
                 + " reason=" + safeReason(restartReason));
-        startOnMain(restartPackage, restartReason);
+        boolean forcedDirectTeardown = pendingForcedDirectTeardown;
+        finishStopCompletion();
+        if (forcedDirectTeardown) {
+            log("package reinit restart suppressed by forced teardown");
+        } else {
+            startOnMain(restartPackage, restartReason);
+        }
     }
 
     private boolean isCurrentWazeDirectCallback(String ownerPackage,

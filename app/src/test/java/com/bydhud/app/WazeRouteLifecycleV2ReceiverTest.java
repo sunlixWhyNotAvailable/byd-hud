@@ -45,6 +45,10 @@ public final class WazeRouteLifecycleV2ReceiverTest {
         assertFalse(legacy.contains("markTrustStart"));
         assertFalse(legacy.contains("awaitTrust"));
         assertTrue(v2.contains("trustedIdentity(appContext, identity)"));
+        int onReceive = v2.indexOf("public void onReceive");
+        int identityCheck = v2.indexOf("trustedIdentity(appContext, identity)", onReceive);
+        int payloadRead = v2.indexOf("eventElapsedMs = intent.getLongExtra", onReceive);
+        assertTrue(identityCheck > onReceive && payloadRead > identityCheck);
         assertTrue(legacy.contains("timing.markDeliveryStart"));
         assertFalse(v2.contains("NavigatorPatchStore.isInstalledWazeLifecycleV2"));
         assertTrue(v2.contains("getApplicationInfo("));

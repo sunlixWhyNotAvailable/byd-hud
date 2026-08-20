@@ -15,6 +15,8 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.util.Log;
 
+import java.util.concurrent.atomic.AtomicBoolean;
+
 //anchors the HudRuntimeService android entry point so lifecycle recovery stays separate from business logic.
 public final class HudRuntimeService extends Service {
     private static final String TAG = "BydHudRuntimeService";
@@ -25,6 +27,15 @@ public final class HudRuntimeService extends Service {
             "com.bydhud.app.action.START_PERSISTENT_RUNTIME";
     private static final String EXTRA_REASON = "reason";
     private static final long HEARTBEAT_INTERVAL_MS = 30_000L;
+    private static final long START_REQUEST_TIMEOUT_MS = 15_000L;
+
+    private static final AtomicBoolean START_IN_FLIGHT = new AtomicBoolean(false);
+    private static Handler startGateHandler;
+    private static final Runnable START_REQUEST_TIMEOUT = () -> {
+        if (START_IN_FLIGHT.compareAndSet(true, false)) {
+            Log.w(TAG, "runtime start request timed out before service confirmation");
+        }
+    };
 
     private final Handler heartbeatHandler = new Handler(Looper.getMainLooper());
     private final Runnable heartbeatRunnable = new Runnable() {
@@ -41,26 +52,98 @@ public final class HudRuntimeService extends Service {
         }
     };
 
+    private boolean runtimeStartInitialized;
+    private boolean runtimeActiveWork;
+
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startPersistent(Context context, String reason) {
-        if (HudPrefs.isUserShutdownActive(context)) {
-            HudRuntimeWatchdog.cancel(context);
-            AppEventLogger.event(context, "runtime startPersistent skipped shutdown_active reason=" + reason);
+        Context appContext = context.getApplicationContext();
+        String safeReason = reason == null ? "" : reason.trim();
+        if (HudPrefs.isUserShutdownActive(appContext)) {
+            HudRuntimeWatchdog.cancel(appContext);
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent skipped shutdown_active reason=" + safeReason);
             return;
         }
-        Intent intent = new Intent(context, HudRuntimeService.class);
-        intent.setAction(ACTION_START_PERSISTENT);
-        intent.putExtra(EXTRA_REASON, reason);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent);
-        } else {
-            context.startService(intent);
+        if (!HudPrefs.isBootEnabled(appContext)) {
+            HudRuntimeWatchdog.cancel(appContext);
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent skipped boot_disabled reason=" + safeReason);
+            return;
         }
+        boolean hardResetPending = HudRuntimeUpgradeGuard.hasPendingHardReset(appContext);
+        if (!hardResetPending
+                && HudRuntimeState.isAlive(appContext, android.os.SystemClock.elapsedRealtime())) {
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent skipped already_alive reason=" + safeReason);
+            return;
+        }
+        if (!START_IN_FLIGHT.compareAndSet(false, true)) {
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent skipped start_in_flight reason=" + safeReason);
+            return;
+        }
+        startGateHandler().removeCallbacks(START_REQUEST_TIMEOUT);
+        startGateHandler().postDelayed(START_REQUEST_TIMEOUT, START_REQUEST_TIMEOUT_MS);
+        Intent intent = new Intent(appContext, HudRuntimeService.class);
+        intent.setAction(ACTION_START_PERSISTENT);
+        intent.putExtra(EXTRA_REASON, safeReason);
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                appContext.startForegroundService(intent);
+            } else {
+                appContext.startService(intent);
+            }
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent requested reason=" + safeReason);
+        } catch (RuntimeException error) {
+            startGateHandler().removeCallbacks(START_REQUEST_TIMEOUT);
+            START_IN_FLIGHT.set(false);
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent failed reason=" + safeReason
+                            + " error=" + error.getClass().getSimpleName());
+            throw error;
+        }
+    }
+
+    enum StartDecision {
+        SHUTDOWN,
+        BOOT_DISABLED,
+        ALREADY_ALIVE,
+        IN_FLIGHT,
+        REQUEST
+    }
+
+    static StartDecision startDecisionForTest(boolean shutdown, boolean bootEnabled,
+            boolean alive, boolean inFlight, boolean hardResetPending) {
+        if (shutdown) return StartDecision.SHUTDOWN;
+        if (!bootEnabled) return StartDecision.BOOT_DISABLED;
+        if (alive && !hardResetPending) return StartDecision.ALREADY_ALIVE;
+        return inFlight ? StartDecision.IN_FLIGHT : StartDecision.REQUEST;
+    }
+
+    static void clearStartRequestForTest() {
+        clearStartRequestGate();
+    }
+
+    private static void clearStartRequestGate() {
+        if (startGateHandler != null) {
+            startGateHandler.removeCallbacks(START_REQUEST_TIMEOUT);
+        }
+        START_IN_FLIGHT.set(false);
+    }
+
+    private static synchronized Handler startGateHandler() {
+        if (startGateHandler == null) {
+            startGateHandler = new Handler(Looper.getMainLooper());
+        }
+        return startGateHandler;
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static void stopPersistent(Context context, String reason) {
         Context appContext = context.getApplicationContext();
+        clearStartRequestGate();
         HudRuntimeWatchdog.cancel(appContext);
         InstrumentProxyManager.get(appContext).shutdown("runtime-stop:" + reason);
         appContext.stopService(new Intent(appContext, HudRuntimeService.class));
@@ -72,6 +155,9 @@ public final class HudRuntimeService extends Service {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
+        clearStartRequestGate();
+        runtimeStartInitialized = false;
+        runtimeActiveWork = false;
         HudRuntimeUpgradeGuard.recordVersionStart(this, "service-create");
         HudGraphicPayload.setContext(this);
         startForeground(NOTIFICATION_ID, buildNotification("Runtime active"));
@@ -111,18 +197,25 @@ public final class HudRuntimeService extends Service {
             HudRuntimeSupervisor.hardResetAfterPackageReplace(this, "service-start:" + reason);
             return START_NOT_STICKY;
         }
+        clearStartRequestGate();
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
-        InstrumentProxyManager.get(this).ensureStarted("runtime-service:" + reason);
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
-        updateNotification(activeWork ? "Runtime active" : "Runtime idle");
-        String hudPackage = NavCapturePrefs.getHudPackage(this);
-        if (activeWork && !hudPackage.isEmpty()
-                && NavCapturePrefs.isHudEnabled(this, hudPackage)) {
-            NavHudLiveSender.get(this).start(hudPackage, "runtime-service:" + reason);
-        }
-        if (activeWork && HudPrefs.isTbtWithoutHudOutputEnabled(this)) {
-            NavHudLiveSender.get(this).refreshTbtObservers();
+        if (!runtimeStartInitialized || activeWork != runtimeActiveWork) {
+            InstrumentProxyManager.get(this).ensureStarted("runtime-service:" + reason);
+            updateNotification(activeWork ? "Runtime active" : "Runtime idle");
+            String hudPackage = NavCapturePrefs.getHudPackage(this);
+            if (activeWork && !hudPackage.isEmpty()
+                    && NavCapturePrefs.isHudEnabled(this, hudPackage)) {
+                NavHudLiveSender.get(this).start(hudPackage, "runtime-service:" + reason);
+            }
+            if (activeWork && HudPrefs.isTbtWithoutHudOutputEnabled(this)) {
+                NavHudLiveSender.get(this).refreshTbtObservers();
+            }
+            runtimeStartInitialized = true;
+            runtimeActiveWork = activeWork;
+        } else {
+            log("runtime duplicate start ignored reason=" + reason);
         }
         if (activeWork) {
             HudRuntimeWatchdog.schedule(this, "service-start");
@@ -162,6 +255,9 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
+        clearStartRequestGate();
+        runtimeStartInitialized = false;
+        runtimeActiveWork = false;
         InstrumentProxyManager.get(this).shutdown("runtime-destroyed");
         HudPrefs.setRuntimeServiceRunning(this, false);
         HudRuntimeState.markStopped(this, "destroyed");

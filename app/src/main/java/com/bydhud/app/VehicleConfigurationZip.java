@@ -15,6 +15,8 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
@@ -63,6 +65,19 @@ final class VehicleConfigurationZip {
                     + "private[_-]?key|client[_-]?secret|authorization|cookie|credential|"
                     + "credentials|username|email|user|vin|lat|latitude|lon|longitude|"
                     + "coordinates?|location|account(?:s|id)?|vehicleidentification)");
+    private static final Pattern MAC_ADDRESS = Pattern.compile(
+            "(?i)(?<![0-9a-f])((?:[0-9a-f]{2}[:-]){5}[0-9a-f]{2})(?![0-9a-f])");
+    private static final Pattern IPV4_ADDRESS = Pattern.compile(
+            "(?<![0-9.])((?:(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2})\\.){3}"
+                    + "(?:25[0-5]|2[0-4][0-9]|1?[0-9]{1,2}))"
+                    + "(/(?:3[0-2]|[12]?[0-9]))?(?![0-9.])");
+    private static final Pattern IPV6_ADDRESS = Pattern.compile(
+            "(?i)(?<![0-9a-f:])(\\[?)([0-9a-f]{0,4}(?::[0-9a-f]{0,4}){2,7})"
+                    + "(%[a-z0-9_.-]+)?(\\]?)"
+                    + "(/(?:12[0-8]|1[01][0-9]|[1-9]?[0-9]))?"
+                    + "(?=$|\\s|[,;)]|:\\d{1,5}\\b)");
+    private static final Pattern IPV6_WILDCARD_ENDPOINT = Pattern.compile(
+            "(?<![0-9A-Fa-f:])::(?=:\\d{1,5}\\b)");
     private static final String CONFIG_FIND =
             "find /system/etc /vendor/etc /product/etc /odm/etc -type f";
     private static final String LIBRARY_FIND =
@@ -127,6 +142,7 @@ final class VehicleConfigurationZip {
         final List<ArchiveFile> files = new ArrayList<>();
         final JSONArray unavailable = new JSONArray();
         final JSONArray excluded = new JSONArray();
+        final NetworkMasker networkMasker = new NetworkMasker();
         int totalBytes;
         boolean adbAuthorized;
 
@@ -333,7 +349,16 @@ final class VehicleConfigurationZip {
         }
 
         private void addText(String path, String source, String value, String note) {
-            byte[] bytes = (value == null ? "" : value).getBytes(StandardCharsets.UTF_8);
+            String original = value == null ? "" : value;
+            String masked = networkMasker.mask(original);
+            if (masked == null) {
+                unavailable(path, "network address masking failed");
+                return;
+            }
+            if (!masked.equals(original)) {
+                note = appendNote(note, "networkAddressesMasked=true");
+            }
+            byte[] bytes = masked.getBytes(StandardCharsets.UTF_8);
             if (bytes.length > MAX_ENTRY_BYTES) {
                 bytes = Arrays.copyOf(bytes, MAX_ENTRY_BYTES);
                 note = appendNote(note, "truncatedAt=" + MAX_ENTRY_BYTES);
@@ -362,7 +387,7 @@ final class VehicleConfigurationZip {
             manifest.put("createdAtMs", System.currentTimeMillis());
             manifest.put("adbAuthorized", adbAuthorized);
             JSONObject policy = new JSONObject();
-            policy.put("networkAddressesMasked", false);
+            policy.put("networkAddressesMasked", true);
             policy.put("navigationLogsIncluded", false);
             policy.put("apksIncluded", false);
             policy.put("nativeLibrariesIncluded", false);
@@ -829,6 +854,127 @@ final class VehicleConfigurationZip {
             this.start = start;
             this.end = end;
             this.replacement = replacement;
+        }
+    }
+
+    static List<String> maskNetworkAddressesForTest(List<String> values) {
+        NetworkMasker masker = new NetworkMasker();
+        List<String> masked = new ArrayList<>();
+        if (values == null) return masked;
+        for (String value : values) masked.add(masker.mask(value == null ? "" : value));
+        return masked;
+    }
+
+    private static final class NetworkMasker {
+        private final Map<String, String> ipAliases = new LinkedHashMap<>();
+        private final Map<String, String> macAliases = new LinkedHashMap<>();
+
+        String mask(String value) {
+            String masked = replaceMac(value == null ? "" : value);
+            masked = replaceIpv4(masked);
+            masked = replaceIpv6WildcardEndpoint(masked);
+            masked = replaceIpv6(masked);
+            return containsRawAddress(masked) ? null : masked;
+        }
+
+        private String replaceMac(String value) {
+            java.util.regex.Matcher matcher = MAC_ADDRESS.matcher(value);
+            StringBuffer output = new StringBuffer();
+            while (matcher.find()) {
+                String key = matcher.group(1).toLowerCase(Locale.ROOT).replace('-', ':');
+                matcher.appendReplacement(output,
+                        java.util.regex.Matcher.quoteReplacement(alias(macAliases, key, "MAC")));
+            }
+            matcher.appendTail(output);
+            return output.toString();
+        }
+
+        private String replaceIpv4(String value) {
+            java.util.regex.Matcher matcher = IPV4_ADDRESS.matcher(value);
+            StringBuffer output = new StringBuffer();
+            while (matcher.find()) {
+                String replacement = alias(ipAliases, matcher.group(1), "IP")
+                        + safeGroup(matcher, 2);
+                matcher.appendReplacement(output,
+                        java.util.regex.Matcher.quoteReplacement(replacement));
+            }
+            matcher.appendTail(output);
+            return output.toString();
+        }
+
+        private String replaceIpv6WildcardEndpoint(String value) {
+            java.util.regex.Matcher matcher = IPV6_WILDCARD_ENDPOINT.matcher(value);
+            StringBuffer output = new StringBuffer();
+            while (matcher.find()) {
+                matcher.appendReplacement(output, java.util.regex.Matcher.quoteReplacement(
+                        alias(ipAliases, "::", "IP")));
+            }
+            matcher.appendTail(output);
+            return output.toString();
+        }
+
+        private String replaceIpv6(String value) {
+            java.util.regex.Matcher matcher = IPV6_ADDRESS.matcher(value);
+            StringBuffer output = new StringBuffer();
+            while (matcher.find()) {
+                String open = safeGroup(matcher, 1);
+                String address = safeGroup(matcher, 2);
+                String zone = safeGroup(matcher, 3);
+                String close = safeGroup(matcher, 4);
+                if (!validBrackets(open, close) || !isIpv6(address)) {
+                    continue;
+                }
+                String replacement = open + alias(ipAliases,
+                        address.toLowerCase(Locale.ROOT), "IP")
+                        + zone + close + safeGroup(matcher, 5);
+                matcher.appendReplacement(output,
+                        java.util.regex.Matcher.quoteReplacement(replacement));
+            }
+            matcher.appendTail(output);
+            return output.toString();
+        }
+
+        private boolean containsRawAddress(String value) {
+            if (MAC_ADDRESS.matcher(value).find() || IPV4_ADDRESS.matcher(value).find()
+                    || IPV6_WILDCARD_ENDPOINT.matcher(value).find()) {
+                return true;
+            }
+            java.util.regex.Matcher matcher = IPV6_ADDRESS.matcher(value);
+            while (matcher.find()) {
+                if (validBrackets(safeGroup(matcher, 1), safeGroup(matcher, 4))
+                        && isIpv6(safeGroup(matcher, 2))) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static boolean validBrackets(String open, String close) {
+            return (open.isEmpty() && close.isEmpty())
+                    || (open.equals("[") && close.equals("]"));
+        }
+
+        private static boolean isIpv6(String address) {
+            try {
+                InetAddress parsed = InetAddress.getByName(address);
+                return parsed instanceof Inet6Address;
+            } catch (Exception ignored) {
+                return false;
+            }
+        }
+
+        private static String alias(Map<String, String> aliases, String key, String kind) {
+            String normalized = key.toLowerCase(Locale.ROOT);
+            String existing = aliases.get(normalized);
+            if (existing != null) return existing;
+            String created = "<" + kind + "_" + (aliases.size() + 1) + ">";
+            aliases.put(normalized, created);
+            return created;
+        }
+
+        private static String safeGroup(java.util.regex.Matcher matcher, int group) {
+            String value = matcher.group(group);
+            return value == null ? "" : value;
         }
     }
 
