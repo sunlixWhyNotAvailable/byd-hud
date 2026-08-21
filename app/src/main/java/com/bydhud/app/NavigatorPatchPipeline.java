@@ -656,9 +656,10 @@ final class NavigatorPatchPipeline {
         int lifecycleTargets = 0;
         boolean lifecyclePatchable = false;
         boolean lifecyclePatched = false;
-        int alertTargets = 0;
-        boolean alertStock = false;
+        int alertOwnerMembers = 0;
         boolean alertPatched = false;
+        boolean alertCompatible = true;
+        boolean alertHasStock = false;
         String reason = "Waze allowlist target missing";
         for (NavigatorApkSet.Member member : set.members) {
             WazeApkInspection inspection = inspectWaze(member.file);
@@ -671,9 +672,14 @@ final class NavigatorPatchPipeline {
                     + inspection.speedTargetCount + inspection.clusterEtaTargetCount;
             lifecyclePatchable |= inspection.lifecyclePatchable();
             lifecyclePatched |= inspection.lifecyclePatched();
-            alertTargets += inspection.alertClassCount;
-            alertStock |= inspection.alertStock();
+            if (inspection.alertClassCount > 0 || inspection.alertOnceClassCount > 0) {
+                alertOwnerMembers++;
+            }
             alertPatched |= inspection.alertPatched();
+            if (inspection.alertClassCount > 0 || inspection.alertOnceClassCount > 0) {
+                alertCompatible &= inspection.alertCompatible();
+                alertHasStock |= inspection.alertHasStock();
+            }
             if (!inspection.reason.isEmpty()) reason = inspection.reason;
         }
         String directState;
@@ -686,8 +692,8 @@ final class NavigatorPatchPipeline {
                 : lifecyclePatchable ? NavigatorPatchStore.PATCHABLE
                 : lifecyclePatched ? NavigatorPatchStore.PATCHED
                 : NavigatorPatchStore.FAILED;
-        String alert = alertTargets != 1 ? NavigatorPatchStore.FAILED
-                : alertStock ? NavigatorPatchStore.PATCHABLE
+        String alert = alertOwnerMembers != 1 || !alertCompatible ? NavigatorPatchStore.FAILED
+                : alertHasStock ? NavigatorPatchStore.PATCHABLE
                 : alertPatched ? NavigatorPatchStore.PATCHED
                 : NavigatorPatchStore.FAILED;
         String compatibilityReason = NavigatorPatchStore.FAILED.equals(optional)
@@ -929,23 +935,26 @@ final class NavigatorPatchPipeline {
                     NavigatorPatchStore.PATCHING, "Patching Waze alerts");
             WazeApkInspection alertOwner = null;
             for (WazeApkInspection inspection : inspections) {
-                if (inspection.alertClassCount <= 0) continue;
+                if (inspection.alertClassCount <= 0 && inspection.alertOnceClassCount <= 0) continue;
                 if (alertOwner != null) {
                     throw new IOException("Waze alert-hook target member is ambiguous");
                 }
                 alertOwner = inspection;
             }
-            if (alertOwner == null || !alertOwner.alertStock()
-                    || alertOwner.alertDexEntries.size() != 1) {
+            if (alertOwner == null || !alertOwner.alertCompatible() || !alertOwner.alertHasStock()) {
                 throw new IOException("Waze alert-hook target missing");
             }
             File target = outputMember(outputDirectory, alertOwner.fileName);
             String dexEntry = alertOwner.alertDexEntries.get(0);
+            byte[] inputDex = readEntry(target, dexEntry);
+            if (!WazePatchEngine.inspectAlertHook(inputDex).patchableComponents()) {
+                throw new IOException("Waze alert-hook stock target missing");
+            }
             File rewritten = new File(transaction, "waze-alert-hook.dex");
-            WazePatchEngine.patchAlertHook(readEntry(target, dexEntry), rewritten);
-            File alertApk = new File(transaction, "waze-alert-hook-unsigned.apk");
+            WazePatchEngine.patchAlertHook(inputDex, rewritten);
             Map<String, File> replacements = new HashMap<>();
             replacements.put(dexEntry, rewritten);
+            File alertApk = new File(transaction, "waze-alert-hook-unsigned.apk");
             repack(target, alertApk, replacements, Collections.emptyMap());
             replaceFile(alertApk, target);
         }
@@ -1087,10 +1096,23 @@ final class NavigatorPatchPipeline {
                 result.alertHelperMethodCount += alert.helperMethodCount;
                 result.alertProducerCallCount += alert.producerCallCount;
                 result.alertCollectorCallCount += alert.collectorCallCount;
+                result.alertTripPublisherCallCount += alert.tripPublisherCallCount;
                 result.alertGuardReadCount += alert.guardReadCount;
                 result.alertGuardWriteCount += alert.guardWriteCount;
                 result.alertLogMarkerCount += alert.logMarkerCount;
-                if (alert.classCount > 0) result.alertDexEntries.add(entry.getName());
+                result.alertOnceClassCount += alert.alertOnceClassCount;
+                result.alertOnceTargetMethodCount += alert.alertOnceTargetMethodCount;
+                result.alertOnceStateReadCount += alert.alertOnceStateReadCount;
+                result.alertOnceModeReadCount += alert.alertOnceModeReadCount;
+                result.alertOnceStateUpdateCount += alert.alertOnceStateUpdateCount;
+                result.alertOnceNativeStartCount += alert.alertOnceNativeStartCount;
+                result.alertOnceGuardCount += alert.alertOnceGuardCount;
+                result.alertOnceUnchangedMethodCount += alert.alertOnceUnchangedMethodCount;
+                result.alertOnceStockShapeCount += alert.alertOnceStockShapeCount;
+                result.alertOncePatchedShapeCount += alert.alertOncePatchedShapeCount;
+                if (alert.classCount > 0 || alert.alertOnceClassCount > 0) {
+                    result.alertDexEntries.add(entry.getName());
+                }
             }
         }
         if (result.allowlistTargetCount != 1) {
@@ -1355,9 +1377,20 @@ final class NavigatorPatchPipeline {
         int alertHelperMethodCount;
         int alertProducerCallCount;
         int alertCollectorCallCount;
+        int alertTripPublisherCallCount;
         int alertGuardReadCount;
         int alertGuardWriteCount;
         int alertLogMarkerCount;
+        int alertOnceClassCount;
+        int alertOnceTargetMethodCount;
+        int alertOnceStateReadCount;
+        int alertOnceModeReadCount;
+        int alertOnceStateUpdateCount;
+        int alertOnceNativeStartCount;
+        int alertOnceGuardCount;
+        int alertOnceUnchangedMethodCount;
+        int alertOnceStockShapeCount;
+        int alertOncePatchedShapeCount;
 
         boolean lifecycleCoreStock() {
             return applicationTargetCount == 1 && applicationHookCount == 0
@@ -1444,8 +1477,39 @@ final class NavigatorPatchPipeline {
                     && alertAnchorCount == 1 && alertHookCallCount == 1
                     && alertHookAfterAnchorCount == 1 && alertHelperMethodCount == 1
                     && alertProducerCallCount == 1 && alertCollectorCallCount == 1
+                    && alertTripPublisherCallCount == 1
                     && alertGuardReadCount == 1 && alertGuardWriteCount == 1
                     && alertLogMarkerCount == 1;
         }
+
+        boolean alertOnceStock() {
+            return alertOnceClassCount == 1 && alertOnceTargetMethodCount == 1
+                    && alertOnceUnchangedMethodCount == 2
+                    && alertOnceStockShapeCount == 1
+                    && alertOnceStateReadCount == 2 && alertOnceModeReadCount == 0
+                    && alertOnceStateUpdateCount == 1 && alertOnceNativeStartCount == 1
+                    && alertOnceGuardCount == 0;
+        }
+
+        boolean alertOncePatched() {
+            return alertOnceClassCount == 1 && alertOnceTargetMethodCount == 1
+                    && alertOnceUnchangedMethodCount == 2
+                    && alertOncePatchedShapeCount == 1
+                    && alertOnceStateReadCount == 3 && alertOnceModeReadCount == 1
+                    && alertOnceStateUpdateCount == 1 && alertOnceNativeStartCount == 1
+                    && alertOnceGuardCount == 2;
+        }
+
+        boolean alertCompatible() {
+            return alertDexEntries.size() == 1
+                    && alertClassCount == 1 && alertOnceClassCount == 1
+                    && (alertStock() || alertPatched())
+                    && (alertOnceStock() || alertOncePatched());
+        }
+
+        boolean alertHasStock() {
+            return alertStock() || alertOnceStock();
+        }
+
     }
 }

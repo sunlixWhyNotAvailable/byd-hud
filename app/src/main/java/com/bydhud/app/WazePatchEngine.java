@@ -5,6 +5,7 @@ import org.jf.dexlib2.Opcodes;
 import org.jf.dexlib2.AccessFlags;
 import org.jf.dexlib2.builder.MethodImplementationBuilder;
 import org.jf.dexlib2.builder.MutableMethodImplementation;
+import org.jf.dexlib2.builder.Label;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction10x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11n;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
@@ -12,6 +13,7 @@ import org.jf.dexlib2.builder.instruction.BuilderInstruction12x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction21t;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction22c;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction22t;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction35c;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.ClassDef;
@@ -70,6 +72,25 @@ final class WazePatchEngine {
     private static final String BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridgeV2;";
     private static final String LEGACY_BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridge;";
     private static final String ALERT_SESSION_CLASS = "Lcom/waze/car_lib/e/q;";
+    private static final String ALERT_ONCE_CLASS = "Lcom/waze/alerters/a/q;";
+    private static final String ALERT_ONCE_STATE_CLASS = "Lcom/waze/alerters/a/p;";
+    private static final String ALERT_ONCE_MODE_CLASS = "Lcom/waze/alerters/a/o;";
+    private static final ImmutableFieldReference ALERT_ONCE_STATE =
+            new ImmutableFieldReference(ALERT_ONCE_CLASS, "g", ALERT_ONCE_STATE_CLASS);
+    private static final ImmutableFieldReference ALERT_ONCE_LISTENER =
+            new ImmutableFieldReference(
+                    ALERT_ONCE_CLASS, "d", "Lcom/waze/alerters/a/l;");
+    private static final ImmutableFieldReference ALERT_ONCE_VALUE =
+            new ImmutableFieldReference(ALERT_ONCE_CLASS, "a", "Lcom/waze/k;");
+    private static final ImmutableMethodReference ALERT_ONCE_MODE = new ImmutableMethodReference(
+            ALERT_ONCE_STATE_CLASS, "c", Collections.emptyList(), ALERT_ONCE_MODE_CLASS);
+    private static final ImmutableMethodReference ALERT_ONCE_UPDATE = new ImmutableMethodReference(
+            ALERT_ONCE_STATE_CLASS, "e", java.util.Arrays.asList(
+            ALERT_ONCE_STATE_CLASS, "Lcom/waze/j;", ALERT_ONCE_MODE_CLASS, "I", "I"),
+            ALERT_ONCE_STATE_CLASS);
+    private static final ImmutableMethodReference ALERT_ONCE_NATIVE_START =
+            new ImmutableMethodReference("Lcom/waze/alerters/a/l;", "d",
+                    Collections.singletonList("Lcom/waze/k;"), "V");
     private static final ImmutableFieldReference ALERT_GUARD =
             new ImmutableFieldReference(ALERT_SESSION_CLASS, "g", "Z");
     private static final ImmutableMethodReference ALERT_ANCHOR = new ImmutableMethodReference(
@@ -335,12 +356,43 @@ final class WazePatchEngine {
                 }
             }
         }
+        for (ClassDef classDef : file.getClasses()) {
+            if (!ALERT_ONCE_CLASS.equals(classDef.getType())) continue;
+            result.alertOnceClassCount++;
+            for (Method method : classDef.getMethods()) {
+                if (matchesAlertOnceTarget(method)) {
+                    result.alertOnceTargetMethodCount++;
+                    result.alertOnceStateReadCount += countFieldOpcode(
+                            method, ALERT_ONCE_STATE, Opcode.IGET_OBJECT);
+                    result.alertOnceModeReadCount += countCall(method, ALERT_ONCE_MODE);
+                    result.alertOnceStateUpdateCount += countCall(method, ALERT_ONCE_UPDATE);
+                    result.alertOnceNativeStartCount += countCall(
+                            method, ALERT_ONCE_NATIVE_START);
+                    result.alertOnceGuardCount += countAlertOnceGuards(method);
+                    AlertOnceInspection structure = inspectAlertOnceMethod(method);
+                    if (structure.stock) result.alertOnceStockShapeCount++;
+                    if (structure.patched) result.alertOncePatchedShapeCount++;
+                }
+                if (matchesAlertOnceMethod(method, "i")
+                        || matchesAlertOnceMethod(method, "j")) {
+                    result.alertOnceUnchangedMethodCount++;
+                }
+            }
+        }
         return result;
     }
 
     static void patchAlertHook(byte[] inputDex, File outputDex) throws IOException {
+        patchAlertComponents(inputDex, outputDex, true, true);
+    }
+
+    static void patchAlertComponents(byte[] inputDex, File outputDex,
+            boolean patchUi, boolean patchAlertOnce) throws IOException {
+        if (!patchUi && !patchAlertOnce) {
+            throw new IOException("Waze alert component selection is empty");
+        }
         AlertInspection inspection = inspectAlertHook(inputDex);
-        if (!inspection.stockTargets()) {
+        if (!inspection.patchableComponents()) {
             throw new IOException("Waze alert-hook target is not compatible stock: "
                     + inspection.summary());
         }
@@ -350,19 +402,24 @@ final class WazePatchEngine {
         int rewritten = 0;
         for (ClassDef classDef : input.getClasses()) {
             if (ALERT_SESSION_CLASS.equals(classDef.getType())) {
-                classes.add(rewriteAlertClass(classDef));
-                rewritten++;
+                classes.add(patchUi && inspection.stockTargets()
+                        ? rewriteAlertClass(classDef) : ImmutableClassDef.of(classDef));
+                if (patchUi && inspection.stockTargets()) rewritten++;
+            } else if (ALERT_ONCE_CLASS.equals(classDef.getType())) {
+                classes.add(patchAlertOnce && inspection.alertOnceStockTargets()
+                        ? rewriteAlertOnceClass(classDef) : ImmutableClassDef.of(classDef));
+                if (patchAlertOnce && inspection.alertOnceStockTargets()) rewritten++;
             } else {
                 classes.add(ImmutableClassDef.of(classDef));
             }
         }
-        if (rewritten != 1) {
-            throw new IOException("Waze alert-hook class rewrite count=" + rewritten);
+        if (rewritten == 0) {
+            throw new IOException("Waze alert-hook class rewrite count=0");
         }
         DexPool.writeTo(outputDex.getAbsolutePath(),
                 new ImmutableDexFile(input.getOpcodes(), classes));
         AlertInspection verified = inspectAlertHook(Files.readAllBytes(outputDex.toPath()));
-        if (!verified.patchedTargets()) {
+        if (!verified.patchedComponents(inspection, patchUi, patchAlertOnce)) {
             throw new IOException("Waze alert-hook verification failed: " + verified.summary());
         }
     }
@@ -392,6 +449,115 @@ final class WazePatchEngine {
                 classDef.getType(), classDef.getAccessFlags(), classDef.getSuperclass(),
                 classDef.getInterfaces(), classDef.getSourceFile(), classDef.getAnnotations(),
                 fields, methods);
+    }
+
+    private static ClassDef rewriteAlertOnceClass(ClassDef classDef) {
+        List<Method> methods = new ArrayList<>();
+        int targetCount = 0;
+        for (Method method : classDef.getMethods()) {
+            if (matchesAlertOnceTarget(method)) {
+                methods.add(injectAlertOnceGuard(method));
+                targetCount++;
+            } else {
+                methods.add(ImmutableMethod.of(method));
+            }
+        }
+        if (targetCount != 1) {
+            throw new IllegalStateException("Waze alert-once target count=" + targetCount);
+        }
+        return new ImmutableClassDef(
+                classDef.getType(), classDef.getAccessFlags(), classDef.getSuperclass(),
+                classDef.getInterfaces(), classDef.getSourceFile(), classDef.getAnnotations(),
+                classDef.getFields(), methods);
+    }
+
+    private static Method injectAlertOnceGuard(Method method) {
+        AlertOnceInspection inspection = inspectAlertOnceMethod(method);
+        if (!inspection.stock) {
+            throw new IllegalStateException(
+                    "Waze alert-once target is not compatible stock: " + inspection.reason);
+        }
+        MethodImplementation source = method.getImplementation();
+        MutableMethodImplementation mutable = new MutableMethodImplementation(source);
+        int thisRegister = source.getRegisterCount() - 1;
+        mutable.addInstruction(0, new BuilderInstruction22c(
+                Opcode.IGET_OBJECT, 4, thisRegister, ALERT_ONCE_STATE));
+        mutable.addInstruction(1, new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 1, 4, 0, 0, 0, 0, ALERT_ONCE_MODE));
+        mutable.addInstruction(2, new BuilderInstruction11x(
+                Opcode.MOVE_RESULT_OBJECT, 4));
+
+        int update = -1;
+        int nativeStart = -1;
+        for (int index = 0; index < mutable.getInstructions().size(); index++) {
+            Instruction instruction = mutable.getInstructions().get(index);
+            if (isCall(instruction, ALERT_ONCE_UPDATE)) {
+                if (update >= 0) throw new IllegalStateException("Waze alert-once update is ambiguous");
+                update = index;
+            }
+            if (isCall(instruction, ALERT_ONCE_NATIVE_START)) {
+                if (nativeStart >= 0) {
+                    throw new IllegalStateException("Waze alert-once native start is ambiguous");
+                }
+                nativeStart = index;
+            }
+        }
+        if (update < 1 || nativeStart < 1) {
+            throw new IllegalStateException("Waze alert-once update or native start is missing");
+        }
+        Instruction updateInstruction = mutable.getInstructions().get(update);
+        if (!(updateInstruction instanceof FiveRegisterInstruction)) {
+            throw new IllegalStateException("Waze alert-once update register shape mismatch");
+        }
+        FiveRegisterInstruction updateRegisters = (FiveRegisterInstruction) updateInstruction;
+        if (updateRegisters.getRegisterD() != 4) {
+            throw new IllegalStateException("Waze alert-once update does not use stock null register");
+        }
+        mutable.replaceInstruction(update, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, updateRegisters.getRegisterCount(),
+                updateRegisters.getRegisterC(), 2, updateRegisters.getRegisterE(),
+                updateRegisters.getRegisterF(), updateRegisters.getRegisterG(),
+                ALERT_ONCE_UPDATE));
+        int nullRegister = -1;
+        for (int index = update - 1; index >= 0; index--) {
+            Instruction instruction = mutable.getInstructions().get(index);
+            if (instruction.getOpcode() == Opcode.CONST_4
+                    && instruction instanceof org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction
+                    && ((org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction) instruction)
+                    .getNarrowLiteral() == 0
+                    && instruction instanceof OneRegisterInstruction
+                    && ((OneRegisterInstruction) instruction).getRegisterA() == 4) {
+                nullRegister = index;
+                break;
+            }
+        }
+        if (nullRegister < 0) {
+            throw new IllegalStateException("Waze alert-once null register is missing");
+        }
+        mutable.removeInstruction(nullRegister);
+        if (nullRegister < nativeStart) nativeStart--;
+
+        int listenerLoad = nativeStart - 2;
+        if (listenerLoad < 0
+                || !isAlertOnceFieldLoad(
+                mutable.getInstructions().get(listenerLoad), ALERT_ONCE_LISTENER, 0, thisRegister)
+                || !isAlertOnceFieldLoad(
+                mutable.getInstructions().get(listenerLoad + 1),
+                ALERT_ONCE_VALUE, thisRegister, thisRegister)) {
+            throw new IllegalStateException("Waze alert-once native receiver shape mismatch");
+        }
+        Label skip = mutable.newLabelForIndex(nativeStart + 1);
+        mutable.addInstruction(listenerLoad, new BuilderInstruction21c(
+                Opcode.SGET_OBJECT, 0,
+                new ImmutableFieldReference(ALERT_ONCE_MODE_CLASS, "b", ALERT_ONCE_MODE_CLASS)));
+        mutable.addInstruction(listenerLoad + 1, new BuilderInstruction22t(
+                Opcode.IF_EQ, 4, 0, skip));
+        mutable.addInstruction(listenerLoad + 2, new BuilderInstruction21c(
+                Opcode.SGET_OBJECT, 0,
+                new ImmutableFieldReference(ALERT_ONCE_MODE_CLASS, "c", ALERT_ONCE_MODE_CLASS)));
+        mutable.addInstruction(listenerLoad + 3, new BuilderInstruction22t(
+                Opcode.IF_EQ, 4, 0, skip));
+        return immutable(method, mutable);
     }
 
     private static Method injectAlertHelperCall(Method method) {
@@ -770,6 +936,202 @@ final class WazePatchEngine {
                 && "c".equals(method.getName())
                 && method.getParameterTypes().isEmpty()
                 && "V".equals(method.getReturnType());
+    }
+
+    private static boolean matchesAlertOnceTarget(Method method) {
+        return matchesAlertOnceMethod(method, "k");
+    }
+
+    private static boolean matchesAlertOnceMethod(Method method, String name) {
+        return ALERT_ONCE_CLASS.equals(method.getDefiningClass())
+                && name.equals(method.getName())
+                && method.getParameterTypes().isEmpty()
+                && "V".equals(method.getReturnType());
+    }
+
+    private static AlertOnceInspection inspectAlertOnceMethod(Method method) {
+        AlertOnceInspection result = new AlertOnceInspection();
+        if (!matchesAlertOnceTarget(method)) {
+            result.reason = "alert-once target method missing";
+            return result;
+        }
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) {
+            result.reason = "alert-once target has no implementation";
+            return result;
+        }
+        result.stateReadCount = countFieldOpcode(method, ALERT_ONCE_STATE, Opcode.IGET_OBJECT);
+        result.modeReadCount = countCall(method, ALERT_ONCE_MODE);
+        result.stateUpdateCount = countCall(method, ALERT_ONCE_UPDATE);
+        result.nativeStartCount = countCall(method, ALERT_ONCE_NATIVE_START);
+        result.guardCount = countAlertOnceGuards(method);
+        result.stock = implementation.getRegisterCount() == 6
+                && result.stateReadCount == 2
+                && result.modeReadCount == 0
+                && result.stateUpdateCount == 1
+                && result.nativeStartCount == 1
+                && result.guardCount == 0
+                && hasAlertOnceStockNullUpdate(method);
+        result.patched = implementation.getRegisterCount() == 6
+                && result.stateReadCount == 3
+                && result.modeReadCount == 1
+                && result.stateUpdateCount == 1
+                && result.nativeStartCount == 1
+                && result.guardCount == 2
+                && hasAlertOnceModeSnapshot(method)
+                && hasAlertOncePatchedUpdate(method);
+        result.reason = result.stock ? "stock alert-once target"
+                : result.patched ? "patched alert-once target"
+                : "alert-once structural guard mismatch: stateRead=" + result.stateReadCount
+                + ", modeRead=" + result.modeReadCount + ", update=" + result.stateUpdateCount
+                + ", nativeStart=" + result.nativeStartCount + ", guards=" + result.guardCount;
+        return result;
+    }
+
+    private static int countAlertOnceGuards(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        List<? extends Instruction> instructions = toList(implementation);
+        int nativeStart = uniqueCallIndex(instructions, ALERT_ONCE_NATIVE_START);
+        if (nativeStart < 6 || nativeStart + 1 >= instructions.size()) return 0;
+        if (!isAlertOnceModeField(instructions.get(nativeStart - 6), "b")
+                || !isAlertOnceModeField(instructions.get(nativeStart - 4), "c")
+                || !isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 2), ALERT_ONCE_LISTENER, 0, 5)
+                || !isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 1), ALERT_ONCE_VALUE, 5, 5)) {
+            return 0;
+        }
+        Instruction first = instructions.get(nativeStart - 5);
+        Instruction second = instructions.get(nativeStart - 3);
+        if (!isAlertOnceGuard(first) || !isAlertOnceGuard(second)) return 0;
+        List<Integer> addresses = new ArrayList<>();
+        int address = 0;
+        for (Instruction instruction : instructions) {
+            addresses.add(address);
+            address += instruction.getCodeUnits();
+        }
+        int firstTarget = addresses.get(nativeStart - 5)
+                + ((OffsetInstruction) first).getCodeOffset();
+        int secondTarget = addresses.get(nativeStart - 3)
+                + ((OffsetInstruction) second).getCodeOffset();
+        int skipTarget = addresses.get(nativeStart + 1);
+        return firstTarget == secondTarget && firstTarget == skipTarget ? 2 : 0;
+    }
+
+    private static boolean isAlertOnceGuard(Instruction instruction) {
+        return instruction.getOpcode() == Opcode.IF_EQ
+                && instruction instanceof org.jf.dexlib2.iface.instruction.TwoRegisterInstruction
+                && ((org.jf.dexlib2.iface.instruction.TwoRegisterInstruction) instruction)
+                .getRegisterA() == 4
+                && ((org.jf.dexlib2.iface.instruction.TwoRegisterInstruction) instruction)
+                .getRegisterB() == 0
+                && instruction instanceof OffsetInstruction;
+    }
+
+    private static boolean isAlertOnceModeField(Instruction instruction, String name) {
+        if (instruction.getOpcode() != Opcode.SGET_OBJECT
+                || !(instruction instanceof ReferenceInstruction)) return false;
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        if (!(reference instanceof FieldReference)) return false;
+        FieldReference field = (FieldReference) reference;
+        return ALERT_ONCE_MODE_CLASS.equals(field.getDefiningClass())
+                && name.equals(field.getName())
+                && ALERT_ONCE_MODE_CLASS.equals(field.getType());
+    }
+
+    private static boolean isAlertOnceFieldLoad(
+            Instruction instruction, FieldReference expected,
+            int destinationRegister, int objectRegister) {
+        if (instruction.getOpcode() != Opcode.IGET_OBJECT
+                || !(instruction instanceof org.jf.dexlib2.iface.instruction.TwoRegisterInstruction)
+                || !(instruction instanceof ReferenceInstruction)) return false;
+        org.jf.dexlib2.iface.instruction.TwoRegisterInstruction registers =
+                (org.jf.dexlib2.iface.instruction.TwoRegisterInstruction) instruction;
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        return registers.getRegisterA() == destinationRegister
+                && registers.getRegisterB() == objectRegister
+                && reference instanceof FieldReference
+                && sameField((FieldReference) reference, expected);
+    }
+
+    private static boolean hasAlertOnceStockNullUpdate(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return false;
+        List<? extends Instruction> instructions = toList(implementation);
+        int update = uniqueCallIndex(instructions, ALERT_ONCE_UPDATE);
+        return update >= 1
+                && hasAlertOnceUpdateRegisters(instructions.get(update), 4)
+                && isConst4(instructions.get(update - 1), 4, 0)
+                && hasAlertOnceNativeReceiver(instructions);
+    }
+
+    private static boolean hasAlertOncePatchedUpdate(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return false;
+        List<? extends Instruction> instructions = toList(implementation);
+        int update = uniqueCallIndex(instructions, ALERT_ONCE_UPDATE);
+        return update >= 0
+                && hasAlertOnceUpdateRegisters(instructions.get(update), 2)
+                && countConst4(instructions, 4, 0) == 0;
+    }
+
+    private static boolean hasAlertOnceModeSnapshot(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return false;
+        List<? extends Instruction> instructions = toList(implementation);
+        if (instructions.size() < 3
+                || !isAlertOnceFieldLoad(instructions.get(0), ALERT_ONCE_STATE, 4, 5)
+                || !isCall(instructions.get(1), ALERT_ONCE_MODE)
+                || !(instructions.get(1) instanceof FiveRegisterInstruction)
+                || ((FiveRegisterInstruction) instructions.get(1)).getRegisterCount() != 1
+                || ((FiveRegisterInstruction) instructions.get(1)).getRegisterC() != 4) {
+            return false;
+        }
+        Instruction result = instructions.get(2);
+        return result.getOpcode() == Opcode.MOVE_RESULT_OBJECT
+                && result instanceof OneRegisterInstruction
+                && ((OneRegisterInstruction) result).getRegisterA() == 4;
+    }
+
+    private static boolean hasAlertOnceNativeReceiver(
+            List<? extends Instruction> instructions) {
+        int nativeStart = uniqueCallIndex(instructions, ALERT_ONCE_NATIVE_START);
+        return nativeStart >= 2
+                && isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 2), ALERT_ONCE_LISTENER, 0, 5)
+                && isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 1), ALERT_ONCE_VALUE, 5, 5);
+    }
+
+    private static boolean hasAlertOnceUpdateRegisters(
+            Instruction instruction, int nullableArgumentRegister) {
+        if (!(instruction instanceof FiveRegisterInstruction)) return false;
+        FiveRegisterInstruction call = (FiveRegisterInstruction) instruction;
+        return call.getRegisterCount() == 5
+                && call.getRegisterC() == 1
+                && call.getRegisterD() == nullableArgumentRegister
+                && call.getRegisterE() == 0
+                && call.getRegisterF() == 2
+                && call.getRegisterG() == 3;
+    }
+
+    private static boolean isConst4(Instruction instruction, int register, int value) {
+        return instruction.getOpcode() == Opcode.CONST_4
+                && instruction instanceof OneRegisterInstruction
+                && ((OneRegisterInstruction) instruction).getRegisterA() == register
+                && instruction instanceof org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction
+                && ((org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction) instruction)
+                .getNarrowLiteral() == value;
+    }
+
+    private static int countConst4(List<? extends Instruction> instructions, int register, int value) {
+        int count = 0;
+        for (Instruction instruction : instructions) {
+            if (!isConst4(instruction, register, value)) continue;
+            count++;
+        }
+        return count;
     }
 
     private static String inspectRouteGuard(Method method) {
@@ -1291,6 +1653,16 @@ final class WazePatchEngine {
         int guardReadCount;
         int guardWriteCount;
         int logMarkerCount;
+        int alertOnceClassCount;
+        int alertOnceTargetMethodCount;
+        int alertOnceStateReadCount;
+        int alertOnceModeReadCount;
+        int alertOnceStateUpdateCount;
+        int alertOnceNativeStartCount;
+        int alertOnceGuardCount;
+        int alertOnceUnchangedMethodCount;
+        int alertOnceStockShapeCount;
+        int alertOncePatchedShapeCount;
 
         boolean stockTargets() {
             return classCount == 1 && fieldAnchorCount == 1 && guardFieldCount == 0
@@ -1308,6 +1680,43 @@ final class WazePatchEngine {
                     && guardWriteCount == 1 && logMarkerCount == 1;
         }
 
+        boolean alertOnceStockTargets() {
+            return alertOnceClassCount == 1 && alertOnceTargetMethodCount == 1
+                    && alertOnceUnchangedMethodCount == 2
+                    && alertOnceStockShapeCount == 1
+                    && alertOnceStateReadCount == 2 && alertOnceModeReadCount == 0
+                    && alertOnceStateUpdateCount == 1 && alertOnceNativeStartCount == 1
+                    && alertOnceGuardCount == 0;
+        }
+
+        boolean alertOncePatchedTargets() {
+            return alertOnceClassCount == 1 && alertOnceTargetMethodCount == 1
+                    && alertOnceUnchangedMethodCount == 2
+                    && alertOncePatchedShapeCount == 1
+                    && alertOnceStateReadCount == 3 && alertOnceModeReadCount == 1
+                    && alertOnceStateUpdateCount == 1 && alertOnceNativeStartCount == 1
+                    && alertOnceGuardCount == 2;
+        }
+
+        boolean patchableComponents() {
+            boolean uiKnown = classCount == 0 || stockTargets() || patchedTargets();
+            boolean onceKnown = alertOnceClassCount == 0
+                    || alertOnceStockTargets() || alertOncePatchedTargets();
+            return uiKnown && onceKnown
+                    && (stockTargets() || alertOnceStockTargets());
+        }
+
+        boolean patchedComponents(AlertInspection input, boolean patchUi,
+                boolean patchAlertOnce) {
+            boolean uiDone = classCount == 0
+                    || (input.stockTargets() ? (!patchUi || patchedTargets()) : patchedTargets());
+            boolean onceDone = alertOnceClassCount == 0
+                    || (input.alertOnceStockTargets()
+                    ? (!patchAlertOnce || alertOncePatchedTargets())
+                    : alertOncePatchedTargets());
+            return uiDone && onceDone;
+        }
+
         String summary() {
             return "class=" + classCount + ", anchorField=" + fieldAnchorCount
                     + ", field=" + guardFieldCount
@@ -1317,7 +1726,26 @@ final class WazePatchEngine {
                     + ", collector=" + collectorCallCount
                     + ", trip=" + tripPublisherCallCount
                     + ", guardRead=" + guardReadCount
-                    + ", guardWrite=" + guardWriteCount + ", marker=" + logMarkerCount;
+                    + ", guardWrite=" + guardWriteCount + ", marker=" + logMarkerCount
+                    + ", alertOnceClass=" + alertOnceClassCount
+                    + ", alertOnceTarget=" + alertOnceTargetMethodCount
+                    + ", alertOnceStateRead=" + alertOnceStateReadCount
+                    + ", alertOnceModeRead=" + alertOnceModeReadCount
+                    + ", alertOnceUpdate=" + alertOnceStateUpdateCount
+                    + ", alertOnceNativeStart=" + alertOnceNativeStartCount
+                    + ", alertOnceGuards=" + alertOnceGuardCount;
         }
+    }
+
+    static final class AlertOnceInspection {
+        int stateReadCount;
+        int modeReadCount;
+        int stateUpdateCount;
+        int nativeStartCount;
+        int guardCount;
+        boolean stock;
+        boolean patched;
+        String reason = "not found";
+
     }
 }

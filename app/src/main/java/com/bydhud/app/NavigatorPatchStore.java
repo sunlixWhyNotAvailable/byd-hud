@@ -13,8 +13,8 @@ import java.util.UUID;
 
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
-    // Invalidate trust-era scan results after structural eligibility/GMaps gate changes.
-    private static final int SCAN_CACHE_REVISION = 7;
+    // Invalidate cached results whenever component structural classification changes.
+    private static final int SCAN_CACHE_REVISION = 8;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";

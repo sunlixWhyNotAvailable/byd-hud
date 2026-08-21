@@ -53,6 +53,7 @@ import androidx.core.graphics.drawable.IconCompat;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -891,9 +892,10 @@ public final class WazeDirectChannel {
     }
 
     private void emitFrame(String reason, boolean routeFrame) {
-        alert = alert.withRouteNative(
-                shouldUseRouteNativeDuringAlert(
-                        navigationFrame, navigationDistanceKnown, alert));
+        if (routeFrame && alert.isActive()) {
+            alert = recomputeAlertOverlayForRoute(
+                    alert, navigationFrame, navigationDistanceKnown);
+        }
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
         int callbackGeneration = sessionGeneration;
         WazeRouteTiming.Frame timing = routeTiming == null || !routeFrame
@@ -919,6 +921,38 @@ public final class WazeDirectChannel {
         return alertDistance > 0 && routeDistance <= alertDistance;
     }
 
+    static boolean sameLogicalAlert(
+            DirectTbtFrame.AlertOverlay previous,
+            DirectTbtFrame.AlertOverlay next) {
+        return previous != null && next != null
+                && previous.isActive() && next.isActive()
+                && previous.getDisplayText().equals(next.getDisplayText())
+                && Arrays.equals(previous.getManeuverPng(), next.getManeuverPng());
+    }
+
+    static DirectTbtFrame.AlertOverlay stabilizeAlertOverlay(
+            DirectTbtFrame.AlertOverlay previous,
+            DirectTbtFrame.AlertOverlay next,
+            DirectTbtFrame routeFrame,
+            boolean routeDistanceKnown) {
+        if (next == null || !next.isActive()) {
+            return next == null ? DirectTbtFrame.AlertOverlay.inactive() : next;
+        }
+        if (sameLogicalAlert(previous, next)) {
+            return next.withRouteNative(previous.useRouteNative());
+        }
+        return recomputeAlertOverlayForRoute(next, routeFrame, routeDistanceKnown);
+    }
+
+    static DirectTbtFrame.AlertOverlay recomputeAlertOverlayForRoute(
+            DirectTbtFrame.AlertOverlay current,
+            DirectTbtFrame routeFrame,
+            boolean routeDistanceKnown) {
+        if (current == null) return DirectTbtFrame.AlertOverlay.inactive();
+        return current.withRouteNative(
+                shouldUseRouteNativeDuringAlert(routeFrame, routeDistanceKnown, current));
+    }
+
     private void showAlert(Alert value) {
         if (suspended) return;
         String title = text(value.getTitle());
@@ -930,8 +964,10 @@ public final class WazeDirectChannel {
             log("alert replaced oldId=" + alert.getId() + " newId=" + value.getId());
         }
         int revision = ++alertRevision;
-        alert = DirectTbtFrame.AlertOverlay.active(
+        DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
                 value.getId(), distanceMeters, displayText, icon);
+        alert = stabilizeAlertOverlay(
+                alert, next, navigationFrame, navigationDistanceKnown);
         log("alert show revision=" + revision + " id=" + value.getId()
                 + " distanceM=" + distanceMeters + " iconBytes=" + icon.length);
         emitFrame("alert_show");

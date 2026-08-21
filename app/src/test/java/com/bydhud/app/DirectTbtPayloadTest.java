@@ -120,6 +120,57 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void alertNativePolicyUsesTheAlertDistanceBoundary() {
+        DirectTbtFrame.AlertOverlay alert200 = DirectTbtFrame.AlertOverlay.active(
+                7, 200, "Camera", new byte[]{8, 9});
+
+        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 210, alert200), true, alert200));
+        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+                frame(11, 9, 200, alert200), true, alert200));
+    }
+
+    @Test
+    public void sameLogicalAlertRefreshKeepsNativeAndUpdatesVisualFields() {
+        DirectTbtFrame.AlertOverlay previous = DirectTbtFrame.AlertOverlay.active(
+                7, 200, "Camera", new byte[]{8, 9}).withRouteNative(true);
+        DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
+                8, 180, "Camera", new byte[]{8, 9});
+
+        DirectTbtFrame.AlertOverlay refreshed = WazeDirectChannel.stabilizeAlertOverlay(
+                previous, next, frame(11, 9, 190, next), true);
+
+        assertTrue(WazeDirectChannel.sameLogicalAlert(previous, next));
+        assertTrue(refreshed.useRouteNative());
+        assertEquals(8, refreshed.getId());
+        assertEquals(180, refreshed.getDistanceMeters());
+        assertEquals("Camera", refreshed.getDisplayText());
+        assertArrayEquals(new byte[]{8, 9}, refreshed.getManeuverPng());
+    }
+
+    @Test
+    public void newLogicalAlertComputesFreshRouteNativeAndRouteFramesRecomputeIt() {
+        DirectTbtFrame.AlertOverlay previous = DirectTbtFrame.AlertOverlay.active(
+                7, 200, "Camera", new byte[]{8, 9}).withRouteNative(true);
+        DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
+                8, 180, "Police", new byte[]{8, 9});
+
+        DirectTbtFrame.AlertOverlay fresh = WazeDirectChannel.stabilizeAlertOverlay(
+                previous, next, frame(11, 9, 190, next), true);
+        assertFalse(WazeDirectChannel.sameLogicalAlert(previous, next));
+        assertFalse(fresh.useRouteNative());
+
+        DirectTbtFrame.AlertOverlay routeAlert = DirectTbtFrame.AlertOverlay.active(
+                9, 200, "Camera", new byte[]{8, 9}).withRouteNative(true);
+        routeAlert = WazeDirectChannel.recomputeAlertOverlayForRoute(
+                routeAlert, frame(11, 9, 210, routeAlert), true);
+        assertFalse(routeAlert.useRouteNative());
+        routeAlert = WazeDirectChannel.recomputeAlertOverlayForRoute(
+                routeAlert, frame(11, 9, 200, routeAlert), true);
+        assertTrue(routeAlert.useRouteNative());
+    }
+
+    @Test
     public void inactiveAlertUsesRouteManeuver() {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame(11, 9, DirectTbtFrame.AlertOverlay.inactive()),

@@ -24,7 +24,7 @@ public final class GmsCorePatchStateContractTest {
     @Test
     public void storePersistsAndInvalidatesTheFourthState() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/NavigatorPatchStore.java");
-        assertTrue(source.contains("SCAN_CACHE_REVISION = 7"));
+        assertTrue(source.contains("SCAN_CACHE_REVISION = 8"));
         assertTrue(source.contains("_scan_gms_core"));
         assertTrue(source.contains("KEY_EXPECTED_GMS_CORE"));
         assertTrue(source.contains("_installed_gms_core"));

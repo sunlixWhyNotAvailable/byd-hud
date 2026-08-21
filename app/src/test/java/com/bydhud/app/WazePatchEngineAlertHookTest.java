@@ -9,12 +9,19 @@ import org.junit.Assume;
 import org.junit.Test;
 import org.jf.dexlib2.AccessFlags;
 import org.jf.dexlib2.Opcode;
+import org.jf.dexlib2.Opcodes;
 import org.jf.dexlib2.builder.MethodImplementationBuilder;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction10x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction21t;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction35c;
 import org.jf.dexlib2.iface.Method;
+import org.jf.dexlib2.iface.ClassDef;
+import org.jf.dexlib2.dexbacked.DexBackedDexFile;
+import org.jf.dexlib2.iface.instruction.Instruction;
+import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.TwoRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.immutable.ImmutableMethod;
 import org.jf.dexlib2.immutable.reference.ImmutableMethodReference;
 
@@ -33,12 +40,73 @@ import java.util.zip.ZipFile;
 
 public final class WazePatchEngineAlertHookTest {
     @Test
+    public void compositeAlertUpgradesEachMissingComponent() throws Exception {
+        Path stock = fixture(
+                "references/navigation/waze/patched/5.20.0.1/waze_mod.apk");
+        Assume.assumeTrue(Files.isRegularFile(stock));
+        byte[] stockDex = alertDex(stock);
+        File hookOnly = File.createTempFile("waze-alert-hook-only-", ".dex");
+        File qOnly = File.createTempFile("waze-alert-q-only-", ".dex");
+        File hookUpgrade = File.createTempFile("waze-alert-hook-upgrade-", ".dex");
+        File qUpgrade = File.createTempFile("waze-alert-q-upgrade-", ".dex");
+        try {
+            WazePatchEngine.patchAlertComponents(stockDex, hookOnly, true, false);
+            WazePatchEngine.AlertInspection hook = WazePatchEngine.inspectAlertHook(
+                    Files.readAllBytes(hookOnly.toPath()));
+            assertTrue(hook.patchedTargets());
+            assertTrue(hook.alertOnceStockTargets());
+            assertTrue(hook.patchableComponents());
+            WazePatchEngine.patchAlertHook(Files.readAllBytes(hookOnly.toPath()), hookUpgrade);
+            WazePatchEngine.AlertInspection hookOutput = WazePatchEngine.inspectAlertHook(
+                    Files.readAllBytes(hookUpgrade.toPath()));
+            assertTrue(hookOutput.patchedTargets() && hookOutput.alertOncePatchedTargets());
+
+            WazePatchEngine.patchAlertComponents(stockDex, qOnly, false, true);
+            WazePatchEngine.AlertInspection q = WazePatchEngine.inspectAlertHook(
+                    Files.readAllBytes(qOnly.toPath()));
+            assertTrue(q.stockTargets());
+            assertTrue(q.alertOncePatchedTargets());
+            assertTrue(q.patchableComponents());
+            WazePatchEngine.patchAlertHook(Files.readAllBytes(qOnly.toPath()), qUpgrade);
+            WazePatchEngine.AlertInspection qOutput = WazePatchEngine.inspectAlertHook(
+                    Files.readAllBytes(qUpgrade.toPath()));
+            assertTrue(qOutput.patchedTargets() && qOutput.alertOncePatchedTargets());
+        } finally {
+            hookOnly.delete();
+            qOnly.delete();
+            hookUpgrade.delete();
+            qUpgrade.delete();
+        }
+    }
+
+    @Test
+    public void partialAlertOnceGuardIsRejectedByCompositeClassifier() throws Exception {
+        Path stock = fixture(
+                "references/navigation/waze/patched/5.20.0.1/waze_mod.apk");
+        Assume.assumeTrue(Files.isRegularFile(stock));
+        WazePatchEngine.AlertInspection partial = WazePatchEngine.inspectAlertHook(
+                alertDex(stock));
+        partial.alertOnceModeReadCount = 1;
+        assertFalse(partial.alertOnceStockTargets());
+        assertFalse(partial.alertOncePatchedTargets());
+        assertFalse(partial.patchableComponents());
+
+        partial = WazePatchEngine.inspectAlertHook(alertDex(stock));
+        partial.alertOnceStockShapeCount = 0;
+        assertFalse(partial.alertOnceStockTargets());
+        assertFalse(partial.patchableComponents());
+    }
+
+    @Test
     public void realStockPatchesToBeta4AndRejectsRepatch() throws Exception {
         Path stock = fixture(
                 "references/navigation/waze/patched/5.20.0.1/waze_mod.apk");
         Path alerts = fixture(
                 "references/navigation/waze/patched/5.20.0.1/"
                         + "waze-5.20.0.1-cluster-alerts.apk");
+        Path integrated = fixture(
+                "arhud/runtime/build_outputs/"
+                        + "waze-5.20.0.1-hud-bridge-alert-once.apk");
         Assume.assumeTrue(Files.isRegularFile(stock));
 
         byte[] stockDex = alertDex(stock);
@@ -50,11 +118,26 @@ public final class WazePatchEngineAlertHookTest {
                 && stockLifecycle.legacyRouteHookCount == 0
                 && stockLifecycle.legacyBridgeClassCount == 0);
         assertTrue(WazePatchEngine.inspectAlertHook(stockDex).stockTargets());
+        WazePatchEngine.AlertInspection stockAlert =
+                WazePatchEngine.inspectAlertHook(stockDex);
+        assertTrue(stockAlert.alertOnceStockTargets());
+        assertTrue(stockAlert.patchableComponents());
+        String stockAlertOnceI = alertOnceMethod(stockDex, "i");
+        String stockAlertOnceJ = alertOnceMethod(stockDex, "j");
+        byte[] integratedDex = null;
+        if (Files.isRegularFile(integrated)) {
+            integratedDex = alertDex(integrated);
+            WazePatchEngine.AlertInspection integratedAlert =
+                    WazePatchEngine.inspectAlertHook(integratedDex);
+            assertTrue(integratedAlert.patchedTargets());
+            assertTrue(integratedAlert.alertOncePatchedTargets());
+        }
         if (Files.isRegularFile(alerts)) {
             WazePatchEngine.AlertInspection oldAlert =
                     WazePatchEngine.inspectAlertHook(alertDex(alerts));
             assertEquals(0, oldAlert.tripPublisherCallCount);
             assertFalse(oldAlert.patchedTargets());
+            assertFalse(oldAlert.patchableComponents());
         }
 
         File lifecycleOutput = File.createTempFile("waze-lifecycle-", ".dex");
@@ -95,6 +178,13 @@ public final class WazePatchEngineAlertHookTest {
             WazePatchEngine.AlertInspection patched =
                     WazePatchEngine.inspectAlertHook(outputDex);
             assertTrue(patched.patchedTargets());
+            assertTrue(patched.alertOncePatchedTargets());
+            assertEquals(stockAlertOnceI, alertOnceMethod(outputDex, "i"));
+            assertEquals(stockAlertOnceJ, alertOnceMethod(outputDex, "j"));
+            if (integratedDex != null) {
+                assertEquals(alertOnceMethod(integratedDex, "k"),
+                        alertOnceMethod(outputDex, "k"));
+            }
             assertEquals(1, patched.tripPublisherCallCount);
             try {
                 WazePatchEngine.patchAlertHook(Files.readAllBytes(output.toPath()), duplicate);
@@ -288,6 +378,33 @@ public final class WazePatchEngineAlertHookTest {
             while ((count = input.read(buffer)) >= 0) output.write(buffer, 0, count);
             return output.toByteArray();
         }
+    }
+
+    private static String alertOnceMethod(byte[] dex, String name) throws IOException {
+        DexBackedDexFile file = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new java.io.ByteArrayInputStream(dex));
+        for (ClassDef classDef : file.getClasses()) {
+            if (!"Lcom/waze/alerters/a/q;".equals(classDef.getType())) continue;
+            for (Method method : classDef.getMethods()) {
+                if (!name.equals(method.getName()) || method.getImplementation() == null) continue;
+                StringBuilder body = new StringBuilder();
+                for (Instruction instruction : method.getImplementation().getInstructions()) {
+                    body.append(instruction.getOpcode());
+                    if (instruction instanceof OneRegisterInstruction) {
+                        body.append(':').append(((OneRegisterInstruction) instruction).getRegisterA());
+                    }
+                    if (instruction instanceof TwoRegisterInstruction) {
+                        body.append(':').append(((TwoRegisterInstruction) instruction).getRegisterB());
+                    }
+                    if (instruction instanceof ReferenceInstruction) {
+                        body.append(':').append(((ReferenceInstruction) instruction).getReference());
+                    }
+                    body.append('\n');
+                }
+                return body.toString();
+            }
+        }
+        throw new IOException("Waze alert-once method missing: " + name);
     }
 
 }
