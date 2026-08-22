@@ -94,14 +94,13 @@ final class NavAppFilter {
         Set<String> packages = new TreeSet<>();
         packages.add("app.revanced.android.apps.maps");
         packages.add("com.google.android.apps.maps");
-        packages.add("com.iternio.abrpapp");
         packages.add("com.waze");
         return Collections.unmodifiableSet(packages);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCuratedNavigationPackage(String packageName) {
-        return isKnownNavigationPackage(normalize(packageName));
+        return curatedNavigationPackages().contains(normalize(packageName));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

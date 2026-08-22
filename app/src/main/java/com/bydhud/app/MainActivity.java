@@ -548,7 +548,7 @@ public final class MainActivity extends ComponentActivity {
         manualRoot.addView(row(button("Apply Guide", v -> applyNavigationFieldsAndSend())));
 
         appsRoot.addView(section("Supported apps"));
-        appsRoot.addView(warningLabel("SUPPORTED APPS: Google Maps, Waze, ABRP"));
+        appsRoot.addView(warningLabel("SUPPORTED APPS: Google Maps, Waze"));
         appsRoot.addView(warningLabel("Unsupported apps are logging only"));
         capturePackagesView = label("", 14, false);
         appsRoot.addView(capturePackagesView);
@@ -4080,8 +4080,8 @@ public final class MainActivity extends ComponentActivity {
                 return "Підтримувані";
             case "All apps":
                 return "Всі";
-            case "SUPPORTED APPS: Google Maps, Waze, ABRP":
-                return "ПІДТРИМУВАНІ: Google Maps, Waze, ABRP";
+            case "SUPPORTED APPS: Google Maps, Waze":
+                return "ПІДТРИМУВАНІ: Google Maps, Waze";
             case "Unsupported apps are logging only":
                 return "Непідтримувані застосунки тільки логуються";
             case "No supported navigation apps visible":
@@ -4229,8 +4229,8 @@ public final class MainActivity extends ComponentActivity {
                 return "Apply Guide";
             case "Всі":
                 return "All apps";
-            case "ПІДТРИМУВАНІ: Google Maps, Waze, ABRP":
-                return "SUPPORTED APPS: Google Maps, Waze, ABRP";
+            case "ПІДТРИМУВАНІ: Google Maps, Waze":
+                return "SUPPORTED APPS: Google Maps, Waze";
             case "Непідтримувані застосунки тільки логуються":
                 return "Unsupported apps are logging only";
             case "Підтримувані навігатори не знайдені":

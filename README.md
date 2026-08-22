@@ -39,11 +39,11 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Direct channels | Structured low-latency data from a compatible patched Google Maps or Waze build |
 | Optional legacy input | Accessibility, notification, or visual parsing after its settings and services are explicitly enabled |
 | Dashboard control | Move a running navigator between displays, optionally request fullscreen presentation, and set its projection height |
-| Navigator downloads | Download and validate the supported Waze and Google Maps builds from the fixed project release |
+| Navigator downloads | Download and validate the fixed navigator assets currently offered in the `Apps` tab |
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
 | Logs and storage | Record diagnostics and performance data, manage logs by day, and share only the selected data |
 | Updates | Stable releases by default, with an optional beta channel |
-| Manual testing | Send individual navigation fields to the windshield HUD and dashboard card for diagnostics |
+| Manual testing | Send diagnostic navigation fields through the supported windshield-HUD and dashboard-card outputs |
 
 <p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
@@ -63,10 +63,10 @@ By default, the direct channel leaves the navigator screen unchanged while navig
 | Navigator use | Package | Currently supported build |
 | --- | --- | --- |
 | Waze direct output and patching | `com.waze` | stock `4.95.0.3` or project-patched `5.20.0.1` |
-| Google Maps direct output and patching | `app.revanced.android.apps.maps` | Fixed download: Google Maps ReVanced `25.16.03.747108139`; local patching also recognizes `26.30.09.950492155`, which remains a vehicle-validation build |
+| Google Maps direct output and patching | `app.revanced.android.apps.maps` | Google Maps ReVanced `25.16.03.747108139` or `26.30.09.950492155`; version 26.30 remains a vehicle-validation build |
 | Official Google Maps legacy input only | `com.google.android.apps.maps` | Accessibility/notification capture when its services are enabled; not accepted by the patcher |
 
-The patcher verifies the package, Android signature, included package files, and expected internal layout. A matching version label alone is not sufficient.
+The patcher verifies that the selected package is intact and structurally compatible. A project or repository signer is not required, and a matching version label alone is not sufficient.
 
 ### Direct-channel switching
 
@@ -74,7 +74,7 @@ The patcher verifies the package, Android signature, included package files, and
 - If direct updates stop for five seconds, BYD HUD may switch to a legacy input only when that navigator's optional legacy path is already enabled and ready.
 - Google Maps legacy fallback requires granted and connected accessibility/notification capture services. Waze legacy fallback additionally requires the unsupported `Screen capture channel (legacy)` switch, which is off by default.
 - Without those prerequisites, no fallback starts after the timeout. When valid direct data returns, BYD HUD clears any legacy state and switches back immediately.
-- The `HUD` status is active only while navigation guidance is actually being sent. Selecting a navigator without starting navigation leaves it in the waiting state.
+- The `HUD` status is active only while navigation guidance is actually being sent. Selecting a navigator without starting navigation leaves it in the idle state.
 
 ## Using the Apps tab
 
@@ -95,12 +95,12 @@ The same tab also lists other applications that can be moved between displays, b
 | Status | Meaning |
 | --- | --- |
 | `HUD: running` | A navigation payload is currently reaching the vehicle HUD |
-| `HUD: waiting` | HUD output is selected, but there is no current navigation payload |
+| `HUD: idle` | No navigation guidance is currently being delivered to the vehicle HUD |
 | `HUD: failed` | An attempted required HUD delivery failed; ADB and permission states remain separate |
-| `ADB: OK` | The local ADB bridge is authorized and available |
-| `ADB: not granted` | ADB-dependent maintenance functions are unavailable |
-| `Permissions: OK` | Required base permissions are present |
-| `Permissions: missing` | One or more required base permissions must be restored |
+| `ADB: OK` | Required app settings and permissions are present; this is not a live ADB connection indicator |
+| `ADB: not granted` | One or more required app settings or permissions are missing |
+| `Permissions: OK` | Required capture settings and services are ready |
+| `Permissions: missing` | One or more capture settings or services must be restored |
 
 ## Navigation output options
 
@@ -213,7 +213,7 @@ Official Google Maps package `com.google.android.apps.maps`, bundles with OBB ex
 ### How patching works
 
 1. Select the installed navigator or optionally choose a downloaded version.
-2. Press `Check` to verify that the package, signature, included files, and app layout match a supported build.
+2. Press `Check` to verify that the package is intact and its files and app layout match a supported build.
 3. Review the component status pills. Waze reports the direct channel, stability, and alerts separately. Google Maps reports the direct channel, Google services dialog handling, audio, and PiP separately.
 4. Press `Patch` and confirm the warning.
 5. BYD HUD repeats all compatibility checks, changes only recognized app parts, signs the complete package set with a key generated on this tablet, and asks Android to install it.
@@ -231,7 +231,7 @@ For Waze, the direct channel is mandatory; stability and alert support remain op
 - Compatibility is determined from the selected app itself, not from where the file was downloaded. Android still enforces signature continuity when updating an installed app.
 - A compatible patched APK may be shared, but Android can require uninstall/reinstall when its signer differs from the installed copy.
 
-Back up important navigator data and sign in to its account before patching. The patcher never sends selected APKs to a server. The separate download actions on the `Apps` tab retrieve only the three fixed, pinned navigator assets documented above; patching a user-selected source still operates locally.
+Back up important navigator data and sign in to its account before patching. The patcher never sends selected APKs to a server. The separate download actions on the `Apps` tab retrieve only the fixed, pinned navigator assets currently offered there; patching a user-selected source still operates locally.
 
 ## Runtime and maintenance options
 
@@ -240,7 +240,7 @@ Back up important navigator data and sign in to its account before patching. The
 | `Boot runtime service` | On | Restarts the BYD HUD runtime after supported boot and update events |
 | `Save diagnostic screenshots and extended logs` | Off | Records additional navigation evidence; use it only while diagnosing because it consumes more storage |
 | `Check for updates` | On | Checks the stable GitHub release channel |
-| `Take part in beta testing` | Off | Includes prereleases, which may be unstable or broken |
+| `Take part in beta-testing` | Off | Includes prereleases, which may be unstable or broken |
 
 `ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and the runtime cleanly.
 
@@ -280,7 +280,7 @@ BYD HUD does not automatically send crash reports, performance traces, screensho
 
 ## Manual HUD testing
 
-The `Manual` tab is a diagnostic tool. It does not require an active route in Google Maps or Waze. Enabling Manual mode starts temporary diagnostic navigation output and sends the same text, distance, lane, PNG, and native-arrow values to the windshield HUD and dashboard navigation card. Rapid edits are combined so only the latest state is shown. Disabling Manual mode clears its output and returns control to active live navigation. It should not be used as a navigation source.
+The `Manual` tab is a diagnostic tool. It does not require an active route in Google Maps or Waze. Enabling Manual mode publishes the selected text, distance, lane, PNG, and native-arrow test values through the same supported vehicle outputs as live navigation. Vehicle displays do not mirror every field: the dashboard TBT card carries its native maneuver and text state rather than copying the HUD lane or PNG image. Rapid edits are combined so only the latest state is shown. Disabling Manual mode clears its output and returns control to active live navigation. It should not be used as a navigation source.
 
 <p align="center"><img src="docs/screenshots/en/manual.png" alt="Manual HUD payload testing" width="100%"></p>
 
@@ -306,7 +306,7 @@ The `Manual` tab is a diagnostic tool. It does not require an active route in Go
 
 When the existing ADB RSA key is authorized, dashboard-card integration starts automatically with the BYD HUD runtime; there is no additional setup or status indicator. Without authorized ADB, compatible direct navigation can still reach the windshield HUD, but the dashboard navigation card and dashboard movement controls are unavailable on the tested firmware.
 
-When `Lane output` is enabled and the navigator supplies lanes, BYD HUD sends the same lane guidance to the windshield HUD and, with authorized ADB, to the dashboard navigation card. Empty or ended guidance clears the previous lanes instead of leaving stale information on screen.
+When `Lane output` is enabled and the navigator supplies lanes, BYD HUD publishes the guidance through all supported vehicle navigation outputs. Authorized ADB enables the additional vehicle lane interface needed by some vehicles; it does not turn the TBT maneuver card into a copy of the HUD lane image. Empty or ended guidance clears the previous lanes instead of leaving stale information on screen.
 
 ### What requires ADB
 
@@ -323,7 +323,7 @@ When `Lane output` is enabled and the navigator supplies lanes, BYD HUD sends th
 
 ## Troubleshooting
 
-### HUD stays in `waiting`
+### HUD stays in `idle`
 
 - Confirm that `HUD` is enabled for the correct navigator.
 - Start an active route; selecting a navigator alone does not produce HUD data.
@@ -393,6 +393,7 @@ Issues and focused pull requests are welcome. Please describe the vehicle, firmw
 - The OpenBYD project inspired part of the vehicle-integration approach used for broader dashboard-card and HUD compatibility. BYD HUD's implementation and behavior were verified independently on SL06 and SL07.
 - The dashboard resize approach was inspired by [BYD Mate](https://github.com/AndyShaman/BYDMate).
 - Additional Waze maneuver and lane glyphs used by the fallback parser were created specifically for this project.
+- Олексій (Oleksiy) provided diagnostics and logs and performed testing, verification, and functional validation of BYD HUD on the BYD Sea Lion 06 EV.
 
 ## Tested devices
 
@@ -400,6 +401,7 @@ Issues and focused pull requests are welcome. Please describe the vehicle, firmw
 | --- | --- | --- | --- |
 | BYD Sea Lion 07 EV 2025 | China | 5.0 | Tested by the maintainer |
 | BYD Sea Lion 07 EV 2024 | China | 5.0 | Tested by a project user |
+| BYD Sea Lion 06 EV | China | 5.0 | Tested by a project user |
 
 HUD output is known to work on the tested tablet firmware starting from version `2510`. Other models, regions, firmware versions, resolutions, and instrument clusters may behave differently.
 
