@@ -13,6 +13,7 @@ public final class WazeAlertDistanceTest {
         assertEquals(300, WazeDirectChannel.parseDistanceMeters("0,3 КМ"));
         assertEquals(300, WazeDirectChannel.parseDistanceMeters("300 m"));
         assertEquals(1609, WazeDirectChannel.parseDistanceMeters("1 MI"));
-        assertEquals(0, WazeDirectChannel.parseDistanceMeters("без відстані"));
+        assertEquals(0, WazeDirectChannel.parseDistanceMeters("0 m"));
+        assertEquals(-1, WazeDirectChannel.parseDistanceMeters("без відстані"));
     }
 }

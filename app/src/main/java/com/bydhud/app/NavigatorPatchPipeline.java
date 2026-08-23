@@ -651,8 +651,10 @@ final class NavigatorPatchPipeline {
                     ? "Google Maps patch anchors are incompatible" : "Compatible";
             return copyStates(metadata, directState, gmsCoreState, optionalState, alertState, reason);
         }
-        int stock = 0;
-        int patched = 0;
+        int allowlistStock = 0;
+        int allowlistPatched = 0;
+        int laneStock = 0;
+        int lanePatched = 0;
         int lifecycleTargets = 0;
         boolean lifecyclePatchable = false;
         boolean lifecyclePatched = false;
@@ -661,13 +663,20 @@ final class NavigatorPatchPipeline {
         boolean alertCompatible = true;
         boolean alertHasStock = false;
         String reason = "Waze allowlist target missing";
+        String laneReason = "Waze lane target missing";
         for (NavigatorApkSet.Member member : set.members) {
             WazeApkInspection inspection = inspectWaze(member.file);
             if (WazePatchEngine.PATCHABLE_STOCK.equals(inspection.allowlistClassification)) {
-                stock++;
+                allowlistStock++;
             } else if (WazePatchEngine.ALREADY_PATCHED.equals(inspection.allowlistClassification)) {
-                patched++;
+                allowlistPatched++;
             }
+            if (WazePatchEngine.PATCHABLE_STOCK.equals(inspection.laneClassification)) {
+                laneStock++;
+            } else if (WazePatchEngine.ALREADY_PATCHED.equals(inspection.laneClassification)) {
+                lanePatched++;
+            }
+            if (inspection.laneTargetCount > 0) laneReason = inspection.laneReason;
             lifecycleTargets += inspection.applicationTargetCount + inspection.routeTargetCount
                     + inspection.speedTargetCount + inspection.clusterEtaTargetCount;
             lifecyclePatchable |= inspection.lifecyclePatchable();
@@ -683,11 +692,15 @@ final class NavigatorPatchPipeline {
             if (!inspection.reason.isEmpty()) reason = inspection.reason;
         }
         String directState;
-        if (stock == 1 && patched == 0) directState = NavigatorPatchStore.PATCHABLE;
-        else if (stock == 0 && patched == 1) directState = NavigatorPatchStore.PATCHED;
+        if (allowlistStock + allowlistPatched == 1 && laneStock + lanePatched == 1) {
+            directState = allowlistPatched == 1 && lanePatched == 1
+                    ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
+        }
         else return copyStates(metadata, NavigatorPatchStore.FAILED,
                 NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED,
-                NavigatorPatchStore.NOT_CHECKED, reason);
+                NavigatorPatchStore.NOT_CHECKED,
+                allowlistStock + allowlistPatched != 1
+                        ? reason : laneReason);
         String optional = lifecycleTargets == 0 ? NavigatorPatchStore.FAILED
                 : lifecyclePatchable ? NavigatorPatchStore.PATCHABLE
                 : lifecyclePatched ? NavigatorPatchStore.PATCHED
@@ -861,7 +874,9 @@ final class NavigatorPatchPipeline {
             File outputDirectory, File transaction, ScanResult input) throws Exception {
         List<WazeApkInspection> inspections = new ArrayList<>();
         WazeApkInspection allowlist = null;
+        WazeApkInspection lanes = null;
         int allowlistCount = 0;
+        int laneCount = 0;
         for (NavigatorApkSet.Member member : sourceSet.members) {
             WazeApkInspection inspection = inspectWaze(member.file);
             inspections.add(inspection);
@@ -869,20 +884,40 @@ final class NavigatorPatchPipeline {
                 allowlist = inspection;
                 allowlistCount++;
             }
+            if (inspection.laneTargetCount == 1) {
+                lanes = inspection;
+                laneCount++;
+            }
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
-            if (allowlistCount != 1 || allowlist == null) {
-                throw new IOException("Waze allowlist target member is ambiguous");
+            if (allowlistCount != 1 || allowlist == null || laneCount != 1 || lanes == null) {
+                throw new IOException("Waze direct target member is ambiguous");
             }
-            File target = outputMember(outputDirectory, allowlist.fileName);
-            File rewrittenDex = new File(transaction, "waze-direct.dex");
-            WazePatchEngine.patchWazeAllowlist(
-                    readEntry(target, allowlist.allowlistDex), rewrittenDex);
-            File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
-            Map<String, File> replacements = new HashMap<>();
-            replacements.put(allowlist.allowlistDex, rewrittenDex);
-            repack(target, rewrittenApk, replacements, Collections.emptyMap());
-            replaceFile(rewrittenApk, target);
+            boolean patchedDirect = false;
+            if (WazePatchEngine.PATCHABLE_STOCK.equals(allowlist.allowlistClassification)) {
+                File target = outputMember(outputDirectory, allowlist.fileName);
+                File rewrittenDex = new File(transaction, "waze-direct.dex");
+                WazePatchEngine.patchWazeAllowlist(
+                        readEntry(target, allowlist.allowlistDex), rewrittenDex);
+                File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
+                Map<String, File> replacements = new HashMap<>();
+                replacements.put(allowlist.allowlistDex, rewrittenDex);
+                repack(target, rewrittenApk, replacements, Collections.emptyMap());
+                replaceFile(rewrittenApk, target);
+                patchedDirect = true;
+            }
+            if (WazePatchEngine.PATCHABLE_STOCK.equals(lanes.laneClassification)) {
+                File target = outputMember(outputDirectory, lanes.fileName);
+                File rewrittenDex = new File(transaction, "waze-lanes.dex");
+                WazePatchEngine.patchLanes(readEntry(target, lanes.laneDex), rewrittenDex);
+                File rewrittenApk = new File(transaction, "waze-lanes-unsigned.apk");
+                Map<String, File> replacements = new HashMap<>();
+                replacements.put(lanes.laneDex, rewrittenDex);
+                repack(target, rewrittenApk, replacements, Collections.emptyMap());
+                replaceFile(rewrittenApk, target);
+                patchedDirect = true;
+            }
+            if (!patchedDirect) throw new IOException("Waze direct patch has no stock component");
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) {
             NavigatorPatchStore.transition(context, NavigatorPatchStore.Profile.WAZE,
@@ -1054,6 +1089,14 @@ final class NavigatorPatchPipeline {
                     result.allowlistClassification = allowlist.classification;
                     result.reason = allowlist.reason;
                 }
+                WazePatchEngine.LaneInspection lane = WazePatchEngine.inspectLane(bytes);
+                if (lane.frameClassCount > 0 || lane.producerTargetCount > 0
+                        || lane.adapterTargetCount > 0) {
+                    result.laneTargetCount++;
+                    result.laneDex = entry.getName();
+                    result.laneClassification = lane.classification;
+                    result.laneReason = lane.reason;
+                }
                 WazePatchEngine.LifecycleInspection lifecycle =
                         WazePatchEngine.inspectLifecycle(bytes);
                 result.applicationTargetCount += lifecycle.applicationTargetCount;
@@ -1119,6 +1162,11 @@ final class NavigatorPatchPipeline {
             result.allowlistClassification = WazePatchEngine.UNSUPPORTED;
             result.reason = "Waze allowlist target count=" + result.allowlistTargetCount;
             result.allowlistDex = "";
+        }
+        if (result.laneTargetCount != 1) {
+            result.laneClassification = WazePatchEngine.UNSUPPORTED;
+            result.laneReason = "Waze lane target count=" + result.laneTargetCount;
+            result.laneDex = "";
         }
         return result;
     }
@@ -1349,6 +1397,10 @@ final class NavigatorPatchPipeline {
         String allowlistDex = "";
         String allowlistClassification = WazePatchEngine.UNSUPPORTED;
         String reason = "Waze allowlist target missing";
+        int laneTargetCount;
+        String laneDex = "";
+        String laneClassification = WazePatchEngine.UNSUPPORTED;
+        String laneReason = "Waze lane target missing";
         int applicationTargetCount;
         int applicationHookCount;
         int legacyApplicationHookCount;

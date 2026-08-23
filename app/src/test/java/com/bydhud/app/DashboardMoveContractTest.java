@@ -22,6 +22,20 @@ public final class DashboardMoveContractTest {
                 "ui-independent-dashboard-explicit"));
         assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("shutdown"));
         assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("hud-switch-to-gmaps"));
+        assertTrue(NavAppDisplayController.isDirectNavigatorReplacement(
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME));
+        assertTrue(NavAppDisplayController.isDirectNavigatorReplacement(
+                GMapsDirectChannel.PACKAGE_NAME, "com.waze"));
+        assertFalse(NavAppDisplayController.isDirectNavigatorReplacement(
+                "com.waze", "com.waze"));
+        assertFalse(NavAppDisplayController.isDirectNavigatorReplacement(
+                "com.waze", "com.example.navigation"));
+        assertTrue(NavAppDisplayController.shouldPrepareAutoContainerLeaseTransfer(
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME, "com.waze", 7L));
+        assertFalse(NavAppDisplayController.shouldPrepareAutoContainerLeaseTransfer(
+                "", GMapsDirectChannel.PACKAGE_NAME, "com.waze", 7L));
+        assertFalse(NavAppDisplayController.shouldPrepareAutoContainerLeaseTransfer(
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME, "com.waze", 0L));
     }
 
     @Test
@@ -110,9 +124,18 @@ public final class DashboardMoveContractTest {
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
         assertTrue(source.contains("onDashboardReturnConfirmed"));
         int returnRelease = source.indexOf("projectionReleased = waitForProjectionRelease(");
+        int compositorRelease = source.indexOf(
+                "releaseAutoContainerLeaseIfRequested(", returnRelease);
         int returnReassert = source.indexOf(
                 "requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason)");
-        assertTrue(returnRelease >= 0 && returnReassert > returnRelease);
+        assertTrue(returnRelease >= 0 && compositorRelease > returnRelease);
+        assertTrue(returnReassert > compositorRelease);
+        assertTrue(source.contains("AUTO_CONTAINER_RELEASE = 18"));
+        assertTrue(source.contains("KEY_AUTOCONTAINER_LEASE_GENERATION"));
+        assertTrue(source.contains("dashboard_autocontainer_lease_transferred"));
+        assertTrue(source.contains("dashboard_autocontainer_lease_retained"));
+        assertFalse(source.contains("AUTO_CONTAINER_OFF"));
+        assertFalse(source.contains("AUTO_CONTAINER_PARTIAL"));
         int senderStart = source.indexOf("private String sendAutoContainerIfRequested");
         int senderEnd = source.indexOf("private static String autoContainerStatus", senderStart);
         assertTrue(senderStart >= 0 && senderEnd > senderStart);

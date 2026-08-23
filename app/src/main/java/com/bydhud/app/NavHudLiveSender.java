@@ -2045,7 +2045,7 @@ final class NavHudLiveSender {
         if (!previous.isActive()) return false;
         return previous.getId() != next.getId()
                 || previous.getDistanceMeters() != next.getDistanceMeters()
-                || previous.useRouteNative() != next.useRouteNative()
+                || previous.useRouteFrame() != next.useRouteFrame()
                 || !previous.getDisplayText().equals(next.getDisplayText())
                 || !Arrays.equals(previous.getManeuverPng(), next.getManeuverPng());
     }

@@ -19,8 +19,8 @@ public final class ShareCompletionSourceContractTest {
                 "public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(");
 
         assertTrue(upload.contains("List<String> submittedDays = immutableStorageDays(days)"));
-        assertTrue(upload.contains("LogShareZip.create(this, submittedDays)"));
-        assertTrue(upload.contains("SentryLogUploader.upload(\n                    this, archive.file, submittedDays)"));
+        assertTrue(upload.contains("LogShareZip.create(this, submittedDays, uploadId)"));
+        assertTrue(upload.contains("SentryLogUploader.upload(\n                    this, archive.file, submittedDays, uploadId)"));
         assertTrue(upload.contains("if (upload.ok && !publishShareCompletionIfCurrent("));
         assertTrue(activity.contains("STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken"));
         assertTrue(activity.contains("public void composeCancelStorageShareOperation("));
@@ -44,6 +44,33 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(config.contains("SentryLogUploader.uploadConfiguration"));
         assertTrue(!config.contains("publishShareCompletion"));
         assertTrue(activity.contains("queuePendingShare(result.file, Collections.emptyList())"));
+    }
+
+    @Test
+    public void navigationSentryUploadThreadsOneIdIntoArchiveAndEvent() throws IOException {
+        String activity = source("MainActivity.java");
+        String upload = between(activity,
+                "public ComposeSentryUploadResult composeUploadStorageDaysToSentry(",
+                "public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(");
+        assertTrue(upload.contains("String uploadId = SentryLogUploader.newUploadId()"));
+        assertTrue(upload.contains("LogShareZip.create(this, submittedDays, uploadId)"));
+        assertTrue(upload.contains("SentryLogUploader.upload(\n                    this, archive.file, submittedDays, uploadId)"));
+
+        String zip = source("LogShareZip.java");
+        assertTrue(zip.contains("+ (uploadId.isEmpty() ? \"\" : \"-\" + uploadId)"));
+        String sentry = source("SentryLogUploader.java");
+        assertTrue(sentry.contains("event.setTag(\"upload_id\", uploadId)"));
+    }
+
+    @Test
+    public void developerButtonUsesImmediateThirtySecondCooldownAndCallbackGuard()
+            throws IOException {
+        String compose = source("BydHudRuntimeCompose.kt");
+        assertTrue(compose.contains("SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L"));
+        assertTrue(compose.contains("sentryButtonEnabled = sentryButtonRemaining == 0"));
+        assertTrue(compose.contains(
+                "if (sentryUploadCooldownUntilMs <= now)"));
+        assertTrue(compose.contains("sentryUploadCooldownRemaining = 30"));
     }
 
     @Test

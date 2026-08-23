@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
@@ -26,6 +27,16 @@ public final class SentryLogUploaderTest {
         assertEquals("20260803,20260804", logs.getTag("selected_days"));
         assertEquals("vehicle_configuration", configuration.getTag("upload_type"));
         assertNull(configuration.getTag("selected_days"));
+    }
+
+    @Test
+    public void navigationUploadCarriesTheSameShortIdAsItsEventMetadata() {
+        String uploadId = SentryLogUploader.newUploadId();
+        SentryEvent event = SentryLogUploader.buildManualUploadEvent(
+                "logs", "navigation_logs", "20260803", uploadId);
+
+        assertTrue(uploadId.matches("[0-9a-f]{8}"));
+        assertEquals(uploadId, event.getTag("upload_id"));
     }
 
     @Test

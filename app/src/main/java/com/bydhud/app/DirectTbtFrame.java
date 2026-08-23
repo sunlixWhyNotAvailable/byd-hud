@@ -407,24 +407,27 @@ public final class DirectTbtFrame {
     /** Alert state is an overlay; navigation lanes remain on the parent frame. */
     public static final class AlertOverlay {
         private static final AlertOverlay INACTIVE =
-                new AlertOverlay(false, -1, 0, "", null, false);
+                new AlertOverlay(false, -1, 0, false, "", null, false);
 
         private final boolean active;
         private final int id;
         private final int distanceMeters;
+        private final boolean distanceKnown;
         private final String displayText;
         private final byte[] maneuverPng;
-        private final boolean useRouteNative;
+        private final boolean useRouteFrame;
 
         private AlertOverlay(boolean active, int id, int distanceMeters,
+                             boolean distanceKnown,
                              String displayText, byte[] maneuverPng,
-                             boolean useRouteNative) {
+                             boolean useRouteFrame) {
             this.active = active;
             this.id = id;
             this.distanceMeters = Math.max(0, distanceMeters);
+            this.distanceKnown = distanceKnown;
             this.displayText = safeText(displayText);
             this.maneuverPng = cloneBytes(maneuverPng);
-            this.useRouteNative = useRouteNative;
+            this.useRouteFrame = useRouteFrame;
         }
 
         public static AlertOverlay inactive() {
@@ -433,12 +436,14 @@ public final class DirectTbtFrame {
 
         public static AlertOverlay active(
                 int id, int distanceMeters, String displayText, byte[] maneuverPng) {
-            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng, false);
+            return new AlertOverlay(true, id, distanceMeters, distanceMeters >= 0,
+                    displayText, maneuverPng, false);
         }
 
-        AlertOverlay withRouteNative(boolean enabled) {
-            if (!active || useRouteNative == enabled) return this;
-            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng, enabled);
+        AlertOverlay withRouteFrame(boolean enabled) {
+            if (!active || useRouteFrame == enabled) return this;
+            return new AlertOverlay(true, id, distanceMeters, distanceKnown,
+                    displayText, maneuverPng, enabled);
         }
 
         public boolean isActive() {
@@ -453,6 +458,10 @@ public final class DirectTbtFrame {
             return distanceMeters;
         }
 
+        public boolean isDistanceKnown() {
+            return distanceKnown;
+        }
+
         public String getDisplayText() {
             return displayText;
         }
@@ -461,8 +470,8 @@ public final class DirectTbtFrame {
             return maneuverPng.clone();
         }
 
-        public boolean useRouteNative() {
-            return useRouteNative;
+        public boolean useRouteFrame() {
+            return useRouteFrame;
         }
     }
 }

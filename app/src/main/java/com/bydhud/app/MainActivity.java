@@ -1963,8 +1963,9 @@ public final class MainActivity extends ComponentActivity {
             return new ComposeSentryUploadResult(false, "", "share already running");
         }
         List<String> submittedDays = immutableStorageDays(days);
+        String uploadId = SentryLogUploader.newUploadId();
         try {
-            LogShareZip.Result archive = LogShareZip.create(this, submittedDays);
+            LogShareZip.Result archive = LogShareZip.create(this, submittedDays, uploadId);
             if (!archive.ok || archive.file == null) {
                 return new ComposeSentryUploadResult(false, "", archive.detail);
             }
@@ -1978,7 +1979,7 @@ public final class MainActivity extends ComponentActivity {
                         error.getClass().getSimpleName() + ": " + error.getMessage());
             }
             SentryLogUploader.Result upload = SentryLogUploader.upload(
-                    this, archive.file, submittedDays);
+                    this, archive.file, submittedDays, uploadId);
             if (upload.ok && !publishShareCompletionIfCurrent(
                     operationToken, submittedDays)) {
                 return new ComposeSentryUploadResult(false, "", "cancelled");

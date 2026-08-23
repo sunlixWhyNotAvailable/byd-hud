@@ -122,8 +122,16 @@ final class LogShareZip {
 
     //Background-callable; copies a stable snapshot before releasing the topology writer lock.
     static synchronized Result create(Context context, List<String> selectedDays) {
+        return create(context, selectedDays, "");
+    }
+
+    //Navigation-log Sentry uploads carry a short correlation ID in the archive name.
+    static synchronized Result create(Context context, List<String> selectedDays, String uploadId) {
         if (context == null) {
             return failure("missing context");
+        }
+        if (uploadId == null || (!uploadId.isEmpty() && !uploadId.matches("[0-9a-f]{8}"))) {
+            return failure("invalid upload id");
         }
         List<String> days;
         try {
@@ -138,6 +146,7 @@ final class LogShareZip {
         }
         String fileName = ZIP_PREFIX
                 + new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date())
+                + (uploadId.isEmpty() ? "" : "-" + uploadId)
                 + ".zip";
         File output = new File(shareDir, fileName);
         File part = new File(shareDir, fileName + ".part");

@@ -63,6 +63,8 @@ public final class DirectTbtPayloadTest {
                 DirectTbtPayload.Options.ALL);
 
         assertEquals(99, prepared.nativeManeuver());
+        assertEquals(25, prepared.distanceMeters());
+        assertEquals("Camera", prepared.displayText());
         assertEquals(1, prepared.laneCount());
         assertEquals(3, prepared.lanePngBytes());
         assertEquals(2, prepared.maneuverPngBytes());
@@ -80,94 +82,86 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
-    public void activeAlertUsesRouteNativeWhenPolicyAllowsIt() {
+    public void routeWinnerUsesTheCompleteRouteFrame() {
         DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.active(
-                7, 25, "Camera", new byte[]{8, 9}).withRouteNative(true);
+                7, 250, "Camera", new byte[]{8, 9}).withRouteFrame(true);
 
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame(11, 9, 80, alert), DirectTbtPayload.Options.ALL);
 
         assertEquals(9, prepared.nativeManeuver());
-        assertEquals(2, prepared.maneuverPngBytes());
+        assertEquals(80, prepared.distanceMeters());
+        assertEquals("Road", prepared.displayText());
+        assertEquals(3, prepared.maneuverPngBytes());
         assertEquals(1, prepared.laneCount());
+        assertEquals("current", prepared.maneuverMode());
     }
 
     @Test
-    public void alertNativePolicyCoversOrderingNearnessAndUnknowns() {
+    public void closestCandidatePolicyCoversEqualityZeroAndUnknowns() {
         DirectTbtFrame.AlertOverlay alert250 = DirectTbtFrame.AlertOverlay.active(
                 7, 250, "Camera", new byte[]{8, 9});
         DirectTbtFrame.AlertOverlay alert25 = DirectTbtFrame.AlertOverlay.active(
                 7, 25, "Camera", new byte[]{8, 9});
-        DirectTbtFrame.AlertOverlay unknownAlertDistance = DirectTbtFrame.AlertOverlay.active(
+        DirectTbtFrame.AlertOverlay zeroAlertDistance = DirectTbtFrame.AlertOverlay.active(
                 7, 0, "Camera", new byte[]{8, 9});
+        DirectTbtFrame.AlertOverlay unknownAlertDistance = DirectTbtFrame.AlertOverlay.active(
+                7, -1, "Camera", new byte[]{8, 9});
 
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 9, 200, alert250), true, alert250));
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 100, alert25), true, alert25));
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 0, alert25), true, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 101, alert25), true, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 250, alert250), true, alert250));
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 251, alert250), true, alert250));
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 0, zeroAlertDistance), true, zeroAlertDistance));
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 1, zeroAlertDistance), true, zeroAlertDistance));
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 9, 0, alert25), false, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 9, 101, unknownAlertDistance), true, unknownAlertDistance));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(-1, 9, 50, alert25), true, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 99, 50, alert25), true, alert25));
     }
 
     @Test
-    public void alertNativePolicyUsesTheAlertDistanceBoundary() {
-        DirectTbtFrame.AlertOverlay alert200 = DirectTbtFrame.AlertOverlay.active(
-                7, 200, "Camera", new byte[]{8, 9});
-
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 210, alert200), true, alert200));
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 200, alert200), true, alert200));
-    }
-
-    @Test
-    public void sameLogicalAlertRefreshKeepsNativeAndUpdatesVisualFields() {
-        DirectTbtFrame.AlertOverlay previous = DirectTbtFrame.AlertOverlay.active(
-                7, 200, "Camera", new byte[]{8, 9}).withRouteNative(true);
+    public void everyAlertAndRouteSnapshotReevaluatesTheWholeCandidate() {
         DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
                 8, 180, "Camera", new byte[]{8, 9});
 
-        DirectTbtFrame.AlertOverlay refreshed = WazeDirectChannel.stabilizeAlertOverlay(
-                previous, next, frame(11, 9, 190, next), true);
+        DirectTbtFrame.AlertOverlay selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                next, frame(11, 9, 190, next), true);
 
-        assertTrue(WazeDirectChannel.sameLogicalAlert(previous, next));
-        assertTrue(refreshed.useRouteNative());
-        assertEquals(8, refreshed.getId());
-        assertEquals(180, refreshed.getDistanceMeters());
-        assertEquals("Camera", refreshed.getDisplayText());
-        assertArrayEquals(new byte[]{8, 9}, refreshed.getManeuverPng());
+        assertFalse(selected.useRouteFrame());
+        DirectTbtFrame.AlertOverlay refreshed = DirectTbtFrame.AlertOverlay.active(
+                9, 200, "Camera", new byte[]{8, 9});
+        selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                refreshed, frame(11, 9, 190, refreshed), true);
+        assertTrue(selected.useRouteFrame());
+        selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                selected, frame(11, 9, 210, selected), true);
+        assertFalse(selected.useRouteFrame());
     }
 
     @Test
-    public void newLogicalAlertComputesFreshRouteNativeAndRouteFramesRecomputeIt() {
-        DirectTbtFrame.AlertOverlay previous = DirectTbtFrame.AlertOverlay.active(
-                7, 200, "Camera", new byte[]{8, 9}).withRouteNative(true);
-        DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
-                8, 180, "Police", new byte[]{8, 9});
+    public void unknownAlertDistanceUsesAlertOnlyWhenNoValidRouteExists() {
+        DirectTbtFrame.AlertOverlay unknown = DirectTbtFrame.AlertOverlay.active(
+                7, -1, "Camera", new byte[]{8, 9});
+        DirectTbtFrame.AlertOverlay selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                unknown, frame(-1, 9, 120, unknown), false);
 
-        DirectTbtFrame.AlertOverlay fresh = WazeDirectChannel.stabilizeAlertOverlay(
-                previous, next, frame(11, 9, 190, next), true);
-        assertFalse(WazeDirectChannel.sameLogicalAlert(previous, next));
-        assertFalse(fresh.useRouteNative());
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame(-1, 9, 120, selected), DirectTbtPayload.Options.ALL);
 
-        DirectTbtFrame.AlertOverlay routeAlert = DirectTbtFrame.AlertOverlay.active(
-                9, 200, "Camera", new byte[]{8, 9}).withRouteNative(true);
-        routeAlert = WazeDirectChannel.recomputeAlertOverlayForRoute(
-                routeAlert, frame(11, 9, 210, routeAlert), true);
-        assertFalse(routeAlert.useRouteNative());
-        routeAlert = WazeDirectChannel.recomputeAlertOverlayForRoute(
-                routeAlert, frame(11, 9, 200, routeAlert), true);
-        assertTrue(routeAlert.useRouteNative());
+        assertFalse(unknown.isDistanceKnown());
+        assertFalse(selected.useRouteFrame());
+        assertEquals(99, prepared.nativeManeuver());
+        assertEquals(0, prepared.distanceMeters());
+        assertEquals("Camera", prepared.displayText());
     }
 
     @Test

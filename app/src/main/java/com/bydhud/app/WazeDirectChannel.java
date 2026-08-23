@@ -53,7 +53,6 @@ import androidx.core.graphics.drawable.IconCompat;
 
 import java.io.ByteArrayOutputStream;
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -83,7 +82,6 @@ public final class WazeDirectChannel {
     private static final long FRAME_SILENCE_MS = 5000L;
     private static final long HEALTH_PROBE_TIMEOUT_MS = 5000L;
     private static final long ALERT_TTL_MS = 5000L;
-    private static final int ALERT_ROUTE_NATIVE_NEAR_METERS = 100;
     private static final int MAX_ICON_DIMENSION_PX = 256;
     private static final Pattern ALERT_DISTANCE = Pattern.compile(
             "(\\d+[.,]?\\d*)\\s*(\\u043a\\u043c|km|mi|yd|ft|\\u043c|m)(?=$|\\s|[.,;:!?])",
@@ -134,6 +132,7 @@ public final class WazeDirectChannel {
     private long lastDirectActivityMs;
     private boolean healthProbeInFlight;
     private int healthProbeSequence;
+    private final TemplateRefreshGate templateRefreshGate = new TemplateRefreshGate();
     private Mode mode = Mode.CLUSTER;
 
     public WazeDirectChannel(Context context, Listener listener) {
@@ -287,6 +286,7 @@ public final class WazeDirectChannel {
     }
 
     private void prepareRouteStart(String reason) {
+        templateRefreshGate.reset();
         startReason = safeText(reason);
         routeTiming = null;
         if (mode == Mode.CLUSTER) {
@@ -319,6 +319,7 @@ public final class WazeDirectChannel {
         cancelRebind();
         cancelAlertWatchdog();
         cancelDirectHealth();
+        templateRefreshGate.reset();
         setHandshakeUnavailable("suspended:" + stopReason, false);
         endNavigation("suspended:" + stopReason, false);
         pauseAndStopSession(oldGeneration, stopReason);
@@ -328,6 +329,7 @@ public final class WazeDirectChannel {
 
     private void hardStopOnChannel(String reason) {
         String stopReason = safeText(reason);
+        templateRefreshGate.reset();
         if (!active) {
             setHandshakeUnavailable("hard-stopped:" + stopReason, false);
             return;
@@ -572,16 +574,36 @@ public final class WazeDirectChannel {
 
     private void fetchTemplate(int expectedGeneration) {
         if (!isCurrent(expectedGeneration) || suspended || appManager == null) return;
+        TemplateRefreshGate.Request request = templateRefreshGate.begin();
+        if (request == null) return;
+        startTemplateRequest(expectedGeneration, request);
+    }
+
+    private void startTemplateRequest(int expectedGeneration,
+                                       TemplateRefreshGate.Request request) {
         try {
             appManager.getTemplate(new DoneCallback(
                     expectedGeneration, "getTemplate",
                     response -> {
                         onTemplate(expectedGeneration, response);
                         recordTemplateResponse("getTemplate");
-                    }));
+                    },
+                    () -> completeTemplateRequest(expectedGeneration, request)));
         } catch (Throwable t) {
             sessionFailure(expectedGeneration, "get_template_exception", t);
+            completeTemplateRequest(expectedGeneration, request);
         }
+    }
+
+    private void completeTemplateRequest(int expectedGeneration,
+                                         TemplateRefreshGate.Request request) {
+        TemplateRefreshGate.Request followUp = templateRefreshGate.complete(request);
+        if (followUp == null) return;
+        if (!isCurrent(expectedGeneration) || suspended || appManager == null) {
+            templateRefreshGate.reset();
+            return;
+        }
+        startTemplateRequest(expectedGeneration, followUp);
     }
 
     private void onTemplate(int expectedGeneration, Bundleable response) throws Exception {
@@ -650,6 +672,7 @@ public final class WazeDirectChannel {
         if (source != null) {
             onBindingLost(expectedGeneration, source, reason);
         } else {
+            templateRefreshGate.reset();
             generation++;
             sessionGeneration++;
             unavailableBindFailureReported = true;
@@ -720,6 +743,7 @@ public final class WazeDirectChannel {
     }
 
     private void clearSessionState() {
+        templateRefreshGate.reset();
         if (carHost != null) carHost.appHost.clearSurfaceSession("session-cleared");
         carApp = null;
         appManager = null;
@@ -892,8 +916,8 @@ public final class WazeDirectChannel {
     }
 
     private void emitFrame(String reason, boolean routeFrame) {
-        if (routeFrame && alert.isActive()) {
-            alert = recomputeAlertOverlayForRoute(
+        if (routeFrame) {
+            alert = selectAlertOverlayCandidate(
                     alert, navigationFrame, navigationDistanceKnown);
         }
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
@@ -905,7 +929,7 @@ public final class WazeDirectChannel {
                 OWNER_PACKAGE, callbackGeneration, frame, reason, timing));
     }
 
-    static boolean shouldUseRouteNativeDuringAlert(
+    static boolean shouldUseRouteFrameDuringAlert(
             DirectTbtFrame routeFrame,
             boolean routeDistanceKnown,
             DirectTbtFrame.AlertOverlay alert) {
@@ -915,42 +939,19 @@ public final class WazeDirectChannel {
         }
         int nativeManeuver = routeFrame.getBydManeuver();
         if (nativeManeuver <= 0 || nativeManeuver == 99) return false;
-        int routeDistance = routeFrame.getDistanceMeters();
-        if (routeDistance <= ALERT_ROUTE_NATIVE_NEAR_METERS) return true;
-        int alertDistance = alert.getDistanceMeters();
-        return alertDistance > 0 && routeDistance <= alertDistance;
+        return !alert.isDistanceKnown()
+                || routeFrame.getDistanceMeters() <= alert.getDistanceMeters();
     }
 
-    static boolean sameLogicalAlert(
-            DirectTbtFrame.AlertOverlay previous,
-            DirectTbtFrame.AlertOverlay next) {
-        return previous != null && next != null
-                && previous.isActive() && next.isActive()
-                && previous.getDisplayText().equals(next.getDisplayText())
-                && Arrays.equals(previous.getManeuverPng(), next.getManeuverPng());
-    }
-
-    static DirectTbtFrame.AlertOverlay stabilizeAlertOverlay(
-            DirectTbtFrame.AlertOverlay previous,
-            DirectTbtFrame.AlertOverlay next,
+    static DirectTbtFrame.AlertOverlay selectAlertOverlayCandidate(
+            DirectTbtFrame.AlertOverlay candidate,
             DirectTbtFrame routeFrame,
             boolean routeDistanceKnown) {
-        if (next == null || !next.isActive()) {
-            return next == null ? DirectTbtFrame.AlertOverlay.inactive() : next;
+        if (candidate == null || !candidate.isActive()) {
+            return candidate == null ? DirectTbtFrame.AlertOverlay.inactive() : candidate;
         }
-        if (sameLogicalAlert(previous, next)) {
-            return next.withRouteNative(previous.useRouteNative());
-        }
-        return recomputeAlertOverlayForRoute(next, routeFrame, routeDistanceKnown);
-    }
-
-    static DirectTbtFrame.AlertOverlay recomputeAlertOverlayForRoute(
-            DirectTbtFrame.AlertOverlay current,
-            DirectTbtFrame routeFrame,
-            boolean routeDistanceKnown) {
-        if (current == null) return DirectTbtFrame.AlertOverlay.inactive();
-        return current.withRouteNative(
-                shouldUseRouteNativeDuringAlert(routeFrame, routeDistanceKnown, current));
+        return candidate.withRouteFrame(
+                shouldUseRouteFrameDuringAlert(routeFrame, routeDistanceKnown, candidate));
     }
 
     private void showAlert(Alert value) {
@@ -966,8 +967,7 @@ public final class WazeDirectChannel {
         int revision = ++alertRevision;
         DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
                 value.getId(), distanceMeters, displayText, icon);
-        alert = stabilizeAlertOverlay(
-                alert, next, navigationFrame, navigationDistanceKnown);
+        alert = selectAlertOverlayCandidate(next, navigationFrame, navigationDistanceKnown);
         log("alert show revision=" + revision + " id=" + value.getId()
                 + " distanceM=" + distanceMeters + " iconBytes=" + icon.length);
         emitFrame("alert_show");
@@ -1163,7 +1163,7 @@ public final class WazeDirectChannel {
 
     static int parseDistanceMeters(String value) {
         Matcher matcher = ALERT_DISTANCE.matcher(safeText(value));
-        if (!matcher.find()) return 0;
+        if (!matcher.find()) return -1;
         try {
             double number = Double.parseDouble(matcher.group(1).replace(',', '.'));
             String unit = matcher.group(2).toLowerCase(Locale.ROOT);
@@ -1173,7 +1173,7 @@ public final class WazeDirectChannel {
             else if (unit.equals("ft")) number *= 0.3048d;
             return Math.max(0, (int) Math.round(number));
         } catch (RuntimeException e) {
-            return 0;
+            return -1;
         }
     }
 
@@ -1213,6 +1213,39 @@ public final class WazeDirectChannel {
 
     private static String typeName(Object value) {
         return value == null ? "null" : value.getClass().getName();
+    }
+
+    static final class TemplateRefreshGate {
+        private Request inFlight;
+        private boolean pending;
+
+        Request begin() {
+            if (inFlight != null) {
+                pending = true;
+                return null;
+            }
+            inFlight = new Request();
+            return inFlight;
+        }
+
+        Request complete(Request request) {
+            if (request == null || request != inFlight) return null;
+            if (!pending) {
+                inFlight = null;
+                return null;
+            }
+            pending = false;
+            inFlight = new Request();
+            return inFlight;
+        }
+
+        void reset() {
+            inFlight = null;
+            pending = false;
+        }
+
+        static final class Request {
+        }
     }
 
     private static int meters(Distance distance) {
@@ -1863,6 +1896,7 @@ public final class WazeDirectChannel {
         private final String name;
         private final ResultHandler success;
         private final Runnable completion;
+        private final int expectedSessionGeneration;
 
         DoneCallback(int expectedGeneration, String name, ResultHandler success) {
             this(expectedGeneration, name, success, null);
@@ -1871,6 +1905,7 @@ public final class WazeDirectChannel {
         DoneCallback(int expectedGeneration, String name, ResultHandler success,
                 Runnable completion) {
             this.expectedGeneration = expectedGeneration;
+            this.expectedSessionGeneration = sessionGeneration;
             this.name = name;
             this.success = success;
             this.completion = completion;
@@ -1884,6 +1919,11 @@ public final class WazeDirectChannel {
         @Override
         public void onSuccess(Bundleable response) {
             postBinder(expectedGeneration, () -> {
+                if (!callbackMatchesSession(
+                        expectedSessionGeneration, sessionGeneration, suspended)) {
+                    if (completion != null) completion.run();
+                    return;
+                }
                 log("callback success=" + name);
                 try {
                     if (success != null) success.run(response);
@@ -1907,6 +1947,11 @@ public final class WazeDirectChannel {
             }
             String finalPayload = payload;
             postBinder(expectedGeneration, () -> {
+                if (!callbackMatchesSession(
+                        expectedSessionGeneration, sessionGeneration, suspended)) {
+                    if (completion != null) completion.run();
+                    return;
+                }
                 try {
                     if (success == null) {
                         log("callback failure=" + name + " detail=" + finalPayload);
@@ -1919,6 +1964,11 @@ public final class WazeDirectChannel {
                 }
             });
         }
+    }
+
+    static boolean callbackMatchesSession(
+            int expectedSessionGeneration, int currentSessionGeneration, boolean suspended) {
+        return !suspended && expectedSessionGeneration == currentSessionGeneration;
     }
 
     private interface ResultHandler {

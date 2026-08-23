@@ -171,6 +171,8 @@ private enum class SentryUploadPhase {
     Failure
 }
 
+private const val SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L
+
 //defines Palette UI/state support so Compose code can keep rendering intent explicit.
 private data class Palette(
     val dark: Boolean,
@@ -580,6 +582,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var sentryUploadPhase by remember { mutableStateOf<SentryUploadPhase?>(null) }
     var sentryUploadEventId by remember { mutableStateOf("") }
     var sentryUploadError by remember { mutableStateOf("") }
+    var sentryUploadCooldownUntilMs by rememberSaveable { mutableStateOf(0L) }
+    var sentryUploadCooldownRemaining by remember { mutableIntStateOf(0) }
     var sentryUploadingConfiguration by remember { mutableStateOf(false) }
     var configurationShareBusy by remember { mutableStateOf(false) }
     var configurationShareVisible by rememberSaveable { mutableStateOf(false) }
@@ -849,6 +853,24 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             sentryUploadError = ""
             sentryUploadPhase = SentryUploadPhase.Preparing
         }
+    }
+
+    LaunchedEffect(sentryUploadCooldownUntilMs) {
+        val deadline = sentryUploadCooldownUntilMs
+        if (deadline <= 0L) {
+            sentryUploadCooldownRemaining = 0
+            return@LaunchedEffect
+        }
+        while (true) {
+            val remainingMs = deadline - SystemClock.elapsedRealtime()
+            if (remainingMs <= 0L) break
+            sentryUploadCooldownRemaining = ((remainingMs + 999L) / 1000L)
+                .toInt()
+                .coerceIn(1, 30)
+            delay(minOf(1000L, remainingMs))
+        }
+        sentryUploadCooldownRemaining = 0
+        sentryUploadCooldownUntilMs = 0L
     }
 
     LaunchedEffect(blockingUiFlow) {
@@ -1490,24 +1512,41 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
 
         storageShareSummary?.let { summary ->
+            val sentryCooldownActive = sentryUploadCooldownUntilMs > SystemClock.elapsedRealtime()
+            val sentryButtonRemaining = if (sentryCooldownActive) {
+                sentryUploadCooldownRemaining.coerceAtLeast(1)
+            } else {
+                0
+            }
             StorageShareDestinationOverlay(
                 copy = copy,
                 shareCopy = shareCopy,
                 palette = palette,
                 summary = summary,
                 onSentry = {
-                    storageShareSummary = null
-                    sentryUploadingConfiguration = false
-                    sentryUploadEventId = ""
-                    sentryUploadError = ""
-                    sentryUploadPhase = SentryUploadPhase.Preparing
-                    storageShareDestination = StorageShareDestination.Sentry
-                    storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
-                    storageShareStartedAt = System.currentTimeMillis()
-                    storageShareOperationToken = activity.composeBeginStorageShareOperation()
-                    storageShareTerminalPhase = ""
-                    storageShareBusy = true
+                    val now = SystemClock.elapsedRealtime()
+                    if (sentryUploadCooldownUntilMs <= now) {
+                        sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
+                        sentryUploadCooldownRemaining = 30
+                        storageShareSummary = null
+                        sentryUploadingConfiguration = false
+                        sentryUploadEventId = ""
+                        sentryUploadError = ""
+                        sentryUploadPhase = SentryUploadPhase.Preparing
+                        storageShareDestination = StorageShareDestination.Sentry
+                        storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
+                        storageShareStartedAt = System.currentTimeMillis()
+                        storageShareOperationToken = activity.composeBeginStorageShareOperation()
+                        storageShareTerminalPhase = ""
+                        storageShareBusy = true
+                    }
                 },
+                sentryButtonText = if (sentryButtonRemaining > 0) {
+                    sentryButtonRemaining.toString()
+                } else {
+                    shareCopy.shareToSentry
+                },
+                sentryButtonEnabled = sentryButtonRemaining == 0,
                 onAnotherApp = {
                     storageShareSummary = null
                     storageShareDestination = StorageShareDestination.Android
@@ -2359,6 +2398,8 @@ private fun StorageShareDestinationOverlay(
     palette: Palette,
     summary: MainActivity.ComposeStorageShareSummary,
     onSentry: () -> Unit,
+    sentryButtonText: String,
+    sentryButtonEnabled: Boolean,
     onAnotherApp: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -2429,9 +2470,10 @@ private fun StorageShareDestinationOverlay(
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
             ) {
                 HudButton(
-                    shareCopy.shareToSentry,
+                    sentryButtonText,
                     palette,
                     primary = true,
+                    enabled = sentryButtonEnabled,
                     width = 210.dp,
                     onClick = onSentry
                 )

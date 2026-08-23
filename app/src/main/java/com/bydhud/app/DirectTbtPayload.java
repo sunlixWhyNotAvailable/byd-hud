@@ -60,6 +60,10 @@ public final class DirectTbtPayload {
         DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
         Options safeOptions = options == null ? Options.ALL : options;
         DirectTbtFrame.AlertOverlay alert = safeFrame.getAlertOverlay();
+        if (alert.isActive() && alert.useRouteFrame()) {
+            safeFrame = safeFrame.withAlertOverlay(DirectTbtFrame.AlertOverlay.inactive());
+            alert = safeFrame.getAlertOverlay();
+        }
 
         List<DirectTbtFrame.Lane> lanes = safeOptions.lanes
                 ? safeFrame.getLanes() : Collections.emptyList();
@@ -78,8 +82,7 @@ public final class DirectTbtPayload {
                 : (blankLaneManeuver || blankDestinationManeuver
                 ? safeOptions.blankS72Png.clone() : navManeuverPng);
         int nativeManeuver = alert.isActive()
-                ? (alert.useRouteNative()
-                ? safeFrame.getBydManeuver() : NATIVE_BLANK_ID)
+                ? NATIVE_BLANK_ID
                 : (blankLaneManeuver || destinationManeuver
                 ? NATIVE_BLANK_ID : safeFrame.getBydManeuver());
         int distanceMeters = alert.isActive()
