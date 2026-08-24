@@ -35,6 +35,8 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(onResume.indexOf("invalidateComposeSnapshot();")
                 < onResume.indexOf("requestRuntimeUiStateRefresh("));
         assertTrue(onResume.contains("invalidateComposeSnapshot();"));
+        assertTrue(onResume.contains(
+                "requestRuntimeUiStateRefresh(this, true, \"activity-resume\")"));
         assertTrue(runtimeScan.contains("NavRuntimePermissionStatus.check(appContext)"));
         assertFalse(runtimeScan.contains("requestStorageRefresh("));
         assertFalse(runtimeScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
@@ -114,6 +116,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(lifecycleObserver.contains("composeRequestStorageRefresh(false)"));
         assertTrue(lifecycleObserver.contains("composeRequestPatchUiStateRefresh("));
         assertTrue(lifecycleObserver.contains("false,"));
+        assertTrue(lifecycleObserver.contains("activity-resume-apps"));
         assertFalse(lifecycleObserver.contains("requestTabStateRefresh("));
         assertTrue(lifecycleObserver.contains("latestSelectedTab"));
         assertTrue(refresh.contains("if (snapshot != refreshed) snapshot = refreshed"));
@@ -145,6 +148,22 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(storage.contains("app, \"retired-day-cleanup\")"));
         assertTrue(retention.contains("request.onComplete == null"));
         assertTrue(retention.contains("requestStorageRefreshAfterMutation("));
+    }
+
+    @Test
+    public void storageSnapshotKeepsWriteProbeExclusiveButScansUnderReadLock()
+            throws IOException {
+        String storage = source("NavigationLogStorage.java");
+        String snapshot = between(storage, "static StorageSnapshot snapshotAccessibleStorage(",
+                "//Caller stops active Waze/logcat first;");
+
+        assertTrue(snapshot.contains(
+                "List<StorageRoot> roots = withWriteLock(() -> accessibleRootsLocked(app));"));
+        assertTrue(snapshot.contains("return withReadLock(() -> snapshotAccessibleStorageLocked("));
+        assertTrue(snapshot.contains(
+                "roots, activeDay, activeLogcatDay, activeCropDay"));
+        assertFalse(snapshot.contains(
+                "withWriteLock(() -> snapshotAccessibleStorageLocked("));
     }
 
     @Test

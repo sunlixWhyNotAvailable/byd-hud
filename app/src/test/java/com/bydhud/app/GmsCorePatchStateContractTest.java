@@ -24,7 +24,7 @@ public final class GmsCorePatchStateContractTest {
     @Test
     public void storePersistsAndInvalidatesTheFourthState() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/NavigatorPatchStore.java");
-        assertTrue(source.contains("SCAN_CACHE_REVISION = 8"));
+        assertTrue(source.contains("SCAN_CACHE_REVISION = 10"));
         assertTrue(source.contains("_scan_gms_core"));
         assertTrue(source.contains("KEY_EXPECTED_GMS_CORE"));
         assertTrue(source.contains("_installed_gms_core"));
@@ -34,7 +34,7 @@ public final class GmsCorePatchStateContractTest {
     public void productionAndPreviewExposeTheFourthGMapsPill() throws IOException {
         String production = source("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String preview = previewSource();
-        assertTrue(production.contains("row.gmsCoreLabel to row.gmsCoreState"));
+        assertTrue(production.contains("patchSecondaryLabel(row, copy.language) to row.gmsCoreState"));
         assertTrue(preview.contains("gmapsGmsCorePatchStatus"));
         assertTrue(preview.contains("optionalLabel = \"GmsCore\""));
     }

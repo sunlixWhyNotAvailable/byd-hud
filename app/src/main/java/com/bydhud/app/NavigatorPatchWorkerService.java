@@ -111,6 +111,7 @@ public final class NavigatorPatchWorkerService extends Service {
             sendResult(message.replyTo, operation, STATUS_FAILED, "Invalid or duplicate operation", null);
             return true;
         }
+        final int command = message.what;
         final Messenger reply = message.replyTo;
         final Bundle request = new Bundle(data);
         Task task = new Task(reply);
@@ -137,7 +138,7 @@ public final class NavigatorPatchWorkerService extends Service {
             }
             FutureTask<Void> future = new FutureTask<>(() -> {
                 task.started = true;
-                run(message.what, request, task);
+                run(command, request, task);
                 return null;
             });
             task.future = future;

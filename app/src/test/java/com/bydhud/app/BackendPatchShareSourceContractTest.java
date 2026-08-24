@@ -13,7 +13,7 @@ import java.nio.file.Paths;
 
 public final class BackendPatchShareSourceContractTest {
     @Test
-    public void resumeUsesRuntimeTtlAndAssetRefreshPublishesOnlyOnChange() throws IOException {
+    public void resumeForcesRuntimeRefreshAndAssetRefreshPublishesOnlyOnChange() throws IOException {
         String activity = source("MainActivity.java");
         String compose = source("BydHudRuntimeCompose.kt");
         String onResume = between(activity, "protected void onResume()", "protected void onPause()");
@@ -22,7 +22,7 @@ public final class BackendPatchShareSourceContractTest {
         String tabRefresh = between(compose, "fun requestTabStateRefresh(",
                 "fun runAction(");
 
-        assertTrue(onResume.contains("requestRuntimeUiStateRefresh(this, false"));
+        assertTrue(onResume.contains("requestRuntimeUiStateRefresh(this, true"));
         assertTrue(tabRefresh.contains(
                 "RuntimeTab.Apps -> activity.composeRequestRuntimeUiStateRefresh(false, reason)"));
         assertTrue(tabRefresh.contains("RuntimeTab.Logs,"));

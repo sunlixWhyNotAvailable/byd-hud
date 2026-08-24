@@ -13,6 +13,16 @@ import org.junit.Test;
 
 public final class PatchOperationUiSourceContractTest {
     @Test
+    public void ukrainianPatchCheckLabelsFitTheActionRow() throws IOException {
+        String source = source("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+
+        assertTrue(source.contains("patchNotChecked = \"перевір\""));
+        assertTrue(source.contains("checkPatch = \"Перевір\""));
+        assertFalse(source.contains("patchNotChecked = \"перевірити\""));
+        assertFalse(source.contains("checkPatch = \"Перевірити\""));
+    }
+
+    @Test
     public void productionUsesOneNonModalThreeCardStack() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String stack = between(source,

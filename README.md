@@ -214,11 +214,11 @@ Official Google Maps package `com.google.android.apps.maps`, bundles with OBB ex
 
 1. Select the installed navigator or optionally choose a downloaded version.
 2. Press `Check` to verify that the package is intact and its files and app layout match a supported build.
-3. Review the component status pills. Waze reports the direct channel, stability, and alerts separately. Google Maps reports the direct channel, Google services dialog handling, audio, and PiP separately.
+3. Review the component status pills. Waze reports the direct channel, lanes, stability, and alerts separately. Google Maps reports the direct channel, Google services dialog handling, audio, and PiP separately.
 4. Press `Patch` and confirm the warning.
 5. BYD HUD repeats all compatibility checks, changes only recognized app parts, signs the complete package set with a key generated on this tablet, and asks Android to install it.
 
-For Waze, the direct channel is mandatory; stability and alert support remain optional. Google Maps Direct, Google services dialog handling, Audio, and PiP are independent components, so one component does not determine whether another works. PiP disables navigation picture-in-picture without disabling dashboard resizing. The Google Maps 26.30 Direct component obtains Google-rendered maneuver images without requiring its turn card to remain visible. Waze alert support is currently limited to the compatible Waze 5.20.0.1 build.
+For Waze, the direct channel and lanes are mandatory; stability and alert support remain optional. Google Maps Direct, Google services dialog handling, Audio, and PiP are independent components, so one component does not determine whether another works. PiP disables navigation picture-in-picture without disabling dashboard resizing. The Google Maps 26.30 Direct component obtains Google-rendered maneuver images without requiring its turn card to remain visible. Waze alert support is currently limited to the compatible Waze 5.20.0.1 build.
 
 `Check` and `Patch` use persistent progress cards that stay visible while you switch tabs. Waze and Google Maps can be checked or prepared at the same time, while Android installation remains one-at-a-time. Patch cards stack with archive/share progress instead of covering one another. `Stop` is available only while the current operation can still be cancelled safely; use `Close` to dismiss a finished, cancelled, or failed card.
 

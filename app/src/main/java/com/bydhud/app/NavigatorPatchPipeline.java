@@ -460,6 +460,10 @@ final class NavigatorPatchPipeline {
                 && !NavigatorPatchStore.PATCHED.equals(output.directState)) {
             throw new IOException("Direct channel post-verification failed");
         }
+        if (profile == NavigatorPatchStore.Profile.WAZE
+                && !NavigatorPatchStore.PATCHED.equals(output.gmsCoreState)) {
+            throw new IOException("Waze lanes post-verification failed");
+        }
         if (profile == NavigatorPatchStore.Profile.GMAPS
                 && NavigatorPatchStore.PATCHABLE.equals(input.gmsCoreState)
                 && !outcome.gmsCoreFailed
@@ -835,16 +839,14 @@ final class NavigatorPatchPipeline {
             }
             if (!inspection.reason.isEmpty()) reason = inspection.reason;
         }
-        String directState;
-        if (allowlistStock + allowlistPatched == 1 && laneStock + lanePatched == 1) {
-            directState = allowlistPatched == 1 && lanePatched == 1
-                    ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
-        }
-        else return copyStates(metadata, NavigatorPatchStore.FAILED,
-                NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED,
-                NavigatorPatchStore.NOT_CHECKED,
-                allowlistStock + allowlistPatched != 1
-                        ? reason : laneReason);
+        String directState = allowlistStock + allowlistPatched != 1
+                ? NavigatorPatchStore.FAILED
+                : allowlistPatched == 1
+                ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
+        String laneState = laneStock + lanePatched != 1
+                ? NavigatorPatchStore.FAILED
+                : lanePatched == 1
+                ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
         String optional = lifecycleTargets == 0 ? NavigatorPatchStore.FAILED
                 : lifecyclePatchable ? NavigatorPatchStore.PATCHABLE
                 : lifecyclePatched ? NavigatorPatchStore.PATCHED
@@ -853,11 +855,15 @@ final class NavigatorPatchPipeline {
                 : alertHasStock ? NavigatorPatchStore.PATCHABLE
                 : alertPatched ? NavigatorPatchStore.PATCHED
                 : NavigatorPatchStore.FAILED;
-        String compatibilityReason = NavigatorPatchStore.FAILED.equals(optional)
+        String compatibilityReason = NavigatorPatchStore.FAILED.equals(directState)
+                ? reason
+                : NavigatorPatchStore.FAILED.equals(laneState)
+                ? laneReason
+                : NavigatorPatchStore.FAILED.equals(optional)
                 ? "Stable session anchors are incompatible"
                 : NavigatorPatchStore.FAILED.equals(alert)
                 ? "Waze alert anchors are incompatible" : "Compatible";
-        return copyStates(metadata, directState, NavigatorPatchStore.NOT_CHECKED,
+        return copyStates(metadata, directState, laneState,
                 optional, alert, compatibilityReason);
     }
 
@@ -1038,34 +1044,38 @@ final class NavigatorPatchPipeline {
             }
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
-            if (allowlistCount != 1 || allowlist == null || laneCount != 1 || lanes == null) {
+            if (allowlistCount != 1 || allowlist == null) {
                 throw new IOException("Waze direct target member is ambiguous");
             }
-            boolean patchedDirect = false;
-            if (WazePatchEngine.PATCHABLE_STOCK.equals(allowlist.allowlistClassification)) {
-                File target = outputMember(outputDirectory, allowlist.fileName);
-                File rewrittenDex = new File(transaction, "waze-direct.dex");
-                WazePatchEngine.patchWazeAllowlist(
-                        readEntry(target, allowlist.allowlistDex), rewrittenDex);
-                File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
-                Map<String, File> replacements = new HashMap<>();
-                replacements.put(allowlist.allowlistDex, rewrittenDex);
-                repack(target, rewrittenApk, replacements, Collections.emptyMap());
-                replaceFile(rewrittenApk, target);
-                patchedDirect = true;
+            if (!WazePatchEngine.PATCHABLE_STOCK.equals(
+                    allowlist.allowlistClassification)) {
+                throw new IOException("Waze direct patch has no stock component");
             }
-            if (WazePatchEngine.PATCHABLE_STOCK.equals(lanes.laneClassification)) {
-                File target = outputMember(outputDirectory, lanes.fileName);
-                File rewrittenDex = new File(transaction, "waze-lanes.dex");
-                WazePatchEngine.patchLanes(readEntry(target, lanes.laneDex), rewrittenDex);
-                File rewrittenApk = new File(transaction, "waze-lanes-unsigned.apk");
-                Map<String, File> replacements = new HashMap<>();
-                replacements.put(lanes.laneDex, rewrittenDex);
-                repack(target, rewrittenApk, replacements, Collections.emptyMap());
-                replaceFile(rewrittenApk, target);
-                patchedDirect = true;
+            File target = outputMember(outputDirectory, allowlist.fileName);
+            File rewrittenDex = new File(transaction, "waze-direct.dex");
+            WazePatchEngine.patchWazeAllowlist(
+                    readEntry(target, allowlist.allowlistDex), rewrittenDex);
+            File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
+            Map<String, File> replacements = new HashMap<>();
+            replacements.put(allowlist.allowlistDex, rewrittenDex);
+            repack(target, rewrittenApk, replacements, Collections.emptyMap());
+            replaceFile(rewrittenApk, target);
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.gmsCoreState)) {
+            if (laneCount != 1 || lanes == null) {
+                throw new IOException("Waze lane target member is ambiguous");
             }
-            if (!patchedDirect) throw new IOException("Waze direct patch has no stock component");
+            if (!WazePatchEngine.PATCHABLE_STOCK.equals(lanes.laneClassification)) {
+                throw new IOException("Waze lane patch has no stock component");
+            }
+            File target = outputMember(outputDirectory, lanes.fileName);
+            File rewrittenDex = new File(transaction, "waze-lanes.dex");
+            WazePatchEngine.patchLanes(readEntry(target, lanes.laneDex), rewrittenDex);
+            File rewrittenApk = new File(transaction, "waze-lanes-unsigned.apk");
+            Map<String, File> replacements = new HashMap<>();
+            replacements.put(lanes.laneDex, rewrittenDex);
+            repack(target, rewrittenApk, replacements, Collections.emptyMap());
+            replaceFile(rewrittenApk, target);
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.optionalState)) {
             if (reportProgress) NavigatorPatchStore.transition(context,

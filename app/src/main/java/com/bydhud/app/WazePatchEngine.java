@@ -490,7 +490,7 @@ final class WazePatchEngine {
         if (result.stockShape()) {
             result.classification = PATCHABLE_STOCK;
             result.reason = "exact stock Waze lane targets";
-        } else if (result.patchedShape()) {
+        } else if (result.patchedShape() || result.publishedShape()) {
             result.classification = ALREADY_PATCHED;
             result.reason = "exact patched Waze lane targets";
         } else {
@@ -2177,6 +2177,20 @@ final class WazePatchEngine {
                     && producerTargetCount == 1 && producerSourceCount == 2
                     && producerFieldCount == 2 && producerEmptyCount == 1
                     && producerTypeCount == 1 && producerCastCount == 1
+                    && producerStockCtorCount == 0 && producerPatchedCtorCount == 1
+                    && adapterTargetCount == 1 && adapterSentinelCount == 0
+                    && adapterHelperCallCount == 1 && adapterHelperCount == 1
+                    && adapterMapperCount == 1;
+        }
+
+        boolean publishedShape() {
+            return frameClassCount == 1 && frameFieldCount == 1
+                    && frameStockCtorCount == 0 && framePatchedCtorCount == 1
+                    && frameGetterCount == 1
+                    && frameEqualsFieldCount == 2 && frameHashFieldCount == 1
+                    && producerTargetCount == 1 && producerSourceCount == 1
+                    && producerFieldCount == 1 && producerEmptyCount == 1
+                    && producerTypeCount == 0 && producerCastCount == 0
                     && producerStockCtorCount == 0 && producerPatchedCtorCount == 1
                     && adapterTargetCount == 1 && adapterSentinelCount == 0
                     && adapterHelperCallCount == 1 && adapterHelperCount == 1

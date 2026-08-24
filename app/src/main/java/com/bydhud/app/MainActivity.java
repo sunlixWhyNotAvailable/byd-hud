@@ -288,7 +288,7 @@ public final class MainActivity extends ComponentActivity {
         maybeStartPendingAdbAuthorization();
         refreshControls();
         invalidateComposeSnapshot();
-        requestRuntimeUiStateRefresh(this, false, "activity-resume");
+        requestRuntimeUiStateRefresh(this, true, "activity-resume");
         notifyPendingShare();
     }
 

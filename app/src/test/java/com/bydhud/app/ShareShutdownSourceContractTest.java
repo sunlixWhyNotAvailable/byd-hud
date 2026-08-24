@@ -62,7 +62,7 @@ public final class ShareShutdownSourceContractTest {
         assertTrue(source.contains("archiving = \"Archiving\""));
         assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));
         assertTrue(source.contains("patchWazeAlerts = \"Alerts\""));
-        assertTrue(source.contains("patchNotChecked = \"перевірити\""));
+        assertTrue(source.contains("patchNotChecked = \"перевір\""));
         assertTrue(source.contains("patchNotChecked = \"check\""));
         assertTrue(source.contains("\"Стабільність\" else \"Stability\""));
     }

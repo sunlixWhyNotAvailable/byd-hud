@@ -15,13 +15,19 @@ public final class NavigatorPatchPolicyTest {
     }
 
     @Test
-    public void wazeKeepsDirectAsMandatoryGate() {
+    public void wazeKeepsDirectAndLanesAsMandatoryGates() {
         assertTrue(NavigatorPatchStore.isPatchEnabled(
-                NavigatorPatchStore.Profile.WAZE, "PATCHABLE", "FAILED", "FAILED"));
+                NavigatorPatchStore.Profile.WAZE,
+                "PATCHABLE", "PATCHED", "FAILED", "FAILED"));
         assertTrue(NavigatorPatchStore.isPatchEnabled(
-                NavigatorPatchStore.Profile.WAZE, "PATCHED", "FAILED", "PATCHABLE"));
+                NavigatorPatchStore.Profile.WAZE,
+                "PATCHED", "PATCHED", "FAILED", "PATCHABLE"));
         assertFalse(NavigatorPatchStore.isPatchEnabled(
-                NavigatorPatchStore.Profile.WAZE, "FAILED", "FAILED", "PATCHABLE"));
+                NavigatorPatchStore.Profile.WAZE,
+                "FAILED", "PATCHED", "FAILED", "PATCHABLE"));
+        assertFalse(NavigatorPatchStore.isPatchEnabled(
+                NavigatorPatchStore.Profile.WAZE,
+                "PATCHABLE", "FAILED", "PATCHED", "PATCHED"));
     }
 
     @Test

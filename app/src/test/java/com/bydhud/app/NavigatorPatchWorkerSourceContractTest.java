@@ -25,6 +25,9 @@ public final class NavigatorPatchWorkerSourceContractTest {
         assertTrue(worker.contains("volatile boolean cancelled"));
         assertTrue(worker.contains("future.cancel(true)"));
         assertTrue(worker.contains("checkCancelled(task);"));
+        assertTrue(worker.contains("final int command = message.what;"));
+        assertTrue(worker.contains("run(command, request, task);"));
+        assertFalse(worker.contains("run(message.what, request, task);"));
         assertTrue(worker.contains("linkToDeath(task.replyDeath, 0)"));
         assertTrue(worker.contains("unlinkReplyDeath(task)"));
         assertTrue(worker.contains("Process.killProcess(android.os.Process.myPid())"));

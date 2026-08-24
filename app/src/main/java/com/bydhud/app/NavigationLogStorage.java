@@ -339,8 +339,10 @@ final class NavigationLogStorage {
         String activeLogcatDay = LogcatRecorder.activeStartDay();
         WazeCropCapture.RetentionState crop = WazeCropCapture.currentRetentionState();
         String activeCropDay = crop.active ? crop.day : "";
-        return withWriteLock(() -> snapshotAccessibleStorageLocked(
-                context.getApplicationContext(), activeDay, activeLogcatDay, activeCropDay));
+        Context app = context.getApplicationContext();
+        List<StorageRoot> roots = withWriteLock(() -> accessibleRootsLocked(app));
+        return withReadLock(() -> snapshotAccessibleStorageLocked(
+                roots, activeDay, activeLogcatDay, activeCropDay));
     }
 
     //Caller stops active Waze/logcat first; Waze restart must replace its cached sessionDir.
@@ -1484,11 +1486,10 @@ final class NavigationLogStorage {
     }
 
     private static StorageSnapshot snapshotAccessibleStorageLocked(
-            Context context,
+            List<StorageRoot> roots,
             String activeDay,
             String activeLogcatDay,
             String activeCropDay) {
-        List<StorageRoot> roots = accessibleRootsLocked(context);
         Set<String> activeDirectSessions = activeDirectSessionsSnapshot();
         Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
         long totalBytes = 0L;

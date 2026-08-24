@@ -14,7 +14,7 @@ import java.util.UUID;
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
     // Invalidate cached results whenever component structural classification changes.
-    private static final int SCAN_CACHE_REVISION = 8;
+    private static final int SCAN_CACHE_REVISION = 10;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";
@@ -79,13 +79,14 @@ final class NavigatorPatchStore {
     private static final String KEY_INSTALL_OWNER_TOKEN = "install_owner_token";
 
     enum Profile {
-        WAZE("waze", "com.waze", "Waze", "", "Stable session", "Waze alerts"),
+        WAZE("waze", "com.waze", "Waze", "Lanes", "Stable session", "Waze alerts"),
         GMAPS("gmaps", "app.revanced.android.apps.maps", "Google Maps (ReVanced)",
                 "GmsCore", "Audio channel", "PiP");
 
         final String id;
         final String packageName;
         final String fallbackLabel;
+        // Shared second component: Waze lanes or Google Maps GmsCore.
         final String gmsCoreLabel;
         final String optionalLabel;
         final String alertLabel;
@@ -1251,9 +1252,10 @@ final class NavigatorPatchStore {
     static boolean isPatchEnabled(Profile profile, String direct, String gmsCore,
             String optional, String auxiliary) {
         if (profile == Profile.WAZE) {
-            return PATCHABLE.equals(direct)
-                    || (PATCHED.equals(direct)
-                    && (PATCHABLE.equals(optional) || PATCHABLE.equals(auxiliary)));
+            boolean coreCompatible = (PATCHABLE.equals(direct) || PATCHED.equals(direct))
+                    && (PATCHABLE.equals(gmsCore) || PATCHED.equals(gmsCore));
+            return coreCompatible && (PATCHABLE.equals(direct) || PATCHABLE.equals(gmsCore)
+                    || PATCHABLE.equals(optional) || PATCHABLE.equals(auxiliary));
         }
         return PATCHABLE.equals(direct)
                 || PATCHABLE.equals(gmsCore)

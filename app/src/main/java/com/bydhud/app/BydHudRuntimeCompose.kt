@@ -920,7 +920,9 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             false,
                             "activity-resume-patch"
                         )
-                        RuntimeTab.Apps,
+                        RuntimeTab.Apps -> activity.composeRequestPatchUiStateRefresh(
+                            "activity-resume-apps"
+                        )
                         RuntimeTab.Logs,
                         RuntimeTab.Options,
                         RuntimeTab.Manual -> Unit
@@ -3819,7 +3821,7 @@ private fun PatchTab(
                             val componentStates = buildList {
                                 add(copy.patchDirectChannel to row.directState)
                                 if (row.gmsCoreLabel.isNotEmpty()) {
-                                    add(row.gmsCoreLabel to row.gmsCoreState)
+                                    add(patchSecondaryLabel(row, copy.language) to row.gmsCoreState)
                                 }
                                 add(patchOptionalLabel(row, copy.language) to row.optionalState)
                                 if (row.alertLabel.isNotEmpty()) {
@@ -3946,6 +3948,16 @@ private fun patchOptionalLabel(
         return if (language == Language.Ua) "Стабільність" else "Stability"
     }
     return if (language == Language.Ua) "Аудіоканал" else row.optionalLabel
+}
+
+private fun patchSecondaryLabel(
+    row: MainActivity.ComposeNavigatorPatchRow,
+    language: Language
+): String {
+    if (row.profileId == "waze") {
+        return if (language == Language.Ua) "Смуги" else "Lanes"
+    }
+    return row.gmsCoreLabel
 }
 
 private fun patchAlertLabel(
@@ -6345,7 +6357,7 @@ private fun uaCopy() = enCopy().copy(
     availableNavigators = "Доступні навігатори",
     noSupportedNavigators = "Немає підтримуваних навігаторів",
     appVersion = "Версія",
-    patchNotChecked = "перевірити",
+    patchNotChecked = "перевір",
     patchDirectChannel = "Прямий канал",
     patchWazeAlerts = "Попередження",
     patchClearSelection = "Скасувати вибір файла",
@@ -6362,7 +6374,7 @@ private fun uaCopy() = enCopy().copy(
     patchProgress = "Застосування патчу навігатора",
     patchRecovery = "Потрібне відновлення",
     patchRestore = "Відновити вихідний пакет",
-    checkPatch = "Перевірити",
+    checkPatch = "Перевір",
     applyPatch = "Пропатчити",
     patchConfirmTitle = "Пропатчити %s?",
     patchConfirmText = "Перед встановленням пропатченого пакета установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний пакет зберігається для відновлення.",

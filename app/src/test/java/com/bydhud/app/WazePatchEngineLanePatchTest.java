@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -41,10 +42,44 @@ import java.util.zip.ZipFile;
 
 public final class WazePatchEngineLanePatchTest {
     private static final String FIXTURE =
-            "references/navigation/waze/patched/5.20.0.1/waze_mod.apk";
+            "../references/navigation/waze/patched/5.20.0.1/waze_mod.apk";
     private static final String FRAME = "Lcom/waze/car_lib/s/cf;";
     private static final String PRODUCER = "Lcom/waze/car_lib/s/br;";
     private static final String ADAPTER = "Lcom/waze/i/a;";
+
+    @Test
+    public void publishedShapePredicateRequiresExactCounts() {
+        WazePatchEngine.LaneInspection lane = new WazePatchEngine.LaneInspection();
+        lane.frameClassCount = 1;
+        lane.frameFieldCount = 1;
+        lane.framePatchedCtorCount = 1;
+        lane.frameGetterCount = 1;
+        lane.frameEqualsFieldCount = 2;
+        lane.frameHashFieldCount = 1;
+        lane.producerTargetCount = 1;
+        lane.producerSourceCount = 1;
+        lane.producerFieldCount = 1;
+        lane.producerEmptyCount = 1;
+        lane.producerPatchedCtorCount = 1;
+        lane.adapterTargetCount = 1;
+        lane.adapterHelperCallCount = 1;
+        lane.adapterHelperCount = 1;
+        lane.adapterMapperCount = 1;
+        assertTrue(lane.publishedShape());
+        lane.producerSourceCount++;
+        assertFalse(lane.publishedShape());
+    }
+
+    @Test
+    public void localDirectApkLaneInspectionAcceptsPublishedShapeWhenAvailable() throws Exception {
+        Path apk = fixture("../direct-apks/latest/waze-direct.apk");
+        Assume.assumeTrue(Files.isRegularFile(apk));
+        WazePatchEngine.LaneInspection lane = WazePatchEngine.inspectLane(laneDex(apk));
+        assertEquals(WazePatchEngine.ALREADY_PATCHED, lane.classification);
+        assertTrue(lane.publishedShape());
+        assertEquals("frame=1/1/0/1/1/2/1, producer=1/1/1/1/0/0/0/1, adapter=1/0/1/1/1",
+                lane.summary().substring(0, lane.summary().indexOf(", classification=")));
+    }
 
     @Test
     public void realStockPatchesToStructuredLanesAndRejectsRepatch() throws Exception {
