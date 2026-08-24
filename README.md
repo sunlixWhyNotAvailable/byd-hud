@@ -63,7 +63,7 @@ By default, the direct channel leaves the navigator screen unchanged while navig
 | Navigator use | Package | Currently supported build |
 | --- | --- | --- |
 | Waze direct output and patching | `com.waze` | stock `4.95.0.3` or project-patched `5.20.0.1` |
-| Google Maps direct output and patching | `app.revanced.android.apps.maps` | Google Maps ReVanced `25.16.03.747108139` or `26.30.09.950492155`; version 26.30 remains a vehicle-validation build |
+| Google Maps direct output and fixed download | `app.revanced.android.apps.maps` | Google Maps ReVanced `26.30.09.950492155` |
 | Official Google Maps legacy input only | `com.google.android.apps.maps` | Accessibility/notification capture when its services are enabled; not accepted by the patcher |
 
 The patcher verifies that the selected package is intact and structurally compatible. A project or repository signer is not required, and a matching version label alone is not sufficient.
@@ -169,7 +169,7 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Show Waze alerts` | On | Keeps a supplied Waze alert visible while route distance, street, lanes, and the matching native maneuver continue to update |
+| `Show Waze alerts` | On | Shows the closer known item when a route maneuver and Waze alert compete; an active alert uses its own image, distance, and text, keeps lane guidance, and hides the native route arrow |
 | `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate route screen; Back returns to the normal Waze screen for the rest of that route |
 
 The custom surface is route-scoped. Changing its switch during an active route does not replace the current route screen. A five-second readiness failure keeps standard Waze direct guidance active and waits for the next route before trying the surface again. Returning to Waze during the same route restores the surface; ending the route closes it. The Waze alert switch controls windshield-HUD alerts only; alerts supplied to the custom surface remain visible there.
@@ -208,7 +208,7 @@ The `Patch` tab is optional. It can add a BYD HUD direct channel to a supported 
 - compatible `.apkm` or `.apks` split-package archives;
 - an APK-only `.xapk` archive.
 
-Official Google Maps package `com.google.android.apps.maps`, bundles with OBB expansion data, and unsupported package layouts are rejected. The currently recognized builds are Waze `4.95.0.3` / `5.20.0.1` and Google Maps ReVanced `25.16.03.747108139` / `26.30.09.950492155`; Google Maps 26.30 remains a vehicle-validation build.
+Official Google Maps package `com.google.android.apps.maps`, bundles with OBB expansion data, and unsupported package layouts are rejected. The currently recognized patch inputs are Waze `4.95.0.3` / `5.20.0.1` and Google Maps ReVanced `25.16.03.747108139` / `26.30.09.950492155`.
 
 ### How patching works
 

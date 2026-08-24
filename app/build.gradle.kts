@@ -79,23 +79,11 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 
-//keeps a stable local release-candidate APK outside app/build so Gradle clean does not remove it.
-val copyDebugApkToBuildOutputs by tasks.registering(Copy::class) {
-    dependsOn("packageDebug")
-    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
-    into(rootProject.layout.projectDirectory.dir("build_outputs"))
-    rename { "byd-hud-v${android.defaultConfig.versionName}.apk" }
-}
-
-tasks.matching { it.name == "assembleDebug" }.configureEach {
-    finalizedBy(copyDebugApkToBuildOutputs)
-}
-
 val copyPerformanceApkToBuildOutputs by tasks.registering(Copy::class) {
     dependsOn("packagePerformance")
     from(layout.buildDirectory.file("outputs/apk/performance/app-performance.apk"))
     into(rootProject.layout.projectDirectory.dir("build_outputs"))
-    rename { "byd-hud-v${android.defaultConfig.versionName}-performance.apk" }
+    rename { "byd-hud-v${android.defaultConfig.versionName}.apk" }
 }
 
 tasks.matching { it.name == "assemblePerformance" }.configureEach {

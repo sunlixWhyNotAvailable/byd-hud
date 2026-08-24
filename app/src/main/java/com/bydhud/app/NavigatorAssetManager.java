@@ -174,23 +174,23 @@ final class NavigatorAssetManager {
                 1030706L,
                 "com.waze",
                 NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
-                "31686FA8C5A8CD34D0D19B20F9348502C5082140F602F02933BC4BC806B096AB",
+                "5B34D0BF24A28FC3ACCF483E821070357206C88199A2AC56AD48D1D4AC03E424",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v1/waze-5.20.0.1-direct.apk",
                 "waze-5.20.0.1-direct.apk",
                 NavigatorPatchStore.Profile.WAZE));
         assets.add(new Asset(
-                "gmaps-direct-25.16.03.747108139",
+                "gmaps-direct-26.30.09.950492155",
                 "Google Maps ReVanced patched version",
                 "Google Maps ReVanced патчена версія",
-                "25.16.03.747108139",
-                1068022637L,
+                "26.30.09.950492155",
+                1068694917L,
                 "app.revanced.android.apps.maps",
                 NavigatorAssetSignerCatalog.GMAPS_PROJECT_SIGNER,
-                "33E8BE8187F87F720A8D08D6C8653DAB58F4AAC80C61988AAC8F384A9295CD35",
+                "86EB9A465897F1C771E29C9250330862E0C1F777B93D21A743BF43791C0B2FA3",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
-                        + "navigator-assets-v1/google-maps-revanced-25.16.03.747108139-direct.apk",
-                "google-maps-revanced-25.16.03.747108139-direct.apk",
+                        + "navigator-assets-v1/google-maps-revanced-26.30.09.950492155-direct.apk",
+                "google-maps-revanced-26.30.09.950492155-direct.apk",
                 NavigatorPatchStore.Profile.GMAPS));
         ASSETS = Collections.unmodifiableList(assets);
     }
