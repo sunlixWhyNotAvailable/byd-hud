@@ -37,6 +37,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     private Handler captureHandler;
     private String pendingPackageName;
     private String pendingSource;
+    private long pendingDiscoveryToken;
     private NavCaptureIngressPolicy.Mode pendingMode = NavCaptureIngressPolicy.Mode.OFF;
     private boolean captureScheduled;
     private long lastCaptureElapsedMs;
@@ -72,6 +73,11 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveWindowCapture(Context context, String packageName, String reason) {
+        requestActiveWindowCapture(context, packageName, reason, 0L);
+    }
+
+    static void requestActiveWindowCapture(Context context, String packageName,
+            String reason, long discoveryToken) {
         NavAccessibilityService service = activeService;
         if (service == null) {
             AppEventLogger.event(context, "accessibility_active_scan skipped no-service reason="
@@ -80,7 +86,8 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
         NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
         if (mode != NavCaptureIngressPolicy.Mode.OFF) {
-            service.postCaptureActiveWindow(packageName, "active-" + safe(reason), mode);
+            service.postCaptureActiveWindow(
+                    packageName, "active-" + safe(reason), mode, discoveryToken);
         }
     }
 
@@ -93,6 +100,7 @@ public final class NavAccessibilityService extends AccessibilityService {
                     .toLowerCase(java.util.Locale.ROOT))) return;
             service.pendingPackageName = null;
             service.pendingSource = null;
+            service.pendingDiscoveryToken = 0L;
             service.pendingMode = NavCaptureIngressPolicy.Mode.OFF;
         }
     }
@@ -109,6 +117,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (service.captureQueueLock) {
             service.pendingPackageName = null;
             service.pendingSource = null;
+            service.pendingDiscoveryToken = 0L;
             service.pendingMode = NavCaptureIngressPolicy.Mode.OFF;
             service.captureScheduled = false;
         }
@@ -147,7 +156,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
         lastCaptureElapsedMs = now;
         postCaptureActiveWindow(packageName,
-                "eventType=" + event.getEventType(), mode);
+                "eventType=" + event.getEventType(), mode, 0L);
     }
 
     @Override
@@ -163,6 +172,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (captureQueueLock) {
             pendingPackageName = null;
             pendingSource = null;
+            pendingDiscoveryToken = 0L;
             pendingMode = NavCaptureIngressPolicy.Mode.OFF;
             captureScheduled = false;
         }
@@ -184,15 +194,20 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //guard active-window traversal so accessibility node trees are captured by one serialized path.
     private void postCaptureActiveWindow(String packageName, String source,
-            NavCaptureIngressPolicy.Mode mode) {
+            NavCaptureIngressPolicy.Mode mode, long discoveryToken) {
         Handler handler = captureHandler;
         if (handler == null) {
             return;
         }
         synchronized (captureQueueLock) {
+            if (shouldPreservePendingDiscoveryForTest(
+                    captureScheduled, pendingDiscoveryToken, discoveryToken)) {
+                return;
+            }
             pendingPackageName = packageName;
             pendingSource = source;
             pendingMode = mode;
+            pendingDiscoveryToken = Math.max(0L, discoveryToken);
             if (captureScheduled) {
                 return;
             }
@@ -212,23 +227,33 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
+    static boolean shouldPreservePendingDiscoveryForTest(
+            boolean captureScheduled, long pendingDiscoveryToken,
+            long incomingDiscoveryToken) {
+        return captureScheduled && pendingDiscoveryToken > 0L
+                && incomingDiscoveryToken <= 0L;
+    }
+
     private void drainLatestCapture() {
         String packageName;
         String source;
+        long discoveryToken;
         NavCaptureIngressPolicy.Mode mode;
         synchronized (captureQueueLock) {
             packageName = pendingPackageName;
             source = pendingSource;
+            discoveryToken = pendingDiscoveryToken;
             mode = pendingMode;
             pendingPackageName = null;
             pendingSource = null;
+            pendingDiscoveryToken = 0L;
             pendingMode = NavCaptureIngressPolicy.Mode.OFF;
             if (packageName == null || activeService != this) {
                 captureScheduled = false;
                 return;
             }
         }
-        captureActiveWindow(packageName, source, mode);
+        captureActiveWindow(packageName, source, mode, discoveryToken);
         Handler handler = captureHandler;
         synchronized (captureQueueLock) {
             if (pendingPackageName == null || handler == null) {
@@ -241,7 +266,7 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void captureActiveWindow(String packageName, String source,
-            NavCaptureIngressPolicy.Mode requestedMode) {
+            NavCaptureIngressPolicy.Mode requestedMode, long discoveryToken) {
         NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
         if (mode == NavCaptureIngressPolicy.Mode.OFF || requestedMode == null) return;
         try {
@@ -253,12 +278,13 @@ public final class NavAccessibilityService extends AccessibilityService {
                 wazeNodes = captureWazeRouteNodesAcrossWindows(source);
                 if (wazeNodes.hasRouteEvidence) {
                     publishAccessibilityPayload(packageName, wazeNodes.payload,
-                            mode == NavCaptureIngressPolicy.Mode.FALLBACK);
+                            mode == NavCaptureIngressPolicy.Mode.FALLBACK,
+                            discoveryToken);
                 }
                 if (mode == NavCaptureIngressPolicy.Mode.DISCOVERY) return;
             }
             if (NavCaptureIngressPolicy.mode(packageName)
-                    != NavCaptureIngressPolicy.Mode.FALLBACK) return;
+                    != NavCaptureIngressPolicy.Mode.FALLBACK && discoveryToken <= 0L) return;
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root == null) {
                 NavCaptureStore.rawEvent(this, "accessibility", packageName,
@@ -278,10 +304,12 @@ public final class NavAccessibilityService extends AccessibilityService {
                 builder.append("; nodes=").append(state.nodes);
                 builder.append("; truncated=").append(state.truncated ? "true" : "false");
                 String payload = capPayload(builder.toString());
-                boolean feedLiveParser = mode == NavCaptureIngressPolicy.Mode.FALLBACK
+                boolean feedLiveParser = (mode == NavCaptureIngressPolicy.Mode.FALLBACK
+                        || discoveryToken > 0L)
                         && (wazeNodes == null || !wazeNodes.hasRouteEvidence);
                 NavRouteEvidencePolicy.RawRouteState rawState =
-                        publishAccessibilityPayload(packageName, payload, feedLiveParser);
+                    publishAccessibilityPayload(
+                            packageName, payload, feedLiveParser, discoveryToken);
                 if (wazeNodes != null && wazeNodes.hasRouteEvidence) {
                     NavHudLiveSender.get(this).updateWazeAccessibilityGeometry(
                             packageName, payload);
@@ -305,12 +333,13 @@ public final class NavAccessibilityService extends AccessibilityService {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavRouteEvidencePolicy.RawRouteState publishAccessibilityPayload(
             String packageName, String payload) {
-        return publishAccessibilityPayload(packageName, payload, true);
+        return publishAccessibilityPayload(packageName, payload, true, 0L);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavRouteEvidencePolicy.RawRouteState publishAccessibilityPayload(
-            String packageName, String payload, boolean feedLiveParser) {
+            String packageName, String payload, boolean feedLiveParser,
+            long discoveryToken) {
         if (NavCaptureIngressPolicy.mode(packageName)
                 == NavCaptureIngressPolicy.Mode.OFF) {
             return NavRouteEvidencePolicy.RawRouteState.UNKNOWN;
@@ -326,7 +355,8 @@ public final class NavAccessibilityService extends AccessibilityService {
                     "accessibility_raw", packageName, payload, nowElapsedMs);
         }
         if (feedLiveParser) {
-            NavHudLiveSender.get(this).updateFromNavigationAccessibility(packageName, payload);
+            NavHudLiveSender.get(this).updateFromNavigationAccessibility(
+                    packageName, payload, discoveryToken);
         }
         return rawState;
     }

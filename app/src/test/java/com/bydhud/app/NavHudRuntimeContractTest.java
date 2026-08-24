@@ -334,13 +334,23 @@ public final class NavHudRuntimeContractTest {
         assertFalse(NavHudLiveSender.acceptsGMapsTeardownForTest(true, 8L, 8L));
 
         String sender = source("NavHudLiveSender.java");
-        int methodStart = sender.indexOf(
-                "private boolean ensureGMapsRegisteredWhenTransportReady");
-        int methodEnd = sender.indexOf("\n    private static String laneDirections", methodStart);
-        assertTrue(methodStart >= 0 && methodEnd > methodStart);
-        String registration = sender.substring(methodStart, methodEnd);
-        assertFalse(registration.contains("hudOutput.isBound"));
-        assertTrue(registration.contains("gmapsDirectChannel.ensureRegistered(reason)"));
+        assertFalse(sender.contains("ensureGMapsRegisteredWhenTransportReady"));
+        assertTrue(sender.contains("GMapsDirectState.QUIESCENT"));
+        assertTrue(sender.contains("openGMapsLegacyDiscovery"));
+        assertTrue(sender.contains("acceptsGMapsLegacyDiscoveryForTest"));
+        assertTrue(sender.contains("gmapsDirectIngressGeneration.incrementAndGet()"));
+        assertTrue(sender.contains("cancelPendingRouteEndStops(GMapsDirectChannel.PACKAGE_NAME)"));
+        assertTrue(sender.contains("gmaps legacy callback blocked inactive token="));
+        assertTrue(sender.contains("closeGMapsLegacyDiscovery(\"hud-stop:"));
+        assertTrue(sender.contains("forceClearLegacyFallback(activePackage, \"notification-removed\", now)"));
+        assertTrue(sender.contains("forceClearLegacyFallback(packageName, \"arrival-route-ended\", now)"));
+        int forcedStop = sender.indexOf("private void forceClearLegacyFallback(");
+        int directStop = sender.indexOf("private void stopDirectNavigator(", forcedStop);
+        assertTrue(forcedStop >= 0 && directStop > forcedStop);
+        String terminalFallback = sender.substring(forcedStop, directStop);
+        assertTrue(terminalFallback.contains("gmapsDirectState = GMapsDirectState.QUIESCENT"));
+        assertTrue(terminalFallback.contains("gmapsDirectTimedOut = false"));
+        assertTrue(terminalFallback.contains("cancelGMapsDirectTimeout()"));
     }
 
     @Test

@@ -35,7 +35,7 @@ public final class BackendPatchShareSourceContractTest {
     }
 
     @Test
-    public void checkAndPatchRestorePooledThreadPriority() throws IOException {
+    public void checkAndPatchUsesWorkerBoundaryAndRestoresPriority() throws IOException {
         String activity = source("MainActivity.java");
         String pipeline = source("NavigatorPatchPipeline.java");
 
@@ -46,10 +46,16 @@ public final class BackendPatchShareSourceContractTest {
                 "static PreparedPatch prepare(");
         String prepare = between(pipeline, "static PreparedPatch prepare(",
                 "static ScanResult inspectInstalled(");
-        assertTrue(scan.contains("lowerCurrentThreadPriority()"));
-        assertTrue(scan.contains("restoreCurrentThreadPriority(previousPriority)"));
-        assertTrue(prepare.contains("lowerCurrentThreadPriority()"));
-        assertTrue(prepare.contains("restoreCurrentThreadPriority(previousPriority)"));
+        assertTrue(scan.contains("return scanViaWorker(context, profile);"));
+        assertTrue(prepare.contains("return prepareViaWorker(context, profile);"));
+        String workerScan = between(pipeline, "static ScanResult scanViaWorker(",
+                "static PreparedPatch prepareViaWorker(");
+        String workerPrepare = between(pipeline, "static PreparedPatch prepareViaWorker(",
+                "/** Heavy read-only work executed by NavigatorPatchWorkerService. */");
+        assertTrue(workerScan.contains("lowerCurrentThreadPriority()"));
+        assertTrue(workerScan.contains("restoreCurrentThreadPriority(previousPriority)"));
+        assertTrue(workerPrepare.contains("lowerCurrentThreadPriority()"));
+        assertTrue(workerPrepare.contains("restoreCurrentThreadPriority(previousPriority)"));
     }
 
     @Test

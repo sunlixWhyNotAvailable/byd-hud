@@ -981,7 +981,7 @@ final class VehicleTbtPublisher {
             if (lane == null || count >= directions.length) continue;
             int direction = Math.max(0, Math.min(254, lane.getAmapCode()));
             directions[count] = direction;
-            recommendations[count] = lane.isRecommended() ? direction : 255;
+            recommendations[count] = lane.getAmapRecommendationCode();
             count++;
         }
         return count == 0 ? LanePayload.EMPTY : new LanePayload(
@@ -994,9 +994,11 @@ final class VehicleTbtPublisher {
         int[] directions = new int[lanes.length];
         int[] recommendations = new int[lanes.length];
         for (int index = 0; index < lanes.length; index++) {
-            int direction = Math.max(0, Math.min(254, lanes[index].iconId));
+            int direction = lanes[index].instrumentCode();
+            if (direction < 0) return LanePayload.EMPTY;
+            direction = Math.max(0, Math.min(254, direction));
             directions[index] = direction;
-            recommendations[index] = lanes[index].recommended ? direction : 255;
+            recommendations[index] = lanes[index].recommendationCode();
         }
         return lanes.length == 0
                 ? LanePayload.EMPTY : new LanePayload(directions, recommendations);

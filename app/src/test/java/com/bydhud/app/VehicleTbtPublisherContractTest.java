@@ -70,6 +70,62 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
+    public void manualCompoundLanesKeepCompleteAndSelectedDirectionSets() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 3;
+        manual.laneString = "S*+R|S+R*|S*+L*";
+
+        VehicleTbtPublisher.LanePayload payload =
+                VehicleTbtPublisher.lanePayloadForTest(manual);
+
+        assertArrayEquals(new int[]{4, 4, 2}, payload.directions);
+        assertArrayEquals(new int[]{0, 3, 2}, payload.recommendations);
+        assertEquals("4,0|4,3|2,2|", HudLaneModel.field29Value(manual));
+    }
+
+    @Test
+    public void manualSmoothDirectionsNormalizeToInstrumentLeftRight() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 2;
+        manual.laneString = "Ls|Rs*";
+
+        VehicleTbtPublisher.LanePayload payload =
+                VehicleTbtPublisher.lanePayloadForTest(manual);
+
+        assertArrayEquals(new int[]{1, 3}, payload.directions);
+        assertArrayEquals(new int[]{255, 3}, payload.recommendations);
+        assertTrue(HudRoadPayload.shouldWriteLaneMetadata(manual));
+    }
+
+    @Test
+    public void manualUturnCompositeUsesUturnPriority() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 2;
+        manual.laneString = "U*+R|U+R*";
+
+        VehicleTbtPublisher.LanePayload payload =
+                VehicleTbtPublisher.lanePayloadForTest(manual);
+
+        assertArrayEquals(new int[]{5, 5}, payload.directions);
+        assertArrayEquals(new int[]{5, 255}, payload.recommendations);
+        assertEquals("5,5|5,255|", HudLaneModel.field29Value(manual));
+    }
+
+    @Test
+    public void unrepresentableManualLaneStaysBitmapOnly() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 2;
+        manual.laneString = "RampL|R";
+
+        assertEquals(0, VehicleTbtPublisher.lanePayloadForTest(manual).directions.length);
+        assertFalse(HudRoadPayload.shouldWriteLaneMetadata(manual));
+    }
+
+    @Test
     public void failedLanePlaneInvalidatesGuidanceDedupWithoutFailingCoreGuidance() {
         assertTrue(VehicleTbtPublisher.laneOperationsSucceededForTest(
                 Collections.singletonList(new InstrumentProxyContract.Operation(

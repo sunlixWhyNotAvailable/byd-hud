@@ -186,6 +186,67 @@ public final class GmapsDiagnosticPatcher {
     private GmapsDiagnosticPatcher() {
     }
 
+    /** Single archive/DEX pass used by the production patch pipeline. */
+    public static final class ComponentInspection {
+        public final String profile;
+        public final String direct;
+        public final String gmsCore;
+        public final String audio;
+        public final String pip;
+
+        ComponentInspection(String profile, String direct, String gmsCore,
+                String audio, String pip) {
+            this.profile = profile;
+            this.direct = direct;
+            this.gmsCore = gmsCore;
+            this.audio = audio;
+            this.pip = pip;
+        }
+    }
+
+    public static ComponentInspection inspectComponents(File apk) throws IOException {
+        return inspectComponents(Collections.singletonList(apk)).get(0);
+    }
+
+    public static List<ComponentInspection> inspectComponents(List<File> apks)
+            throws IOException {
+        if (apks == null || apks.isEmpty()) throw new IOException("APK set is empty");
+        List<CandidateApk> candidates = new ArrayList<>();
+        for (File apk : apks) {
+            requireFile(apk, "APK");
+            readManifestEntry(apk);
+            candidates.add(scanCandidates(apk, PROFILES));
+        }
+        Profile profile = detectProfile(candidates, true);
+        List<ComponentInspection> result = new ArrayList<>();
+        for (CandidateApk apk : candidates) result.add(componentInspection(apk, profile));
+        return result;
+    }
+
+    public static ComponentInspection inspectComponents(File apk, String validatedProfile)
+            throws IOException {
+        requireFile(apk, "APK");
+        readManifestEntry(apk);
+        Profile profile = profileById(validatedProfile);
+        return componentInspection(
+                scanCandidates(apk, Collections.singletonList(profile)), profile);
+    }
+
+    private static ComponentInspection componentInspection(CandidateApk apk, Profile profile)
+            throws IOException {
+        Inspection inspection = apk.inspections.get(profile);
+        if (inspection == null) throw new IOException("Missing GMaps profile inspection");
+        String pip;
+        try {
+            pip = inspectPipManifest(apk.file).classification;
+        } catch (IOException error) {
+            pip = "PIP_INSPECTION_FAILED";
+        }
+        return new ComponentInspection(inspection.profile.id,
+                inspection.directClassification(), inspection.gmsCoreState,
+                inspection.audioClassification(), pip);
+    }
+
     public static String inspectClassification(File apk) throws IOException {
         requireFile(apk, "APK");
         return inspect(apk).classification();
@@ -765,110 +826,126 @@ public final class GmapsDiagnosticPatcher {
         // keeps all GMaps component scans fail-closed on duplicate/oversized
         // manifests, not just the optional PiP scan.
         readManifestEntry(apk);
-        Profile profile = detectProfile(apk);
-        Inspection inspection = new Inspection(profile);
+        CandidateApk candidates = scanCandidates(apk, PROFILES);
+        return candidates.inspections.get(
+                detectProfile(Collections.singletonList(candidates), true));
+    }
+
+    private static Inspection inspect(File apk, Profile profile) throws IOException {
+        return scanCandidates(apk, Collections.singletonList(profile)).inspections.get(profile);
+    }
+
+    private static CandidateApk scanCandidates(File apk, List<Profile> profiles)
+            throws IOException {
+        Map<Profile, Inspection> inspections = new LinkedHashMap<>();
+        for (Profile profile : profiles) inspections.put(profile, new Inspection(profile));
         try (ZipFile zip = new ZipFile(apk)) {
             List<? extends ZipEntry> entries = Collections.list(zip.entries());
             entries.sort(Comparator.comparing(ZipEntry::getName));
             for (ZipEntry entry : entries) {
                 if (!isDexEntry(entry.getName())) continue;
-                inspection.dexEntries.add(entry.getName());
+                for (Inspection inspection : inspections.values()) {
+                    inspection.dexEntries.add(entry.getName());
+                }
                 DexBackedDexFile dex = readDex(readEntry(zip, entry.getName()));
                 for (ClassDef classDef : dex.getClasses()) {
-                    if (LOGGER_CLASS.equals(classDef.getType())) {
-                        inspection.loggerClassCount++;
-                        inspection.loggerDexEntry = entry.getName();
-                        for (Field field : classDef.getFields()) {
-                            if ("CAP_STATE_REPLAY".equals(field.getName())) {
-                                inspection.loggerStateReplay = true;
-                            } else if ("CAP_HEARTBEAT".equals(field.getName())) {
-                                inspection.loggerHeartbeat = true;
-                            } else if ("CAP_BITMAP_GENERATION".equals(field.getName())) {
-                                inspection.loggerBitmapGeneration = true;
-                            } else if ("CAP_ROUTE_GENERATION".equals(field.getName())) {
-                                inspection.loggerRouteGeneration = true;
-                            }
-                        }
-                    }
-                    if (profile.gateOwner.equals(classDef.getType())) {
-                        for (Method method : classDef.getMethods()) {
-                            if (!matchesProducerGate(method, profile)) continue;
-                            inspection.gateTargetCount++;
-                            inspection.gateDexEntry = entry.getName();
-                            GateScan gate = scanProducerGate(
-                                    method.getImplementation(), profile);
-                            inspection.stockGateCount += gate.stockCount;
-                            inspection.gateBypassCount += gate.bypassCount;
-                            inspection.gateBridgeCount += gate.bridgeCount;
-                            inspection.gateGuard = gate.guard;
-                            SpeedScan speed = scanSpeedState(
-                                    method.getImplementation(), profile);
-                            inspection.speedStateCount += speed.stateCount;
-                            inspection.speedHookCount += speed.hookCount;
-                        }
-                    }
-                    if (profile.audioOwner.equals(classDef.getType())) {
-                        for (Method method : classDef.getMethods()) {
-                            if (!matchesNavigationAudio(method, profile)) continue;
-                            inspection.audioTargetCount++;
-                            inspection.audioDexEntry = entry.getName();
-                            AudioScan audio = scanNavigationAudio(method.getImplementation());
-                            inspection.stockAudioCount += audio.stockCount;
-                            inspection.patchedAudioCount += audio.patchedCount;
-                            inspection.audioGuard = audio.guard;
-                        }
-                    }
-                    if (profile.playbackAudioOwner.equals(classDef.getType())) {
-                        for (Method method : classDef.getMethods()) {
-                            if (!matchesPlaybackAudio(method, profile)) continue;
-                            inspection.playbackAudioTargetCount++;
-                            inspection.playbackAudioDexEntry = entry.getName();
-                            PlaybackAudioScan audio =
-                                    scanPlaybackAudio(method.getImplementation());
-                            inspection.stockPlaybackAudioCount += audio.stockCount;
-                            inspection.patchedPlaybackAudioCount += audio.patchedCount;
-                            inspection.playbackAudioGuard = audio.guard;
-                        }
-                    }
-                    if (profile.gmsCoreOwner.equals(classDef.getType())) {
-                        for (Method method : classDef.getMethods()) {
-                            if (!matchesGmsCoreDialog(method, profile)) continue;
-                            inspection.gmsCoreTargetCount++;
-                            inspection.gmsCoreDexEntry = entry.getName();
-                            inspection.gmsCoreState = inspectGmsCoreState(
-                                    method.getImplementation(), profile);
-                        }
-                    }
-                    for (Hook hook : profile.hooks) {
-                        if (!hook.owner.equals(classDef.getType())) continue;
-                        for (Method method : classDef.getMethods()) {
-                            if (!hook.matches(method)) continue;
-                            HookResult result = inspection.results.get(hook.id);
-                            result.targetCount++;
-                            result.dexEntry = entry.getName();
-                            MethodImplementation implementation = method.getImplementation();
-                            if (implementation == null) {
-                                result.guard = "missing implementation";
-                                continue;
-                            }
-                            result.hookCallCount += countLoggerCalls(implementation, hook);
-                            result.legacyHookCallCount += countLegacyLoggerCalls(
-                                    implementation, hook);
-                            result.returnVoidCount = countReturnVoid(implementation);
-                            result.normalReturnIndex = hook.placement
-                                    == HookPlacement.POST_BODY_BEFORE_RETURN_VOID
-                                    ? normalReturnVoidIndex(implementation) : -1;
-                            result.insertedCallCount = result.hookCallCount
-                                    + result.legacyHookCallCount;
-                            result.guard = verifyHookImplementation(implementation, hook);
-                            inspection.hooksByDex.computeIfAbsent(
-                                    entry.getName(), unused -> new ArrayList<>()).add(hook);
-                        }
+                    for (Map.Entry<Profile, Inspection> candidate : inspections.entrySet()) {
+                        inspectClass(candidate.getValue(), candidate.getKey(),
+                                entry.getName(), classDef);
                     }
                 }
             }
         }
-        return inspection;
+        return new CandidateApk(apk, inspections);
+    }
+
+    private static void inspectClass(Inspection inspection, Profile profile,
+            String dexEntry, ClassDef classDef) {
+        if (LOGGER_CLASS.equals(classDef.getType())) {
+            inspection.loggerClassCount++;
+            inspection.loggerDexEntry = dexEntry;
+            for (Field field : classDef.getFields()) {
+                if ("CAP_STATE_REPLAY".equals(field.getName())) {
+                    inspection.loggerStateReplay = true;
+                } else if ("CAP_HEARTBEAT".equals(field.getName())) {
+                    inspection.loggerHeartbeat = true;
+                } else if ("CAP_BITMAP_GENERATION".equals(field.getName())) {
+                    inspection.loggerBitmapGeneration = true;
+                } else if ("CAP_ROUTE_GENERATION".equals(field.getName())) {
+                    inspection.loggerRouteGeneration = true;
+                }
+            }
+        }
+        if (profile.gateOwner.equals(classDef.getType())) {
+            for (Method method : classDef.getMethods()) {
+                if (!matchesProducerGate(method, profile)) continue;
+                inspection.gateTargetCount++;
+                inspection.gateDexEntry = dexEntry;
+                GateScan gate = scanProducerGate(method.getImplementation(), profile);
+                inspection.stockGateCount += gate.stockCount;
+                inspection.gateBypassCount += gate.bypassCount;
+                inspection.gateBridgeCount += gate.bridgeCount;
+                inspection.gateGuard = gate.guard;
+                SpeedScan speed = scanSpeedState(method.getImplementation(), profile);
+                inspection.speedStateCount += speed.stateCount;
+                inspection.speedHookCount += speed.hookCount;
+            }
+        }
+        if (profile.audioOwner.equals(classDef.getType())) {
+            for (Method method : classDef.getMethods()) {
+                if (!matchesNavigationAudio(method, profile)) continue;
+                inspection.audioTargetCount++;
+                inspection.audioDexEntry = dexEntry;
+                AudioScan audio = scanNavigationAudio(method.getImplementation());
+                inspection.stockAudioCount += audio.stockCount;
+                inspection.patchedAudioCount += audio.patchedCount;
+                inspection.audioGuard = audio.guard;
+            }
+        }
+        if (profile.playbackAudioOwner.equals(classDef.getType())) {
+            for (Method method : classDef.getMethods()) {
+                if (!matchesPlaybackAudio(method, profile)) continue;
+                inspection.playbackAudioTargetCount++;
+                inspection.playbackAudioDexEntry = dexEntry;
+                PlaybackAudioScan audio = scanPlaybackAudio(method.getImplementation());
+                inspection.stockPlaybackAudioCount += audio.stockCount;
+                inspection.patchedPlaybackAudioCount += audio.patchedCount;
+                inspection.playbackAudioGuard = audio.guard;
+            }
+        }
+        if (profile.gmsCoreOwner.equals(classDef.getType())) {
+            for (Method method : classDef.getMethods()) {
+                if (!matchesGmsCoreDialog(method, profile)) continue;
+                inspection.gmsCoreTargetCount++;
+                inspection.gmsCoreDexEntry = dexEntry;
+                inspection.gmsCoreState = inspectGmsCoreState(
+                        method.getImplementation(), profile);
+            }
+        }
+        for (Hook hook : profile.hooks) {
+            if (!hook.owner.equals(classDef.getType())) continue;
+            for (Method method : classDef.getMethods()) {
+                if (!hook.matches(method)) continue;
+                HookResult result = inspection.results.get(hook.id);
+                result.targetCount++;
+                result.dexEntry = dexEntry;
+                MethodImplementation implementation = method.getImplementation();
+                if (implementation == null) {
+                    result.guard = "missing implementation";
+                    continue;
+                }
+                result.hookCallCount += countLoggerCalls(implementation, hook);
+                result.legacyHookCallCount += countLegacyLoggerCalls(implementation, hook);
+                result.returnVoidCount = countReturnVoid(implementation);
+                result.normalReturnIndex = hook.placement
+                        == HookPlacement.POST_BODY_BEFORE_RETURN_VOID
+                        ? normalReturnVoidIndex(implementation) : -1;
+                result.insertedCallCount = result.hookCallCount + result.legacyHookCallCount;
+                result.guard = verifyHookImplementation(implementation, hook);
+                inspection.hooksByDex.computeIfAbsent(
+                        dexEntry, unused -> new ArrayList<>()).add(hook);
+            }
+        }
     }
 
     private static Profile detectProfile(File apk) throws IOException {
@@ -918,24 +995,19 @@ public final class GmapsDiagnosticPatcher {
     }
 
     private static Profile detectProfile(File apk, boolean required) throws IOException {
+        return detectProfile(
+                Collections.singletonList(scanCandidates(apk, PROFILES)), required);
+    }
+
+    private static Profile detectProfile(List<CandidateApk> apks, boolean required)
+            throws IOException {
         Map<Profile, Integer> matches = new LinkedHashMap<>();
         for (Profile profile : PROFILES) matches.put(profile, 0);
-        try (ZipFile zip = new ZipFile(apk)) {
-            List<? extends ZipEntry> entries = Collections.list(zip.entries());
-            entries.sort(Comparator.comparing(ZipEntry::getName));
-            for (ZipEntry entry : entries) {
-                if (!isDexEntry(entry.getName())) continue;
-                DexBackedDexFile dex = readDex(readEntry(zip, entry.getName()));
-                for (ClassDef classDef : dex.getClasses()) {
-                    for (Profile profile : PROFILES) {
-                        if (!profile.gateOwner.equals(classDef.getType())) continue;
-                        for (Method method : classDef.getMethods()) {
-                            if (matchesProducerGate(method, profile)) {
-                                matches.put(profile, matches.get(profile) + 1);
-                            }
-                        }
-                    }
-                }
+        for (CandidateApk apk : apks) {
+            for (Map.Entry<Profile, Inspection> candidate : apk.inspections.entrySet()) {
+                Profile profile = candidate.getKey();
+                matches.put(profile,
+                        matches.get(profile) + candidate.getValue().gateTargetCount);
             }
         }
         Profile selected = null;
@@ -950,6 +1022,11 @@ public final class GmapsDiagnosticPatcher {
             throw new IOException("unsupported GMaps target profile: " + matches);
         }
         return selected;
+    }
+
+    private static Profile profileById(String id) throws IOException {
+        for (Profile profile : PROFILES) if (profile.id.equals(id)) return profile;
+        throw new IOException("unsupported GMaps target profile: " + id);
     }
 
     private static void requireKnownProfile(String profileId) throws IOException {
@@ -2184,6 +2261,16 @@ public final class GmapsDiagnosticPatcher {
     private enum SpeedLayout {
         V25,
         V26
+    }
+
+    private static final class CandidateApk {
+        final File file;
+        final Map<Profile, Inspection> inspections;
+
+        CandidateApk(File file, Map<Profile, Inspection> inspections) {
+            this.file = file;
+            this.inspections = inspections;
+        }
     }
 
     private static final class Profile {

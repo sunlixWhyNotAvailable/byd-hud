@@ -950,7 +950,7 @@ public final class MainActivity extends ComponentActivity {
     public void composeCheckNavigatorPatch(String profileId) throws Exception {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
-        NavigatorPatchPipeline.scan(this, profile);
+        NavigatorPatchPipeline.scanViaWorker(this, profile);
         requestPatchUiStateRefresh(this, true, "patch-scan");
     }
 
@@ -959,7 +959,7 @@ public final class MainActivity extends ComponentActivity {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
         NavigatorPatchPipeline.PreparedPatch prepared =
-                NavigatorPatchPipeline.prepare(this, profile);
+                NavigatorPatchPipeline.prepareViaWorker(this, profile);
         if (prepared.destructive && !destructiveApproved) {
             NavigatorPatchPipeline.discardPrepared(this, prepared,
                     "Installed signer changed; destructive confirmation is required");
@@ -969,12 +969,23 @@ public final class MainActivity extends ComponentActivity {
         try {
             NavigatorPackageInstaller.begin(this, prepared);
         } catch (Exception error) {
-            NavigatorPatchStore.transition(this, profile,
-                    prepared.destructive && !NavigatorPackageInstaller.isInstalled(
-                            this, profile.packageName)
-                            ? NavigatorPatchStore.RECOVERY_REQUIRED
-                            : NavigatorPatchStore.FAILED,
-                    error.getMessage());
+            String phase = NavigatorPatchStore.operation(this, profile).phase;
+            if (NavigatorPatchStore.isCancellationRequested(this, profile)
+                    || NavigatorPatchStore.CANCEL_REQUESTED.equals(phase)
+                    || NavigatorPatchStore.CANCELLED.equals(phase)
+                    || error instanceof NavigatorPatchPipeline.OperationCancelledException) {
+                if (!NavigatorPatchStore.CANCELLED.equals(phase)) {
+                    NavigatorPatchPipeline.finishQueuedCancellation(
+                            this, profile, "Patch installation cancelled");
+                }
+            } else {
+                NavigatorPatchStore.transition(this, profile,
+                        prepared.destructive && !NavigatorPackageInstaller.isInstalled(
+                                this, profile.packageName)
+                                ? NavigatorPatchStore.RECOVERY_REQUIRED
+                                : NavigatorPatchStore.FAILED,
+                        error.getMessage());
+            }
             throw error;
         } finally {
             requestPatchUiStateRefresh(this, true, "patch-apply");

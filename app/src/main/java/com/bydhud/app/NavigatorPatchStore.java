@@ -22,6 +22,7 @@ final class NavigatorPatchStore {
 
     static final String IDLE = "IDLE";
     static final String COPYING = "COPYING";
+    static final String WAITING_FOR_PATCHER = "WAITING_FOR_PATCHER";
     static final String VERIFYING = "VERIFYING";
     static final String SCANNING = "SCANNING";
     static final String PATCHING = "PATCHING";
@@ -283,6 +284,18 @@ final class NavigatorPatchStore {
                         installed == null ? -1L : installed.lastUpdateTime)
                 .putInt(profile.id + "_scan_revision", SCAN_CACHE_REVISION)
                 .commit();
+    }
+
+    static synchronized boolean completeScanUnlessCancelled(Context context,
+            NavigatorPatchPipeline.ScanResult result, String phase, String detail) {
+        Profile profile = result.profile;
+        if (isCancellationRequested(context, profile)
+                || CANCEL_REQUESTED.equals(operation(context, profile).phase)) {
+            return false;
+        }
+        saveScan(context, result);
+        transitionLocal(context, profile, phase, detail, -1);
+        return true;
     }
 
     static synchronized void claim(Context context, Profile profile, String kind,
@@ -605,11 +618,15 @@ final class NavigatorPatchStore {
         return next;
     }
 
-    static synchronized void setTransaction(Context context, Profile profile, File directory,
+    static synchronized boolean setTransaction(Context context, Profile profile, File directory,
             boolean destructive, NavigatorPatchPipeline.ScanResult expected,
             long initialUpdateTime, long initialVersionCode, String initialSigner,
-            String initialFingerprint) {
-        prefs(context).edit()
+            String initialFingerprint, String readyDetail) throws IOException {
+        if (isCancellationRequested(context, profile)
+                || CANCEL_REQUESTED.equals(operation(context, profile).phase)) {
+            return false;
+        }
+        boolean committed = prefs(context).edit()
                 .putString(profileKey(profile, KEY_TRANSACTION_DIR), directory.getName())
                 .putBoolean(profileKey(profile, KEY_DESTRUCTIVE), destructive)
                 .putString(profileKey(profile, KEY_TRANSACTION_TOKEN), directory.getName())
@@ -629,6 +646,9 @@ final class NavigatorPatchStore {
                 .putString(profileKey(profile, KEY_EXPECTED_CALLBACK), "")
                 .putBoolean(profileKey(profile, KEY_CALLBACK_CONSUMED), false)
                 .commit();
+        if (!committed) throw new IOException("Cannot publish navigator patch transaction");
+        transitionLocal(context, profile, READY_TO_INSTALL, readyDetail, 100);
+        return true;
     }
 
     static synchronized void setTransactionDirectory(Context context, Profile profile,
@@ -920,7 +940,8 @@ final class NavigatorPatchStore {
     static boolean canCancel(OperationSnapshot operation) {
         if (operation == null || operation.profile == null || !operation.busy()) return false;
         if (!OP_CHECK.equals(operation.kind) && !OP_PATCH.equals(operation.kind)) return false;
-        return COPYING.equals(operation.phase) || VERIFYING.equals(operation.phase)
+        return COPYING.equals(operation.phase) || WAITING_FOR_PATCHER.equals(operation.phase)
+                || VERIFYING.equals(operation.phase)
                 || SCANNING.equals(operation.phase) || PATCHING.equals(operation.phase)
                 || REPACKING.equals(operation.phase) || SIGNING.equals(operation.phase)
                 || OUTPUT_VERIFY.equals(operation.phase) || READY_TO_INSTALL.equals(operation.phase)
@@ -1140,12 +1161,7 @@ final class NavigatorPatchStore {
     }
 
     private static void requestInstallDrain(Context context) {
-        Context appContext = context.getApplicationContext();
-        Thread worker = new Thread(
-                () -> NavigatorPackageInstaller.drainInstallQueue(appContext),
-                "NavigatorPatchDrain");
-        worker.setPriority(Thread.MIN_PRIORITY);
-        worker.start();
+        NavigatorPackageInstaller.drainInstallQueue(context);
     }
 
     static void recordInstalledVerification(

@@ -85,6 +85,12 @@
             android:stopWithTask="false" />
 
         <service
+            android:name=".NavigatorPatchWorkerService"
+            android:exported="false"
+            android:process=":navigator_patcher"
+            android:stopWithTask="false" />
+
+        <service
             android:name=".WazeMediaProjectionService"
             android:exported="false"
             android:foregroundServiceType="mediaProjection"

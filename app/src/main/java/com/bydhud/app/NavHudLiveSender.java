@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 //defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
 final class NavHudLiveSender {
@@ -565,8 +566,22 @@ final class NavHudLiveSender {
     private boolean gmapsDirectRouteEnded;
     private boolean gmapsDirectTimeoutScheduled;
     private long gmapsDirectTimeoutSessionGeneration;
-    private long lastGMapsDirectRegistrationProbeMs;
-    private boolean gmapsDirectRegistrationSuppressed;
+    private enum GMapsDirectState {
+        UNKNOWN,
+        QUIESCENT,
+        ACTIVE_WAITING_FRAME,
+        ACTIVE_FRAME
+    }
+    private GMapsDirectState gmapsDirectState = GMapsDirectState.UNKNOWN;
+    private long gmapsDirectStateSessionGeneration = -1L;
+    private long gmapsDirectStateProducerEpoch = -1L;
+    private long gmapsDirectStateRouteGeneration = -1L;
+    private long gmapsLegacyDiscoveryGeneration;
+    private long gmapsLegacyDiscoveryToken;
+    private long gmapsLegacyDiscoveryIngressGeneration;
+    private final AtomicLong gmapsDirectIngressGeneration = new AtomicLong();
+    private boolean gmapsLegacyDiscoveryOpen;
+    private boolean gmapsLegacyFallbackClaimed;
     private volatile DirectSessionLog wazeDirectSession;
     private volatile DirectSessionLog gmapsDirectSession;
     private HudOutputPreferenceSnapshot lastOutputPreferenceSnapshot;
@@ -607,6 +622,10 @@ final class NavHudLiveSender {
                 || !isCurrentGMapsTimeoutToken()) {
             return;
         }
+        if (gmapsDirectState == GMapsDirectState.QUIESCENT) {
+            log("gmaps direct timeout ignored state=QUIESCENT");
+            return;
+        }
         hudOutput.clearDirectFrameForLoss(
                 GMapsDirectChannel.OWNER_PACKAGE,
                 gmapsDirectTimeoutSessionGeneration,
@@ -615,7 +634,6 @@ final class NavHudLiveSender {
         gmapsDirectFrameReceived = false;
         gmapsDirectTimedOut = true;
         activateGMapsLegacyFallbackIfReady("direct-frame-timeout");
-        ensureGMapsRegisteredWhenTransportReady("frame-timeout");
     }
 
     private final Runnable sendLoop = new Runnable() {
@@ -679,6 +697,10 @@ final class NavHudLiveSender {
                 scheduleRouteHealthLoop();
                 return;
             }
+            if (GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) {
+                forceClearLegacyFallback(activePackage, "notification-removed", now);
+                return;
+            }
             stopLegacyFallbackOnMain(activePackage, "notification-removed");
         }
     };
@@ -693,30 +715,20 @@ final class NavHudLiveSender {
             }
             long now = SystemClock.elapsedRealtime();
             if (GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) {
-                if (gmapsDirectRouteEnded) {
-                    if (now - lastGMapsDirectRegistrationProbeMs
-                            >= GMAPS_DIRECT_TIMEOUT_MS) {
-                        ensureGMapsRegisteredWhenTransportReady("route-ended-health");
-                    }
+                if (gmapsDirectRouteEnded
+                        || gmapsDirectState == GMapsDirectState.QUIESCENT
+                        || gmapsDirectState == GMapsDirectState.ACTIVE_FRAME) {
                     scheduleRouteHealthLoop();
                     return;
                 }
-                if (gmapsDirectFallbackActive) {
+                if (!gmapsDirectTimedOut && !gmapsDirectTimeoutScheduled) {
+                    scheduleGMapsDirectTimeout();
+                }
+                if (gmapsDirectTimedOut) {
                     activateGMapsLegacyFallbackIfReady("fallback-health");
                 }
-                if (!gmapsDirectTimedOut) {
-                    if (!gmapsDirectTimeoutScheduled) scheduleGMapsDirectTimeout();
-                    scheduleRouteHealthLoop();
-                    return;
-                }
-                activateGMapsLegacyFallbackIfReady("fallback-health");
-                if (now - lastGMapsDirectRegistrationProbeMs >= GMAPS_DIRECT_TIMEOUT_MS) {
-                    ensureGMapsRegisteredWhenTransportReady("fallback-health");
-                }
-                if (!gmapsDirectFallbackActive) {
-                    scheduleRouteHealthLoop();
-                    return;
-                }
+                scheduleRouteHealthLoop();
+                return;
             }
             if (WAZE_PACKAGE.equals(activePackage) && !wazeFallbackActive) {
                 scheduleWazeDirectColdTimeout("route-health");
@@ -831,6 +843,10 @@ final class NavHudLiveSender {
                 return;
             }
             long now = SystemClock.elapsedRealtime();
+            if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
+                forceClearLegacyFallback(packageName, "arrival-route-ended", now);
+                return;
+            }
             NavRouteStateStore.get(context).clearRoute(packageName, "arrival-route-ended", now);
             if ("com.waze".equals(packageName)) {
                 WazeRouteTracker.get(context).onRouteEnded("arrival-route-ended", now);
@@ -1026,6 +1042,9 @@ final class NavHudLiveSender {
                     @Override
                     public void onHandshakeAvailable(String ownerPackage,
                             long sessionGeneration, String reason) {
+                        if (gmapsDirectChannel.sessionGeneration() == sessionGeneration) {
+                            gmapsDirectIngressGeneration.incrementAndGet();
+                        }
                         handler.post(() -> onGMapsDirectHandshakeAvailable(
                                 ownerPackage, sessionGeneration, reason));
                     }
@@ -1038,8 +1057,25 @@ final class NavHudLiveSender {
                     }
 
                     @Override
+                    public void onRouteState(String ownerPackage,
+                            long sessionGeneration, long producerEpoch,
+                            long routeGeneration, boolean routeActive,
+                            boolean routeActiveKnown, String reason) {
+                        if (routeActiveKnown
+                                && gmapsDirectChannel.sessionGeneration() == sessionGeneration) {
+                            gmapsDirectIngressGeneration.incrementAndGet();
+                        }
+                        handler.post(() -> onGMapsDirectRouteState(
+                                ownerPackage, sessionGeneration, producerEpoch,
+                                routeGeneration, routeActive, routeActiveKnown, reason));
+                    }
+
+                    @Override
                     public void onNavigationStarted(String ownerPackage,
                             long sessionGeneration, String reason) {
+                        if (gmapsDirectChannel.sessionGeneration() == sessionGeneration) {
+                            gmapsDirectIngressGeneration.incrementAndGet();
+                        }
                         handler.post(() -> onGMapsDirectNavigationStarted(
                                 ownerPackage, sessionGeneration, reason));
                     }
@@ -1049,6 +1085,9 @@ final class NavHudLiveSender {
                             DirectTbtFrame frame, String reason,
                             GMapsDirectChannel.BitmapSelection bitmapSelection,
                             GMapsTimingDiagnostics.Frame timing) {
+                        if (gmapsDirectChannel.sessionGeneration() == sessionGeneration) {
+                            gmapsDirectIngressGeneration.incrementAndGet();
+                        }
                         handler.post(() -> onGMapsDirectFrame(
                                 ownerPackage, sessionGeneration, frame, reason,
                                 bitmapSelection, timing));
@@ -2266,10 +2305,90 @@ final class NavHudLiveSender {
                     "gmaps-producer-replaced", SystemClock.elapsedRealtime());
         }
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        closeGMapsLegacyDiscovery("direct-handshake:" + safeReason(reason));
         gmapsDirectHandshakeAvailable = true;
         updateCaptureIngressPolicy();
         gmapsDirectTimeoutSessionGeneration = sessionGeneration;
         log("gmaps direct handshake available reason=" + safeReason(reason));
+    }
+
+    private void onGMapsDirectRouteState(String ownerPackage,
+            long sessionGeneration, long producerEpoch, long routeGeneration,
+            boolean routeActive, boolean routeActiveKnown, String reason) {
+        if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        if (!routeActiveKnown) {
+            log("gmaps route state unknown session=" + sessionGeneration
+                    + " producerEpoch=" + producerEpoch
+                    + " routeGeneration=" + routeGeneration
+                    + " reason=" + safeReason(reason));
+            return;
+        }
+        if (!acceptsGMapsRouteStateFence(
+                gmapsDirectStateSessionGeneration,
+                gmapsDirectStateProducerEpoch,
+                gmapsDirectStateRouteGeneration,
+                sessionGeneration, producerEpoch, routeGeneration)) {
+            log("gmaps route state ignored stale session=" + sessionGeneration
+                    + " producerEpoch=" + producerEpoch
+                    + " routeGeneration=" + routeGeneration);
+            return;
+        }
+        boolean sameSession = gmapsDirectStateSessionGeneration == sessionGeneration;
+        gmapsDirectStateSessionGeneration = sessionGeneration;
+        gmapsDirectStateProducerEpoch = producerEpoch;
+        gmapsDirectStateRouteGeneration = routeGeneration;
+        if (!routeActive) {
+            gmapsDirectState = GMapsDirectState.QUIESCENT;
+            gmapsDirectTimedOut = false;
+            cancelGMapsDirectTimeout();
+            closeGMapsLegacyDiscovery("route-inactive:" + safeReason(reason));
+            if (gmapsDirectFallbackActive) {
+                stopLegacyFallbackOnMain(
+                        GMapsDirectChannel.PACKAGE_NAME,
+                        "route-inactive:" + safeReason(reason));
+            }
+            gmapsDirectFrameReceived = false;
+            gmapsDirectFallbackActive = false;
+            updateCaptureIngressPolicy();
+            log("gmaps route state=QUIESCENT session=" + sessionGeneration
+                    + " producerEpoch=" + producerEpoch
+                    + " routeGeneration=" + routeGeneration
+                    + " reason=" + safeReason(reason));
+            return;
+        }
+        gmapsDirectState = gmapsDirectFrameReceived && sameSession
+                ? GMapsDirectState.ACTIVE_FRAME
+                : GMapsDirectState.ACTIVE_WAITING_FRAME;
+        cancelPendingRouteEndStops(GMapsDirectChannel.PACKAGE_NAME);
+        gmapsDirectRouteEnded = false;
+        gmapsDirectTimedOut = false;
+        closeGMapsLegacyDiscovery("route-active:" + safeReason(reason));
+        // Keep an already-rendering fallback until the first direct frame can replace it.
+        updateCaptureIngressPolicy();
+        if (gmapsDirectState == GMapsDirectState.ACTIVE_FRAME) {
+            cancelGMapsDirectTimeout();
+        } else {
+            scheduleGMapsDirectTimeout();
+        }
+        log("gmaps route state=" + gmapsDirectState
+                + " session=" + sessionGeneration
+                + " producerEpoch=" + producerEpoch
+                + " routeGeneration=" + routeGeneration
+                + " reason=" + safeReason(reason));
+    }
+
+    static boolean acceptsGMapsRouteStateFence(
+            long currentSessionGeneration, long currentProducerEpoch,
+            long currentRouteGeneration, long incomingSessionGeneration,
+            long incomingProducerEpoch, long incomingRouteGeneration) {
+        if (incomingSessionGeneration < currentSessionGeneration) return false;
+        if (incomingSessionGeneration > currentSessionGeneration) return true;
+        if (currentProducerEpoch >= 0L && incomingProducerEpoch >= 0L) {
+            if (incomingProducerEpoch < currentProducerEpoch) return false;
+            if (incomingProducerEpoch > currentProducerEpoch) return true;
+        }
+        return currentRouteGeneration < 0L || incomingRouteGeneration < 0L
+                || incomingRouteGeneration >= currentRouteGeneration;
     }
 
     private void onGMapsDirectHandshakeUnavailable(String ownerPackage,
@@ -2291,9 +2410,8 @@ final class NavHudLiveSender {
         }
         gmapsDirectFrameReceived = false;
         updateCaptureIngressPolicy();
-        if (gmapsDirectTimedOut) {
-            activateGMapsLegacyFallbackIfReady("handshake-unavailable");
-        } else if (!gmapsDirectTimeoutScheduled) {
+        if (gmapsDirectState != GMapsDirectState.QUIESCENT
+                && !gmapsDirectTimedOut && !gmapsDirectTimeoutScheduled) {
             scheduleGMapsDirectTimeout();
         }
         log("gmaps direct handshake unavailable reason=" + safeReason(reason));
@@ -2306,6 +2424,7 @@ final class NavHudLiveSender {
                 "gmaps-route-superseded:" + safeReason(reason),
                 SystemClock.elapsedRealtime());
         if (!isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration)) return;
+        cancelPendingRouteEndStops(GMapsDirectChannel.PACKAGE_NAME);
         ensureGMapsDirectSession("navigation-started:" + safeReason(reason));
         eventGMapsDirectSession("navigation_started", reason);
         logRouteStartOutputPreferences("gmaps", sessionGeneration, reason);
@@ -2322,9 +2441,10 @@ final class NavHudLiveSender {
         gmapsDirectFrameReceived = false;
         gmapsDirectTimedOut = false;
         gmapsLegacyUnavailableLogged = false;
-        gmapsDirectRegistrationSuppressed = false;
+        gmapsDirectState = GMapsDirectState.ACTIVE_WAITING_FRAME;
+        gmapsDirectStateSessionGeneration = sessionGeneration;
+        closeGMapsLegacyDiscovery("navigation-started");
         updateCaptureIngressPolicy();
-        lastGMapsDirectRegistrationProbeMs = 0L;
         boolean hudOwner = isHudOutputOwner(ownerPackage);
         if (!manualTbtActive) {
             tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
@@ -2366,9 +2486,10 @@ final class NavHudLiveSender {
         gmapsDirectFallbackActive = false;
         gmapsDirectTimedOut = false;
         gmapsLegacyUnavailableLogged = false;
-        gmapsDirectRegistrationSuppressed = false;
+        gmapsDirectState = GMapsDirectState.ACTIVE_FRAME;
+        gmapsDirectStateSessionGeneration = sessionGeneration;
+        closeGMapsLegacyDiscovery("frame");
         updateCaptureIngressPolicy();
-        lastGMapsDirectRegistrationProbeMs = 0L;
         latestGMapsDirectFrame = frame;
         latestGMapsDirectFrameReason = safeReason(reason);
         latestGMapsDirectFrameSessionGeneration = sessionGeneration;
@@ -2821,9 +2942,11 @@ final class NavHudLiveSender {
         cancelGMapsDirectTimeout();
         gmapsDirectFrameReceived = false;
         gmapsDirectFallbackActive = false;
+        gmapsDirectState = GMapsDirectState.QUIESCENT;
+        gmapsDirectStateSessionGeneration = callbackGeneration;
+        closeGMapsLegacyDiscovery("navigation-ended:" + safeReason(reason));
         gmapsDirectRouteEnded = true;
         gmapsTbtRouteStartedAtMs = 0L;
-        lastGMapsDirectRegistrationProbeMs = 0L;
         if (hudOwner) resetLatestPayload();
         NavRouteStateStore.get(context).markRouteEnded(
                 GMapsDirectChannel.PACKAGE_NAME,
@@ -2837,7 +2960,8 @@ final class NavHudLiveSender {
     private void scheduleGMapsDirectTimeout() {
         handler.removeCallbacks(gmapsDirectTimeout);
         if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
-                || gmapsDirectRouteEnded || gmapsDirectTimedOut) {
+                || gmapsDirectRouteEnded || gmapsDirectTimedOut
+                || gmapsDirectState == GMapsDirectState.QUIESCENT) {
             gmapsDirectTimeoutScheduled = false;
             return;
         }
@@ -2862,9 +2986,12 @@ final class NavHudLiveSender {
         gmapsDirectTimedOut = false;
         gmapsLegacyUnavailableLogged = false;
         gmapsDirectRouteEnded = false;
-        gmapsDirectRegistrationSuppressed = false;
+        gmapsDirectState = GMapsDirectState.UNKNOWN;
+        gmapsDirectStateSessionGeneration = -1L;
+        gmapsDirectStateProducerEpoch = -1L;
+        gmapsDirectStateRouteGeneration = -1L;
+        closeGMapsLegacyDiscovery("session-reset");
         gmapsTbtRouteStartedAtMs = 0L;
-        lastGMapsDirectRegistrationProbeMs = 0L;
         latestGMapsDirectFrame = null;
         latestGMapsDirectFrameReason = "";
         latestGMapsDirectFrameSessionGeneration = 0L;
@@ -2872,10 +2999,104 @@ final class NavHudLiveSender {
         updateCaptureIngressPolicy();
     }
 
+    private void openGMapsLegacyDiscovery(String reason) {
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)
+                || gmapsDirectRouteEnded
+                || gmapsDirectState == GMapsDirectState.QUIESCENT) {
+            return;
+        }
+        gmapsLegacyDiscoveryToken = ++gmapsLegacyDiscoveryGeneration;
+        gmapsLegacyDiscoveryIngressGeneration = gmapsDirectIngressGeneration.get();
+        gmapsLegacyDiscoveryOpen = true;
+        gmapsLegacyFallbackClaimed = false;
+        gmapsDirectHandshakeAvailable = false;
+        updateCaptureIngressPolicy();
+        requestActiveInputState(
+                GMapsDirectChannel.PACKAGE_NAME,
+                "direct-discovery-" + gmapsLegacyDiscoveryToken + ":" + safeReason(reason),
+                gmapsLegacyDiscoveryToken);
+        log("gmaps legacy discovery open token=" + gmapsLegacyDiscoveryToken
+                + " session=" + gmapsDirectStateSessionGeneration
+                + " producerEpoch=" + gmapsDirectStateProducerEpoch
+                + " routeGeneration=" + gmapsDirectStateRouteGeneration
+                + " reason=" + safeReason(reason));
+    }
+
+    private void closeGMapsLegacyDiscovery(String reason) {
+        if (gmapsLegacyDiscoveryOpen || gmapsLegacyFallbackClaimed) {
+            log("gmaps legacy discovery closed token=" + gmapsLegacyDiscoveryToken
+                    + " reason=" + safeReason(reason));
+        }
+        gmapsLegacyDiscoveryOpen = false;
+        gmapsLegacyDiscoveryToken = 0L;
+        gmapsLegacyDiscoveryIngressGeneration = 0L;
+        gmapsLegacyFallbackClaimed = false;
+    }
+
+    private boolean claimGMapsLegacyFallbackFromFreshCallback(
+            String packageName, long discoveryToken, boolean eligible, String reason) {
+        if (!GMapsDirectChannel.PACKAGE_NAME.equals(normalizePackage(packageName))) {
+            return true;
+        }
+        if (!active || !GMapsDirectChannel.PACKAGE_NAME.equals(activePackage)) {
+            log("gmaps legacy callback blocked inactive token=" + discoveryToken
+                    + " reason=" + safeReason(reason));
+            return false;
+        }
+        if (gmapsDirectFallbackActive) return true;
+        if (gmapsLegacyFallbackClaimed) return true;
+        if (!acceptsGMapsLegacyDiscoveryForTest(
+                gmapsLegacyDiscoveryOpen,
+                gmapsLegacyDiscoveryToken,
+                discoveryToken,
+                gmapsLegacyDiscoveryIngressGeneration,
+                gmapsDirectIngressGeneration.get(),
+                true)) {
+            log("gmaps legacy callback blocked stale discovery token="
+                + discoveryToken + " expected=" + gmapsLegacyDiscoveryToken
+                + " reason=" + safeReason(reason));
+            return false;
+        }
+        if (!acceptsGMapsLegacyDiscoveryForTest(
+                gmapsLegacyDiscoveryOpen,
+                gmapsLegacyDiscoveryToken,
+                discoveryToken,
+                gmapsLegacyDiscoveryIngressGeneration,
+                gmapsDirectIngressGeneration.get(),
+                eligible)) {
+            log("gmaps legacy callback not eligible token=" + discoveryToken
+                + " reason=" + safeReason(reason));
+            return false;
+        }
+        gmapsDirectFallbackActive = true;
+        legacyFallbackOwnerPackage = GMapsDirectChannel.PACKAGE_NAME;
+        updateCaptureIngressPolicy();
+        hudOutput.selectNavigationSource(
+                HudOutputCoordinator.Source.LEGACY,
+                "gmaps-fallback:discovery-" + discoveryToken);
+        hudOutput.ensureBound("gmaps-fallback:discovery-" + discoveryToken);
+        gmapsLegacyFallbackClaimed = true;
+        gmapsLegacyDiscoveryOpen = false;
+        log("gmaps legacy callback claimed token=" + gmapsLegacyDiscoveryToken
+                + " reason=" + safeReason(reason));
+        return true;
+    }
+
+    static boolean acceptsGMapsLegacyDiscoveryForTest(
+            boolean discoveryOpen, long expectedToken, long incomingToken,
+            long discoveryIngressGeneration, long currentIngressGeneration,
+            boolean eligiblePayload) {
+        return discoveryOpen && expectedToken > 0L
+                && incomingToken == expectedToken
+                && discoveryIngressGeneration == currentIngressGeneration
+                && eligiblePayload;
+    }
+
     private void activateGMapsLegacyFallbackIfReady(String reason) {
         boolean captureReady = NavRuntimePermissionStatus.check(context).readyForCapture();
         if (shouldDeactivateGMapsLegacyFallback(gmapsDirectFallbackActive, captureReady)) {
             gmapsDirectFallbackActive = false;
+            closeGMapsLegacyDiscovery("capture-unavailable");
             updateCaptureIngressPolicy();
             resetLatestPayload();
             hudOutput.selectNavigationSource(
@@ -2899,15 +3120,9 @@ final class NavHudLiveSender {
             return;
         }
         gmapsLegacyUnavailableLogged = false;
-        gmapsDirectFallbackActive = true;
-        legacyFallbackOwnerPackage = GMapsDirectChannel.PACKAGE_NAME;
-        updateCaptureIngressPolicy();
-        hudOutput.selectNavigationSource(
-                HudOutputCoordinator.Source.LEGACY,
-                "gmaps-fallback:" + safeReason(reason));
-        hudOutput.ensureBound("gmaps-fallback:" + safeReason(reason));
-        requestActiveInputState(GMapsDirectChannel.PACKAGE_NAME, reason);
-        sendLatestIfReady("gmaps-fallback");
+        if (!gmapsLegacyDiscoveryOpen && !gmapsLegacyFallbackClaimed) {
+            openGMapsLegacyDiscovery(reason);
+        }
         log("gmaps source=legacy reason=" + safeReason(reason));
     }
 
@@ -2955,20 +3170,6 @@ final class NavHudLiveSender {
         if (session != null) session.end(safeReason(reason));
     }
 
-    private boolean ensureGMapsRegisteredWhenTransportReady(String reason) {
-        // GMaps direct IPC is an app-to-app channel.  SOME/IP/HUD binding must
-        // not gate producer liveness or re-registration while HUD output is off
-        // or temporarily unavailable.
-        if (gmapsDirectRegistrationSuppressed) {
-            log("gmaps direct registration resumed reason="
-                    + safeReason(reason));
-            gmapsDirectRegistrationSuppressed = false;
-        }
-        lastGMapsDirectRegistrationProbeMs = SystemClock.elapsedRealtime();
-        gmapsDirectChannel.ensureRegistered(reason);
-        return true;
-    }
-
     private static String laneDirections(DirectTbtFrame frame) {
         if (frame == null || frame.getLanes().isEmpty()) return "";
         StringBuilder value = new StringBuilder();
@@ -2978,8 +3179,8 @@ final class NavHudLiveSender {
             if (index > 0) value.append('|');
             String raw = normalizeString(lane.getRawDirections());
             if (raw.length() > 32) raw = raw.substring(0, 32);
-            value.append(lane.getDirection())
-                    .append(lane.isRecommended() ? '*' : '-')
+            value.append(lane.getAmapCode())
+                    .append(',').append(lane.getAmapRecommendationCode())
                     .append(':').append(raw);
         }
         if (frame.getLanes().size() > count) value.append("|...");
@@ -3887,13 +4088,19 @@ final class NavHudLiveSender {
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromNavigationNotification(String packageName, String notificationKey,
             NavParserResult result) {
+        updateFromNavigationNotification(packageName, notificationKey, result, 0L);
+    }
+
+    void updateFromNavigationNotification(String packageName, String notificationKey,
+            NavParserResult result, long discoveryToken) {
         if (result == null) {
             return;
         }
         final String normalized = normalizePackage(packageName);
         final String safeKey = normalizeString(notificationKey);
         final int routeGeneration = wazeRouteGeneration;
-        handler.post(() -> updateOnMain(normalized, safeKey, result, routeGeneration));
+        handler.post(() -> updateOnMain(
+                normalized, safeKey, result, routeGeneration, discoveryToken));
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
@@ -3903,11 +4110,16 @@ final class NavHudLiveSender {
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     void updateFromNavigationAccessibility(String packageName, String payload) {
+        updateFromNavigationAccessibility(packageName, payload, 0L);
+    }
+
+    void updateFromNavigationAccessibility(String packageName, String payload,
+            long discoveryToken) {
         final String normalized = normalizePackage(packageName);
         final String safePayload = normalizeString(payload);
         final int routeGeneration = wazeRouteGeneration;
         handler.post(() -> updateAccessibilityOnMain(
-                normalized, safePayload, routeGeneration));
+                normalized, safePayload, routeGeneration, discoveryToken));
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
@@ -4333,6 +4545,7 @@ final class NavHudLiveSender {
             tbtGMapsObserver = retainRoute;
             cancelGMapsDirectTimeout();
             gmapsDirectFallbackActive = false;
+            closeGMapsLegacyDiscovery("source-switch:" + next);
             updateCaptureIngressPolicy();
         }
         tbtPublisher.updateOwnerHudPriority(previous, tbtGeneration, false);
@@ -4539,6 +4752,10 @@ final class NavHudLiveSender {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) return false;
         if (isDirectNavigator(normalized)) {
+            if (GMapsDirectChannel.PACKAGE_NAME.equals(normalized)
+                    && gmapsLegacyDiscoveryOpen) {
+                return true;
+            }
             if (!isLegacyFallbackIngressOwner(normalized)) {
                 log("fallback ingress cached only package=" + normalized
                         + " reason=direct-owner-or-unavailable");
@@ -4578,6 +4795,7 @@ final class NavHudLiveSender {
             WazeCropCapture.get(context).stop("legacy-fallback-stop:" + safeReason(reason));
         } else if (GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) {
             gmapsDirectFallbackActive = false;
+            closeGMapsLegacyDiscovery("fallback-stop:" + safeReason(reason));
         } else {
             active = false;
             activePackage = "";
@@ -4598,6 +4816,11 @@ final class NavHudLiveSender {
         NavRouteStateStore.get(context).markRouteEnded(normalized, reason, now);
         if (WAZE_PACKAGE.equals(normalized)) {
             WazeRouteTracker.get(context).onRouteEnded(reason, now);
+        } else if (GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) {
+            gmapsDirectState = GMapsDirectState.QUIESCENT;
+            gmapsDirectTimedOut = false;
+            gmapsDirectFrameReceived = false;
+            cancelGMapsDirectTimeout();
         }
         stopLegacyFallbackOnMain(normalized, reason);
     }
@@ -4621,7 +4844,7 @@ final class NavHudLiveSender {
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateOnMain(String packageName, String notificationKey,
-            NavParserResult result, int routeGeneration) {
+            NavParserResult result, int routeGeneration, long discoveryToken) {
         if (packageName.isEmpty()) {
             return;
         }
@@ -4669,6 +4892,10 @@ final class NavHudLiveSender {
             scheduleSendLoop();
             return;
         }
+        if (!claimGMapsLegacyFallbackFromFreshCallback(
+                packageName, discoveryToken, true, "notification")) {
+            return;
+        }
         long now = SystemClock.elapsedRealtime();
         boolean blankGMapsTextOnlyStraightManeuver =
                 shouldBlankGMapsNotificationTextOnlyStraightManeuver(packageName, result);
@@ -4702,7 +4929,7 @@ final class NavHudLiveSender {
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     private void updateAccessibilityOnMain(String packageName, String payload,
-                                           int routeGeneration) {
+                                           int routeGeneration, long discoveryToken) {
         if (packageName.isEmpty() || payload.isEmpty()) {
             return;
         }
@@ -4762,6 +4989,10 @@ final class NavHudLiveSender {
             scheduleSendLoop();
             return;
         }
+        if (!claimGMapsLegacyFallbackFromFreshCallback(
+                packageName, discoveryToken, true, "accessibility")) {
+            return;
+        }
         cancelAccessibilityNoRouteStop();
         long now = SystemClock.elapsedRealtime();
         lastAccessibilityResultMs = now;
@@ -4806,6 +5037,11 @@ final class NavHudLiveSender {
         }
         if (!hudEnabled) {
             log("visual snapshot only package=" + packageName + " reason=" + result.reason);
+            return;
+        }
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)
+                && gmapsLegacyDiscoveryOpen && !gmapsLegacyFallbackClaimed) {
+            log("gmaps visual discovery callback ignored reason=" + result.reason);
             return;
         }
         if (!prepareLegacyFallbackIngress(packageName, "visual")) {
@@ -4888,6 +5124,11 @@ final class NavHudLiveSender {
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private void requestActiveInputState(String packageName, String reason) {
+        requestActiveInputState(packageName, reason, 0L);
+    }
+
+    private void requestActiveInputState(
+            String packageName, String reason, long discoveryToken) {
         NavRuntimePermissionStatus permissionStatus = NavRuntimePermissionStatus.check(context);
         if (!permissionStatus.notificationListenerConnected) {
             log("active input notification unavailable package=" + packageName
@@ -4895,7 +5136,8 @@ final class NavHudLiveSender {
         } else {
             NavNotificationListenerService.requestActiveNotificationScan(
                     context,
-                    "start-hud-" + packageName + "-" + reason);
+                    "start-hud-" + packageName + "-" + reason,
+                    discoveryToken);
         }
         if (!permissionStatus.accessibilityServiceConnected
                 || permissionStatus.accessibilityServiceCrashed) {
@@ -4903,9 +5145,7 @@ final class NavHudLiveSender {
                     + " reason=" + reason + " status=" + permissionStatus.summary());
         } else {
             NavAccessibilityService.requestActiveWindowCapture(
-                    context,
-                    packageName,
-                    "start-hud-" + reason);
+                    context, packageName, "start-hud-" + reason, discoveryToken);
         }
     }
 
@@ -4961,6 +5201,12 @@ final class NavHudLiveSender {
         handler.removeCallbacks(notificationRemovedStop);
         handler.removeCallbacks(accessibilityNoRouteStop);
         handler.removeCallbacks(arrivalRouteEndStop);
+        if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
+            cancelGMapsDirectTimeout();
+            closeGMapsLegacyDiscovery("hud-stop:" + safeReason(reason));
+            gmapsDirectFallbackActive = false;
+            gmapsDirectTimedOut = false;
+        }
         sendLoopScheduled = false;
         routeHealthScheduled = false;
         active = false;
@@ -5587,6 +5833,26 @@ final class NavHudLiveSender {
         pendingArrivalPackage = "";
         pendingNoRouteScheduledAtMs = 0L;
         pendingArrivalScheduledAtMs = 0L;
+    }
+
+    private void cancelPendingRouteEndStops(String packageName) {
+        String normalized = normalizePackage(packageName);
+        if (normalized.equals(pendingRemovalPackage)) {
+            handler.removeCallbacks(notificationRemovedStop);
+            pendingRemovalKey = "";
+            pendingRemovalPackage = "";
+            pendingRemovalActiveKey = "";
+        }
+        if (normalized.equals(pendingNoRoutePackage)) {
+            handler.removeCallbacks(accessibilityNoRouteStop);
+            pendingNoRoutePackage = "";
+            pendingNoRouteScheduledAtMs = 0L;
+        }
+        if (normalized.equals(pendingArrivalPackage)) {
+            handler.removeCallbacks(arrivalRouteEndStop);
+            pendingArrivalPackage = "";
+            pendingArrivalScheduledAtMs = 0L;
+        }
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.

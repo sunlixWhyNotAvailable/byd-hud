@@ -13,10 +13,17 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class NavigatorPackageInstaller {
     private static final long INTERRUPTED_TIMEOUT_MS = 10L * 60L * 1000L;
     private static final AtomicBoolean VERIFY_RUNNING = new AtomicBoolean();
+    private static final ExecutorService INSTALL_QUEUE = Executors.newSingleThreadExecutor(r -> {
+        Thread worker = new Thread(r, "NavigatorPatchDrain");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        return worker;
+    });
     static final String EXTRA_OPERATION = "navigator_patch_operation";
     static final String EXTRA_PROFILE = "navigator_patch_profile";
     static final String EXTRA_TOKEN = "navigator_patch_token";
@@ -78,6 +85,11 @@ final class NavigatorPackageInstaller {
     }
 
     static void drainInstallQueue(Context context) {
+        Context appContext = context.getApplicationContext();
+        INSTALL_QUEUE.execute(() -> drainInstallQueueNow(appContext));
+    }
+
+    private static void drainInstallQueueNow(Context context) {
         if (!canInstall(context)) return;
         NavigatorPatchStore.OperationSnapshot global =
                 NavigatorPatchStore.operation(context, null);
@@ -101,6 +113,15 @@ final class NavigatorPackageInstaller {
         try {
             begin(context, NavigatorPatchPipeline.resumePrepared(context, next));
         } catch (Exception error) {
+            NavigatorPatchStore.OperationSnapshot current =
+                    NavigatorPatchStore.operation(context, next);
+            if (NavigatorPatchStore.CANCELLED.equals(current.phase)) return;
+            if (NavigatorPatchStore.isCancellationRequested(context, next)
+                    || error instanceof NavigatorPatchPipeline.OperationCancelledException) {
+                NavigatorPatchPipeline.finishQueuedCancellation(
+                        context, next, "Queued installation cancelled");
+                return;
+            }
             NavigatorPatchStore.transition(context, next, NavigatorPatchStore.FAILED,
                     error.getMessage() == null ? "Queued install failed" : error.getMessage());
             NavigatorPatchStore.releaseInstall(context, next);
@@ -604,7 +625,7 @@ final class NavigatorPackageInstaller {
                     NavigatorSigningKey.installedCertificateSha256(
                         context, profile.packageName))
                     && NavigatorPatchStore.initialFingerprint(context, profile).equals(
-                    NavigatorApkSet.inspectInstalled(context, profile).fingerprint);
+                    NavigatorPatchPipeline.inspectInstalled(context, profile).sha256);
         } catch (Exception ignored) {
             return false;
         }
@@ -640,7 +661,7 @@ final class NavigatorPackageInstaller {
                 NavigatorSigningKey.installedCertificateSha256(
                         context, prepared.profile.packageName))
                 || !prepared.installedFingerprint.equals(
-                NavigatorApkSet.inspectInstalled(context, prepared.profile).fingerprint)) {
+                NavigatorPatchPipeline.inspectInstalled(context, prepared.profile).sha256)) {
             throw new IOException("Installed navigator changed after staging");
         }
     }

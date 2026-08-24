@@ -67,10 +67,7 @@ final class HudRoadPayload {
     private static boolean shouldWriteLaneMetadata(HudState state, int trustedLaneCount) {
         return state.includeLaneBitmap
                 && trustedLaneCount > 1
-                && !HudLaneModel.hasMixedRecommendations(state)
-                && !HudLaneModel.hasSmoothDirections(state)
-                && !HudLaneModel.hasCustomLaneResources(state)
-                && !HudLaneModel.hasRampDirections(state);
+                && !HudLaneModel.hasUnrepresentableSemanticDirections(state);
     }
 
     //sends encoded data here so transport side effects stay behind a single boundary.

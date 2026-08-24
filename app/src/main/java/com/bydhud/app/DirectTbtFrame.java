@@ -375,14 +375,28 @@ public final class DirectTbtFrame {
 
     /** Lane metadata used by field 29 of the cluster payload. */
     public static final class Lane {
+        public static final int NO_RECOMMENDATION = 255;
         private final int direction;
         private final boolean recommended;
         private final String rawDirections;
+        private final int amapCode;
+        private final int amapRecommendationCode;
 
         public Lane(int direction, boolean recommended, String rawDirections) {
             this.direction = direction;
             this.recommended = recommended;
             this.rawDirections = safeText(rawDirections);
+            this.amapCode = legacyAmapCode(direction);
+            this.amapRecommendationCode = recommended ? this.amapCode : NO_RECOMMENDATION;
+        }
+
+        /** Creates a lane with the complete and selected Instrument direction codes. */
+        public Lane(int amapCode, int amapRecommendationCode, String rawDirections) {
+            this.direction = amapCode;
+            this.recommended = amapRecommendationCode != NO_RECOMMENDATION;
+            this.rawDirections = safeText(rawDirections);
+            this.amapCode = amapCode;
+            this.amapRecommendationCode = amapRecommendationCode;
         }
 
         public int getDirection() {
@@ -398,10 +412,35 @@ public final class DirectTbtFrame {
         }
 
         public int getAmapCode() {
+            return amapCode;
+        }
+
+        public int getAmapRecommendationCode() {
+            return amapRecommendationCode;
+        }
+
+        static int legacyAmapCode(int direction) {
             if (direction == 3) return 3;
             if (direction == 2) return 4;
             return 0;
         }
+
+        /** Instrument's compact lane vocabulary; returns -1 for an unrepresentable set. */
+        static int instrumentCodeForMask(int mask) {
+            switch (mask) {
+                case 1: return 0; // S
+                case 2: return 1; // L
+                case 3: return 2; // S+L
+                case 4: return 3; // R
+                case 5: return 4; // S+R
+                case 8: return 5; // U-left
+                case 6: return 6; // L+R
+                case 7: return 7; // S+L+R
+                case 16: return 8; // U-right
+                default: return -1;
+            }
+        }
+
     }
 
     /** Alert state is an overlay; navigation lanes remain on the parent frame. */

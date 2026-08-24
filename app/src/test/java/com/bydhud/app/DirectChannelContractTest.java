@@ -1,5 +1,6 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
@@ -49,6 +50,12 @@ public final class DirectChannelContractTest {
                 false, false, true, false, 9L, 9L));
         assertFalse(GMapsDirectChannel.acceptsHelloLivenessForTest(
                 false, false, true, true, 10L, 9L));
+    }
+
+    @Test
+    public void staleHelloCannotCloseCurrentFallbackDiscovery() {
+        assertTrue(GMapsDirectChannel.acceptsHelloHandshakeForTest(false));
+        assertFalse(GMapsDirectChannel.acceptsHelloHandshakeForTest(true));
     }
 
     @Test
@@ -176,6 +183,25 @@ public final class DirectChannelContractTest {
         assertEquals(3, lanes.get(2).getDirection());
         assertTrue(lanes.get(0).isRecommended());
         assertFalse(lanes.get(2).isRecommended());
+    }
+
+    @Test
+    public void wazeLaneProjectionComposesDirectionsAndRecommendations() {
+        assertArrayEquals(new int[]{4, 0},
+                WazeDirectChannel.laneCodesForTest(
+                        new int[]{2, 6}, new boolean[]{true, false}));
+        assertArrayEquals(new int[]{7, 7},
+                WazeDirectChannel.laneCodesForTest(
+                        new int[]{2, 5, 6}, new boolean[]{true, true, true}));
+        assertArrayEquals(new int[]{5, 255},
+                WazeDirectChannel.laneCodesForTest(
+                        new int[]{9, 5}, new boolean[]{false, true}));
+        assertArrayEquals(new int[]{5, 5},
+                WazeDirectChannel.laneCodesForTest(
+                        new int[]{5, 9}, new boolean[]{true, true}));
+        assertArrayEquals(new int[]{0, 0},
+                WazeDirectChannel.laneCodesForTest(
+                        new int[]{Integer.MIN_VALUE}, new boolean[]{true}));
     }
 
     @Test

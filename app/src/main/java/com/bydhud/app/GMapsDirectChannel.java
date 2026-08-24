@@ -267,6 +267,7 @@ final class GMapsDirectChannel {
                     if (!hadActiveRoute) sessionGeneration++;
                     navigating = false;
                     terminalLatched = false;
+                    producerRouteGeneration = -1L;
                     activeRouteGeneration = -1L;
                     terminalRouteGeneration = -1L;
                     resetSession();
@@ -299,7 +300,20 @@ final class GMapsDirectChannel {
                         ? "hello-stale-route" : "hello");
                 listener.onLog("gmaps_timing " + timing.protocolLine(true)
                         + " control=hello");
-                listener.onHandshakeAvailable(OWNER_PACKAGE, sessionGeneration, helloReason);
+                if (!staleHelloRoute) {
+                    listener.onRouteState(
+                            OWNER_PACKAGE,
+                            sessionGeneration,
+                            producerEpoch,
+                            incomingRouteGeneration >= 0L
+                                    ? incomingRouteGeneration : producerRouteGeneration,
+                            routeActivePresent ? advertisedRouteActive : navigating,
+                            routeActivePresent,
+                            helloReason);
+                }
+                if (acceptsHelloHandshakeForTest(staleHelloRoute)) {
+                    listener.onHandshakeAvailable(OWNER_PACKAGE, sessionGeneration, helloReason);
+                }
                 if (acceptsHelloLivenessForTest(
                         producerEpochChanged, staleHelloRoute, navigating,
                         advertisedRouteActive, incomingRouteGeneration, activeRouteGeneration)) {
@@ -336,6 +350,17 @@ final class GMapsDirectChannel {
                         && incomingRouteGeneration >= 0L) {
                     terminalRouteGeneration = Math.max(
                             terminalRouteGeneration, incomingRouteGeneration);
+                }
+                if (!staleHeartbeatRoute) {
+                    listener.onRouteState(
+                            OWNER_PACKAGE,
+                            sessionGeneration,
+                            producerEpoch,
+                            incomingRouteGeneration >= 0L
+                                    ? incomingRouteGeneration : producerRouteGeneration,
+                            routeActivePresent ? advertisedRouteActive : navigating,
+                            routeActivePresent,
+                            "heartbeat");
                 }
                 boolean exactActiveRoute = navigating && advertisedRouteActive
                         && (incomingRouteGeneration < 0L
@@ -387,6 +412,14 @@ final class GMapsDirectChannel {
                 resetSession();
                 listener.onLog("gmaps_timing " + timing.protocolLine(true)
                         + " control=start");
+                listener.onRouteState(
+                        OWNER_PACKAGE,
+                        sessionGeneration,
+                        producerEpoch,
+                        activeRouteGeneration,
+                        true,
+                        true,
+                        "start");
                 listener.onNavigationStarted(OWNER_PACKAGE, sessionGeneration, "start");
                 listener.onLiveness(OWNER_PACKAGE, sessionGeneration, "start");
                 return true;
@@ -471,6 +504,10 @@ final class GMapsDirectChannel {
                 && (incomingGeneration < 0L || incomingGeneration == activeGeneration);
     }
 
+    static boolean acceptsHelloHandshakeForTest(boolean staleHelloRoute) {
+        return !staleHelloRoute;
+    }
+
     static long routeGenerationForTest(Bundle data) {
         if (data == null) return -1L;
         long route = data.getLong("routeGeneration", -1L);
@@ -537,6 +574,14 @@ final class GMapsDirectChannel {
             listener.onNavigationStarted(
                     OWNER_PACKAGE, sessionGeneration, "frame-missed-start");
         }
+        listener.onRouteState(
+                OWNER_PACKAGE,
+                sessionGeneration,
+                producerEpoch,
+                activeRouteGeneration,
+                true,
+                true,
+                "frame");
         return true;
     }
 
@@ -757,6 +802,14 @@ final class GMapsDirectChannel {
         }
         activeRouteGeneration = -1L;
         resetSession();
+        listener.onRouteState(
+                OWNER_PACKAGE,
+                callbackGeneration,
+                producerEpoch,
+                terminalRouteGeneration,
+                false,
+                true,
+                reason);
         listener.onNavigationEnded(
                 OWNER_PACKAGE, routeGeneration, callbackGeneration, reason);
     }
@@ -1217,6 +1270,9 @@ final class GMapsDirectChannel {
     interface Listener {
         void onHandshakeAvailable(String ownerPackage, long sessionGeneration, String reason);
         void onHandshakeUnavailable(String ownerPackage, long sessionGeneration, String reason);
+        void onRouteState(String ownerPackage, long sessionGeneration,
+                long producerEpoch, long routeGeneration, boolean routeActive,
+                boolean routeActiveKnown, String reason);
         void onNavigationStarted(String ownerPackage, long sessionGeneration, String reason);
         void onFrame(String ownerPackage, long sessionGeneration,
                 DirectTbtFrame frame, String reason, BitmapSelection bitmapSelection,

@@ -71,8 +71,9 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(profile2516.contains("\"Lbikc;\", Arrays.asList("));
         assertTrue(source.contains(
                 "PROFILES = Arrays.asList(PROFILE_2630, PROFILE_2516)"));
-        assertTrue(pipeline.contains("private static String inspectGmapsPip("));
-        assertTrue(pipeline.contains("PIP_INSPECTION_FAILED"));
+        assertTrue(source.contains("private static ComponentInspection componentInspection("));
+        assertTrue(source.contains("PIP_INSPECTION_FAILED"));
+        assertTrue(pipeline.contains("member.base ? inspection.pip : \"UNSUPPORTED\""));
     }
 
     @Test
@@ -103,8 +104,8 @@ public final class GmapsBeta7PatcherSourceContractTest {
                 < pipInspection.indexOf("inspectPipManifest(apk)"));
         assertTrue(source.contains("public static void patchDirect("));
         assertTrue(source.contains("public static void patchNavigationAudio("));
-        assertTrue(pipeline.contains("boolean hasCode = hasDexEntries(member.file);"));
-        assertTrue(pipeline.contains("private static boolean hasDexEntries(File apk)"));
+        assertTrue(pipeline.contains("inspectGmapsSet(set)"));
+        assertTrue(source.contains("inspectComponents(List<File> apks)"));
         assertTrue(source.contains("String directClassification()"));
         assertTrue(source.contains("String audioClassification()"));
         assertTrue(source.contains("return \"PATCHABLE_STOCK\""));
@@ -156,7 +157,8 @@ public final class GmapsBeta7PatcherSourceContractTest {
     public void reviewFixesKeepPlacementUpgradeGateOrderAndAtomicOutputs() throws IOException {
         String source = sourcePath(
                 "app/src/main/java/com/bydhud/gmapsdiag/patcher/GmapsDiagnosticPatcher.java");
-        assertTrue(source.contains("hook.placement\n                                    == HookPlacement.POST_BODY_BEFORE_RETURN_VOID"));
+        assertTrue(source.contains("result.normalReturnIndex = hook.placement"));
+        assertTrue(source.contains("== HookPlacement.POST_BODY_BEFORE_RETURN_VOID"));
         assertTrue(source.contains("private static boolean placementSatisfied(HookResult result, Hook hook)"));
         assertTrue(source.contains("legacy.targetCount == 1"));
         assertTrue(source.contains("legacy.hookCallCount + legacy.legacyHookCallCount == 1"));

@@ -21,6 +21,9 @@ public final class GmapsDiagnosticPatcherTest {
             IOException error = assertThrows(IOException.class,
                     () -> GmapsDiagnosticPatcher.readManifestEntry(apk.toFile()));
             assertTrue(error.getMessage().contains("Duplicate APK manifest entries"));
+            IOException compositeError = assertThrows(IOException.class,
+                    () -> GmapsDiagnosticPatcher.inspectComponents(apk.toFile(), "26.30"));
+            assertTrue(compositeError.getMessage().contains("Duplicate APK manifest entries"));
         } finally {
             Files.deleteIfExists(apk);
         }

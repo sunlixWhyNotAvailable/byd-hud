@@ -15,7 +15,7 @@ public final class GmsCorePatchStateContractTest {
     public void pipelineCarriesIndependentGmsCoreState() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/NavigatorPatchPipeline.java");
         assertTrue(source.contains("final String gmsCoreState"));
-        assertTrue(source.contains("inspectGmsCoreClassification"));
+        assertTrue(source.contains("inspection.gmsCore"));
         assertTrue(source.contains("patchGmsCore"));
         assertTrue(source.contains("verifyGmsCore"));
         assertTrue(source.contains("gmsCoreFailed"));

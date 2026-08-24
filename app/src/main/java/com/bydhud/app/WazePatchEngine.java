@@ -252,12 +252,38 @@ final class WazePatchEngine {
     static final String PARTIAL = "PARTIAL";
     static final String UNSUPPORTED = "UNSUPPORTED";
 
+    static final class CompositeInspection {
+        final WazeInspection allowlist;
+        final LaneInspection lane;
+        final LifecycleInspection lifecycle;
+        final AlertInspection alert;
+
+        CompositeInspection(WazeInspection allowlist, LaneInspection lane,
+                LifecycleInspection lifecycle, AlertInspection alert) {
+            this.allowlist = allowlist;
+            this.lane = lane;
+            this.lifecycle = lifecycle;
+            this.alert = alert;
+        }
+    }
+
     private WazePatchEngine() {
+    }
+
+    static CompositeInspection inspectComposite(byte[] dex) throws IOException {
+        DexBackedDexFile file = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return new CompositeInspection(inspectWaze(file), inspectLane(file),
+                inspectLifecycle(file), inspectAlertHook(file));
     }
 
     static WazeInspection inspectWaze(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return inspectWaze(file);
+    }
+
+    private static WazeInspection inspectWaze(DexBackedDexFile file) throws IOException {
         int matches = 0;
         WazeInspection result = null;
         for (ClassDef classDef : file.getClasses()) {
@@ -303,6 +329,10 @@ final class WazePatchEngine {
     static LifecycleInspection inspectLifecycle(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return inspectLifecycle(file);
+    }
+
+    private static LifecycleInspection inspectLifecycle(DexBackedDexFile file) throws IOException {
         LifecycleInspection result = new LifecycleInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (BRIDGE_CLASS.equals(classDef.getType())) result.bridgeClassCount++;
@@ -409,6 +439,10 @@ final class WazePatchEngine {
     static LaneInspection inspectLane(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(Opcodes.forApi(29),
                 new ByteArrayInputStream(dex));
+        return inspectLane(file);
+    }
+
+    private static LaneInspection inspectLane(DexBackedDexFile file) throws IOException {
         LaneInspection result = new LaneInspection();
         for (ClassDef c : file.getClasses()) {
             if (LANE_FRAME_CLASS.equals(c.getType())) {
@@ -500,6 +534,10 @@ final class WazePatchEngine {
     static AlertInspection inspectAlertHook(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return inspectAlertHook(file);
+    }
+
+    private static AlertInspection inspectAlertHook(DexBackedDexFile file) throws IOException {
         AlertInspection result = new AlertInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (!ALERT_SESSION_CLASS.equals(classDef.getType())) continue;

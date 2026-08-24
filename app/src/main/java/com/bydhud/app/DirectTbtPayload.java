@@ -211,7 +211,7 @@ public final class DirectTbtPayload {
         for (DirectTbtFrame.Lane lane : lanes) {
             int code = lane.getAmapCode();
             out.append(code).append(',')
-                    .append(lane.isRecommended() ? code : 255)
+                    .append(lane.getAmapRecommendationCode())
                     .append('|');
         }
         return out.toString();
