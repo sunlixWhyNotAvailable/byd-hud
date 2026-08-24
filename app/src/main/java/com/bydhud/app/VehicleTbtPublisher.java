@@ -51,6 +51,7 @@ final class VehicleTbtPublisher {
     private int[] lastInstrumentLaneDirections = new int[0];
     private int[] lastInstrumentLaneRecommendations = new int[0];
     private boolean lastGuidanceHasAmapFallback;
+    private boolean handoffPendingInstrumentRecovery;
     private boolean hasLastInstrumentSemantic;
     private boolean hasLastAmapSemantic;
     private String lastAmapSemanticKey = "";
@@ -129,6 +130,12 @@ final class VehicleTbtPublisher {
             return;
         }
         if (routeActive) {
+            if (replaceDirectRoute(
+                    ownerPackage, ownerGeneration, owner, generation,
+                    switchDashboard, hasHudPriority, reason, null,
+                    dashboardCompletion)) {
+                return;
+            }
             boolean replacingDirectWithManual = MANUAL_OWNER.equals(owner)
                     && !MANUAL_OWNER.equals(ownerPackage);
             endRoute(ownerPackage, ownerGeneration, "source-replaced",
@@ -137,6 +144,7 @@ final class VehicleTbtPublisher {
         ownerPackage = owner;
         ownerGeneration = generation;
         routeActive = true;
+        handoffPendingInstrumentRecovery = false;
         resetGuidanceDedup();
         teardownEligible = false;
         ownerHasHudPriority = hasHudPriority;
@@ -155,6 +163,63 @@ final class VehicleTbtPublisher {
         log("tbt_route_start owner=" + owner + " generation=" + generation);
     }
 
+    /**
+     * Transfers an active direct TBT owner without exposing a terminal frame.
+     * The owner/token advance happens before any successor Binder/broadcast work,
+     * so callbacks from the superseded owner are fenced at the shared boundary.
+     */
+    boolean replaceDirectRoute(
+            String currentPackage, long currentGeneration,
+            String successorPackage, long successorGeneration,
+            boolean switchDashboard, boolean successorHasHudPriority,
+            String reason, DirectTbtFrame successorFrame,
+            Runnable dashboardCompletion) {
+        String current = safe(currentPackage);
+        String successor = safe(successorPackage);
+        if (!routeActive || !matches(current, currentGeneration)
+                || !isDirectOwner(current) || !isDirectOwner(successor)
+                || current.equals(successor)) {
+            return false;
+        }
+        ownerPackage = successor;
+        ownerGeneration = successorGeneration;
+        ownerHasHudPriority = successorHasHudPriority;
+        ++routeToken;
+        teardownEligible = false;
+        teardownOwner = "";
+        teardownGeneration = Long.MIN_VALUE;
+        teardownReason = "";
+        resetGuidanceDedup();
+        lastGuidanceHasAmapFallback = false;
+        handoffPendingInstrumentRecovery = successorFrame == null;
+
+        Trace successorTrace = trace(successor, successorGeneration,
+                reason, successorFrame, null);
+        sendStatus(STATUS_ACTIVE, successorTrace);
+        if (successorFrame != null) {
+            lastGuidanceHasAmapFallback = true;
+            sendInstrumentFrame(successorFrame, successorTrace);
+            sendAmapFrame(successorFrame, successorTrace);
+        }
+        if (switchDashboard) {
+            dispatchDashboard(successor, successorGeneration,
+                    successorTrace, dashboardCompletion);
+        } else if (dashboardCompletion != null) {
+            dashboardCompletion.run();
+        }
+        record(successorTrace, "lifecycle", "replace", "navigation",
+                null, 0, 0L, "direct-owner-handoff");
+        log("tbt_route_replace previous=" + current
+                + " successor=" + successor
+                + " generation=" + successorGeneration);
+        return true;
+    }
+
+    private static boolean isDirectOwner(String owner) {
+        return WazeDirectChannel.OWNER_PACKAGE.equals(owner)
+                || GMapsDirectChannel.OWNER_PACKAGE.equals(owner);
+    }
+
     void publishFrame(String packageName, long generation, DirectTbtFrame frame) {
         publishFrame(packageName, generation, frame, "frame");
     }
@@ -167,6 +232,7 @@ final class VehicleTbtPublisher {
             beginRoute(packageName, generation, false, false);
         }
         if (!routeActive || !matches(packageName, generation)) return;
+        handoffPendingInstrumentRecovery = false;
         Trace trace = trace(packageName, generation, reason, frame, null);
         lastGuidanceHasAmapFallback = true;
         sendInstrumentFrame(frame, trace);
@@ -223,6 +289,7 @@ final class VehicleTbtPublisher {
         long endedGeneration = ownerGeneration;
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
         ++routeToken;
+        handoffPendingInstrumentRecovery = false;
         lastGuidanceHasAmapFallback = false;
         sendTerminalGuidanceClear(trace);
         sendAmapTerminal(trace);
@@ -492,6 +559,7 @@ final class VehicleTbtPublisher {
     }
 
     private void sendTerminalGuidanceClear(Trace trace) {
+        handoffPendingInstrumentRecovery = false;
         hasInstrumentGuidance = true;
         lastInstrumentIcon = 0;
         lastInstrumentDistance = -1;
@@ -591,6 +659,7 @@ final class VehicleTbtPublisher {
     }
 
     private void sendAmapTerminal(Trace trace) {
+        handoffPendingInstrumentRecovery = false;
         Intent intent = new Intent(AMAP_ACTION);
         intent.setPackage(AMAP_PACKAGE);
         addStockAmapFlags(intent);
@@ -666,6 +735,7 @@ final class VehicleTbtPublisher {
                 DirectTbtFrame.TravelMetrics.unavailable(),
                 new LanePayload(lastInstrumentLaneDirections,
                         lastInstrumentLaneRecommendations));
+        trace.routeToken = routeToken;
         if (hasInstrumentStatus) {
             int status = lastInstrumentStatus;
             instrument.sendNavigationStatus(status,
@@ -700,8 +770,10 @@ final class VehicleTbtPublisher {
                 lastInstrumentDistance, lastInstrumentRoad,
                 DirectTbtFrame.TravelMetrics.unavailable(),
                 DirectTbtFrame.TravelMetrics.unavailable());
+        trace.routeToken = routeToken;
         if (shouldPreserveAmapFallbackForTest(
-                routeActive, lastGuidanceHasAmapFallback)) {
+                routeActive, lastGuidanceHasAmapFallback)
+                || handoffPendingInstrumentRecovery) {
             record(trace, "instrument_proxy", "unavailable", "preserve_amap_fallback",
                     null, -1, 0L, safe(reason));
             log("tbt_proxy_unavailable preserve_amap_fallback reason=" + safe(reason));
@@ -749,6 +821,8 @@ final class VehicleTbtPublisher {
             int icon, int distance, String road,
             int[] laneDirections, int[] laneRecommendations) {
         recordInstrumentResult(result, trace, 0, icon, distance, road);
+        if (trace == null || !matches(trace.owner, trace.generation)
+                || trace.routeToken != routeToken) return;
         if (laneOperationsSucceededForTest(result == null ? null : result.operations)) return;
         if (lastInstrumentIcon == icon
                 && lastInstrumentDistance == distance
@@ -881,10 +955,12 @@ final class VehicleTbtPublisher {
                     ? lanePayloadForTest(frame == null ? null : frame.getLanes())
                     : lanePayloadForTest(manualState);
         }
-        return new Trace(source, safe(owner), generation,
+        Trace trace = new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
                 nativeId, intermediateAmapIcon, amapIcon, roundaboutExit,
                 distance, preserveText(road), route, next, lanes);
+        trace.routeToken = routeToken;
+        return trace;
     }
 
     private static String sourceForOwner(String owner) {
@@ -1046,6 +1122,7 @@ final class VehicleTbtPublisher {
         final DirectTbtFrame.TravelMetrics route;
         final DirectTbtFrame.TravelMetrics next;
         final LanePayload lanes;
+        long routeToken = Long.MIN_VALUE;
 
         Trace(String source, String owner, long generation, String transactionId,
                 String reason, int nativeId, int amapIcon, int roundaboutExit,

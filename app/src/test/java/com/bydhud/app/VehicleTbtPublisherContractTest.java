@@ -270,6 +270,68 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
+    public void directOwnerReplacementHasNoTerminalOrIdleInterlude() throws IOException {
+        String source = source(
+                "app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        int beginStart = source.indexOf("void beginRoute(String packageName, long generation,\n"
+                + "            boolean switchDashboard, boolean hasHudPriority,\n"
+                + "            String reason, Runnable dashboardCompletion)");
+        int beginEnd = source.indexOf("\n    /**", beginStart);
+        assertTrue(beginStart >= 0 && beginEnd > beginStart);
+        String begin = source.substring(beginStart, beginEnd);
+        assertTrue(begin.indexOf("replaceDirectRoute(") < begin.indexOf("endRoute("));
+
+        int start = source.indexOf("boolean replaceDirectRoute(");
+        int end = source.indexOf("\n    private static boolean isDirectOwner", start);
+        assertTrue(start >= 0 && end > start);
+        String replacement = source.substring(start, end);
+        assertFalse(replacement.contains("sendTerminalGuidanceClear"));
+        assertFalse(replacement.contains("sendAmapTerminal"));
+        assertFalse(replacement.contains("STATUS_IDLE"));
+        assertTrue(replacement.indexOf("ownerPackage = successor")
+                < replacement.indexOf("sendStatus(STATUS_ACTIVE"));
+        assertTrue(replacement.indexOf("++routeToken")
+                < replacement.indexOf("sendStatus(STATUS_ACTIVE"));
+        assertTrue(replacement.indexOf("resetGuidanceDedup")
+                < replacement.indexOf("sendStatus(STATUS_ACTIVE"));
+        assertTrue(replacement.contains("sendInstrumentFrame(successorFrame"));
+        assertTrue(replacement.contains("sendAmapFrame(successorFrame"));
+    }
+
+    @Test
+    public void handoffRecoveryAndRouteTokenFenceProtectActiveOutput() throws IOException {
+        String source = source(
+                "app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        int replacementStart = source.indexOf("boolean replaceDirectRoute(");
+        int replacementEnd = source.indexOf(
+                "\n    private static boolean isDirectOwner", replacementStart);
+        assertTrue(replacementStart >= 0 && replacementEnd > replacementStart);
+        String replacement = source.substring(replacementStart, replacementEnd);
+        assertTrue(replacement.contains(
+                "handoffPendingInstrumentRecovery = successorFrame == null"));
+
+        int sameOwnerStart = source.indexOf("if (routeActive && owner.equals(ownerPackage))");
+        int sameOwnerEnd = source.indexOf(
+                "\n        if (routeActive && ownerHasHudPriority", sameOwnerStart);
+        assertTrue(sameOwnerStart >= 0 && sameOwnerEnd > sameOwnerStart);
+        assertFalse(source.substring(sameOwnerStart, sameOwnerEnd).contains(
+                "handoffPendingInstrumentRecovery = false"));
+
+        int unavailableStart = source.indexOf("private void handleInstrumentUnavailable");
+        int unavailableEnd = source.indexOf(
+                "\n    static boolean shouldPreserveAmapFallbackForTest", unavailableStart);
+        assertTrue(unavailableStart >= 0 && unavailableEnd > unavailableStart);
+        String unavailable = source.substring(unavailableStart, unavailableEnd);
+        assertTrue(unavailable.contains("handoffPendingInstrumentRecovery"));
+        assertTrue(unavailable.indexOf("handoffPendingInstrumentRecovery")
+                < unavailable.indexOf("sendAmapTerminal(trace)"));
+
+        assertTrue(source.contains("trace.routeToken = routeToken;"));
+        assertTrue(source.contains("trace.routeToken != routeToken"));
+        assertTrue(source.contains("handoffPendingInstrumentRecovery = false;"));
+    }
+
+    @Test
     public void verifiedAmapMappingFeedsInstrumentNamespaceWithoutInventingExitNumbers() {
         int[] expected = {
                 0, 0, 1, 2, 3, 5, 7, 8, 9, 11, 45, 13, 24, 46, 47, 48, 49,

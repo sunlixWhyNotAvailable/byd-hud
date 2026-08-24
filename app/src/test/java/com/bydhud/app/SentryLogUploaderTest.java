@@ -10,6 +10,7 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
 import java.nio.file.Files;
+import java.util.Collections;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
 
@@ -37,6 +38,21 @@ public final class SentryLogUploaderTest {
 
         assertTrue(uploadId.matches("[0-9a-f]{8}"));
         assertEquals(uploadId, event.getTag("upload_id"));
+        assertEquals(Collections.singletonList("manual-navigation-upload:" + uploadId),
+                event.getFingerprints());
+    }
+
+    @Test
+    public void emptyUploadIdAndConfigurationKeepDefaultGrouping() {
+        SentryEvent logs = SentryLogUploader.buildManualUploadEvent(
+                "logs", "navigation_logs", "20260803", "");
+        SentryEvent configuration = SentryLogUploader.buildManualUploadEvent(
+                "configuration", "vehicle_configuration", "", "");
+
+        assertNull(logs.getTag("upload_id"));
+        assertNull(logs.getFingerprints());
+        assertNull(configuration.getTag("upload_id"));
+        assertNull(configuration.getFingerprints());
     }
 
     @Test

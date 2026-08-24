@@ -3,6 +3,7 @@ package com.bydhud.app;
 import android.content.Context;
 
 import java.io.File;
+import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.zip.ZipFile;
@@ -134,6 +135,7 @@ final class SentryLogUploader {
         }
         if (uploadId != null && !uploadId.isEmpty()) {
             event.setTag("upload_id", uploadId);
+            event.setFingerprints(Collections.singletonList("manual-navigation-upload:" + uploadId));
         }
         return event;
     }

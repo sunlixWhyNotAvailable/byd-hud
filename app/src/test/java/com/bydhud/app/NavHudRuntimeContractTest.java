@@ -381,6 +381,90 @@ public final class NavHudRuntimeContractTest {
     }
 
     @Test
+    public void DirectOwnerHandoffSelectsSuccessorBeforeAnyTerminalPath()
+            throws IOException {
+        String sender = source("NavHudLiveSender.java");
+        assertTrue(sender.contains("tbtPublisher.replaceDirectRoute("));
+
+        int wazeStart = sender.indexOf("private void onWazeDirectNavigationStarted");
+        int wazeStartEnd = sender.indexOf(
+                "\n    private void onWazeDirectFrame", wazeStart);
+        assertTrue(wazeStart >= 0 && wazeStartEnd > wazeStart);
+        assertTrue(sender.substring(wazeStart, wazeStartEnd)
+                .contains("tbtPublisher.beginRoute("));
+
+        int gmapsStart = sender.indexOf("private void onGMapsDirectNavigationStarted");
+        int gmapsStartEnd = sender.indexOf(
+                "\n    private void onGMapsDirectFrame", gmapsStart);
+        assertTrue(gmapsStart >= 0 && gmapsStartEnd > gmapsStart);
+        assertTrue(sender.substring(gmapsStart, gmapsStartEnd)
+                .contains("tbtPublisher.beginRoute("));
+
+        int wazeFrameStart = sender.indexOf("private void onWazeDirectFrame");
+        int wazeFrameEnd = sender.indexOf("\n    private void logWazeDirectTiming", wazeFrameStart);
+        assertTrue(wazeFrameStart >= 0 && wazeFrameEnd > wazeFrameStart);
+        String wazeFrame = sender.substring(wazeFrameStart, wazeFrameEnd);
+        assertTrue(wazeFrame.indexOf("replaceDirectRoute")
+                < wazeFrame.indexOf("tbtPublisher.publishFrame"));
+
+        int gmapsFrameStart = sender.indexOf("private void onGMapsDirectFrame");
+        int gmapsFrameEnd = sender.indexOf("\n    private void logGMapsDirectTiming", gmapsFrameStart);
+        assertTrue(gmapsFrameStart >= 0 && gmapsFrameEnd > gmapsFrameStart);
+        String gmapsFrame = sender.substring(gmapsFrameStart, gmapsFrameEnd);
+        assertTrue(gmapsFrame.indexOf("replaceDirectRoute")
+                < gmapsFrame.indexOf("tbtPublisher.publishFrame"));
+
+        int helperStart = sender.indexOf("private boolean handoffOrEndDirectRoute(");
+        int helperEnd = sender.indexOf("\n    private DirectTbtFrame latestRestorableWazeFrame", helperStart);
+        assertTrue(helperStart >= 0 && helperEnd > helperStart);
+        String helper = sender.substring(helperStart, helperEnd);
+        assertTrue(helper.indexOf("selectRemainingTbtRoute")
+                < helper.indexOf("tbtPublisher.endRoute"));
+
+        int wazeEndStart = sender.indexOf("private void onWazeDirectNavigationEnded");
+        int wazeEndEnd = sender.indexOf("\n    private void closeWazeForSupersedingInactiveLifecycle", wazeEndStart);
+        assertTrue(wazeEndStart >= 0 && wazeEndEnd > wazeEndStart);
+        String wazeEnd = sender.substring(wazeEndStart, wazeEndEnd);
+        assertTrue(wazeEnd.contains("handoffOrEndDirectRoute("));
+
+        int gmapsEndStart = sender.indexOf("private void onGMapsDirectNavigationEnded");
+        int gmapsEndEnd = sender.indexOf("\n    private void scheduleGMapsDirectTimeout", gmapsEndStart);
+        assertTrue(gmapsEndStart >= 0 && gmapsEndEnd > gmapsEndStart);
+        String gmapsEnd = sender.substring(gmapsEndStart, gmapsEndEnd);
+        assertTrue(gmapsEnd.contains("handoffOrEndDirectRoute("));
+
+        int observerStart = sender.indexOf("private void stopTbtObserver");
+        int observerEnd = sender.indexOf("\n    void refreshTbtObservers", observerStart);
+        assertTrue(observerStart >= 0 && observerEnd > observerStart);
+        String observer = sender.substring(observerStart, observerEnd);
+        assertTrue(observer.contains("handoffOrEndDirectRoute("));
+
+        int sourceSwitchStart = sender.indexOf("private void completeSourceSwitch");
+        int sourceSwitchEnd = sender.indexOf("\n    private boolean shouldRetainRouteForTbt", sourceSwitchStart);
+        assertTrue(sourceSwitchStart >= 0 && sourceSwitchEnd > sourceSwitchStart);
+        assertTrue(sender.substring(sourceSwitchStart, sourceSwitchEnd)
+                .contains("handoffOrEndDirectRoute("));
+
+        int stopStart = sender.indexOf("private void stopOnMain");
+        int stopEnd = sender.indexOf("\n    private void completeNavigationStop", stopStart);
+        assertTrue(stopStart >= 0 && stopEnd > stopStart);
+        assertTrue(sender.substring(stopStart, stopEnd)
+                .contains("handoffOrEndDirectRoute("));
+
+        int hardStopStart = sender.indexOf("private void hardStopDirectNavigatorsForPackageReplace");
+        int hardStopEnd = sender.indexOf("\n    private void", hardStopStart + 10);
+        assertTrue(hardStopStart >= 0 && hardStopEnd > hardStopStart);
+        assertFalse(sender.substring(hardStopStart, hardStopEnd)
+                .contains("handoffOrEndDirectRoute("));
+
+        int reinitStart = sender.indexOf("private void completeRuntimeResetAfterPackageReplace");
+        int reinitEnd = sender.indexOf("\n    private void", reinitStart + 10);
+        assertTrue(reinitStart >= 0 && reinitEnd > reinitStart);
+        assertFalse(sender.substring(reinitStart, reinitEnd)
+                .contains("handoffOrEndDirectRoute("));
+    }
+
+    @Test
     public void TextModeRepublishesOneProjectedFrameWithoutRouteLifecycleMutation()
             throws IOException {
         String sender = source("NavHudLiveSender.java");
@@ -397,7 +481,7 @@ public final class NavHudRuntimeContractTest {
         assertFalse(change.contains("resetTransport"));
 
         int effectiveStart = sender.indexOf("private DirectTbtFrame effectiveDirectFrame");
-        int effectiveEnd = sender.indexOf("\n    private void selectRemainingTbtRoute", effectiveStart);
+        int effectiveEnd = sender.indexOf("\n    private boolean selectRemainingTbtRoute", effectiveStart);
         String effective = sender.substring(effectiveStart, effectiveEnd);
         assertTrue(effective.contains("HudTextTransliterator.transformFrame"));
 

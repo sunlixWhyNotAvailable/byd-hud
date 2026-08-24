@@ -54,6 +54,7 @@ final class GMapsDirectChannel {
     private static final int MAX_FRAME_BYTES = 512 * 1024;
     private static final int MAX_BITMAP_DIMENSION = 256;
     static final int MAX_MANEUVER_BITMAP_CACHE = 64;
+    static final int MAX_ROUTE_PAYLOAD_HISTORY = 128;
     private static final long REGISTER_RETRY_MS = 5000L;
     private static final long PRODUCER_LEASE_MS = 5000L;
     private static final long LEASE_CHECK_MS = 2000L;
@@ -65,6 +66,8 @@ final class GMapsDirectChannel {
     private final Messenger inbound;
     private final GMapsDirectManeuverMap maneuverMap = new GMapsDirectManeuverMap();
     private final Map<String, ManeuverBitmap> maneuverBitmaps = newManeuverBitmapCache();
+    private final RoutePayloadResurrectionFence routePayloadFence =
+            new RoutePayloadResurrectionFence();
     private final Runnable registrationRetry = this::retryRegistration;
     private final Runnable leaseCheck = this::checkProducerLease;
 
@@ -187,6 +190,47 @@ final class GMapsDirectChannel {
                 return size() > MAX_MANEUVER_BITMAP_CACHE;
             }
         };
+    }
+
+    static final class RoutePayloadResurrectionFence {
+        private final Map<String, Boolean> acceptedPayloads =
+                new LinkedHashMap<String, Boolean>(
+                        MAX_ROUTE_PAYLOAD_HISTORY, 0.75f, true) {
+                    @Override
+                    protected boolean removeEldestEntry(
+                            Map.Entry<String, Boolean> eldest) {
+                        return size() > MAX_ROUTE_PAYLOAD_HISTORY;
+                    }
+                };
+        private int lastAcceptedCurrentStepIndex = -1;
+
+        boolean accepts(Integer currentStepIndex, String payloadDigest) {
+            if (currentStepIndex == null || currentStepIndex < 0) return true;
+            boolean digestAvailable = payloadDigest != null
+                    && !payloadDigest.isEmpty()
+                    && !"unavailable".equals(payloadDigest);
+            if (!digestAvailable) return true;
+            if (currentStepIndex < lastAcceptedCurrentStepIndex
+                    && acceptedPayloads.containsKey(payloadDigest)) {
+                return false;
+            }
+            acceptedPayloads.put(payloadDigest, Boolean.TRUE);
+            lastAcceptedCurrentStepIndex = currentStepIndex;
+            return true;
+        }
+
+        void reset() {
+            acceptedPayloads.clear();
+            lastAcceptedCurrentStepIndex = -1;
+        }
+
+        int size() {
+            return acceptedPayloads.size();
+        }
+
+        int lastAcceptedCurrentStepIndex() {
+            return lastAcceptedCurrentStepIndex;
+        }
     }
 
     private boolean handleMessageSafely(Message message, long handlerEntryElapsedMs) {
@@ -638,6 +682,16 @@ final class GMapsDirectChannel {
                 listener.onLog("frame ignored sequence=" + sequence + " shape=" + shape);
                 return;
             }
+            Integer currentStepIndex = integerValue(summary.get("currentStepIndex"));
+            String payloadDigest = sha256(payload);
+            if (!routePayloadFence.accepts(currentStepIndex, payloadDigest)) {
+                listener.onLog("frame ignored reason=payload-resurrection sequence="
+                        + sequence + " currentStepIndex=" + currentStepIndex
+                        + " lastAcceptedCurrentStepIndex="
+                        + routePayloadFence.lastAcceptedCurrentStepIndex()
+                        + " sha256=" + payloadDigest);
+                return;
+            }
             int wireValue = intValue(summary.get("maneuverEnum"), -1);
             int distance = Math.max(0, intValue(summary.get("distanceMeters"), 0));
             GMapsDirectManeuverMap.Result mapping = maneuverMap.map(wireValue, distance > 0);
@@ -824,6 +878,7 @@ final class GMapsDirectChannel {
         firstStructuredFrame = false;
         maneuverBitmaps.clear();
         maneuverMap.reset();
+        routePayloadFence.reset();
     }
 
     private void registerClient(String reason) {
@@ -1011,6 +1066,13 @@ final class GMapsDirectChannel {
         long number = ((Number) value).longValue();
         return number < Integer.MIN_VALUE || number > Integer.MAX_VALUE
                 ? fallback : (int) number;
+    }
+
+    private static Integer integerValue(Object value) {
+        if (!(value instanceof Number)) return null;
+        long number = ((Number) value).longValue();
+        return number < Integer.MIN_VALUE || number > Integer.MAX_VALUE
+                ? null : (int) number;
     }
 
     private static long longValue(Object value, long fallback) {

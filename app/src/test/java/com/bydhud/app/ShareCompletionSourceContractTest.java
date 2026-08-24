@@ -60,6 +60,8 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(zip.contains("+ (uploadId.isEmpty() ? \"\" : \"-\" + uploadId)"));
         String sentry = source("SentryLogUploader.java");
         assertTrue(sentry.contains("event.setTag(\"upload_id\", uploadId)"));
+        assertTrue(sentry.contains(
+                "event.setFingerprints(Collections.singletonList(\"manual-navigation-upload:\" + uploadId))"));
     }
 
     @Test

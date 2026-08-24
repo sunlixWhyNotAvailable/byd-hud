@@ -86,7 +86,7 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
-    public void snapshotCallbacksAndVersionUseBeta7Contract() throws IOException {
+    public void snapshotCallbacksAndVersionUseCurrentContract() throws IOException {
         String activity = sourcePath("app/src/main/java/com/bydhud/app/MainActivity.java");
         String gradle = sourcePath("app/build.gradle.kts");
 
@@ -96,8 +96,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 90"));
-        assertTrue(gradle.contains("versionName = \"2.4.0-beta.8\""));
+        assertTrue(gradle.contains("versionCode = 91"));
+        assertTrue(gradle.contains("versionName = \"2.4.0-beta.9\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {
