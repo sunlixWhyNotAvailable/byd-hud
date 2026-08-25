@@ -17,6 +17,8 @@ public final class StorageAndLogsUiSourceContractTest {
     public void storageTabUsesAcceptedThreeColumnLogControls() throws IOException {
         String source = source();
         String storage = between(source, "private fun StorageTab(", "private fun PatchTab(");
+        String logControls = between(
+                storage, "item(key = \"navigation-log-controls\")", "items(");
 
         assertFalse(source.contains("private fun LogsTab("));
         assertFalse(source.contains("RuntimeTab.Logs"));
@@ -41,6 +43,7 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(storage.contains(".width(232.dp)"));
         assertTrue(storage.contains("width = 180.dp"));
         assertTrue(storage.contains("verticalAlignment = Alignment.Top"));
+        assertTrue(logControls.contains("horizontalArrangement = Arrangement.SpaceBetween"));
         assertTrue(storage.contains(".align(Alignment.CenterVertically)"));
         assertTrue(source.contains(
                 "activity.composeTryStartBlockingUiFlow(\"configuration-share\")"));

@@ -34,7 +34,6 @@ final class NavHudLiveSender {
     private static final long WAZE_VISUAL_FRESH_MS = 2500L;
     private static final long WAZE_ROUTE_NODE_FRESH_MS = 3000L;
     private static final long WAZE_ROUTE_FIELD_TTL_MS = WAZE_ROUTE_NODE_FRESH_MS;
-    private static final long DASHBOARD_WATCHDOG_INTERVAL_MS = 5000L;
     private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
     private static final long WAZE_ROUTE_STATE_REQUEST_INTERVAL_MS = 5000L;
     private static final long WAZE_SPEED_LIMIT_EXPIRY_MS = 60_000L;
@@ -503,7 +502,6 @@ final class NavHudLiveSender {
     private long lastVisualResultMs;
     private long lastWazeRouteNodeResultMs;
     private long latestRouteStateMs;
-    private long lastDashboardWatchdogMs;
     private boolean lastWazeRouteNodeScanHadRoute;
     private boolean firstNavAfterPackageReplaceAwaitingSomeIp;
     private long firstNavAfterPackageReplaceConnectStartMs;
@@ -644,7 +642,6 @@ final class NavHudLiveSender {
             if (!active) {
                 return;
             }
-            maybeRepairDashboardProjection(SystemClock.elapsedRealtime(), "send-loop");
             sendLatestIfReady("loop");
             scheduleSendLoop();
         }
@@ -4583,7 +4580,6 @@ final class NavHudLiveSender {
         updateCaptureIngressPolicy();
         reconcileTbtOwnershipForHud(packageName);
         updateTbtOwnerPriority(packageName);
-        lastDashboardWatchdogMs = 0L;
         log("start package=" + packageName + " reason=" + reason);
         if (WAZE_PACKAGE.equals(packageName)) {
             if (!resumeExistingDirectRouteForHud(packageName, reason)) {
@@ -5519,31 +5515,6 @@ final class NavHudLiveSender {
             return true;
         }
         return WAZE_PACKAGE.equals(NavAppDisplayController.get(context).persistedDashboardPackage());
-    }
-
-    //repairs lost app-owned dashboard projection without adding another service or a tight polling loop.
-    private void maybeRepairDashboardProjection(long now, String reason) {
-        if (!active || !WAZE_PACKAGE.equals(activePackage)) {
-            return;
-        }
-        if (now - lastDashboardWatchdogMs < DASHBOARD_WATCHDOG_INTERVAL_MS) {
-            return;
-        }
-        lastDashboardWatchdogMs = now;
-        String packageName = NavAppDisplayController.get(context).persistedDashboardPackage();
-        if (!WAZE_PACKAGE.equals(packageName)) {
-            return;
-        }
-        if (ClusterProjectionService.isProjectedPackageCurrent(packageName)) {
-            return;
-        }
-        log("dashboard watchdog restore package=" + packageName
-                + " reason=" + safeReason(reason));
-        ClusterProjectionService.startProjection(
-                context,
-                packageName,
-                NavAppDisplayController.get(context).persistedDashboardMode(),
-                "watchdog:" + safeReason(reason));
     }
 
     //clears route text before send so looped HUD frames cannot keep stale distance or street.

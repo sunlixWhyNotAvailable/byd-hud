@@ -80,6 +80,21 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
+    public void navigationSenderCannotResurrectDashboardProjection() throws Exception {
+        java.nio.file.Path file = Paths.get(
+                "app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
+        if (!Files.exists(file)) {
+            file = Paths.get("src/main/java/com/bydhud/app/NavHudLiveSender.java");
+        }
+        String source = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+
+        assertFalse(source.contains("DASHBOARD_WATCHDOG_INTERVAL_MS"));
+        assertFalse(source.contains("lastDashboardWatchdogMs"));
+        assertFalse(source.contains("maybeRepairDashboardProjection"));
+        assertFalse(source.contains("\"watchdog:\""));
+    }
+
+    @Test
     public void autoContainerPolicyOnlySelectsExplicitTransitions() {
         assertEquals(16, NavAppDisplayController.autoContainerValueForTest(
                 true, HudPrefs.DASHBOARD_MODE_FULL, true));

@@ -3604,7 +3604,7 @@ private fun StorageTab(
                     .fillMaxWidth()
                     .padding(14.dp),
                 verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 CodeBlock(
                     text = if (!snapshot.storageCacheAvailable) {

@@ -41,7 +41,7 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Dashboard control | Move a running navigator between displays, choose its screen mode, and tune the projection window |
 | Navigator downloads | Download and validate the fixed navigator assets currently offered in the `Apps` tab |
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
-| Logs and storage | Record diagnostics and performance data, manage logs by day, and share only the selected data |
+| Storage and logs | Record diagnostics and performance data, manage logs by day, and share only the selected data |
 | Updates | Stable releases by default, with an optional beta channel |
 | Manual testing | Send diagnostic navigation fields through the supported windshield-HUD and dashboard-card outputs |
 
@@ -247,20 +247,19 @@ Back up important navigator data and sign in to its account before patching. The
 
 `ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and the runtime cleanly.
 
-## Logs, storage, and privacy
+## Storage, logs, and privacy
 
 BYD HUD stores navigation evidence in day folders so one trip can be shared without exposing unrelated days.
 
-<p align="center"><img src="docs/screenshots/en/storage.png" alt="Daily log storage and sharing" width="100%"></p>
-
-<p align="center"><img src="docs/screenshots/en/logs.png" alt="Logcat and configuration diagnostics" width="100%"></p>
-
-### Storage tab
+### Storage and logs tab
 
 - shows current log size and the configured size limit;
 - groups navigation logs, snapshots, screenshots, and optional logcat by day;
+- shows the private and public navigation-log folder locations;
 - shares or deletes only the selected days;
-- shows file count, archive size, and a sensitive-data warning before creating a ZIP.
+- shows file count, archive size, and a sensitive-data warning before creating a ZIP;
+- uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
+- provides `Share configuration` for a smaller diagnostic archive containing device, permission, network, patcher, and navigation-output details.
 
 Archive preparation uses a persistent progress card that remains visible across tabs and can be stopped safely. It stacks with Waze and Google Maps patch cards instead of overlapping them.
 
@@ -271,13 +270,7 @@ Archive preparation uses a persistent progress card that remains visible across 
 
 After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears exactly the day checkboxes captured for that archive. Archive, chooser, upload, or cancellation failure keeps the selection. Days selected while an upload is running remain selected.
 
-### Logs tab
-
-- `Start Logcat` starts an explicit system log recording and, with authorized ADB, captures the initial performance state;
-- `Stop Logcat` ends the current recording;
-- `Share configuration` creates a smaller diagnostic archive for the device, permissions, network, patcher, and navigation-output setup.
-
-With authorized ADB, `Start Logcat` records all system log buffers and `Stop Logcat` adds final frame and system metrics. Without ADB, the same two-button flow records the buffers and diagnostics available to the app. There are no fixed-duration presets. Configuration sharing works without ADB; an already-authorized bridge only adds more read-only system diagnostics. Sharing does not request ADB access and does not enable telemetry.
+With authorized ADB, starting Logcat records all system log buffers and captures the initial performance state; stopping it adds final frame and system metrics. Without ADB, the same stateful button records the buffers and diagnostics available to the app. There are no fixed-duration presets. Configuration sharing works without ADB; an already-authorized bridge only adds more read-only system diagnostics. Sharing does not request ADB access and does not enable telemetry.
 
 BYD HUD does not automatically send crash reports, performance traces, screenshots, screen recordings, or navigation logs to the Sentry service. Read the complete policy in [PRIVACY.md](PRIVACY.md).
 
@@ -365,11 +358,11 @@ Open a [GitHub issue](https://github.com/sunlixWhyNotAvailable/byd-hud/issues) a
 For a navigation-output problem:
 
 1. Reproduce it with `Save diagnostic screenshots and extended logs` enabled when possible.
-2. Open `Storage` and select only the affected day.
+2. Open `Storage and logs` and select only the affected day.
 3. Press `Share selected` and choose your messenger or `Send to developer`.
 4. Disable detailed diagnostics after the test to reduce storage use.
 
-For a permission, device, patcher, or startup problem, use `Logs -> Share configuration` instead.
+For a permission, device, patcher, or startup problem, use `Storage and logs -> Share configuration` instead.
 
 > Navigation archives may contain coordinates, searched destinations, street names, notification text, screenshots, and device identifiers. Review the warning before sharing and use only the minimum required day.
 
