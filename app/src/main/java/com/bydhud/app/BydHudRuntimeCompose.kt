@@ -129,7 +129,6 @@ private enum class RuntimeTab {
     Apps,
     Storage,
     Patch,
-    Logs,
     Manual
 }
 
@@ -203,7 +202,6 @@ private data class Copy(
     val subtitle: String,
     val main: String,
     val apps: String,
-    val logs: String,
     val manual: String,
     val hudRunning: String,
     val hudIdle: String,
@@ -326,20 +324,9 @@ private data class Copy(
     val sendMain: String,
     val startAppFirst: String,
     val noBackgroundApps: String,
-    val logsHint: String,
-    val logcatRecorder: String,
-    val recorderStatus: String,
-    val waiting: String,
-    val logcatWaiting: String,
-    val logcatRecording: String,
-    val logcatSaving: String,
-    val logcatSaved: String,
     val startLogcat: String,
     val stopLogcat: String,
     val shareConfiguration: String,
-    val applicationState: String,
-    val navigationLogs: String,
-    val pathHint: String,
     val storage: String,
     val storageHint: String,
     val storageSettings: String,
@@ -644,7 +631,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             RuntimeTab.Apps -> activity.composeRequestRuntimeUiStateRefresh(false, reason)
             RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
             RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(reason)
-            RuntimeTab.Logs,
             RuntimeTab.Options,
             RuntimeTab.Manual -> Unit
         }
@@ -923,7 +909,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         RuntimeTab.Apps -> activity.composeRequestPatchUiStateRefresh(
                             "activity-resume-apps"
                         )
-                        RuntimeTab.Logs,
                         RuntimeTab.Options,
                         RuntimeTab.Manual -> Unit
                     }
@@ -1219,6 +1204,16 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         copy = copy,
                         palette = palette,
                         snapshot = snapshot,
+                        configurationShareBusy = configurationShareBusy,
+                        logcatBusy = logcatBusy,
+                        onStartLogcat = { runLogcatAction(true) },
+                        onStopLogcat = { runLogcatAction(false) },
+                        onShareConfiguration = {
+                            if (!configurationShareBusy
+                                && activity.composeTryStartBlockingUiFlow("configuration-share")) {
+                                configurationShareVisible = true
+                            }
+                        },
                         sortOldestFirst = storageSortOldestFirst,
                         selectedDays = selectedStorageDays,
                         storageActionBusy = storageDeleteBusy || storageShareBusy,
@@ -1238,22 +1233,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             }
                         },
                         onShareSelected = ::beginStorageShare
-                    )
-                    RuntimeTab.Logs -> LogsTab(
-                        copy = copy,
-                        palette = palette,
-                        snapshot = snapshot,
-                        activity = activity,
-                        configurationShareBusy = configurationShareBusy,
-                        logcatBusy = logcatBusy,
-                        onStartLogcat = { runLogcatAction(true) },
-                        onStopLogcat = { runLogcatAction(false) },
-                        onShareConfiguration = {
-                            if (!configurationShareBusy
-                                && activity.composeTryStartBlockingUiFlow("configuration-share")) {
-                                configurationShareVisible = true
-                            }
-                        }
                     )
                     RuntimeTab.Patch -> PatchTab(
                         copy = copy,
@@ -3432,100 +3411,15 @@ private fun AppRow(
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun LogsTab(
-    copy: Copy,
-    palette: Palette,
-    snapshot: MainActivity.ComposeSnapshot,
-    activity: MainActivity,
-    configurationShareBusy: Boolean,
-    logcatBusy: Boolean,
-    onStartLogcat: () -> Unit,
-    onStopLogcat: () -> Unit,
-    onShareConfiguration: () -> Unit
-) {
-    val privacy = if (copy.language == Language.Ua) {
-        "Запис містить системні логи. Перевірте файли перед поширенням; автоматичного завантаження немає."
-    } else {
-        "The capture contains system logs. Review it before sharing; nothing is uploaded automatically."
-    }
-    LazyPageSurface(copy.logs, copy.logsHint, palette) {
-        item(key = "log-status") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Section(copy.logcatRecorder, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(copy.recorderStatus, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        Text(localizedLogcatStatus(snapshot.logcatStatus, copy), color = palette.muted, fontSize = 13.sp)
-                    }
-                    Pill(if (snapshot.logcatRecording) "recording" else copy.waiting, palette.yellow, palette.yellowSoft)
-                }
-                Divider(palette)
-                Row(
-                    modifier = Modifier.padding(14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    HudButton(
-                        copy.startLogcat,
-                        palette,
-                        primary = !snapshot.logcatRecording,
-                        enabled = !snapshot.logcatRecording && !logcatBusy,
-                        width = 0.dp,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        onStartLogcat()
-                    }
-                    HudButton(
-                        copy.stopLogcat,
-                        palette,
-                        primary = snapshot.logcatRecording,
-                        enabled = snapshot.logcatRecording && !logcatBusy,
-                        width = 0.dp,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        onStopLogcat()
-                    }
-                    HudButton(
-                        copy.shareConfiguration,
-                        palette,
-                        primary = false,
-                        enabled = !configurationShareBusy,
-                        width = 0.dp,
-                        modifier = Modifier.weight(1f),
-                        onClick = onShareConfiguration
-                    )
-                }
-                Text(
-                    privacy,
-                    color = palette.muted,
-                    fontSize = 12.sp,
-                    modifier = Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp)
-                )
-                }
-                Section(copy.applicationState, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
-                    CodeBlock(snapshot.applicationState, palette, compact = true, modifier = Modifier.padding(14.dp))
-                }
-            }
-        }
-
-        item(key = "navigation-log-paths") {
-            Section(copy.navigationLogs, palette) {
-                CodeBlock(snapshot.logPaths + "\n\n" + copy.pathHint, palette, compact = true, modifier = Modifier.padding(14.dp))
-            }
-        }
-    }
-}
-
-@Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun StorageTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
+    configurationShareBusy: Boolean,
+    logcatBusy: Boolean,
+    onStartLogcat: () -> Unit,
+    onStopLogcat: () -> Unit,
+    onShareConfiguration: () -> Unit,
     sortOldestFirst: Boolean,
     selectedDays: List<String>,
     storageActionBusy: Boolean,
@@ -3644,38 +3538,79 @@ private fun StorageTab(
                 Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
+                    .padding(14.dp),
+                verticalAlignment = Alignment.Top,
                 horizontalArrangement = Arrangement.spacedBy(10.dp)
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    if (!snapshot.storageCacheAvailable) {
-                        Text(coldStorageText, color = palette.muted, fontSize = 14.sp)
+                CodeBlock(
+                    text = if (!snapshot.storageCacheAvailable) {
+                        coldStorageText
                     } else {
-                        snapshot.navCaptureFolderPaths.forEachIndexed { index, path ->
-                            if (index > 0) Spacer(Modifier.height(6.dp))
-                            ReadOnlyPathField(path, palette, modifier = Modifier.fillMaxWidth())
-                        }
+                        snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
+                            val location = if (path.trimEnd('/').endsWith(
+                                    "/Documents/BYD-HUD", ignoreCase = true
+                                )) {
+                                copy.publicStorageLocation
+                            } else {
+                                copy.privateStorageLocation
+                            }
+                            "$location:\n$path"
+                        }.ifBlank { copy.storageNoDayFolders }
+                    },
+                    palette = palette,
+                    compact = true,
+                    modifier = Modifier.width(430.dp)
+                )
+                Column(
+                    modifier = Modifier.width(300.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    HudButton(
+                        if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
+                        palette,
+                        primary = true,
+                        enabled = !storageActionBusy && !logcatBusy,
+                        width = 0.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()
+                    }
+                    HudButton(
+                        copy.shareConfiguration,
+                        palette,
+                        primary = false,
+                        enabled = !storageActionBusy && !configurationShareBusy,
+                        width = 0.dp,
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onShareConfiguration
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .width(232.dp)
+                        .align(Alignment.CenterVertically),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+                ) {
+                    HudIconButton(
+                        icon = R.drawable.ic_share,
+                        contentDescription = copy.shareSelected,
+                        palette = palette,
+                        tint = palette.accent,
+                        enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
+                        onClick = { onShareSelected(selectedDayNames) }
+                    )
+                    HudButton(
+                        if (sortOldestFirst) copy.sortByName else copy.sortByDate,
+                        palette,
+                        primary = false,
+                        enabled = snapshot.storageCacheAvailable && !storageSortBusy,
+                        width = 180.dp
+                    ) {
+                        onSortOldestFirst(!sortOldestFirst)
                     }
                 }
-                HudIconButton(
-                    icon = R.drawable.ic_share,
-                    contentDescription = copy.shareSelected,
-                    palette = palette,
-                    tint = palette.accent,
-                    enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
-                    onClick = { onShareSelected(selectedDayNames) }
-                )
-                HudButton(
-                    if (sortOldestFirst) copy.sortByName else copy.sortByDate,
-                    palette,
-                    primary = false,
-                    enabled = snapshot.storageCacheAvailable && !storageSortBusy,
-                    width = 190.dp
-                ) {
-                    onSortOldestFirst(!sortOldestFirst)
-                }
-                }
+            }
                 if (days.isEmpty()) {
                     Divider(palette)
                     Text(
@@ -3920,18 +3855,6 @@ private fun PatchTab(
         }
 
     }
-}
-
-private fun localizedLogcatStatus(status: String, copy: Copy): String {
-    val lines = status.split('\n', limit = 2)
-    val localized = when (lines.firstOrNull()) {
-        LogcatRecorder.STATUS_WAITING, "" -> copy.logcatWaiting
-        LogcatRecorder.STATUS_RECORDING -> copy.logcatRecording
-        LogcatRecorder.STATUS_SAVING -> copy.logcatSaving
-        LogcatRecorder.STATUS_SAVED -> copy.logcatSaved
-        else -> lines.first()
-    }
-    return if (lines.size == 1) localized else "$localized\n${lines[1]}"
 }
 
 private fun selectedPatchVersion(row: MainActivity.ComposeNavigatorPatchRow): String {
@@ -4383,29 +4306,6 @@ private fun ReadOnlyValueField(
 }
 
 @Composable
-//renders the public storage path without implying it is editable.
-private fun ReadOnlyPathField(text: String, palette: Palette, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .height(42.dp)
-            .clip(RoundedCornerShape(7.dp))
-            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-            .background(palette.field)
-            .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text,
-            color = palette.muted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 13.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
-    }
-}
-
-@Composable
 //guards storage-limit selection with a real draggable control and no zero-weight endpoint layout.
 private fun StorageLimitSlider(
     limit: Int,
@@ -4552,9 +4452,9 @@ private fun StorageDayRow(
 }
 
 private fun storageLocationLabel(day: MainActivity.ComposeStorageDay, copy: Copy): String = when {
-    day.hasPublicStorage && day.hasPrivateStorage -> copy.bothStorageLocations
-    day.hasPublicStorage -> copy.publicStorageLocation
-    else -> copy.privateStorageLocation
+    day.hasPublicStorage && day.hasPrivateStorage -> copy.bothStorageLocations.lowercase(Locale.ROOT)
+    day.hasPublicStorage -> copy.publicStorageLocation.lowercase(Locale.ROOT)
+    else -> copy.privateStorageLocation.lowercase(Locale.ROOT)
 }
 
 @Composable
@@ -5736,7 +5636,6 @@ private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSel
         TabButton(copy.main, RuntimeTab.Options, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.storage, RuntimeTab.Storage, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.patch, RuntimeTab.Patch, selected, palette, Modifier.weight(1f), onSelect)
-        TabButton(copy.logs, RuntimeTab.Logs, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.manual, RuntimeTab.Manual, selected, palette, Modifier.weight(1f), onSelect)
     }
 }
@@ -5790,7 +5689,6 @@ private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
 private fun iconFor(tab: RuntimeTab): Int = when (tab) {
     RuntimeTab.Options -> R.drawable.ic_tab_options
     RuntimeTab.Apps -> R.drawable.ic_tab_apps
-    RuntimeTab.Logs -> R.drawable.ic_tab_logs
     RuntimeTab.Storage -> R.drawable.ic_tab_storage
     RuntimeTab.Patch -> R.drawable.ic_tab_patch
     RuntimeTab.Manual -> R.drawable.ic_tab_manual
@@ -5956,7 +5854,6 @@ private fun enCopy() = Copy(
     subtitle = "HUD navigation output | v${BuildConfig.VERSION_NAME}",
     main = "Options",
     apps = "Apps",
-    logs = "Logs",
     patch = "Patch",
     manual = "Manual",
     hudRunning = "HUD: running",
@@ -6080,31 +5977,20 @@ private fun enCopy() = Copy(
     sendMain = "Send to main",
     startAppFirst = "Start app first",
     noBackgroundApps = "Supported apps are not duplicated here. This list shows only current non-system background apps.",
-    logsHint = "Capture bounded full-system diagnostics and navigation artifact paths.",
-    logcatRecorder = "Logcat recorder",
-    recorderStatus = "Recorder status",
-    waiting = "waiting",
-    logcatWaiting = "Waiting to record",
-    logcatRecording = "Recording log",
-    logcatSaving = "Saving log",
-    logcatSaved = "Log saved",
     startLogcat = "Start Logcat",
     stopLogcat = "Stop Logcat",
     shareConfiguration = "Share configuration",
-    applicationState = "Application state",
-    navigationLogs = "Navigation logs",
-    pathHint = "Path to navigation logs on tablet.",
-    storage = "Storage",
-    storageHint = "Navigation log retention and cleanup controls.",
+    storage = "Storage and logs",
+    storageHint = "Navigation log recording, sharing, retention, and cleanup controls.",
     storageSettings = "Storage settings",
     navLogsFolderLimit = "Navigation logs folder limit",
     navLogsFolderLimitHint = "Old data is deleted while the app is running when this folder exceeds the limit.",
     storageLimitGb = "Limit, GB",
     currentNavLogsSize = "Current navigation logs folder size",
     navigationLogsFolder = "Navigation logs folder",
-    privateStorageLocation = "private folder",
-    publicStorageLocation = "public folder",
-    bothStorageLocations = "public and private folders",
+    privateStorageLocation = "Private folder",
+    publicStorageLocation = "Public folder",
+    bothStorageLocations = "Public and private folders",
     shareSelected = "Share selected",
     sortByDate = "Newest first",
     sortByName = "Oldest first",
@@ -6184,7 +6070,6 @@ private fun uaCopy() = enCopy().copy(
     subtitle = "Виведення навігації на HUD | v${BuildConfig.VERSION_NAME}",
     main = "Налаштування",
     apps = "Застосунки",
-    logs = "Логи",
     patch = "Патч",
     manual = "Ручний",
     hudRunning = "HUD: працює",
@@ -6304,31 +6189,20 @@ private fun uaCopy() = enCopy().copy(
     sendMain = "На основний екран",
     startAppFirst = "Спочатку запусти",
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
-    logsHint = "Збір обмеженої повносистемної діагностики та шляхів до навігаційних логів.",
-    logcatRecorder = "Запис logcat",
-    recorderStatus = "Стан запису",
-    waiting = "очікування",
-    logcatWaiting = "Очікування запису",
-    logcatRecording = "Йде запис логу",
-    logcatSaving = "Збереження логу",
-    logcatSaved = "Лог збережено",
     startLogcat = "Почати Logcat",
     stopLogcat = "Зупинити Logcat",
     shareConfiguration = "Поділитись конф-єю",
-    applicationState = "Стан застосунку",
-    navigationLogs = "Навігаційні логи",
-    pathHint = "Шлях до навігаційних логів на планшеті.",
-    storage = "Сховище",
-    storageHint = "Зберігання й очищення навігаційних логів.",
+    storage = "Сховище та логи",
+    storageHint = "Запис, поширення, зберігання й очищення навігаційних логів.",
     storageSettings = "Налаштування сховища",
     navLogsFolderLimit = "Ліміт теки з журналом навігації",
     navLogsFolderLimitHint = "Старі дані видаляються під час роботи застосунку, коли тека перевищує ліміт.",
     storageLimitGb = "Ліміт, ГБ",
     currentNavLogsSize = "Поточний розмір теки з журналом навігації",
     navigationLogsFolder = "Тека журналу навігації",
-    privateStorageLocation = "приватна тека",
-    publicStorageLocation = "публічна тека",
-    bothStorageLocations = "публічна та приватна теки",
+    privateStorageLocation = "Приватна тека",
+    publicStorageLocation = "Публічна тека",
+    bothStorageLocations = "Публічна та приватна теки",
     shareSelected = "Поділитися вибраним",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",

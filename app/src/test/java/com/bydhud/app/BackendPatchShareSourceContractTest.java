@@ -25,7 +25,7 @@ public final class BackendPatchShareSourceContractTest {
         assertTrue(onResume.contains("requestRuntimeUiStateRefresh(this, true"));
         assertTrue(tabRefresh.contains(
                 "RuntimeTab.Apps -> activity.composeRequestRuntimeUiStateRefresh(false, reason)"));
-        assertTrue(tabRefresh.contains("RuntimeTab.Logs,"));
+        assertFalse(tabRefresh.contains("RuntimeTab.Logs"));
         assertFalse(tabRefresh.contains("composeRequestRuntimeUiStateRefresh(true, reason)"));
         assertTrue(asset.contains("if (!next.equals(navigatorAssetSnapshots))"));
         assertTrue(asset.contains("publishSharedUiStateChange();"));
