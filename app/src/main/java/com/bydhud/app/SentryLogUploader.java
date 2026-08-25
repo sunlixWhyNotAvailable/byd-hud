@@ -6,6 +6,8 @@ import java.io.File;
 import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipFile;
 
 import io.sentry.Attachment;
@@ -14,8 +16,10 @@ import io.sentry.Sentry;
 import io.sentry.SentryEvent;
 import io.sentry.SentryLevel;
 import io.sentry.android.core.SentryAndroid;
+import io.sentry.hints.SubmissionResult;
 import io.sentry.protocol.Message;
 import io.sentry.protocol.SentryId;
+import io.sentry.util.HintUtils;
 
 // Sends only an explicitly selected diagnostic archive; no automatic telemetry is enabled.
 final class SentryLogUploader {
@@ -30,6 +34,26 @@ final class SentryLogUploader {
             this.ok = ok;
             this.eventId = eventId == null ? "" : eventId;
             this.detail = detail == null ? "" : detail;
+        }
+    }
+
+    static final class SubmissionResultTracker implements SubmissionResult {
+        private final CountDownLatch completion = new CountDownLatch(1);
+        private volatile boolean success;
+
+        @Override
+        public void setResult(boolean result) {
+            success = result;
+            completion.countDown();
+        }
+
+        @Override
+        public boolean isSuccess() {
+            return success;
+        }
+
+        boolean await(long timeoutMs) throws InterruptedException {
+            return completion.await(timeoutMs, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -65,6 +89,7 @@ final class SentryLogUploader {
             LogShareZip.deleteArtifact(archive);
             return new Result(false, "", validation);
         }
+        boolean transportSucceeded = false;
         try {
             SentryAndroid.init(context.getApplicationContext(), options -> {
                 options.setDsn(BuildConfig.SENTRY_DSN);
@@ -96,21 +121,39 @@ final class SentryLogUploader {
             Hint hint = new Hint();
             hint.addAttachment(new Attachment(
                     archive.getAbsolutePath(), archive.getName(), "application/zip"));
+            SubmissionResultTracker submissionResult = new SubmissionResultTracker();
+            HintUtils.setTypeCheckHint(hint, submissionResult);
             SentryId eventId = Sentry.captureEvent(event, hint);
             if (SentryId.EMPTY_ID.equals(eventId)) {
-                return new Result(false, "", "Sentry did not accept the upload");
+                return new Result(false, "", "Sentry did not accept the upload; archive retained: "
+                        + archive.getName());
             }
-            Sentry.flush(30_000L);
+            boolean callbackCompleted = submissionResult.await(30_000L);
+            if (!callbackCompleted || !submissionResult.isSuccess()) {
+                String detail = callbackCompleted
+                        ? "Sentry did not deliver the upload"
+                        : "Sentry upload timed out";
+                return new Result(false, "", detail + "; archive retained: "
+                        + archive.getName());
+            }
+            transportSucceeded = true;
             return new Result(true, eventId.toString(), "uploaded");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return new Result(false, "", "Upload interrupted; archive retained: "
+                    + archive.getName());
         } catch (Throwable error) {
             return new Result(false, "", error.getClass().getSimpleName() + ": "
-                    + String.valueOf(error.getMessage()));
+                    + String.valueOf(error.getMessage()) + "; archive retained: "
+                    + archive.getName());
         } finally {
             try {
                 Sentry.close();
             } catch (Throwable ignored) {
             }
-            LogShareZip.deleteArtifact(archive);
+            if (transportSucceeded) {
+                LogShareZip.deleteArtifact(archive);
+            }
         }
     }
 

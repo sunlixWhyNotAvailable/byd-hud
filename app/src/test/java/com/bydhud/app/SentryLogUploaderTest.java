@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
@@ -9,7 +10,10 @@ import org.junit.Test;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.RandomAccessFile;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Collections;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipOutputStream;
@@ -53,6 +57,55 @@ public final class SentryLogUploaderTest {
         assertNull(logs.getFingerprints());
         assertNull(configuration.getTag("upload_id"));
         assertNull(configuration.getFingerprints());
+    }
+
+    @Test
+    public void submissionTrackerCoversPendingTimeoutFalseAndTrue() throws Exception {
+        SentryLogUploader.SubmissionResultTracker pending =
+                new SentryLogUploader.SubmissionResultTracker();
+        assertFalse(pending.await(0L));
+
+        SentryLogUploader.SubmissionResultTracker rejected =
+                new SentryLogUploader.SubmissionResultTracker();
+        rejected.setResult(false);
+        assertTrue(rejected.await(1L));
+        assertFalse(rejected.isSuccess());
+
+        SentryLogUploader.SubmissionResultTracker accepted =
+                new SentryLogUploader.SubmissionResultTracker();
+        accepted.setResult(true);
+        assertTrue(accepted.await(1L));
+        assertTrue(accepted.isSuccess());
+    }
+
+    @Test
+    public void failedAndTimedOutUploadsRetainArchiveWhileSuccessDeletesIt() throws Exception {
+        Path path = Paths.get("app/src/main/java/com/bydhud/app/SentryLogUploader.java");
+        if (!Files.exists(path)) {
+            path = Paths.get("src/main/java/com/bydhud/app/SentryLogUploader.java");
+        }
+        String source = new String(Files.readAllBytes(path),
+                StandardCharsets.UTF_8);
+        int upload = source.indexOf("boolean transportSucceeded = false;");
+        int finallyStart = source.indexOf("} finally {", upload);
+        int cleanup = source.indexOf("LogShareZip.deleteArtifact(archive)", finallyStart);
+        assertTrue(upload >= 0 && finallyStart > upload && cleanup > finallyStart);
+        assertTrue(source.indexOf("LogShareZip.deleteArtifact(archive)", upload) == cleanup);
+        assertTrue(source.indexOf("LogShareZip.deleteArtifact(archive)", cleanup + 1) < 0);
+        assertTrue(source.substring(finallyStart, cleanup).contains(
+                "if (transportSucceeded)"));
+        assertTrue(source.contains("submissionResult.await(30_000L)"));
+        assertFalse(source.contains("Sentry.flush("));
+        assertTrue(source.contains("HintUtils.setTypeCheckHint(hint, submissionResult)"));
+        int capture = source.indexOf("Sentry.captureEvent(event, hint)", upload);
+        int accepted = source.indexOf("SentryId.EMPTY_ID.equals(eventId)", capture);
+        int await = source.indexOf("submissionResult.await(30_000L)", accepted);
+        int requireSuccess = source.indexOf("!submissionResult.isSuccess()", await);
+        int confirmed = source.indexOf("transportSucceeded = true;", requireSuccess);
+        int success = source.indexOf("return new Result(true, eventId.toString()", confirmed);
+        assertTrue(capture > upload && accepted > capture && await > accepted
+                && requireSuccess > await
+                && confirmed > requireSuccess && success > confirmed);
     }
 
     @Test
