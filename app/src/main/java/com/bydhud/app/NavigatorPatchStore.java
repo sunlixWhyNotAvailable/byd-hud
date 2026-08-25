@@ -973,24 +973,37 @@ final class NavigatorPatchStore {
 
     static synchronized boolean dismiss(Context context, Profile profile) {
         if (profile == null) return false;
+        boolean local = localOperation(context, profile);
         OperationSnapshot current = operation(context, profile);
         if (!(FAILED.equals(current.phase) || CANCELLED.equals(current.phase)
                 || VERIFIED.equals(current.phase))) return false;
         File transaction = transactionDirectory(context, profile);
-        clearTransactionMetadata(context, profile);
+        if (shouldDismissLegacyGlobal(local, current, profile)) {
+            clearLegacyTerminal(context);
+        } else {
+            clearTransactionMetadata(context, profile);
+            prefs(context).edit()
+                    .putString(profileKey(profile, KEY_OPERATION_PHASE), IDLE)
+                    .putString(profileKey(profile, KEY_OPERATION_DETAIL), "")
+                    .putString(profileKey(profile, KEY_OPERATION_ERROR), "")
+                    .putInt(profileKey(profile, KEY_OPERATION_PROGRESS), 0)
+                    .putLong(profileKey(profile, KEY_READY_AT), 0L)
+                    .putBoolean(profileKey(profile, KEY_CANCEL_REQUESTED), false)
+                    .commit();
+        }
         releaseInstall(context, profile);
-        prefs(context).edit()
-                .putString(profileKey(profile, KEY_OPERATION_PHASE), IDLE)
-                .putString(profileKey(profile, KEY_OPERATION_DETAIL), "")
-                .putString(profileKey(profile, KEY_OPERATION_ERROR), "")
-                .putInt(profileKey(profile, KEY_OPERATION_PROGRESS), 0)
-                .putLong(profileKey(profile, KEY_READY_AT), 0L)
-                .putBoolean(profileKey(profile, KEY_CANCEL_REQUESTED), false)
-                .commit();
         MainActivity.publishSharedUiStateChange();
         deleteTreeQuietly(transaction);
         requestInstallDrain(context);
         return true;
+    }
+
+    static boolean shouldDismissLegacyGlobal(
+            boolean local, OperationSnapshot operation, Profile profile) {
+        return !local && operation != null && operation.profile == profile
+                && localKind(operation.kind)
+                && (FAILED.equals(operation.phase) || CANCELLED.equals(operation.phase)
+                || VERIFIED.equals(operation.phase));
     }
 
     static synchronized boolean claimInstall(Context context, Profile profile) throws IOException {
@@ -1061,7 +1074,12 @@ final class NavigatorPatchStore {
     }
 
     static synchronized void clearTransactionMetadata(Context context) {
-        prefs(context).edit()
+        removeGlobalTransactionMetadata(prefs(context).edit()).commit();
+    }
+
+    private static SharedPreferences.Editor removeGlobalTransactionMetadata(
+            SharedPreferences.Editor editor) {
+        return editor
                 .remove(KEY_TRANSACTION_DIR)
                 .remove(KEY_DESTRUCTIVE)
                 .remove(KEY_SESSION_ID)
@@ -1085,7 +1103,15 @@ final class NavigatorPatchStore {
                 .remove(KEY_OPERATION_PROGRESS)
                 .remove(KEY_OPERATION_ERROR)
                 .remove(KEY_READY_AT)
-                .remove(KEY_CANCEL_REQUESTED)
+                .remove(KEY_CANCEL_REQUESTED);
+    }
+
+    private static void clearLegacyTerminal(Context context) {
+        removeGlobalTransactionMetadata(prefs(context).edit())
+                .remove(KEY_OPERATION_PROFILE)
+                .remove(KEY_OPERATION_PHASE)
+                .remove(KEY_OPERATION_DETAIL)
+                .remove(KEY_STATE_AT)
                 .commit();
     }
 
