@@ -1,5 +1,6 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -10,6 +11,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.IntSupplier;
 
 public final class WazeRouteLifecycleV2ReceiverTest {
     @Test
@@ -20,6 +23,54 @@ public final class WazeRouteLifecycleV2ReceiverTest {
                 "com.waze", 10123, 10456));
         assertFalse(WazeRouteLifecycleV2Receiver.matchesIdentityMetadata(
                 "other.package", 10123, 10123));
+        assertFalse(WazeRouteLifecycleV2Receiver.matchesIdentityMetadata(
+                "com.waze", -1, -1));
+    }
+
+    @Test
+    public void everyUidMismatchRefreshesAndStalePreviousUidIsRejected() {
+        WazeRouteLifecycleV2Receiver.resetIdentityCacheForTest();
+        AtomicInteger installedUid = new AtomicInteger(10123);
+        AtomicInteger reads = new AtomicInteger();
+        IntSupplier reader = () -> {
+            reads.incrementAndGet();
+            return installedUid.get();
+        };
+        try {
+            assertTrue(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 10123, reader));
+            installedUid.set(20234);
+            assertTrue(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 20234, reader));
+            installedUid.set(30345);
+            assertTrue(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 30345, reader));
+            assertFalse(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 20234, reader));
+            assertEquals(4, reads.get());
+
+            installedUid.set(40456);
+            assertFalse(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 40456, () -> -1));
+            assertFalse(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 30345, reader));
+            assertTrue(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 40456, reader));
+            assertEquals(5, reads.get());
+
+            installedUid.set(50567);
+            assertFalse(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 50567, () -> {
+                        throw new IllegalStateException("read failed");
+                    }));
+            assertFalse(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 40456, reader));
+            assertTrue(WazeRouteLifecycleV2Receiver.trustedIdentity(
+                    "com.waze", 50567, reader));
+            assertEquals(6, reads.get());
+        } finally {
+            WazeRouteLifecycleV2Receiver.resetIdentityCacheForTest();
+        }
     }
 
     @Test
@@ -33,6 +84,19 @@ public final class WazeRouteLifecycleV2ReceiverTest {
         assertTrue(legacy.contains("enqueue(appContext, goAsync(), \"v1\""));
         assertTrue(v2.contains("enqueue(appContext, goAsync(), \"v2\""));
         assertTrue(v2.contains("getApplicationInfo("));
+        assertTrue(v2.contains("IntSupplier"));
+        assertFalse(v2.contains("wazeUidRefreshAttempted"));
+        int refreshHelper = v2.indexOf(
+                "static boolean trustedIdentity(String creatorPackage");
+        int identityLock = v2.indexOf("synchronized (IDENTITY_LOCK)", refreshHelper);
+        int uidRead = v2.indexOf("installedUidReader.getAsInt()", identityLock);
+        int cacheUpdate = v2.indexOf("cachedWazeUid = installedUid", uidRead);
+        int refreshedCompare = v2.indexOf(
+                "return matchesIdentityMetadata(creatorPackage, creatorUid, installedUid)",
+                cacheUpdate);
+        assertTrue(refreshHelper >= 0 && identityLock > refreshHelper
+                && uidRead > identityLock && cacheUpdate > uidRead
+                && refreshedCompare > cacheUpdate);
         assertTrue(v2.contains("matchesIdentityMetadata"));
         assertFalse(v2.contains("getLongVersionCode()"));
         assertFalse(v2.contains("lastUpdateTime"));

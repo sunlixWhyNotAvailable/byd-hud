@@ -7,6 +7,8 @@ import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.os.SystemClock;
 
+import java.util.function.IntSupplier;
+
 /** Receives lifecycle protocol v2 from a structurally compatible installed Waze build. */
 public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static final String ACTION = "com.bydhud.app.action.WAZE_NAVIGATION_STATE_V2";
@@ -20,7 +22,6 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static final int PROTOCOL_VERSION = WazeRouteLifecycleStore.V2_PROTOCOL_VERSION;
     private static final Object IDENTITY_LOCK = new Object();
     private static volatile int cachedWazeUid = -1;
-    private static volatile boolean wazeUidRefreshAttempted;
     static boolean requestCurrentState(Context context, String reason) {
         if (context == null) return false;
         Context appContext = context.getApplicationContext();
@@ -177,30 +178,29 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
 
     static boolean trustedIdentity(Context context, PendingIntent identity) {
         if (identity == null) return false;
-        int installedUid = cachedWazeUid(context);
-        if (matchesIdentityMetadata(identity.getCreatorPackage(),
-                identity.getCreatorUid(), installedUid)) {
+        return trustedIdentity(identity.getCreatorPackage(), identity.getCreatorUid(),
+                () -> readInstalledWazeUid(context));
+    }
+
+    static boolean trustedIdentity(String creatorPackage, int creatorUid,
+            IntSupplier installedUidReader) {
+        if (installedUidReader == null) return false;
+        if (matchesIdentityMetadata(creatorPackage, creatorUid, cachedWazeUid)) {
             return true;
         }
         synchronized (IDENTITY_LOCK) {
-            if (wazeUidRefreshAttempted) return false;
-            wazeUidRefreshAttempted = true;
-            installedUid = readInstalledWazeUid(context);
-            if (installedUid >= 0) cachedWazeUid = installedUid;
-        }
-        return matchesIdentityMetadata(identity.getCreatorPackage(),
-                identity.getCreatorUid(), installedUid);
-    }
-
-    private static int cachedWazeUid(Context context) {
-        int cached = cachedWazeUid;
-        if (cached >= 0) return cached;
-        synchronized (IDENTITY_LOCK) {
-            if (cachedWazeUid < 0) {
-                int loaded = readInstalledWazeUid(context);
-                if (loaded >= 0) cachedWazeUid = loaded;
+            if (matchesIdentityMetadata(creatorPackage, creatorUid, cachedWazeUid)) {
+                return true;
             }
-            return cachedWazeUid;
+            final int installedUid;
+            try {
+                installedUid = installedUidReader.getAsInt();
+            } catch (RuntimeException error) {
+                cachedWazeUid = -1;
+                return false;
+            }
+            cachedWazeUid = installedUid;
+            return matchesIdentityMetadata(creatorPackage, creatorUid, installedUid);
         }
     }
 
@@ -216,13 +216,13 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
     static void resetIdentityCacheForTest() {
         synchronized (IDENTITY_LOCK) {
             cachedWazeUid = -1;
-            wazeUidRefreshAttempted = false;
         }
     }
 
     static boolean matchesIdentityMetadata(String creatorPackage, int creatorUid,
             int installedUid) {
-        return WazeRouteLifecycleStore.WAZE_PACKAGE.equals(creatorPackage)
+        return installedUid >= 0
+                && WazeRouteLifecycleStore.WAZE_PACKAGE.equals(creatorPackage)
                 && creatorUid == installedUid;
     }
 
