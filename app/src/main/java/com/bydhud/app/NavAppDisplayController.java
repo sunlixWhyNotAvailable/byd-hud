@@ -113,6 +113,7 @@ final class NavAppDisplayController {
     private boolean moveInProgress;
     private String activeDashboardPackage = "";
     private String pendingAutoContainerLeaseTransferFrom = "";
+    private long pendingAutoContainerLeaseTransferGeneration;
     private Listener listener;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
@@ -484,6 +485,8 @@ final class NavAppDisplayController {
                         "dashboard-confirmation-failed:" + safe(reason));
                 clearDashboardProjection(
                         "dashboard-confirmation-failed:" + safe(reason));
+                releaseAutoContainerLeaseAfterFailedSuccessor(
+                        packageName, "dashboard-confirmation-failed:" + safe(reason));
                 remember(new NavAppDisplayState(
                         packageName,
                         confirmed.taskId,
@@ -551,6 +554,15 @@ final class NavAppDisplayController {
         if (!requested || value == 0) {
             return "";
         }
+        if (value == AUTO_CONTAINER_FULLSCREEN) {
+            String existingLease = persistedAutoContainerLeasePackage();
+            String normalized = normalizePackage(packageName);
+            if (!existingLease.isEmpty() && !existingLease.equals(normalized)) {
+                log(normalized, "dashboard_autocontainer_skipped_existing_lease="
+                        + existingLease + " reason=" + safe(reason));
+                return "existing AutoContainer lease retained";
+            }
+        }
         try {
             LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(context, value);
             if (result.success()) {
@@ -582,8 +594,16 @@ final class NavAppDisplayController {
         if (!fullscreen || (layoutFailure != null && !layoutFailure.isEmpty())) return;
         long generation = projectionGenerationForPackage(packageName);
         if (generation <= 0L) return;
+        String normalized = normalizePackage(packageName);
+        String existingLease = persistedAutoContainerLeasePackage();
+        if (!existingLease.isEmpty() && !existingLease.equals(normalized)) {
+            log(normalized, "dashboard_autocontainer_lease_acquire_skipped_existing="
+                    + existingLease + " generation=" + generation
+                    + " reason=" + safe(reason));
+            return;
+        }
         dashboardPrefs().edit()
-                .putString(KEY_AUTOCONTAINER_LEASE_PACKAGE, normalizePackage(packageName))
+                .putString(KEY_AUTOCONTAINER_LEASE_PACKAGE, normalized)
                 .putLong(KEY_AUTOCONTAINER_LEASE_GENERATION, generation)
                 .apply();
         log(packageName, "dashboard_autocontainer_lease_acquired generation="
@@ -593,6 +613,11 @@ final class NavAppDisplayController {
     private void releaseAutoContainerLeaseIfRequested(
             String packageName, long generation, boolean projectionReleased, String reason) {
         if (!projectionReleased || !isUserRequestedReturnForTest(reason)) return;
+        releaseAutoContainerLease(packageName, generation, "return-release", reason);
+    }
+
+    private void releaseAutoContainerLease(
+            String packageName, long generation, String operation, String reason) {
         String normalized = normalizePackage(packageName);
         SharedPreferences prefs = dashboardPrefs();
         String leasePackage = normalizePackage(
@@ -605,15 +630,59 @@ final class NavAppDisplayController {
             return;
         }
         String failure = sendAutoContainerIfRequested(
-                normalized, AUTO_CONTAINER_RELEASE, true, "return-release");
+                normalized, AUTO_CONTAINER_RELEASE, true, operation);
         if (failure == null || failure.isEmpty()) {
-            clearAutoContainerLease("return-release:" + safe(reason));
-            log(normalized, "dashboard_autocontainer_lease_released generation="
-                    + generation + " reason=" + safe(reason));
+            if (clearAutoContainerLeaseIfExact(
+                    normalized, generation, operation + ":" + safe(reason))) {
+                log(normalized, "dashboard_autocontainer_lease_released operation="
+                        + operation + " generation=" + generation + " reason=" + safe(reason));
+            }
         } else {
-            log(normalized, "dashboard_autocontainer_lease_retained generation="
-                    + generation + " reason=" + safe(reason));
+            log(normalized, "dashboard_autocontainer_lease_retained operation="
+                    + operation + " generation=" + generation + " reason=" + safe(reason));
         }
+    }
+
+    private void releaseAutoContainerLeaseAfterFailedSuccessor(
+            String successorPackage, String reason) {
+        String previousPackage = normalizePackage(pendingAutoContainerLeaseTransferFrom);
+        String successor = normalizePackage(successorPackage);
+        SharedPreferences prefs = dashboardPrefs();
+        String leasePackage = normalizePackage(
+                prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
+        long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
+        long pendingGeneration = pendingAutoContainerLeaseTransferGeneration;
+        if (previousPackage.isEmpty() || successor.isEmpty()
+                || pendingGeneration <= 0L
+                || !previousPackage.equals(leasePackage)
+                || leaseGeneration != pendingGeneration
+                || !isDirectNavigatorReplacement(previousPackage, successor)) {
+            return;
+        }
+        NavAppDisplayState previous = waitForMainDisplay(
+                previousPackage, "failed-successor-previous-main-confirm");
+        NavAppDisplayState successorState = waitForMainDisplay(
+                successor, "failed-successor-successor-main-confirm");
+        boolean previousOnMain = isOnMainDisplay(previous);
+        boolean successorOnMain = isOnMainDisplay(successorState);
+        boolean noProjectionOwner = waitForProjectionRelease(
+                successor,
+                "failed-successor-projection-release");
+        if (!shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                previousOnMain, successorOnMain, noProjectionOwner,
+                previousPackage, successor,
+                previousPackage, pendingGeneration,
+                leasePackage, leaseGeneration)) {
+            return;
+        }
+        releaseAutoContainerLease(
+                previousPackage, pendingGeneration, "failed-successor-release", reason);
+    }
+
+    private boolean isOnMainDisplay(NavAppDisplayState state) {
+        return state != null
+                && state.taskId >= 0
+                && state.displayId == MAIN_DISPLAY_ID;
     }
 
     private void clearAutoContainerLease(String reason) {
@@ -626,6 +695,32 @@ final class NavAppDisplayController {
         if (!previous.isEmpty()) {
             log(previous, "dashboard_autocontainer_lease_clear reason=" + safe(reason));
         }
+    }
+
+    private boolean clearAutoContainerLeaseIfExact(
+            String packageName, long generation, String reason) {
+        String normalized = normalizePackage(packageName);
+        SharedPreferences prefs = dashboardPrefs();
+        String leasePackage = normalizePackage(
+                prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
+        long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
+        if (!normalized.equals(leasePackage)
+                || generation <= 0L
+                || leaseGeneration != generation) {
+            log(normalized, "dashboard_autocontainer_lease_clear_skipped"
+                    + " leasePackage=" + leasePackage
+                    + " leaseGeneration=" + leaseGeneration
+                    + " package=" + normalized
+                    + " generation=" + generation
+                    + " reason=" + safe(reason));
+            return false;
+        }
+        prefs.edit()
+                .remove(KEY_AUTOCONTAINER_LEASE_PACKAGE)
+                .remove(KEY_AUTOCONTAINER_LEASE_GENERATION)
+                .apply();
+        log(normalized, "dashboard_autocontainer_lease_clear reason=" + safe(reason));
+        return true;
     }
 
     private String persistedAutoContainerLeasePackage() {
@@ -940,6 +1035,7 @@ final class NavAppDisplayController {
         long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
         if (leasePackage.isEmpty() || leaseGeneration <= 0L
                 || !leasePackage.equals(pendingAutoContainerLeaseTransferFrom)
+                || leaseGeneration != pendingAutoContainerLeaseTransferGeneration
                 || !isDirectNavigatorReplacement(leasePackage, packageName)) {
             return;
         }
@@ -948,6 +1044,7 @@ final class NavAppDisplayController {
                 .putLong(KEY_AUTOCONTAINER_LEASE_GENERATION, generation)
                 .apply();
         pendingAutoContainerLeaseTransferFrom = "";
+        pendingAutoContainerLeaseTransferGeneration = 0L;
         log(packageName, "dashboard_autocontainer_lease_transferred from="
                 + leasePackage + " to=" + packageName
                 + " generation=" + generation);
@@ -962,6 +1059,7 @@ final class NavAppDisplayController {
         if (shouldPrepareAutoContainerLeaseTransfer(
                 previousPackage, nextPackage, leasePackage, leaseGeneration)) {
             pendingAutoContainerLeaseTransferFrom = leasePackage;
+            pendingAutoContainerLeaseTransferGeneration = leaseGeneration;
         }
     }
 
@@ -971,6 +1069,25 @@ final class NavAppDisplayController {
         return leaseGeneration > 0L
                 && previousPackage.equals(leasePackage)
                 && isDirectNavigatorReplacement(previousPackage, nextPackage);
+    }
+
+    static boolean shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+            boolean previousOnMain, boolean successorOnMain, boolean noProjectionOwner,
+            String previousPackage, String successorPackage,
+            String pendingPackage, long pendingGeneration,
+            String leasePackage, long leaseGeneration) {
+        String previous = normalizePackage(previousPackage);
+        String successor = normalizePackage(successorPackage);
+        String pending = normalizePackage(pendingPackage);
+        String lease = normalizePackage(leasePackage);
+        return previousOnMain
+                && successorOnMain
+                && noProjectionOwner
+                && pendingGeneration > 0L
+                && pending.equals(previous)
+                && lease.equals(pending)
+                && leaseGeneration == pendingGeneration
+                && isDirectNavigatorReplacement(previous, successor);
     }
 
     static boolean isDirectNavigatorReplacement(String previousPackage, String nextPackage) {
@@ -997,11 +1114,11 @@ final class NavAppDisplayController {
 
     private boolean waitForProjectionRelease(String packageName, String reason) {
         long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
-        while (ClusterProjectionService.isProjectedPackageCurrent(packageName)
+        while (ClusterProjectionService.hasProjectionOwner()
                 && android.os.SystemClock.elapsedRealtime() < deadline) {
             sleepDisplayConfirmInterval();
         }
-        boolean released = !ClusterProjectionService.isProjectedPackageCurrent(packageName);
+        boolean released = !ClusterProjectionService.hasProjectionOwner();
         log(packageName, "dashboard_projection_release_confirmed=" + released
                 + " reason=" + safe(reason));
         return released;
@@ -1097,6 +1214,7 @@ final class NavAppDisplayController {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void endMove(String packageName) {
         pendingAutoContainerLeaseTransferFrom = "";
+        pendingAutoContainerLeaseTransferGeneration = 0L;
         synchronized (lock) {
             moveInProgress = false;
         }

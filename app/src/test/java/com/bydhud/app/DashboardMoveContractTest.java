@@ -39,6 +39,38 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
+    public void failedSuccessorReleaseRequiresBothTasksNoOwnerAndExactLease() {
+        assertTrue(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                true, true, true,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME,
+                "com.waze", 7L, "com.waze", 7L));
+        assertFalse(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                false, true, true,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME,
+                "com.waze", 7L, "com.waze", 7L));
+        assertFalse(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                true, false, true,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME,
+                "com.waze", 7L, "com.waze", 7L));
+        assertFalse(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                true, true, false,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME,
+                "com.waze", 7L, "com.waze", 7L));
+        assertFalse(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                true, true, true,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME,
+                "com.waze", 7L, GMapsDirectChannel.PACKAGE_NAME, 7L));
+        assertFalse(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                true, true, true,
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME,
+                "com.waze", 7L, "com.waze", 8L));
+        assertFalse(NavAppDisplayController.shouldReleaseAutoContainerLeaseAfterFailedSuccessorForTest(
+                true, true, true,
+                "com.waze", "com.example.navigation",
+                "com.waze", 7L, "com.waze", 7L));
+    }
+
+    @Test
     public void returnTbtReassertRequiresTheExactCurrentHudRoute() {
         assertTrue(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
                 true, true, false, true, true,
@@ -134,11 +166,67 @@ public final class DashboardMoveContractTest {
         assertTrue(source.contains("KEY_AUTOCONTAINER_LEASE_GENERATION"));
         assertTrue(source.contains("dashboard_autocontainer_lease_transferred"));
         assertTrue(source.contains("dashboard_autocontainer_lease_retained"));
+        assertTrue(source.contains("releaseAutoContainerLeaseAfterFailedSuccessor"));
+        assertTrue(source.contains("pendingAutoContainerLeaseTransferGeneration"));
+        assertTrue(source.contains("ClusterProjectionService.hasProjectionOwner()"));
+        assertTrue(source.contains("dashboard_autocontainer_lease_acquire_skipped_existing="));
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
         assertFalse(source.contains("AUTO_CONTAINER_PARTIAL"));
         int senderStart = source.indexOf("private String sendAutoContainerIfRequested");
         int senderEnd = source.indexOf("private static String autoContainerStatus", senderStart);
         assertTrue(senderStart >= 0 && senderEnd > senderStart);
-        assertFalse(source.substring(senderStart, senderEnd).contains("returnToMain"));
+        String sender = source.substring(senderStart, senderEnd);
+        assertFalse(sender.contains("returnToMain"));
+        assertTrue(sender.indexOf("if (value == AUTO_CONTAINER_FULLSCREEN)")
+                < sender.indexOf("LocalAdbBridge.runAutoContainer(context, value)"));
+        assertTrue(sender.contains("existing AutoContainer lease retained"));
+
+        int failedBranch = source.indexOf(
+                "if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed))");
+        int failedReturn = source.indexOf("ClusterProjectionService.returnToMain(", failedBranch);
+        int failedRelease = source.indexOf(
+                "releaseAutoContainerLeaseAfterFailedSuccessor(", failedReturn);
+        int failedRemember = source.indexOf(
+                "independent dashboard projection not confirmed", failedRelease);
+        assertTrue(failedReturn >= 0 && failedRelease > failedReturn && failedRemember > failedRelease);
+        int failedHelper = source.indexOf(
+                "private void releaseAutoContainerLeaseAfterFailedSuccessor(", failedRelease);
+        int noOwner = source.indexOf("waitForProjectionRelease(", failedHelper);
+        int failedLeaseRelease = source.indexOf("releaseAutoContainerLease(", noOwner);
+        assertTrue(failedHelper > failedRelease
+                && noOwner > failedHelper
+                && failedLeaseRelease > noOwner);
+
+        int leaseReleaseStart = source.indexOf("private void releaseAutoContainerLease(");
+        int leaseReleaseEnd = source.indexOf(
+                "private void releaseAutoContainerLeaseAfterFailedSuccessor(", leaseReleaseStart);
+        String leaseRelease = source.substring(leaseReleaseStart, leaseReleaseEnd);
+        int release18 = leaseRelease.indexOf("AUTO_CONTAINER_RELEASE, true");
+        int clearAfterRelease = leaseRelease.indexOf("clearAutoContainerLeaseIfExact(", release18);
+        int retainAfterFailure = leaseRelease.indexOf(
+                "dashboard_autocontainer_lease_retained", clearAfterRelease);
+        assertTrue(release18 >= 0
+                && clearAfterRelease > release18
+                && retainAfterFailure > clearAfterRelease);
+        assertEquals(clearAfterRelease, leaseRelease.lastIndexOf("clearAutoContainerLeaseIfExact("));
+
+        int transferStart = source.indexOf("private void transferAutoContainerLeaseIfReplaced(");
+        int transferEnd = source.indexOf("private void prepareAutoContainerLeaseTransfer(", transferStart);
+        String transfer = source.substring(transferStart, transferEnd);
+        assertTrue(transfer.contains("leaseGeneration != pendingAutoContainerLeaseTransferGeneration"));
+        assertTrue(transfer.contains("putString(KEY_AUTOCONTAINER_LEASE_PACKAGE, packageName)"));
+        assertTrue(transfer.contains("putLong(KEY_AUTOCONTAINER_LEASE_GENERATION, generation)"));
+        assertTrue(transfer.contains("pendingAutoContainerLeaseTransferGeneration = 0L"));
+
+        int reconcileStart = source.indexOf("private boolean reconcileConfirmedDashboardOwnership(");
+        int reconcileEnd = source.indexOf("return true;", reconcileStart);
+        assertTrue(source.indexOf("transferAutoContainerLeaseIfReplaced", reconcileStart) < reconcileEnd);
+        assertEquals(-1, source.substring(reconcileStart, reconcileEnd)
+                .indexOf("AUTO_CONTAINER_RELEASE"));
+        int endMoveStart = source.indexOf("private void endMove(String packageName)");
+        int endMoveEnd = source.indexOf("notifyStatusChanged();", endMoveStart);
+        String endMove = source.substring(endMoveStart, endMoveEnd);
+        assertTrue(endMove.contains("pendingAutoContainerLeaseTransferFrom = \"\";"));
+        assertTrue(endMove.contains("pendingAutoContainerLeaseTransferGeneration = 0L;"));
     }
 }

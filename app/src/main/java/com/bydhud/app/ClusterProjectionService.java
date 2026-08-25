@@ -118,6 +118,12 @@ public final class ClusterProjectionService extends Service
         return service != null && service.hasCurrentProjection(packageName);
     }
 
+    //exposes whether any app still owns the compositor projection, regardless of package.
+    static boolean hasProjectionOwner() {
+        ClusterProjectionService service = instance;
+        return service != null && service.hasProjectionOwnerUnsafe();
+    }
+
     //exposes the real virtual display id so callers confirm the physical move against the created target.
     static int projectedDisplayIdForPackage(String packageName) {
         ClusterProjectionService service = instance;
@@ -720,6 +726,13 @@ public final class ClusterProjectionService extends Service
                     && projectionSurface.isValid()
                     && projectionGeometryValid
                     && safe(projectedPackage).equals(safe(packageName));
+        }
+    }
+
+    private boolean hasProjectionOwnerUnsafe() {
+        synchronized (lock) {
+            return projectionRequested
+                    && !safe(projectedPackage).isEmpty();
         }
     }
 
