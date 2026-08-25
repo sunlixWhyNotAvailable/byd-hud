@@ -16,7 +16,31 @@ public final class GMapsPayloadFenceTest {
 
         assertTrue(fence.accepts(0, digest("A0")));
         assertTrue(fence.accepts(1, digest("B1")));
+        assertTrue(fence.accepts(0, digest("C0")));
         assertFalse(fence.accepts(0, digest("A0")));
+    }
+
+    @Test
+    public void previousPayloadIsRejectedRegardlessOfReportedStepIndex() {
+        for (int revisitIndex : new int[] {0, 1, 2}) {
+            GMapsDirectChannel.RoutePayloadResurrectionFence fence = fence();
+            String previous = digest("A0");
+
+            assertTrue(fence.accepts(0, previous));
+            assertTrue(fence.accepts(1, digest("B1")));
+            assertFalse(fence.accepts(revisitIndex, previous));
+        }
+    }
+
+    @Test
+    public void immediateDuplicatePayloadIsAccepted() {
+        GMapsDirectChannel.RoutePayloadResurrectionFence fence = fence();
+        String payload = digest("A0");
+
+        assertTrue(fence.accepts(1, payload));
+        assertTrue(fence.accepts(0, payload));
+        assertEquals(1, fence.size());
+        assertEquals(1, fence.lastAcceptedCurrentStepIndex());
     }
 
     @Test
@@ -31,12 +55,14 @@ public final class GMapsPayloadFenceTest {
     @Test
     public void resetAllowsPayloadFromNewGeneration() {
         GMapsDirectChannel.RoutePayloadResurrectionFence fence = fence();
+        String latest = digest("B1");
 
         assertTrue(fence.accepts(0, digest("A0")));
-        assertTrue(fence.accepts(1, digest("B1")));
+        assertTrue(fence.accepts(1, latest));
         fence.reset();
 
-        assertTrue(fence.accepts(0, digest("A0")));
+        assertEquals(0, fence.size());
+        assertTrue(fence.accepts(1, latest));
         assertEquals(1, fence.size());
     }
 
@@ -62,6 +88,12 @@ public final class GMapsPayloadFenceTest {
         assertTrue(fence.accepts(0, oldPayload));
         assertTrue(fence.accepts(1, digest("B1")));
         assertTrue(fence.accepts(null, oldPayload));
+        assertTrue(fence.accepts(-1, oldPayload));
+        assertTrue(fence.accepts(2, null));
+        assertTrue(fence.accepts(2, ""));
+        assertTrue(fence.accepts(2, "unavailable"));
+        assertEquals(2, fence.size());
+        assertEquals(1, fence.lastAcceptedCurrentStepIndex());
         assertFalse(fence.accepts(0, oldPayload));
 
         fence.reset();

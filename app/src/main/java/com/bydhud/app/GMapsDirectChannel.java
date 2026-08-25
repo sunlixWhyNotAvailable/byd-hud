@@ -203,6 +203,7 @@ final class GMapsDirectChannel {
                         return size() > MAX_ROUTE_PAYLOAD_HISTORY;
                     }
                 };
+        private String lastAcceptedPayloadDigest = "";
         private int lastAcceptedCurrentStepIndex = -1;
 
         boolean accepts(Integer currentStepIndex, String payloadDigest) {
@@ -211,17 +212,19 @@ final class GMapsDirectChannel {
                     && !payloadDigest.isEmpty()
                     && !"unavailable".equals(payloadDigest);
             if (!digestAvailable) return true;
-            if (currentStepIndex < lastAcceptedCurrentStepIndex
-                    && acceptedPayloads.containsKey(payloadDigest)) {
+            if (payloadDigest.equals(lastAcceptedPayloadDigest)) return true;
+            if (acceptedPayloads.containsKey(payloadDigest)) {
                 return false;
             }
             acceptedPayloads.put(payloadDigest, Boolean.TRUE);
+            lastAcceptedPayloadDigest = payloadDigest;
             lastAcceptedCurrentStepIndex = currentStepIndex;
             return true;
         }
 
         void reset() {
             acceptedPayloads.clear();
+            lastAcceptedPayloadDigest = "";
             lastAcceptedCurrentStepIndex = -1;
         }
 
