@@ -7,9 +7,24 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 
 public final class GMapsBitmapFlowTest {
+    @Test
+    public void turnPngBuildersShareTheHudGraphicPayloadClassMonitor() throws Exception {
+        Method oemBuilder = HudGraphicPayload.class.getDeclaredMethod(
+                "buildOemTurnPng", int.class);
+        Method turnBuilder = HudGraphicPayload.class.getDeclaredMethod(
+                "buildTurnPng", HudState.class);
+
+        assertTrue(Modifier.isStatic(oemBuilder.getModifiers()));
+        assertTrue(Modifier.isSynchronized(oemBuilder.getModifiers()));
+        assertTrue(Modifier.isStatic(turnBuilder.getModifiers()));
+        assertTrue(Modifier.isSynchronized(turnBuilder.getModifiers()));
+    }
+
     @Test
     public void departSelectsCachedGoogleBitmapWithoutViewIdFilter() {
         byte[] google = png(36, 36, 1);

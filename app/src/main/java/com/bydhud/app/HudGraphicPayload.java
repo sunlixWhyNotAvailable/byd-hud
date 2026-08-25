@@ -486,7 +486,7 @@ final class HudGraphicPayload {
     }
 
     //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    static byte[] buildOemTurnPng(int turnBitmapId) {
+    static synchronized byte[] buildOemTurnPng(int turnBitmapId) {
         if (appContext == null) {
             return isOemBlankTurnSource(turnBitmapId)
                     ? buildBlankTurnPng(1, 1, Color.TRANSPARENT)
