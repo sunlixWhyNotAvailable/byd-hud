@@ -90,6 +90,7 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicBoolean STORAGE_SCAN_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean STORAGE_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean APP_SCAN_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean APP_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
@@ -1706,6 +1707,9 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         if (!APP_SCAN_IN_PROGRESS.compareAndSet(false, true)) {
+            if (force) {
+                APP_FORCE_REFRESH_PENDING.set(true);
+            }
             return;
         }
         appScanStatus = "scanning";
@@ -1751,6 +1755,9 @@ public final class MainActivity extends ComponentActivity {
             } finally {
                 APP_SCAN_IN_PROGRESS.set(false);
                 publishSharedUiStateChange();
+                if (APP_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                    requestRuntimeUiStateRefresh(appContext, true, "pending-force");
+                }
             }
         }, "bydhud-app-scan").start();
     }

@@ -56,6 +56,33 @@ public final class Beta7UiResponsivenessSourceContractTest {
     }
 
     @Test
+    public void forcedRuntimeScanCollisionQueuesOneFollowUpAfterRelease() throws IOException {
+        String source = source("MainActivity.java");
+        String runtimeScan = between(source, "static void requestRuntimeUiStateRefresh(",
+                "static void requestPatchUiStateRefresh(");
+        String collision = between(runtimeScan,
+                "if (!APP_SCAN_IN_PROGRESS.compareAndSet(false, true)) {",
+                "appScanStatus = \"scanning\";");
+        String completion = between(runtimeScan, "} finally {",
+                "}, \"bydhud-app-scan\").start();");
+
+        assertTrue(source.contains(
+                "private static final AtomicBoolean APP_FORCE_REFRESH_PENDING"));
+        assertTrue(collision.contains("if (force) {"));
+        assertTrue(collision.contains("APP_FORCE_REFRESH_PENDING.set(true);"));
+        assertTrue(occurrences(collision, "APP_FORCE_REFRESH_PENDING.set(true);") == 1);
+        int release = completion.indexOf("APP_SCAN_IN_PROGRESS.set(false);");
+        int followUp = completion.indexOf(
+                "APP_FORCE_REFRESH_PENDING.getAndSet(false)", release);
+        int followUpRequest = completion.indexOf(
+                "requestRuntimeUiStateRefresh(appContext, true, \"pending-force\")",
+                followUp);
+        assertTrue(release >= 0 && followUp > release && followUpRequest > followUp);
+        assertTrue(occurrences(runtimeScan,
+                "requestRuntimeUiStateRefresh(appContext, true, \"pending-force\")") == 1);
+    }
+
+    @Test
     public void bootstrapRefreshesAllDomainsWhileHeartbeatRefreshesRuntimeOnly()
             throws IOException {
         String activity = source("MainActivity.java");
