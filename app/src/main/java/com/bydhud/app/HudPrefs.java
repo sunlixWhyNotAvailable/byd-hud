@@ -36,7 +36,9 @@ final class HudPrefs {
             "speed_limit_lane_overlay_size";
     private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
+    //keeps the legacy boolean only as a migration input for the mode selector.
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
+    private static final String KEY_DASHBOARD_SCREEN_MODE = "dashboard_screen_mode";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
     private static final String KEY_TBT_WITHOUT_HUD_OUTPUT = "tbt_without_hud_output";
     private static final String KEY_SWITCH_TO_TBT_ON_HUD_START = "switch_to_tbt_on_hud_start";
@@ -61,6 +63,9 @@ final class HudPrefs {
     static final int TRANSLITERATION_OFF = HudTextTransliterator.OFF;
     static final int TRANSLITERATION_UKRAINIAN = HudTextTransliterator.UKRAINIAN;
     static final int TRANSLITERATION_UNIVERSAL = HudTextTransliterator.UNIVERSAL;
+    static final int DASHBOARD_MODE_NONE = 0;
+    static final int DASHBOARD_MODE_PARTIAL = 1;
+    static final int DASHBOARD_MODE_FULL = 2;
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
@@ -352,12 +357,26 @@ final class HudPrefs {
         prefs(context).edit().putBoolean(KEY_WAZE_CUSTOM_SURFACE, enabled).apply();
     }
 
-    static boolean isFullscreenDashboardEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_FULLSCREEN_DASHBOARD, true);
+    static int dashboardScreenMode(Context context) {
+        SharedPreferences preferences = prefs(context);
+        if (!preferences.contains(KEY_DASHBOARD_SCREEN_MODE)) {
+            int migrated = !preferences.contains(KEY_FULLSCREEN_DASHBOARD)
+                    || preferences.getBoolean(KEY_FULLSCREEN_DASHBOARD, true)
+                    ? DASHBOARD_MODE_FULL : DASHBOARD_MODE_NONE;
+            preferences.edit().putInt(KEY_DASHBOARD_SCREEN_MODE, migrated).apply();
+            return migrated;
+        }
+        return normalizeDashboardScreenMode(
+                preferences.getInt(KEY_DASHBOARD_SCREEN_MODE, DASHBOARD_MODE_FULL));
     }
 
-    static void setFullscreenDashboardEnabled(Context context, boolean enabled) {
-        prefs(context).edit().putBoolean(KEY_FULLSCREEN_DASHBOARD, enabled).apply();
+    static void setDashboardScreenMode(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_DASHBOARD_SCREEN_MODE,
+                normalizeDashboardScreenMode(mode)).apply();
+    }
+
+    static int normalizeDashboardScreenMode(int mode) {
+        return clamp(mode, DASHBOARD_MODE_NONE, DASHBOARD_MODE_FULL);
     }
 
     static int dashboardHeightPercent(Context context) {

@@ -47,7 +47,6 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
@@ -92,9 +91,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
@@ -283,8 +289,8 @@ private data class Copy(
     val showRemainingTimeHint: String,
     val showRemainingDistance: String,
     val showRemainingDistanceHint: String,
-    val fullscreenDashboard: String,
-    val fullscreenDashboardHint: String,
+    val dashboardScreenMode: String,
+    val dashboardScreenModeHint: String,
     val dashboardHeight: String,
     val dashboardHeightHint: String,
     val smallDistanceClamp: String,
@@ -1681,6 +1687,11 @@ private fun OptionsTab(
     } else {
         listOf("Maneuver only", "Lanes only", "Free or maneuver", "Free or lanes")
     }
+    val dashboardScreenModes = if (ua) {
+        listOf("Немає", "Частковий", "Повний")
+    } else {
+        listOf("None", "Partial", "Full")
+    }
     val routeMetricsTitle = if (ua) {
         "Режим виводу ЕТА/часу/дистанції"
     } else {
@@ -1993,9 +2004,15 @@ private fun OptionsTab(
             }
         }
         optionsSection("dashboard-control", copy.dashboardControl, palette) {
-            row("fullscreen-dashboard") {
-                SwitchRow(copy.fullscreenDashboard, copy.fullscreenDashboardHint, snapshot.fullscreenDashboardEnabled, palette) {
-                    runAction { activity.composeSetFullscreenDashboardEnabled(it) }
+            row("dashboard-screen-mode") {
+                SettingRow(copy.dashboardScreenMode, copy.dashboardScreenModeHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.dashboardScreenMode,
+                        options = dashboardScreenModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetDashboardScreenMode(mode) } }
+                    )
                 }
             }
             row("dashboard-height") {
@@ -4375,7 +4392,7 @@ private fun DashboardHeightRow(
                 fontSize = 15.sp
             )
         }
-        Text(hint, color = palette.muted, fontSize = 13.sp)
+        Text(rowExplanation(hint), color = palette.muted, fontSize = 13.sp)
         Slider(
             value = sliderValue,
             onValueChange = { sliderValue = it.coerceIn(20f, 100f) },
@@ -4848,6 +4865,8 @@ private fun Section(
     }
 }
 
+private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(".")
+
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun SettingRow(
@@ -4872,7 +4891,7 @@ private fun SettingRow(
             )
             if (hint.isNotBlank()) {
                 Text(
-                    hint,
+                    rowExplanation(hint),
                     color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
                     fontSize = 13.sp
                 )
@@ -4931,58 +4950,82 @@ private fun HudDropdown(
                 modifier = Modifier.align(Alignment.CenterEnd)
             )
         }
-        DropdownMenu(
-            expanded = expanded && enabled,
-            onDismissRequest = { expanded = false },
-            modifier = Modifier
-                .width(width)
-                .clip(RoundedCornerShape(6.dp))
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
-                .background(palette.panel)
-                .drawBehind {
-                    val rowHeightPx = rowHeight.toPx()
-                    drawRect(
-                        color = selectedBackground,
-                        topLeft = Offset(0f, safeIndex * rowHeightPx),
-                        size = Size(size.width, rowHeightPx)
-                    )
-                }
-        ) {
-            options.forEachIndexed { index, option ->
-                Box(
+        if (expanded && enabled) {
+            Popup(
+                popupPositionProvider = HudDropdownPositionProvider,
+                onDismissRequest = { expanded = false },
+                properties = PopupProperties(focusable = true)
+            ) {
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .height(if (index == 0 || index == options.lastIndex) 32.dp else rowHeight)
-                        .clickable {
-                            onSelected(index)
-                            expanded = false
-                        },
-                    contentAlignment = Alignment.Center
+                        .width(width)
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
+                        .background(palette.panel)
                 ) {
-                    Text(
-                        text = option,
-                        color = if (index == safeIndex && palette.dark) Color.White else palette.text,
-                        fontSize = 14.sp,
-                        fontWeight = if (index == safeIndex) FontWeight.SemiBold else FontWeight.Normal,
-                        textAlign = TextAlign.Center,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp)
-                    )
-                    if (index < options.lastIndex) {
+                    options.forEachIndexed { index, option ->
                         Box(
                             modifier = Modifier
-                                .align(Alignment.BottomCenter)
                                 .fillMaxWidth()
-                                .height(1.dp)
-                                .background(palette.border)
-                        )
+                                .height(rowHeight)
+                                .background(if (index == safeIndex) selectedBackground else Color.Transparent)
+                                .clickable {
+                                    onSelected(index)
+                                    expanded = false
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = option,
+                                color = if (index == safeIndex && palette.dark) Color.White else palette.text,
+                                fontSize = 14.sp,
+                                fontWeight = if (index == safeIndex) FontWeight.SemiBold else FontWeight.Normal,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp)
+                            )
+                            if (index < options.lastIndex) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .fillMaxWidth()
+                                        .height(1.dp)
+                                        .background(palette.border)
+                                )
+                            }
+                        }
                     }
                 }
             }
         }
+    }
+}
+
+private object HudDropdownPositionProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize
+    ): IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        val anchoredX = if (layoutDirection == LayoutDirection.Ltr) {
+            anchorBounds.left
+        } else {
+            anchorBounds.right - popupContentSize.width
+        }
+        val below = anchorBounds.bottom
+        val above = anchorBounds.top - popupContentSize.height
+        val maxY = (windowSize.height - popupContentSize.height).coerceAtLeast(0)
+        val y = when {
+            below + popupContentSize.height <= windowSize.height -> below
+            above >= 0 -> above
+            else -> below.coerceIn(0, maxY)
+        }
+        return IntOffset(anchoredX.coerceIn(0, maxX), y)
     }
 }
 
@@ -5113,7 +5156,7 @@ private fun SwitchRow(
             )
             if (hint.isNotBlank()) {
                 Text(
-                    hint,
+                    rowExplanation(hint),
                     color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
                     fontSize = 13.sp
                 )
@@ -5165,7 +5208,7 @@ private fun ActionRow(
     ) {
         Column(Modifier.weight(1f)) {
             Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Text(hint, color = palette.muted, fontSize = 13.sp)
+            Text(rowExplanation(hint), color = palette.muted, fontSize = 13.sp)
         }
         Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             left()
@@ -5203,7 +5246,7 @@ private fun ManualModeTile(
         verticalArrangement = Arrangement.Center
     ) {
         Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-        Text(hint, color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(rowExplanation(hint), color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 
@@ -5936,8 +5979,8 @@ private fun enCopy() = Copy(
     showRemainingTimeHint = "Prepend the remaining trip time to the street text.",
     showRemainingDistance = "Show remaining distance",
     showRemainingDistanceHint = "Prepend the remaining trip distance to the street text.",
-    fullscreenDashboard = "Fullscreen dashboard",
-    fullscreenDashboardHint = "Use fullscreen dashboard mode.",
+    dashboardScreenMode = "Dashboard screen mode",
+    dashboardScreenModeHint = "Choose the dashboard screen mode",
     dashboardHeight = "Height",
     dashboardHeightHint = "Window height as a percentage of the dashboard height.",
     smallDistanceClamp = "Small distance clamp",
@@ -6149,8 +6192,8 @@ private fun uaCopy() = enCopy().copy(
     showRemainingTimeHint = "Додавати залишок часу поїздки перед назвою вулиці.",
     showRemainingDistance = "Показувати залишок дистанції",
     showRemainingDistanceHint = "Додавати залишок дистанції поїздки перед назвою вулиці.",
-    fullscreenDashboard = "Повний екран приборки",
-    fullscreenDashboardHint = "Використовувати повноекранний режим приборки.",
+    dashboardScreenMode = "Режим екрану на приборці",
+    dashboardScreenModeHint = "Оберіть режим екрану на приборці",
     dashboardHeight = "Висота",
     dashboardHeightHint = "Висота вікна у відсотках від висоти приборки.",
     smallDistanceClamp = "Обрізка малої дистанції",

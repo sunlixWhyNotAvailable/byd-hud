@@ -28,6 +28,7 @@ final class NavAppDisplayController {
             "autocontainer_lease_generation";
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
+    private static final int AUTO_CONTAINER_PARTIAL = 17;
     private static final int AUTO_CONTAINER_FULLSCREEN = 16;
     private static final int AUTO_CONTAINER_RELEASE = 18;
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
@@ -96,8 +97,20 @@ final class NavAppDisplayController {
 
     //keeps compositor policy pure so tests cannot accidentally require a vehicle connection.
     static int autoContainerValueForTest(
-            boolean toDashboard, boolean fullscreen, boolean explicit) {
-        return toDashboard && explicit && fullscreen ? AUTO_CONTAINER_FULLSCREEN : 0;
+            boolean toDashboard, int dashboardMode, boolean explicit) {
+        if (!toDashboard || !explicit) return 0;
+        return autoContainerValueForMode(dashboardMode);
+    }
+
+    private static int autoContainerValueForMode(int dashboardMode) {
+        switch (HudPrefs.normalizeDashboardScreenMode(dashboardMode)) {
+            case HudPrefs.DASHBOARD_MODE_PARTIAL:
+                return AUTO_CONTAINER_PARTIAL;
+            case HudPrefs.DASHBOARD_MODE_FULL:
+                return AUTO_CONTAINER_FULLSCREEN;
+            default:
+                return 0;
+        }
     }
 
     static boolean isUserRequestedReturnForTest(String reason) {
@@ -263,13 +276,13 @@ final class NavAppDisplayController {
     void moveToDashboard(String packageName, String reason) {
         moveToDashboard(
                 packageName,
-                HudPrefs.isFullscreenDashboardEnabled(context),
+                HudPrefs.dashboardScreenMode(context),
                 reason);
     }
 
     //moves to an explicit dashboard layout; the worker rechecks task state before dispatching it.
-    void moveToDashboard(String packageName, boolean fullscreen, String reason) {
-        moveIndependentDashboardApp(packageName, true, fullscreen, reason);
+    void moveToDashboard(String packageName, int dashboardMode, String reason) {
+        moveIndependentDashboardApp(packageName, true, dashboardMode, reason);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -282,7 +295,7 @@ final class NavAppDisplayController {
         moveIndependentDashboardApp(
                 packageName,
                 toDashboard,
-                HudPrefs.isFullscreenDashboardEnabled(context),
+                HudPrefs.dashboardScreenMode(context),
                 reason);
     }
 
@@ -290,8 +303,9 @@ final class NavAppDisplayController {
     void moveIndependentDashboardApp(
             String packageName,
             boolean toDashboard,
-            boolean fullscreen,
+            int dashboardMode,
             String reason) {
+        int normalizedDashboardMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
         String normalized = normalizePackage(packageName);
         String label = toDashboard ? "independent_dashboard_on" : "independent_dashboard_off";
         if (!beginMove(normalized, label + " reason=" + safe(reason))) {
@@ -302,7 +316,7 @@ final class NavAppDisplayController {
                 () -> moveIndependentDashboardAppBlocking(
                         normalized,
                         toDashboard,
-                        fullscreen,
+                        normalizedDashboardMode,
                         reason),
                 "BydHudIndependentDashboardDisplay");
         worker.start();
@@ -328,7 +342,7 @@ final class NavAppDisplayController {
     private void moveIndependentDashboardAppBlocking(
             String packageName,
             boolean toDashboard,
-            boolean fullscreen,
+            int dashboardMode,
             String reason) {
         try {
             if (packageName.isEmpty()) {
@@ -457,11 +471,11 @@ final class NavAppDisplayController {
                         "independent-dashboard-already-projected:" + safe(reason));
                 String layoutFailure = sendAutoContainerIfRequested(
                         packageName,
-                        AUTO_CONTAINER_FULLSCREEN,
-                        fullscreen,
+                        autoContainerValueForMode(dashboardMode),
+                        autoContainerValueForMode(dashboardMode) != 0,
                         "existing-dashboard");
-                acquireAutoContainerLeaseIfFullscreenSucceeded(
-                        packageName, fullscreen, layoutFailure, "existing-dashboard");
+                acquireAutoContainerLeaseIfSucceeded(
+                        packageName, dashboardMode, layoutFailure, "existing-dashboard");
                 remember(new NavAppDisplayState(
                         packageName,
                         current.taskId,
@@ -503,11 +517,11 @@ final class NavAppDisplayController {
                     packageName, confirmed.displayId, "dashboard-confirmed:" + safe(reason));
             String layoutFailure = sendAutoContainerIfRequested(
                     packageName,
-                    AUTO_CONTAINER_FULLSCREEN,
-                    fullscreen,
+                    autoContainerValueForMode(dashboardMode),
+                    autoContainerValueForMode(dashboardMode) != 0,
                     "dashboard-confirmed");
-            acquireAutoContainerLeaseIfFullscreenSucceeded(
-                    packageName, fullscreen, layoutFailure, "dashboard-confirmed");
+            acquireAutoContainerLeaseIfSucceeded(
+                    packageName, dashboardMode, layoutFailure, "dashboard-confirmed");
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
@@ -554,7 +568,7 @@ final class NavAppDisplayController {
         if (!requested || value == 0) {
             return "";
         }
-        if (value == AUTO_CONTAINER_FULLSCREEN) {
+        if (value == AUTO_CONTAINER_FULLSCREEN || value == AUTO_CONTAINER_PARTIAL) {
             String existingLease = persistedAutoContainerLeasePackage();
             String normalized = normalizePackage(packageName);
             if (!existingLease.isEmpty() && !existingLease.equals(normalized)) {
@@ -589,9 +603,10 @@ final class NavAppDisplayController {
                 : safeBase + "; " + failure;
     }
 
-    private void acquireAutoContainerLeaseIfFullscreenSucceeded(
-            String packageName, boolean fullscreen, String layoutFailure, String reason) {
-        if (!fullscreen || (layoutFailure != null && !layoutFailure.isEmpty())) return;
+    private void acquireAutoContainerLeaseIfSucceeded(
+            String packageName, int dashboardMode, String layoutFailure, String reason) {
+        if (autoContainerValueForMode(dashboardMode) == 0
+                || (layoutFailure != null && !layoutFailure.isEmpty())) return;
         long generation = projectionGenerationForPackage(packageName);
         if (generation <= 0L) return;
         String normalized = normalizePackage(packageName);

@@ -64,7 +64,7 @@ final class LocalAdbBridge {
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
     private static final Pattern AUTO_CONTAINER_COMMAND = Pattern.compile(
-            "service call (?:auto_container|AutoContainer) 2 i32 1000 i32 (?:16|18) s16 '\"\"'");
+            "service call (?:auto_container|AutoContainer) 2 i32 1000 i32 (?:16|17|18) s16 '\"\"'");
     private static final String CAPTURE_SHELL_ROOT =
             "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD"
                     + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/BYD-HUD)";
@@ -429,7 +429,7 @@ final class LocalAdbBridge {
 
     //keeps AutoContainer values behind the same authenticated allowlist as task moves.
     static ShellResult runAutoContainer(Context context, int value) throws IOException {
-        if (value != 16 && value != 18) {
+        if (value != 16 && value != 17 && value != 18) {
             throw new SecurityException("Unsupported AutoContainer value: " + value);
         }
         ShellResult lowercase = normalizeAutoContainerResult(runRuntimeShellCommand(
@@ -448,7 +448,7 @@ final class LocalAdbBridge {
 
     private static String autoContainerCommand(String service, int value) {
         if (!("auto_container".equals(service) || "AutoContainer".equals(service))
-                || (value != 16 && value != 18)) {
+                || (value != 16 && value != 17 && value != 18)) {
             throw new IllegalArgumentException("Unsupported AutoContainer request");
         }
         return "service call " + service + " 2 i32 1000 i32 " + value + " s16 '\"\"'";

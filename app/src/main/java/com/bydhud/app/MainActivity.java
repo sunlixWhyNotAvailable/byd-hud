@@ -823,7 +823,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.speedLimitLaneOverlaySize(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
-                HudPrefs.isFullscreenDashboardEnabled(this),
+                HudPrefs.dashboardScreenMode(this),
                 HudPrefs.dashboardHeightPercent(this),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 HudPrefs.isRoundaboutLeftHandTraffic(this),
@@ -1424,9 +1424,10 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
-    public void composeSetFullscreenDashboardEnabled(boolean enabled) {
-        HudPrefs.setFullscreenDashboardEnabled(this, enabled);
-        appendStatus("Fullscreen dashboard " + (enabled ? "enabled" : "disabled"));
+    public void composeSetDashboardScreenMode(int mode) {
+        int persistedMode = HudPrefs.normalizeDashboardScreenMode(mode);
+        HudPrefs.setDashboardScreenMode(this, persistedMode);
+        appendStatus("Dashboard screen mode " + persistedMode);
         refreshControls();
     }
 
@@ -2319,7 +2320,7 @@ public final class MainActivity extends ComponentActivity {
         public final int speedLimitLaneOverlaySize;
         public final boolean wazeScreenCaptureEnabled;
         public final boolean wazeCustomSurfaceEnabled;
-        public final boolean fullscreenDashboardEnabled;
+        public final int dashboardScreenMode;
         public final int dashboardHeightPercent;
         public final boolean smallDistanceClampEnabled;
         public final boolean roundaboutLeftHandTraffic;
@@ -2384,7 +2385,7 @@ public final class MainActivity extends ComponentActivity {
                 int speedLimitLaneOverlaySize,
                 boolean wazeScreenCaptureEnabled,
                 boolean wazeCustomSurfaceEnabled,
-                boolean fullscreenDashboardEnabled,
+                int dashboardScreenMode,
                 int dashboardHeightPercent,
                 boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
@@ -2432,7 +2433,7 @@ public final class MainActivity extends ComponentActivity {
             this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
-            this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
+            this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
             this.dashboardHeightPercent = DashboardProjectionPolicy.clampHeightPercent(
                     dashboardHeightPercent);
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
@@ -2526,7 +2527,7 @@ public final class MainActivity extends ComponentActivity {
                     && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
                     && wazeScreenCaptureEnabled == other.wazeScreenCaptureEnabled
                     && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
-                    && fullscreenDashboardEnabled == other.fullscreenDashboardEnabled
+                    && dashboardScreenMode == other.dashboardScreenMode
                     && dashboardHeightPercent == other.dashboardHeightPercent
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && roundaboutLeftHandTraffic == other.roundaboutLeftHandTraffic
@@ -2588,7 +2589,7 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeScreenCaptureEnabled,
-                    wazeCustomSurfaceEnabled, fullscreenDashboardEnabled,
+                    wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardHeightPercent, smallDistanceClampEnabled,
                     roundaboutLeftHandTraffic, settingsPermissionsGranted, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
@@ -3291,7 +3292,7 @@ public final class MainActivity extends ComponentActivity {
         controller.moveIndependentDashboardApp(
                 normalized,
                 toDashboard,
-                HudPrefs.isFullscreenDashboardEnabled(this),
+                HudPrefs.dashboardScreenMode(this),
                 "ui-independent-dashboard-explicit");
         appendStatus((toDashboard ? "sending " : "returning ")
                 + normalized

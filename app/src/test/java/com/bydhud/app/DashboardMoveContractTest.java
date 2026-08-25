@@ -12,12 +12,38 @@ import org.junit.Test;
 
 public final class DashboardMoveContractTest {
     @Test
+    public void dashboardModePreferenceMigratesTheLegacyFullscreenBoolean() throws Exception {
+        assertEquals(HudPrefs.DASHBOARD_MODE_NONE,
+                HudPrefs.normalizeDashboardScreenMode(-1));
+        assertEquals(HudPrefs.DASHBOARD_MODE_PARTIAL,
+                HudPrefs.normalizeDashboardScreenMode(HudPrefs.DASHBOARD_MODE_PARTIAL));
+        assertEquals(HudPrefs.DASHBOARD_MODE_FULL,
+                HudPrefs.normalizeDashboardScreenMode(3));
+
+        java.nio.file.Path file = Paths.get(
+                "app/src/main/java/com/bydhud/app/HudPrefs.java");
+        if (!Files.exists(file)) {
+            file = Paths.get("src/main/java/com/bydhud/app/HudPrefs.java");
+        }
+        String source = new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        assertTrue(source.contains("if (!preferences.contains(KEY_DASHBOARD_SCREEN_MODE))"));
+        assertTrue(source.contains("preferences.getBoolean(KEY_FULLSCREEN_DASHBOARD, true)"));
+        assertTrue(source.contains("? DASHBOARD_MODE_FULL : DASHBOARD_MODE_NONE"));
+        assertTrue(source.contains("putInt(KEY_DASHBOARD_SCREEN_MODE, migrated)"));
+    }
+
+    @Test
     public void autoContainerPolicyOnlySelectsExplicitTransitions() {
-        assertEquals(16, NavAppDisplayController.autoContainerValueForTest(true, true, true));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(true, false, true));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(true, true, false));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(false, false, true));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(false, false, false));
+        assertEquals(16, NavAppDisplayController.autoContainerValueForTest(
+                true, HudPrefs.DASHBOARD_MODE_FULL, true));
+        assertEquals(17, NavAppDisplayController.autoContainerValueForTest(
+                true, HudPrefs.DASHBOARD_MODE_PARTIAL, true));
+        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
+                true, HudPrefs.DASHBOARD_MODE_NONE, true));
+        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
+                true, HudPrefs.DASHBOARD_MODE_FULL, false));
+        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
+                false, HudPrefs.DASHBOARD_MODE_FULL, true));
         assertTrue(NavAppDisplayController.isUserRequestedReturnForTest(
                 "ui-independent-dashboard-explicit"));
         assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("shutdown"));
@@ -97,14 +123,16 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
-    public void autoContainerAllowlistRejectsMiniAndInjection() {
+    public void autoContainerAllowlistAcceptsOnlyDashboardModesAndRelease() {
         assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest("id"));
         String command = LocalAdbBridge.autoContainerCommandForTest("auto_container", 16);
         assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(command));
         assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(
+                LocalAdbBridge.autoContainerCommandForTest("auto_container", 17)));
+        assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(
                 LocalAdbBridge.autoContainerCommandForTest("AutoContainer", 18)));
         assertFalse(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(
-                "service call auto_container 2 i32 1000 i32 17 s16 '\"\"'"));
+                "service call auto_container 2 i32 1000 i32 35 s16 '\"\"'"));
         assertFalse(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(
                 command + "; id"));
         assertTrue(LocalAdbBridge.isSuccessfulAutoContainerResponse(
@@ -171,13 +199,13 @@ public final class DashboardMoveContractTest {
         assertTrue(source.contains("ClusterProjectionService.hasProjectionOwner()"));
         assertTrue(source.contains("dashboard_autocontainer_lease_acquire_skipped_existing="));
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
-        assertFalse(source.contains("AUTO_CONTAINER_PARTIAL"));
+        assertTrue(source.contains("AUTO_CONTAINER_PARTIAL"));
         int senderStart = source.indexOf("private String sendAutoContainerIfRequested");
         int senderEnd = source.indexOf("private static String autoContainerStatus", senderStart);
         assertTrue(senderStart >= 0 && senderEnd > senderStart);
         String sender = source.substring(senderStart, senderEnd);
         assertFalse(sender.contains("returnToMain"));
-        assertTrue(sender.indexOf("if (value == AUTO_CONTAINER_FULLSCREEN)")
+        assertTrue(sender.indexOf("if (value == AUTO_CONTAINER_FULLSCREEN || value == AUTO_CONTAINER_PARTIAL)")
                 < sender.indexOf("LocalAdbBridge.runAutoContainer(context, value)"));
         assertTrue(sender.contains("existing AutoContainer lease retained"));
 

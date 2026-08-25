@@ -68,21 +68,55 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
-    public void dropdownCompensatesMaterialPaddingWithoutPerRowSelectedFill() throws IOException {
+    public void dropdownUsesFocusablePopupWithEqualRowsAndBoundedPosition() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String dropdown = between(source,
                 "private fun HudDropdown(",
                 "private fun HudIntegerStepper(");
 
         assertTrue(dropdown.contains("val rowHeight = 40.dp"));
-        assertTrue(dropdown.contains(".drawBehind {"));
-        assertTrue(dropdown.contains("color = selectedBackground"));
-        assertTrue(dropdown.contains("topLeft = Offset(0f, safeIndex * rowHeightPx)"));
-        assertTrue(dropdown.contains("size = Size(size.width, rowHeightPx)"));
-        assertTrue(dropdown.contains(
-                ".height(if (index == 0 || index == options.lastIndex) 32.dp else rowHeight)"));
-        assertFalse(dropdown.contains(
-                "if (index == safeIndex) selectedBackground else Color.Transparent"));
+        assertTrue(dropdown.contains("Popup("));
+        assertTrue(dropdown.contains("PopupProperties(focusable = true)"));
+        assertTrue(dropdown.contains(".height(rowHeight)"));
+        assertTrue(dropdown.contains(".background(if (index == safeIndex) selectedBackground else Color.Transparent)"));
+        assertFalse(dropdown.contains("DropdownMenu("));
+        assertFalse(dropdown.contains("32.dp"));
+
+        String position = between(source,
+                "private object HudDropdownPositionProvider",
+                "@Composable\nprivate fun HudIntegerStepper(");
+        assertTrue(position.contains("below + popupContentSize.height <= windowSize.height"));
+        assertTrue(position.contains("above >= 0"));
+        assertTrue(position.contains("below.coerceIn(0, maxY)"));
+    }
+
+    @Test
+    public void dashboardScreenModeUsesAcceptedLabelsAndRuntimeCallback() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
+
+        assertTrue(options.contains("row(\"dashboard-screen-mode\")"));
+        assertTrue(options.contains("listOf(\"Немає\", \"Частковий\", \"Повний\")"));
+        assertTrue(options.contains("listOf(\"None\", \"Partial\", \"Full\")"));
+        assertTrue(options.contains("selectedIndex = snapshot.dashboardScreenMode"));
+        assertTrue(options.contains("activity.composeSetDashboardScreenMode(mode)"));
+        assertFalse(options.contains("fullscreenDashboard"));
+    }
+
+    @Test
+    public void rowExplanationsStripOnlyFinalFullStopThroughSharedHelper() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        assertTrue(source.contains("private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(\".\")"));
+        assertTrue(between(source, "private fun DashboardHeightRow(",
+                "private fun StorageDayRow(").contains("rowExplanation(hint)"));
+        assertTrue(between(source, "private fun SettingRow(",
+                "private fun HudDropdown(").contains("rowExplanation(hint)"));
+        assertTrue(between(source, "private fun SwitchRow(",
+                "private fun UpdateCheckLine(").contains("rowExplanation(hint)"));
+        assertTrue(between(source, "private fun ActionRow(",
+                "private fun ManualModeTile(").contains("rowExplanation(hint)"));
+        assertTrue(between(source, "private fun ManualModeTile(",
+                "private fun LabeledInput(").contains("rowExplanation(hint)"));
     }
 
     @Test
