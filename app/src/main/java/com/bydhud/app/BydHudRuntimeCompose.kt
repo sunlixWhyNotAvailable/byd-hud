@@ -291,8 +291,14 @@ private data class Copy(
     val showRemainingDistanceHint: String,
     val dashboardScreenMode: String,
     val dashboardScreenModeHint: String,
+    val dashboardWidth: String,
+    val dashboardWidthHint: String,
     val dashboardHeight: String,
     val dashboardHeightHint: String,
+    val dashboardOffset: String,
+    val dashboardOffsetHint: String,
+    val dashboardScale: String,
+    val dashboardScaleHint: String,
     val smallDistanceClamp: String,
     val smallDistanceHint: String,
     val roundaboutLeft: String,
@@ -2015,9 +2021,50 @@ private fun OptionsTab(
                     )
                 }
             }
-            row("dashboard-height") {
-                DashboardHeightRow(copy.dashboardHeight, copy.dashboardHeightHint, snapshot.dashboardHeightPercent, palette) {
-                    runAction { activity.composeSetDashboardHeightPercent(it) }
+            if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE) {
+                row("dashboard-width") {
+                    DashboardPercentRow(copy.dashboardWidth, copy.dashboardWidthHint,
+                        snapshot.dashboardWidthPercent,
+                        DashboardProjectionPolicy.MIN_WIDTH_PERCENT,
+                        DashboardProjectionPolicy.MAX_WIDTH_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardWidthPercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
+                }
+                row("dashboard-height") {
+                    DashboardPercentRow(copy.dashboardHeight, copy.dashboardHeightHint,
+                        snapshot.dashboardHeightPercent,
+                        DashboardProjectionPolicy.MIN_HEIGHT_PERCENT,
+                        DashboardProjectionPolicy.MAX_HEIGHT_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardHeightPercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
+                }
+                row("dashboard-offset") {
+                    DashboardPercentRow(copy.dashboardOffset, copy.dashboardOffsetHint,
+                        snapshot.dashboardOffsetPercent,
+                        DashboardProjectionPolicy.MIN_OFFSET_PERCENT,
+                        DashboardProjectionPolicy.MAX_OFFSET_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardOffsetPercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
+                }
+                row("dashboard-scale") {
+                    DashboardPercentRow(copy.dashboardScale, copy.dashboardScaleHint,
+                        snapshot.dashboardScalePercent,
+                        DashboardProjectionPolicy.MIN_SCALE_PERCENT,
+                        DashboardProjectionPolicy.MAX_SCALE_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardScalePercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
                 }
             }
         }
@@ -4359,14 +4406,16 @@ private fun storageLimitFromSliderValue(value: Float): Int =
     value.roundToInt().coerceIn(1, 10)
 
 @Composable
-private fun DashboardHeightRow(
+private fun DashboardPercentRow(
     title: String,
     hint: String,
     percent: Int,
+    minPercent: Int,
+    maxPercent: Int,
     palette: Palette,
     onPercent: (Int) -> Unit
 ) {
-    val coerced = percent.coerceIn(20, 100)
+    val coerced = percent.coerceIn(minPercent, maxPercent)
     var sliderValue by remember(coerced) { mutableStateOf(coerced.toFloat()) }
     Column(
         modifier = Modifier
@@ -4395,14 +4444,14 @@ private fun DashboardHeightRow(
         Text(rowExplanation(hint), color = palette.muted, fontSize = 13.sp)
         Slider(
             value = sliderValue,
-            onValueChange = { sliderValue = it.coerceIn(20f, 100f) },
+            onValueChange = { sliderValue = it.coerceIn(minPercent.toFloat(), maxPercent.toFloat()) },
             onValueChangeFinished = {
-                val next = sliderValue.roundToInt().coerceIn(20, 100)
+                val next = sliderValue.roundToInt().coerceIn(minPercent, maxPercent)
                 sliderValue = next.toFloat()
                 onPercent(next)
             },
-            valueRange = 20f..100f,
-            steps = 79,
+            valueRange = minPercent.toFloat()..maxPercent.toFloat(),
+            steps = (maxPercent - minPercent) - 1,
             colors = SliderDefaults.colors(
                 thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
                 activeTrackColor = palette.accent,
@@ -5981,8 +6030,14 @@ private fun enCopy() = Copy(
     showRemainingDistanceHint = "Prepend the remaining trip distance to the street text.",
     dashboardScreenMode = "Dashboard screen mode",
     dashboardScreenModeHint = "Choose the dashboard screen mode",
+    dashboardWidth = "Width",
+    dashboardWidthHint = "Window width as a percentage of the dashboard width.",
     dashboardHeight = "Height",
     dashboardHeightHint = "Window height as a percentage of the dashboard height.",
+    dashboardOffset = "Horizontal offset",
+    dashboardOffsetHint = "Position within the remaining horizontal space: 0% left, 50% center, 100% right.",
+    dashboardScale = "Scale",
+    dashboardScaleHint = "Scale the projected dashboard content inside the window.",
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Send 11 m for distances from 0 to 10 m instead of the OEM close marker.",
     roundaboutLeft = "Roundabout left-hand traffic",
@@ -6194,8 +6249,14 @@ private fun uaCopy() = enCopy().copy(
     showRemainingDistanceHint = "Додавати залишок дистанції поїздки перед назвою вулиці.",
     dashboardScreenMode = "Режим екрану на приборці",
     dashboardScreenModeHint = "Оберіть режим екрану на приборці",
+    dashboardWidth = "Ширина",
+    dashboardWidthHint = "Ширина вікна у відсотках від ширини приборки.",
     dashboardHeight = "Висота",
     dashboardHeightHint = "Висота вікна у відсотках від висоти приборки.",
+    dashboardOffset = "Горизонтальне зміщення",
+    dashboardOffsetHint = "Положення у вільному просторі: 0% ліворуч, 50% по центру, 100% праворуч.",
+    dashboardScale = "Масштаб",
+    dashboardScaleHint = "Масштаб проєктованого вмісту приборки всередині вікна.",
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Передавати 11 м для дистанцій від 0 до 10 м замість штатного маркера близької відстані.",
     roundaboutLeft = "Лівосторонній рух на кільці",

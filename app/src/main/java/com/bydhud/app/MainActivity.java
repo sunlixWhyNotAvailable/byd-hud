@@ -795,6 +795,9 @@ public final class MainActivity extends ComponentActivity {
         }
         StorageCacheState storage = storageCacheState;
         ShareLaunchEvent shareLaunchEvent = SHARE_LAUNCH_EVENT.get();
+        int dashboardScreenMode = HudPrefs.dashboardScreenMode(this);
+        DashboardProjectionPolicy.Profile dashboardProfile =
+                HudPrefs.dashboardProjectionProfile(this, dashboardScreenMode);
         return new ComposeSnapshot(
                 HudPrefs.isUaLanguage(this),
                 HudPrefs.isDarkTheme(this),
@@ -823,8 +826,11 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.speedLimitLaneOverlaySize(this),
                 HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
-                HudPrefs.dashboardScreenMode(this),
-                HudPrefs.dashboardHeightPercent(this),
+                dashboardScreenMode,
+                dashboardProfile.widthPercent,
+                dashboardProfile.heightPercent,
+                dashboardProfile.offsetPercent,
+                dashboardProfile.scalePercent,
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 HudPrefs.isRoundaboutLeftHandTraffic(this),
                 permissionStatus.settingsGranted(),
@@ -1431,12 +1437,51 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
-    public void composeSetDashboardHeightPercent(int percent) {
-        HudPrefs.setDashboardHeightPercent(this, percent);
-        int persistedPercent = HudPrefs.dashboardHeightPercent(this);
-        ClusterProjectionService.applyDashboardHeight(
-                this, persistedPercent, "options-height-release");
-        appendStatus("Dashboard height " + persistedPercent + "%");
+    public void composeSetDashboardWidthPercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardWidthPercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "width",
+                HudPrefs.dashboardProjectionProfile(this, mode).widthPercent);
+    }
+
+    public void composeSetDashboardHeightPercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardHeightPercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "height",
+                HudPrefs.dashboardProjectionProfile(this, mode).heightPercent);
+    }
+
+    public void composeSetDashboardOffsetPercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardOffsetPercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "offset",
+                HudPrefs.dashboardProjectionProfile(this, mode).offsetPercent);
+    }
+
+    public void composeSetDashboardScalePercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardScalePercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "scale",
+                HudPrefs.dashboardProjectionProfile(this, mode).scalePercent);
+    }
+
+    private void finishDashboardProfileChange(int mode, String field, int persistedValue) {
+        ClusterProjectionService.applyDashboardProfile(this, mode,
+                "options-" + field + "-release");
+        appendStatus("Dashboard " + field + " " + persistedValue + "%");
+        invalidateComposeSnapshot();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2321,7 +2366,10 @@ public final class MainActivity extends ComponentActivity {
         public final boolean wazeScreenCaptureEnabled;
         public final boolean wazeCustomSurfaceEnabled;
         public final int dashboardScreenMode;
+        public final int dashboardWidthPercent;
         public final int dashboardHeightPercent;
+        public final int dashboardOffsetPercent;
+        public final int dashboardScalePercent;
         public final boolean smallDistanceClampEnabled;
         public final boolean roundaboutLeftHandTraffic;
         public final boolean settingsPermissionsGranted;
@@ -2386,7 +2434,8 @@ public final class MainActivity extends ComponentActivity {
                 boolean wazeScreenCaptureEnabled,
                 boolean wazeCustomSurfaceEnabled,
                 int dashboardScreenMode,
-                int dashboardHeightPercent,
+                int dashboardWidthPercent, int dashboardHeightPercent,
+                int dashboardOffsetPercent, int dashboardScalePercent,
                 boolean smallDistanceClampEnabled,
                 boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
@@ -2434,8 +2483,10 @@ public final class MainActivity extends ComponentActivity {
             this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
-            this.dashboardHeightPercent = DashboardProjectionPolicy.clampHeightPercent(
-                    dashboardHeightPercent);
+            this.dashboardWidthPercent = dashboardWidthPercent;
+            this.dashboardHeightPercent = dashboardHeightPercent;
+            this.dashboardOffsetPercent = dashboardOffsetPercent;
+            this.dashboardScalePercent = dashboardScalePercent;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
@@ -2528,7 +2579,10 @@ public final class MainActivity extends ComponentActivity {
                     && wazeScreenCaptureEnabled == other.wazeScreenCaptureEnabled
                     && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
                     && dashboardScreenMode == other.dashboardScreenMode
+                    && dashboardWidthPercent == other.dashboardWidthPercent
                     && dashboardHeightPercent == other.dashboardHeightPercent
+                    && dashboardOffsetPercent == other.dashboardOffsetPercent
+                    && dashboardScalePercent == other.dashboardScalePercent
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && roundaboutLeftHandTraffic == other.roundaboutLeftHandTraffic
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
@@ -2590,7 +2644,8 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeScreenCaptureEnabled,
                     wazeCustomSurfaceEnabled, dashboardScreenMode,
-                    dashboardHeightPercent, smallDistanceClampEnabled,
+                    dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
+                    dashboardScalePercent, smallDistanceClampEnabled,
                     roundaboutLeftHandTraffic, settingsPermissionsGranted, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
                     logOnlyPackages, observedPackages, activeDashboardPackage,

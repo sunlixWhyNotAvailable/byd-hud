@@ -40,6 +40,14 @@ final class HudPrefs {
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DASHBOARD_SCREEN_MODE = "dashboard_screen_mode";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
+    private static final String KEY_DASHBOARD_PARTIAL_WIDTH_PERCENT = "dashboard_partial_width_percent";
+    private static final String KEY_DASHBOARD_PARTIAL_HEIGHT_PERCENT = "dashboard_partial_height_percent";
+    private static final String KEY_DASHBOARD_PARTIAL_OFFSET_PERCENT = "dashboard_partial_offset_percent";
+    private static final String KEY_DASHBOARD_PARTIAL_SCALE_PERCENT = "dashboard_partial_scale_percent";
+    private static final String KEY_DASHBOARD_FULL_WIDTH_PERCENT = "dashboard_full_width_percent";
+    private static final String KEY_DASHBOARD_FULL_HEIGHT_PERCENT = "dashboard_full_height_percent";
+    private static final String KEY_DASHBOARD_FULL_OFFSET_PERCENT = "dashboard_full_offset_percent";
+    private static final String KEY_DASHBOARD_FULL_SCALE_PERCENT = "dashboard_full_scale_percent";
     private static final String KEY_TBT_WITHOUT_HUD_OUTPUT = "tbt_without_hud_output";
     private static final String KEY_SWITCH_TO_TBT_ON_HUD_START = "switch_to_tbt_on_hud_start";
     private static final String KEY_DARK_THEME = "dark_theme";
@@ -379,16 +387,64 @@ final class HudPrefs {
         return clamp(mode, DASHBOARD_MODE_NONE, DASHBOARD_MODE_FULL);
     }
 
-    static int dashboardHeightPercent(Context context) {
-        return DashboardProjectionPolicy.clampHeightPercent(prefs(context).getInt(
-                KEY_DASHBOARD_HEIGHT_PERCENT,
-                DashboardProjectionPolicy.DEFAULT_HEIGHT_PERCENT));
+    static DashboardProjectionPolicy.Profile dashboardProjectionProfile(Context context, int mode) {
+        SharedPreferences preferences = prefs(context);
+        int normalizedMode = normalizeDashboardScreenMode(mode);
+        if (normalizedMode == DASHBOARD_MODE_NONE) {
+            return DashboardProjectionPolicy.defaultProfile();
+        }
+        boolean full = normalizedMode == DASHBOARD_MODE_FULL;
+        String widthKey = full ? KEY_DASHBOARD_FULL_WIDTH_PERCENT
+                : KEY_DASHBOARD_PARTIAL_WIDTH_PERCENT;
+        String heightKey = full ? KEY_DASHBOARD_FULL_HEIGHT_PERCENT
+                : KEY_DASHBOARD_PARTIAL_HEIGHT_PERCENT;
+        String offsetKey = full ? KEY_DASHBOARD_FULL_OFFSET_PERCENT
+                : KEY_DASHBOARD_PARTIAL_OFFSET_PERCENT;
+        String scaleKey = full ? KEY_DASHBOARD_FULL_SCALE_PERCENT
+                : KEY_DASHBOARD_PARTIAL_SCALE_PERCENT;
+        int heightDefault = full && preferences.contains(KEY_DASHBOARD_HEIGHT_PERCENT)
+                ? preferences.getInt(KEY_DASHBOARD_HEIGHT_PERCENT,
+                DashboardProjectionPolicy.DEFAULT_HEIGHT_PERCENT)
+                : DashboardProjectionPolicy.DEFAULT_HEIGHT_PERCENT;
+        return new DashboardProjectionPolicy.Profile(
+                preferences.getInt(widthKey, DashboardProjectionPolicy.DEFAULT_WIDTH_PERCENT),
+                preferences.getInt(heightKey, heightDefault),
+                preferences.getInt(offsetKey, DashboardProjectionPolicy.DEFAULT_OFFSET_PERCENT),
+                preferences.getInt(scaleKey, DashboardProjectionPolicy.DEFAULT_SCALE_PERCENT));
     }
 
-    static void setDashboardHeightPercent(Context context, int percent) {
+    static void setDashboardWidthPercent(Context context, int mode, int percent) {
+        putDashboardValue(context, mode, KEY_DASHBOARD_PARTIAL_WIDTH_PERCENT,
+                KEY_DASHBOARD_FULL_WIDTH_PERCENT,
+                DashboardProjectionPolicy.clampWidthPercent(percent));
+    }
+
+    static void setDashboardHeightPercent(Context context, int mode, int percent) {
+        putDashboardValue(context, mode, KEY_DASHBOARD_PARTIAL_HEIGHT_PERCENT,
+                KEY_DASHBOARD_FULL_HEIGHT_PERCENT,
+                DashboardProjectionPolicy.clampHeightPercent(percent));
+    }
+
+    static void setDashboardOffsetPercent(Context context, int mode, int percent) {
+        putDashboardValue(context, mode, KEY_DASHBOARD_PARTIAL_OFFSET_PERCENT,
+                KEY_DASHBOARD_FULL_OFFSET_PERCENT,
+                DashboardProjectionPolicy.clampOffsetPercent(percent));
+    }
+
+    static void setDashboardScalePercent(Context context, int mode, int percent) {
+        putDashboardValue(context, mode, KEY_DASHBOARD_PARTIAL_SCALE_PERCENT,
+                KEY_DASHBOARD_FULL_SCALE_PERCENT,
+                DashboardProjectionPolicy.clampScalePercent(percent));
+    }
+
+    private static void putDashboardValue(Context context, int mode,
+            String partialKey, String fullKey, int value) {
+        int normalizedMode = normalizeDashboardScreenMode(mode);
+        if (normalizedMode == DASHBOARD_MODE_NONE) {
+            return;
+        }
         prefs(context).edit().putInt(
-                KEY_DASHBOARD_HEIGHT_PERCENT,
-                DashboardProjectionPolicy.clampHeightPercent(percent)).apply();
+                normalizedMode == DASHBOARD_MODE_FULL ? fullKey : partialKey, value).apply();
     }
 
     static boolean isTbtWithoutHudOutputEnabled(Context context) {

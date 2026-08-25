@@ -33,6 +33,53 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
+    public void projectionPersistsTheExplicitModeForStickyRecovery() throws Exception {
+        java.nio.file.Path controller = Paths.get(
+                "app/src/main/java/com/bydhud/app/NavAppDisplayController.java");
+        if (!Files.exists(controller)) {
+            controller = Paths.get("src/main/java/com/bydhud/app/NavAppDisplayController.java");
+        }
+        String controllerSource = new String(
+                Files.readAllBytes(controller), StandardCharsets.UTF_8);
+        assertTrue(controllerSource.contains("KEY_ACTIVE_MODE"));
+        assertTrue(controllerSource.contains("persistedDashboardMode()"));
+        assertTrue(controllerSource.contains(
+                "persistDashboardProjection(normalized, normalizedMode, reason)"));
+
+        java.nio.file.Path service = Paths.get(
+                "app/src/main/java/com/bydhud/app/ClusterProjectionService.java");
+        if (!Files.exists(service)) {
+            service = Paths.get("src/main/java/com/bydhud/app/ClusterProjectionService.java");
+        }
+        String serviceSource = new String(
+                Files.readAllBytes(service), StandardCharsets.UTF_8);
+        assertTrue(serviceSource.contains("EXTRA_MODE"));
+        assertTrue(serviceSource.contains(
+                "requestProjection(packageName, dashboardMode, reason)"));
+        assertTrue(serviceSource.contains(
+                "requestProjection(packageName, dashboardMode, \"restore:\""));
+        int resizeStart = serviceSource.indexOf("private void resizeActiveProjection(");
+        int resizeEnd = serviceSource.indexOf(
+                "private void recoverProjectionAfterResizeFailure(", resizeStart);
+        String resize = serviceSource.substring(resizeStart, resizeEnd);
+        assertTrue(resize.contains("projectionGeometryValid = false;"));
+        assertTrue(resize.contains("surfaceGeneration++;"));
+        assertTrue(resize.contains("projectionGeometryValid = true;"));
+        assertTrue(resize.contains("|| !projectionGeometryValid"));
+        assertTrue(resize.contains("view.getHolder().setFixedSize(oldBufferWidth, oldBufferHeight)"));
+        assertTrue(resize.contains("display.resize(oldBufferWidth, oldBufferHeight"));
+        assertTrue(resize.contains("params.width = oldWidth;"));
+        assertTrue(resize.contains("params.x = oldLeft;"));
+        int requestStart = serviceSource.indexOf("private void requestProjection(");
+        int requestEnd = serviceSource.indexOf("private void returnPackageToMain(", requestStart);
+        String request = serviceSource.substring(requestStart, requestEnd);
+        int invalidMoveGuard = request.indexOf(
+                "virtualDisplay != existing || !projectionGeometryValid");
+        assertTrue(invalidMoveGuard >= 0);
+        assertTrue(request.indexOf("movePackageToDisplay(", invalidMoveGuard) > invalidMoveGuard);
+    }
+
+    @Test
     public void autoContainerPolicyOnlySelectsExplicitTransitions() {
         assertEquals(16, NavAppDisplayController.autoContainerValueForTest(
                 true, HudPrefs.DASHBOARD_MODE_FULL, true));

@@ -38,7 +38,7 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Navigation output | Maneuver image, native arrow, distance, street or cue, lanes, and optional route metrics |
 | Direct channels | Structured low-latency data from a compatible patched Google Maps or Waze build |
 | Optional legacy input | Accessibility, notification, or visual parsing after its settings and services are explicitly enabled |
-| Dashboard control | Move a running navigator between displays, choose its screen mode, and set its projection height |
+| Dashboard control | Move a running navigator between displays, choose its screen mode, and tune the projection window |
 | Navigator downloads | Download and validate the fixed navigator assets currently offered in the `Apps` tab |
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
 | Logs and storage | Record diagnostics and performance data, manage logs by day, and share only the selected data |
@@ -183,9 +183,12 @@ Waze route recovery is independent from the `HUD` switch and dashboard placement
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Dashboard screen mode` | Full | Selects `None`, `Partial`, or `Full` presentation after the navigator reaches the dashboard |
+| `Width` | 100% | Changes the projected window width live from 20% to 100% |
 | `Height` | 100% | Changes the projected window height live from 20% to 100% |
+| `Horizontal offset` | 50% | Positions the window in the remaining horizontal space: 0% left, 50% centered, 100% right |
+| `Scale` | 100% | Changes the navigator content scale inside the window from 50% to 150% |
 
-The navigator must already be running and dashboard control requires authorized ADB access. BYD HUD moves the navigator window and verifies its placement first. `None` only moves the navigator and leaves the current cluster layout unchanged; `Partial` requests the partial presentation; `Full` requests the full presentation. Changing the selector alone sends no vehicle command. A failed presentation request leaves the navigator on the dashboard and reports the failure. Use `Send to main` to return it. During an active Waze custom-surface route, the route surface follows Waze so the BYD HUD settings screen is not moved by mistake.
+The navigator must already be running and dashboard control requires authorized ADB access. BYD HUD moves the navigator window and verifies its placement first. `None` only moves the navigator and leaves the current cluster layout unchanged; its geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Changing the selector alone sends no vehicle command. A failed presentation request leaves the navigator on the dashboard and reports the failure. Use `Send to main` to return it. During an active Waze custom-surface route, the route surface follows Waze so the BYD HUD settings screen is not moved by mistake.
 
 <!-- Photo slot: docs/screenshots/en/dashboard.jpg
 Use a landscape photo showing the real instrument cluster. Place it here.

@@ -19,6 +19,7 @@ final class NavAppDisplayController {
     private static final String CHANNEL = "nav_app_display";
     private static final String PREFS = "bydhud_dashboard_projection";
     private static final String KEY_ACTIVE_PACKAGE = "active_package";
+    private static final String KEY_ACTIVE_MODE = "active_mode";
     private static final String KEY_ACTIVE_REASON = "active_reason";
     private static final String KEY_ACTIVE_UPDATED_MS = "active_updated_ms";
     private static final String KEY_PROJECTION_GENERATION = "projection_generation";
@@ -194,6 +195,13 @@ final class NavAppDisplayController {
         return normalizePackage(dashboardPrefs().getString(KEY_ACTIVE_PACKAGE, ""));
     }
 
+    //persists the exact mode paired with the dashboard package for sticky recovery.
+    int persistedDashboardMode() {
+        return HudPrefs.normalizeDashboardScreenMode(dashboardPrefs().getInt(
+                KEY_ACTIVE_MODE,
+                HudPrefs.dashboardScreenMode(context)));
+    }
+
     //a real boot invalidates the old virtual display; update and process recovery do not.
     void clearStaleProjectionIntentForBoot(String reason) {
         synchronized (lock) {
@@ -260,7 +268,11 @@ final class NavAppDisplayController {
                     parsed.displayId,
                     parsed.visible,
                     "display=" + parsed.displayId + " task=" + parsed.taskId);
-            reconcileConfirmedDashboardOwnership(normalized, observed, "display-check");
+            reconcileConfirmedDashboardOwnership(
+                    normalized,
+                    observed,
+                    persistedDashboardMode(),
+                    "display-check");
             return remember(observed);
         } catch (IOException | SecurityException e) {
             return remember(new NavAppDisplayState(
@@ -463,11 +475,17 @@ final class NavAppDisplayController {
                 return;
             }
             if (alreadyProjected) {
+                ClusterProjectionService.startProjection(
+                        context,
+                        packageName,
+                        dashboardMode,
+                        "dashboard-existing:" + safe(reason));
                 boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                         packageName, current.displayId, "dashboard-existing:" + safe(reason));
                 reconcileConfirmedDashboardOwnership(
                         packageName,
                         current,
+                        dashboardMode,
                         "independent-dashboard-already-projected:" + safe(reason));
                 String layoutFailure = sendAutoContainerIfRequested(
                         packageName,
@@ -488,7 +506,8 @@ final class NavAppDisplayController {
                                 layoutFailure)));
                 return;
             }
-            ClusterProjectionService.startProjection(context, packageName, safe(reason));
+            ClusterProjectionService.startProjection(
+                    context, packageName, dashboardMode, safe(reason));
             NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(
                     packageName,
                     "independent-dashboard-start");
@@ -512,6 +531,7 @@ final class NavAppDisplayController {
             reconcileConfirmedDashboardOwnership(
                     packageName,
                     confirmed,
+                    dashboardMode,
                     "independent-dashboard-confirmed:" + safe(reason));
             boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                     packageName, confirmed.displayId, "dashboard-confirmed:" + safe(reason));
@@ -991,6 +1011,7 @@ final class NavAppDisplayController {
     private boolean reconcileConfirmedDashboardOwnership(
             String packageName,
             NavAppDisplayState state,
+            int dashboardMode,
             String reason) {
         if (!isConfirmedProjectedDashboardDisplay(packageName, state)) {
             return false;
@@ -1004,8 +1025,10 @@ final class NavAppDisplayController {
             ownershipChanged = !normalized.equals(activeDashboardPackage);
             activeDashboardPackage = normalized;
         }
-        if (!normalized.equals(previousPersistedPackage)) {
-            persistDashboardProjection(normalized, reason);
+        int normalizedMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
+        if (!normalized.equals(previousPersistedPackage)
+                || persistedDashboardMode() != normalizedMode) {
+            persistDashboardProjection(normalized, normalizedMode, reason);
         }
         if (ownershipChanged) {
             log(normalized, "dashboard_live_owner_confirmed package=" + normalized
@@ -1192,7 +1215,7 @@ final class NavAppDisplayController {
     }
 
     //keeps dashboard projection intent outside process memory for projection-service recovery.
-    private void persistDashboardProjection(String packageName, String reason) {
+    private void persistDashboardProjection(String packageName, int dashboardMode, String reason) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
             return;
@@ -1200,6 +1223,7 @@ final class NavAppDisplayController {
         dashboardPrefs()
                 .edit()
                 .putString(KEY_ACTIVE_PACKAGE, normalized)
+                .putInt(KEY_ACTIVE_MODE, HudPrefs.normalizeDashboardScreenMode(dashboardMode))
                 .putString(KEY_ACTIVE_REASON, safe(reason))
                 .putLong(KEY_ACTIVE_UPDATED_MS, System.currentTimeMillis())
                 .apply();
@@ -1213,6 +1237,7 @@ final class NavAppDisplayController {
         dashboardPrefs()
                 .edit()
                 .remove(KEY_ACTIVE_PACKAGE)
+                .remove(KEY_ACTIVE_MODE)
                 .putString(KEY_ACTIVE_REASON, safe(reason))
                 .putLong(KEY_ACTIVE_UPDATED_MS, System.currentTimeMillis())
                 .apply();

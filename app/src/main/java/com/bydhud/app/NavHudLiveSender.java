@@ -5542,6 +5542,7 @@ final class NavHudLiveSender {
         ClusterProjectionService.startProjection(
                 context,
                 packageName,
+                NavAppDisplayController.get(context).persistedDashboardMode(),
                 "watchdog:" + safeReason(reason));
     }
 

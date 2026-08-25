@@ -104,10 +104,54 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
+    public void dashboardProfilesExposeIndependentGeometryControlsAndHideForNone() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
+
+        assertTrue(options.contains("snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE"));
+        assertTrue(options.contains("snapshot.dashboardWidthPercent"));
+        assertTrue(options.contains("snapshot.dashboardHeightPercent"));
+        assertTrue(options.contains("snapshot.dashboardOffsetPercent"));
+        assertTrue(options.contains("snapshot.dashboardScalePercent"));
+        assertTrue(options.contains("activity.composeSetDashboardWidthPercent("));
+        assertTrue(options.contains("activity.composeSetDashboardHeightPercent("));
+        assertTrue(options.contains("activity.composeSetDashboardOffsetPercent("));
+        assertTrue(options.contains("activity.composeSetDashboardScalePercent("));
+        assertTrue(options.contains("snapshot.dashboardScreenMode, it"));
+        assertTrue(options.contains("DashboardPercentRow(copy.dashboardWidth"));
+        assertTrue(options.contains("DashboardPercentRow(copy.dashboardHeight"));
+        assertTrue(options.contains("DashboardPercentRow(copy.dashboardOffset"));
+        assertTrue(options.contains("DashboardPercentRow(copy.dashboardScale"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MIN_WIDTH_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MAX_WIDTH_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MIN_HEIGHT_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MAX_HEIGHT_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MIN_OFFSET_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MAX_OFFSET_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MIN_SCALE_PERCENT"));
+        assertTrue(options.contains("DashboardProjectionPolicy.MAX_SCALE_PERCENT"));
+
+        String prefs = sourcePath("app/src/main/java/com/bydhud/app/HudPrefs.java");
+        assertTrue(prefs.contains("dashboardProjectionProfile(Context context, int mode)"));
+        assertTrue(prefs.contains("DashboardProjectionPolicy.defaultProfile()"));
+        assertTrue(prefs.contains("KEY_DASHBOARD_PARTIAL_WIDTH_PERCENT"));
+        assertTrue(prefs.contains("KEY_DASHBOARD_FULL_WIDTH_PERCENT"));
+        assertTrue(prefs.contains("KEY_DASHBOARD_HEIGHT_PERCENT"));
+        assertTrue(prefs.contains("int heightDefault = full && preferences.contains(KEY_DASHBOARD_HEIGHT_PERCENT)"));
+        assertTrue(prefs.contains("DashboardProjectionPolicy.clampScalePercent(percent)"));
+
+        String activity = sourcePath("app/src/main/java/com/bydhud/app/MainActivity.java");
+        assertTrue(activity.contains(
+                "composeSetDashboardWidthPercent(int editedMode, int percent)"));
+        assertTrue(activity.contains(
+                "int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);"));
+    }
+
+    @Test
     public void rowExplanationsStripOnlyFinalFullStopThroughSharedHelper() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         assertTrue(source.contains("private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(\".\")"));
-        assertTrue(between(source, "private fun DashboardHeightRow(",
+        assertTrue(between(source, "private fun DashboardPercentRow(",
                 "private fun StorageDayRow(").contains("rowExplanation(hint)"));
         assertTrue(between(source, "private fun SettingRow(",
                 "private fun HudDropdown(").contains("rowExplanation(hint)"));
