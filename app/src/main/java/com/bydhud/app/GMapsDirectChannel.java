@@ -71,9 +71,9 @@ final class GMapsDirectChannel {
     private final Runnable registrationRetry = this::retryRegistration;
     private final Runnable leaseCheck = this::checkProducerLease;
 
-    private boolean running;
+    private volatile boolean running;
     private boolean connected;
-    private boolean navigating;
+    private volatile boolean navigating;
     private boolean terminalLatched;
     private boolean firstStructuredFrame;
     private volatile long sessionGeneration;
@@ -122,6 +122,7 @@ final class GMapsDirectChannel {
             registerClient("start:" + safe(reason));
             handler.removeCallbacks(leaseCheck);
             handler.postDelayed(leaseCheck, LEASE_CHECK_MS);
+            listener.onChannelStarted(OWNER_PACKAGE, sessionGeneration, safe(reason));
         });
     }
 
@@ -1330,6 +1331,7 @@ final class GMapsDirectChannel {
     }
 
     interface Listener {
+        void onChannelStarted(String ownerPackage, long sessionGeneration, String reason);
         void onHandshakeAvailable(String ownerPackage, long sessionGeneration, String reason);
         void onHandshakeUnavailable(String ownerPackage, long sessionGeneration, String reason);
         void onRouteState(String ownerPackage, long sessionGeneration,

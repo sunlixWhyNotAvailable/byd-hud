@@ -24,6 +24,88 @@ public final class NavHudRuntimeContractTest {
     }
 
     @Test
+    public void GmapsInitialTimeoutUsesExactStartedChannelGeneration()
+            throws IOException {
+        assertTrue(NavHudLiveSender.acceptsGMapsChannelStartForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                GMapsDirectChannel.OWNER_PACKAGE, true, true, 7L, 7L));
+        assertFalse(NavHudLiveSender.acceptsGMapsChannelStartForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                GMapsDirectChannel.OWNER_PACKAGE, true, true, 7L, 8L));
+        assertFalse(NavHudLiveSender.acceptsGMapsChannelStartForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                GMapsDirectChannel.OWNER_PACKAGE, true, true, 8L, 7L));
+        assertFalse(NavHudLiveSender.acceptsGMapsChannelStartForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                GMapsDirectChannel.OWNER_PACKAGE, false, true, 7L, 7L));
+        assertFalse(NavHudLiveSender.acceptsGMapsChannelStartForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                GMapsDirectChannel.OWNER_PACKAGE, true, false, 7L, 7L));
+        assertTrue(NavHudLiveSender.acceptsGMapsTimeoutForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                false, false, false, true, 7L, 7L));
+        assertFalse(NavHudLiveSender.acceptsGMapsTimeoutForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                false, false, false, true, 7L, 8L));
+        assertFalse(NavHudLiveSender.acceptsGMapsTimeoutForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                false, false, false, true, 8L, 7L));
+        assertFalse(NavHudLiveSender.acceptsGMapsTimeoutForTest(
+                true, GMapsDirectChannel.PACKAGE_NAME,
+                false, false, false, false, 7L, 7L));
+
+        String channel = source("GMapsDirectChannel.java");
+        int channelStart = channel.indexOf("void start(String reason)");
+        int generationAdvance = channel.indexOf("sessionGeneration++;", channelStart);
+        int register = channel.indexOf("registerClient(\"start:", channelStart);
+        int startedCallback = channel.indexOf("listener.onChannelStarted(", register);
+        assertTrue(channelStart >= 0);
+        assertTrue(generationAdvance > channelStart);
+        assertTrue(startedCallback > generationAdvance);
+        assertTrue(startedCallback > register);
+        assertTrue(channel.contains(
+                "listener.onChannelStarted(OWNER_PACKAGE, sessionGeneration, safe(reason));"));
+
+        String sender = source("NavHudLiveSender.java");
+        int probeStart = sender.indexOf("private void startGMapsDirectProbe");
+        int probeEnd = sender.indexOf("\n    private void onGMapsDirectChannelStarted", probeStart);
+        assertTrue(probeStart >= 0 && probeEnd > probeStart);
+        assertFalse(sender.substring(probeStart, probeEnd)
+                .contains("scheduleGMapsDirectTimeout"));
+
+        int healthStart = sender.indexOf("private final Runnable routeHealthLoop");
+        int healthEnd = sender.indexOf("\n    private final Runnable", healthStart + 1);
+        assertTrue(healthStart >= 0 && healthEnd > healthStart);
+        String health = sender.substring(healthStart, healthEnd);
+        assertTrue(health.contains(
+                "gmapsDirectState == GMapsDirectState.ACTIVE_WAITING_FRAME"));
+
+        int callbackStart = sender.indexOf("private void onGMapsDirectChannelStarted");
+        int callbackEnd = sender.indexOf("\n    private void onGMapsDirectHandshakeAvailable", callbackStart);
+        assertTrue(callbackStart >= 0 && callbackEnd > callbackStart);
+        String callback = sender.substring(callbackStart, callbackEnd);
+        assertTrue(callback.indexOf("acceptsGMapsChannelStartForTest")
+                < callback.indexOf("scheduleGMapsDirectTimeout(sessionGeneration)"));
+        assertEquals(1, occurrences(callback, "scheduleGMapsDirectTimeout(sessionGeneration)"));
+
+        int scheduleStart = sender.indexOf("private void scheduleGMapsDirectTimeout");
+        int scheduleEnd = sender.indexOf("\n    private void cancelGMapsDirectTimeout", scheduleStart);
+        assertTrue(scheduleStart >= 0 && scheduleEnd > scheduleStart);
+        String schedule = sender.substring(scheduleStart, scheduleEnd);
+        assertFalse(schedule.contains("+ 1L"));
+        assertTrue(sender.contains("GMAPS_DIRECT_TIMEOUT_MS = 5000L"));
+        assertEquals(1, occurrences(
+                schedule, "postDelayed(gmapsDirectTimeout, GMAPS_DIRECT_TIMEOUT_MS)"));
+
+        int timeoutStart = sender.indexOf("private void onGMapsDirectTimeout()");
+        int timeoutEnd = sender.indexOf("\n    private final Runnable sendLoop", timeoutStart);
+        assertTrue(timeoutStart >= 0 && timeoutEnd > timeoutStart);
+        String timeout = sender.substring(timeoutStart, timeoutEnd);
+        assertTrue(timeout.indexOf("isCurrentGMapsTimeoutToken()")
+                < timeout.indexOf("hudOutput.clearDirectFrameForLoss("));
+    }
+
+    @Test
     public void TbtFramesDoNotStealOwnershipWithoutAStartOrHudPriority() {
         assertTrue(NavHudLiveSender.shouldClaimTbtOwnerForFrameForTest(
                 false, false, false, false, false));
@@ -523,6 +605,17 @@ public final class NavHudRuntimeContractTest {
             searchFrom = clear + 1;
         }
         assertEquals(2, checked);
+    }
+
+    private static int occurrences(String source, String needle) {
+        int count = 0;
+        int from = 0;
+        while (true) {
+            int found = source.indexOf(needle, from);
+            if (found < 0) return count;
+            count++;
+            from = found + needle.length();
+        }
     }
 
     private static String source(String name) throws IOException {
