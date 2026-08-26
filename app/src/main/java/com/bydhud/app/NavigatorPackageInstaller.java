@@ -147,7 +147,8 @@ final class NavigatorPackageInstaller {
             String initialInstalledIdentity = "";
             if (isInstalled(context, profile.packageName)) {
                 initialInstalledIdentity = NavigatorPatchStore.installedIdentity(context, profile);
-                initialArtifact = NavigatorPatchPipeline.inspectInstalled(context, profile);
+                initialArtifact = NavigatorPatchPipeline.inspectInstalledMetadata(
+                        context, profile);
                 if (sameArtifact(expected, initialArtifact)) {
                     completeRestore(context, profile, initialArtifact,
                             "Original APK is already installed", initialInstalledIdentity);
@@ -171,7 +172,7 @@ final class NavigatorPackageInstaller {
             NavigatorPatchStore.setSessionId(context, sessionId);
             NavHudLiveSender.get(context).stop(profile.packageName, "navigator-restore", true);
             if (isInstalled(context, profile.packageName)) {
-                if (!initialInstalledTargetUnchanged(context, profile)) {
+                if (!initialRestoreTargetUnchanged(context, profile)) {
                     throw new IOException("Installed navigator changed during recovery staging");
                 }
                 NavigatorPatchStore.expectCallback(context, OP_UNINSTALL_RESTORE);
@@ -292,7 +293,7 @@ final class NavigatorPackageInstaller {
             try {
                 installedIdentity = NavigatorPatchStore.installedIdentity(appContext, profile);
                 NavigatorPatchPipeline.ScanResult result =
-                        NavigatorPatchPipeline.inspectInstalled(appContext, profile);
+                        NavigatorPatchPipeline.inspectInstalledMetadata(appContext, profile);
                 verifyExpected(appContext, profile, result, false);
                 completeRestore(appContext, profile, result, "Original APK restored",
                         installedIdentity);
@@ -677,17 +678,32 @@ final class NavigatorPackageInstaller {
 
     private static boolean initialInstalledTargetUnchanged(Context context,
             NavigatorPatchStore.Profile profile) {
+        return initialInstalledTargetUnchanged(context, profile, false);
+    }
+
+    private static boolean initialRestoreTargetUnchanged(Context context,
+            NavigatorPatchStore.Profile profile) {
+        return initialInstalledTargetUnchanged(context, profile, true);
+    }
+
+    private static boolean initialInstalledTargetUnchanged(Context context,
+            NavigatorPatchStore.Profile profile, boolean metadataOnly) {
         try {
             PackageInfo info = context.getPackageManager().getPackageInfo(
                     profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
-            return NavigatorPatchStore.initialUpdateTime(context, profile) == info.lastUpdateTime
-                    && NavigatorPatchStore.initialVersionCode(context, profile)
-                    == info.getLongVersionCode()
-                    && NavigatorPatchStore.initialSigner(context, profile).equals(
+            if (NavigatorPatchStore.initialUpdateTime(context, profile) != info.lastUpdateTime
+                    || NavigatorPatchStore.initialVersionCode(context, profile)
+                    != info.getLongVersionCode()
+                    || !NavigatorPatchStore.initialSigner(context, profile).equals(
                     NavigatorSigningKey.installedCertificateSha256(
-                        context, profile.packageName))
-                    && NavigatorPatchStore.initialFingerprint(context, profile).equals(
-                    NavigatorPatchPipeline.inspectInstalled(context, profile).sha256);
+                        context, profile.packageName))) {
+                return false;
+            }
+            NavigatorPatchPipeline.ScanResult installed = metadataOnly
+                    ? NavigatorPatchPipeline.inspectInstalledMetadata(context, profile)
+                    : NavigatorPatchPipeline.inspectInstalled(context, profile);
+            return NavigatorPatchStore.initialFingerprint(context, profile).equals(
+                    installed.sha256);
         } catch (Exception ignored) {
             return false;
         }

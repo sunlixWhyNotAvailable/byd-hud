@@ -670,14 +670,14 @@ final class NavigatorPatchPipeline {
         }
     }
 
+    static ScanResult inspectInstalledMetadata(Context context,
+            NavigatorPatchStore.Profile profile) throws Exception {
+        return metadata(NavigatorApkSet.inspectInstalled(context, profile), profile);
+    }
+
     static ScanResult verifyRecoverySource(Context context,
             NavigatorPatchStore.Profile profile, File source) throws Exception {
-        ScanResult inspected = NavigatorPatchWorkerClient.inspectDirectory(
-                context, profile, UUID.randomUUID().toString(), source);
-        return new ScanResult(profile, inspected.sha256, inspected.versionName,
-                inspected.versionCode, inspected.signerSha256,
-                NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED,
-                NavigatorPatchStore.NOT_CHECKED, NavigatorPatchStore.NOT_CHECKED, "");
+        return metadata(NavigatorApkSet.readDirectory(context, profile, source), profile);
     }
 
     static void discardPrepared(Context context, PreparedPatch prepared, String reason) {

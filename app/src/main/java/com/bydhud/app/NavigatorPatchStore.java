@@ -1131,8 +1131,9 @@ final class NavigatorPatchStore {
                 || !transactionDirectory(context, profile).isDirectory()) return false;
         try {
             if (!installedIdentity.equals(installedIdentity(context, profile))) return false;
-            NavigatorPatchPipeline.ScanResult actual =
-                    NavigatorPatchPipeline.inspectInstalled(context, profile);
+            NavigatorPatchPipeline.ScanResult actual = OP_RECOVERY.equals(operation.kind)
+                    ? NavigatorPatchPipeline.inspectInstalledMetadata(context, profile)
+                    : NavigatorPatchPipeline.inspectInstalled(context, profile);
             return expectedSha(context, profile).equals(actual.sha256)
                     && expectedVersionCode(context, profile) == actual.versionCode
                     && expectedSigner(context, profile).equals(actual.signerSha256);

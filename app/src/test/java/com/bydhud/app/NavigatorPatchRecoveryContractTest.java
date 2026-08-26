@@ -72,6 +72,44 @@ public final class NavigatorPatchRecoveryContractTest {
         assertTrue(installer.contains("migrateKnownReceiverContextFailure"));
     }
 
+    @Test
+    public void rollbackUsesExactSetMetadataWithoutPatchProfileDetection() throws IOException {
+        String pipeline = source("NavigatorPatchPipeline.java");
+        String installer = source("NavigatorPackageInstaller.java");
+        String store = source("NavigatorPatchStore.java");
+        String sourceVerification = between(pipeline,
+                "static ScanResult verifyRecoverySource(", "static void discardPrepared(");
+        String beginRestore = between(installer,
+                "static void beginRestore(", "static void commitPreparedSession(");
+        String patchedVerification = between(installer,
+                "static void verifyInstalledAsync(", "static void verifyRestoredAsync(");
+        String restoredVerification = between(installer,
+                "static void verifyRestoredAsync(",
+                "static boolean isFinalVerificationRetryable(");
+        String unchangedFence = between(installer,
+                "private static boolean initialInstalledTargetUnchanged(Context context,\n"
+                        + "            NavigatorPatchStore.Profile profile, boolean metadataOnly)",
+                "private static void finishUnchangedFailure(");
+        String retryFence = between(store,
+                "static boolean finalVerificationTransactionMatches(",
+                "static synchronized void releaseInstall(");
+
+        assertTrue(sourceVerification.contains("NavigatorApkSet.readDirectory"));
+        assertFalse(sourceVerification.contains("NavigatorPatchWorkerClient"));
+        assertFalse(sourceVerification.contains("inspectComponents"));
+        assertTrue(beginRestore.contains("initialRestoreTargetUnchanged"));
+        assertTrue(patchedVerification.contains("NavigatorPatchPipeline.inspectInstalled("));
+        assertFalse(patchedVerification.contains("inspectInstalledMetadata"));
+        assertTrue(restoredVerification.contains("inspectInstalledMetadata"));
+        assertFalse(restoredVerification.contains("NavigatorPatchPipeline.inspectInstalled("));
+        assertTrue(occurrences(installer, "inspectInstalledMetadata") == 3);
+        assertTrue(retryFence.contains("OP_RECOVERY.equals(operation.kind)"));
+        assertTrue(retryFence.contains("NavigatorPatchPipeline.inspectInstalledMetadata"));
+        assertTrue(retryFence.contains("NavigatorPatchPipeline.inspectInstalled(context"));
+        assertTrue(unchangedFence.indexOf("initialSigner(context, profile)")
+                < unchangedFence.indexOf("inspectInstalledMetadata(context, profile)"));
+    }
+
     private static String source(String fileName) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/" + fileName);
@@ -86,5 +124,15 @@ public final class NavigatorPatchRecoveryContractTest {
         assertTrue("missing start marker " + start, from >= 0);
         assertTrue("missing end marker " + end, to > from);
         return source.substring(from, to);
+    }
+
+    private static int occurrences(String value, String needle) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = value.indexOf(needle, offset)) >= 0) {
+            count++;
+            offset += needle.length();
+        }
+        return count;
     }
 }

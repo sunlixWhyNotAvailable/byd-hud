@@ -58,7 +58,8 @@ public final class NavigatorPatchWorkerSourceContractTest {
         assertTrue(pipeline.contains("ScanResult output = NavigatorPatchWorkerClient.inspectDirectory("));
         assertTrue(pipeline.contains("finishQueuedCancellation(context, profile"));
         assertTrue(pipeline.contains("workerInspectDirectory"));
-        assertFalse(pipeline.contains("NavigatorApkSet.inspectInstalled(context, profile)"));
+        assertTrue(pipeline.contains(
+                "return metadata(NavigatorApkSet.inspectInstalled(context, profile), profile);"));
         assertTrue(gmaps.contains("inspectComponents(List<File> apks)"));
         assertTrue(gmaps.contains("scanCandidates(apk, PROFILES)"));
         assertFalse(pipeline.contains("validatedGmapsProfile"));
