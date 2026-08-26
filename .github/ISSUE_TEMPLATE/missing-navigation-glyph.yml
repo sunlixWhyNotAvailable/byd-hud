@@ -1,8 +1,5 @@
-name: "🧭 Navigation output / Вивід навігації"
-description: "Report missing or incorrect HUD, TBT, maneuver, or lane output / Повідомити про неправильний вивід навігації"
-title: "[Navigation]: "
-labels:
-  - bug
+name: Missing or incorrect navigation output
+description: Report missing or incorrect HUD navigation output.
 body:
   - type: markdown
     attributes:
@@ -31,7 +28,7 @@ body:
     id: app-version
     attributes:
       label: BYD HUD app version
-      placeholder: "Copy the version shown in the BYD HUD header"
+      placeholder: "v1.3.0"
     validations:
       required: true
 

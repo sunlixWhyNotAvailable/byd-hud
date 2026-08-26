@@ -1,8 +1,5 @@
-name: "🐛 Bug report / Звіт про помилку"
-description: "Report crashes, broken controls, permissions, update, storage, or runtime issues / Повідомити про помилку застосунку"
-title: "[Bug]: "
-labels:
-  - bug
+name: Bug report
+description: Report crashes, broken controls, permissions, update, storage, or runtime issues.
 body:
   - type: markdown
     attributes:
@@ -47,7 +44,7 @@ body:
     id: app-version
     attributes:
       label: BYD HUD app version
-      placeholder: "Copy the version shown in the BYD HUD header"
+      placeholder: "v1.3.0"
     validations:
       required: true
 
