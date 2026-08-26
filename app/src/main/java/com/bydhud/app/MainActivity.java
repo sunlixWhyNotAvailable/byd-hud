@@ -145,7 +145,6 @@ public final class MainActivity extends ComponentActivity {
     private Button disconnectButton;
     private Switch bootSwitch;
     private Switch smallDistanceClampSwitch;
-    private Switch roundaboutLeftHandSwitch;
     private Switch pngOutputSwitch;
     private Switch nativeOutputSwitch;
     private Switch laneOutputSwitch;
@@ -155,7 +154,6 @@ public final class MainActivity extends ComponentActivity {
     private int selectedTabIndex = 0;
     private CompoundButton.OnCheckedChangeListener bootSwitchListener;
     private CompoundButton.OnCheckedChangeListener smallDistanceClampSwitchListener;
-    private CompoundButton.OnCheckedChangeListener roundaboutLeftHandSwitchListener;
     private CompoundButton.OnCheckedChangeListener pngOutputSwitchListener;
     private CompoundButton.OnCheckedChangeListener nativeOutputSwitchListener;
     private CompoundButton.OnCheckedChangeListener laneOutputSwitchListener;
@@ -450,12 +448,6 @@ public final class MainActivity extends ComponentActivity {
                 setSmallDistanceClamp(checked);
         smallDistanceClampSwitch = switchRow(mainRoot, "Small distance clamp",
                 HudPrefs.isSmallDistanceClampEnabled(this), smallDistanceClampSwitchListener);
-        roundaboutLeftHandSwitchListener = (buttonView, checked) ->
-                setRoundaboutLeftHandTraffic(checked);
-        roundaboutLeftHandSwitch = switchRow(mainRoot, "Roundabout left-hand traffic",
-                HudPrefs.isRoundaboutLeftHandTraffic(this), roundaboutLeftHandSwitchListener);
-        mainRoot.addView(label("Roundabout left-hand traffic: Changes roundabout assets for PNG output",
-                13, false));
 
         logRoot.addView(section("Logcat"));
         logcatRecorderStatusView = label(LogcatRecorder.STATUS_WAITING, 14, false);
@@ -676,9 +668,9 @@ public final class MainActivity extends ComponentActivity {
                 + NavigationLogStorage.publicLogsPath()
                 + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, "
                 + "someip_tx.jsonl, tbt_tx.jsonl"
-                + "\n\nWaze crop:\n"
+                + "\n\nHistorical Waze crop sessions:\n"
                 + NavigationLogStorage.publicWazeCropPath()
-                + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";
+                + "\nProbe channels: notification_large_icon, unsupported_start_hud, nav_app_display";
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -824,7 +816,6 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.speedLimitCompositePlacement(this),
                 HudPrefs.speedLimitManeuverOverlaySize(this),
                 HudPrefs.speedLimitLaneOverlaySize(this),
-                HudPrefs.isWazeScreenCaptureEnabled(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
                 dashboardScreenMode,
                 dashboardProfile.widthPercent,
@@ -832,7 +823,6 @@ public final class MainActivity extends ComponentActivity {
                 dashboardProfile.offsetPercent,
                 dashboardProfile.scalePercent,
                 HudPrefs.isSmallDistanceClampEnabled(this),
-                HudPrefs.isRoundaboutLeftHandTraffic(this),
                 permissionStatus.settingsGranted(),
                 permissionStatus.readyForCapture(),
                 permissionStatus.summary(),
@@ -1233,7 +1223,6 @@ public final class MainActivity extends ComponentActivity {
         return "HUD package: " + (hudPackage.isEmpty() ? "(none)" : hudPackage)
                 + "\nLog-only: " + formatCapturePackages(NavCapturePrefs.getLogOnlyPackages(this))
                 + "\nObserved: " + formatCapturePackages(NavCapturePrefs.getObservedPackages(this))
-                + "\nWaze crop: " + (WazeCropCapture.get(this).isRunning() ? "active session" : "idle")
                 + "\nRuntime service: "
                 + HudRuntimeState.summary(this, SystemClock.elapsedRealtime())
                 + "\nPermissions: " + permissionStatus.summary();
@@ -1419,10 +1408,6 @@ public final class MainActivity extends ComponentActivity {
         setSpeedLimitLaneOverlaySize(size);
     }
 
-    public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
-        setWazeScreenCaptureEnabled(enabled);
-    }
-
     public void composeSetWazeCustomSurfaceEnabled(boolean enabled) {
         HudPrefs.setWazeCustomSurfaceEnabled(this, enabled);
         appendStatus("Waze custom surface " + (enabled ? "ON" : "OFF"));
@@ -1490,11 +1475,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSetRoundaboutLeftHandTraffic(boolean enabled) {
-        setRoundaboutLeftHandTraffic(enabled);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetUaLanguage(boolean ua) {
         setUiLanguage(ua);
     }
@@ -1529,41 +1509,22 @@ public final class MainActivity extends ComponentActivity {
             return new ComposeDeleteDayResult(day, false, false, "invalid day");
         }
 
-        boolean active = NavigationLogStorage.isActiveNavCaptureDay(day);
-        WazeCropCapture crop = WazeCropCapture.get(this);
-        boolean restartCrop = active && crop.isRunning();
         boolean restartLogcat = LogcatRecorder.isRecording()
                 && day.equals(LogcatRecorder.activeStartDay());
         boolean logcatUsesDay = LogcatRecorder.hasSessionForDay(day);
-        boolean cropRebaseStarted = false;
         boolean logcatStopped = false;
-        if (active) {
-            cropRebaseStarted = crop.beginStorageDayRebase("storage-day-rebase");
-            if (!cropRebaseStarted) {
-                crop.finishStorageDayRebase(
-                        restartCrop, "storage-day-rebase-after-timeout");
-                return new ComposeDeleteDayResult(
-                        day, false, false, "crop worker did not stop; deletion aborted");
-            }
-        }
         if (logcatUsesDay) {
             CountDownLatch logcatStop = new CountDownLatch(1);
             LogcatRecorder.stopAsync(this, logcatStop::countDown);
             try {
                 if (!logcatStop.await(LOGCAT_STOP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
                         || LogcatRecorder.hasSessionForDay(day)) {
-                    if (cropRebaseStarted) {
-                        crop.finishStorageDayRebase(restartCrop, "storage-day-rebase-stop-failed");
-                    }
                     return new ComposeDeleteDayResult(
                             day, false, false, "logcat did not stop; deletion aborted");
                 }
                 logcatStopped = true;
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
-                if (cropRebaseStarted) {
-                    crop.finishStorageDayRebase(restartCrop, "storage-day-rebase-stop-interrupted");
-                }
                 return new ComposeDeleteDayResult(
                         day, false, false, "logcat stop wait interrupted; deletion aborted");
             }
@@ -1574,9 +1535,6 @@ public final class MainActivity extends ComponentActivity {
         try {
             retirement = NavigationLogStorage.retireStorageDay(this, day);
         } finally {
-            if (cropRebaseStarted) {
-                crop.finishStorageDayRebase(restartCrop, "storage-day-rebase");
-            }
             if (restartLogcat && logcatStopped) {
                 logcatRestart = LogcatRecorder.restartAfterRebase(this);
             }
@@ -1604,9 +1562,8 @@ public final class MainActivity extends ComponentActivity {
             deleted &= tombstone != null && !tombstone.exists();
         }
         return new ComposeDeleteDayResult(day, deleted, false,
-                appendLogcatRestartFailure(deleted
-                        ? (active ? "deleted and live writers rebased" : "deleted")
-                        : "delete incomplete", logcatRestart));
+                appendLogcatRestartFailure(
+                        deleted ? "deleted" : "delete incomplete", logcatRestart));
     }
 
     //Runs one retained batch so Activity recreation cannot abandon the remaining selected days.
@@ -2363,7 +2320,6 @@ public final class MainActivity extends ComponentActivity {
         public final int speedLimitCompositePlacement;
         public final int speedLimitManeuverOverlaySize;
         public final int speedLimitLaneOverlaySize;
-        public final boolean wazeScreenCaptureEnabled;
         public final boolean wazeCustomSurfaceEnabled;
         public final int dashboardScreenMode;
         public final int dashboardWidthPercent;
@@ -2371,7 +2327,6 @@ public final class MainActivity extends ComponentActivity {
         public final int dashboardOffsetPercent;
         public final int dashboardScalePercent;
         public final boolean smallDistanceClampEnabled;
-        public final boolean roundaboutLeftHandTraffic;
         public final boolean settingsPermissionsGranted;
         public final boolean captureReady;
         public final String permissionSummary;
@@ -2431,13 +2386,12 @@ public final class MainActivity extends ComponentActivity {
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
                 int speedLimitLaneOverlaySize,
-                boolean wazeScreenCaptureEnabled,
                 boolean wazeCustomSurfaceEnabled,
                 int dashboardScreenMode,
                 int dashboardWidthPercent, int dashboardHeightPercent,
                 int dashboardOffsetPercent, int dashboardScalePercent,
                 boolean smallDistanceClampEnabled,
-                boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
+                boolean settingsPermissionsGranted,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
                 String hudStatus, String hudPackage, String logOnlyPackages,
                 String observedPackages, String activeDashboardPackage,
@@ -2480,7 +2434,6 @@ public final class MainActivity extends ComponentActivity {
             this.speedLimitCompositePlacement = speedLimitCompositePlacement;
             this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
             this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
-            this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
             this.dashboardWidthPercent = dashboardWidthPercent;
@@ -2488,7 +2441,6 @@ public final class MainActivity extends ComponentActivity {
             this.dashboardOffsetPercent = dashboardOffsetPercent;
             this.dashboardScalePercent = dashboardScalePercent;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
-            this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
             this.captureReady = captureReady;
             this.permissionSummary = permissionSummary == null ? "" : permissionSummary;
@@ -2576,7 +2528,6 @@ public final class MainActivity extends ComponentActivity {
                     && speedLimitCompositePlacement == other.speedLimitCompositePlacement
                     && speedLimitManeuverOverlaySize == other.speedLimitManeuverOverlaySize
                     && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
-                    && wazeScreenCaptureEnabled == other.wazeScreenCaptureEnabled
                     && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
                     && dashboardScreenMode == other.dashboardScreenMode
                     && dashboardWidthPercent == other.dashboardWidthPercent
@@ -2584,7 +2535,6 @@ public final class MainActivity extends ComponentActivity {
                     && dashboardOffsetPercent == other.dashboardOffsetPercent
                     && dashboardScalePercent == other.dashboardScalePercent
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
-                    && roundaboutLeftHandTraffic == other.roundaboutLeftHandTraffic
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
                     && captureReady == other.captureReady
                     && dashboardMoveInProgress == other.dashboardMoveInProgress
@@ -2642,11 +2592,10 @@ public final class MainActivity extends ComponentActivity {
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
                     speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
-                    speedLimitLaneOverlaySize, wazeScreenCaptureEnabled,
-                    wazeCustomSurfaceEnabled, dashboardScreenMode,
+                    speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
                     dashboardScalePercent, smallDistanceClampEnabled,
-                    roundaboutLeftHandTraffic, settingsPermissionsGranted, captureReady,
+                    settingsPermissionsGranted, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
                     logOnlyPackages, observedPackages, activeDashboardPackage,
                     dashboardMoveInProgress, logcatRecording, logcatStatus, logPaths,
@@ -3086,7 +3035,7 @@ public final class MainActivity extends ComponentActivity {
                 appsCuratedListRoot.addView(activeAppView(app,
                         app.packageName.equals(hudPackage),
                         logOnlyPackages.contains(app.packageName),
-                        true));
+                        isSupportedHudPackage(app.packageName)));
             }
         }
         List<ActiveAppRow> allApps = new ArrayList<>();
@@ -3382,10 +3331,6 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("nav capture ignored: system package " + normalized);
             return;
         }
-        if (enabled && requiresLegacyCaptureRuntimeReady(normalized)
-                && !ensureNavCaptureRuntimeReadyForStart("hud", normalized)) {
-            return;
-        }
         if (enabled && !isSupportedHudPackage(normalized)) {
             NavCapturePrefs.setLogOnlyEnabled(this, normalized, true);
             NavCapturePrefs.setHudEnabled(this, normalized, false);
@@ -3418,9 +3363,6 @@ public final class MainActivity extends ComponentActivity {
         } else {
             NavHudLiveSender.get(this).demoteHudToTbtObserver(
                     normalized, "ui-stop", true);
-            if ("com.waze".equals(normalized)) {
-                WazeCropCapture.get(this).stop("ui-stop-hud");
-            }
             appendStatus("nav live HUD stop requested");
         }
         refreshActiveAppsList();
@@ -3432,9 +3374,6 @@ public final class MainActivity extends ComponentActivity {
         if (previous.isEmpty()) {
             return;
         }
-        if ("com.waze".equals(previous)) {
-            WazeCropCapture.get(this).stop("hud-switch");
-        }
         NavAppDisplayController controller = NavAppDisplayController.get(this);
         appendStatus("return previous HUD app to main: " + previous);
         controller.moveToMain(previous, "hud-switch-to-" + normalizePackage(nextPackage));
@@ -3443,12 +3382,6 @@ public final class MainActivity extends ComponentActivity {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedHudPackage(String packageName) {
         return NavCapturePrefs.isSupportedHudPackage(packageName);
-    }
-
-    static boolean requiresLegacyCaptureRuntimeReady(String packageName) {
-        String normalized = normalizePackage(packageName);
-        return !"com.waze".equals(normalized)
-                && !GMapsDirectChannel.PACKAGE_NAME.equals(normalized);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -3491,9 +3424,6 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         NavHudLiveSender.get(this).stop(normalized, "ui-stop", true);
-        if ("com.waze".equals(normalized)) {
-            WazeCropCapture.get(this).stop("ui-stop");
-        }
         if (NavCapturePrefs.isHudEnabled(this, normalized)) {
             NavCapturePrefs.setHudEnabled(this, normalized, false);
             appendStatus("nav live HUD stop requested");
@@ -3682,8 +3612,6 @@ public final class MainActivity extends ComponentActivity {
 
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         NavHudLiveSender.get(this).stop(hudPackage, safeReason, true);
-        WazeCropCapture.get(this).stop(safeReason);
-        WazeMediaProjectionController.resetForRuntimeReinit(this, safeReason);
 
         NavAppDisplayController.get(this).returnActiveDashboardToMain(safeReason);
 
@@ -3750,17 +3678,6 @@ public final class MainActivity extends ComponentActivity {
                 ? "ON: HUD displays 11m for active 0..10m"
                 : "OFF: HUD sends raw 0..10m"));
         AppEventLogger.event(this, "ui small_distance_clamp=" + enabled);
-        refreshControls();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setRoundaboutLeftHandTraffic(boolean enabled) {
-        HudPrefs.setRoundaboutLeftHandTraffic(this, enabled);
-        cachedPayloadKey = "";
-        appendStatus("Roundabout traffic " + (enabled
-                ? "LEFT: Waze exits use S60-S69"
-                : "RIGHT: Waze exits use S50-S59"));
-        AppEventLogger.event(this, "ui roundabout_left_hand_traffic=" + enabled);
         refreshControls();
     }
 
@@ -3926,14 +3843,6 @@ public final class MainActivity extends ComponentActivity {
         int persisted = HudPrefs.speedLimitLaneOverlaySize(this);
         appendStatus("Speed limit lane overlay size " + persisted);
         AppEventLogger.event(this, "ui speed_limit_lane_overlay_size=" + persisted);
-        refreshControls();
-    }
-
-    private void setWazeScreenCaptureEnabled(boolean enabled) {
-        HudPrefs.setWazeScreenCaptureEnabled(this, enabled);
-        NavHudLiveSender.get(this).onWazeScreenCapturePreferenceChanged(enabled);
-        appendStatus("Waze screen capture " + (enabled ? "ON" : "OFF"));
-        AppEventLogger.event(this, "ui waze_screen_capture=" + enabled);
         refreshControls();
     }
 
@@ -5426,7 +5335,6 @@ public final class MainActivity extends ComponentActivity {
                         + " | navLogOnly=" + formatCapturePackages(NavCapturePrefs.getLogOnlyPackages(this))
                         + " | navDisplay=" + NavAppDisplayController.get(this)
                                 .lastState(NavCapturePrefs.getHudPackage(this)).displayId
-                        + " | wazeCrop=" + WazeCropCapture.get(this).isRunning()
                         + " | smallDistClamp=" + HudPrefs.isSmallDistanceClampEnabled(this)
                         + " | arrowMode=" + (arrowCuratedMode ? "curated" : "raw")
                         + " | curated=" + (curatedIndex + 1) + "/" + HudArrowComboCatalog.size()
@@ -5465,11 +5373,6 @@ public final class MainActivity extends ComponentActivity {
             smallDistanceClampSwitch.setOnCheckedChangeListener(null);
             smallDistanceClampSwitch.setChecked(HudPrefs.isSmallDistanceClampEnabled(this));
             smallDistanceClampSwitch.setOnCheckedChangeListener(smallDistanceClampSwitchListener);
-        }
-        if (roundaboutLeftHandSwitch != null) {
-            roundaboutLeftHandSwitch.setOnCheckedChangeListener(null);
-            roundaboutLeftHandSwitch.setChecked(HudPrefs.isRoundaboutLeftHandTraffic(this));
-            roundaboutLeftHandSwitch.setOnCheckedChangeListener(roundaboutLeftHandSwitchListener);
         }
         if (pngOutputSwitch != null) {
             pngOutputSwitch.setOnCheckedChangeListener(null);

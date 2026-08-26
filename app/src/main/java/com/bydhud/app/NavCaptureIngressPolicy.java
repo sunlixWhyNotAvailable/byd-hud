@@ -12,12 +12,11 @@ import java.util.concurrent.Executors;
 final class NavCaptureIngressPolicy {
     enum Mode {
         OFF,
-        DISCOVERY,
-        FALLBACK
+        LOG_ONLY
     }
 
     private static final String WAZE = "com.waze";
-    private static final String GMAPS = "app.revanced.android.apps.maps";
+    private static final String REVANCED_GMAPS = "app.revanced.android.apps.maps";
     private static final Object LOCK = new Object();
     private static final ExecutorService REFRESH = Executors.newSingleThreadExecutor(runnable -> {
         Thread thread = new Thread(runnable, "BydHudCapturePolicy");
@@ -43,20 +42,9 @@ final class NavCaptureIngressPolicy {
         NavCapturePrefs.IngressPreferences preferences =
                 NavCapturePrefs.ingressPreferences(context);
         synchronized (LOCK) {
-            Snapshot current = snapshot;
-            snapshot = current.withPreferences(
+            snapshot = snapshot.withPreferences(
                     preferences.hudPackage, preferences.logOnlyPackages,
-                    HudPrefs.isWazeScreenCaptureEnabled(context),
                     HudPrefs.isUserShutdownActive(context));
-        }
-    }
-
-    static void updateRuntime(boolean runtimeActive, String activePackage,
-            boolean wazeDirect, boolean wazeFallback,
-            boolean gmapsDirect, boolean gmapsFallback) {
-        synchronized (LOCK) {
-            snapshot = snapshot.withRuntime(runtimeActive, normalize(activePackage),
-                    wazeDirect, wazeFallback, gmapsDirect, gmapsFallback);
         }
     }
 
@@ -67,88 +55,52 @@ final class NavCaptureIngressPolicy {
     }
 
     static Mode resolveModeForTest(String packageName, String hudPackage,
-            Set<String> logOnlyPackages, boolean shutdown, boolean runtimeActive,
-            String activePackage, boolean wazeLegacyEnabled,
-            boolean wazeDirect, boolean wazeFallback,
-            boolean gmapsDirect, boolean gmapsFallback) {
-        return new Snapshot(hudPackage, logOnlyPackages, shutdown, runtimeActive,
-                activePackage, wazeLegacyEnabled, wazeDirect, wazeFallback,
-                gmapsDirect, gmapsFallback).mode(normalize(packageName));
+            Set<String> logOnlyPackages, boolean shutdown) {
+        return new Snapshot(hudPackage, logOnlyPackages, shutdown)
+                .mode(normalize(packageName));
     }
 
     private static String normalize(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(java.util.Locale.ROOT);
     }
 
+    private static boolean isDirectHudPackage(String packageName) {
+        return WAZE.equals(packageName) || REVANCED_GMAPS.equals(packageName);
+    }
+
     private static final class Snapshot {
         final String hudPackage;
         final Set<String> logOnlyPackages;
         final boolean shutdown;
-        final boolean runtimeActive;
-        final String activePackage;
-        final boolean wazeLegacyEnabled;
-        final boolean wazeDirect;
-        final boolean wazeFallback;
-        final boolean gmapsDirect;
-        final boolean gmapsFallback;
 
-        Snapshot(String hudPackage, Set<String> logOnlyPackages,
-                boolean shutdown, boolean runtimeActive, String activePackage,
-                boolean wazeLegacyEnabled, boolean wazeDirect, boolean wazeFallback,
-                boolean gmapsDirect, boolean gmapsFallback) {
+        Snapshot(String hudPackage, Set<String> logOnlyPackages, boolean shutdown) {
             this.hudPackage = normalize(hudPackage);
-            this.logOnlyPackages = Collections.unmodifiableSet(new HashSet<>(
-                    logOnlyPackages == null ? Collections.emptySet() : logOnlyPackages));
+            Set<String> normalizedLogOnly = new HashSet<>();
+            if (logOnlyPackages != null) {
+                for (String packageName : logOnlyPackages) {
+                    String normalized = normalize(packageName);
+                    if (!normalized.isEmpty()) normalizedLogOnly.add(normalized);
+                }
+            }
+            this.logOnlyPackages = Collections.unmodifiableSet(normalizedLogOnly);
             this.shutdown = shutdown;
-            this.runtimeActive = runtimeActive;
-            this.activePackage = normalize(activePackage);
-            this.wazeLegacyEnabled = wazeLegacyEnabled;
-            this.wazeDirect = wazeDirect;
-            this.wazeFallback = wazeFallback;
-            this.gmapsDirect = gmapsDirect;
-            this.gmapsFallback = gmapsFallback;
         }
 
         static Snapshot empty() {
-            return new Snapshot("", Collections.emptySet(), true, false, "",
-                    false, false, false, false, false);
+            return new Snapshot("", Collections.emptySet(), true);
         }
 
         Snapshot withPreferences(String hudPackage, Set<String> logOnlyPackages,
-                boolean wazeLegacyEnabled, boolean shutdown) {
-            return new Snapshot(hudPackage, logOnlyPackages, shutdown, runtimeActive,
-                    activePackage, wazeLegacyEnabled, wazeDirect, wazeFallback,
-                    gmapsDirect, gmapsFallback);
-        }
-
-        Snapshot withRuntime(boolean runtimeActive, String activePackage,
-                boolean wazeDirect, boolean wazeFallback,
-                boolean gmapsDirect, boolean gmapsFallback) {
-            return new Snapshot(hudPackage, logOnlyPackages, shutdown, runtimeActive,
-                    activePackage, wazeLegacyEnabled, wazeDirect, wazeFallback,
-                    gmapsDirect, gmapsFallback);
+                boolean shutdown) {
+            return new Snapshot(hudPackage, logOnlyPackages, shutdown);
         }
 
         Mode mode(String packageName) {
             if (shutdown || packageName.isEmpty()) return Mode.OFF;
             boolean selected = packageName.equals(hudPackage);
-            boolean logOnly = logOnlyPackages.contains(packageName);
-            if (!selected && !logOnly) return Mode.OFF;
-            if (WAZE.equals(packageName)) {
-                if (wazeDirect) return Mode.OFF;
-                if (logOnly) return Mode.FALLBACK;
-                if (!runtimeActive || !WAZE.equals(activePackage)) return Mode.OFF;
-                if (!wazeLegacyEnabled) return Mode.OFF;
-                return wazeFallback ? Mode.FALLBACK : Mode.DISCOVERY;
-            }
-            if (GMAPS.equals(packageName)) {
-                if (gmapsDirect) return Mode.OFF;
-                if (logOnly) return Mode.FALLBACK;
-                if (!runtimeActive || !GMAPS.equals(activePackage)) return Mode.OFF;
-                return gmapsFallback ? Mode.FALLBACK : Mode.DISCOVERY;
-            }
-            return logOnly || (runtimeActive && packageName.equals(activePackage))
-                    ? Mode.FALLBACK : Mode.OFF;
+            if (selected && isDirectHudPackage(packageName)) return Mode.OFF;
+            if (logOnlyPackages.contains(packageName) || selected) return Mode.LOG_ONLY;
+            return Mode.OFF;
         }
     }
 }

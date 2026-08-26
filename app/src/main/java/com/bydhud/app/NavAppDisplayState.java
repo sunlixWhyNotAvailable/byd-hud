@@ -35,10 +35,4 @@ final class NavAppDisplayState {
         return displayId > 0;
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    boolean isUsableForCrop() {
-        return taskId >= 0
-                && displayId != DISPLAY_UNKNOWN
-                && visible;
-    }
 }

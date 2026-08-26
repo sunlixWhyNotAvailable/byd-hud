@@ -65,19 +65,6 @@ final class LocalAdbBridge {
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
     private static final Pattern AUTO_CONTAINER_COMMAND = Pattern.compile(
             "service call (?:auto_container|AutoContainer) 2 i32 1000 i32 (?:16|17|18) s16 '\"\"'");
-    private static final String CAPTURE_SHELL_ROOT =
-            "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD"
-                    + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/BYD-HUD)";
-    private static final String CAPTURE_SESSION_PATH =
-            "/[0-9]{8}/waze-crop/[A-Za-z0-9_.-]{1,80}/screen_[0-9]{4}\\.png";
-    private static final Pattern WAZE_SCREENSHOT_COMMAND = Pattern.compile(
-            "screencap -d [0-9]{1,3} -p "
-                    + CAPTURE_SHELL_ROOT
-                    + CAPTURE_SESSION_PATH);
-    private static final Pattern APP_LOCAL_RM_COMMAND = Pattern.compile(
-            "rm "
-                    + CAPTURE_SHELL_ROOT
-                    + CAPTURE_SESSION_PATH);
     private static final Pattern DIAGNOSTIC_LOGCAT_COMMAND = Pattern.compile(
             "logcat -b all -v threadtime -T '[0-9]{2}-[0-9]{2} "
                     + "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}' -d");
@@ -882,9 +869,7 @@ final class LocalAdbBridge {
                 || "dumpsys activity activities".equals(command)
                 || isVehicleConfigurationCommand(command)
                 || MOVE_STACK_COMMAND.matcher(command).matches()
-                || AUTO_CONTAINER_COMMAND.matcher(command).matches()
-                || WAZE_SCREENSHOT_COMMAND.matcher(command).matches()
-                || APP_LOCAL_RM_COMMAND.matcher(command).matches();
+                || AUTO_CONTAINER_COMMAND.matcher(command).matches();
     }
 
     private static boolean isAllowedDiagnosticShellCommand(String command) {

@@ -164,9 +164,6 @@ final class HudRuntimeSupervisor {
                         senderTeardownComplete.set(true);
                         finishReset.run();
                     });
-            WazeCropCapture.get(appContext).stop("package-replace-hard-reset");
-            WazeMediaProjectionController.resetForRuntimeReinit(
-                    appContext, "package-replace-hard-reset:" + safeReason);
             appContext.stopService(new android.content.Intent(appContext, HudRuntimeService.class));
             HudPrefs.setRuntimeServiceRunning(appContext, false);
             statePersisted.set(HudRuntimeState.markPackageReplaceReset(appContext, safeReason));

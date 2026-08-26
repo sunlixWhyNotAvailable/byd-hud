@@ -13,36 +13,6 @@ import org.junit.Test;
 
 public final class NavFallbackLifecycleBoundaryTest {
     @Test
-    public void fallbackPublisherRequiresExplicitOwnerAndFallbackMode() {
-        assertTrue(NavHudLiveSender.shouldPublishLegacyFallbackForTest(
-                "com.waze", "com.waze", "com.waze",
-                true, false, true, false, false));
-        assertFalse(NavHudLiveSender.shouldPublishLegacyFallbackForTest(
-                "com.waze", "com.waze", "com.waze",
-                true, true, false, false, false));
-        assertTrue(NavHudLiveSender.shouldPublishLegacyFallbackForTest(
-                "com.example.maps", "com.example.maps", "com.example.maps",
-                true, false, false, false, false));
-        assertFalse(NavHudLiveSender.shouldPublishLegacyFallbackForTest(
-                "com.waze", "app.revanced.android.apps.maps", "com.waze",
-                true, false, true, false, false));
-    }
-
-    @Test
-    public void frameworkIngressDoesNotOwnDirectLifecycle() throws IOException {
-        String source = source("NavHudLiveSender.java");
-        assertIngressBodyHasNoDirectLifecycle(source, "updateOnMain");
-        assertIngressBodyHasNoDirectLifecycle(source, "updateAccessibilityOnMain");
-        assertIngressBodyHasNoDirectLifecycle(source, "updateVisualCueOnMain");
-        assertTrue(source.contains("prepareLegacyFallbackIngress(packageName, \"notification\")"));
-        assertTrue(source.contains("prepareLegacyFallbackIngress(packageName, \"accessibility\")"));
-        assertTrue(source.contains("prepareLegacyFallbackIngress(packageName, \"visual\")"));
-        assertTrue(source.contains("stopLegacyFallbackOnMain"));
-        assertFalse(source.contains("onWazeLegacyRouteEvidence"));
-        assertFalse(source.contains("forceClearNavigator"));
-    }
-
-    @Test
     public void packageReplaceResetIsFencedWithoutProcessKill() throws IOException {
         String supervisor = source("HudRuntimeSupervisor.java");
         assertFalse(supervisor.contains("killProcess"));
@@ -76,18 +46,6 @@ public final class NavFallbackLifecycleBoundaryTest {
         assertTrue(supervisor.contains("hardResetPending || !HudRuntimeState.isAlive"));
         assertTrue(service.contains("startPersistent skipped start_in_flight"));
         assertTrue(service.contains("static void clearStartRequestForTest()"));
-    }
-
-    private static void assertIngressBodyHasNoDirectLifecycle(String source, String method) {
-        int start = source.indexOf("private void " + method + "(");
-        if (start < 0) start = source.indexOf("void " + method + "(");
-        int next = source.indexOf("\n    //", start + 1);
-        String body = source.substring(start, next < 0 ? source.length() : next);
-        assertFalse(method + " starts Direct", body.contains("startOnMain("));
-        assertFalse(method + " switches Direct", body.contains("beginSourceSwitch("));
-        assertFalse(method + " stops Direct", body.contains("stopOnMain("));
-        assertFalse(method + " rearms Direct", body.contains("ensureGMapsRegisteredWhenTransportReady"));
-        assertFalse(method + " rearms Waze Direct", body.contains("scheduleWazeDirectColdTimeout"));
     }
 
     private static String source(String name) throws IOException {

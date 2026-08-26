@@ -53,12 +53,6 @@ public final class DirectChannelContractTest {
     }
 
     @Test
-    public void staleHelloCannotCloseCurrentFallbackDiscovery() {
-        assertTrue(GMapsDirectChannel.acceptsHelloHandshakeForTest(false));
-        assertFalse(GMapsDirectChannel.acceptsHelloHandshakeForTest(true));
-    }
-
-    @Test
     public void routeGenerationRejectsStaleTerminalEventsButAllowsMissedStartFrame() {
         assertFalse(GMapsDirectChannel.acceptsRouteGenerationForTest(
                 4, 9L, 8L, true));
@@ -237,6 +231,23 @@ public final class DirectChannelContractTest {
                 " MANEUVER-BITMAP "));
         assertTrue(NavHudLiveSender.shouldDispatchSemanticTbtForDirectReason(
                 "frame"));
+    }
+
+    @Test
+    public void speedBeforeSyntheticFirstFrameSurvivesUntilExplicitStart() {
+        String owner = GMapsDirectChannel.PACKAGE_NAME;
+        DirectSpeedLimitStore.clear(owner);
+        DirectSpeedLimitStore.update(owner, 50, 50, "km/h", 1L);
+
+        if (NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart("first-frame")) {
+            DirectSpeedLimitStore.clear(owner);
+        }
+        assertTrue(DirectSpeedLimitStore.snapshot(owner).isActive());
+
+        if (NavHudLiveSender.shouldClearGMapsSpeedLimitOnDirectStart("start")) {
+            DirectSpeedLimitStore.clear(owner);
+        }
+        assertFalse(DirectSpeedLimitStore.snapshot(owner).isActive());
     }
 
     private static Map<String, Object> lane(Map<String, Object> arrow) {

@@ -1034,7 +1034,6 @@ final class NavAppDisplayController {
             log(normalized, "dashboard_live_owner_confirmed package=" + normalized
                     + " display=" + state.displayId + " generation=" + generation
                     + " reason=" + safe(reason));
-            NavHudLiveSender.get(context).onDashboardProjectionConfirmed(normalized, state);
         }
         return true;
     }

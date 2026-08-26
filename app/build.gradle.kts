@@ -12,8 +12,8 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        versionCode = 91
-        versionName = "2.4.0-beta.9"
+        versionCode = 92
+        versionName = "2.4.0-beta.10"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",

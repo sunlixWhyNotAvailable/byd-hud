@@ -117,7 +117,10 @@ public final class Beta7UiResponsivenessSourceContractTest {
     @Test
     public void allTabsAreCacheFirstWhileAppRowsStayVirtualized() throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
+        String activity = source("MainActivity.java");
         String apps = between(source, "private fun AppsTab(", "private fun AppRow(");
+        String legacyApps = between(activity,
+                "private void refreshActiveAppsList()", "private void refreshDynamicAppsUi()");
         String tabEffect = between(source, "LaunchedEffect(selectedTab)",
                 "DisposableEffect(activity)");
         String refresh = between(source, "fun refresh()", "fun runAction(");
@@ -149,6 +152,11 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(refresh.contains("if (snapshot != refreshed) snapshot = refreshed"));
         assertTrue(apps.contains("count = snapshot.supportedApps.size"));
         assertTrue(apps.contains("snapshot.supportedApps[index].packageName"));
+        assertTrue(apps.contains(
+                "supported = snapshot.supportedApps[index].supportedHud"));
+        assertTrue(legacyApps.contains("isSupportedHudPackage(app.packageName)"));
+        assertFalse(legacyApps.contains("logOnlyPackages.contains(app.packageName),\n"
+                + "                        true"));
         assertTrue(apps.contains("count = snapshot.allApps.size"));
         assertTrue(apps.contains("snapshot.allApps[index].packageName"));
         assertFalse(apps.contains("supportedApps.forEachIndexed"));
@@ -182,13 +190,13 @@ public final class Beta7UiResponsivenessSourceContractTest {
             throws IOException {
         String storage = source("NavigationLogStorage.java");
         String snapshot = between(storage, "static StorageSnapshot snapshotAccessibleStorage(",
-                "//Caller stops active Waze/logcat first;");
+                "//Atomically disconnects every accessible fragment");
 
         assertTrue(snapshot.contains(
                 "List<StorageRoot> roots = withWriteLock(() -> accessibleRootsLocked(app));"));
         assertTrue(snapshot.contains("return withReadLock(() -> snapshotAccessibleStorageLocked("));
         assertTrue(snapshot.contains(
-                "roots, activeDay, activeLogcatDay, activeCropDay"));
+                "roots, activeDay, activeLogcatDay"));
         assertFalse(snapshot.contains(
                 "withWriteLock(() -> snapshotAccessibleStorageLocked("));
     }

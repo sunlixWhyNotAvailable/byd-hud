@@ -137,7 +137,9 @@ public final class WazeSpeedLimitLifecycleSourceContractTest {
         if (!Files.isRegularFile(file)) {
             file = root.resolve(modulePath);
         }
-        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n');
     }
 
     private static int occurrences(String value, String needle) {

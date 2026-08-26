@@ -17,49 +17,53 @@ import java.util.Set;
 public final class NavCaptureIngressPolicyTest {
     private static final String WAZE = "com.waze";
     private static final String GMAPS = "app.revanced.android.apps.maps";
+    private static final String OFFICIAL_GMAPS = "com.google.android.apps.maps";
 
     @Test
-    public void directDisarmsFallbackCapture() {
+    public void selectedDirectPackagesNeverFrameworkIngest() {
         assertEquals(NavCaptureIngressPolicy.Mode.OFF,
-                mode(WAZE, WAZE, true, true, false, false, false));
+                mode(WAZE, WAZE));
         assertEquals(NavCaptureIngressPolicy.Mode.OFF,
-                mode(GMAPS, GMAPS, true, false, false, true, false));
+                mode(GMAPS, GMAPS));
     }
 
     @Test
-    public void wazeRequiresExplicitLegacyFallback() {
+    public void selectedUnsupportedPackageIsLogOnly() {
         assertEquals(NavCaptureIngressPolicy.Mode.OFF,
-                mode(WAZE, WAZE, false, false, false, false, false));
-        assertEquals(NavCaptureIngressPolicy.Mode.DISCOVERY,
-                mode(WAZE, WAZE, true, false, false, false, false));
-        assertEquals(NavCaptureIngressPolicy.Mode.FALLBACK,
-                mode(WAZE, WAZE, true, false, true, false, false));
+                mode(WAZE, WAZE));
+        assertEquals(NavCaptureIngressPolicy.Mode.LOG_ONLY,
+                mode(OFFICIAL_GMAPS, OFFICIAL_GMAPS));
+        assertEquals(NavCaptureIngressPolicy.Mode.LOG_ONLY,
+                NavCaptureIngressPolicy.resolveModeForTest(
+                        "com.example.unsupported", "com.example.unsupported",
+                        Collections.emptySet(), false));
     }
 
     @Test
-    public void gmapsUsesDiscoveryUntilFallbackIsSelected() {
-        assertEquals(NavCaptureIngressPolicy.Mode.DISCOVERY,
-                mode(GMAPS, GMAPS, true, false, false, false, false));
-        assertEquals(NavCaptureIngressPolicy.Mode.FALLBACK,
-                mode(GMAPS, GMAPS, true, false, false, false, true));
-        assertEquals(NavCaptureIngressPolicy.Mode.FALLBACK,
+    public void explicitLogOnlyPackagesRemainDiagnosticOnly() {
+        assertEquals(NavCaptureIngressPolicy.Mode.LOG_ONLY,
                 NavCaptureIngressPolicy.resolveModeForTest(
-                        "com.google.android.apps.maps",
-                        "com.google.android.apps.maps", Collections.emptySet(),
-                        false, true, "com.google.android.apps.maps",
-                        false, false, false, false, false));
+                        WAZE, "", Set.of(WAZE), false));
+        assertEquals(NavCaptureIngressPolicy.Mode.LOG_ONLY,
+                NavCaptureIngressPolicy.resolveModeForTest(
+                        OFFICIAL_GMAPS, "", Set.of(OFFICIAL_GMAPS), false));
+        assertEquals(NavCaptureIngressPolicy.Mode.OFF,
+                NavCaptureIngressPolicy.resolveModeForTest(
+                        WAZE, WAZE, Set.of(WAZE), false));
     }
 
     @Test
-    public void logOnlyCaptureRemainsAvailableButNeverOverridesDirect() {
-        assertEquals(NavCaptureIngressPolicy.Mode.FALLBACK,
+    public void policyNormalizesPackagesAndShutdownAlwaysDisarms() {
+        assertEquals(NavCaptureIngressPolicy.Mode.LOG_ONLY,
                 NavCaptureIngressPolicy.resolveModeForTest(
-                        WAZE, "", Set.of(WAZE), false, false, "",
-                        false, false, false, false, false));
+                        " COM.EXAMPLE.MAPS ", " com.example.maps ",
+                        Collections.emptySet(), false));
+        assertEquals(NavCaptureIngressPolicy.Mode.LOG_ONLY,
+                NavCaptureIngressPolicy.resolveModeForTest(
+                        "COM.WAZE", "", Set.of(" com.Waze "), false));
         assertEquals(NavCaptureIngressPolicy.Mode.OFF,
                 NavCaptureIngressPolicy.resolveModeForTest(
-                        WAZE, "", Set.of(WAZE), false, false, "",
-                        true, true, false, false, false));
+                        OFFICIAL_GMAPS, OFFICIAL_GMAPS, Collections.emptySet(), true));
     }
 
     @Test
@@ -77,12 +81,24 @@ public final class NavCaptureIngressPolicyTest {
         assertFalse(accessibilityCallback.contains("HudPrefs."));
         assertTrue(accessibilityCallback.contains("NavCaptureIngressPolicy.mode"));
         assertTrue(accessibilityCallback.contains("postCaptureActiveWindow"));
+        assertFalse(accessibility.contains("NavHudLiveSender"));
+        assertFalse(accessibility.contains("NavRouteStateStore"));
+        assertFalse(accessibility.contains("WazeRouteTracker"));
+        assertFalse(accessibility.contains("WazeRouteNode"));
+        assertFalse(accessibility.contains("accessibility_waze_nodes"));
+        assertFalse(accessibility.contains("DISCOVERY"));
+        assertFalse(accessibility.contains("FALLBACK"));
 
         String postedCallback = between(notification,
                 "public void onNotificationPosted", "private void postObservedPackage");
         assertFalse(postedCallback.contains("NavCapturePrefs."));
         assertFalse(postedCallback.contains("HudPrefs."));
         assertTrue(postedCallback.contains("NavCaptureIngressPolicy.mode"));
+        assertFalse(notification.contains("NavHudLiveSender"));
+        assertFalse(notification.contains("NavRouteStateStore"));
+        assertFalse(notification.contains("WazeRouteTracker"));
+        assertFalse(notification.contains("DISCOVERY"));
+        assertFalse(notification.contains("FALLBACK"));
         assertTrue(notification.contains("pendingPosted.remove(postedToken(sbn))"));
         assertTrue(notification.contains("pendingPosted.clear()"));
         assertTrue(notification.contains("postedDrainScheduled = false"));
@@ -93,13 +109,9 @@ public final class NavCaptureIngressPolicyTest {
         assertFalse(receiver.contains("Looper.getMainLooper()"));
     }
 
-    private static NavCaptureIngressPolicy.Mode mode(String packageName,
-            String hudPackage, boolean wazeLegacy, boolean wazeDirect,
-            boolean wazeFallback, boolean gmapsDirect, boolean gmapsFallback) {
+    private static NavCaptureIngressPolicy.Mode mode(String packageName, String hudPackage) {
         return NavCaptureIngressPolicy.resolveModeForTest(
-                packageName, hudPackage, Collections.emptySet(), false,
-                true, hudPackage, wazeLegacy, wazeDirect, wazeFallback,
-                gmapsDirect, gmapsFallback);
+                packageName, hudPackage, Collections.emptySet(), false);
     }
 
     private static String between(String source, String start, String end) {

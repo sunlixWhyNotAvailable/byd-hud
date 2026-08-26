@@ -13,7 +13,6 @@ import java.util.function.Consumer;
 final class HudOutputCoordinator {
     enum Source {
         NONE,
-        LEGACY,
         DIRECT,
         MANUAL
     }
@@ -53,9 +52,7 @@ final class HudOutputCoordinator {
 
     private boolean manualEnabled;
     private boolean directEnabled;
-    private boolean legacyEnabled;
     private HudState manualState;
-    private HudState legacyState;
     private DirectTbtFrame directFrame;
     private volatile Source activeSource = Source.NONE;
     private Source pendingSource = Source.NONE;
@@ -196,16 +193,6 @@ final class HudOutputCoordinator {
         });
     }
 
-    void publishLegacy(HudState state, String reason) {
-        HudState copy = state == null ? null : state.copy();
-        worker.post(() -> {
-            legacyState = copy;
-            if (activeSource == Source.LEGACY) {
-                scheduleImmediate(reason);
-            }
-        });
-    }
-
     void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
             String ownerPackage, long ownerSessionGeneration) {
         publishDirect(frame, reason, receivedAtMs, null, null,
@@ -293,7 +280,7 @@ final class HudOutputCoordinator {
 
     void selectNavigationSource(Source source, String reason,
             String ownerPackage, long ownerSessionGeneration) {
-        if (source != Source.DIRECT && source != Source.LEGACY && source != Source.NONE) {
+        if (source != Source.DIRECT && source != Source.NONE) {
             throw new IllegalArgumentException("navigation source=" + source);
         }
         worker.post(() -> {
@@ -307,7 +294,6 @@ final class HudOutputCoordinator {
                 invalidateDirectOwnerOnWorker("source=" + source + " reason=" + reason);
             }
             directEnabled = source == Source.DIRECT;
-            legacyEnabled = source == Source.LEGACY;
             if (source != Source.DIRECT) {
                 directAlertClearPending = false;
                 lastBitmapTxDiagnosticKey = "";
@@ -316,7 +302,6 @@ final class HudOutputCoordinator {
                 directFrame = null;
                 directBitmapSelection = null;
                 directBitmapTxLogger = null;
-                legacyState = null;
             }
             reconcile(reason);
         });
@@ -344,17 +329,6 @@ final class HudOutputCoordinator {
                         detectedAtMs, firstClearCompletion, true);
                 return;
             }
-            boolean legacySelected = legacyEnabled
-                    || activeSource == Source.LEGACY
-                    || pendingSource == Source.LEGACY;
-            if (!legacySelected) {
-                invalidateDormantDirectOwnerOnWorker(
-                        ownerPackage, ownerSessionGeneration, "navigation-end:" + reason);
-                reconcile(reason, detectedAtMs, firstClearCompletion);
-                return;
-            }
-            legacyEnabled = false;
-            legacyState = null;
             invalidateDirectOwnerOnWorker("navigation-end:" + reason);
             reconcile(reason, detectedAtMs, firstClearCompletion);
         });
@@ -466,7 +440,6 @@ final class HudOutputCoordinator {
             Runnable interruptedCompletion = takePendingClearCompletions();
             manualEnabled = false;
             directEnabled = false;
-            legacyEnabled = false;
             manualState = null;
             directFrame = null;
             directBitmapSelection = null;
@@ -474,7 +447,6 @@ final class HudOutputCoordinator {
             lastBitmapTxDiagnosticKey = "";
             directAlertClearPending = false;
             invalidateDirectOwnerOnWorker("shutdown:" + reason);
-            legacyState = null;
             if (interruptedClear) {
                 generation++;
                 cancelScheduledWork();
@@ -650,13 +622,12 @@ final class HudOutputCoordinator {
     }
 
     private Source desiredSource() {
-        return chooseSource(manualEnabled, directEnabled, legacyEnabled);
+        return chooseSource(manualEnabled, directEnabled);
     }
 
-    static Source chooseSource(boolean manual, boolean direct, boolean legacy) {
+    static Source chooseSource(boolean manual, boolean direct) {
         if (manual) return Source.MANUAL;
         if (direct) return Source.DIRECT;
-        if (legacy) return Source.LEGACY;
         return Source.NONE;
     }
 
@@ -666,9 +637,6 @@ final class HudOutputCoordinator {
         }
         if (source == Source.DIRECT) {
             return directFrame != null;
-        }
-        if (source == Source.LEGACY) {
-            return legacyState != null;
         }
         return false;
     }
@@ -874,7 +842,7 @@ final class HudOutputCoordinator {
             }
             return preparedDirectPayload.build(directCounter);
         }
-        HudState state = source == Source.MANUAL ? manualState.copy() : legacyState.copy();
+        HudState state = manualState.copy();
         state = HudDisplayPolicy.apply(
                 state,
                 HudPrefs.isSmallDistanceClampEnabled(context));
@@ -1226,14 +1194,12 @@ final class HudOutputCoordinator {
 
     private String channelFor(Source source) {
         if (source == Source.DIRECT) return directChannel;
-        if (source == Source.LEGACY) return "legacy";
         if (source == Source.MANUAL) return "manual";
         return "transport";
     }
 
     private static String sourceName(Source source) {
         if (source == Source.DIRECT) return "direct";
-        if (source == Source.LEGACY) return "legacy";
         if (source == Source.MANUAL) return "manual";
         return "none";
     }

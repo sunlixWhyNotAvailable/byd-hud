@@ -23,9 +23,39 @@ public final class OptionsLazySourceContractTest {
         assertTrue(source.contains("contentType = \"options-header\""));
         assertTrue(source.contains("contentType = \"options-row\""));
         assertTrue(source.contains("val key: String"));
-        assertTrue(source.contains("item(key = \"$sectionKey:${row.key}\""));
+        assertTrue(source.contains("item(key = \"${section.key}:${row.key}\""));
         assertFalse(options.contains("forEachIndexed"));
         assertTrue(source.contains(".clearAndSetSemantics {}"));
+
+        assertOrdered(options,
+                "optionsSection(\"runtime-permissions\"",
+                "optionsSection(\"basic-navigation\"",
+                "optionsSection(\"route-eta\"",
+                "optionsSection(\"speed-limit\"",
+                "optionsSection(\"waze-features\"",
+                "optionsSection(\"extra-navigation\"",
+                "optionsSection(\"dashboard-control\"");
+        assertTrue(options.contains("R.drawable.ic_options_build"));
+        assertTrue(options.contains("R.drawable.ic_options_navigation"));
+        assertTrue(options.contains("R.drawable.ic_options_schedule"));
+        assertTrue(options.contains("R.drawable.ic_options_speed"));
+        assertTrue(options.contains("R.drawable.waze_app_icon"));
+        assertTrue(options.contains("R.drawable.ic_options_settings"));
+        assertTrue(options.contains("R.drawable.ic_options_directions_car"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_build"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_navigation"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_schedule"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_speed"));
+        assertEquals(1, occurrences(options, "R.drawable.waze_app_icon"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_settings"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_directions_car"));
+        assertTrue(source.contains("SidebarOptionsSurface("));
+        assertFalse(options.contains("LazyPageSurface"));
+        assertTrue(source.contains("key(selectedSection.key)"));
+        assertTrue(source.contains(".width(260.dp)"));
+        assertTrue(source.contains("Arrangement.spacedBy(16.dp)"));
+        assertFalse(options.contains("screen-capture-channel"));
+        assertFalse(options.contains("roundabout-left"));
     }
 
     @Test
@@ -33,11 +63,14 @@ public final class OptionsLazySourceContractTest {
         String source = sourcePath("../byd-hud-compose-preview/compose-preview/src/main/java/com/bydhud/preview/MainActivity.kt");
         String options = between(source, "private fun MainTab(", "private data class PreviewOptionsRowSpec");
 
-        assertEquals(7, occurrences(options, "previewOptionsSection("));
+        assertEquals(7, occurrences(options, "section("));
         assertFalse(options.contains("DashboardTile("));
+        assertTrue(options.contains("buildPreviewOptionsSections"));
+        assertTrue(source.contains("previewOptionsSection(selectedSection"));
+        assertTrue(source.contains("key(selectedSection.key)"));
         assertTrue(source.contains("contentType = \"options-header\""));
         assertTrue(source.contains("contentType = \"options-row\""));
-        assertTrue(source.contains("item(key = \"$sectionKey:${row.key}\""));
+        assertTrue(source.contains("item(key = \"${section.key}:${row.key}\""));
         String compactSwitch = between(source, "private fun CompactSwitchLine(", "private fun PreviewDropdown(");
         String hudSwitch = between(source, "private fun HudSwitch(", "private fun Segmented(");
         assertTrue(compactSwitch.contains("role = Role.Switch"));
@@ -77,5 +110,15 @@ public final class OptionsLazySourceContractTest {
             offset += marker.length();
         }
         return count;
+    }
+
+    private static void assertOrdered(String source, String... markers) {
+        int previous = -1;
+        for (String marker : markers) {
+            int current = source.indexOf(marker);
+            assertTrue("missing marker: " + marker, current >= 0);
+            assertTrue("marker out of order: " + marker, current > previous);
+            previous = current;
+        }
     }
 }

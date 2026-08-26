@@ -73,13 +73,6 @@ public final class NavHudRuntimeContractTest {
         assertFalse(sender.substring(probeStart, probeEnd)
                 .contains("scheduleGMapsDirectTimeout"));
 
-        int healthStart = sender.indexOf("private final Runnable routeHealthLoop");
-        int healthEnd = sender.indexOf("\n    private final Runnable", healthStart + 1);
-        assertTrue(healthStart >= 0 && healthEnd > healthStart);
-        String health = sender.substring(healthStart, healthEnd);
-        assertTrue(health.contains(
-                "gmapsDirectState == GMapsDirectState.ACTIVE_WAITING_FRAME"));
-
         int callbackStart = sender.indexOf("private void onGMapsDirectChannelStarted");
         int callbackEnd = sender.indexOf("\n    private void onGMapsDirectHandshakeAvailable", callbackStart);
         assertTrue(callbackStart >= 0 && callbackEnd > callbackStart);
@@ -230,7 +223,7 @@ public final class NavHudRuntimeContractTest {
 
         String sender = source("NavHudLiveSender.java");
         int resetStart = sender.indexOf("private void resetRuntimeAfterPackageReplace");
-        int resetEnd = sender.indexOf("\n    //updates shared state here", resetStart);
+        int resetEnd = sender.indexOf("\n    //starts or schedules work here", resetStart);
         assertTrue(resetStart >= 0 && resetEnd > resetStart);
         String reset = sender.substring(resetStart, resetEnd);
         assertTrue(reset.indexOf("hudOutput.endNavigationOutput")
@@ -418,21 +411,11 @@ public final class NavHudRuntimeContractTest {
         String sender = source("NavHudLiveSender.java");
         assertFalse(sender.contains("ensureGMapsRegisteredWhenTransportReady"));
         assertTrue(sender.contains("GMapsDirectState.QUIESCENT"));
-        assertTrue(sender.contains("openGMapsLegacyDiscovery"));
-        assertTrue(sender.contains("acceptsGMapsLegacyDiscoveryForTest"));
-        assertTrue(sender.contains("gmapsDirectIngressGeneration.incrementAndGet()"));
-        assertTrue(sender.contains("cancelPendingRouteEndStops(GMapsDirectChannel.PACKAGE_NAME)"));
-        assertTrue(sender.contains("gmaps legacy callback blocked inactive token="));
-        assertTrue(sender.contains("closeGMapsLegacyDiscovery(\"hud-stop:"));
-        assertTrue(sender.contains("forceClearLegacyFallback(activePackage, \"notification-removed\", now)"));
-        assertTrue(sender.contains("forceClearLegacyFallback(packageName, \"arrival-route-ended\", now)"));
-        int forcedStop = sender.indexOf("private void forceClearLegacyFallback(");
-        int directStop = sender.indexOf("private void stopDirectNavigator(", forcedStop);
-        assertTrue(forcedStop >= 0 && directStop > forcedStop);
-        String terminalFallback = sender.substring(forcedStop, directStop);
-        assertTrue(terminalFallback.contains("gmapsDirectState = GMapsDirectState.QUIESCENT"));
-        assertTrue(terminalFallback.contains("gmapsDirectTimedOut = false"));
-        assertTrue(terminalFallback.contains("cancelGMapsDirectTimeout()"));
+        assertTrue(sender.contains("cancelGMapsDirectTimeout()"));
+        assertFalse(sender.contains("openGMapsLegacyDiscovery"));
+        assertFalse(sender.contains("forceClearLegacyFallback"));
+        assertFalse(sender.contains("updateFromNavigationAccessibility"));
+        assertFalse(sender.contains("updateFromNavigationNotification"));
     }
 
     @Test
@@ -557,7 +540,6 @@ public final class NavHudRuntimeContractTest {
         assertTrue(change.contains("HudPrefs.KEY_TEXT_TRANSLITERATION"));
         assertTrue(change.contains("publishManualOnWorker"));
         assertTrue(change.contains("republishLatestDirectFrame"));
-        assertTrue(change.contains("sendLatestIfReady"));
         assertFalse(change.contains("endNavigationOutput"));
         assertFalse(change.contains("selectNavigationSource"));
         assertFalse(change.contains("resetTransport"));
@@ -626,6 +608,8 @@ public final class NavHudRuntimeContractTest {
             file = root.resolve("src/main/java/com/bydhud/app/")
                     .resolve(name).normalize();
         }
-        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n")
+                .replace('\r', '\n');
     }
 }

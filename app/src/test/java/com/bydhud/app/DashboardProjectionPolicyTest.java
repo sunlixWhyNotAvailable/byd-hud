@@ -126,6 +126,30 @@ public final class DashboardProjectionPolicyTest {
     }
 
     @Test
+    public void modeDefaultsMatchAcceptedProductionProfiles() {
+        DashboardProjectionPolicy.Profile partial =
+                DashboardProjectionPolicy.partialDefaultProfile();
+        assertEquals(30, partial.widthPercent);
+        assertEquals(75, partial.heightPercent);
+        assertEquals(99, partial.offsetPercent);
+        assertEquals(50, partial.scalePercent);
+
+        DashboardProjectionPolicy.Profile full =
+                DashboardProjectionPolicy.fullDefaultProfile();
+        assertEquals(100, full.widthPercent);
+        assertEquals(75, full.heightPercent);
+        assertEquals(50, full.offsetPercent);
+        assertEquals(100, full.scalePercent);
+
+        DashboardProjectionPolicy.Profile nativeProfile =
+                DashboardProjectionPolicy.defaultProfile();
+        assertEquals(100, nativeProfile.widthPercent);
+        assertEquals(100, nativeProfile.heightPercent);
+        assertEquals(50, nativeProfile.offsetPercent);
+        assertEquals(100, nativeProfile.scalePercent);
+    }
+
+    @Test
     public void profileValuesClampToSafeRuntimeBounds() {
         DashboardProjectionPolicy.Profile profile = new DashboardProjectionPolicy.Profile(
                 0, 200, -1, 500);
@@ -133,6 +157,10 @@ public final class DashboardProjectionPolicyTest {
         assertEquals(100, profile.heightPercent);
         assertEquals(0, profile.offsetPercent);
         assertEquals(150, profile.scalePercent);
+
+        DashboardProjectionPolicy.Profile minimumScale =
+                new DashboardProjectionPolicy.Profile(100, 100, 50, 0);
+        assertEquals(20, minimumScale.scalePercent);
     }
 
     private static DashboardProjectionPolicy.ObservedDisplay classify(

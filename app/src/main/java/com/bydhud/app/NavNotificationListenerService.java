@@ -1,6 +1,6 @@
 package com.bydhud.app;
 
-//listens to navigation notifications so background routes can update without screen capture.
+//listens to notifications for bounded log-only diagnostics.
 
 import android.app.Notification;
 import android.content.Context;
@@ -54,11 +54,6 @@ public final class NavNotificationListenerService extends NotificationListenerSe
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static void requestActiveNotificationScan(Context context, String reason) {
-        requestActiveNotificationScan(context, reason, 0L);
-    }
-
-    static void requestActiveNotificationScan(Context context, String reason,
-            long discoveryToken) {
         NavNotificationListenerService service = activeService;
         if (service == null) {
             AppEventLogger.event(context, "notification_active_scan skipped no-listener reason="
@@ -66,7 +61,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             return;
         }
         service.postNotificationWork(
-                () -> service.processActiveNotifications(reason, discoveryToken));
+                () -> service.processActiveNotifications(reason));
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -154,7 +149,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             }
             lastRuntimeDetail = "connected";
             AppEventLogger.event(this, "notification_listener connected");
-            processActiveNotifications("listener-connected", 0L);
+            processActiveNotifications("listener-connected");
         });
     }
 
@@ -205,7 +200,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
         }
         if (newlyObserved) postObservedPackage(packageName);
         if (NavCaptureIngressPolicy.mode(packageName)
-                == NavCaptureIngressPolicy.Mode.OFF) return;
+                != NavCaptureIngressPolicy.Mode.LOG_ONLY) return;
         enqueuePosted(sbn);
     }
 
@@ -254,7 +249,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 sbn = entry.getValue();
                 pendingPosted.remove(entry.getKey());
             }
-            processPostedNotification(sbn, "posted", 0L);
+            processPostedNotification(sbn, "posted");
             processed++;
         }
         Handler handler = notificationHandler;
@@ -266,7 +261,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void processActiveNotifications(String reason, long discoveryToken) {
+    private void processActiveNotifications(String reason) {
         if (HudPrefs.isUserShutdownActive(this)) {
             return;
         }
@@ -278,19 +273,10 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             if (notifications == null) {
                 return;
             }
-            Set<String> activeGMapsNavigationTokens = new HashSet<>();
             for (StatusBarNotification sbn : notifications) {
-                if (NavCaptureIngressPolicy.mode(sbn.getPackageName())
-                        != NavCaptureIngressPolicy.Mode.OFF
-                        && isOngoingGMapsNavigationNotification(sbn)) {
-                    activeGMapsNavigationTokens.add(NavHudLiveSender.notificationPresenceToken(
-                            sbn.getPackageName(), sbn.getKey()));
-                }
                 processPostedNotification(
-                        sbn, "active-" + safe(reason), discoveryToken);
+                        sbn, "active-" + safe(reason));
             }
-            NavHudLiveSender.get(this).reconcileNavigationNotificationPresence(
-                    activeGMapsNavigationTokens, "active-scan-" + safe(reason));
         } catch (RuntimeException e) {
             AppEventLogger.event(this, "notification_active_scan failed "
                     + e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
@@ -298,36 +284,26 @@ public final class NavNotificationListenerService extends NotificationListenerSe
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void processPostedNotification(StatusBarNotification sbn, String source,
-            long discoveryToken) {
+    private void processPostedNotification(StatusBarNotification sbn, String source) {
         if (sbn == null || HudPrefs.isUserShutdownActive(this)) {
             return;
         }
         String packageName = sbn.getPackageName();
         NavCaptureIngressPolicy.Mode mode = NavCaptureIngressPolicy.mode(packageName);
-        if (mode == NavCaptureIngressPolicy.Mode.OFF) return;
+        if (mode != NavCaptureIngressPolicy.Mode.LOG_ONLY) return;
         Notification notification = sbn.getNotification();
         if (isOngoing(notification)) {
             NavCapturePrefs.addObservedPackageFast(this, packageName);
         }
         NotificationFields fields = notificationFields(sbn);
-        NavHudLiveSender.get(this).updateNavigationNotificationPresence(
-                packageName, fields.key, fields.ongoing, fields.category);
         String payload = buildPostedPayload(fields, source);
         NavCaptureStore.rawEvent(this,
                 "posted".equals(source) ? "notification" : "notification_active",
                 packageName,
                 payload);
         long nowElapsedMs = SystemClock.elapsedRealtime();
-        NavRouteStateStore.get(this).updateFromRawPayload(
-                packageName, "notification_raw", payload, nowElapsedMs);
-        WazeRouteTracker.get(this).updateFromRawPayload(
-                "notification_raw", packageName, payload, nowElapsedMs);
-        if (mode == NavCaptureIngressPolicy.Mode.DISCOVERY && discoveryToken <= 0L) return;
-        if (NavCaptureIngressPolicy.mode(packageName)
-                != NavCaptureIngressPolicy.Mode.FALLBACK
-                && discoveryToken <= 0L) return;
-        NavManeuverEvidence maneuverEvidence = largeIconEvidence(packageName, notification, nowElapsedMs);
+        NavManeuverEvidence maneuverEvidence = largeIconEvidence(packageName, notification,
+                nowElapsedMs);
         NavParserResult parsed = NavParserDispatcher.parseNotification(
                 packageName,
                 fields.title,
@@ -340,8 +316,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 maneuverEvidence,
                 nowElapsedMs);
         if (parsed != null) {
-            NavHudLiveSender.get(this).updateFromNavigationNotification(
-                    packageName, fields.key, parsed, discoveryToken);
+            NavCaptureStore.snapshot(this, parsed.snapshot);
         }
     }
 
@@ -360,19 +335,10 @@ public final class NavNotificationListenerService extends NotificationListenerSe
             return;
         }
         String packageName = sbn.getPackageName();
-        NavRouteStateStore.get(this).onRouteRemoved(
-                packageName, "notification removed key=" + safe(sbn.getKey()),
-                SystemClock.elapsedRealtime());
-        WazeRouteTracker.get(this).onNotificationRemoved(
-                packageName, sbn.getKey(), SystemClock.elapsedRealtime());
         if (NavCaptureIngressPolicy.mode(packageName)
-                == NavCaptureIngressPolicy.Mode.OFF) return;
+                != NavCaptureIngressPolicy.Mode.LOG_ONLY) return;
         String payload = "key=" + safe(sbn.getKey());
         NavCaptureStore.rawEvent(this, "notification_removed", packageName, payload);
-        if (NavParserDispatcher.isSupportedPackage(packageName)) {
-            NavHudLiveSender.get(this).stopForRemovedNavigationNotification(
-                    packageName, sbn.getKey(), "notification-removed", true);
-        }
     }
 
     private boolean postNotificationWork(Runnable work) {
@@ -392,7 +358,6 @@ public final class NavNotificationListenerService extends NotificationListenerSe
 
     private void postNotificationTeardown(String reason) {
         Runnable cleanup = () -> {
-            NavHudLiveSender.get(this).clearNavigationNotificationPresence(reason);
             WazeCaptureDebugWriter.get().appEvent(
                     this, "notification_listener " + reason);
         };
@@ -415,18 +380,6 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 textLinesExtra(extras),
                 notification == null ? "" : notification.category,
                 isOngoing(notification));
-    }
-
-    private static boolean isOngoingGMapsNavigationNotification(StatusBarNotification sbn) {
-        if (sbn == null
-                || NavTextNormalizer.sourceApp(sbn.getPackageName())
-                != NavSnapshot.SourceApp.GOOGLE_MAPS) {
-            return false;
-        }
-        Notification notification = sbn.getNotification();
-        return isOngoing(notification)
-                && "navigation".equals(NavTextNormalizer.lower(
-                notification == null ? "" : notification.category));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

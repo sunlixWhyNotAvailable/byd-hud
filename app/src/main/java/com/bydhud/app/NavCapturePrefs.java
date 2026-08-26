@@ -202,8 +202,7 @@ final class NavCapturePrefs {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedHudPackage(String packageName) {
         String normalized = normalizePackage(packageName);
-        return "com.google.android.apps.maps".equals(normalized)
-                || "app.revanced.android.apps.maps".equals(normalized)
+        return "app.revanced.android.apps.maps".equals(normalized)
                 || "com.waze".equals(normalized);
     }
 

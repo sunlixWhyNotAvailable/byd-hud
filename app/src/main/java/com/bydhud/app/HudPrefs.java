@@ -11,7 +11,6 @@ final class HudPrefs {
     private static final String PREFS_NAME = "byd_hud_prefs";
     private static final String KEY_BOOT_ENABLED = "boot_enabled";
     private static final String KEY_SMALL_DISTANCE_CLAMP = "small_distance_clamp";
-    private static final String KEY_ROUNDABOUT_LEFT_HAND_TRAFFIC = "roundabout_left_hand_traffic";
     private static final String KEY_OUTPUT_PNG = "output_png";
     private static final String KEY_OUTPUT_NATIVE = "output_native";
     private static final String KEY_OUTPUT_LANES = "output_lanes";
@@ -34,7 +33,6 @@ final class HudPrefs {
             "speed_limit_maneuver_overlay_size";
     private static final String KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE =
             "speed_limit_lane_overlay_size";
-    private static final String KEY_WAZE_SCREEN_CAPTURE = "waze_screen_capture";
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     //keeps the legacy boolean only as a migration input for the mode selector.
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
@@ -105,16 +103,6 @@ final class HudPrefs {
     static void setSmallDistanceClampEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_SMALL_DISTANCE_CLAMP, enabled).apply();
         markOutputOptionChanged(KEY_SMALL_DISTANCE_CLAMP);
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean isRoundaboutLeftHandTraffic(Context context) {
-        return prefs(context).getBoolean(KEY_ROUNDABOUT_LEFT_HAND_TRAFFIC, false);
-    }
-
-    //keeps this HUD step isolated so cluster payload behavior stays predictable.
-    static void setRoundaboutLeftHandTraffic(Context context, boolean enabled) {
-        prefs(context).edit().putBoolean(KEY_ROUNDABOUT_LEFT_HAND_TRAFFIC, enabled).apply();
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -349,14 +337,6 @@ final class HudPrefs {
         return clamp(size, 1, 36);
     }
 
-    static boolean isWazeScreenCaptureEnabled(Context context) {
-        return prefs(context).getBoolean(KEY_WAZE_SCREEN_CAPTURE, false);
-    }
-
-    static void setWazeScreenCaptureEnabled(Context context, boolean enabled) {
-        prefs(context).edit().putBoolean(KEY_WAZE_SCREEN_CAPTURE, enabled).apply();
-    }
-
     static boolean isWazeCustomSurfaceEnabled(Context context) {
         return prefs(context).getBoolean(KEY_WAZE_CUSTOM_SURFACE, false);
     }
@@ -394,6 +374,9 @@ final class HudPrefs {
             return DashboardProjectionPolicy.defaultProfile();
         }
         boolean full = normalizedMode == DASHBOARD_MODE_FULL;
+        DashboardProjectionPolicy.Profile modeDefaults = full
+                ? DashboardProjectionPolicy.fullDefaultProfile()
+                : DashboardProjectionPolicy.partialDefaultProfile();
         String widthKey = full ? KEY_DASHBOARD_FULL_WIDTH_PERCENT
                 : KEY_DASHBOARD_PARTIAL_WIDTH_PERCENT;
         String heightKey = full ? KEY_DASHBOARD_FULL_HEIGHT_PERCENT
@@ -404,13 +387,13 @@ final class HudPrefs {
                 : KEY_DASHBOARD_PARTIAL_SCALE_PERCENT;
         int heightDefault = full && preferences.contains(KEY_DASHBOARD_HEIGHT_PERCENT)
                 ? preferences.getInt(KEY_DASHBOARD_HEIGHT_PERCENT,
-                DashboardProjectionPolicy.DEFAULT_HEIGHT_PERCENT)
-                : DashboardProjectionPolicy.DEFAULT_HEIGHT_PERCENT;
+                modeDefaults.heightPercent)
+                : modeDefaults.heightPercent;
         return new DashboardProjectionPolicy.Profile(
-                preferences.getInt(widthKey, DashboardProjectionPolicy.DEFAULT_WIDTH_PERCENT),
+                preferences.getInt(widthKey, modeDefaults.widthPercent),
                 preferences.getInt(heightKey, heightDefault),
-                preferences.getInt(offsetKey, DashboardProjectionPolicy.DEFAULT_OFFSET_PERCENT),
-                preferences.getInt(scaleKey, DashboardProjectionPolicy.DEFAULT_SCALE_PERCENT));
+                preferences.getInt(offsetKey, modeDefaults.offsetPercent),
+                preferences.getInt(scaleKey, modeDefaults.scalePercent));
     }
 
     static void setDashboardWidthPercent(Context context, int mode, int percent) {

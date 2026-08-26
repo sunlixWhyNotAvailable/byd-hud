@@ -4,19 +4,26 @@ package com.bydhud.app;
 
 //defines the DashboardProjectionPolicy module boundary so related behavior stays readable inside one unit.
 final class DashboardProjectionPolicy {
-    private static final String WAZE_PACKAGE = "com.waze";
     static final int MIN_WIDTH_PERCENT = 20;
     static final int MAX_WIDTH_PERCENT = 100;
     static final int DEFAULT_WIDTH_PERCENT = 100;
+    static final int DEFAULT_PARTIAL_WIDTH_PERCENT = 30;
+    static final int DEFAULT_FULL_WIDTH_PERCENT = 100;
     static final int MIN_HEIGHT_PERCENT = 20;
     static final int MAX_HEIGHT_PERCENT = 100;
     static final int DEFAULT_HEIGHT_PERCENT = 100;
+    static final int DEFAULT_PARTIAL_HEIGHT_PERCENT = 75;
+    static final int DEFAULT_FULL_HEIGHT_PERCENT = 75;
     static final int MIN_OFFSET_PERCENT = 0;
     static final int MAX_OFFSET_PERCENT = 100;
     static final int DEFAULT_OFFSET_PERCENT = 50;
-    static final int MIN_SCALE_PERCENT = 50;
+    static final int DEFAULT_PARTIAL_OFFSET_PERCENT = 99;
+    static final int DEFAULT_FULL_OFFSET_PERCENT = 50;
+    static final int MIN_SCALE_PERCENT = 20;
     static final int MAX_SCALE_PERCENT = 150;
     static final int DEFAULT_SCALE_PERCENT = 100;
+    static final int DEFAULT_PARTIAL_SCALE_PERCENT = 50;
+    static final int DEFAULT_FULL_SCALE_PERCENT = 100;
     static final int VIRTUAL_WIDTH = 1920;
     static final int VIRTUAL_BASE_HEIGHT = 720;
     static final int VIRTUAL_DENSITY = 320;
@@ -53,6 +60,22 @@ final class DashboardProjectionPolicy {
                 DEFAULT_HEIGHT_PERCENT,
                 DEFAULT_OFFSET_PERCENT,
                 DEFAULT_SCALE_PERCENT);
+    }
+
+    static Profile partialDefaultProfile() {
+        return new Profile(
+                DEFAULT_PARTIAL_WIDTH_PERCENT,
+                DEFAULT_PARTIAL_HEIGHT_PERCENT,
+                DEFAULT_PARTIAL_OFFSET_PERCENT,
+                DEFAULT_PARTIAL_SCALE_PERCENT);
+    }
+
+    static Profile fullDefaultProfile() {
+        return new Profile(
+                DEFAULT_FULL_WIDTH_PERCENT,
+                DEFAULT_FULL_HEIGHT_PERCENT,
+                DEFAULT_FULL_OFFSET_PERCENT,
+                DEFAULT_FULL_SCALE_PERCENT);
     }
 
     static Profile nativeProfileForMode(int dashboardMode, Profile profile) {
@@ -122,16 +145,6 @@ final class DashboardProjectionPolicy {
                 state,
                 activeDashboardPackage,
                 activeDashboardDisplayId) == ObservedDisplay.DASHBOARD;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean shouldRestartWazeCropAfterDashboardProjection(
-            String packageName,
-            String activePackage,
-            boolean onDashboardDisplay) {
-        return onDashboardDisplay
-                && WAZE_PACKAGE.equals(normalizePackage(packageName))
-                && WAZE_PACKAGE.equals(normalizePackage(activePackage));
     }
 
     //normalizes values here so malformed app text cannot leak into dashboard decisions.

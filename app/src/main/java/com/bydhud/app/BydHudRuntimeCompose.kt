@@ -56,6 +56,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -71,6 +72,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
@@ -244,8 +246,6 @@ private data class Copy(
     val betaTestingHint: String,
     val shutdown: String,
     val shutdownHint: String,
-    val screenCaptureChannel: String,
-    val screenCaptureChannelHint: String,
     val updateTitle: String,
     val updateCurrentVersion: String,
     val updateAvailableVersion: String,
@@ -260,7 +260,6 @@ private data class Copy(
     val notice: String,
     val wazeDirectNotice: String,
     val wazeSupportedVersions: String,
-    val screenCaptureUnsupportedNotice: String,
     val pngOutput: String,
     val pngHint: String,
     val nativeOutput: String,
@@ -301,8 +300,6 @@ private data class Copy(
     val dashboardScaleHint: String,
     val smallDistanceClamp: String,
     val smallDistanceHint: String,
-    val roundaboutLeft: String,
-    val roundaboutHint: String,
     val appsHint: String,
     val lastScan: String,
     val refreshApps: String,
@@ -1743,8 +1740,8 @@ private fun OptionsTab(
     val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
             || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
 
-    LazyPageSurface(copy.main, copy.mainHint, palette, itemSpacing = 0.dp) {
-        optionsSection("runtime-permissions", copy.permissionsRuntime, palette) {
+    val sections = buildOptionsSections {
+        optionsSection("runtime-permissions", copy.permissionsRuntime, R.drawable.ic_options_build) {
             row("adb-permissions") {
                 SettingRow(copy.adbPermissions, copy.adbHint, palette) {
                     HudButton(copy.grantAdb, palette, primary = true, width = 190.dp) {
@@ -1797,18 +1794,8 @@ private fun OptionsTab(
                     )
                 }
             }
-            row("screen-capture-channel") {
-                SwitchRow(
-                    copy.screenCaptureChannel,
-                    copy.screenCaptureChannelHint,
-                    snapshot.wazeScreenCaptureEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetWazeScreenCaptureEnabled(it) }
-                }
-            }
         }
-        optionsSection("basic-navigation", copy.basicNavigationOutput, palette) {
+        optionsSection("basic-navigation", copy.basicNavigationOutput, R.drawable.ic_options_navigation) {
             row("png-output") {
                 SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
                     runAction { activity.composeSetPngOutputEnabled(it) }
@@ -1846,7 +1833,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("route-eta", if (ua) "ЕТА маршруту" else "Route ETA", palette) {
+        optionsSection("route-eta", if (ua) "ЕТА маршруту" else "Route ETA", R.drawable.ic_options_schedule) {
             row("route-metrics-mode") {
                 SettingRow(routeMetricsTitle, routeMetricsHint, palette) {
                     HudDropdown(
@@ -1874,7 +1861,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", palette) {
+        optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", R.drawable.ic_options_speed) {
             row("speed-limit-mode") {
                 SettingRow(if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode", speedLimitModeHint, palette) {
                     HudDropdown(
@@ -1970,7 +1957,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("waze-features", copy.wazeFeatures, palette) {
+        optionsSection("waze-features", copy.wazeFeatures, R.drawable.waze_app_icon) {
             row("waze-alerts") {
                 SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
                     runAction { activity.composeSetWazeAlertsEnabled(it) }
@@ -1982,7 +1969,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("extra-navigation", copy.extraNavigationOptions, palette) {
+        optionsSection("extra-navigation", copy.extraNavigationOptions, R.drawable.ic_options_settings) {
             row("tbt-without-hud") {
                 SwitchRow(copy.tbtWithoutHudOutput, copy.tbtWithoutHudOutputHint, snapshot.tbtWithoutHudOutputEnabled, palette) {
                     runAction { activity.composeSetTbtWithoutHudOutputEnabled(it) }
@@ -2003,13 +1990,8 @@ private fun OptionsTab(
                     runAction { activity.composeSetSmallDistanceClamp(it) }
                 }
             }
-            row("roundabout-left") {
-                SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
-                    runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
-                }
-            }
         }
-        optionsSection("dashboard-control", copy.dashboardControl, palette) {
+        optionsSection("dashboard-control", copy.dashboardControl, R.drawable.ic_options_directions_car) {
             row("dashboard-screen-mode") {
                 SettingRow(copy.dashboardScreenMode, copy.dashboardScreenModeHint, palette) {
                     HudDropdown(
@@ -2069,6 +2051,13 @@ private fun OptionsTab(
             }
         }
     }
+    SidebarOptionsSurface(
+        title = copy.main,
+        hint = copy.mainHint,
+        categoriesLabel = if (ua) "Категорії" else "Categories",
+        sections = sections,
+        palette = palette
+    )
 }
 
 @Composable
@@ -3208,7 +3197,7 @@ private fun AppsTab(
                         snapshot.supportedApps[index],
                         copy,
                         palette,
-                        supported = true,
+                        supported = snapshot.supportedApps[index].supportedHud,
                         runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
                         activity = activity,
                         runAction = runAction
@@ -4847,29 +4836,171 @@ private class OptionsSectionScope {
     }
 }
 
-private fun LazyListScope.optionsSection(
-    sectionKey: String,
-    title: String,
-    palette: Palette,
-    gapBefore: Dp = 10.dp,
-    content: OptionsSectionScope.() -> Unit
-) {
-    val scope = OptionsSectionScope().apply(content)
-    item(key = "$sectionKey:gap", contentType = "options-gap") {
-        Spacer(Modifier.height(gapBefore))
+private data class OptionsSectionSpec(
+    val key: String,
+    val title: String,
+    @DrawableRes val icon: Int,
+    val rows: List<OptionsRowSpec>
+)
+
+private class OptionsSectionsScope {
+    val sections = mutableListOf<OptionsSectionSpec>()
+
+    fun optionsSection(
+        key: String,
+        title: String,
+        @DrawableRes icon: Int,
+        content: OptionsSectionScope.() -> Unit
+    ) {
+        sections += OptionsSectionSpec(
+            key = key,
+            title = title,
+            icon = icon,
+            rows = OptionsSectionScope().apply(content).rows.toList()
+        )
     }
-    item(key = "$sectionKey:header", contentType = "options-header") {
+}
+
+private fun buildOptionsSections(
+    content: OptionsSectionsScope.() -> Unit
+): List<OptionsSectionSpec> = OptionsSectionsScope().apply(content).sections.toList()
+
+@Composable
+private fun SidebarOptionsSurface(
+    title: String,
+    hint: String,
+    categoriesLabel: String,
+    sections: List<OptionsSectionSpec>,
+    palette: Palette
+) {
+    var selectedKey by rememberSaveable { mutableStateOf(sections.first().key) }
+    val selectedSection = sections.firstOrNull { it.key == selectedKey } ?: sections.first()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+            .background(palette.panel)
+            .padding(14.dp)
+    ) {
+        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
+        Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Spacer(Modifier.height(12.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(260.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(12.dp))
+                    .border(1.dp, palette.border, RoundedCornerShape(12.dp))
+                    .background(palette.panelAlt)
+                    .padding(horizontal = 8.dp, vertical = 10.dp)
+            ) {
+                Text(
+                    text = categoriesLabel.uppercase(Locale.ROOT),
+                    color = palette.muted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                )
+                Spacer(Modifier.height(4.dp))
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    sections.forEach { section ->
+                        SidebarOptionsCategoryItem(
+                            section = section,
+                            selected = section.key == selectedSection.key,
+                            palette = palette,
+                            onClick = { selectedKey = section.key }
+                        )
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            ) {
+                key(selectedSection.key) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, palette.border, RoundedCornerShape(12.dp))
+                            .background(palette.surface),
+                        contentPadding = PaddingValues(12.dp)
+                    ) {
+                        sidebarOptionsSection(selectedSection, palette)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SidebarOptionsCategoryItem(
+    section: OptionsSectionSpec,
+    selected: Boolean,
+    palette: Palette,
+    onClick: () -> Unit
+) {
+    val foreground = if (selected) palette.accent else palette.muted
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) palette.accent.copy(alpha = 0.14f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Image(
+            painter = painterResource(section.icon),
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            colorFilter = ColorFilter.tint(foreground),
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = section.title,
+            color = foreground,
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private fun LazyListScope.sidebarOptionsSection(
+    section: OptionsSectionSpec,
+    palette: Palette
+) {
+    item(key = "${section.key}:header", contentType = "options-header") {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
-            Text(title.uppercase(), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            Text(section.title.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
     }
-    scope.rows.forEachIndexed { index, row ->
-        item(key = "$sectionKey:${row.key}", contentType = "options-row") {
+    section.rows.forEachIndexed { index, row ->
+        item(key = "${section.key}:${row.key}", contentType = "options-row") {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -4877,7 +5008,7 @@ private fun LazyListScope.optionsSection(
                         palette,
                         palette.panel,
                         top = false,
-                        bottom = index == scope.rows.lastIndex
+                        bottom = index == section.rows.lastIndex
                     )
             ) {
                 if (index > 0) Divider(palette)
@@ -5983,8 +6114,6 @@ private fun enCopy() = Copy(
     betaTestingHint = "Check for experimental version. Usage may be unstable or broken",
     shutdown = "Shutdown",
     shutdownHint = "Stop the app until it is opened again",
-    screenCaptureChannel = "Screen capture channel (legacy)",
-    screenCaptureChannelHint = "Allows screen capture for maneuver output. No longer supported",
     updateTitle = "Update",
     updateCurrentVersion = "Current version:",
     updateAvailableVersion = "Available version:",
@@ -5999,7 +6128,6 @@ private fun enCopy() = Copy(
     notice = "Notice",
     wazeDirectNotice = "Waze HUD output works best through the direct channel. Supported versions:",
     wazeSupportedVersions = "stock 4.95.0.3 / patched 5.20.0.1",
-    screenCaptureUnsupportedNotice = "The screen capture channel is no longer supported by the developer.",
     pngOutput = "PNG output",
     pngHint = "Send maneuver source image payload.",
     nativeOutput = "Native output",
@@ -6040,8 +6168,6 @@ private fun enCopy() = Copy(
     dashboardScaleHint = "Scale the projected dashboard content inside the window.",
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Send 11 m for distances from 0 to 10 m instead of the OEM close marker.",
-    roundaboutLeft = "Roundabout left-hand traffic",
-    roundaboutHint = "Changes roundabout assets for PNG output. (Legacy with screen capture channel)",
     appsHint = "Manage navigator output to the HUD and dashboard.",
     lastScan = "Last scan",
     refreshApps = "Refresh apps",
@@ -6202,8 +6328,6 @@ private fun uaCopy() = enCopy().copy(
     betaTestingHint = "Перевіряти наявність експериментальних версій. Може бути нестабільна або зламана робота",
     shutdown = "Вимкнути",
     shutdownHint = "Завершити роботу застосунку до наступного відкриття",
-    screenCaptureChannel = "Канал захоплення екрану (сумісність)",
-    screenCaptureChannelHint = "Дозволяє використання захоплення екрану для виводу маневрів. Більше не підтримується",
     updateTitle = "Оновлення",
     updateCurrentVersion = "Поточна версія:",
     updateAvailableVersion = "Доступна версія:",
@@ -6214,11 +6338,10 @@ private fun uaCopy() = enCopy().copy(
     updateAction = "Оновити",
     basicNavigationOutput = "Базовий вивід навігації",
     extraNavigationOptions = "Додаткові функції навігації",
-    dashboardControl = "Керування дашбордом",
+    dashboardControl = "Керування приборкою",
     notice = "Примітка",
     wazeDirectNotice = "Вивід Waze на HUD найкраще працює через прямий канал. Підтримувані версії:",
     wazeSupportedVersions = "стокова 4.95.0.3 / патчена 5.20.0.1",
-    screenCaptureUnsupportedNotice = "Канал захоплення екрану більше не підтримується розробником.",
     pngOutput = "Вивід PNG",
     pngHint = "Надсилати зображення маневру.",
     nativeOutput = "Вивід штатного маневру",
@@ -6259,8 +6382,6 @@ private fun uaCopy() = enCopy().copy(
     dashboardScaleHint = "Масштаб проєктованого вмісту приборки всередині вікна.",
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Передавати 11 м для дистанцій від 0 до 10 м замість штатного маркера близької відстані.",
-    roundaboutLeft = "Лівосторонній рух на кільці",
-    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG. (Сумісність з каналом захоплення екрану)",
     appsHint = "Керування виводом навігаторів на HUD та приборку.",
     lastScan = "Останнє сканування",
     refreshApps = "Оновити застосунки",

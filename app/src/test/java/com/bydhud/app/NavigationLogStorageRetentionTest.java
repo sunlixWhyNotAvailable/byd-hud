@@ -42,43 +42,11 @@ public final class NavigationLogStorageRetentionTest {
         File oldDay = write(root, "20260718/logs/events.log", 10);
 
         NavigationLogStorage.enforceNavCaptureRetentionForTest(
-                root, "20260720", "20260719", "", "", "", 1L);
+                root, "20260720", "20260719", 1L);
 
         assertTrue(activeNavigation.exists());
         assertTrue(activeLogcat.exists());
         assertFalse(oldDay.getParentFile().getParentFile().exists());
-    }
-
-    @Test
-    public void currentCropSessionIsKeptWhileOlderSessionIsDeleted() throws IOException {
-        File root = temporaryFolder.newFolder("sessions");
-        File current = write(root,
-                "20260720/waze-crop/current/source_frame_2.png", 10);
-        File old = write(root,
-                "20260720/waze-crop/old/source_frame_1.png", 10);
-
-        NavigationLogStorage.enforceNavCaptureRetentionForTest(
-                root, "20260720", "waze-crop", "current",
-                "source_frame_2.png", 15L);
-
-        assertTrue(current.exists());
-        assertFalse(old.getParentFile().exists());
-    }
-
-    @Test
-    public void activeCropRetentionKeepsOnlyCurrentScreenshotWhenNeeded() throws IOException {
-        File root = temporaryFolder.newFolder("active-crop-screenshots");
-        File old = write(root,
-                "20260720/waze-crop/current/source_frame_1.png", 10);
-        File current = write(root,
-                "20260720/waze-crop/current/source_frame_2.png", 10);
-
-        NavigationLogStorage.enforceNavCaptureRetentionForTest(
-                root, "20260720", "waze-crop", "current",
-                "source_frame_2.png", 10L);
-
-        assertFalse(old.exists());
-        assertTrue(current.exists());
     }
 
     @Test
@@ -95,7 +63,7 @@ public final class NavigationLogStorageRetentionTest {
                 "20260720", NavigationLogStorage.GMAPS_DIRECT_DIR, "current");
         try {
             NavigationLogStorage.enforceNavCaptureRetentionForTest(
-                    root, "20260720", "", "", "", 15L);
+                    root, "20260720", "", 15L);
         } finally {
             NavigationLogStorage.unregisterDirectSession(
                     "20260720", NavigationLogStorage.GMAPS_DIRECT_DIR, "current");
@@ -107,6 +75,19 @@ public final class NavigationLogStorageRetentionTest {
     }
 
     @Test
+    public void sameDayRetentionCanRemoveHistoricalCropSession() throws IOException {
+        File root = temporaryFolder.newFolder("historical-crop");
+        File activeLog = write(root, "20260720/logs/events.log", 1);
+        File oldCrop = write(root, "20260720/waze-crop/old/screen_1.png", 10);
+
+        NavigationLogStorage.enforceNavCaptureRetentionForTest(
+                root, "20260720", "", 1L);
+
+        assertTrue(activeLog.exists());
+        assertFalse(oldCrop.getParentFile().exists());
+    }
+
+    @Test
     public void retiredTombstoneCountsTowardRetentionLimit() throws IOException {
         File root = temporaryFolder.newFolder("tombstones");
         File active = write(root, "20260720/logs/events.log", 1);
@@ -115,19 +96,11 @@ public final class NavigationLogStorageRetentionTest {
                 ".delete-20260717-123-0/logs/events.log", 10);
 
         NavigationLogStorage.enforceNavCaptureRetentionForTest(
-                root, "20260720", "", "", "", "", 15L);
+                root, "20260720", "", 15L);
 
         assertTrue(active.exists());
         assertTrue(tombstone.exists());
         assertFalse(oldDay.getParentFile().getParentFile().exists());
-    }
-
-    @Test
-    public void cropSessionDayRemainsActiveAcrossMidnight() {
-        assertTrue(NavigationLogStorage.isActiveNavCaptureDayForTest(
-                "20260720", "20260721", "", "20260720"));
-        assertFalse(NavigationLogStorage.isActiveNavCaptureDayForTest(
-                "20260719", "20260721", "", "20260720"));
     }
 
     @Test
@@ -136,7 +109,7 @@ public final class NavigationLogStorageRetentionTest {
                 "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
         try {
             assertTrue(NavigationLogStorage.isActiveNavCaptureDayForTest(
-                    "20260720", "20260721", "", ""));
+                    "20260720", "20260721", ""));
         } finally {
             NavigationLogStorage.unregisterDirectSession(
                     "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
@@ -155,7 +128,7 @@ public final class NavigationLogStorageRetentionTest {
                 "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
         try {
             NavigationLogStorage.enforceNavCaptureRetentionForTest(
-                    root, "20260721", "", "", "", 12L);
+                    root, "20260721", "", 12L);
         } finally {
             NavigationLogStorage.unregisterDirectSession(
                     "20260720", NavigationLogStorage.WAZE_DIRECT_DIR, "current");
