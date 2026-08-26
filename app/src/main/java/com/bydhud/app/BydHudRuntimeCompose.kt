@@ -1631,13 +1631,13 @@ private fun Header(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             HudStatusPill(hudStatus, copy, palette)
-            //guard top-bar adb status so OK means grant-backed capture permissions are already present.
-            Pill(if (snapshot.settingsPermissionsGranted) copy.adbOk else copy.adbNotGranted,
+            // ADB reflects persisted authorization evidence; Permissions reflects current grants.
+            Pill(if (snapshot.adbAuthorized) copy.adbOk else copy.adbNotGranted,
+                if (snapshot.adbAuthorized) palette.green else palette.red,
+                if (snapshot.adbAuthorized) palette.greenSoft else palette.redSoft)
+            Pill(if (snapshot.settingsPermissionsGranted) copy.permissionsOk else copy.permissionsMissing,
                 if (snapshot.settingsPermissionsGranted) palette.green else palette.red,
                 if (snapshot.settingsPermissionsGranted) palette.greenSoft else palette.redSoft)
-            Pill(if (snapshot.captureReady) copy.permissionsOk else copy.permissionsMissing,
-                if (snapshot.captureReady) palette.green else palette.red,
-                if (snapshot.captureReady) palette.greenSoft else palette.redSoft)
             Segmented(copy.ukr, copy.eng, snapshot.uaLanguage, palette,
                 onLeft = { onLanguage(true) },
                 onRight = { onLanguage(false) })
@@ -2579,7 +2579,10 @@ private fun OperationProgressStack(
                 onClose = {}
             ))
         }
-        patchOperations.filter { it.kind.isNotEmpty() && it.phase != "IDLE" }.forEach { operation ->
+        patchOperations.filter {
+            it.kind.isNotEmpty() && it.phase != "IDLE"
+                    && !(it.recoveryRequired && it.acknowledged)
+        }.forEach { operation ->
             val navigator = if (operation.profileId == "waze") "Waze" else "Google Maps"
             val phase = patchStepLabel(operation, copy.language).let { label ->
                 if (operation.progress in 1..99) "$label · ${operation.progress}%" else label
@@ -2592,7 +2595,8 @@ private fun OperationProgressStack(
                 startedAt = operation.startedAt,
                 busy = operation.busy,
                 stopEnabled = operation.cancelAllowed,
-                closeEnabled = operation.phase == "FAILED" || operation.phase == "CANCELLED",
+                closeEnabled = operation.phase == "FAILED" || operation.phase == "CANCELLED"
+                        || operation.recoveryRequired,
                 failed = operation.phase == "FAILED" || operation.recoveryRequired,
                 success = operation.phase == "VERIFIED",
                 onStop = { onCancelPatch(operation.profileId) },
@@ -4886,7 +4890,7 @@ private fun SidebarOptionsSurface(
     ) {
         Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
         Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier
                 .fillMaxWidth()
@@ -4900,23 +4904,28 @@ private fun SidebarOptionsSurface(
                     .clip(RoundedCornerShape(12.dp))
                     .border(1.dp, palette.border, RoundedCornerShape(12.dp))
                     .background(palette.panelAlt)
-                    .padding(horizontal = 8.dp, vertical = 10.dp)
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
             ) {
                 Text(
                     text = categoriesLabel.uppercase(Locale.ROOT),
                     color = palette.muted,
                     fontSize = 13.sp,
                     fontWeight = FontWeight.SemiBold,
-                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 4.dp)
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
                 )
-                Spacer(Modifier.height(4.dp))
-                Column(
+                Spacer(Modifier.height(2.dp))
+                LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
                 ) {
-                    sections.forEach { section ->
+                    items(
+                        count = sections.size,
+                        key = { index -> sections[index].key },
+                        contentType = { "options-category" }
+                    ) { index ->
+                        val section = sections[index]
                         SidebarOptionsCategoryItem(
                             section = section,
                             selected = section.key == selectedSection.key,
@@ -4963,7 +4972,7 @@ private fun SidebarOptionsCategoryItem(
             .clip(RoundedCornerShape(10.dp))
             .background(if (selected) palette.accent.copy(alpha = 0.14f) else Color.Transparent)
             .clickable(onClick = onClick)
-            .padding(horizontal = 14.dp, vertical = 10.dp),
+            .padding(horizontal = 14.dp, vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Image(

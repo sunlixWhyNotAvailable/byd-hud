@@ -73,7 +73,7 @@ final class NavAppDisplayController {
     //defines the Listener module boundary so related behavior stays readable inside one unit.
     interface Listener {
         //keeps this step explicit so callers can rely on one documented behavior boundary.
-        void onNavAppDisplayChanged();
+        void onNavAppDisplayChanged(boolean moveInProgress);
     }
 
     private static NavAppDisplayController instance;
@@ -136,9 +136,10 @@ final class NavAppDisplayController {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    void setListener(Listener listener) {
+    boolean setListener(Listener listener) {
         synchronized (lock) {
             this.listener = listener;
+            return moveInProgress;
         }
     }
 
@@ -1287,11 +1288,13 @@ final class NavAppDisplayController {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void notifyStatusChanged() {
         Listener callback;
+        boolean moving;
         synchronized (lock) {
             callback = listener;
+            moving = moveInProgress;
         }
         if (callback != null) {
-            callback.onNavAppDisplayChanged();
+            callback.onNavAppDisplayChanged(moving);
         }
     }
 

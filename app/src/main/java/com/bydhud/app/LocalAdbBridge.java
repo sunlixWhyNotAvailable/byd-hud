@@ -46,7 +46,8 @@ final class LocalAdbBridge {
     private static final Object PERMISSION_GRANT_LOCK = new Object();
     private static final Object RUNTIME_CONNECTION_LOCK = new Object();
     private static final Object KEY_PAIR_LOCK = new Object();
-    private static final long RUNTIME_IDLE_CLOSE_MS = 30000L;
+    //Retain an idle transport for real command bursts; status checks never touch it.
+    private static final long RUNTIME_IDLE_CLOSE_MS = 30L * 60L * 1000L;
     private static final long POST_SETTINGS_POLL_TIMEOUT_MS = 3000L;
     private static final long POST_GRANT_POLL_TIMEOUT_MS = 30000L;
     private static final long POST_GRANT_POLL_INTERVAL_MS = 250L;
@@ -1681,12 +1682,14 @@ final class LocalAdbBridge {
                         verifiedFingerprintThisProcess)
                 .apply();
         AppEventLogger.event(context, "adb_bridge authorized key=" + keyFingerprint);
+        MainActivity.requestRuntimeStatusRefresh(context, true, "adb-authorization-verified");
     }
 
     private static void clearAuthorizedFingerprint(Context context, String keyFingerprint) {
         verifiedFingerprintThisProcess = "";
         prefs(context).edit().remove(KEY_AUTHORIZED_FINGERPRINT).apply();
         AppEventLogger.event(context, "adb_bridge authorization_revoked key=" + keyFingerprint);
+        MainActivity.requestRuntimeStatusRefresh(context, true, "adb-authorization-rejected");
     }
 
     //tracks only the socket blocked on RSA consent so shell sessions remain untouched.

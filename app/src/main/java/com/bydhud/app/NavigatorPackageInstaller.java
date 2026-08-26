@@ -217,51 +217,63 @@ final class NavigatorPackageInstaller {
     }
 
     static void verifyInstalledAsync(Context context, NavigatorPatchStore.Profile profile) {
+        Context appContext = context.getApplicationContext();
         if (!VERIFY_RUNNING.compareAndSet(false, true)) return;
         NavigatorPatchStore.transition(
-                context, profile, NavigatorPatchStore.INSTALLED_VERIFY,
+                appContext, profile, NavigatorPatchStore.INSTALLED_VERIFY,
                 "Verifying installed APK");
+        AtomicBoolean retry = new AtomicBoolean();
         Thread worker = new Thread(() -> {
+            String installedIdentity = "";
             try {
-                String installedIdentity = NavigatorPatchStore.installedIdentity(context, profile);
-                if (!NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName)) {
+                installedIdentity = NavigatorPatchStore.installedIdentity(appContext, profile);
+                if (!NavigatorSigningKey.installedUsesLocalKey(appContext, profile.packageName)) {
                     throw new IOException("Installed signer does not match local patcher key");
                 }
                 NavigatorPatchPipeline.ScanResult result =
-                        NavigatorPatchPipeline.inspectInstalled(context, profile);
-                verifyExpected(context, profile, result, true);
+                        NavigatorPatchPipeline.inspectInstalled(appContext, profile);
+                verifyExpected(appContext, profile, result, true);
                 NavigatorPatchPipeline.ScanResult visibleResult =
-                        withExpectedOptionalFailure(context, profile, result);
-                PackageInfo info = context.getPackageManager().getPackageInfo(
+                        withExpectedOptionalFailure(appContext, profile, result);
+                PackageInfo info = appContext.getPackageManager().getPackageInfo(
                         profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
-                File transaction = NavigatorPatchStore.transactionDirectory(context, profile);
+                File transaction = NavigatorPatchStore.transactionDirectory(appContext, profile);
                 if (!installedIdentity.equals(
-                        NavigatorPatchStore.installedIdentity(context, profile))) {
+                        NavigatorPatchStore.installedIdentity(appContext, profile))) {
                     throw new IOException("Installed navigator changed during verification");
                 }
-                NavigatorPatchStore.clearExternal(context, profile);
-                NavigatorPatchStore.saveScan(context, visibleResult);
+                NavigatorPatchStore.clearExternal(appContext, profile);
+                NavigatorPatchStore.saveScan(appContext, visibleResult);
                 NavigatorPatchStore.recordInstalledVerification(
-                        context, profile, info.lastUpdateTime, info.getLongVersionCode(),
+                        appContext, profile, info.lastUpdateTime, info.getLongVersionCode(),
                         visibleResult.sha256, visibleResult.directState,
                         visibleResult.gmsCoreState,
                         visibleResult.optionalState, visibleResult.alertState);
                 NavigatorPatchStore.transition(
-                        context, profile, NavigatorPatchStore.VERIFIED, "Installed and verified");
-                NavigatorPatchStore.clearTransactionMetadata(context, profile);
-                NavigatorPatchStore.releaseInstall(context, profile);
+                        appContext, profile, NavigatorPatchStore.VERIFIED, "Installed and verified");
+                NavigatorPatchStore.clearTransactionMetadata(appContext, profile);
+                NavigatorPatchStore.releaseInstall(appContext, profile);
                 NavigatorPatchPipeline.deleteTree(transaction);
-                MainActivity.requestPatchUiStateRefresh(context, true, "patch-verified");
-                drainInstallQueue(context);
+                MainActivity.requestPatchUiStateRefresh(appContext, true, "patch-verified");
+                drainInstallQueue(appContext);
             } catch (Exception error) {
-                NavigatorPatchStore.transition(context, profile,
-                        NavigatorPatchStore.RECOVERY_REQUIRED,
-                        error.getMessage());
-                NavigatorPatchStore.releaseInstall(context, profile);
-                MainActivity.requestPatchUiStateRefresh(context, true, "patch-recovery");
-                drainInstallQueue(context);
+                if (isFinalVerificationRetryable(error)
+                        && NavigatorPatchStore.finalVerificationTransactionMatches(
+                        appContext, profile, installedIdentity)
+                        && NavigatorPatchStore.consumeFinalVerificationRetry(appContext, profile)) {
+                    AppEventLogger.event(appContext,
+                            "navigator_patch final_verification_retry profile=" + profile.id);
+                    retry.set(true);
+                    return;
+                }
+                NavigatorPatchStore.transition(appContext, profile,
+                        NavigatorPatchStore.RECOVERY_REQUIRED, error.getMessage());
+                NavigatorPatchStore.releaseInstall(appContext, profile);
+                MainActivity.requestPatchUiStateRefresh(appContext, true, "patch-recovery");
+                drainInstallQueue(appContext);
             } finally {
                 VERIFY_RUNNING.set(false);
+                if (retry.get()) verifyInstalledAsync(appContext, profile);
             }
         }, "NavigatorPatchVerify");
         worker.setPriority(Thread.MIN_PRIORITY);
@@ -269,35 +281,85 @@ final class NavigatorPackageInstaller {
     }
 
     static void verifyRestoredAsync(Context context, NavigatorPatchStore.Profile profile) {
+        Context appContext = context.getApplicationContext();
         if (!VERIFY_RUNNING.compareAndSet(false, true)) return;
         NavigatorPatchStore.transition(
-                context, profile, NavigatorPatchStore.INSTALLED_VERIFY,
+                appContext, profile, NavigatorPatchStore.INSTALLED_VERIFY,
                 "Verifying restored APK");
+        AtomicBoolean retry = new AtomicBoolean();
         Thread worker = new Thread(() -> {
+            String installedIdentity = "";
             try {
-                String installedIdentity = NavigatorPatchStore.installedIdentity(context, profile);
+                installedIdentity = NavigatorPatchStore.installedIdentity(appContext, profile);
                 NavigatorPatchPipeline.ScanResult result =
-                        NavigatorPatchPipeline.inspectInstalled(context, profile);
-                verifyExpected(context, profile, result, false);
-                completeRestore(context, profile, result, "Original APK restored",
+                        NavigatorPatchPipeline.inspectInstalled(appContext, profile);
+                verifyExpected(appContext, profile, result, false);
+                completeRestore(appContext, profile, result, "Original APK restored",
                         installedIdentity);
             } catch (Exception error) {
-                NavigatorPatchStore.transition(context, profile,
+                if (isFinalVerificationRetryable(error)
+                        && NavigatorPatchStore.finalVerificationTransactionMatches(
+                        appContext, profile, installedIdentity)
+                        && NavigatorPatchStore.consumeFinalVerificationRetry(appContext, profile)) {
+                    AppEventLogger.event(appContext,
+                            "navigator_patch final_restore_verification_retry profile=" + profile.id);
+                    retry.set(true);
+                    return;
+                }
+                NavigatorPatchStore.transition(appContext, profile,
                         NavigatorPatchStore.RECOVERY_REQUIRED, error.getMessage());
             } finally {
                 VERIFY_RUNNING.set(false);
+                if (retry.get()) verifyRestoredAsync(appContext, profile);
             }
         }, "NavigatorRestoreVerify");
         worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
     }
 
-    static void reconcile(Context context) {
-        reconcileGlobal(context);
-        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
-            reconcileLocal(context, profile);
+    static boolean isFinalVerificationRetryable(Exception error) {
+        String message = error == null || error.getMessage() == null
+                ? "" : error.getMessage().toLowerCase(java.util.Locale.ROOT);
+        return !message.contains("does not match")
+                && !message.contains("changed during")
+                && !message.contains("signer")
+                && !message.contains("missing")
+                && !message.contains("rejected");
+    }
+
+    private static void migrateKnownReceiverContextFailure(
+            Context context, NavigatorPatchStore.Profile profile) {
+        NavigatorPatchStore.OperationSnapshot operation =
+                NavigatorPatchStore.operation(context, profile);
+        if (!NavigatorPatchStore.RECOVERY_REQUIRED.equals(operation.phase)
+                || !NavigatorPatchStore.isRestrictedReceiverContextFailure(operation.error)
+                || VERIFY_RUNNING.get()
+                || !NavigatorPackageInstaller.isInstalled(context, profile.packageName)) return;
+        try {
+            String installedIdentity = NavigatorPatchStore.installedIdentity(context, profile);
+            if (!NavigatorPatchStore.finalVerificationTransactionMatches(
+                    context, profile, installedIdentity)
+                    || !NavigatorPatchStore.consumeFinalVerificationRetry(context, profile)) return;
+        } catch (Exception ignored) {
+            return;
         }
-        drainInstallQueue(context);
+        AppEventLogger.event(context,
+                "navigator_patch migrate_receiver_context_failure profile=" + profile.id);
+        if (NavigatorPatchStore.expectedDirect(context, profile).isEmpty()) {
+            verifyRestoredAsync(context, profile);
+        } else {
+            verifyInstalledAsync(context, profile);
+        }
+    }
+
+    static void reconcile(Context context) {
+        Context appContext = context.getApplicationContext();
+        reconcileGlobal(appContext);
+        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
+            migrateKnownReceiverContextFailure(appContext, profile);
+            reconcileLocal(appContext, profile);
+        }
+        drainInstallQueue(appContext);
     }
 
     private static void reconcileGlobal(Context context) {

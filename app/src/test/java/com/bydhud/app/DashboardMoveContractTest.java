@@ -319,4 +319,57 @@ public final class DashboardMoveContractTest {
         assertTrue(endMove.contains("pendingAutoContainerLeaseTransferFrom = \"\";"));
         assertTrue(endMove.contains("pendingAutoContainerLeaseTransferGeneration = 0L;"));
     }
+
+    @Test
+    public void moveStatusPublishesCachedStateAndScansOnceOnIdleTransition() throws Exception {
+        String activity = source("MainActivity.java");
+        String listener = between(activity,
+                "NavAppDisplayController displayController = NavAppDisplayController.get(this);",
+                "requestInitialUiStateRefresh(this, \"activity-create\")");
+        assertTrue(listener.contains(
+                "dashboardMoveInProgress = displayController.setListener(moveInProgress ->"));
+        assertFalse(listener.contains("dashboardMoveInProgress = displayController.isMoveInProgress();"));
+        assertTrue(listener.contains(
+                "boolean moveFinished = dashboardMoveInProgress && !moveInProgress;"));
+        assertTrue(listener.contains("if (moveInProgress || moveFinished)"));
+        assertTrue(listener.contains("publishSharedUiStateChange();"));
+        assertTrue(listener.contains("if (moveFinished)"));
+        assertEquals(1, occurrences(listener, "scheduleAppScan();"));
+        assertFalse(listener.contains("refreshControls();"));
+        assertFalse(activity.contains("refreshAppsSoon("));
+
+        String controller = source("NavAppDisplayController.java");
+        assertTrue(controller.contains("boolean setListener(Listener listener)"));
+        assertTrue(controller.contains("this.listener = listener;\n            return moveInProgress;"));
+        assertTrue(controller.contains("void onNavAppDisplayChanged(boolean moveInProgress)"));
+        assertTrue(controller.contains("moving = moveInProgress;"));
+        assertTrue(controller.contains("callback.onNavAppDisplayChanged(moving);"));
+    }
+
+    private static String source(String fileName) throws Exception {
+        java.nio.file.Path path = Paths.get(
+                "app/src/main/java/com/bydhud/app/" + fileName);
+        if (!Files.exists(path)) {
+            path = Paths.get("src/main/java/com/bydhud/app/" + fileName);
+        }
+        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+    }
+
+    private static String between(String source, String start, String end) {
+        int from = source.indexOf(start);
+        int to = source.indexOf(end, from + start.length());
+        assertTrue("missing start marker " + start, from >= 0);
+        assertTrue("missing end marker " + end, to > from);
+        return source.substring(from, to);
+    }
+
+    private static int occurrences(String source, String value) {
+        int count = 0;
+        int from = 0;
+        while ((from = source.indexOf(value, from)) >= 0) {
+            count++;
+            from += value.length();
+        }
+        return count;
+    }
 }

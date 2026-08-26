@@ -26,7 +26,7 @@ public final class HudRuntimeService extends Service {
     private static final String ACTION_START_PERSISTENT =
             "com.bydhud.app.action.START_PERSISTENT_RUNTIME";
     private static final String EXTRA_REASON = "reason";
-    private static final long HEARTBEAT_INTERVAL_MS = 30_000L;
+    private static final long HEARTBEAT_INTERVAL_MS = 5L * 60L * 1000L;
     private static final long START_REQUEST_TIMEOUT_MS = 15_000L;
 
     private static final AtomicBoolean START_IN_FLIGHT = new AtomicBoolean(false);
@@ -45,8 +45,6 @@ public final class HudRuntimeService extends Service {
             boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(HudRuntimeService.this);
             HudRuntimeState.markHeartbeat(HudRuntimeService.this,
                     activeWork ? "periodic" : "idle-periodic");
-            InstrumentProxyManager.get(HudRuntimeService.this)
-                    .ensureStarted("runtime-heartbeat");
             requestRuntimeUiRefresh(false, "runtime-heartbeat");
             heartbeatHandler.postDelayed(this, HEARTBEAT_INTERVAL_MS);
         }
@@ -332,11 +330,12 @@ public final class HudRuntimeService extends Service {
     }
 
     private void requestInitialUiRefresh(String reason) {
-        MainActivity.requestInitialUiStateRefresh(this, reason);
+        MainActivity.requestBackgroundUiStateRefresh(this, reason);
     }
 
     private void requestRuntimeUiRefresh(boolean force, String reason) {
-        MainActivity.requestRuntimeUiStateRefresh(this, force, reason);
+        //The periodic path is local-only; authoritative app scans are UI/event driven.
+        MainActivity.requestRuntimeStatusRefresh(this, false, reason);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

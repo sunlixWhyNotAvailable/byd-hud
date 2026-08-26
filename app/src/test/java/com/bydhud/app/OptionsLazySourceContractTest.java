@@ -54,6 +54,17 @@ public final class OptionsLazySourceContractTest {
         assertTrue(source.contains("key(selectedSection.key)"));
         assertTrue(source.contains(".width(260.dp)"));
         assertTrue(source.contains("Arrangement.spacedBy(16.dp)"));
+        String sidebar = between(source,
+                "private fun SidebarOptionsSurface(",
+                "private fun SidebarOptionsCategoryItem(");
+        assertEquals(2, occurrences(sidebar, "LazyColumn("));
+        assertTrue(sidebar.contains("contentType = { \"options-category\" }"));
+        assertTrue(sidebar.contains(".padding(horizontal = 8.dp, vertical = 6.dp)"));
+        assertTrue(sidebar.contains("verticalArrangement = Arrangement.spacedBy(2.dp)"));
+        String categoryItem = between(source,
+                "private fun SidebarOptionsCategoryItem(",
+                "private fun LazyListScope.sidebarOptionsSection(");
+        assertTrue(categoryItem.contains(".padding(horizontal = 14.dp, vertical = 8.dp)"));
         assertFalse(options.contains("screen-capture-channel"));
         assertFalse(options.contains("roundabout-left"));
     }

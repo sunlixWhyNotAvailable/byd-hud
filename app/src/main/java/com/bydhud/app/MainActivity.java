@@ -63,7 +63,8 @@ public final class MainActivity extends ComponentActivity {
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
-    private static final long RUNTIME_UI_REFRESH_INTERVAL_MS = 30000L;
+    private static final long RUNTIME_UI_REFRESH_INTERVAL_MS = 5L * 60L * 1000L;
+    private static final long RUNTIME_STATUS_REFRESH_INTERVAL_MS = 5L * 60L * 1000L;
     private static final long PATCH_UI_REFRESH_INTERVAL_MS = 1000L;
     private static final long ASSET_UI_REFRESH_INTERVAL_MS = 1000L;
     private static final long LOGCAT_STOP_TIMEOUT_MS = 90000L;
@@ -91,6 +92,10 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicBoolean STORAGE_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean APP_SCAN_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean APP_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
+    private static final AtomicBoolean RUNTIME_STATUS_REFRESH_IN_PROGRESS =
+            new AtomicBoolean(false);
+    private static final AtomicBoolean RUNTIME_STATUS_REFRESH_PENDING =
+            new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
@@ -110,7 +115,10 @@ public final class MainActivity extends ComponentActivity {
     private static volatile boolean appScanCacheAvailable;
     private static volatile String appScanStatus = "";
     private static volatile NavRuntimePermissionStatus cachedNavRuntimePermissionStatus;
+    private static volatile boolean cachedAdbAuthorizationKnown;
+    private static volatile boolean cachedAdbAuthorizationStatusAvailable;
     private static volatile long lastRuntimeUiRefreshAtMs;
+    private static volatile long lastRuntimeStatusRefreshAtMs;
     private static volatile long lastPatchUiRefreshAtMs;
     private static volatile long lastAssetUiRefreshAtMs;
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -205,6 +213,7 @@ public final class MainActivity extends ComponentActivity {
     private boolean mainUiReady;
     private boolean activityResumed;
     private boolean activityWindowFocused;
+    private boolean dashboardMoveInProgress;
     private String composeBlockingUiFlow = "compose-starting";
     private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean exitRequested;
@@ -252,10 +261,22 @@ public final class MainActivity extends ComponentActivity {
             HudRuntimeWatchdog.cancel(this);
         }
         hudOutput = HudOutputCoordinator.get(this);
-        NavAppDisplayController.get(this).setListener(() -> runOnUiThread(() -> {
-            refreshControls();
-            scheduleAppScan();
+        NavAppDisplayController displayController = NavAppDisplayController.get(this);
+        dashboardMoveInProgress = displayController.setListener(moveInProgress -> runOnUiThread(() -> {
+            if (destroyed) {
+                return;
+            }
+            boolean moveFinished = dashboardMoveInProgress && !moveInProgress;
+            dashboardMoveInProgress = moveInProgress;
+            if (moveInProgress || moveFinished) {
+                //The Apps rows are cache-backed; publish only the move gate/status change here.
+                publishSharedUiStateChange();
+            }
+            if (moveFinished) {
+                scheduleAppScan();
+            }
         }));
+        requestActivityLocalStatusRefresh("activity-create");
         requestInitialUiStateRefresh(this, "activity-create");
         BydHudRuntimeCompose.install(this);
         appendStatus(buildSafetyBanner());
@@ -287,6 +308,7 @@ public final class MainActivity extends ComponentActivity {
         maybeStartPendingAdbAuthorization();
         refreshControls();
         invalidateComposeSnapshot();
+        requestActivityLocalStatusRefresh("activity-resume");
         requestRuntimeUiStateRefresh(this, true, "activity-resume");
         notifyPendingShare();
     }
@@ -824,6 +846,7 @@ public final class MainActivity extends ComponentActivity {
                 dashboardProfile.scalePercent,
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 permissionStatus.settingsGranted(),
+                adbAuthorized(),
                 permissionStatus.readyForCapture(),
                 permissionStatus.summary(),
                 LocalAdbBridge.adbKeyFingerprint(this),
@@ -977,8 +1000,7 @@ public final class MainActivity extends ComponentActivity {
                 }
             } else {
                 NavigatorPatchStore.transition(this, profile,
-                        prepared.destructive && !NavigatorPackageInstaller.isInstalled(
-                                this, profile.packageName)
+                        NavigatorPatchStore.requiresRecovery(this, profile)
                                 ? NavigatorPatchStore.RECOVERY_REQUIRED
                                 : NavigatorPatchStore.FAILED,
                         error.getMessage());
@@ -1135,7 +1157,7 @@ public final class MainActivity extends ComponentActivity {
                     value.operationToken, value.startedAt, value.progress, value.error,
                     value.readyAt, value.destructive, value.busy(),
                     NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase),
-                    NavigatorPatchStore.canCancel(value), value.terminal()));
+                    NavigatorPatchStore.canCancel(value), value.terminal(), value.acknowledged));
         }
         result.sort((left, right) -> Long.compare(left.startedAt, right.startedAt));
         return Collections.unmodifiableList(result);
@@ -1168,6 +1190,13 @@ public final class MainActivity extends ComponentActivity {
             cachedNavRuntimePermissionStatus = NavRuntimePermissionStatus.check(this);
             return cachedNavRuntimePermissionStatus;
         }
+    }
+
+    //returns persisted key evidence without opening a socket or running a shell command.
+    private boolean adbAuthorized() {
+        return cachedAdbAuthorizationStatusAvailable
+                ? cachedAdbAuthorizationKnown
+                : LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
     }
 
     private void invalidateNavRuntimePermissionStatus() {
@@ -1690,14 +1719,107 @@ public final class MainActivity extends ComponentActivity {
         requestRuntimeUiStateRefresh(this, true, "activity-app-scan");
     }
 
+    //uses the shared local-only status path for every Activity visibility transition.
+    private void requestActivityLocalStatusRefresh(String reason) {
+        requestRuntimeStatusRefresh(this, true, reason);
+    }
+
     static void requestInitialUiStateRefresh(Context context, String reason) {
         requestStorageRefresh(context, false, reason + "-storage");
+        requestRuntimeStatusRefresh(context, false, reason + "-status");
         requestRuntimeUiStateRefresh(context, false, reason + "-runtime");
+        requestPatchUiStateRefresh(context, false, reason + "-patch");
+    }
+
+    //boot/runtime service bootstrap keeps mutable status local-only; app scans belong to UI open.
+    static void requestBackgroundUiStateRefresh(Context context, String reason) {
+        requestStorageRefresh(context, false, reason + "-storage");
+        requestRuntimeStatusRefresh(context, false, reason + "-status");
         requestPatchUiStateRefresh(context, false, reason + "-patch");
     }
 
     static void requestStorageRefreshAfterMutation(Context context, String reason) {
         requestStorageRefresh(context, true, "mutation-" + reason);
+    }
+
+    //refreshes only current key evidence and Android grants; this path never opens ADB.
+    static void requestRuntimeStatusRefresh(Context context, boolean force, String reason) {
+        Context appContext = context.getApplicationContext();
+        long now = SystemClock.elapsedRealtime();
+        boolean cacheFresh = cachedNavRuntimePermissionStatus != null
+                && cachedAdbAuthorizationStatusAvailable
+                && lastRuntimeStatusRefreshAtMs > 0L
+                && now - lastRuntimeStatusRefreshAtMs < RUNTIME_STATUS_REFRESH_INTERVAL_MS;
+        if (!force && cacheFresh) {
+            return;
+        }
+        if (!RUNTIME_STATUS_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+            if (force) {
+                RUNTIME_STATUS_REFRESH_PENDING.set(true);
+            }
+            return;
+        }
+        new Thread(() -> {
+            try {
+                NavRuntimePermissionStatus refreshed =
+                        NavRuntimePermissionStatus.check(appContext);
+                boolean adbAuthorized = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
+                NavRuntimePermissionStatus previous = cachedNavRuntimePermissionStatus;
+                boolean previousAdbAvailable = cachedAdbAuthorizationStatusAvailable;
+                boolean changed = !sameRuntimePermissionStatus(previous, refreshed)
+                        || !previousAdbAvailable
+                        || cachedAdbAuthorizationKnown != adbAuthorized;
+                cachedNavRuntimePermissionStatus = refreshed;
+                cachedAdbAuthorizationKnown = adbAuthorized;
+                cachedAdbAuthorizationStatusAvailable = true;
+                lastRuntimeStatusRefreshAtMs = SystemClock.elapsedRealtime();
+                AppEventLogger.event(appContext, "ui_runtime_status_refresh reason=" + reason
+                        + " adbAuthorized=" + adbAuthorized
+                        + " settingsGranted=" + refreshed.settingsGranted());
+                if (changed) {
+                    publishSharedUiStateChange();
+                }
+            } catch (RuntimeException error) {
+                AppEventLogger.event(appContext, "ui_runtime_status_refresh failed "
+                        + error.getClass().getSimpleName());
+            } finally {
+                RUNTIME_STATUS_REFRESH_IN_PROGRESS.set(false);
+                if (RUNTIME_STATUS_REFRESH_PENDING.getAndSet(false)) {
+                    requestRuntimeStatusRefresh(appContext, true, "pending-force");
+                }
+            }
+        }, "bydhud-runtime-status").start();
+    }
+
+    //keeps the cache comparison local so a status heartbeat publishes only actual changes.
+    private static boolean sameRuntimePermissionStatus(
+            NavRuntimePermissionStatus left, NavRuntimePermissionStatus right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        if (left.settings == null || right.settings == null) {
+            return left.settings == right.settings
+                    && left.notificationListenerConnected == right.notificationListenerConnected
+                    && left.accessibilityServiceConnected == right.accessibilityServiceConnected
+                    && left.accessibilityServiceCrashed == right.accessibilityServiceCrashed;
+        }
+        return left.settingsGranted() == right.settingsGranted()
+                && left.notificationListenerConnected == right.notificationListenerConnected
+                && left.accessibilityServiceConnected == right.accessibilityServiceConnected
+                && left.accessibilityServiceCrashed == right.accessibilityServiceCrashed
+                && left.settings.notificationListenerEnabled
+                == right.settings.notificationListenerEnabled
+                && left.settings.accessibilityServiceEnabled
+                == right.settings.accessibilityServiceEnabled
+                && left.settings.accessibilityMasterEnabled
+                == right.settings.accessibilityMasterEnabled
+                && left.settings.dashboardOverlayEnabled
+                == right.settings.dashboardOverlayEnabled
+                && left.settings.storageReadEnabled == right.settings.storageReadEnabled
+                && left.settings.storageWriteEnabled == right.settings.storageWriteEnabled;
     }
 
     static void requestRuntimeUiStateRefresh(Context context, boolean force, String reason) {
@@ -2328,6 +2450,7 @@ public final class MainActivity extends ComponentActivity {
         public final int dashboardScalePercent;
         public final boolean smallDistanceClampEnabled;
         public final boolean settingsPermissionsGranted;
+        public final boolean adbAuthorized;
         public final boolean captureReady;
         public final String permissionSummary;
         public final String adbKeyFingerprint;
@@ -2392,6 +2515,7 @@ public final class MainActivity extends ComponentActivity {
                 int dashboardOffsetPercent, int dashboardScalePercent,
                 boolean smallDistanceClampEnabled,
                 boolean settingsPermissionsGranted,
+                boolean adbAuthorized,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
                 String hudStatus, String hudPackage, String logOnlyPackages,
                 String observedPackages, String activeDashboardPackage,
@@ -2442,6 +2566,7 @@ public final class MainActivity extends ComponentActivity {
             this.dashboardScalePercent = dashboardScalePercent;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
+            this.adbAuthorized = adbAuthorized;
             this.captureReady = captureReady;
             this.permissionSummary = permissionSummary == null ? "" : permissionSummary;
             this.adbKeyFingerprint = adbKeyFingerprint == null ? "" : adbKeyFingerprint;
@@ -2536,6 +2661,7 @@ public final class MainActivity extends ComponentActivity {
                     && dashboardScalePercent == other.dashboardScalePercent
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
+                    && adbAuthorized == other.adbAuthorized
                     && captureReady == other.captureReady
                     && dashboardMoveInProgress == other.dashboardMoveInProgress
                     && logcatRecording == other.logcatRecording
@@ -2595,7 +2721,7 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
                     dashboardScalePercent, smallDistanceClampEnabled,
-                    settingsPermissionsGranted, captureReady,
+                    settingsPermissionsGranted, adbAuthorized, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
                     logOnlyPackages, observedPackages, activeDashboardPackage,
                     dashboardMoveInProgress, logcatRecording, logcatStatus, logPaths,
@@ -2856,11 +2982,20 @@ public final class MainActivity extends ComponentActivity {
         public final boolean recoveryRequired;
         public final boolean cancelAllowed;
         public final boolean terminal;
+        public final boolean acknowledged;
 
         ComposePatchOperation(String profileId, String kind, String phase, String detail,
                 String operationToken, long startedAt, int progress, String error, long readyAt,
                 boolean destructive, boolean busy, boolean recoveryRequired,
                 boolean cancelAllowed, boolean terminal) {
+            this(profileId, kind, phase, detail, operationToken, startedAt, progress, error,
+                    readyAt, destructive, busy, recoveryRequired, cancelAllowed, terminal, false);
+        }
+
+        ComposePatchOperation(String profileId, String kind, String phase, String detail,
+                String operationToken, long startedAt, int progress, String error, long readyAt,
+                boolean destructive, boolean busy, boolean recoveryRequired,
+                boolean cancelAllowed, boolean terminal, boolean acknowledged) {
             this.profileId = profileId == null ? "" : profileId;
             this.kind = kind == null ? "" : kind;
             this.phase = phase == null ? NavigatorPatchStore.IDLE : phase;
@@ -2875,6 +3010,7 @@ public final class MainActivity extends ComponentActivity {
             this.recoveryRequired = recoveryRequired;
             this.cancelAllowed = cancelAllowed;
             this.terminal = terminal;
+            this.acknowledged = acknowledged;
         }
 
         static ComposePatchOperation idle() {
@@ -2892,6 +3028,7 @@ public final class MainActivity extends ComponentActivity {
                     && destructive == other.destructive && busy == other.busy
                     && recoveryRequired == other.recoveryRequired
                     && cancelAllowed == other.cancelAllowed && terminal == other.terminal
+                    && acknowledged == other.acknowledged
                     && Objects.equals(profileId, other.profileId)
                     && Objects.equals(kind, other.kind)
                     && Objects.equals(phase, other.phase)
@@ -2904,7 +3041,7 @@ public final class MainActivity extends ComponentActivity {
         public int hashCode() {
             return Objects.hash(profileId, kind, phase, detail, operationToken, startedAt,
                     progress, error, readyAt, destructive, busy, recoveryRequired,
-                    cancelAllowed, terminal);
+                    cancelAllowed, terminal, acknowledged);
         }
     }
 
@@ -3301,12 +3438,6 @@ public final class MainActivity extends ComponentActivity {
         appendStatus((toDashboard ? "sending " : "returning ")
                 + normalized
                 + (toDashboard ? " to dashboard" : " to main"));
-        refreshAppsSoon();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshAppsSoon() {
-        handler.postDelayed(this::refreshControls, 250L);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -4772,6 +4903,7 @@ public final class MainActivity extends ComponentActivity {
             updateAdbBridgeStatus(prefix + ": " + result.message
                     + "\n" + permissionSummary);
         }
+        requestRuntimeStatusRefresh(this, true, "adb-grant-result");
         refreshControls();
         if (!status.readyForCapture() && status.settingsGranted()
                 && result.shouldRecheckPermissions()) {
