@@ -103,8 +103,6 @@ The same tab also lists other applications that can be moved between displays, b
 
 The `Options` tab controls what BYD HUD sends. Changing a switch affects the next outgoing HUD state; it does not change the map inside the navigator.
 
-<p align="center"><img src="docs/screenshots/en/options.png" alt="Navigation output and dashboard options" width="100%"></p>
-
 ### Basic navigation output
 
 | Setting | Default | When enabled | When disabled |
@@ -120,6 +118,8 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 Street text has priority over the text direction because both use the same vehicle field. If both are empty, BYD HUD sends a blank placeholder so text from the previous maneuver is not left on screen.
 
 Transliteration offers `Ukrainian` for Ukrainian road names and `Universal` for other writing systems. It changes only the text sent to the vehicle, not the text inside the navigator.
+
+<p align="center"><img src="docs/screenshots/en/settings-basic-navigation.png" alt="Basic navigation output settings" width="100%"></p>
 
 ### Route metrics
 
@@ -140,6 +140,8 @@ Enabled metrics are added before the street or cue, for example:
 
 Google Maps direct supplies all three metrics. Project-patched Waze `5.20.0.1` supplies ETA, remaining time, and remaining distance for the next stop and the entire route. On a multi-stop route, `Entire route` uses the final destination; if an individual whole-route value is unavailable, BYD HUD uses the corresponding available next-stop value.
 
+<p align="center"><img src="docs/screenshots/en/settings-route-eta.png" alt="Route ETA, time, and distance settings" width="100%"></p>
+
 ### Speed limit
 
 | Setting | Default | Behavior |
@@ -153,6 +155,8 @@ Google Maps direct supplies all three metrics. Project-patched Waze `5.20.0.1` s
 
 An alert occupies the maneuver field with the same priority as a route maneuver. A standalone sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when non-composite output replaces an occupied maneuver, alert, or lane field. Composite mode draws the sign into the selected maneuver or lane image without discarding its existing guidance and does not use the replacement timer. This feature requires a current compatible project-patched Google Maps or Waze build.
 
+<p align="center"><img src="docs/screenshots/en/settings-speed-limit.png" alt="Speed limit output settings" width="100%"></p>
+
 ### Additional navigation behavior
 
 | Setting | Default | Behavior |
@@ -161,12 +165,16 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 | `Create a TBT card even for an active navigator session without HUD output` | On | Publishes direct guidance to the dashboard TBT card independently of windshield-HUD selection; the HUD-selected navigator has priority, otherwise the most recently started route is used |
 | `Switch to the TBT card when HUD output starts` | On | Best-effort selects the dashboard TBT layout when direct HUD output starts; a layout-switch failure does not block TBT or windshield-HUD data |
 
+<p align="center"><img src="docs/screenshots/en/settings-extra-navigation.png" alt="Extra navigation behavior settings" width="100%"></p>
+
 ### Waze functions
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Show Waze alerts` | On | Shows the closer known item when a route maneuver and Waze alert compete; an active alert uses its own image, distance, and text, keeps lane guidance, and hides the native route arrow |
 | `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate route screen; Back returns to the normal Waze screen for the rest of that route |
+
+<p align="center"><img src="docs/screenshots/en/settings-waze.png" alt="Waze alert and custom surface settings" width="100%"></p>
 
 The custom surface is route-scoped. Changing its switch during an active route does not replace the current route screen. A five-second readiness failure keeps standard Waze direct guidance active and waits for the next route before trying the surface again. Returning to Waze during the same route restores the surface; ending the route closes it. The Waze alert switch controls windshield-HUD alerts only; alerts supplied to the custom surface remain visible there.
 
@@ -185,6 +193,8 @@ Waze route recovery is independent from the `HUD` switch and dashboard placement
 | `Scale` | Full 100%; Partial 50% | Changes the navigator content scale inside the window from 20% to 150% |
 
 The navigator must already be running and dashboard control requires authorized ADB access. BYD HUD moves the navigator window and verifies its placement first. `None` only moves the navigator and leaves the current cluster layout unchanged; its geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Changing the selector alone sends no vehicle command. A failed presentation request leaves the navigator on the dashboard and reports the failure. Use `Send to main` to return it. During an active Waze custom-surface route, the route surface follows Waze so the BYD HUD settings screen is not moved by mistake.
+
+<p align="center"><img src="docs/screenshots/en/settings-dashboard.png" alt="Dashboard screen mode and projection geometry settings" width="100%"></p>
 
 <!-- Photo slot: docs/screenshots/en/dashboard.jpg
 Use a landscape photo showing the real instrument cluster. Place it here.
@@ -243,6 +253,8 @@ Back up important navigator data and sign in to its account before patching. The
 
 `ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and the runtime cleanly.
 
+<p align="center"><img src="docs/screenshots/en/settings-permissions-runtime.png" alt="Permissions, background runtime, diagnostics, and update settings" width="100%"></p>
+
 ## Storage, logs, and privacy
 
 BYD HUD stores navigation evidence in day folders so one trip can be shared without exposing unrelated days.
@@ -257,13 +269,7 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 - uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
 - provides `Share configuration` for a smaller diagnostic archive containing device, permission, network, patcher, and navigation-output details.
 
-<!-- Release screenshot slot: docs/screenshots/en/storage-and-logs.png
-Capture the complete Storage and logs tab with the folder paths, Logcat and
-Share configuration actions, Share/sort controls, and at least one day row.
-Do not capture an open modal, transient operation, or private route data.
-Suggested markup:
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
--->
 
 Archive preparation uses a persistent progress card that remains visible across tabs and can be stopped safely. It stacks with Waze and Google Maps patch cards instead of overlapping them.
 
@@ -271,6 +277,8 @@ Archive preparation uses a persistent progress card that remains visible across 
 
 - `Another app` opens the normal Android share chooser;
 - `Send to developer` uploads the same selected ZIP to the Sentry service once.
+
+<p align="center"><img src="docs/screenshots/en/storage-share.png" alt="Navigation log sharing confirmation and privacy warning" width="100%"></p>
 
 After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears exactly the day checkboxes captured for that archive. Archive, chooser, upload, or cancellation failure keeps the selection. Days selected while an upload is running remain selected.
 

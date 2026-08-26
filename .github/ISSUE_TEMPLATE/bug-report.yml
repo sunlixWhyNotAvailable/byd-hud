@@ -1,41 +1,49 @@
-name: Bug report
-description: Report crashes, broken controls, permissions, update, storage, or runtime issues.
+name: "🐛 Bug report / Повідомлення про помилку"
+description: "Report crashes, broken controls, permissions, updates, storage, or runtime issues / Повідомити про збій або несправність застосунку"
+title: "[Bug]: "
+labels:
+  - bug
 body:
   - type: markdown
     attributes:
       value: |
-        Use this template for app bugs that are not just missing or incorrect navigation glyphs.
+        Use this template for app bugs that are not limited to missing or incorrect navigation output.
 
-        For missing lanes, maneuvers, or wrong HUD navigation output, use the navigation output template instead.
+        For missing lanes, maneuvers, or incorrect HUD navigation output, use the navigation output template instead.
+
+        Використовуйте цей шаблон для помилок застосунку, які не обмежуються відсутнім або некоректним навігаційним виводом.
+
+        Для відсутніх смуг, маневрів або некоректного виводу навігації на HUD використовуйте окремий шаблон навігаційного виводу.
 
   - type: dropdown
     id: bug-area
     attributes:
-      label: Bug area
+      label: Bug area / Категорія помилки
       options:
-        - Crash
-        - Install or update
-        - ADB or permissions
-        - UI controls
-        - HUD runtime
-        - Dashboard / virtual screen
-        - Storage
-        - Other
+        - Crash / Збій
+        - Install or update / Встановлення або оновлення
+        - ADB or permissions / ADB або дозволи
+        - UI controls / Елементи керування
+        - HUD runtime / Фонова робота HUD
+        - Dashboard or virtual screen / Приборка або віртуальний екран
+        - Navigator patcher / Патчер навігаторів
+        - Storage and logs / Сховище та логи
+        - Other / Інше
     validations:
       required: true
 
   - type: input
     id: car-model
     attributes:
-      label: Car model
-      placeholder: "BYD Sea Lion 07 EV 2025"
+      label: Car model / Модель автомобіля
+      placeholder: "BYD Sea Lion 06 EV"
     validations:
       required: true
 
   - type: input
     id: dilink-version
     attributes:
-      label: DiLink version
+      label: DiLink version / Версія DiLink
       placeholder: "DiLink 5.0"
     validations:
       required: true
@@ -43,49 +51,51 @@ body:
   - type: input
     id: app-version
     attributes:
-      label: BYD HUD app version
-      placeholder: "v1.3.0"
+      label: BYD HUD app version / Версія BYD HUD
+      placeholder: "v2.4.0-beta.10"
     validations:
       required: true
 
   - type: textarea
     id: what-happened
     attributes:
-      label: What happened?
-      description: Describe the visible problem.
-      placeholder: "The app crashes when I open Storage tab."
+      label: What happened? / Що сталося?
+      description: Describe the visible problem / Опишіть видиму проблему
+      placeholder: |
+        Example: The app closes when I open Storage and logs.
+        Приклад: застосунок закривається під час відкриття вкладки «Сховище та логи».
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: Steps to reproduce
-      description: Write the shortest sequence that triggers the bug.
+      label: Steps to reproduce / Кроки для відтворення
+      description: Write the shortest sequence that triggers the bug / Наведіть найкоротшу послідовність, яка спричиняє помилку
       placeholder: |
-        1. Open BYD HUD
-        2. Go to Storage
-        3. Tap ...
+        1. Open BYD HUD / Відкрийте BYD HUD
+        2. Open Storage and logs / Відкрийте «Сховище та логи»
+        3. Tap ... / Натисніть ...
     validations:
       required: true
 
   - type: textarea
     id: expected
     attributes:
-      label: Expected behavior
-      description: What should happen instead?
+      label: Expected behavior / Очікувана поведінка
+      description: What should happen instead? / Що повинно відбутися натомість?
     validations:
       required: true
 
   - type: textarea
     id: logs
     attributes:
-      label: Logs and screenshots
-      description: Drag and drop screenshots, crash logs, logcat, or session archive here.
+      label: Logs and screenshots / Логи та скріншоти
+      description: Drag and drop screenshots, logs, or the relevant archive here / Перетягніть сюди скріншоти, логи або відповідний архів
       placeholder: |
-        Attach or link:
-        - screenshots or screen recording
-        - logcat if available
-        - nav-capture/session archive if relevant
+        Attach or link / Додайте файл або посилання:
+        - screenshots or a screen recording / скріншоти або запис екрана
+        - logcat if available / logcat, якщо доступний
+        - the selected day or configuration archive when relevant / архів вибраного дня або конфігурації, якщо доречно
     validations:
       required: false

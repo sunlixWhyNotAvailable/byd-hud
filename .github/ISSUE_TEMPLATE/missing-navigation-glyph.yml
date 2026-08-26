@@ -1,25 +1,32 @@
-name: Missing or incorrect navigation output
-description: Report missing or incorrect HUD navigation output.
+name: "🧭 Navigation output / Вивід навігації"
+description: "Report missing or incorrect HUD or dashboard navigation output / Повідомити про відсутній або некоректний навігаційний вивід"
+title: "[Navigation]: "
+labels:
+  - bug
 body:
   - type: markdown
     attributes:
       value: |
-        Use this template when BYD HUD shows missing or incorrect maneuver, lane, distance, street, or dashboard output.
+        Use this template when BYD HUD shows a missing or incorrect maneuver, lane, distance, street, alert, or dashboard output.
 
         Please attach the session logs and screenshots from the affected trip.
+
+        Використовуйте цей шаблон, якщо BYD HUD показує відсутній або некоректний маневр, смуги, дистанцію, вулицю, попередження чи вивід на приборці.
+
+        Додайте логи сесії та скріншоти з відповідної поїздки.
 
   - type: input
     id: car-model
     attributes:
-      label: Car model
-      placeholder: "BYD Sea Lion 07 EV 2025"
+      label: Car model / Модель автомобіля
+      placeholder: "BYD Sea Lion 06 EV"
     validations:
       required: true
 
   - type: input
     id: dilink-version
     attributes:
-      label: DiLink version
+      label: DiLink version / Версія DiLink
       placeholder: "DiLink 5.0"
     validations:
       required: true
@@ -27,44 +34,43 @@ body:
   - type: input
     id: app-version
     attributes:
-      label: BYD HUD app version
-      placeholder: "v1.3.0"
+      label: BYD HUD app version / Версія BYD HUD
+      placeholder: "v2.4.0-beta.10"
     validations:
       required: true
 
   - type: dropdown
     id: navigator
     attributes:
-      label: Navigator
+      label: Navigator / Навігатор
       options:
         - Waze
         - Google Maps
-        - ABRP
-        - Other
+        - Other / Інше
     validations:
       required: true
 
   - type: dropdown
     id: display-mode
     attributes:
-      label: Display mode
+      label: Navigator placement / Розміщення навігатора
       options:
-        - Main screen
-        - Dashboard / virtual screen
-        - Background / notification
-        - Unknown
+        - Main screen / Основний екран
+        - Dashboard or virtual screen / Приборка або віртуальний екран
+        - Background / Фон
+        - Unknown / Невідомо
     validations:
       required: true
 
   - type: textarea
     id: artifacts
     attributes:
-      label: Session logs and screenshots
-      description: Drag and drop files here, or link to a folder/archive with the affected session.
+      label: Session logs and screenshots / Логи сесії та скріншоти
+      description: Drag and drop files here, or link the archive with the affected session / Перетягніть сюди файли або додайте посилання на архів відповідної сесії
       placeholder: |
-        Attach or link:
-        - nav-capture session archive or folder
-        - relevant screenshots / source_frame_*.png / screen_*.png
-        - logcat if available
+        Attach or link / Додайте файл або посилання:
+        - the selected day archive / архів вибраного дня
+        - relevant screenshots or a screen recording / відповідні скріншоти або запис екрана
+        - logcat if available / logcat, якщо доступний
     validations:
       required: true
