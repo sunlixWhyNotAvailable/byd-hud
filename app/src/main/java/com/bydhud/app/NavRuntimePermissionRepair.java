@@ -62,7 +62,7 @@ final class NavRuntimePermissionRepair {
             try {
                 checkAndRepairBlockingOwned(appContext, reason, allowAdb, safeMode);
             } finally {
-                finishRepair();
+                finishRepair(appContext);
             }
         }, "BydHudNavPermissionRepair");
         worker.start();
@@ -118,7 +118,7 @@ final class NavRuntimePermissionRepair {
                     allowAdb,
                     safeMode);
         } finally {
-            finishRepair();
+            finishRepair(appContext);
         }
     }
 
@@ -172,11 +172,12 @@ final class NavRuntimePermissionRepair {
         return result;
     }
 
-    private static void finishRepair() {
+    private static void finishRepair(Context appContext) {
         synchronized (LOCK) {
             running = false;
             LOCK.notifyAll();
         }
+        MainActivity.requestRuntimeStatusRefresh(appContext, true, "permission-repair-result");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

@@ -1199,12 +1199,6 @@ public final class MainActivity extends ComponentActivity {
                 : LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
     }
 
-    private void invalidateNavRuntimePermissionStatus() {
-        synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
-            cachedNavRuntimePermissionStatus = null;
-        }
-    }
-
     //keeps alias checks centralized so HUD/log row state cannot drift between Maps variants.
     private static boolean isSelectedPackage(String rowPackage, String selectedPackage) {
         String row = normalizePackage(rowPackage);
@@ -1764,21 +1758,11 @@ public final class MainActivity extends ComponentActivity {
                 NavRuntimePermissionStatus refreshed =
                         NavRuntimePermissionStatus.check(appContext);
                 boolean adbAuthorized = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
-                NavRuntimePermissionStatus previous = cachedNavRuntimePermissionStatus;
-                boolean previousAdbAvailable = cachedAdbAuthorizationStatusAvailable;
-                boolean changed = !sameRuntimePermissionStatus(previous, refreshed)
-                        || !previousAdbAvailable
-                        || cachedAdbAuthorizationKnown != adbAuthorized;
-                cachedNavRuntimePermissionStatus = refreshed;
-                cachedAdbAuthorizationKnown = adbAuthorized;
-                cachedAdbAuthorizationStatusAvailable = true;
+                updateRuntimeStatusCache(refreshed, adbAuthorized);
                 lastRuntimeStatusRefreshAtMs = SystemClock.elapsedRealtime();
                 AppEventLogger.event(appContext, "ui_runtime_status_refresh reason=" + reason
                         + " adbAuthorized=" + adbAuthorized
                         + " settingsGranted=" + refreshed.settingsGranted());
-                if (changed) {
-                    publishSharedUiStateChange();
-                }
             } catch (RuntimeException error) {
                 AppEventLogger.event(appContext, "ui_runtime_status_refresh failed "
                         + error.getClass().getSimpleName());
@@ -1789,6 +1773,23 @@ public final class MainActivity extends ComponentActivity {
                 }
             }
         }, "bydhud-runtime-status").start();
+    }
+
+    //Publishes the same cache transition that the visible Compose snapshot must observe.
+    static void updateRuntimeStatusCache(
+            NavRuntimePermissionStatus refreshed, boolean adbAuthorized) {
+        boolean changed;
+        synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
+            changed = !sameRuntimePermissionStatus(cachedNavRuntimePermissionStatus, refreshed)
+                    || !cachedAdbAuthorizationStatusAvailable
+                    || cachedAdbAuthorizationKnown != adbAuthorized;
+            cachedNavRuntimePermissionStatus = refreshed;
+            cachedAdbAuthorizationKnown = adbAuthorized;
+            cachedAdbAuthorizationStatusAvailable = true;
+        }
+        if (changed) {
+            publishSharedUiStateChange();
+        }
     }
 
     //keeps the cache comparison local so a status heartbeat publishes only actual changes.
@@ -4758,8 +4759,8 @@ public final class MainActivity extends ComponentActivity {
         if (authorizationPromptMode != LocalAdbBridge.AuthorizationPromptMode.NEVER) {
             autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.RUNNING;
         }
-        invalidateNavRuntimePermissionStatus();
-        NavRuntimePermissionStatus runningStatus = navRuntimePermissionStatus();
+        //Grant decisions must not consume the cache transition before it is published.
+        NavRuntimePermissionStatus runningStatus = NavRuntimePermissionStatus.check(this);
         if (runningStatus.needsAdbGrant()) {
             updateAdbBridgeStatus(
                     runningStatus.uiSummary(false, LocalAdbBridge.adbKeyFingerprint(this))
@@ -4823,8 +4824,7 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         adbGrantInProgress = false;
-        invalidateNavRuntimePermissionStatus();
-        NavRuntimePermissionStatus status = navRuntimePermissionStatus();
+        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         boolean keyVerified = LocalAdbBridge.isCurrentKeyVerifiedThisProcess(this);
         if (keyVerified) {
             InstrumentProxyManager.get(this).onAuthorizationVerified();

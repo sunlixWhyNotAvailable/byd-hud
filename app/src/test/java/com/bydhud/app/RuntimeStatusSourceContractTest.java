@@ -1,18 +1,46 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import org.junit.After;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.io.IOException;
+import java.lang.reflect.Field;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Focused contract for the local-only runtime status ownership boundary. */
 public final class RuntimeStatusSourceContractTest {
+    private static final String[] CACHE_FIELDS = {
+            "cachedNavRuntimePermissionStatus", "cachedAdbAuthorizationKnown",
+            "cachedAdbAuthorizationStatusAvailable"
+    };
+    private final Object[] savedCache = new Object[CACHE_FIELDS.length];
+    private long savedRevision;
+
+    @Before
+    public void saveSharedState() throws Exception {
+        for (int i = 0; i < CACHE_FIELDS.length; i++) {
+            savedCache[i] = field(CACHE_FIELDS[i]).get(null);
+        }
+        savedRevision = uiRevision();
+    }
+
+    @After
+    public void restoreSharedState() throws Exception {
+        for (int i = 0; i < CACHE_FIELDS.length; i++) {
+            field(CACHE_FIELDS[i]).set(null, savedCache[i]);
+        }
+        ((AtomicLong) field("UI_STATE_REVISION").get(null)).set(savedRevision);
+    }
+
     @Test
     public void heartbeatUsesFiveMinuteLocalStatusWithoutStartingAdbWork() throws IOException {
         String service = source("HudRuntimeService.java");
@@ -37,6 +65,7 @@ public final class RuntimeStatusSourceContractTest {
 
         assertTrue(status.contains("NavRuntimePermissionStatus.check(appContext)"));
         assertTrue(status.contains("LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext)"));
+        assertTrue(status.contains("updateRuntimeStatusCache(refreshed, adbAuthorized)"));
         assertFalse(status.contains("LocalAdbBridge.runRuntimeShellCommand"));
         assertFalse(status.contains("NavAppTaskScanner"));
         assertFalse(status.contains("Connection.open"));
@@ -107,6 +136,92 @@ public final class RuntimeStatusSourceContractTest {
         assertTrue(snapshot.contains("public final boolean adbAuthorized"));
         assertTrue(snapshot.contains("public final boolean settingsPermissionsGranted"));
         assertTrue(activity.contains("permissionStatus.settingsGranted(),\n                adbAuthorized(),"));
+    }
+
+    @Test
+    public void grantDecisionsDoNotSilentlyReplaceTheSharedCache() throws IOException {
+        String activity = source("MainActivity.java");
+        String grant = between(activity, "boolean automatic) {",
+                "private void handleAdbGrantResult(");
+        String result = between(activity, "private void handleAdbGrantResult(",
+                "private void updateAdbBridgeStatus(");
+
+        assertFalse(activity.contains("invalidateNavRuntimePermissionStatus"));
+        assertFalse(grant.contains("= navRuntimePermissionStatus()"));
+        assertFalse(result.contains("= navRuntimePermissionStatus()"));
+        assertTrue(grant.contains("NavRuntimePermissionStatus.check(this)"));
+        assertTrue(result.contains("NavRuntimePermissionStatus.check(this)"));
+        assertTrue(result.contains("requestRuntimeStatusRefresh(this, true, \"adb-grant-result\")"));
+    }
+
+    @Test
+    public void bothRepairPathsRefreshAfterReleasingTheRepairGate() throws IOException {
+        String repair = source("NavRuntimePermissionRepair.java");
+        assertEquals(2, repair.split("finally \\{\\s+finishRepair\\(appContext\\);", -1).length - 1);
+        String finish = between(repair, "private static void finishRepair(",
+                "private static void sleepQuietly(");
+        assertTrue(finish.contains("MainActivity.requestRuntimeStatusRefresh(appContext, true,"));
+        assertTrue(finish.indexOf("LOCK.notifyAll()")
+                < finish.indexOf("MainActivity.requestRuntimeStatusRefresh"));
+        assertFalse(finish.contains("runRuntimeShellCommand"));
+        assertFalse(finish.contains("requestRuntimeUiStateRefresh"));
+    }
+
+    @Test
+    public void repairedPermissionsPublishOnceWithoutAnotherUiAction() throws Exception {
+        MainActivity.updateRuntimeStatusCache(permissionStatus(false, false), true);
+        long before = uiRevision();
+
+        //Repair completes after the visible snapshot was created with missing grants.
+        MainActivity.updateRuntimeStatusCache(permissionStatus(true, true), true);
+        assertEquals(before + 1, uiRevision());
+        assertTrue(cachedPermissions().settingsGranted());
+
+        //The Activity's later completion read must not publish the same result again.
+        MainActivity.updateRuntimeStatusCache(permissionStatus(true, true), true);
+        assertEquals(before + 1, uiRevision());
+    }
+
+    @Test
+    public void grantedSettingsPublishWhileServicesRebindAndAdbStaysIndependent()
+            throws Exception {
+        MainActivity.updateRuntimeStatusCache(permissionStatus(false, false), true);
+        long before = uiRevision();
+        MainActivity.updateRuntimeStatusCache(permissionStatus(true, false), true);
+
+        assertEquals(before + 1, uiRevision());
+        assertTrue(cachedPermissions().settingsGranted());
+        assertFalse(cachedPermissions().readyForCapture());
+
+        MainActivity.updateRuntimeStatusCache(permissionStatus(true, false), false);
+        assertEquals(before + 2, uiRevision());
+        assertTrue(cachedPermissions().settingsGranted());
+        assertFalse((boolean) field("cachedAdbAuthorizationKnown").get(null));
+
+        MainActivity.updateRuntimeStatusCache(permissionStatus(false, false), false);
+        assertEquals(before + 3, uiRevision());
+        assertFalse(cachedPermissions().settingsGranted());
+    }
+
+    private static NavRuntimePermissionStatus permissionStatus(boolean granted, boolean connected) {
+        NavPermissionStatus settings = NavPermissionStatus.forTest(
+                true, granted, true, true, "notification", granted ? "accessibility" : "");
+        return NavRuntimePermissionStatus.fromSettingsForTest(
+                settings, true, connected, false, "notification", "accessibility");
+    }
+
+    private static long uiRevision() throws Exception {
+        return ((AtomicLong) field("UI_STATE_REVISION").get(null)).get();
+    }
+
+    private static NavRuntimePermissionStatus cachedPermissions() throws Exception {
+        return (NavRuntimePermissionStatus) field("cachedNavRuntimePermissionStatus").get(null);
+    }
+
+    private static Field field(String name) throws Exception {
+        Field field = MainActivity.class.getDeclaredField(name);
+        field.setAccessible(true);
+        return field;
     }
 
     private static String source(String fileName) throws IOException {
