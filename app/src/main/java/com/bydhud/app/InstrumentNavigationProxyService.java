@@ -83,6 +83,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private volatile boolean connected;
     private volatile int activeCapabilities;
     private boolean trafficLightOutputsOwned;
+    private boolean trafficLightInitialized;
 
     InstrumentNavigationProxyService(
             Context systemContext, long generation, String nonce, int allowedUid,
@@ -280,9 +281,13 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                             "traffic-light capability unavailable");
                 }
                 List<InstrumentProxyContract.Operation> operations = new ArrayList<>(4);
+                boolean fullState = !trafficLightInitialized
+                        || sampleIndex == HudCheckTrafficLight.CLEAR;
                 if (sampleIndex != HudCheckTrafficLight.CLEAR) {
                     // Mark before writes: a partial vendor failure still needs cleanup.
                     trafficLightOutputsOwned = true;
+                } else {
+                    trafficLightInitialized = false;
                 }
                 int[] values = sampleIndex == HudCheckTrafficLight.CLEAR
                         ? HudCheckTrafficLight.clearValues()
@@ -292,26 +297,31 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     operations.add(operation("bodywork_traffic_light", -1,
                             SystemClock.elapsedRealtime(), "unavailable"));
                 } else {
+                    // Inactive records and distance belong to setup/cleanup, not 1Hz refresh.
                     for (int intersection = 0;
-                            intersection < HudCheckTrafficLight.INTERSECTION_COUNT;
+                            intersection < (fullState ? HudCheckTrafficLight.INTERSECTION_COUNT : 1);
                             intersection++) {
                         operations.add(setBodyworkTrafficLight(currentBodywork,
                                 intersection, intersection == 0
                                         ? values : HudCheckTrafficLight.clearValues()));
                     }
                 }
-                InstrumentApi currentInstrument = instrument();
-                if (currentInstrument == null || currentInstrument.writer == null) {
-                    operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
-                            SystemClock.elapsedRealtime(), "unavailable"));
-                } else {
-                    operations.add(setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT,
-                            sampleIndex == HudCheckTrafficLight.CLEAR
-                                    ? 0 : HudCheckTrafficLight.DISTANCE_METERS));
+                if (fullState) {
+                    InstrumentApi currentInstrument = instrument();
+                    if (currentInstrument == null || currentInstrument.writer == null) {
+                        operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
+                                SystemClock.elapsedRealtime(), "unavailable"));
+                    } else {
+                        operations.add(setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT,
+                                sampleIndex == HudCheckTrafficLight.CLEAR
+                                        ? 0 : HudCheckTrafficLight.DISTANCE_METERS));
+                    }
                 }
                 boolean allSucceeded = allOperationsSucceeded(operations);
                 if (sampleIndex == HudCheckTrafficLight.CLEAR && allSucceeded) {
                     trafficLightOutputsOwned = false;
+                } else if (sampleIndex != HudCheckTrafficLight.CLEAR && allSucceeded) {
+                    trafficLightInitialized = true;
                 }
                 return InstrumentProxyContract.operationResult(operations,
                         allSucceeded ? "" : "traffic-light operation failed");
@@ -667,6 +677,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private boolean clearTrafficLightOutputs() {
+        trafficLightInitialized = false;
         List<InstrumentProxyContract.Operation> operations = new ArrayList<>(4);
         BodyworkApi currentBodywork = bodywork;
         if (currentBodywork != null && currentBodywork.trafficLightCapable()) {

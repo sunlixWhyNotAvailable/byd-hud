@@ -50,15 +50,64 @@ public final class HudCheckTrafficLightTest {
     }
 
     @Test
+    public void repeatsWriteOnlyTheActiveTupleAfterSuccessfulInitialization() throws Exception {
+        String source = source("InstrumentNavigationProxyService.java");
+        String send = source.substring(source.indexOf("public Bundle sendHudCheckTrafficLight("),
+                source.indexOf("public void shutdown("));
+        assertTrue(source.contains("private boolean trafficLightInitialized;"));
+        assertTrue(send.contains("boolean fullState = !trafficLightInitialized\n"
+                + "                        || sampleIndex == HudCheckTrafficLight.CLEAR;"));
+        assertTrue(send.contains("intersection < (fullState ? HudCheckTrafficLight.INTERSECTION_COUNT : 1)"));
+        assertTrue(send.contains("intersection, intersection == 0\n"
+                + "                                        ? values : HudCheckTrafficLight.clearValues()"));
+        assertTrue(send.contains("if (fullState) {\n"
+                + "                    InstrumentApi currentInstrument = instrument();"));
+        assertEquals(1, occurrences(send, "setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT,"));
+        assertTrue(send.contains("} else if (sampleIndex != HudCheckTrafficLight.CLEAR && allSucceeded) {\n"
+                + "                    trafficLightInitialized = true;"));
+        // A failed initial write retries setup; a failed active-only write must
+        // not reset a completed setup. Ownership alone cannot prove setup succeeded.
+        assertEquals(1, occurrences(source, "trafficLightInitialized = true;"));
+        assertFalse(send.contains("trafficLightInitialized = allSucceeded"));
+        assertFalse(send.contains("sampleIndex == last"));
+    }
+
+    @Test
+    public void explicitAndDisconnectClearsInvalidateSetupBeforeAnyWrite() throws Exception {
+        String source = source("InstrumentNavigationProxyService.java");
+        String send = source.substring(source.indexOf("public Bundle sendHudCheckTrafficLight("),
+                source.indexOf("public void shutdown("));
+        assertTrue(send.contains("trafficLightOutputsOwned = true;\n"
+                + "                } else {\n"
+                + "                    trafficLightInitialized = false;"));
+        assertTrue(send.indexOf("trafficLightInitialized = false;")
+                < send.indexOf("setBodyworkTrafficLight("));
+        assertTrue(send.contains("if (sampleIndex == HudCheckTrafficLight.CLEAR && allSucceeded) {\n"
+                + "                    trafficLightOutputsOwned = false;"));
+        String clear = source.substring(source.indexOf("private boolean clearTrafficLightOutputs()"),
+                source.indexOf("private static boolean success(Object result)"));
+        assertTrue(clear.indexOf("trafficLightInitialized = false;") >= 0);
+        assertTrue(clear.indexOf("trafficLightInitialized = false;")
+                < clear.indexOf("setBodyworkTrafficLight("));
+        assertTrue(clear.contains("intersection < HudCheckTrafficLight.INTERSECTION_COUNT"));
+        assertTrue(clear.contains("setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT, 0)"));
+        assertTrue(clear.contains("if (cleared) trafficLightOutputsOwned = false;"));
+    }
+
+    @Test
+    public void heldSamplesKeepOneSecondRefreshAndUseTheExistingReconnectReplay() throws Exception {
+        String publisher = source("VehicleTbtPublisher.java");
+        String send = publisher.substring(publisher.indexOf("private void publishHudCheckLight("),
+                publisher.indexOf("private static boolean successfulCheckResult("));
+        assertTrue(send.contains("index == hudCheckLightIndex\n"
+                + "                && now - hudCheckLightLastAttemptMs < 1000L"));
+        assertTrue(send.contains("instrument.sendHudCheckTrafficLight(index, reason,"));
+        assertTrue(publisher.contains("publishHudCheckLight(hudCheckLightIndex, \"hud-check-ready-replay\", true)"));
+    }
+
+    @Test
     public void serviceStopClearsOnlyAfterThisServiceOwnedTrafficLightOutput() throws Exception {
-        Path root = Paths.get(System.getProperty("user.dir"));
-        Path service = root.resolve(
-                "app/src/main/java/com/bydhud/app/InstrumentNavigationProxyService.java");
-        if (!Files.isRegularFile(service)) {
-            service = root.resolve(
-                    "src/main/java/com/bydhud/app/InstrumentNavigationProxyService.java");
-        }
-        String source = new String(Files.readAllBytes(service), StandardCharsets.UTF_8);
+        String source = source("InstrumentNavigationProxyService.java");
         assertTrue(source.contains("if (trafficLightOutputsOwned) clearTrafficLightOutputs();"));
         assertTrue(source.contains("if (!connected)"));
         assertTrue(source.contains("if (sampleIndex != HudCheckTrafficLight.CLEAR)"));
@@ -69,5 +118,16 @@ public final class HudCheckTrafficLightTest {
                 "if (trafficLightOutputsOwned) clearTrafficLightOutputs();", stopStart);
         assertTrue(stopStart >= 0 && stopConnected >= 0 && stopClear >= 0);
         assertTrue(stopConnected < stopClear);
+    }
+
+    private static int occurrences(String source, String value) {
+        return (source.length() - source.replace(value, "").length()) / value.length();
+    }
+
+    private static String source(String name) throws Exception {
+        Path root = Paths.get(System.getProperty("user.dir"));
+        Path path = root.resolve("app/src/main/java/com/bydhud/app/" + name);
+        if (!Files.isRegularFile(path)) path = root.resolve("src/main/java/com/bydhud/app/" + name);
+        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
 }
