@@ -100,6 +100,8 @@ public final class ComposeSnapshotEqualityTest {
                 arguments[index] = 1L;
             } else if (type == String.class) {
                 arguments[index] = "value";
+            } else if (type == HudCheckState.class) {
+                arguments[index] = new HudCheckState();
             } else if (genericName.contains("ComposeStorageDay")) {
                 arguments[index] = Collections.singletonList(new MainActivity.ComposeStorageDay(
                         "20260810", "2026-08-10", 2, 42L, true, true, false));

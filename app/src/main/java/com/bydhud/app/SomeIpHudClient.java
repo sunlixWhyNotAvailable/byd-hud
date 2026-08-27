@@ -90,6 +90,14 @@ final class SomeIpHudClient {
         return ret;
     }
 
+    int startAuxiliaryService(long serviceId) throws RemoteException {
+        return transactLong(TRANSACTION_START_SERVICE, serviceId);
+    }
+
+    int stopAuxiliaryService(long serviceId) throws RemoteException {
+        return transactLong(TRANSACTION_STOP_SERVICE, serviceId);
+    }
+
     //sends encoded data here so transport side effects stay behind a single boundary.
     int send(byte[] payload) throws RemoteException {
         return sendToTopic(HUD_ROAD_INFO_TOPIC, payload);

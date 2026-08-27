@@ -42,7 +42,7 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
 | Storage and logs | Record diagnostics and performance data, manage logs by day, and share only the selected data |
 | Updates | Stable releases by default, with an optional beta channel |
-| Manual testing | Send diagnostic navigation fields through the supported windshield-HUD and dashboard-card outputs |
+| HUD check | Test stock and bitmap navigation output, text, distances, traffic lights and additional vehicle display fields without a navigator |
 
 <p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
@@ -286,9 +286,16 @@ With authorized ADB, starting Logcat records all system log buffers and captures
 
 BYD HUD does not automatically send crash reports, performance traces, screenshots, screen recordings, or navigation logs to the Sentry service. Read the complete policy in [PRIVACY.md](PRIVACY.md).
 
-## Manual HUD testing
+## HUD check
 
-The `Manual` tab is a diagnostic tool. It does not require an active route in Google Maps or Waze. Enabling Manual mode publishes the selected text, distance, lane, PNG, and native-arrow test values through the same supported vehicle outputs as live navigation. Vehicle displays do not mirror every field: the dashboard TBT card carries its native maneuver and text state rather than copying the HUD lane or PNG image. Rapid edits are combined so only the latest state is shown. Disabling Manual mode clears its output and returns control to active live navigation. It should not be used as a navigation source.
+The `HUD check` tab tests the vehicle's supported navigation displays without an active route in Google Maps or Waze. Choose an output mode and press `Start`; use it while parked, not as a navigation source.
+
+- `Basic output` has independent previous/next controls for maneuvers, lanes, distances, street names and traffic-light samples. Maneuver and lane controls each offer `Stock` or `Bitmap`: Stock asks the vehicle to draw its own symbols, while Bitmap sends an image rendered by BYD HUD. The native maneuver arrow always uses the vehicle's symbols. Distances cycle through `1 / 11 / 20 / 55 / 155 / 1555 / 15555` metres. Street samples include Latin and Cyrillic words; the local transliteration switch converts Cyrillic to Latin without changing the selected word or normal navigation settings.
+- `Extended output` keeps a stock straight-ahead maneuver, stock lanes, `77 m` and `Continue straight` on screen while cycling through additional fields such as ETA, speed limits, maps, cameras and traffic lights. `Auto` changes the selected example every 500 ms; turning it off holds the current example and enables previous/next controls. The panel shows the expected content. Not every vehicle supports every field, and a successful send is not proof that the vehicle displayed it.
+
+`Stop`, leaving the tab, putting BYD HUD in the background or switching between Basic and Extended ends the test and clears its output. Any still-active eligible navigation resumes. Starting again retains the selected example. Test choices do not alter the settings used by Waze or Google Maps. Authorized ADB enables the additional vehicle interface required for stock lanes and some other fields on supported cars; unavailable outputs do not prevent the others from being tested. The TBT card uses its own maneuver and text layout, not a copy of the HUD lane or bitmap image.
+
+The image below shows the previous test layout; updated HUD check screenshots are pending.
 
 <p align="center"><img src="docs/screenshots/en/manual.png" alt="Manual HUD payload testing" width="100%"></p>
 

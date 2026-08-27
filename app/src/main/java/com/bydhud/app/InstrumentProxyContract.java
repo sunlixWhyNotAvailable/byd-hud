@@ -13,6 +13,7 @@ final class InstrumentProxyContract {
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;
     static final int CAP_INSTRUMENT_LANES = 1 << 3;
+    static final int CAP_TRAFFIC_LIGHT = 1 << 4;
     static final String ACTION_CONNECTED =
             "com.bydhud.app.action.INSTRUMENT_PROXY_CONNECTED";
     static final String EXTRA_GENERATION = "generation";

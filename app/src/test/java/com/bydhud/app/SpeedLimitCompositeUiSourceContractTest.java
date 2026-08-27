@@ -158,9 +158,9 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(between(source, "private fun SwitchRow(",
                 "private fun UpdateCheckLine(").contains("rowExplanation(hint)"));
         assertTrue(between(source, "private fun ActionRow(",
-                "private fun ManualModeTile(").contains("rowExplanation(hint)"));
-        assertTrue(between(source, "private fun ManualModeTile(",
-                "private fun LabeledInput(").contains("rowExplanation(hint)"));
+                "private fun CodeBlock(").contains("rowExplanation(hint)"));
+        assertTrue(between(source, "private fun HudCheckModeTile(",
+                "private fun OutputImageChoice(").contains("rowExplanation(hint)"));
     }
 
     @Test
@@ -174,8 +174,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 92"));
-        assertTrue(gradle.contains("versionName = \"2.4.0-beta.10\""));
+        assertTrue(gradle.contains("versionCode = 93"));
+        assertTrue(gradle.contains("versionName = \"2.4.0-beta.11\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

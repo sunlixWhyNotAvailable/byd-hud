@@ -71,6 +71,12 @@ final class InstrumentProxyManager {
     private boolean terminalClearInFlight;
     private long guidanceBarrierToken;
     private final List<ResultCallback> terminalClearCallbacks = new ArrayList<>();
+    private PendingTrafficLight pendingTrafficLight;
+    private PendingTrafficLight deferredTrafficLight;
+    private boolean trafficLightScheduled;
+    private boolean trafficLightBarrierActive;
+    private long trafficLightBarrierToken;
+    private final List<ResultCallback> trafficLightClearCallbacks = new ArrayList<>();
     private final AtomicLong generationCounter = new AtomicLong(System.currentTimeMillis());
     private final AtomicLong operationCounter = new AtomicLong();
     private final SecureRandom random = new SecureRandom();
@@ -119,6 +125,7 @@ final class InstrumentProxyManager {
             InstrumentProxyStore.Identity.none();
     private boolean helperIdentityLoaded;
     private CapabilityMode capabilityMode = CapabilityMode.NONE;
+    private boolean trafficLightCapable;
 
     static InstrumentProxyManager get(Context context) {
         synchronized (INSTANCE_LOCK) {
@@ -266,6 +273,161 @@ final class InstrumentProxyManager {
         if (executor != null && !enqueueCall(executor, this::drainGuidance)) {
             failPendingGuidance("proxy call worker unavailable");
         }
+    }
+
+    void sendHudCheckTrafficLight(int sampleIndex, String reason) {
+        sendHudCheckTrafficLight(sampleIndex, reason, null);
+    }
+
+    void sendHudCheckTrafficLight(int sampleIndex, String reason, ResultCallback callback) {
+        if (!HudCheckTrafficLight.validSampleIndex(sampleIndex)) {
+            deliver(callback, Result.unavailable("unknown traffic-light sample"));
+            return;
+        }
+        if (sampleIndex == HudCheckTrafficLight.CLEAR) {
+            sendTrafficLightClear(reason, callback);
+            return;
+        }
+        if (!trafficLightCapabilityAvailable()) {
+            deliver(callback, Result.unavailable("traffic-light capability unavailable"));
+            return;
+        }
+        PendingTrafficLight superseded;
+        ExecutorService executor = null;
+        boolean deferredPath;
+        synchronized (callLock) {
+            PendingTrafficLight next = new PendingTrafficLight(sampleIndex,
+                    preserveText(reason), callback);
+            deferredPath = trafficLightBarrierActive;
+            if (deferredPath) {
+                superseded = deferredTrafficLight;
+                deferredTrafficLight = next;
+            } else {
+                superseded = pendingTrafficLight;
+                pendingTrafficLight = next;
+                if (!trafficLightScheduled) {
+                    trafficLightScheduled = true;
+                    executor = calls;
+                }
+            }
+        }
+        if (superseded != null) {
+            deliver(superseded.callback, Result.unavailable(
+                    deferredPath ? "coalesced during traffic-light clear"
+                            : "coalesced by newer traffic-light sample"));
+        }
+        if (executor != null && !enqueueCall(executor, this::drainTrafficLight)) {
+            failPendingTrafficLight("proxy call worker unavailable");
+        }
+    }
+
+    private boolean trafficLightCapabilityAvailable() {
+        synchronized (lock) {
+            return state == State.READY && proxy != null && trafficLightCapable;
+        }
+    }
+
+    private void sendTrafficLightClear(String reason, ResultCallback callback) {
+        PendingTrafficLight superseded;
+        PendingTrafficLight deferredSuperseded = null;
+        ExecutorService executor = null;
+        long barrierToken = 0L;
+        long expectedEpoch = 0L;
+        synchronized (callLock) {
+            superseded = pendingTrafficLight;
+            pendingTrafficLight = null;
+            trafficLightScheduled = false;
+            if (trafficLightBarrierActive) {
+                deferredSuperseded = deferredTrafficLight;
+                deferredTrafficLight = null;
+                if (callback != null) trafficLightClearCallbacks.add(callback);
+            } else {
+                trafficLightBarrierActive = true;
+                barrierToken = ++trafficLightBarrierToken;
+                expectedEpoch = callEpoch;
+                trafficLightClearCallbacks.clear();
+                if (callback != null) trafficLightClearCallbacks.add(callback);
+                executor = calls;
+            }
+        }
+        if (superseded != null) {
+            deliver(superseded.callback,
+                    Result.unavailable("superseded by traffic-light clear"));
+        }
+        if (deferredSuperseded != null) {
+            deliver(deferredSuperseded.callback,
+                    Result.unavailable("superseded by duplicate traffic-light clear"));
+        }
+        if (executor == null) return;
+        final long requestToken = barrierToken;
+        final long requestEpoch = expectedEpoch;
+        if (!enqueueCall(executor,
+                () -> executeTrafficLightClear(requestToken, requestEpoch, reason))) {
+            finishTrafficLightClear(requestToken,
+                    Result.unavailable("proxy call worker unavailable"));
+        }
+    }
+
+    private void executeTrafficLightClear(
+            long requestToken, long requestEpoch, String reason) {
+        synchronized (callLock) {
+            if (!trafficLightBarrierActive || requestToken != trafficLightBarrierToken
+                    || requestEpoch != callEpoch) {
+                return;
+            }
+        }
+        executeCall("traffic_light_clear:" + safe(reason),
+                result -> finishTrafficLightClear(requestToken, result),
+                (current, currentGeneration) -> current.sendHudCheckTrafficLight(
+                        currentGeneration, HudCheckTrafficLight.CLEAR));
+    }
+
+    private void finishTrafficLightClear(long requestToken, Result result) {
+        List<ResultCallback> callbacks;
+        ExecutorService executor = null;
+        PendingTrafficLight deferred;
+        synchronized (callLock) {
+            if (!trafficLightBarrierActive || requestToken != trafficLightBarrierToken) return;
+            trafficLightBarrierActive = false;
+            callbacks = new ArrayList<>(trafficLightClearCallbacks);
+            trafficLightClearCallbacks.clear();
+            deferred = deferredTrafficLight;
+            deferredTrafficLight = null;
+            if (deferred != null) {
+                pendingTrafficLight = deferred;
+                trafficLightScheduled = true;
+                executor = calls;
+            }
+        }
+        if (deferred != null && !enqueueCall(executor, this::drainTrafficLight)) {
+            failPendingTrafficLight("proxy call worker unavailable");
+        }
+        for (ResultCallback clearCallback : callbacks) {
+            deliver(clearCallback, result);
+        }
+    }
+
+    private void drainTrafficLight() {
+        PendingTrafficLight request;
+        synchronized (callLock) {
+            request = pendingTrafficLight;
+            pendingTrafficLight = null;
+            trafficLightScheduled = false;
+        }
+        if (request == null) return;
+        executeCall("traffic_light:" + request.reason, request.callback,
+                (current, currentGeneration) -> current.sendHudCheckTrafficLight(
+                        currentGeneration, request.sampleIndex));
+    }
+
+    private void failPendingTrafficLight(String reason) {
+        PendingTrafficLight failed;
+        synchronized (callLock) {
+            failed = pendingTrafficLight;
+            pendingTrafficLight = null;
+            trafficLightScheduled = false;
+        }
+        if (failed != null) deliver(failed.callback, Result.unavailable(reason));
     }
 
     /** Clears Instrument guidance and fences the next normal frame behind that clear. */
@@ -434,7 +596,8 @@ final class InstrumentProxyManager {
             activeOperationId = operationId;
             activeOperationGeneration = currentGeneration;
             activeOperationCallback = callback;
-            activeOperationTerminal = "terminal_guidance_clear".equals(operation);
+            activeOperationTerminal = "terminal_guidance_clear".equals(operation)
+                    || operation.startsWith("traffic_light_clear:");
         }
         worker.schedule(
                 () -> handleCallTimeout(operationId, currentGeneration,
@@ -457,7 +620,25 @@ final class InstrumentProxyManager {
                 activeOperationTerminal = false;
             }
         }
+        logTrafficLightResult(operation, result);
         if (currentResult) deliver(callback, result);
+    }
+
+    private void logTrafficLightResult(String operation, Result result) {
+        if (operation == null || !operation.startsWith("traffic_light")) return;
+        StringBuilder detail = new StringBuilder("traffic_light_result operation=")
+                .append(safe(operation)).append(" available=")
+                .append(result != null && result.available).append(" error=")
+                .append(result == null ? "no result" : safe(result.error));
+        if (result != null) {
+            detail.append(" operations=");
+            for (InstrumentProxyContract.Operation item : result.operations) {
+                detail.append(item.name).append(':').append(item.result);
+                if (!item.error.isEmpty()) detail.append('(').append(item.error).append(')');
+                detail.append(',');
+            }
+        }
+        log(detail.toString());
     }
 
     private void handleCallTimeout(
@@ -508,7 +689,10 @@ final class InstrumentProxyManager {
         ResultCallback activeCallback;
         PendingGuidance pending;
         PendingGuidance deferred;
+        PendingTrafficLight trafficPending;
+        PendingTrafficLight trafficDeferred;
         List<ResultCallback> resetTerminalCallbacks = null;
+        List<ResultCallback> resetTrafficLightCallbacks = null;
         boolean activeTerminal;
         boolean scheduleDeferred = false;
         ExecutorService deferredExecutor = null;
@@ -542,6 +726,19 @@ final class InstrumentProxyManager {
             } else {
                 deferred = null;
             }
+            trafficPending = pendingTrafficLight;
+            pendingTrafficLight = null;
+            trafficLightScheduled = false;
+            if (trafficLightBarrierActive) {
+                resetTrafficLightCallbacks = new ArrayList<>(trafficLightClearCallbacks);
+                trafficLightClearCallbacks.clear();
+                trafficLightBarrierActive = false;
+                trafficLightBarrierToken++;
+                trafficDeferred = deferredTrafficLight;
+                deferredTrafficLight = null;
+            } else {
+                trafficDeferred = null;
+            }
         }
         previous.shutdownNow();
         if (activeCallback != null && !activeTerminal) {
@@ -554,6 +751,20 @@ final class InstrumentProxyManager {
             Result reset = Result.unavailable("proxy reset: " + safe(reason));
             for (ResultCallback terminalCallback : resetTerminalCallbacks) {
                 deliver(terminalCallback, reset);
+            }
+        }
+        if (trafficPending != null) {
+            deliver(trafficPending.callback, Result.unavailable(
+                    "proxy reset: " + safe(reason)));
+        }
+        if (trafficDeferred != null) {
+            deliver(trafficDeferred.callback, Result.unavailable(
+                    "proxy reset: " + safe(reason)));
+        }
+        if (resetTrafficLightCallbacks != null) {
+            Result reset = Result.unavailable("proxy reset: " + safe(reason));
+            for (ResultCallback clearCallback : resetTrafficLightCallbacks) {
+                deliver(clearCallback, reset);
             }
         }
         if (scheduleDeferred && !enqueueCall(deferredExecutor, this::drainGuidance)) {
@@ -772,6 +983,8 @@ final class InstrumentProxyManager {
                         result, InstrumentProxyContract.CAP_DIRECT_FID),
                 InstrumentProxyContract.hasCapability(
                         result, InstrumentProxyContract.CAP_INSTRUMENT_SDK));
+        boolean connectedTrafficLight = InstrumentProxyContract.hasCapability(
+                result, InstrumentProxyContract.CAP_TRAFFIC_LIGHT);
         if (!InstrumentProxyContract.isReady(result)
                 || !InstrumentProxyContract.hasUsableNavigationCapability(result)
                 || connectedMode == CapabilityMode.NONE) {
@@ -803,6 +1016,7 @@ final class InstrumentProxyManager {
             state = State.READY;
             helperIdentity = connectedIdentity;
             capabilityMode = connectedMode;
+            trafficLightCapable = connectedTrafficLight;
             connectedAtMs = SystemClock.elapsedRealtime();
             nextRetryAtMs = 0L;
         }
@@ -994,6 +1208,7 @@ final class InstrumentProxyManager {
         pingInFlight = false;
         pingToken++;
         capabilityMode = CapabilityMode.NONE;
+        trafficLightCapable = false;
     }
 
     private String newNonce() {
@@ -1085,6 +1300,18 @@ final class InstrumentProxyManager {
             this.road = road;
             this.laneDirections = laneDirections.clone();
             this.laneRecommendations = laneRecommendations.clone();
+            this.callback = callback;
+        }
+    }
+
+    private static final class PendingTrafficLight {
+        final int sampleIndex;
+        final String reason;
+        final ResultCallback callback;
+
+        PendingTrafficLight(int sampleIndex, String reason, ResultCallback callback) {
+            this.sampleIndex = sampleIndex;
+            this.reason = reason == null ? "" : reason;
             this.callback = callback;
         }
     }

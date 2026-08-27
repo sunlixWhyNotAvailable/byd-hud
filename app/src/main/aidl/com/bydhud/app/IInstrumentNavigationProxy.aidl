@@ -9,5 +9,6 @@ interface IInstrumentNavigationProxy {
     Bundle sendNavigationStatus(long generation, int status);
     Bundle sendGuidance(long generation, int icon, int distanceMeters, String road,
             in int[] laneDirections, in int[] laneRecommendations);
+    Bundle sendHudCheckTrafficLight(long generation, int sampleIndex);
     oneway void shutdown(long generation);
 }

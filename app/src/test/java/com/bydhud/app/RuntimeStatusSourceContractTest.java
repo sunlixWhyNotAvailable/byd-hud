@@ -141,7 +141,7 @@ public final class RuntimeStatusSourceContractTest {
     @Test
     public void grantDecisionsDoNotSilentlyReplaceTheSharedCache() throws IOException {
         String activity = source("MainActivity.java");
-        String grant = between(activity, "boolean automatic) {",
+        String grant = between(activity, "private void requestAdbPermissionGrant(",
                 "private void handleAdbGrantResult(");
         String result = between(activity, "private void handleAdbGrantResult(",
                 "private void updateAdbBridgeStatus(");

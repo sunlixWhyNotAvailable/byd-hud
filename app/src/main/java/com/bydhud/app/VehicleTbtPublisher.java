@@ -4,6 +4,7 @@ import android.annotation.SuppressLint;
 import android.content.Context;
 import android.content.Intent;
 import android.os.Handler;
+import android.os.SystemClock;
 import android.util.Log;
 
 import java.nio.ByteBuffer;
@@ -55,6 +56,28 @@ final class VehicleTbtPublisher {
     private boolean hasLastInstrumentSemantic;
     private boolean hasLastAmapSemantic;
     private String lastAmapSemanticKey = "";
+    private volatile int hudCheckInstrumentResult;
+    private volatile int hudCheckAmapResult;
+    private volatile int hudCheckLightResult;
+    private volatile int hudCheckLightIndex = -1;
+    private boolean hudCheckLightOwned;
+    private long hudCheckLightLastAttemptMs;
+
+    String hudCheckStatus(boolean ukrainian) {
+        String result = "Instrument: " + checkResultText(hudCheckInstrumentResult, ukrainian)
+                + " · AMap: " + checkResultText(hudCheckAmapResult, ukrainian);
+        if (hudCheckLightIndex >= 0) {
+            result += (ukrainian ? " · Світлофор: " : " · Traffic light: ")
+                    + checkResultText(hudCheckLightResult, ukrainian);
+        }
+        return result;
+    }
+
+    private static String checkResultText(int result, boolean ukrainian) {
+        if (result > 0) return ukrainian ? "надіслано" : "sent";
+        if (result < 0) return ukrainian ? "недоступно/помилка" : "unavailable/error";
+        return ukrainian ? "очікування" : "waiting";
+    }
 
     VehicleTbtPublisher(Context context, Handler ownerHandler) {
         this.context = context.getApplicationContext();
@@ -242,6 +265,11 @@ final class VehicleTbtPublisher {
     void publishManualFrame(String packageName, long generation,
             HudState state, String reason) {
         if (state == null || !routeActive || !matches(packageName, generation)) return;
+        if (state.hudCheck != null) {
+            int lightIndex = state.hudCheck.mode == HudCheckState.Mode.BASIC
+                    ? state.hudCheck.trafficLightIndex : -1;
+            publishHudCheckLight(lightIndex, reason, false);
+        }
         ManualMapping mapping = manualMappingForTest(
                 state.turnBitmapId, state.maneuverId);
         Trace trace = trace(packageName, generation, reason, null, state);
@@ -254,6 +282,7 @@ final class VehicleTbtPublisher {
             sendAmapFrame(mapping.amapManeuver, mapping.roundaboutExit,
                     distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace, true);
         } else {
+            if (state.hudCheck != null) hudCheckAmapResult = -1;
             record(trace, "amap_broadcast", "skip", "no_exact_mapping",
                     null, 0, 0L, "");
         }
@@ -285,6 +314,7 @@ final class VehicleTbtPublisher {
     private void endRoute(String packageName, long generation,
             String reason, boolean emitIdle) {
         if (!routeActive || !matches(packageName, generation)) return;
+        if (MANUAL_OWNER.equals(ownerPackage)) publishHudCheckLight(-1, reason, true);
         String endedOwner = ownerPackage;
         long endedGeneration = ownerGeneration;
         Trace trace = trace(endedOwner, endedGeneration, reason, null, null);
@@ -710,6 +740,38 @@ final class VehicleTbtPublisher {
         hasLastInstrumentSemantic = false;
         hasLastAmapSemantic = false;
         lastAmapSemanticKey = "";
+        hudCheckInstrumentResult = 0;
+        hudCheckAmapResult = 0;
+    }
+
+    private void publishHudCheckLight(int index, String reason, boolean force) {
+        if (index < 0 && !hudCheckLightOwned) return;
+        long now = SystemClock.elapsedRealtime();
+        if (!force && index == hudCheckLightIndex
+                && now - hudCheckLightLastAttemptMs < 1000L) return;
+        if (index != hudCheckLightIndex) hudCheckLightResult = 0;
+        hudCheckLightIndex = index;
+        hudCheckLightLastAttemptMs = now;
+        if (index >= 0) hudCheckLightOwned = true;
+        long token = routeToken;
+        instrument.sendHudCheckTrafficLight(index, reason, result -> ownerHandler.post(() -> {
+            if (index != hudCheckLightIndex || (index >= 0 && token != routeToken)) return;
+            int outcome = successfulCheckResult(result) ? 1 : -1;
+            if (index < 0 && outcome > 0) hudCheckLightOwned = false;
+            if (hudCheckLightResult != outcome) {
+                hudCheckLightResult = outcome;
+                MainActivity.publishSharedUiStateChange();
+            }
+        }));
+    }
+
+    private static boolean successfulCheckResult(InstrumentProxyManager.Result result) {
+        if (result == null || !result.available || !result.error.isEmpty()
+                || result.operations.isEmpty()) return false;
+        for (InstrumentProxyContract.Operation operation : result.operations) {
+            if (operation.result != 0 || !operation.error.isEmpty()) return false;
+        }
+        return true;
     }
 
     static DirectTbtFrame.TravelMetrics selectMetricsForTest(DirectTbtFrame frame) {
@@ -722,6 +784,9 @@ final class VehicleTbtPublisher {
     }
 
     private void replayInstrumentState() {
+        if (hudCheckLightOwned && hudCheckLightIndex < 0) {
+            publishHudCheckLight(-1, "hud-check-ready-clear", true);
+        }
         if (!hasInstrumentStatus && !hasInstrumentGuidance) return;
         String owner = ownerPackage.isEmpty() ? teardownOwner : ownerPackage;
         long generation = ownerGeneration == Long.MIN_VALUE
@@ -754,12 +819,22 @@ final class VehicleTbtPublisher {
                             result, trace, icon, distance, road,
                             laneDirections, laneRecommendations)));
         }
+        if (routeActive && MANUAL_OWNER.equals(ownerPackage) && hudCheckLightIndex >= 0) {
+            publishHudCheckLight(hudCheckLightIndex, "hud-check-ready-replay", true);
+        }
         log("tbt_proxy_replay status="
                 + (hasInstrumentStatus ? lastInstrumentStatus : -1)
                 + " icon=" + (hasInstrumentGuidance ? lastInstrumentIcon : -1));
     }
 
     private void handleInstrumentUnavailable(String reason) {
+        if (routeActive && MANUAL_OWNER.equals(ownerPackage)) {
+            boolean changed = hudCheckInstrumentResult != -1
+                    || (hudCheckLightIndex >= 0 && hudCheckLightResult != -1);
+            hudCheckInstrumentResult = -1;
+            if (hudCheckLightIndex >= 0) hudCheckLightResult = -1;
+            if (changed) MainActivity.publishSharedUiStateChange();
+        }
         if (!hasInstrumentStatus && !hasInstrumentGuidance) return;
         String owner = ownerPackage.isEmpty() ? teardownOwner : ownerPackage;
         long generation = ownerGeneration == Long.MIN_VALUE
@@ -823,6 +898,13 @@ final class VehicleTbtPublisher {
         recordInstrumentResult(result, trace, 0, icon, distance, road);
         if (trace == null || !matches(trace.owner, trace.generation)
                 || trace.routeToken != routeToken) return;
+        if (MANUAL_OWNER.equals(trace.owner)) {
+            int outcome = successfulCheckResult(result) ? 1 : -1;
+            if (hudCheckInstrumentResult != outcome) {
+                hudCheckInstrumentResult = outcome;
+                MainActivity.publishSharedUiStateChange();
+            }
+        }
         if (laneOperationsSucceededForTest(result == null ? null : result.operations)) return;
         if (lastInstrumentIcon == icon
                 && lastInstrumentDistance == distance
@@ -909,10 +991,20 @@ final class VehicleTbtPublisher {
         long startedAt = System.nanoTime();
         try {
             context.sendBroadcast(intent);
+            if (MANUAL_OWNER.equals(trace.owner) && "frame".equals(operation)
+                    && hudCheckAmapResult != 1) {
+                hudCheckAmapResult = 1;
+                MainActivity.publishSharedUiStateChange();
+            }
             record(trace, "amap_broadcast", operation, AMAP_ACTION,
                     arguments, 0, elapsedMs(startedAt), "");
             return true;
         } catch (RuntimeException error) {
+            if (MANUAL_OWNER.equals(trace.owner) && "frame".equals(operation)
+                    && hudCheckAmapResult != -1) {
+                hudCheckAmapResult = -1;
+                MainActivity.publishSharedUiStateChange();
+            }
             record(trace, "amap_broadcast", operation, AMAP_ACTION,
                     arguments, -1, elapsedMs(startedAt), describe(error));
             Log.w(TAG, "TBT AMap broadcast failed: " + operation, error);
@@ -950,7 +1042,7 @@ final class VehicleTbtPublisher {
                 ? DirectTbtFrame.TravelMetrics.unavailable()
                 : frame.getTripMetrics().getNextStop();
         LanePayload lanes = LanePayload.EMPTY;
-        if (HudPrefs.isLaneOutputEnabled(context)) {
+        if (shouldPublishLanes(HudPrefs.isLaneOutputEnabled(context), manualState)) {
             lanes = manualState == null
                     ? lanePayloadForTest(frame == null ? null : frame.getLanes())
                     : lanePayloadForTest(manualState);
@@ -961,6 +1053,10 @@ final class VehicleTbtPublisher {
                 distance, preserveText(road), route, next, lanes);
         trace.routeToken = routeToken;
         return trace;
+    }
+
+    static boolean shouldPublishLanes(boolean enabled, HudState manualState) {
+        return enabled || (manualState != null && manualState.hudCheck != null);
     }
 
     private static String sourceForOwner(String owner) {
@@ -1065,7 +1161,9 @@ final class VehicleTbtPublisher {
     }
 
     static LanePayload lanePayloadForTest(HudState state) {
-        if (state == null || !state.includeLaneBitmap) return LanePayload.EMPTY;
+        if (state == null || (!state.includeLaneBitmap && state.hudCheck == null)) {
+            return LanePayload.EMPTY;
+        }
         HudLaneModel.LaneSpec[] lanes = HudLaneModel.parse(state);
         int[] directions = new int[lanes.length];
         int[] recommendations = new int[lanes.length];

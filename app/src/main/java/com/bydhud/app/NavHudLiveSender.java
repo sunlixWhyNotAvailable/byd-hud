@@ -14,6 +14,7 @@ import java.util.Arrays;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
+import java.util.function.UnaryOperator;
 
 //defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
 final class NavHudLiveSender {
@@ -21,6 +22,8 @@ final class NavHudLiveSender {
     private static final String WAZE_PACKAGE = "com.waze";
     private static final String MANUAL_TBT_OWNER = VehicleTbtPublisher.MANUAL_OWNER;
     private static final long SEND_INTERVAL_MS = 1000L;
+    private static final long HUD_CHECK_INTERVAL_MS = 500L;
+    private static final HudCheckState IDLE_HUD_CHECK = new HudCheckState();
     private static final long TBT_TEARDOWN_RETRY_MS = 30_000L;
     private static final long ACTIVE_ROUTE_STALE_CLEAR_MS = 15000L;
     private static final long WAZE_DIRECT_TIMEOUT_MS = 5000L;
@@ -238,6 +241,63 @@ final class NavHudLiveSender {
         return wazeDirectChannel.isActive();
     }
 
+    static synchronized HudCheckState hudCheckSnapshot() {
+        return instance == null ? IDLE_HUD_CHECK : instance.hudCheckState;
+    }
+
+    static synchronized String hudCheckStatus(boolean ukrainian) {
+        if (instance == null || !instance.hudCheckState.running) return "";
+        return instance.hudOutput.hudCheckStatus(ukrainian) + " · "
+                + instance.tbtPublisher.hudCheckStatus(ukrainian);
+    }
+
+    void updateHudCheck(UnaryOperator<HudCheckState> action, String reason) {
+        handler.post(() -> {
+            HudCheckState previous = hudCheckState;
+            HudCheckState next = action.apply(previous);
+            if (next.equals(previous)) return;
+            handler.removeCallbacks(hudCheckTick);
+            hudCheckState = next;
+            if (next.running) {
+                if (previous.running) publishManualOnWorker(next.toHudState(), reason);
+                else startManualOnWorker(next.toHudState(), reason);
+                handler.postDelayed(hudCheckTick, hudCheckIntervalMs(next));
+            } else if (previous.running) {
+                stopManualOnWorker(reason, !HudPrefs.isUserShutdownActive(context));
+            }
+            MainActivity.publishSharedUiStateChange();
+        });
+    }
+
+    static void stopHudCheckIfRunning(String reason) {
+        NavHudLiveSender current;
+        synchronized (NavHudLiveSender.class) {
+            current = instance;
+        }
+        // Enqueue even if Start is still waiting on the worker; FIFO makes Stop win.
+        if (current != null) current.updateHudCheck(HudCheckState::stop, reason);
+    }
+
+    private void tickHudCheck() {
+        if (!hudCheckState.running || !manualTbtActive) return;
+        HudCheckState previous = hudCheckState;
+        hudCheckState = previous.tick();
+        if (!hudCheckState.equals(previous)) {
+            publishManualOnWorker(hudCheckState.toHudState(), "hud-check-auto");
+            MainActivity.publishSharedUiStateChange();
+        } else if (latestManualTbtState != null) {
+            // Holds the selected sample and retries only failed Instrument operations.
+            tbtPublisher.publishManualFrame(MANUAL_TBT_OWNER, manualTbtGeneration,
+                    latestManualTbtState, "hud-check-hold");
+        }
+        handler.postDelayed(hudCheckTick, hudCheckIntervalMs(hudCheckState));
+    }
+
+    static long hudCheckIntervalMs(HudCheckState state) {
+        return state.mode == HudCheckState.Mode.EXTENDED && state.automatic
+                ? HUD_CHECK_INTERVAL_MS : SEND_INTERVAL_MS;
+    }
+
     void startManual(HudState state, String reason) {
         HudState copy = state == null ? null : state.copy();
         handler.post(() -> startManualOnWorker(copy, reason));
@@ -332,6 +392,11 @@ final class NavHudLiveSender {
     }
 
     private void stopManualOnWorker(String reason, boolean restoreDirect) {
+        handler.removeCallbacks(hudCheckTick);
+        if (hudCheckState.running) {
+            hudCheckState = hudCheckState.stop();
+            MainActivity.publishSharedUiStateChange();
+        }
         hudOutput.setManualEnabled(false, "manual-stop:" + safeReason(reason));
         synchronized (manualPublishLock) {
             pendingManualPublishState = null;
@@ -355,6 +420,7 @@ final class NavHudLiveSender {
     }
 
     private HudState effectiveManualState(HudState state) {
+        if (state.hudCheck != null) return state.copy();
         HudState effective = HudDisplayPolicy.apply(
                 state, HudPrefs.isSmallDistanceClampEnabled(context));
         int tbtManeuver = manualTbtManeuverForTest(effective.maneuverId);
@@ -377,6 +443,8 @@ final class NavHudLiveSender {
     private boolean tbtWazeObserver;
     private boolean tbtGMapsObserver;
     private boolean manualTbtActive;
+    private volatile HudCheckState hudCheckState = IDLE_HUD_CHECK;
+    private final Runnable hudCheckTick = this::tickHudCheck;
     private long manualTbtGeneration;
     private HudState latestManualSourceState;
     private HudState latestManualTbtState;

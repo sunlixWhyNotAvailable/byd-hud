@@ -8,6 +8,11 @@ import android.os.SystemClock;
 import android.util.Log;
 
 import java.util.function.Consumer;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
 
 // Serializes every HUD producer through one SOME/IP owner.
 final class HudOutputCoordinator {
@@ -53,6 +58,17 @@ final class HudOutputCoordinator {
     private boolean manualEnabled;
     private boolean directEnabled;
     private HudState manualState;
+    private HudCheckState preparedHudCheck;
+    private byte[] preparedHudCheckPayload;
+    private List<HudCheckPayload.Packet> hudCheckPackets = Collections.emptyList();
+    private final Set<Long> hudCheckReadyServices = new LinkedHashSet<>();
+    private final Set<Long> hudCheckOwnedServices = new LinkedHashSet<>();
+    private final Set<Long> hudCheckActiveTopics = new LinkedHashSet<>();
+    private final Set<Long> hudCheckPendingClearTopics = new LinkedHashSet<>();
+    private long hudCheckAuxiliarySentAtMs;
+    private volatile int hudCheckRoadResult;
+    private volatile int hudCheckAuxiliaryResult;
+    private volatile boolean hudCheckHasAuxiliary;
     private DirectTbtFrame directFrame;
     private volatile Source activeSource = Source.NONE;
     private Source pendingSource = Source.NONE;
@@ -172,6 +188,21 @@ final class HudOutputCoordinator {
         return client.isBound();
     }
 
+    String hudCheckStatus(boolean ukrainian) {
+        String status = "RoadInfo: " + checkResultText(hudCheckRoadResult, ukrainian);
+        if (hudCheckHasAuxiliary) {
+            status += (ukrainian ? " · Додаткові поля: " : " · Additional fields: ")
+                    + checkResultText(hudCheckAuxiliaryResult, ukrainian);
+        }
+        return status;
+    }
+
+    private static String checkResultText(int result, boolean ukrainian) {
+        if (result > 0) return ukrainian ? "надіслано" : "sent";
+        if (result < 0) return ukrainian ? "недоступно/помилка" : "unavailable/error";
+        return ukrainian ? "очікування" : "waiting";
+    }
+
     void ensureBound(String reason) {
         worker.post(() -> ensureBoundOnWorker(reason));
     }
@@ -189,6 +220,14 @@ final class HudOutputCoordinator {
     void setManualEnabled(boolean enabled, String reason) {
         worker.post(() -> {
             manualEnabled = enabled;
+            if (!enabled) {
+                releaseHudCheckAuxiliary(reason);
+                preparedHudCheck = null;
+                preparedHudCheckPayload = null;
+                hudCheckPackets = Collections.emptyList();
+                hudCheckHasAuxiliary = false;
+                hudCheckRoadResult = 0;
+            }
             reconcile(reason);
         });
     }
@@ -439,6 +478,7 @@ final class HudOutputCoordinator {
                     || pendingTransitionClearCompletion != null;
             Runnable interruptedCompletion = takePendingClearCompletions();
             manualEnabled = false;
+            releaseHudCheckAuxiliary(reason);
             directEnabled = false;
             manualState = null;
             directFrame = null;
@@ -791,6 +831,12 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
+            if (source == Source.MANUAL && manualState.hudCheck != null) {
+                setHudCheckRoadResult(1);
+                publishHudCheckAuxiliary(reason);
+            } else if (!hudCheckPendingClearTopics.isEmpty()) {
+                releaseHudCheckAuxiliary("hud-check-late-clear");
+            }
             if (source == Source.DIRECT) {
                 emitBitmapTxAfterSuccess(SystemClock.elapsedRealtime());
             }
@@ -843,11 +889,163 @@ final class HudOutputCoordinator {
             return preparedDirectPayload.build(directCounter);
         }
         HudState state = manualState.copy();
+        if (state.hudCheck != null) {
+            if (!sameHudCheckPayload(state.hudCheck, preparedHudCheck)) {
+                hudCheckPendingClearTopics.addAll(hudCheckActiveTopics);
+                hudCheckActiveTopics.clear();
+                preparedHudCheck = state.hudCheck;
+                preparedHudCheckPayload = HudCheckPayload.buildRoadInfo(context, preparedHudCheck);
+                hudCheckPackets = HudCheckPayload.auxiliaryPackets(context, preparedHudCheck);
+                hudCheckHasAuxiliary = !hudCheckPackets.isEmpty();
+                hudCheckAuxiliarySentAtMs = 0L;
+                hudCheckAuxiliaryResult = 0;
+            }
+            return preparedHudCheckPayload;
+        }
         state = HudDisplayPolicy.apply(
                 state,
                 HudPrefs.isSmallDistanceClampEnabled(context));
         HudOutputPreferences.apply(context, state);
         return HudRoadPayload.build(state);
+    }
+
+    private void setHudCheckRoadResult(int result) {
+        if (hudCheckRoadResult == result) return;
+        hudCheckRoadResult = result;
+        MainActivity.publishSharedUiStateChange();
+    }
+
+    static boolean sameHudCheckPayload(HudCheckState first, HudCheckState second) {
+        if (first == null || second == null || first.mode != second.mode) return false;
+        if (first.mode == HudCheckState.Mode.EXTENDED) {
+            return first.extendedIndex == second.extendedIndex;
+        }
+        return first.maneuverIndex == second.maneuverIndex
+                && first.laneIndex == second.laneIndex
+                && first.distanceIndex == second.distanceIndex
+                && first.streetIndex == second.streetIndex
+                && first.maneuverBitmap == second.maneuverBitmap
+                && first.laneBitmap == second.laneBitmap
+                && first.transliterate == second.transliterate;
+    }
+
+    private void publishHudCheckAuxiliary(String reason) {
+        long now = SystemClock.elapsedRealtime();
+        if (hudCheckAuxiliarySentAtMs > 0L
+                && now - hudCheckAuxiliarySentAtMs < DEFAULT_INTERVAL_MS) return;
+        if (hudCheckAuxiliarySentAtMs > 0L && preparedHudCheck != null) {
+            // A held sample still needs fresh protocol timestamps (e.g. light countdown).
+            hudCheckPackets = HudCheckPayload.auxiliaryPackets(context, preparedHudCheck);
+        }
+        hudCheckAuxiliarySentAtMs = now;
+        boolean success = flushHudCheckAuxiliaryClears(reason);
+        if (success) {
+            for (HudCheckPayload.Packet packet : hudCheckPackets) {
+                if (!ensureHudCheckService(packet.serviceId, reason)) {
+                    success = false;
+                    continue;
+                }
+                // Remember even an uncertain write: it may have reached the vehicle.
+                hudCheckActiveTopics.add(packet.topicId);
+                success &= sendHudCheckPacket(packet, "hud_check", reason);
+            }
+        }
+        hudCheckHasAuxiliary = !hudCheckPackets.isEmpty()
+                || !hudCheckPendingClearTopics.isEmpty();
+        int outcome = success ? 1 : -1;
+        if (hudCheckAuxiliaryResult != outcome) {
+            hudCheckAuxiliaryResult = outcome;
+            MainActivity.publishSharedUiStateChange();
+        }
+    }
+
+    private boolean ensureHudCheckService(long serviceId, String reason) {
+        if (serviceId == SomeIpHudClient.HUD_NAVI_INFO_SERVICE_ID) return serviceStarted;
+        if (hudCheckReadyServices.contains(serviceId)) return true;
+        if (!client.isBound()) return false;
+        long startedAt = SystemClock.elapsedRealtime();
+        String detail = reason + " service=0x" + Long.toHexString(serviceId);
+        try {
+            int result = client.startAuxiliaryService(serviceId);
+            txLog.recordLifecycle("service_start", "manual", "hud_check_aux", detail,
+                    result, "", SystemClock.elapsedRealtime() - startedAt);
+            if (!isStartReadyResult(result)) return false;
+            hudCheckReadyServices.add(serviceId);
+            // Do not stop an already-running provider owned by another application.
+            if (result == RESULT_OK) hudCheckOwnedServices.add(serviceId);
+            return true;
+        } catch (RemoteException | RuntimeException error) {
+            txLog.recordLifecycle("service_start", "manual", "hud_check_aux", detail,
+                    null, error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
+                    SystemClock.elapsedRealtime() - startedAt);
+            return false;
+        }
+    }
+
+    private boolean sendHudCheckPacket(HudCheckPayload.Packet packet, String kind,
+            String reason) {
+        long startedAt = SystemClock.elapsedRealtime();
+        try {
+            int result = client.sendToTopic(packet.topicId, packet.payload);
+            txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
+                    packet.payload, packet.payload, result, "",
+                    SystemClock.elapsedRealtime() - startedAt);
+            if (resultMarksServiceUnstarted(result)) {
+                hudCheckReadyServices.remove(packet.serviceId);
+                hudCheckOwnedServices.remove(packet.serviceId);
+            }
+            return isPayloadSuccessResult(result);
+        } catch (RemoteException | RuntimeException error) {
+            hudCheckReadyServices.remove(packet.serviceId);
+            hudCheckOwnedServices.remove(packet.serviceId);
+            txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
+                    packet.payload, packet.payload, null,
+                    error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
+                    SystemClock.elapsedRealtime() - startedAt);
+            return false;
+        }
+    }
+
+    private boolean flushHudCheckAuxiliaryClears(String reason) {
+        if (hudCheckPendingClearTopics.isEmpty()) return true;
+        if (!client.isBound()) return false;
+        List<HudCheckPayload.Packet> clears = HudCheckPayload.clearAuxiliaryPackets();
+        for (long topic : new ArrayList<>(hudCheckPendingClearTopics)) {
+            boolean found = false;
+            boolean success = true;
+            for (HudCheckPayload.Packet packet : clears) {
+                if (packet.topicId != topic) continue;
+                found = true;
+                success &= ensureHudCheckService(packet.serviceId, reason)
+                        && sendHudCheckPacket(packet, "hud_check_clear", reason);
+            }
+            if (found && success) hudCheckPendingClearTopics.remove(topic);
+        }
+        return hudCheckPendingClearTopics.isEmpty();
+    }
+
+    private void releaseHudCheckAuxiliary(String reason) {
+        hudCheckPendingClearTopics.addAll(hudCheckActiveTopics);
+        hudCheckActiveTopics.clear();
+        flushHudCheckAuxiliaryClears(reason);
+        if (!client.isBound()) return;
+        for (long serviceId : new ArrayList<>(hudCheckOwnedServices)) {
+            long startedAt = SystemClock.elapsedRealtime();
+            String detail = reason + " service=0x" + Long.toHexString(serviceId);
+            try {
+                int result = client.stopAuxiliaryService(serviceId);
+                txLog.recordLifecycle("service_stop", "manual", "hud_check_aux", detail,
+                        result, "", SystemClock.elapsedRealtime() - startedAt);
+                if (result == RESULT_OK || result == RESULT_NOT_STARTED) {
+                    hudCheckOwnedServices.remove(serviceId);
+                    hudCheckReadyServices.remove(serviceId);
+                }
+            } catch (RemoteException | RuntimeException error) {
+                txLog.recordLifecycle("service_stop", "manual", "hud_check_aux", detail,
+                        null, error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
+                        SystemClock.elapsedRealtime() - startedAt);
+            }
+        }
     }
 
     private void emitBitmapTxAfterSuccess(long sentAtMs) {
@@ -1093,6 +1291,7 @@ final class HudOutputCoordinator {
 
     private boolean sendRequiredClear(String reason, Source source, String kind)
             throws RemoteException {
+        if (!manualEnabled) releaseHudCheckAuxiliary(reason);
         byte[] payload = DirectTbtPayload.buildClear();
         int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
         logAsync("clear result=" + result + " reason=" + reason);
@@ -1109,6 +1308,7 @@ final class HudOutputCoordinator {
             return -1L;
         }
         try {
+            if (!manualEnabled) releaseHudCheckAuxiliary(reason);
             byte[] payload = DirectTbtPayload.buildClear();
             int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
             long completedAtMs = SystemClock.elapsedRealtime();
@@ -1121,6 +1321,7 @@ final class HudOutputCoordinator {
     }
 
     private void stopServiceAndUnbind(String reason) {
+        releaseHudCheckAuxiliary(reason);
         ++bindGeneration;
         finishBindAttempt();
         worker.removeCallbacks(transportRecovery);
@@ -1144,6 +1345,8 @@ final class HudOutputCoordinator {
         }
         serviceStarted = false;
         client.unbind();
+        hudCheckReadyServices.clear();
+        hudCheckOwnedServices.clear();
         directCounter = 0;
         lastTransportSource = Source.NONE;
         lastTransportChannel = "transport";
@@ -1206,6 +1409,16 @@ final class HudOutputCoordinator {
 
     private void handleTransportFailure(String reason, Throwable error) {
         HudDeliveryStatus.recordFailure();
+        if (manualEnabled && manualState != null && manualState.hudCheck != null) {
+            setHudCheckRoadResult(-1);
+            if (hudCheckHasAuxiliary && hudCheckAuxiliaryResult != -1) {
+                hudCheckAuxiliaryResult = -1;
+                MainActivity.publishSharedUiStateChange();
+            }
+        }
+        hudCheckReadyServices.clear();
+        hudCheckOwnedServices.clear();
+        hudCheckAuxiliarySentAtMs = 0L;
         serviceStarted = false;
         sendScheduled = false;
         protocolRetryScheduled = false;
@@ -1242,6 +1455,9 @@ final class HudOutputCoordinator {
 
     private void handleProtocolFailure(String detail) {
         HudDeliveryStatus.recordFailure();
+        if (manualEnabled && manualState != null && manualState.hudCheck != null) {
+            setHudCheckRoadResult(-1);
+        }
         sendScheduled = false;
         worker.removeCallbacks(sendLoop);
         if (protocolRetryScheduled || desiredSource() == Source.NONE) {

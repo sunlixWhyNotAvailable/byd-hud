@@ -17,9 +17,10 @@ public final class ManualTbtRuntimeContractTest {
     public void mainActivityRoutesManualOutputThroughTheNavigationArbiter() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/MainActivity.java");
 
-        assertTrue(source.contains("NavHudLiveSender.get(this).startManual(state"));
-        assertTrue(source.contains("NavHudLiveSender.get(this).publishManual(state"));
-        assertTrue(source.contains("NavHudLiveSender.get(this).stopManual("));
+        assertTrue(source.contains("NavHudLiveSender.get(this).updateHudCheck("));
+        assertTrue(source.contains("NavHudLiveSender.stopHudCheckIfRunning(reason)"));
+        assertFalse(source.contains("public void composeSendRaw("));
+        assertFalse(source.contains("public void composeSendManualLane("));
         assertFalse(source.contains("start blocked: Connect first"));
         assertFalse(source.contains("send blocked: service not connected"));
     }
@@ -94,17 +95,13 @@ public final class ManualTbtRuntimeContractTest {
     }
 
     @Test
-    public void manualEditsUseCanonicalRoadAndRejectIncompleteNumbers() throws IOException {
+    public void hudCheckEditsUseTheSharedStateInsteadOfLegacyRawFields() throws IOException {
         String main = source("app/src/main/java/com/bydhud/app/MainActivity.java");
 
-        assertTrue(main.contains("state.roadName = combo.roadLabel()"));
-        assertTrue(main.contains("parseIntOrNull"));
-        assertTrue(main.contains("distanceEdit == null\n"
-                + "                ? clamp(state.distanceToIntersection, 0, 99999)"));
-        assertTrue(main.contains("laneCountEdit == null\n"
-                + "                ? clamp(state.numOfLanes, 0, 8)"));
-        assertTrue(main.contains("numeric fields are incomplete"));
-        assertTrue(main.contains("raw apply waiting: numeric fields are incomplete"));
+        assertTrue(main.contains("current -> current.step(field, delta)"));
+        assertTrue(main.contains("current -> current.withTransliterate(transliterate)"));
+        assertTrue(main.contains("NavHudLiveSender.hudCheckSnapshot()"));
+        assertFalse(main.contains("public void composeSetManualMode("));
     }
 
     @Test

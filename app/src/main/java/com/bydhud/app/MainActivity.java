@@ -337,6 +337,9 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStop() {
         super.onStop();
+        if (!isChangingConfigurations()) {
+            NavHudLiveSender.stopHudCheckIfRunning("hud-check-background");
+        }
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
             return;
@@ -860,15 +863,8 @@ public final class MainActivity extends ComponentActivity {
                 LogcatRecorder.statusText(),
                 logPathsText(),
                 composeApplicationState(permissionStatus),
-                manualModeEnabled,
-                arrowCuratedMode,
-                curatedIndex,
-                HudArrowComboCatalog.size(),
-                state.turnBitmapId,
-                state.maneuverId,
-                state.distanceToIntersection,
-                state.roadName == null ? "" : state.roadName,
-                state.laneString == null ? "" : state.laneString,
+                NavHudLiveSender.hudCheckSnapshot(),
+                NavHudLiveSender.hudCheckStatus(uaLanguage),
                 appScan.lastScanText,
                 appScan.hasAuthoritativeTaskState(),
                 APP_SCAN_IN_PROGRESS.get(),
@@ -2314,75 +2310,50 @@ public final class MainActivity extends ComponentActivity {
         shutdownAndExit("ui-shutdown");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSetManualMode(boolean enabled) {
-        setManualMode(enabled);
-        if (enabled) {
-            arrowCuratedMode = true;
-            if (!sending) startSending();
-        } else {
-            stopSending(true);
-        }
-        refreshControls();
+    public void composeHudCheckSelectMode(HudCheckState.Mode mode) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.selectMode(mode), "hud-check-mode");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeStepCurated(int delta) {
-        arrowCuratedMode = true;
-        curatedIndex = delta >= 0
-                ? HudArrowComboCatalog.next(curatedIndex)
-                : HudArrowComboCatalog.prev(curatedIndex);
-        applyCuratedCombo(canUseManualHud());
+    public void composeHudCheckStep(HudCheckState.Field field, int delta) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.step(field, delta), "hud-check-step");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSendRaw(int pngSourceId, int nativeId, int distanceMeters,
-            String street, String lanes) {
-        arrowCuratedMode = false;
-        state.turnBitmapId = clamp(pngSourceId, 1, 99);
-        state.maneuverId = clamp(nativeId, 1, 99);
-        state.distanceToIntersection = clamp(distanceMeters, 0, 99999);
-        state.roadName = street == null ? "" : street;
-        state.laneString = lanes == null ? "" : lanes.trim();
-        state.numOfLanes = countLaneTokens(state.laneString);
-        state.includeLaneBitmap = state.numOfLanes > 1;
-        pngVisible = state.turnBitmapId != HudState.TURN_BITMAP_BLANK_SOURCE_ID;
-        nativeVisible = state.maneuverId != HudState.NATIVE_BLANK_ID;
-        applyArrowVisibility();
-        if (canUseManualHud()) {
-            sendCurrentState("manual-raw-compose");
-        } else {
-            appendStatus("manual raw updated; enable Manual mode to send");
-            refreshControls();
-        }
+    public void composeHudCheckToggleRunning() {
+        // A delayed visual click must not restart a test after the Activity left the foreground.
+        if (!activityResumed || destroyed || exitRequested) return;
+        NavHudLiveSender.get(this).updateHudCheck(
+                HudCheckState::toggleRun, "hud-check-run");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSendManualLane(String lanes) {
-        state.laneString = lanes == null ? "" : lanes.trim();
-        state.numOfLanes = countLaneTokens(state.laneString);
-        state.includeLaneBitmap = state.numOfLanes > 1;
-        if (canUseManualHud()) {
-            sendCurrentState("manual-lanes-compose");
-        } else {
-            appendStatus("manual lanes updated; enable Manual mode to send");
-            refreshControls();
-        }
+    public void composeHudCheckSetAutomatic(boolean automatic) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withAutomatic(automatic), "hud-check-auto-mode");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int countLaneTokens(String lanes) {
-        if (lanes == null || lanes.trim().isEmpty()) {
-            return 0;
-        }
-        String[] parts = lanes.split("\\|");
-        int count = 0;
-        for (String part : parts) {
-            if (!part.trim().isEmpty()) {
-                count++;
-            }
-        }
-        return count;
+    public void composeHudCheckSetManeuverBitmap(boolean bitmap) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withManeuverBitmap(bitmap), "hud-check-maneuver-mode");
+    }
+
+    public void composeHudCheckSetLaneBitmap(boolean bitmap) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withLaneBitmap(bitmap), "hud-check-lane-mode");
+    }
+
+    public void composeHudCheckSetTransliterate(boolean transliterate) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withTransliterate(transliterate), "hud-check-transliteration");
+    }
+
+    public void composeHudCheckStepExtended(int delta) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.stepExtended(delta), "hud-check-extended-step");
+    }
+
+    public void composeHudCheckStop(String reason) {
+        NavHudLiveSender.stopHudCheckIfRunning(reason);
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
@@ -2465,15 +2436,8 @@ public final class MainActivity extends ComponentActivity {
         public final String logcatStatus;
         public final String logPaths;
         public final String applicationState;
-        public final boolean manualModeEnabled;
-        public final boolean arrowCuratedMode;
-        public final int curatedIndex;
-        public final int curatedCount;
-        public final int pngSourceId;
-        public final int nativeManeuverId;
-        public final int distanceMeters;
-        public final String streetText;
-        public final String laneBitmap;
+        public final HudCheckState hudCheck;
+        public final String hudCheckStatus;
         public final String lastScanText;
         public final boolean appRuntimeStatusKnown;
         public final boolean appScanInProgress;
@@ -2521,10 +2485,8 @@ public final class MainActivity extends ComponentActivity {
                 String hudStatus, String hudPackage, String logOnlyPackages,
                 String observedPackages, String activeDashboardPackage,
                 boolean dashboardMoveInProgress, boolean logcatRecording, String logcatStatus,
-                String logPaths, String applicationState, boolean manualModeEnabled,
-                boolean arrowCuratedMode, int curatedIndex, int curatedCount,
-                int pngSourceId, int nativeManeuverId, int distanceMeters, String streetText,
-                String laneBitmap, String lastScanText, boolean appRuntimeStatusKnown,
+                String logPaths, String applicationState, HudCheckState hudCheck,
+                String hudCheckStatus, String lastScanText, boolean appRuntimeStatusKnown,
                 boolean appScanInProgress, boolean appScanCacheAvailable, String appScanStatus,
                 int storageLimitGb, List<String> navCaptureFolderPaths, boolean storageCalculating,
                 boolean storageCacheAvailable, String storageScanError,
@@ -2581,15 +2543,8 @@ public final class MainActivity extends ComponentActivity {
             this.logcatStatus = logcatStatus == null ? "" : logcatStatus;
             this.logPaths = logPaths == null ? "" : logPaths;
             this.applicationState = applicationState == null ? "" : applicationState;
-            this.manualModeEnabled = manualModeEnabled;
-            this.arrowCuratedMode = arrowCuratedMode;
-            this.curatedIndex = curatedIndex;
-            this.curatedCount = curatedCount;
-            this.pngSourceId = pngSourceId;
-            this.nativeManeuverId = nativeManeuverId;
-            this.distanceMeters = distanceMeters;
-            this.streetText = streetText == null ? "" : streetText;
-            this.laneBitmap = laneBitmap == null ? "" : laneBitmap;
+            this.hudCheck = hudCheck;
+            this.hudCheckStatus = hudCheckStatus;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
             this.appRuntimeStatusKnown = appRuntimeStatusKnown;
             this.appScanInProgress = appScanInProgress;
@@ -2666,13 +2621,8 @@ public final class MainActivity extends ComponentActivity {
                     && captureReady == other.captureReady
                     && dashboardMoveInProgress == other.dashboardMoveInProgress
                     && logcatRecording == other.logcatRecording
-                    && manualModeEnabled == other.manualModeEnabled
-                    && arrowCuratedMode == other.arrowCuratedMode
-                    && curatedIndex == other.curatedIndex
-                    && curatedCount == other.curatedCount
-                    && pngSourceId == other.pngSourceId
-                    && nativeManeuverId == other.nativeManeuverId
-                    && distanceMeters == other.distanceMeters
+                    && Objects.equals(hudCheck, other.hudCheck)
+                    && Objects.equals(hudCheckStatus, other.hudCheckStatus)
                     && appRuntimeStatusKnown == other.appRuntimeStatusKnown
                     && appScanInProgress == other.appScanInProgress
                     && appScanCacheAvailable == other.appScanCacheAvailable
@@ -2691,8 +2641,6 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(logcatStatus, other.logcatStatus)
                     && Objects.equals(logPaths, other.logPaths)
                     && Objects.equals(applicationState, other.applicationState)
-                    && Objects.equals(streetText, other.streetText)
-                    && Objects.equals(laneBitmap, other.laneBitmap)
                     && Objects.equals(lastScanText, other.lastScanText)
                     && Objects.equals(appScanStatus, other.appScanStatus)
                     && Objects.equals(navCaptureFolderPaths, other.navCaptureFolderPaths)
@@ -2726,9 +2674,8 @@ public final class MainActivity extends ComponentActivity {
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
                     logOnlyPackages, observedPackages, activeDashboardPackage,
                     dashboardMoveInProgress, logcatRecording, logcatStatus, logPaths,
-                    applicationState, manualModeEnabled, arrowCuratedMode, curatedIndex,
-                    curatedCount, pngSourceId, nativeManeuverId, distanceMeters, streetText,
-                    laneBitmap, lastScanText, appRuntimeStatusKnown, appScanInProgress,
+                    applicationState, hudCheck, hudCheckStatus,
+                    lastScanText, appRuntimeStatusKnown, appScanInProgress,
                     appScanCacheAvailable, appScanStatus, storageLimitGb,
                     navCaptureFolderPaths, storageCalculating, storageCacheAvailable,
                     storageScanError, storageSessionCount, navCaptureFolderBytes, storageDays,

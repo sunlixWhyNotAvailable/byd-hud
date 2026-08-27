@@ -36,6 +36,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private static final int FID_LANE_VISIBLE_BASE = 427_827_300;
     private static final int SETTING_LANE_DISTANCE = 1_285_554_184;
     private static final int SETTING_LANE_COUNT = 1_285_554_200;
+    private static final int FID_DISTANCE_TO_TRAFFIC_LIGHT = HudCheckTrafficLight.DISTANCE_FID;
+    private static final String BODYWORK_CLASS =
+            "android.hardware.bydauto.bodywork.BYDAutoBodyworkDevice";
     private static final int[] SETTING_LANE_STATES = {
             1_285_554_208, 1_285_554_212, 1_285_554_216, 1_285_554_220,
             1_285_554_224, 1_285_554_228, 1_285_554_232, 1_285_554_236,
@@ -59,6 +62,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             "android.permission.BYDAUTO_SETTING_GET";
     private static final String SETTING_SET_PERMISSION =
             "android.permission.BYDAUTO_SETTING_SET";
+    private static final String BODYWORK_COMMON_PERMISSION =
+            "android.permission.BYDAUTO_BODYWORK_COMMON";
+    private static final String BODYWORK_GET_PERMISSION =
+            "android.permission.BYDAUTO_BODYWORK_GET";
+    private static final String BODYWORK_SET_PERMISSION =
+            "android.permission.BYDAUTO_BODYWORK_SET";
     private static final int VENDOR_READ_ERROR = -2_147_482_648;
     private static final int EVENT_VALUE_UNSET = -999_999_999;
     private final long generation;
@@ -69,9 +78,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private final Context systemContext;
     private final Object operationLock = new Object();
     private volatile InstrumentApi instrument;
+    private volatile BodyworkApi bodywork;
     private volatile IInstrumentNavigationClient client;
     private volatile boolean connected;
     private volatile int activeCapabilities;
+    private boolean trafficLightOutputsOwned;
 
     InstrumentNavigationProxyService(
             Context systemContext, long generation, String nonce, int allowedUid,
@@ -111,6 +122,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 }
                 if (current != null && current.laneCapable()) {
                     capabilities |= InstrumentProxyContract.CAP_INSTRUMENT_LANES;
+                }
+                BodyworkApi bodyworkApi = current == null || current.writer == null
+                        ? null : bodywork();
+                if (fidReadiness.ready && current != null && current.writer != null
+                        && bodyworkApi != null && bodyworkApi.trafficLightCapable()) {
+                    capabilities |= InstrumentProxyContract.CAP_TRAFFIC_LIGHT;
                 }
                 activeCapabilities = capabilities;
                 boolean ready = hasNavigationCapability(capabilities);
@@ -246,6 +263,65 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     @Override
+    public Bundle sendHudCheckTrafficLight(long requestGeneration, int sampleIndex) {
+        enforceSession(requestGeneration);
+        if (!HudCheckTrafficLight.validSampleIndex(sampleIndex)) {
+            throw new IllegalArgumentException("unknown traffic-light sample");
+        }
+        synchronized (operationLock) {
+            long identity = Binder.clearCallingIdentity();
+            try {
+                if (!connected) {
+                    return InstrumentProxyContract.operationResult(new ArrayList<>(),
+                            "inactive Instrument proxy session");
+                }
+                if (!hasCapability(InstrumentProxyContract.CAP_TRAFFIC_LIGHT)) {
+                    return InstrumentProxyContract.operationResult(new ArrayList<>(),
+                            "traffic-light capability unavailable");
+                }
+                List<InstrumentProxyContract.Operation> operations = new ArrayList<>(4);
+                if (sampleIndex != HudCheckTrafficLight.CLEAR) {
+                    // Mark before writes: a partial vendor failure still needs cleanup.
+                    trafficLightOutputsOwned = true;
+                }
+                int[] values = sampleIndex == HudCheckTrafficLight.CLEAR
+                        ? HudCheckTrafficLight.clearValues()
+                        : HudCheckTrafficLight.valuesForSample(sampleIndex);
+                BodyworkApi currentBodywork = bodywork();
+                if (currentBodywork == null || !currentBodywork.trafficLightCapable()) {
+                    operations.add(operation("bodywork_traffic_light", -1,
+                            SystemClock.elapsedRealtime(), "unavailable"));
+                } else {
+                    for (int intersection = 0;
+                            intersection < HudCheckTrafficLight.INTERSECTION_COUNT;
+                            intersection++) {
+                        operations.add(setBodyworkTrafficLight(currentBodywork,
+                                intersection, intersection == 0
+                                        ? values : HudCheckTrafficLight.clearValues()));
+                    }
+                }
+                InstrumentApi currentInstrument = instrument();
+                if (currentInstrument == null || currentInstrument.writer == null) {
+                    operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
+                            SystemClock.elapsedRealtime(), "unavailable"));
+                } else {
+                    operations.add(setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT,
+                            sampleIndex == HudCheckTrafficLight.CLEAR
+                                    ? 0 : HudCheckTrafficLight.DISTANCE_METERS));
+                }
+                boolean allSucceeded = allOperationsSucceeded(operations);
+                if (sampleIndex == HudCheckTrafficLight.CLEAR && allSucceeded) {
+                    trafficLightOutputsOwned = false;
+                }
+                return InstrumentProxyContract.operationResult(operations,
+                        allSucceeded ? "" : "traffic-light operation failed");
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+    }
+
+    @Override
     public void shutdown(long requestGeneration) {
         enforceSession(requestGeneration);
         stop("app shutdown");
@@ -319,6 +395,34 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         } catch (Throwable error) {
             return operation(name, -1, startedAt, describe(error));
         }
+    }
+
+    private InstrumentProxyContract.Operation setBodyworkTrafficLight(
+            BodyworkApi current, int intersection, int[] values) {
+        long startedAt = SystemClock.elapsedRealtime();
+        String name = "bodywork_traffic_light:" + (intersection + 1);
+        try {
+            Object eventValue = current.writer.constructor.newInstance();
+            current.writer.intArrayField.set(eventValue, values.clone());
+            Object result = current.writer.set.invoke(current.writer.device,
+                    HudCheckTrafficLight.selectors(intersection), eventValue);
+            return operation(name, resultCode(result), startedAt,
+                    success(result) ? "" : "call returned failure");
+        } catch (Throwable error) {
+            return operation(name, -1, startedAt, describe(error));
+        }
+    }
+
+    private static boolean allOperationsSucceeded(
+            List<InstrumentProxyContract.Operation> operations) {
+        boolean allSucceeded = !operations.isEmpty();
+        for (InstrumentProxyContract.Operation operation : operations) {
+            if (!succeeded(operation)) {
+                allSucceeded = false;
+                break;
+            }
+        }
+        return allSucceeded;
     }
 
     private InstrumentProxyContract.Operation setInstrumentLaneBatch(
@@ -505,6 +609,19 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
     }
 
+    private BodyworkApi bodywork() {
+        BodyworkApi current = bodywork;
+        if (current != null) return current;
+        synchronized (operationLock) {
+            current = bodywork;
+            if (current == null) {
+                current = BodyworkApi.open(systemContext);
+                bodywork = current;
+            }
+            return current;
+        }
+    }
+
     private void onClientDied() {
         stop("client died");
     }
@@ -527,7 +644,10 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private void stop(String reason) {
-        connected = false;
+        synchronized (operationLock) {
+            connected = false;
+            if (trafficLightOutputsOwned) clearTrafficLightOutputs();
+        }
         IInstrumentNavigationClient current = client;
         client = null;
         if (current != null && current.asBinder().isBinderAlive()) {
@@ -544,6 +664,32 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
         Log.i(TAG, "stopping generation=" + generation + " reason=" + reason);
         Looper.getMainLooper().quitSafely();
+    }
+
+    private boolean clearTrafficLightOutputs() {
+        List<InstrumentProxyContract.Operation> operations = new ArrayList<>(4);
+        BodyworkApi currentBodywork = bodywork;
+        if (currentBodywork != null && currentBodywork.trafficLightCapable()) {
+            int[] clearValues = HudCheckTrafficLight.clearValues();
+            for (int intersection = 0;
+                    intersection < HudCheckTrafficLight.INTERSECTION_COUNT;
+                    intersection++) {
+                operations.add(setBodyworkTrafficLight(currentBodywork, intersection, clearValues));
+            }
+        } else {
+            operations.add(operation("bodywork_traffic_light", -1,
+                    SystemClock.elapsedRealtime(), "unavailable"));
+        }
+        InstrumentApi currentInstrument = instrument();
+        if (currentInstrument != null && currentInstrument.writer != null) {
+            operations.add(setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT, 0));
+        } else {
+            operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
+                    SystemClock.elapsedRealtime(), "unavailable"));
+        }
+        boolean cleared = allOperationsSucceeded(operations);
+        if (cleared) trafficLightOutputsOwned = false;
+        return cleared;
     }
 
     private static boolean success(Object result) {
@@ -703,6 +849,41 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
     }
 
+    private static final class BodyworkApi {
+        final Object device;
+        final DirectWriter writer;
+
+        BodyworkApi(Object device, DirectWriter writer) {
+            this.device = device;
+            this.writer = writer;
+        }
+
+        boolean trafficLightCapable() {
+            return device != null && writer != null && writer.intArrayField != null;
+        }
+
+        @SuppressLint("PrivateApi")
+        static BodyworkApi open(Context context) {
+            try {
+                Class<?> deviceClass = Class.forName(BODYWORK_CLASS);
+                Object device = deviceClass.getMethod("getInstance", Context.class)
+                        .invoke(null, new BydPermissionContext(context));
+                Class<?> eventClass = Class.forName(EVENT_VALUE_CLASS);
+                Method set = deviceClass.getMethod("set", int[].class, eventClass);
+                Constructor<?> constructor = eventClass.getConstructor();
+                Field intField = eventClass.getField("intValue");
+                Field bytesField = eventClass.getField("bufferDataValue");
+                Field intArrayField = eventClass.getField("intArrayValue");
+                return new BodyworkApi(device,
+                        new DirectWriter(device, set, constructor,
+                                intField, bytesField, intArrayField));
+            } catch (Throwable error) {
+                Log.w(TAG, "Bodywork traffic-light API unavailable", error);
+                return null;
+            }
+        }
+    }
+
     private static final class DirectWriter {
         final Object device;
         final Method set;
@@ -770,7 +951,10 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     || INSTRUMENT_SET_PERMISSION.equals(permission)
                     || SETTING_COMMON_PERMISSION.equals(permission)
                     || SETTING_GET_PERMISSION.equals(permission)
-                    || SETTING_SET_PERMISSION.equals(permission);
+                    || SETTING_SET_PERMISSION.equals(permission)
+                    || BODYWORK_COMMON_PERMISSION.equals(permission)
+                    || BODYWORK_GET_PERMISSION.equals(permission)
+                    || BODYWORK_SET_PERMISSION.equals(permission);
         }
     }
 }

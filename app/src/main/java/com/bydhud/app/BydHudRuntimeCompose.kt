@@ -41,6 +41,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
@@ -81,6 +82,9 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -137,19 +141,12 @@ private enum class RuntimeTab {
     Apps,
     Storage,
     Patch,
-    Manual
+    HudCheck
 }
 
 private enum class Language {
     Ua,
     En
-}
-
-//defines class UI/state support so Compose code can keep rendering intent explicit.
-private enum class ManualMode {
-    Supported,
-    Lanes,
-    Raw
 }
 
 //models UpdateCheckState data here so transport and parser layers share a stable contract.
@@ -210,7 +207,7 @@ private data class Copy(
     val subtitle: String,
     val main: String,
     val apps: String,
-    val manual: String,
+    val hudCheck: String,
     val hudRunning: String,
     val hudIdle: String,
     val hudFailed: String,
@@ -399,26 +396,38 @@ private data class Copy(
     val patchConfirmText: String,
     val patchConfirmOk: String,
     val patchConfirmCancel: String,
-    val manualHint: String,
-    val manualHudOutput: String,
-    val supportedArrows: String,
-    val supportedArrowsHint: String,
-    val manualLanes: String,
-    val manualLanesHint: String,
-    val rawManeuverIds: String,
-    val rawManeuverHint: String,
-    val manualMode: String,
-    val manualModeHint: String,
-    val pngNumber: String,
-    val nativeNumber: String,
-    val distance: String,
-    val street: String,
-    val laneBitmap: String,
+    val hudCheckHint: String,
+    val basicOutput: String,
+    val basicOutputHint: String,
+    val extendedOutput: String,
+    val extendedOutputHint: String,
+    val checkManeuvers: String,
+    val checkManeuversHint: String,
+    val checkManeuversChannels: String,
+    val checkLanes: String,
+    val checkLanesHint: String,
+    val distanceMeters: String,
+    val checkDistanceHint: String,
+    val streetText: String,
+    val checkStreetHint: String,
+    val checkTransliteration: String,
+    val checkTrafficLight: String,
+    val checkTrafficLightHint: String,
+    val stockImage: String,
+    val bitmapImage: String,
+    val hudCheckRunning: String,
+    val hudCheckStopped: String,
+    val hudCheckStart: String,
+    val hudCheckStop: String,
+    val checkBaseline: String,
+    val currentField: String,
+    val checkAutomatic: String,
+    val checkManualCycle: String,
+    val checkManualCycleHint: String,
+    val checkCycle: String,
+    val checkExtendedNotice: String,
     val previous: String,
     val next: String,
-    val randomize: String,
-    val currentSelection: String,
-    val manualPreview: String
 )
 
 private data class ShareCopy(
@@ -555,6 +564,7 @@ private fun ModalInputBlocker() {
 private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var snapshot by remember { mutableStateOf(activity.composeSnapshot()) }
     var selectedTab by rememberSaveable { mutableStateOf(initialTab) }
+    var previousTab by remember { mutableStateOf(initialTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
@@ -641,7 +651,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
             RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(reason)
             RuntimeTab.Options,
-            RuntimeTab.Manual -> Unit
+            RuntimeTab.HudCheck -> Unit
         }
     }
 
@@ -884,6 +894,10 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     }
 
     LaunchedEffect(selectedTab) {
+        if (previousTab == RuntimeTab.HudCheck && selectedTab != RuntimeTab.HudCheck) {
+            runAction { activity.composeHudCheckStop("tab-change") }
+        }
+        previousTab = selectedTab
         val reason = "tab-${selectedTab.name.lowercase(Locale.ROOT)}"
         requestTabStateRefresh(selectedTab, reason)
     }
@@ -919,7 +933,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             "activity-resume-apps"
                         )
                         RuntimeTab.Options,
-                        RuntimeTab.Manual -> Unit
+                        RuntimeTab.HudCheck -> Unit
                     }
                 }
                 Lifecycle.Event.ON_PAUSE,
@@ -1304,7 +1318,13 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             }
                         }
                     )
-                    RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
+                    RuntimeTab.HudCheck -> HudCheckTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        activity = activity,
+                        runAction = ::runAction
+                    )
                 }
             }
 
@@ -4517,271 +4537,366 @@ private fun storageLocationLabel(day: MainActivity.ComposeStorageDay, copy: Copy
 }
 
 @Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun ManualTab(
+//keeps HUD checks on the shared runtime snapshot; the worker owns cadence and payload sends.
+private fun HudCheckTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
 ) {
-    var mode by rememberSaveable { mutableStateOf(ManualMode.Supported) }
-    var pngNumber by rememberSaveable(snapshot.pngSourceId) { mutableStateOf(snapshot.pngSourceId.coerceIn(1, 99).toString()) }
-    var nativeNumber by rememberSaveable(snapshot.nativeManeuverId) { mutableStateOf(snapshot.nativeManeuverId.coerceIn(1, 99).toString()) }
-    var distance by rememberSaveable(snapshot.distanceMeters) { mutableStateOf(snapshot.distanceMeters.coerceIn(0, 99999).toString()) }
-    var street by rememberSaveable(snapshot.streetText) { mutableStateOf(snapshot.streetText.ifBlank { "TESTER" }) }
-    var rawLane by rememberSaveable(snapshot.laneBitmap) { mutableStateOf(snapshot.laneBitmap.ifBlank { defaultLanePayload }) }
-    var manualLane by rememberSaveable { mutableStateOf(defaultLanePayload) }
-    var laneIndex by rememberSaveable { mutableIntStateOf(0) }
-
-    //sends encoded data here so transport side effects stay behind a single boundary.
-    fun sendRaw() {
-        if (snapshot.manualModeEnabled) {
-            activity.composeSendRaw(
-                manualNumber(pngNumber, 5),
-                manualNumber(nativeNumber, 5),
-                distance.toIntOrNull()?.coerceIn(0, 99999) ?: 230,
-                street,
-                rawLane
-            )
-        }
+    val state = snapshot.hudCheck
+    val ukrainian = snapshot.uaLanguage
+    val statusText = if (state.running) copy.hudCheckRunning else copy.hudCheckStopped
+    val deliveryStatus = snapshot.hudCheckStatus.trim()
+    val statusIsError = deliveryStatus.contains("error", ignoreCase = true)
+        || deliveryStatus.contains("failed", ignoreCase = true)
+        || deliveryStatus.contains("помил", ignoreCase = true)
+    val statusColor = when {
+        statusIsError -> palette.red to palette.redSoft
+        state.running -> palette.green to palette.greenSoft
+        else -> palette.muted to palette.disabled
     }
+    fun step(field: HudCheckState.Field, delta: Int) =
+        runAction { activity.composeHudCheckStep(field, delta) }
 
-    //sends encoded data here so transport side effects stay behind a single boundary.
-    fun sendManualLane(value: String) {
-        if (snapshot.manualModeEnabled) {
-            activity.composeSendManualLane(value)
-        }
-    }
-
-    LazyPageSurface(copy.manual, copy.manualHint, palette) {
-        item(key = "manual-hud-output") {
-            Section(copy.manualHudOutput, palette) {
-                Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                ManualModeTile(copy.supportedArrows, copy.supportedArrowsHint, mode == ManualMode.Supported, palette, Modifier.weight(1f)) {
-                    mode = ManualMode.Supported
-                }
-                ManualModeTile(copy.manualLanes, copy.manualLanesHint, mode == ManualMode.Lanes, palette, Modifier.weight(1f)) {
-                    mode = ManualMode.Lanes
-                }
-                ManualModeTile(copy.rawManeuverIds, copy.rawManeuverHint, mode == ManualMode.Raw, palette, Modifier.weight(1f)) {
-                    mode = ManualMode.Raw
-                }
-                }
-                SwitchRow(copy.manualMode, copy.manualModeHint, snapshot.manualModeEnabled, palette) {
-                    runAction { activity.composeSetManualMode(it) }
-                }
-                Divider(palette)
-
-                when (mode) {
-                ManualMode.Supported -> ActionRow(
-                    copy.supportedArrows,
-                    copy.supportedArrowsHint,
+    LazyPageSurface(
+        title = copy.hudCheck,
+        hint = copy.hudCheckHint,
+        palette = palette,
+        headerAction = {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Pill(statusText, statusColor.first, statusColor.second)
+                HudButton(
+                    if (state.running) copy.hudCheckStop else copy.hudCheckStart,
                     palette,
-                    left = {
-                        HudButton(copy.previous, palette, width = 150.dp) {
-                            runAction { activity.composeStepCurated(-1) }
-                        }
-                    },
-                    right = {
-                        HudButton(copy.next, palette, width = 150.dp) {
-                            runAction { activity.composeStepCurated(1) }
+                    primary = true,
+                    width = 180.dp
+                ) { runAction { activity.composeHudCheckToggleRunning() } }
+            }
+        }
+    ) {
+        item(key = "hud-check-mode") {
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth()) {
+                HudCheckModeTile(
+                    copy.basicOutput,
+                    copy.basicOutputHint,
+                    state.mode == HudCheckState.Mode.BASIC,
+                    palette,
+                    Modifier.weight(1f)
+                ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.BASIC) } }
+                HudCheckModeTile(
+                    copy.extendedOutput,
+                    copy.extendedOutputHint,
+                    state.mode == HudCheckState.Mode.EXTENDED,
+                    palette,
+                    Modifier.weight(1f)
+                ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.EXTENDED) } }
+            }
+        }
+        item(key = "hud-check-status") {
+            if (state.running && deliveryStatus.isNotBlank()) {
+                Text(
+                    deliveryStatus,
+                    color = if (statusIsError) palette.red else palette.muted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+        if (state.mode == HudCheckState.Mode.BASIC) {
+            item(key = "hud-check-basic") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                        .background(palette.panel)
+                ) {
+                    HudCheckRow(copy.checkManeuvers, copy.checkManeuversHint, state.maneuverLabel(ukrainian), palette,
+                        onPrevious = { step(HudCheckState.Field.MANEUVER, -1) },
+                        onNext = { step(HudCheckState.Field.MANEUVER, 1) },
+                        option = {
+                            OutputImageChoice(
+                                bitmap = state.maneuverBitmap,
+                                stockText = copy.stockImage,
+                                bitmapText = copy.bitmapImage,
+                                palette = palette
+                            ) { runAction { activity.composeHudCheckSetManeuverBitmap(it) } }
+                        })
+                    Divider(palette)
+                    HudCheckRow(copy.checkLanes, copy.checkLanesHint, state.lanes(), palette, monospace = true,
+                        onPrevious = { step(HudCheckState.Field.LANES, -1) },
+                        onNext = { step(HudCheckState.Field.LANES, 1) },
+                        option = {
+                            OutputImageChoice(
+                                bitmap = state.laneBitmap,
+                                stockText = copy.stockImage,
+                                bitmapText = copy.bitmapImage,
+                                palette = palette
+                            ) { runAction { activity.composeHudCheckSetLaneBitmap(it) } }
+                        })
+                    Divider(palette)
+                    HudCheckRow(copy.distanceMeters, copy.checkDistanceHint, state.distance().toString(), palette,
+                        onPrevious = { step(HudCheckState.Field.DISTANCE, -1) },
+                        onNext = { step(HudCheckState.Field.DISTANCE, 1) })
+                    Divider(palette)
+                    HudCheckRow(copy.streetText, copy.checkStreetHint, state.effectiveStreet(), palette,
+                        onPrevious = { step(HudCheckState.Field.STREET, -1) },
+                        onNext = { step(HudCheckState.Field.STREET, 1) },
+                        option = {
+                            CompactSwitchBox(
+                                label = copy.checkTransliteration,
+                                checked = state.transliterate,
+                                palette = palette,
+                                width = 230.dp
+                            ) { runAction { activity.composeHudCheckSetTransliterate(it) } }
+                        })
+                    Divider(palette)
+                    HudCheckRow(copy.checkTrafficLight, copy.checkTrafficLightHint, state.trafficLightLabel(ukrainian), palette,
+                        onPrevious = { step(HudCheckState.Field.TRAFFIC_LIGHT, -1) },
+                        onNext = { step(HudCheckState.Field.TRAFFIC_LIGHT, 1) })
+                }
+            }
+        } else {
+            item(key = "hud-check-baseline") {
+                Section(copy.checkBaseline, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
+                    val baseline = listOf(
+                        "${copy.checkManeuvers} · ${copy.checkManeuversChannels}" to
+                            "${if (ukrainian) "Прямо" else "Straight"} · ${copy.stockImage}",
+                        copy.checkLanes to "S* | S | S* | S | S* · ${copy.stockImage}",
+                        copy.distanceMeters to "77",
+                        copy.streetText to "Continue straight"
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
+                        baseline.forEach { (title, value) ->
+                            Column(Modifier.weight(1f)) {
+                                Text(title, color = palette.muted, fontSize = 13.sp)
+                                Spacer(Modifier.height(4.dp))
+                                Text(value, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                            }
                         }
                     }
-                )
-                ManualMode.Lanes -> {
-                    ActionRow(
-                        copy.manualLanes,
-                        copy.manualLanesHint,
-                        palette,
-                        left = {
-                            HudButton(previousPlural(copy), palette, width = 150.dp) {
-                                val next = stepLane(manualLane, laneIndex, -1)
-                                laneIndex = next.first
-                                manualLane = next.second
-                                sendManualLane(manualLane)
-                            }
-                        },
-                        right = {
-                            HudButton(nextPlural(copy), palette, width = 150.dp) {
-                                val next = stepLane(manualLane, laneIndex, 1)
-                                laneIndex = next.first
-                                manualLane = next.second
-                                sendManualLane(manualLane)
+                }
+            }
+            item(key = "hud-check-extended") {
+                Section(copy.currentField, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.7f)
+                                    .heightIn(min = 100.dp)
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(palette.field)
+                                    .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(state.extendedLabel(ukrainian), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                                Spacer(Modifier.height(8.dp))
+                                Text(state.extendedValue(), color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
                             }
                         }
-                    )
-                    ManualLaneFieldRow(copy, palette, manualLane, { manualLane = it }, onPrevious = {
-                        val next = stepLane(manualLane, laneIndex, -1)
-                        laneIndex = next.first
-                        manualLane = next.second
-                        sendManualLane(manualLane)
-                    }, onNext = {
-                        val next = stepLane(manualLane, laneIndex, 1)
-                        laneIndex = next.first
-                        manualLane = next.second
-                        sendManualLane(manualLane)
-                    }, onRandom = {
-                        val next = stepLane(manualLane, laneIndex, 1)
-                        laneIndex = next.first
-                        manualLane = next.second
-                        sendManualLane(manualLane)
-                    })
-                }
-                ManualMode.Raw -> {
-                    RawFields(
-                        copy = copy,
-                        palette = palette,
-                        pngNumber = pngNumber,
-                        onPng = { pngNumber = it },
-                        nativeNumber = nativeNumber,
-                        onNative = { nativeNumber = it },
-                        distance = distance,
-                        onDistance = { distance = it },
-                        street = street,
-                        onStreet = { street = it },
-                        lane = rawLane,
-                        onLane = { rawLane = it },
-                        onPngPrev = {
-                            pngNumber = stepNumber(pngNumber, -1, 5)
-                            sendRaw()
-                        },
-                        onPngNext = {
-                            pngNumber = stepNumber(pngNumber, 1, 5)
-                            sendRaw()
-                        },
-                        onNativePrev = {
-                            nativeNumber = stepNumber(nativeNumber, -1, 5)
-                            sendRaw()
-                        },
-                        onNativeNext = {
-                            nativeNumber = stepNumber(nativeNumber, 1, 5)
-                            sendRaw()
-                        },
-                        onLanePrev = {
-                            val next = stepLane(rawLane, laneIndex, -1)
-                            laneIndex = next.first
-                            rawLane = next.second
-                            sendRaw()
-                        },
-                        onLaneNext = {
-                            val next = stepLane(rawLane, laneIndex, 1)
-                            laneIndex = next.first
-                            rawLane = next.second
-                            sendRaw()
-                        },
-                        onRandom = {
-                            val next = stepLane(rawLane, laneIndex, 1)
-                            laneIndex = next.first
-                            rawLane = next.second
-                            sendRaw()
+                        Column(Modifier.width(280.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CompactSwitchBox(
+                                label = if (state.automatic) copy.checkAutomatic else copy.checkManualCycle,
+                                checked = state.automatic,
+                                palette = palette,
+                                width = 280.dp
+                            ) { runAction { activity.composeHudCheckSetAutomatic(it) } }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                HudChevronButton(
+                                    direction = ChevronDirection.Left,
+                                    contentDescription = copy.previous,
+                                    palette = palette,
+                                    enabled = !state.automatic
+                                ) { runAction { activity.composeHudCheckStepExtended(-1) } }
+                                Text(
+                                    "${state.extendedIndex + 1} / ${HudCheckState.extendedCount()}",
+                                    color = palette.text,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 15.sp,
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = TextAlign.Center
+                                )
+                                HudChevronButton(
+                                    direction = ChevronDirection.Right,
+                                    contentDescription = copy.next,
+                                    palette = palette,
+                                    enabled = !state.automatic
+                                ) { runAction { activity.composeHudCheckStepExtended(1) } }
+                            }
                         }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (state.automatic) copy.checkCycle else copy.checkManualCycleHint,
+                        color = palette.text,
+                        fontSize = 13.sp
                     )
+                    Text(copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
                 }
-                }
-
-                Divider(palette)
-                CurrentSelection(copy, palette, when (mode) {
-                    ManualMode.Supported -> "#${snapshot.curatedIndex + 1}/${snapshot.curatedCount}: S${snapshot.pngSourceId.toString().padStart(2, '0')} / N${snapshot.nativeManeuverId.toString().padStart(2, '0')}"
-                    ManualMode.Lanes -> manualLane
-                    ManualMode.Raw -> "Raw ${manualId("S", pngNumber, 5)} / ${manualId("N", nativeNumber, 5)} / ${distance}m / $street"
-                })
             }
         }
     }
 }
 
 @Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun RawFields(
-    copy: Copy,
-    palette: Palette,
-    pngNumber: String,
-    onPng: (String) -> Unit,
-    nativeNumber: String,
-    onNative: (String) -> Unit,
-    distance: String,
-    onDistance: (String) -> Unit,
-    street: String,
-    onStreet: (String) -> Unit,
-    lane: String,
-    onLane: (String) -> Unit,
-    onPngPrev: () -> Unit,
-    onPngNext: () -> Unit,
-    onNativePrev: () -> Unit,
-    onNativeNext: () -> Unit,
-    onLanePrev: () -> Unit,
-    onLaneNext: () -> Unit,
-    onRandom: () -> Unit
-) {
-    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            LabeledInput(copy.pngNumber, pngNumber, onPng, palette, Modifier.weight(1f))
-            LabeledInput(copy.nativeNumber, nativeNumber, onNative, palette, Modifier.weight(1f))
-            LabeledInput(copy.distance, distance, onDistance, palette, Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                HudButton(copy.previous, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onPngPrev)
-                HudButton(copy.next, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onPngNext)
-            }
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                HudButton(copy.previous, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onNativePrev)
-                HudButton(copy.next, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onNativeNext)
-            }
-            LabeledInput(copy.street, street, onStreet, palette, Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(8.dp))
-        ManualLaneFieldRow(copy, palette, lane, onLane, onLanePrev, onLaneNext, onRandom)
-    }
-}
-
-@Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun ManualLaneFieldRow(
-    copy: Copy,
-    palette: Palette,
+private fun HudCheckRow(
+    title: String,
+    hint: String,
     value: String,
-    onValue: (String) -> Unit,
+    palette: Palette,
+    monospace: Boolean = false,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onRandom: () -> Unit
+    option: @Composable () -> Unit = {}
 ) {
-    Row(
+    ActionRow(title, hint, palette, verticalPadding = 6.dp) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            HudChevronButton(ChevronDirection.Left, "$title: previous", palette, onClick = onPrevious)
+            Box(
+                modifier = Modifier
+                    .width(310.dp)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                    .background(palette.field)
+                    .padding(horizontal = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    value,
+                    color = palette.text,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            HudChevronButton(ChevronDirection.Right, "$title: next", palette, onClick = onNext)
+        }
+        Spacer(Modifier.width(20.dp))
+        Box(Modifier.width(230.dp), contentAlignment = Alignment.CenterEnd) { option() }
+    }
+}
+
+private enum class ChevronDirection { Left, Right }
+
+@Composable
+private fun HudChevronButton(
+    direction: ChevronDirection,
+    contentDescription: String,
+    palette: Palette,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback(enabled)
+    val visualClick = rememberVisualFirstClick(onClick)
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Bottom
+            .width(44.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(pressBackground(if (enabled) palette.panelAlt else palette.disabled, palette, press.pressed))
+            .then(press.modifier)
+            .clickable(
+                enabled = enabled,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center
     ) {
-        LabeledInput(copy.laneBitmap, value, onValue, palette, Modifier.weight(1f))
-        HudButton(previousPlural(copy), palette, width = 150.dp, onClick = onPrevious)
-        HudButton(nextPlural(copy), palette, width = 150.dp, onClick = onNext)
-        HudButton(copy.randomize, palette, width = 150.dp, onClick = onRandom)
+        Canvas(Modifier.size(20.dp)) {
+            val color = if (enabled) palette.text else palette.muted.copy(alpha = 0.55f)
+            val centerY = size.height / 2f
+            val edgeX = if (direction == ChevronDirection.Left) size.width * 0.68f else size.width * 0.32f
+            val tipX = if (direction == ChevronDirection.Left) size.width * 0.32f else size.width * 0.68f
+            drawLine(color, Offset(edgeX, centerY - size.height * 0.28f), Offset(tipX, centerY), strokeWidth = 2.2f, cap = StrokeCap.Round)
+            drawLine(color, Offset(tipX, centerY), Offset(edgeX, centerY + size.height * 0.28f), strokeWidth = 2.2f, cap = StrokeCap.Round)
+        }
     }
 }
 
 @Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun CurrentSelection(copy: Copy, palette: Palette, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(66.dp)
+private fun HudCheckModeTile(
+    title: String,
+    hint: String,
+    selected: Boolean,
+    palette: Palette,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick(onClick)
+    val background = if (selected) palette.active else palette.panelAlt
+    Column(
+        modifier = modifier
+            .height(74.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
+            .background(pressBackground(background, palette, press.pressed))
+            .then(press.modifier)
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
             .padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.Center
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(copy.currentSelection, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Text(value, color = palette.muted, fontSize = 14.sp)
+        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        Text(rowExplanation(hint), color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun OutputImageChoice(
+    bitmap: Boolean,
+    stockText: String,
+    bitmapText: String,
+    palette: Palette,
+    onChange: (Boolean) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.width(230.dp)) {
+        HudButton(
+            stockText,
+            palette,
+            primary = !bitmap,
+            width = 0.dp,
+            modifier = Modifier.weight(1f).semantics {
+                selected = !bitmap
+                role = Role.RadioButton
+            }
+        ) {
+            onChange(false)
         }
-        Pill(copy.manualPreview, palette.muted, palette.disabled)
+        HudButton(
+            bitmapText,
+            palette,
+            primary = bitmap,
+            width = 0.dp,
+            modifier = Modifier.weight(1f).semantics {
+                selected = bitmap
+                role = Role.RadioButton
+            }
+        ) {
+            onChange(true)
+        }
     }
 }
 
@@ -5033,6 +5148,8 @@ private fun Section(
     title: String,
     palette: Palette,
     modifier: Modifier = Modifier,
+    bodyPadding: Dp = 0.dp,
+    headerVerticalPadding: Dp = 10.dp,
     content: @Composable () -> Unit
 ) {
     Column(
@@ -5046,11 +5163,13 @@ private fun Section(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(palette.panelAlt)
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(horizontal = 14.dp, vertical = headerVerticalPadding)
         ) {
             Text(title.uppercase(), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
-        content()
+        Column(modifier = Modifier.padding(bodyPadding)) {
+            content()
+        }
     }
 }
 
@@ -5386,93 +5505,31 @@ private fun ActionRow(
     title: String,
     hint: String,
     palette: Palette,
-    left: @Composable () -> Unit,
-    right: @Composable () -> Unit
+    verticalPadding: Dp = 12.dp,
+    enabled: Boolean = true,
+    action: @Composable () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Text(rowExplanation(hint), color = palette.muted, fontSize = 13.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            left()
-            right()
-        }
-    }
-}
-
-@Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun ManualModeTile(
-    title: String,
-    hint: String,
-    selected: Boolean,
-    palette: Palette,
-    modifier: Modifier,
-    onClick: () -> Unit
-) {
-    val press = rememberPressFeedback()
-    val visualClick = rememberVisualFirstClick(onClick)
-    val baseBackground = if (selected) palette.active else palette.panelAlt
-    Column(
-        modifier = modifier
-            .height(74.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
-            .background(pressBackground(baseBackground, palette, press.pressed))
-            .then(press.modifier)
-            .clickable(
-                interactionSource = press.interactionSource,
-                indication = null,
-                onClick = visualClick
+            Text(
+                title,
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
             )
-            .padding(horizontal = 14.dp),
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-        Text(rowExplanation(hint), color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun LabeledInput(
-    label: String,
-    value: String,
-    onValue: (String) -> Unit,
-    palette: Palette,
-    modifier: Modifier = Modifier
-) {
-    Column(modifier) {
-        Text(label, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-        Spacer(Modifier.height(5.dp))
-        BasicTextField(
-            value = value,
-            onValueChange = onValue,
-            singleLine = true,
-            textStyle = TextStyle(color = palette.text, fontSize = 15.sp, fontFamily = FontFamily.Monospace),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(42.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-                .background(palette.field),
-            decorationBox = { inner ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 11.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    inner()
-                }
-            }
-        )
+            Text(
+                rowExplanation(hint),
+                color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        action()
     }
 }
 
@@ -5868,7 +5925,7 @@ private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSel
         TabButton(copy.main, RuntimeTab.Options, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.storage, RuntimeTab.Storage, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.patch, RuntimeTab.Patch, selected, palette, Modifier.weight(1f), onSelect)
-        TabButton(copy.manual, RuntimeTab.Manual, selected, palette, Modifier.weight(1f), onSelect)
+        TabButton(copy.hudCheck, RuntimeTab.HudCheck, selected, palette, Modifier.weight(1f), onSelect)
     }
 }
 
@@ -5923,7 +5980,7 @@ private fun iconFor(tab: RuntimeTab): Int = when (tab) {
     RuntimeTab.Apps -> R.drawable.ic_tab_apps
     RuntimeTab.Storage -> R.drawable.ic_tab_storage
     RuntimeTab.Patch -> R.drawable.ic_tab_patch
-    RuntimeTab.Manual -> R.drawable.ic_tab_manual
+    RuntimeTab.HudCheck -> R.drawable.ic_tab_manual
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -5935,42 +5992,6 @@ private fun appLabel(row: MainActivity.ComposeAppRow): String {
         else -> row.label.ifBlank { row.packageName }
     }
 }
-
-private const val defaultLanePayload = "S* | S | S* | S | S*"
-
-private val lanePayloadSamples = listOf(
-    defaultLanePayload,
-    "L | S* | S*+R",
-    "S | S | Rs*",
-    "Ls | S*+Ls | S* | S*+R",
-    "L | S*+L | S* | S* | R"
-)
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun validLane(value: String): Boolean {
-    val cells = value.split("|").map { it.trim() }
-    return cells.isNotEmpty() && cells.all { it.isNotEmpty() }
-}
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun stepLane(current: String, index: Int, delta: Int): Pair<Int, String> {
-    val base = if (validLane(current)) index else 0
-    val next = (base + delta + lanePayloadSamples.size) % lanePayloadSamples.size
-    return next to lanePayloadSamples[next]
-}
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun manualNumber(value: String, defaultValue: Int): Int =
-    value.trim().toIntOrNull()?.takeIf { it in 1..99 } ?: defaultValue
-
-private fun stepNumber(value: String, delta: Int, defaultValue: Int): String {
-    val zeroBased = manualNumber(value, defaultValue) - 1
-    return ((zeroBased + delta + 99) % 99 + 1).toString()
-}
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun manualId(prefix: String, value: String, defaultValue: Int): String =
-    "$prefix${manualNumber(value, defaultValue).toString().padStart(2, '0')}"
 
 private fun sanitizeStorageLimitInput(value: String): String {
     val digits = value.filter { it.isDigit() }.take(2)
@@ -6027,13 +6048,6 @@ private fun sessionLabel(count: Int, copy: Copy): String {
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun previousPlural(copy: Copy): String =
-    if (copy.language == Language.Ua) "Попередні" else copy.previous
-
-private fun nextPlural(copy: Copy): String =
-    if (copy.language == Language.Ua) "Наступні" else copy.next
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun darkPalette() = Palette(
     dark = true,
     background = Color(0xFF080D12),
@@ -6087,7 +6101,7 @@ private fun enCopy() = Copy(
     main = "Options",
     apps = "Apps",
     patch = "Patch",
-    manual = "Manual",
+    hudCheck = "HUD check",
     hudRunning = "HUD: running",
     hudIdle = "HUD: idle",
     hudFailed = "HUD: failed",
@@ -6275,26 +6289,38 @@ private fun enCopy() = Copy(
     patchConfirmText = "The installed navigation app must be removed before the patched package can be installed. Its local data will be lost. The selected source package is kept for recovery.",
     patchConfirmOk = "OK",
     patchConfirmCancel = "Cancel",
-    manualHint = "Direct payload checks for HUD and dashboard TBT output.",
-    manualHudOutput = "Manual HUD and TBT output",
-    supportedArrows = "Supported arrows",
-    supportedArrowsHint = "Prev / Next sends supported PNG+Native combo",
-    manualLanes = "Manual lanes",
-    manualLanesHint = "Prev / Next sends lane bitmap immediately",
-    rawManeuverIds = "Raw maneuver IDs",
-    rawManeuverHint = "Number fields send Sxx / Nxx payload IDs immediately",
-    manualMode = "Manual mode",
-    manualModeHint = "When enabled, Manual controls declare navigation and send the same maneuver, street, and distance to HUD and dashboard TBT. Turning it off clears manual output and returns to live navigation output.",
-    pngNumber = "PNG number",
-    nativeNumber = "Native number",
-    distance = "Distance, m",
-    street = "Street text",
-    laneBitmap = "Lane bitmap",
+    hudCheckHint = "Direct payload checks for HUD and dashboard TBT output",
+    basicOutput = "Basic output",
+    basicOutputHint = "Independent controls for the main output fields",
+    extendedOutput = "Extended output",
+    extendedOutputHint = "Constant basic packet · automatic or manual cycle",
+    checkManeuvers = "Maneuvers",
+    checkManeuversHint = "PNG and native follow the same maneuver",
+    checkManeuversChannels = "OEM + native",
+    checkLanes = "Lanes",
+    checkLanesHint = "Recommended and combined lane directions",
+    distanceMeters = "Distance, m",
+    checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
+    streetText = "Street",
+    checkStreetHint = "Latin and Cyrillic words · only Cyrillic is transliterated",
+    checkTransliteration = "Transliteration",
+    checkTrafficLight = "Traffic-light field",
+    checkTrafficLightHint = "Directions, colors, numbers and stock symbols",
+    stockImage = "Stock",
+    bitmapImage = "Bitmap",
+    hudCheckRunning = "Running",
+    hudCheckStopped = "Stopped",
+    hudCheckStart = "Start",
+    hudCheckStop = "Stop",
+    checkBaseline = "Constant basic packet",
+    currentField = "Expected additional output",
+    checkAutomatic = "Auto",
+    checkManualCycle = "Manual",
+    checkManualCycleHint = "Use the arrows to change fields · Auto resumes from this step",
+    checkCycle = "One step every 500 ms · turn Auto off to hold the current step",
+    checkExtendedNotice = "The basic packet stays unchanged · additional field visibility depends on the vehicle",
     previous = "Previous",
     next = "Next",
-    randomize = "Randomize",
-    currentSelection = "Current selection",
-    manualPreview = "manual output preview"
 )
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -6304,7 +6330,7 @@ private fun uaCopy() = enCopy().copy(
     main = "Налаштування",
     apps = "Застосунки",
     patch = "Патч",
-    manual = "Ручний",
+    hudCheck = "Перевірка HUD",
     hudRunning = "HUD: працює",
     hudIdle = "HUD: очікує",
     hudFailed = "HUD: помилка",
@@ -6488,26 +6514,38 @@ private fun uaCopy() = enCopy().copy(
     patchConfirmText = "Перед встановленням пропатченого пакета установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний пакет зберігається для відновлення.",
     patchConfirmOk = "Ок",
     patchConfirmCancel = "Скасувати",
-    manualHint = "Пряма перевірка даних для HUD і TBT-картки приборки.",
-    manualHudOutput = "Ручний вивід на HUD і TBT",
-    supportedArrows = "Підтримувані стрілки",
-    supportedArrowsHint = "Попередній / Наступний одразу надсилає пару PNG і штатного маневру",
-    manualLanes = "Ручні смуги",
-    manualLanesHint = "Попередні / Наступні одразу надсилають зображення смуг",
-    rawManeuverIds = "Сирі ID маневрів",
-    rawManeuverHint = "Числові поля одразу формують ідентифікатори Sxx / Nxx",
-    manualMode = "Ручний режим",
-    manualModeHint = "Коли увімкнено, ручні елементи оголошують навігацію та надсилають однаковий маневр, вулицю й дистанцію на HUD і TBT-картку приборки. Вимкнення очищає ручний вивід і повертає активну навігацію.",
-    pngNumber = "PNG номер",
-    nativeNumber = "Номер штатного маневру",
-    distance = "Дистанція, м",
-    street = "Текст вулиці",
-    laneBitmap = "Зображення смуг",
+    hudCheckHint = "Пряма перевірка даних HUD і TBT-картки приборки",
+    basicOutput = "Базовий вивід",
+    basicOutputHint = "Незалежне керування основними полями виводу",
+    extendedOutput = "Розширений вивід",
+    extendedOutputHint = "Постійний базовий пакет · цикл авто або ручний",
+    checkManeuvers = "Маневри",
+    checkManeuversHint = "PNG і native відповідають одному маневру",
+    checkManeuversChannels = "OEM + native",
+    checkLanes = "Смуги",
+    checkLanesHint = "Рекомендовані та суміщені напрямки",
+    distanceMeters = "Дистанція, м",
+    checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
+    streetText = "Вулиця",
+    checkStreetHint = "Латиниця й кирилиця · транслітерація лише кирилиці",
+    checkTransliteration = "Транслітерація",
+    checkTrafficLight = "Поле світлофора",
+    checkTrafficLightHint = "Напрямки, кольори, числа та штатні символи",
+    stockImage = "Штатне",
+    bitmapImage = "Bitmap",
+    hudCheckRunning = "Працює",
+    hudCheckStopped = "Зупинено",
+    hudCheckStart = "Почати",
+    hudCheckStop = "Зупинити",
+    checkBaseline = "Постійний базовий пакет",
+    currentField = "Додатково має відображатись",
+    checkAutomatic = "Авто",
+    checkManualCycle = "Ручний",
+    checkManualCycleHint = "Стрілки змінюють поле · Авто продовжує з цього кроку",
+    checkCycle = "Один крок кожні 500 мс · вимкніть Авто, щоб утримати крок",
+    checkExtendedNotice = "Базовий пакет не змінюється · відображення додаткового поля залежить від автомобіля",
     previous = "Попередній",
     next = "Наступний",
-    randomize = "Випадково",
-    currentSelection = "Поточний вибір",
-    manualPreview = "попередній перегляд ручного виводу"
 )
 
 private fun shareCopy(language: Language) = if (language == Language.Ua) {

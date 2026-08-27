@@ -137,7 +137,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(tabRefresh.contains("composeRequestRuntimeUiStateRefresh(false, reason)"));
         assertFalse(tabRefresh.contains("RuntimeTab.Logs"));
         assertTrue(tabRefresh.contains("RuntimeTab.Options,"));
-        assertTrue(tabRefresh.contains("RuntimeTab.Manual -> Unit"));
+        assertTrue(tabRefresh.contains("RuntimeTab.HudCheck -> Unit"));
         assertFalse(tabRefresh.contains("RuntimeTab.Logs -> activity.composeRequestRuntimeUiStateRefresh"));
         assertTrue(tabRefresh.contains("composeRequestStorageRefresh(false)"));
         assertTrue(tabRefresh.contains("composeRequestPatchUiStateRefresh(reason)"));
@@ -161,6 +161,32 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(apps.contains("snapshot.allApps[index].packageName"));
         assertFalse(apps.contains("supportedApps.forEachIndexed"));
         assertFalse(apps.contains("allApps.forEachIndexed"));
+    }
+
+    @Test
+    public void hudCheckUsesWorkerStateAndPreviewGeometry() throws IOException {
+        String source = source("BydHudRuntimeCompose.kt");
+        String hudCheck = between(source, "private fun HudCheckTab(",
+                "private enum class ChevronDirection");
+
+        assertTrue(hudCheck.contains("snapshot.hudCheck"));
+        assertTrue(hudCheck.contains("snapshot.hudCheckStatus"));
+        assertTrue(hudCheck.contains("deliveryStatus"));
+        assertTrue(hudCheck.contains("state.running && deliveryStatus.isNotBlank()"));
+        assertTrue(hudCheck.contains("composeHudCheckStep("));
+        assertTrue(hudCheck.contains("composeHudCheckSetManeuverBitmap("));
+        assertTrue(hudCheck.contains("composeHudCheckSetLaneBitmap("));
+        assertTrue(hudCheck.contains("composeHudCheckSetTransliterate("));
+        assertTrue(hudCheck.contains("composeHudCheckStepExtended("));
+        assertTrue(hudCheck.contains(".width(310.dp)"));
+        assertTrue(hudCheck.contains(".width(230.dp)"));
+        assertTrue(hudCheck.contains(".fillMaxWidth(0.7f)"));
+        assertTrue(hudCheck.contains("Modifier.width(280.dp)"));
+        assertTrue(source.contains("composeHudCheckStop(\"tab-change\")"));
+        assertFalse(hudCheck.contains("delay(500"));
+        assertFalse(source.contains("private fun ManualTab("));
+        assertFalse(source.contains("composeSendRaw("));
+        assertFalse(source.contains("composeSendManualLane("));
     }
 
     @Test
