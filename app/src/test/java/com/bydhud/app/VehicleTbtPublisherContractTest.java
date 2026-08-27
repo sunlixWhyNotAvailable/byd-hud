@@ -100,7 +100,7 @@ public final class VehicleTbtPublisherContractTest {
     }
 
     @Test
-    public void manualUturnCompositeUsesUturnPriority() {
+    public void manualUturnCompositeKeepsCompleteAndSelectedDirectionSets() {
         HudState manual = new HudState();
         manual.includeLaneBitmap = true;
         manual.numOfLanes = 2;
@@ -109,9 +109,53 @@ public final class VehicleTbtPublisherContractTest {
         VehicleTbtPublisher.LanePayload payload =
                 VehicleTbtPublisher.lanePayloadForTest(manual);
 
-        assertArrayEquals(new int[]{5, 5}, payload.directions);
-        assertArrayEquals(new int[]{5, 255}, payload.recommendations);
-        assertEquals("5,5|5,255|", HudLaneModel.field29Value(manual));
+        assertArrayEquals(new int[]{17, 17}, payload.directions);
+        assertArrayEquals(new int[]{5, 3}, payload.recommendations);
+        assertEquals("17,5|17,3|", HudLaneModel.field29Value(manual));
+    }
+
+    @Test
+    public void manualTripleLaneMatchesCapturedWazeSemantics() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 2;
+        manual.laneString = "S+L*+U|S";
+
+        VehicleTbtPublisher.LanePayload payload =
+                VehicleTbtPublisher.lanePayloadForTest(manual);
+
+        assertArrayEquals(new int[]{16, 0}, payload.directions);
+        assertArrayEquals(new int[]{1, 255}, payload.recommendations);
+        assertEquals("16,1|0,255|", HudLaneModel.field29Value(manual));
+        // The existing bitmap fallback is not an Instrument direction code.
+        assertEquals(5, HudLaneModel.parse(manual)[0].iconId);
+    }
+
+    @Test
+    public void manualUturnLanesKeepRightUturnAndMultipleRecommendations() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 5;
+        manual.laneString = "S*+UR|L+UR*|R*+UR|L*+R+UL|S+L*+U*";
+
+        VehicleTbtPublisher.LanePayload payload =
+                VehicleTbtPublisher.lanePayloadForTest(manual);
+
+        assertArrayEquals(new int[]{10, 20, 12, 18, 16}, payload.directions);
+        assertArrayEquals(new int[]{0, 8, 3, 1, 11}, payload.recommendations);
+        assertEquals("10,0|20,8|12,3|18,1|16,11|", HudLaneModel.field29Value(manual));
+    }
+
+    @Test
+    public void unsupportedManualUturnSetDoesNotInventNumericLanes() {
+        HudState manual = new HudState();
+        manual.includeLaneBitmap = true;
+        manual.numOfLanes = 3;
+        manual.laneString = "S|UL+UR*|R";
+
+        assertEquals(0, VehicleTbtPublisher.lanePayloadForTest(manual).directions.length);
+        assertEquals("", HudLaneModel.field29Value(manual));
+        assertFalse(HudRoadPayload.shouldWriteLaneMetadata(manual));
     }
 
     @Test

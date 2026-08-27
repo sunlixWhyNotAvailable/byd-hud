@@ -258,6 +258,12 @@ final class HudLaneModel {
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static int compoundIconId(LanePart[] parts) {
+        // Bitmap resource IDs are a separate catalog. Preserve its existing
+        // U-turn fallback; numeric output uses the complete set in parts.
+        for (LanePart part : parts) {
+            if (part.is("UL")) return 5;
+            if (part.is("UR")) return 8;
+        }
         if (parts.length == 2) {
             LanePart left = parts[0];
             LanePart right = parts[1];
@@ -301,36 +307,18 @@ final class HudLaneModel {
 
     private static int instrumentCodeForParts(LanePart[] parts) {
         int mask = 0;
-        int firstUturn = 0;
         for (LanePart part : parts) {
-            int partMask = part.instrumentMask();
-            if ((partMask & (8 | 16)) != 0) {
-                if (firstUturn == 0) firstUturn = partMask;
-            } else {
-                mask |= partMask;
-            }
+            mask |= part.instrumentMask();
         }
-        return firstUturn == 0 ? DirectTbtFrame.Lane.instrumentCodeForMask(mask)
-                : DirectTbtFrame.Lane.instrumentCodeForMask(firstUturn);
+        return DirectTbtFrame.Lane.instrumentCodeForMask(mask);
     }
 
     private static int recommendationCodeForParts(LanePart[] parts) {
         int mask = 0;
-        int firstUturn = 0;
-        int selectedUturn = 0;
         for (LanePart part : parts) {
-            int partMask = part.instrumentMask();
-            if ((partMask & (8 | 16)) != 0) {
-                if (firstUturn == 0) firstUturn = partMask;
-                if (part.recommended && selectedUturn == 0) selectedUturn = partMask;
-            } else if (part.recommended) {
-                mask |= partMask;
+            if (part.recommended) {
+                mask |= part.instrumentMask();
             }
-        }
-        if (firstUturn != 0) {
-            return selectedUturn == firstUturn
-                    ? DirectTbtFrame.Lane.instrumentCodeForMask(firstUturn)
-                    : DirectTbtFrame.Lane.NO_RECOMMENDATION;
         }
         int code = DirectTbtFrame.Lane.instrumentCodeForMask(mask);
         return code < 0 ? DirectTbtFrame.Lane.NO_RECOMMENDATION : code;

@@ -437,6 +437,15 @@ public final class DirectTbtFrame {
                 case 6: return 6; // L+R
                 case 7: return 7; // S+L+R
                 case 16: return 8; // U-right
+                case 9: return 9; // S+U-left
+                case 17: return 10; // S+U-right
+                case 10: return 11; // L+U-left
+                case 20: return 12; // R+U-right
+                case 11: return 16; // S+L+U-left
+                case 12: return 17; // R+U-left
+                case 14: return 18; // L+R+U-left
+                case 13: return 19; // S+R+U-left
+                case 18: return 20; // L+U-right
                 default: return -1;
             }
         }

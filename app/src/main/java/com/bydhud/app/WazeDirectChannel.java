@@ -1094,7 +1094,7 @@ public final class WazeDirectChannel {
         healthProbeSequence++;
     }
 
-    private List<DirectTbtFrame.Lane> mapLanes(List<Lane> lanes) {
+    static List<DirectTbtFrame.Lane> mapLanes(List<Lane> lanes) {
         if (lanes == null || lanes.isEmpty()) return Collections.emptyList();
         List<DirectTbtFrame.Lane> out = new ArrayList<>();
         for (Lane lane : lanes) {
@@ -1102,83 +1102,25 @@ public final class WazeDirectChannel {
             if (directions == null || directions.isEmpty()) continue;
             int fullMask = 0;
             int selectedMask = 0;
-            int firstUturnMask = 0;
-            int selectedUturnMask = 0;
-            boolean invalid = false;
             StringBuilder raw = new StringBuilder();
             for (LaneDirection direction : directions) {
                 if (raw.length() > 0) raw.append('|');
                 raw.append(direction.getShape()).append(':').append(direction.isRecommended());
                 int category = laneCategory(direction.getShape());
-                if (category == 0) {
-                    invalid = true;
-                    continue;
-                }
-                if ((category & (LANE_U_LEFT | LANE_U_RIGHT)) != 0
-                        && firstUturnMask == 0) {
-                    firstUturnMask = category;
-                } else if ((category & (LANE_U_LEFT | LANE_U_RIGHT)) == 0) {
-                    fullMask |= category;
-                }
-                if (direction.isRecommended()) {
-                    if ((category & (LANE_U_LEFT | LANE_U_RIGHT)) != 0) {
-                        if (selectedUturnMask == 0) selectedUturnMask = category;
-                    } else {
-                        selectedMask |= category;
-                    }
-                }
-            }
-            if (invalid && fullMask == 0 && firstUturnMask == 0) continue;
-            int completeCode = firstUturnMask != 0
-                    ? firstUturnMask == LANE_U_LEFT ? 5 : 8
-                    : DirectTbtFrame.Lane.instrumentCodeForMask(fullMask);
-            if (completeCode < 0) continue;
-            int recommendationCode;
-            if (firstUturnMask != 0) {
-                recommendationCode = selectedUturnMask == firstUturnMask ? completeCode
-                        : DirectTbtFrame.Lane.NO_RECOMMENDATION;
-            } else {
-                int selectedCode = selectedMask == 0
-                        ? -1 : DirectTbtFrame.Lane.instrumentCodeForMask(selectedMask);
-                recommendationCode = selectedCode < 0
-                        ? DirectTbtFrame.Lane.NO_RECOMMENDATION : selectedCode;
-            }
-            out.add(new DirectTbtFrame.Lane(completeCode, recommendationCode, raw.toString()));
-        }
-        return out;
-    }
-
-    static int[] laneCodesForTest(int[] shapes, boolean[] selected) {
-        if (shapes == null || shapes.length == 0) return new int[]{-1, 255};
-        int fullMask = 0;
-        int selectedMask = 0;
-        int firstUturnMask = 0;
-        int selectedUturnMask = 0;
-        for (int i = 0; i < shapes.length; i++) {
-            int category = laneCategory(shapes[i]);
-            if (category == 0) continue;
-            if ((category & (LANE_U_LEFT | LANE_U_RIGHT)) != 0) {
-                if (firstUturnMask == 0) firstUturnMask = category;
-            } else {
                 fullMask |= category;
-            }
-            if (selected != null && i < selected.length && selected[i]) {
-                if ((category & (LANE_U_LEFT | LANE_U_RIGHT)) != 0) {
-                    if (selectedUturnMask == 0) selectedUturnMask = category;
-                } else {
+                if (direction.isRecommended()) {
                     selectedMask |= category;
                 }
             }
+            int completeCode = DirectTbtFrame.Lane.instrumentCodeForMask(fullMask);
+            // Do not shift physical lane positions by dropping an unsupported lane.
+            if (completeCode < 0) return Collections.emptyList();
+            int selectedCode = DirectTbtFrame.Lane.instrumentCodeForMask(selectedMask);
+            int recommendationCode = selectedCode < 0
+                    ? DirectTbtFrame.Lane.NO_RECOMMENDATION : selectedCode;
+            out.add(new DirectTbtFrame.Lane(completeCode, recommendationCode, raw.toString()));
         }
-        int full = firstUturnMask != 0
-                ? firstUturnMask == LANE_U_LEFT ? 5 : 8
-                : DirectTbtFrame.Lane.instrumentCodeForMask(fullMask);
-        if (full < 0) return new int[]{-1, 255};
-        int selectedCode = DirectTbtFrame.Lane.instrumentCodeForMask(selectedMask);
-        int recommendation = firstUturnMask != 0
-                ? selectedUturnMask == firstUturnMask ? full : 255
-                : selectedCode < 0 ? 255 : selectedCode;
-        return new int[]{full, recommendation};
+        return out;
     }
 
     private void logNextStep(Step step, String source) {
