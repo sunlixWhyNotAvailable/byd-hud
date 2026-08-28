@@ -19,10 +19,13 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
@@ -43,10 +46,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
@@ -70,8 +75,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
@@ -83,6 +88,8 @@ import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.onLongClick
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
@@ -97,6 +104,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
@@ -107,6 +115,13 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Popup
 import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.motionEventSpy
+import androidx.compose.ui.ExperimentalComposeUiApi
+import androidx.compose.ui.graphics.luminance
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
@@ -253,7 +268,8 @@ private data class Copy(
     val updateAction: String,
     val basicNavigationOutput: String,
     val extraNavigationOptions: String,
-    val dashboardControl: String,
+    val dashboardWindowSize: String,
+    val logs: String,
     val notice: String,
     val wazeDirectNotice: String,
     val wazeSupportedVersions: String,
@@ -1211,7 +1227,15 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                                 showSetupDialog = true
                             }
                         },
-                        onShutdownClick = { runAction { activity.composeShutdownAndExit() } }
+                        onShutdownClick = { runAction { activity.composeShutdownAndExit() } },
+                        dashboardWidget = snapshot.dashboardWidgetState,
+                        widgetOverlayPermission = snapshot.dashboardWidgetOverlayPermission,
+                        onDashboardWidgetChange = { value ->
+                            runAction { activity.composeSetDashboardWidgetState(value) }
+                        },
+                        onWidgetPermissionRequest = {
+                            runAction { activity.composeRequestDashboardWidgetPermission() }
+                        }
                     )
                     RuntimeTab.Apps -> AppsTab(
                         copy = copy,
@@ -1682,9 +1706,14 @@ private fun OptionsTab(
     onBetaChannelChange: (Boolean) -> Unit,
     onManualUpdateCheck: () -> Unit,
     onDisableBgApps: () -> Unit,
-    onShutdownClick: () -> Unit
+    onShutdownClick: () -> Unit,
+    dashboardWidget: DashboardWidgetState,
+    widgetOverlayPermission: Boolean,
+    onDashboardWidgetChange: (DashboardWidgetState) -> Unit,
+    onWidgetPermissionRequest: () -> Unit
 ) {
     val ua = copy.language == Language.Ua
+    var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
     val routeMetricModes = if (ua) {
         listOf("Вимкнений", "До зупинки", "Весь маршрут")
     } else {
@@ -2011,7 +2040,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("dashboard-control", copy.dashboardControl, R.drawable.ic_options_directions_car) {
+        optionsSection("dashboard-window-size", copy.dashboardWindowSize, R.drawable.ic_options_directions_car) {
             row("dashboard-screen-mode") {
                 SettingRow(copy.dashboardScreenMode, copy.dashboardScreenModeHint, palette) {
                     HudDropdown(
@@ -2070,6 +2099,161 @@ private fun OptionsTab(
                 }
             }
         }
+        optionsSection(
+            "dashboard-widget",
+            if (ua) "Віджет приборки" else "Dashboard widget",
+            R.drawable.ic_options_directions_car,
+            preview = { DashboardWidgetSample(dashboardWidget, ua, palette) }
+        ) {
+            row("widget-shape") {
+                SettingRow(
+                    if (ua) "Віджет зміни приборки" else "Dashboard switch widget",
+                    if (ua) "Оберіть форму, щоб увімкнути віджет" else "Choose a shape to enable the widget",
+                    palette
+                ) {
+                    HudDropdown(
+                        selectedIndex = dashboardWidget.shape.ordinal,
+                        options = if (ua) listOf("Викл.", "Квадрат", "Коло") else listOf("Off", "Square", "Circle"),
+                        palette = palette,
+                        width = 190.dp,
+                        optionIcons = listOf(null, 1, 2),
+                        onSelected = { index ->
+                            onDashboardWidgetChange(
+                                dashboardWidget.selectShape(DashboardWidgetShape.entries[index]).normalized()
+                            )
+                        }
+                    )
+                }
+            }
+            row("widget-auto-collapse") {
+                SettingRow(
+                    if (ua) "Автоматично згортати віджет після зміни режиму" else "Automatically collapse the widget after a mode change",
+                    "",
+                    palette,
+                    enabled = dashboardWidget.enabled
+                ) {
+                    HudSwitch(
+                        dashboardWidget.autoCollapse,
+                        { onDashboardWidgetChange(dashboardWidget.copy(autoCollapse = it)) },
+                        palette,
+                        enabled = dashboardWidget.enabled
+                    )
+                }
+            }
+            row("widget-apply-window-profile") {
+                SettingRow(
+                    if (ua) "Застосовувати профіль вікна приборки" else "Apply dashboard window profile",
+                    "",
+                    palette,
+                    enabled = dashboardWidget.enabled
+                ) {
+                    HudSwitch(
+                        dashboardWidget.applyWindowProfile,
+                        { onDashboardWidgetChange(dashboardWidget.copy(applyWindowProfile = it)) },
+                        palette,
+                        enabled = dashboardWidget.enabled
+                    )
+                }
+            }
+            if (dashboardWidget.enabled && !widgetOverlayPermission) {
+                row("widget-overlay-permission") {
+                    SettingRow(
+                        if (ua) "Показ поверх інших застосунків" else "Display over other apps",
+                        if (ua) "Потрібен для віджета на робочому столі" else "Required to show the widget on the home screen",
+                        palette
+                    ) {
+                        HudButton(
+                            if (ua) "Надати дозвіл" else "Grant permission",
+                            palette,
+                            primary = true,
+                            width = 190.dp,
+                            onClick = onWidgetPermissionRequest
+                        )
+                    }
+                }
+            }
+            row("widget-size") {
+                WidgetNumberLine(
+                    if (ua) "Розмір" else "Size",
+                    "24–160 dp",
+                    dashboardWidget.sizeDp,
+                    DashboardWidgetState.SIZE_RANGE,
+                    "dp",
+                    palette,
+                    dashboardWidget.enabled,
+                    showTicks = false
+                ) { value -> onDashboardWidgetChange(dashboardWidget.copy(sizeDp = value).normalized()) }
+            }
+            row("widget-orientation") {
+                SettingRow(if (ua) "Орієнтація" else "Orientation", "", palette, enabled = dashboardWidget.enabled) {
+                    HudDropdown(
+                        selectedIndex = dashboardWidget.orientation.ordinal,
+                        options = if (ua) listOf("Вертикальна", "Горизонтальна") else listOf("Vertical", "Horizontal"),
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = dashboardWidget.enabled,
+                        onSelected = { index ->
+                            onDashboardWidgetChange(
+                                dashboardWidget.selectOrientation(DashboardWidgetOrientation.entries[index])
+                            )
+                        }
+                    )
+                }
+            }
+            row("widget-expand-direction") {
+                SettingRow(if (ua) "Напрямок розкриття" else "Expansion direction", "", palette, enabled = dashboardWidget.enabled) {
+                    HudDropdown(
+                        selectedIndex = if (dashboardWidget.expandForward) 1 else 0,
+                        options = widgetDirectionLabels(dashboardWidget.orientation, ua),
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = dashboardWidget.enabled,
+                        onSelected = { index -> onDashboardWidgetChange(dashboardWidget.selectDirection(index == 1)) }
+                    )
+                }
+            }
+            row("widget-transparency") {
+                WidgetNumberLine(
+                    if (ua) "Прозорість" else "Transparency",
+                    if (ua) "0% — видимий, 100% — невидимий" else "0% visible, 100% invisible",
+                    dashboardWidget.transparency,
+                    0..100,
+                    "%",
+                    palette,
+                    dashboardWidget.enabled
+                ) { value -> onDashboardWidgetChange(dashboardWidget.copy(transparency = value).normalized()) }
+            }
+            row("widget-color") {
+                WidgetColorLine(if (ua) "Колір" else "Color", dashboardWidget.fillArgb, palette, dashboardWidget.enabled) {
+                    widgetColorTarget = false
+                }
+            }
+            row("widget-border-size") {
+                WidgetNumberLine(
+                    if (ua) "Розмір рамки" else "Border width",
+                    if (ua) "0 — прибрати рамку" else "0 removes the border",
+                    dashboardWidget.borderDp,
+                    DashboardWidgetState.BORDER_RANGE,
+                    "dp",
+                    palette,
+                    dashboardWidget.enabled
+                ) { value -> onDashboardWidgetChange(dashboardWidget.copy(borderDp = value).normalized()) }
+            }
+            row("widget-border-color") {
+                WidgetColorLine(if (ua) "Колір рамки" else "Border color", dashboardWidget.borderArgb, palette, dashboardWidget.enabled) {
+                    widgetColorTarget = true
+                }
+            }
+        }
+        optionsSection("dashboard-move", if (ua) "Перенесення на приборку" else "Move to dashboard", R.drawable.ic_options_directions_car) {
+            row("move-placeholder") {
+                SettingRow(
+                    if (ua) "Налаштування перенесення" else "Move settings",
+                    if (ua) "Цей підрозділ буде доповнено наступним кроком" else "This section will be configured in the next step",
+                    palette
+                ) {}
+            }
+        }
     }
     SidebarOptionsSurface(
         title = copy.main,
@@ -2078,6 +2262,322 @@ private fun OptionsTab(
         sections = sections,
         palette = palette
     )
+    widgetColorTarget?.let { border ->
+        WidgetColorPicker(
+            initialArgb = if (border) dashboardWidget.borderArgb else dashboardWidget.fillArgb,
+            title = if (border) {
+                if (ua) "Колір рамки" else "Border color"
+            } else {
+                if (ua) "Колір віджета" else "Widget color"
+            },
+            copy = copy,
+            palette = palette,
+            onDismiss = { widgetColorTarget = null },
+            onSelect = { color ->
+                onDashboardWidgetChange(
+                    if (border) dashboardWidget.copy(borderArgb = color).normalized()
+                    else dashboardWidget.copy(fillArgb = color).normalized()
+                )
+                widgetColorTarget = null
+            }
+        )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun WidgetNumberLine(
+    title: String,
+    hint: String,
+    value: Int,
+    range: IntRange,
+    unit: String,
+    palette: Palette,
+    enabled: Boolean,
+    showTicks: Boolean = true,
+    onChange: (Int) -> Unit
+) {
+    val safeValue = value.coerceIn(range)
+    val sliderInteraction = remember { MutableInteractionSource() }
+    val sliderColors = SliderDefaults.colors(
+        thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
+        activeTrackColor = palette.accent,
+        inactiveTrackColor = palette.disabled,
+        disabledThumbColor = Color.Transparent,
+        disabledActiveTrackColor = palette.disabled,
+        disabledInactiveTrackColor = palette.disabled,
+        activeTickColor = if (showTicks) palette.accent else Color.Transparent,
+        inactiveTickColor = if (showTicks) palette.disabled else Color.Transparent,
+        disabledActiveTickColor = Color.Transparent,
+        disabledInactiveTickColor = Color.Transparent
+    )
+    Column {
+        ActionRow(title, hint, palette, enabled = enabled) {
+            Row(Modifier.width(190.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                HudIntegerStepper(
+                    value = safeValue,
+                    palette = palette,
+                    enabled = enabled,
+                    minValue = range.first,
+                    maxValue = range.last,
+                    fallbackValue = safeValue,
+                    onValueChange = onChange
+                )
+                Text(unit, color = palette.muted, fontSize = 13.sp, modifier = Modifier.width(30.dp), textAlign = TextAlign.End)
+            }
+        }
+        Slider(
+            value = safeValue.toFloat(),
+            onValueChange = { onChange(it.roundToInt().coerceIn(range)) },
+            enabled = enabled,
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = (range.last - range.first - 1).coerceAtLeast(0),
+            colors = sliderColors,
+            interactionSource = sliderInteraction,
+            thumb = {
+                SliderDefaults.Thumb(
+                    interactionSource = sliderInteraction,
+                    colors = sliderColors,
+                    enabled = enabled,
+                    thumbSize = DpSize(4.dp, 28.dp)
+                )
+            },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(48.dp)
+        )
+    }
+}
+
+@Composable
+private fun WidgetColorLine(
+    title: String,
+    argb: Int,
+    palette: Palette,
+    enabled: Boolean,
+    onPick: () -> Unit
+) {
+    ActionRow(title, "", palette, enabled = enabled) {
+        Row(Modifier.width(190.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Row(
+                Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(7.dp))
+                    .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp)).padding(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.size(24.dp).background(Color(argb), RoundedCornerShape(4.dp)).border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp)))
+                Text(String.format(Locale.ROOT, "#%06X", argb and 0xFFFFFF), color = palette.text, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+            }
+            HudIconButton(R.drawable.ic_palette, title, palette, palette.accent, enabled = enabled, modifier = Modifier.size(44.dp), onClick = onPick)
+        }
+    }
+}
+
+@Composable
+private fun WidgetColorPicker(
+    initialArgb: Int,
+    title: String,
+    copy: Copy,
+    palette: Palette,
+    onDismiss: () -> Unit,
+    onSelect: (Int) -> Unit
+) {
+    val ua = copy.language == Language.Ua
+    var draft by remember(initialArgb) { mutableIntStateOf(initialArgb or 0xFF000000.toInt()) }
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            Modifier.width(560.dp).heightIn(max = 600.dp).clip(RoundedCornerShape(8.dp))
+                .background(palette.surface).border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState()).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(title, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Box(Modifier.size(48.dp).background(Color(draft), RoundedCornerShape(7.dp)).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp)))
+                Text(String.format(Locale.ROOT, "#%06X", draft and 0xFFFFFF), color = palette.text, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
+                Spacer(Modifier.weight(1f))
+                listOf(palette.accent, palette.green, palette.yellow, palette.red, Color.White, Color.Black).forEach { color ->
+                    val press = rememberPressFeedback(true)
+                    Box(
+                        Modifier.size(36.dp).then(press.modifier).clip(RoundedCornerShape(6.dp)).background(color)
+                            .border(if (draft == color.toArgb()) 3.dp else 1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
+                            .semantics { contentDescription = String.format(Locale.ROOT, "#%06X", color.toArgb() and 0xFFFFFF) }
+                            .clickable(interactionSource = press.interactionSource, indication = null) { draft = color.toArgb() }
+                    )
+                }
+            }
+            listOf(16 to "R", 8 to "G", 0 to "B").forEach { (shift, label) ->
+                WidgetNumberLine(label, "", (draft ushr shift) and 0xFF, 0..255, "", palette, true) { value ->
+                    draft = (draft and (0xFF shl shift).inv()) or (value shl shift) or 0xFF000000.toInt()
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                HudButton(if (ua) "Обрати" else "Select", palette, primary = true, width = 0.dp, modifier = Modifier.weight(1f)) { onSelect(draft) }
+                HudButton(if (ua) "Скасувати" else "Cancel", palette, primary = false, width = 0.dp, modifier = Modifier.weight(1f), onClick = onDismiss)
+            }
+        }
+    }
+}
+
+private fun widgetDirectionLabels(orientation: DashboardWidgetOrientation, ua: Boolean): List<String> =
+    if (orientation == DashboardWidgetOrientation.Vertical) {
+        if (ua) listOf("Вгору", "Вниз") else listOf("Up", "Down")
+    } else {
+        if (ua) listOf("Вліво", "Вправо") else listOf("Left", "Right")
+    }
+
+@Composable
+private fun DashboardWidgetGraphic(
+    state: DashboardWidgetState,
+    modifier: Modifier = Modifier,
+    size: Dp = state.sizeDp.dp,
+    content: @Composable BoxScope.() -> Unit = {}
+) {
+    val shape = if (state.shape == DashboardWidgetShape.Circle) CircleShape else RoundedCornerShape(0.dp)
+    Box(
+        modifier.size(size).graphicsLayer { alpha = state.alpha }
+            .background(Color(state.fillArgb), shape)
+            .then(if (state.borderDp == 0) Modifier else Modifier.border(state.borderDp.dp, Color(state.borderArgb), shape)),
+        contentAlignment = Alignment.Center,
+        content = content
+    )
+}
+
+@Composable
+private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, palette: Palette) {
+    Column(Modifier.fillMaxWidth().padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text(if (ua) "Вигляд віджета" else "Widget preview", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Box(
+            Modifier.fillMaxWidth().height(196.dp).clip(RoundedCornerShape(8.dp))
+                .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)),
+            contentAlignment = Alignment.Center
+        ) {
+            if (state.enabled) DashboardWidgetGraphic(state)
+            else Text(if (ua) "Вимкнено" else "Off", color = palette.muted, fontSize = 14.sp)
+        }
+        Text("${state.sizeDp} dp · ${state.transparency}%", color = palette.muted, fontSize = 13.sp)
+        Text(
+            if (ua) "Натисніть віджет, щоб розкрити режими\nПеретягніть у зручне місце\nЗатисніть, щоб приховати до наступного відкриття застосунку"
+            else "Tap the widget to expand the modes\nDrag to a convenient position\nLong-press to hide until the app is opened again",
+            color = palette.muted, fontSize = 13.sp
+        )
+        if (state.hidden && state.enabled) Text(if (ua) "Тимчасово приховано" else "Temporarily hidden", color = palette.yellow, fontSize = 13.sp)
+    }
+}
+
+@OptIn(ExperimentalComposeUiApi::class)
+@Composable
+internal fun DashboardWidgetOverlayContent(
+    state: DashboardWidgetState,
+    windowSizeDp: Offset,
+    ua: Boolean,
+    busy: Boolean,
+    onChange: (DashboardWidgetState) -> Unit,
+    onHide: () -> Unit,
+    onMode: (DashboardWidgetMode) -> Unit,
+    onPositionSettled: () -> Unit
+) {
+    val latestState by rememberUpdatedState(state)
+    val latestOnChange by rememberUpdatedState(onChange)
+    val latestOnHide by rememberUpdatedState(onHide)
+    val latestOnMode by rememberUpdatedState(onMode)
+    val latestOnPositionSettled by rememberUpdatedState(onPositionSettled)
+    val density = androidx.compose.ui.platform.LocalDensity.current
+    var pressed by remember { mutableStateOf(false) }
+    val scale by animateFloatAsState(if (pressed) 0.97f else 1f, label = "widget-press")
+    var rawPointer by remember { mutableStateOf(Offset.Zero) }
+    var previousDragPointer by remember { mutableStateOf(Offset.Zero) }
+    val latestWindow by rememberUpdatedState(windowSizeDp)
+    val layout = state.layout(windowSizeDp.x, windowSizeDp.y)
+    val graphicSize = minOf(state.sizeDp.toFloat(), layout.cellSize).dp
+    val foreground = if (Color(state.fillArgb).luminance() > 0.5f) Color.Black else Color.White
+    val anchorInteraction = Modifier
+        .motionEventSpy { rawPointer = Offset(it.rawX, it.rawY) }
+        .semantics {
+            role = Role.Button
+            contentDescription = if (ua) "Плаваючий віджет приборки" else "Floating dashboard widget"
+            onClick(if (state.expanded) { if (ua) "Згорнути" else "Collapse" } else { if (ua) "Розкрити" else "Expand" }) {
+                val next = latestState.toggleExpanded()
+                latestOnChange(next)
+                latestOnPositionSettled()
+                true
+            }
+            onLongClick(if (ua) "Приховати до відкриття застосунку" else "Hide until the app opens") { latestOnHide(); true }
+        }
+        .pointerInput(Unit) {
+            detectDragGestures(
+                onDragStart = { previousDragPointer = rawPointer },
+                onDragEnd = { latestOnPositionSettled() },
+                onDragCancel = { latestOnPositionSettled() }
+            ) { change, _ ->
+                change.consume()
+                val delta = rawPointer - previousDragPointer
+                previousDragPointer = rawPointer
+                val current = latestState
+                val cell = minOf(current.sizeDp.toFloat(), latestWindow.x, latestWindow.y)
+                latestOnChange(current.dragBy(delta.x / density.density, delta.y / density.density, latestWindow.x - cell, latestWindow.y - cell).normalized())
+            }
+        }
+        .pointerInput(Unit) {
+            detectTapGestures(
+                onTap = {
+                    val next = latestState.toggleExpanded()
+                    latestOnChange(next)
+                    latestOnPositionSettled()
+                },
+                onLongPress = { latestOnHide() },
+                onPress = {
+                    pressed = true
+                    try { tryAwaitRelease() } finally { pressed = false }
+                }
+            )
+        }
+    val fields: @Composable () -> Unit = {
+        state.fields(layout.expandForward).forEach { mode ->
+            key(mode) {
+                val interaction = remember { MutableInteractionSource() }
+                val modePressed by interaction.collectIsPressedAsState()
+                Box(
+                    Modifier.size(layout.cellSize.dp).then(
+                        if (mode == null) anchorInteraction
+                        else Modifier.clickable(enabled = !busy, interactionSource = interaction, indication = null, role = Role.Button) { latestOnMode(mode) }
+                    ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    DashboardWidgetGraphic(
+                        state,
+                        Modifier.graphicsLayer { scaleX = if (mode == null) scale else if (modePressed && !busy) 0.97f else 1f; scaleY = scaleX },
+                        size = graphicSize
+                    ) {
+                        if (mode == null) {
+                            if (state.expanded) WidgetCloseIcon(graphicSize * 0.45f, foreground)
+                        } else {
+                            val resource = when (mode) {
+                                DashboardWidgetMode.IpcOff -> R.drawable.ic_widget_ipc_off
+                                DashboardWidgetMode.Tbt -> R.drawable.ic_widget_tbt
+                                DashboardWidgetMode.Mini -> R.drawable.ic_widget_mini
+                                DashboardWidgetMode.Full -> R.drawable.ic_widget_full
+                            }
+                            Icon(painterResource(resource), mode.label, Modifier.size(graphicSize * 0.8f), tint = foreground)
+                        }
+                    }
+                }
+            }
+        }
+    }
+    Box(Modifier.size(layout.width.dp, layout.height.dp)) {
+        if (state.orientation == DashboardWidgetOrientation.Vertical) {
+            Column(verticalArrangement = Arrangement.spacedBy(DashboardWidgetState.GAP.dp)) { fields() }
+        } else {
+            Row(horizontalArrangement = Arrangement.spacedBy(DashboardWidgetState.GAP.dp)) { fields() }
+        }
+    }
+}
+
+@Composable
+private fun WidgetCloseIcon(size: Dp, tint: Color) {
+    Canvas(Modifier.size(size)) {
+        val inset = 2.dp.toPx()
+        drawLine(tint, Offset(inset, inset), Offset(this.size.width - inset, this.size.height - inset), strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+        drawLine(tint, Offset(this.size.width - inset, inset), Offset(inset, this.size.height - inset), strokeWidth = 2.dp.toPx(), cap = StrokeCap.Round)
+    }
 }
 
 @Composable
@@ -3613,118 +4113,104 @@ private fun StorageTab(
         item(key = "navigation-log-controls") {
             Section(copy.navigationLogsFolder, palette) {
                 Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                verticalAlignment = Alignment.Top,
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                CodeBlock(
-                    text = if (!snapshot.storageCacheAvailable) {
-                        coldStorageText
-                    } else {
-                        snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
-                            val location = if (path.trimEnd('/').endsWith(
-                                    "/Documents/BYD-HUD", ignoreCase = true
-                                )) {
-                                copy.publicStorageLocation
-                            } else {
-                                copy.privateStorageLocation
-                            }
-                            "$location:\n$path"
-                        }.ifBlank { copy.storageNoDayFolders }
-                    },
-                    palette = palette,
-                    compact = true,
-                    modifier = Modifier.width(430.dp)
-                )
-                Column(
-                    modifier = Modifier.width(300.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    modifier = Modifier.fillMaxWidth().padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
-                    HudButton(
-                        if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
-                        palette,
-                        primary = true,
-                        enabled = !storageActionBusy && !logcatBusy,
-                        width = 0.dp,
-                        modifier = Modifier.fillMaxWidth()
+                    CodeBlock(
+                        text = if (!snapshot.storageCacheAvailable) coldStorageText else snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
+                            val location = if (path.trimEnd('/').endsWith("/Documents/BYD-HUD", ignoreCase = true)) copy.publicStorageLocation else copy.privateStorageLocation
+                            "$location:\n$path"
+                        }.ifBlank { copy.storageNoDayFolders },
+                        palette = palette,
+                        compact = true,
+                        modifier = Modifier.width(430.dp)
+                    )
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()
+                        HudButton(
+                            if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
+                            palette,
+                            primary = true,
+                            enabled = !storageActionBusy && !logcatBusy,
+                            width = 180.dp
+                        ) {
+                            if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()
+                        }
+                        Spacer(Modifier.weight(1f))
+                        ShareIconLabelButton(
+                            label = copy.shareSelected,
+                            palette = palette,
+                            enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
+                            width = 172.dp,
+                            onClick = { onShareSelected(selectedDayNames) }
+                        )
+                        HudButton(
+                            if (sortOldestFirst) copy.sortByName else copy.sortByDate,
+                            palette,
+                            primary = false,
+                            enabled = snapshot.storageCacheAvailable && !storageSortBusy,
+                            width = 180.dp,
+                            onClick = { onSortOldestFirst(!sortOldestFirst) }
+                        )
                     }
+                }
+            }
+        }
+
+        item(key = "storage-logs-header") {
+            Box(
+                Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
+                    .padding(horizontal = 14.dp, vertical = 10.dp)
+            ) {
+                Text(copy.logs.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+            }
+        }
+        if (days.isEmpty()) {
+            item(key = "storage-logs-empty") {
+                AppSectionMessage(
+                    if (!snapshot.storageCacheAvailable) coldStorageText else copy.storageNoDayFolders,
+                    palette
+                )
+            }
+        }
+        items(
+            count = days.size,
+            key = { index -> "storage-day-${days[index].name}" },
+            contentType = { "storage-day" }
+        ) { index ->
+            val day = days[index]
+            AppSectionRow(index, days.lastIndex, palette) {
+                StorageDayRow(
+                    day = day,
+                    copy = copy,
+                    palette = palette,
+                    selected = selectedDays.contains(day.name),
+                    enabled = !storageSortBusy,
+                    onToggle = { onToggleDay(day.name) },
+                    segmented = true
+                )
+            }
+        }
+        item(key = "storage-logs-footer") {
+            Row(
+                modifier = Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
+                    .padding(14.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                     HudButton(
                         copy.shareConfiguration,
                         palette,
                         primary = false,
                         enabled = !storageActionBusy && !configurationShareBusy,
-                        width = 0.dp,
-                        modifier = Modifier.fillMaxWidth(),
+                        width = 300.dp,
                         onClick = onShareConfiguration
                     )
                 }
-                Row(
-                    modifier = Modifier
-                        .width(232.dp)
-                        .align(Alignment.CenterVertically),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
-                ) {
-                    HudIconButton(
-                        icon = R.drawable.ic_share,
-                        contentDescription = copy.shareSelected,
-                        palette = palette,
-                        tint = palette.accent,
-                        enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
-                        onClick = { onShareSelected(selectedDayNames) }
-                    )
-                    HudButton(
-                        if (sortOldestFirst) copy.sortByName else copy.sortByDate,
-                        palette,
-                        primary = false,
-                        enabled = snapshot.storageCacheAvailable && !storageSortBusy,
-                        width = 180.dp
-                    ) {
-                        onSortOldestFirst(!sortOldestFirst)
-                    }
-                }
-            }
-                if (days.isEmpty()) {
-                    Divider(palette)
-                    Text(
-                        when {
-                            !snapshot.storageCacheAvailable -> coldStorageText
-                            else -> copy.storageNoDayFolders
-                        },
-                        color = palette.muted,
-                        fontSize = 14.sp,
-                        modifier = Modifier.padding(14.dp)
-                    )
-                }
-            }
-        }
-
-        items(
-            count = days.size,
-            key = { index -> "storage-day-${days[index].name}" }
-        ) { index ->
-            val day = days[index]
-            StorageDayRow(
-                day = day,
-                copy = copy,
-                palette = palette,
-                selected = selectedDays.contains(day.name),
-                enabled = !storageSortBusy,
-                onToggle = { onToggleDay(day.name) }
-            )
-        }
-
-        item(key = "storage-delete-action") {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.End
-            ) {
                 HudButton(
                     copy.deleteSelected,
                     palette,
@@ -4485,7 +4971,8 @@ private fun StorageDayRow(
     palette: Palette,
     selected: Boolean,
     enabled: Boolean,
-    onToggle: () -> Unit
+    onToggle: () -> Unit,
+    segmented: Boolean = false
 ) {
     val press = rememberPressFeedback(enabled)
     val visualClick = rememberVisualFirstClick(onToggle)
@@ -4493,8 +4980,9 @@ private fun StorageDayRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
+            .then(if (segmented) Modifier else Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp)))
             .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
@@ -4872,31 +5360,49 @@ private fun OutputImageChoice(
     palette: Palette,
     onChange: (Boolean) -> Unit
 ) {
-    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.width(230.dp)) {
-        HudButton(
-            stockText,
-            palette,
-            primary = !bitmap,
-            width = 0.dp,
-            modifier = Modifier.weight(1f).semantics {
-                selected = !bitmap
+    Row(
+        modifier = Modifier
+            .width(230.dp)
+            .height(42.dp)
+            .clip(RoundedCornerShape(22.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
+            .background(palette.panelAlt)
+            .padding(5.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        OutputImageChoiceItem(stockText, !bitmap, palette, Modifier.weight(1f)) { onChange(false) }
+        OutputImageChoiceItem(bitmapText, bitmap, palette, Modifier.weight(1f)) { onChange(true) }
+    }
+}
+
+@Composable
+private fun OutputImageChoiceItem(
+    text: String,
+    active: Boolean,
+    palette: Palette,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick(onClick)
+    Box(
+        modifier = modifier
+            .fillMaxHeight()
+            .clip(RoundedCornerShape(18.dp))
+            .background(pressBackground(if (active) palette.accent else Color.Transparent, palette, press.pressed))
+            .then(press.modifier)
+            .clickable(
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
+            .semantics {
+                selected = active
                 role = Role.RadioButton
-            }
-        ) {
-            onChange(false)
-        }
-        HudButton(
-            bitmapText,
-            palette,
-            primary = bitmap,
-            width = 0.dp,
-            modifier = Modifier.weight(1f).semantics {
-                selected = bitmap
-                role = Role.RadioButton
-            }
-        ) {
-            onChange(true)
-        }
+            },
+        contentAlignment = Alignment.Center
+    ) {
+        Text(text, color = if (active) Color.White else palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
     }
 }
 
@@ -4959,7 +5465,8 @@ private data class OptionsSectionSpec(
     val key: String,
     val title: String,
     @DrawableRes val icon: Int,
-    val rows: List<OptionsRowSpec>
+    val rows: List<OptionsRowSpec>,
+    val preview: (@Composable () -> Unit)? = null
 )
 
 private class OptionsSectionsScope {
@@ -4969,12 +5476,14 @@ private class OptionsSectionsScope {
         key: String,
         title: String,
         @DrawableRes icon: Int,
+        preview: (@Composable () -> Unit)? = null,
         content: OptionsSectionScope.() -> Unit
     ) {
         sections += OptionsSectionSpec(
             key = key,
             title = title,
             icon = icon,
+            preview = preview,
             rows = OptionsSectionScope().apply(content).rows.toList()
         )
     }
@@ -5123,6 +5632,17 @@ private fun LazyListScope.sidebarOptionsSection(
             Text(section.title.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
     }
+    section.preview?.let { preview ->
+        item(key = "${section.key}:preview", contentType = "options-preview") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = false)
+            ) {
+                preview()
+            }
+        }
+    }
     section.rows.forEachIndexed { index, row ->
         item(key = "${section.key}:${row.key}", contentType = "options-row") {
             Column(
@@ -5216,6 +5736,7 @@ private fun HudDropdown(
     palette: Palette,
     width: Dp,
     enabled: Boolean = true,
+    optionIcons: List<Int?> = emptyList(),
     onSelected: (Int) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -5239,6 +5760,11 @@ private fun HudDropdown(
                 .padding(horizontal = 8.dp),
             contentAlignment = Alignment.Center
         ) {
+            optionIcons.getOrNull(safeIndex)?.let {
+                Box(Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
+                    WidgetOptionIcon(it, fieldContent)
+                }
+            }
             Text(
                 text = options[safeIndex],
                 color = fieldContent,
@@ -5283,6 +5809,11 @@ private fun HudDropdown(
                                 },
                             contentAlignment = Alignment.Center
                         ) {
+                            optionIcons.getOrNull(index)?.let {
+                                Box(Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
+                                    WidgetOptionIcon(it, if (index == safeIndex && palette.dark) Color.White else palette.text)
+                                }
+                            }
                             Text(
                                 text = option,
                                 color = if (index == safeIndex && palette.dark) Color.White else palette.text,
@@ -5308,6 +5839,17 @@ private fun HudDropdown(
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun WidgetOptionIcon(kind: Int, tint: Color) {
+    Canvas(Modifier.size(18.dp)) {
+        if (kind == 1) {
+            drawRect(tint, style = Stroke(width = 2.dp.toPx()))
+        } else {
+            drawCircle(tint, radius = size.minDimension * 0.38f, style = Stroke(width = 2.dp.toPx()))
         }
     }
 }
@@ -5649,6 +6191,45 @@ private fun HudIconButton(
                 else -> tint
             },
             modifier = Modifier.size(28.dp)
+        )
+    }
+}
+
+@Composable
+private fun ShareIconLabelButton(
+    label: String,
+    palette: Palette,
+    enabled: Boolean,
+    width: Dp,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback(enabled)
+    val visualClick = rememberVisualFirstClick(onClick)
+    Row(
+        modifier = Modifier.width(width).height(44.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(pressBackground(if (enabled) palette.panelAlt else palette.disabled, palette, press.pressed))
+            .then(press.modifier)
+            .clickable(enabled = enabled, interactionSource = press.interactionSource, indication = null, onClick = visualClick)
+            .padding(horizontal = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_share),
+            contentDescription = null,
+            tint = if (enabled) palette.accent else palette.muted.copy(alpha = 0.55f),
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(Modifier.width(8.dp))
+        Text(
+            label,
+            color = if (enabled) palette.text else palette.muted.copy(alpha = 0.55f),
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 14.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
         )
     }
 }
@@ -6109,8 +6690,8 @@ private fun enCopy() = Copy(
     adbNotGranted = "ADB: not granted",
     permissionsOk = "Permissions: OK",
     permissionsMissing = "Permissions: missing",
-    ukr = "Укр",
-    eng = "Англ",
+    ukr = "UA",
+    eng = "ENG",
     dark = "Dark",
     light = "Light",
     mainHint = "Navigation settings",
@@ -6147,7 +6728,7 @@ private fun enCopy() = Copy(
     updateAction = "Update",
     basicNavigationOutput = "Basic navigation output",
     extraNavigationOptions = "Extra navigation options",
-    dashboardControl = "Dashboard control",
+    dashboardWindowSize = "Dashboard window size",
     notice = "Notice",
     wazeDirectNotice = "Waze HUD output works best through the direct channel. Supported versions:",
     wazeSupportedVersions = "stock 4.95.0.3 / patched 5.20.0.1",
@@ -6235,10 +6816,11 @@ private fun enCopy() = Copy(
     storageLimitGb = "Limit, GB",
     currentNavLogsSize = "Current navigation logs folder size",
     navigationLogsFolder = "Navigation logs folder",
+    logs = "Logs",
     privateStorageLocation = "Private folder",
     publicStorageLocation = "Public folder",
     bothStorageLocations = "Public and private folders",
-    shareSelected = "Share selected",
+    shareSelected = "Share",
     sortByDate = "Newest first",
     sortByName = "Oldest first",
     deleteSelected = "Delete selected",
@@ -6373,7 +6955,7 @@ private fun uaCopy() = enCopy().copy(
     updateAction = "Оновити",
     basicNavigationOutput = "Базовий вивід навігації",
     extraNavigationOptions = "Додаткові функції навігації",
-    dashboardControl = "Керування приборкою",
+    dashboardWindowSize = "Розміри вікна на приборці",
     notice = "Примітка",
     wazeDirectNotice = "Вивід Waze на HUD найкраще працює через прямий канал. Підтримувані версії:",
     wazeSupportedVersions = "стокова 4.95.0.3 / патчена 5.20.0.1",
@@ -6451,7 +7033,7 @@ private fun uaCopy() = enCopy().copy(
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
     startLogcat = "Почати Logcat",
     stopLogcat = "Зупинити Logcat",
-    shareConfiguration = "Поділитись конф-єю",
+    shareConfiguration = "Поділитись конфігурацією",
     storage = "Сховище та логи",
     storageHint = "Запис, поширення, зберігання й очищення навігаційних логів.",
     storageSettings = "Налаштування сховища",
@@ -6460,10 +7042,13 @@ private fun uaCopy() = enCopy().copy(
     storageLimitGb = "Ліміт, ГБ",
     currentNavLogsSize = "Поточний розмір теки з журналом навігації",
     navigationLogsFolder = "Тека журналу навігації",
+    logs = "Логи",
     privateStorageLocation = "Приватна тека",
     publicStorageLocation = "Публічна тека",
     bothStorageLocations = "Публічна та приватна теки",
-    shareSelected = "Поділитися вибраним",
+    shareSelected = "Поділитись",
+    ukr = "Укр",
+    eng = "Англ",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
     deleteSelected = "Видалити вибране",

@@ -198,6 +198,7 @@ public final class HudRuntimeService extends Service {
         clearStartRequestGate();
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
+        DashboardWidgetController.onRuntimeStart(this);
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         if (!runtimeStartInitialized || activeWork != runtimeActiveWork) {
             InstrumentProxyManager.get(this).ensureStarted("runtime-service:" + reason);

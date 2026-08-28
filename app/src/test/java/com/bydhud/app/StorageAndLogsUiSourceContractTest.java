@@ -39,12 +39,18 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(storage.contains("copy.shareSelected"));
         assertTrue(storage.contains("copy.sortByName"));
         assertTrue(storage.contains(".width(430.dp)"));
-        assertTrue(storage.contains(".width(300.dp)"));
-        assertTrue(storage.contains(".width(232.dp)"));
+        assertTrue(storage.contains("width = 300.dp"));
+        assertTrue(storage.contains("ShareIconLabelButton"));
         assertTrue(storage.contains("width = 180.dp"));
-        assertTrue(storage.contains("verticalAlignment = Alignment.Top"));
-        assertTrue(logControls.contains("horizontalArrangement = Arrangement.SpaceBetween"));
-        assertTrue(storage.contains(".align(Alignment.CenterVertically)"));
+        assertTrue(logControls.contains("verticalAlignment = Alignment.CenterVertically"));
+        assertFalse(logControls.contains("verticalAlignment = Alignment.Top"));
+        assertTrue(logControls.contains("Spacer(Modifier.weight(1f))"));
+        String share = between(logControls, "ShareIconLabelButton(", "onClick = { onShareSelected");
+        assertTrue(share.contains("width = 172.dp"));
+        assertTrue(logControls.contains("Arrangement.spacedBy(10.dp)"));
+        assertTrue(storage.contains("storage-logs-header"));
+        assertTrue(storage.contains("storage-logs-footer"));
+        assertTrue(storage.contains("contentType = { \"storage-day\" }"));
         assertTrue(source.contains(
                 "activity.composeTryStartBlockingUiFlow(\"configuration-share\")"));
         assertTrue(source.contains("configurationShareVisible = true"));

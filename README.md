@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
 
-- **Version:** v3.0.0
+- **Version:** v3.1.0
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
@@ -39,6 +39,7 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Navigation output | Maneuver image, native arrow, distance, street or cue, lanes, and optional route metrics |
 | Direct channels | Structured low-latency data from a compatible patched Google Maps or Waze build |
 | Dashboard control | Move a running navigator between displays, choose its screen mode, and tune the projection window |
+| Dashboard widget | A movable shortcut for IPC OFF, TBT, MINI and FULL, with optional saved window profiles |
 | Navigator downloads | Download and validate the fixed navigator assets currently offered in the `Apps` tab |
 | Navigator patcher | Inspect and locally patch compatible Google Maps or Waze packages for direct-channel support |
 | Storage and logs | Record diagnostics and performance data, manage logs by day, and share only the selected data |
@@ -185,6 +186,8 @@ Waze route recovery is independent from the `HUD` switch and dashboard placement
 
 `Send to dashboard` moves a running application to the instrument cluster. `Send to main` returns it to the center display.
 
+Find the screen mode and geometry controls under `Options → Dashboard window size`.
+
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Dashboard screen mode` | Full | Selects `None`, `Partial`, or `Full` presentation after the navigator reaches the dashboard |
@@ -204,6 +207,29 @@ Suggested markup:
 -->
 
 > Use dashboard controls only while parked. Some stock cluster layouts add dark top and bottom overlays; BYD HUD can resize the window but cannot remove firmware-owned overlays.
+
+### Dashboard widget
+
+Open `Options → Dashboard widget` and choose Square or Circle to enable the floating widget. Allow `Display over other apps` when prompted. The widget remains available over other applications and its own settings page; the fixed sample shows its appearance while you edit it.
+
+Tap to expand the four mode pictures: IPC OFF, TBT, MINI and FULL. Tap the cross to collapse, drag to reposition, or long-press to hide it temporarily. Opening BYD HUD brings an enabled widget back, collapsed. Off disables the widget without changing the dashboard mode. When there is not enough space at a screen edge, the menu opens toward available space while the anchor stays in place.
+
+| Setting | Default | Choices |
+| --- | --- | --- |
+| Widget shape | Off | Off, Square, Circle |
+| Size | 32 dp | 24–160 dp, step 1 |
+| Orientation and direction | Vertical, Down | Vertical: Up/Down; Horizontal: Left/Right |
+| Automatically collapse after a mode change | On | Turn off to keep the menu open |
+| Apply dashboard window profile | On | MINI/FULL apply the matching saved profile to an existing BYD HUD projection |
+| Transparency | 0% | 0% visible, 100% invisible |
+| Color | Blue `#2F86F6` | Color picker |
+| Border size and color | 2 dp, black `#000000` | 0–16 dp; 0 removes the border |
+
+Mode buttons require authorized ADB. They change the presentation without moving, launching or returning a navigator. With profile application off, or without an existing BYD HUD projection, only the mode is requested. Widget profile selection does not change the screen mode saved for the next `Send to dashboard` action. The widget does not mark a mode as currently active because firmware state cannot be determined reliably.
+
+Appearance and position survive restarts. Automatic startup follows `Boot runtime service`; a temporarily hidden widget stays hidden until BYD HUD is opened. `Shutdown` also removes the widget until the app is opened again. Hiding it removes its touch area rather than leaving an invisible overlay.
+
+The `Move to dashboard` Options category is reserved for a future feature; use the existing actions on the `Apps` tab to move applications.
 
 ## Navigator patcher
 
@@ -270,11 +296,13 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 - uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
 - provides `Share configuration` for a smaller diagnostic archive containing device, permission, network, patcher, and navigation-output details.
 
+`Start Logcat` / `Stop Logcat`, `Share` and sorting sit beside the folder paths. Select days in the separate `Logs` section; its footer contains `Share configuration` and `Delete selected`. Configuration sharing does not require selected days.
+
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
 
 Archive preparation uses a persistent progress card that remains visible across tabs and can be stopped safely. It stacks with Waze and Google Maps patch cards instead of overlapping them.
 
-`Share selected` offers two explicit destinations:
+`Share` offers two explicit destinations:
 
 - `Another app` opens the normal Android share chooser;
 - `Send to developer` uploads the same selected ZIP to the Sentry service once.
@@ -371,10 +399,10 @@ For a navigation-output problem:
 
 1. Reproduce it with `Save diagnostic screenshots and extended logs` enabled when possible.
 2. Open `Storage and logs` and select only the affected day.
-3. Press `Share selected` and choose your messenger or `Send to developer`.
+3. Press `Share` and choose your messenger or `Send to developer`.
 4. Disable detailed diagnostics after the test to reduce storage use.
 
-For a permission, device, patcher, or startup problem, use `Storage and logs -> Share configuration` instead.
+For a permission, device, patcher, or startup problem, use `Storage and logs -> Logs -> Share configuration` instead.
 
 > Navigation archives may contain coordinates, searched destinations, street names, notification text, screenshots, and device identifiers. Review the warning before sharing and use only the minimum required day.
 
@@ -412,6 +440,8 @@ HUD output is known to work on the tested tablet firmware starting from version 
 ## License and disclaimer
 
 BYD HUD is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+
+Dashboard mode pictures retain their original BYD artwork ownership; see [third-party notices](THIRD_PARTY_NOTICES.md) for provenance.
 
 This project is independent and is not affiliated with, endorsed by, or sponsored by BYD, DiLink, Waze, Google, Google Maps, or ABRP. All product names and trademarks belong to their respective owners.
 

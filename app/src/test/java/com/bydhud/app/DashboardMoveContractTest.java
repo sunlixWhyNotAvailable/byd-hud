@@ -240,7 +240,10 @@ public final class DashboardMoveContractTest {
                 StandardCharsets.UTF_8);
         assertTrue(source.indexOf("preflightAuthorizedAdb(packageName, reason)")
                 < source.indexOf("ClusterProjectionService.startProjection"));
-        assertFalse(source.contains("StockMapProtocol30011"));
+        String ordinaryMove = between(source,
+                "private void moveIndependentDashboardAppBlocking(",
+                "private boolean preflightAuthorizedAdb(");
+        assertFalse(ordinaryMove.contains("StockMapProtocol30011"));
         assertTrue(source.contains("dashboard_autocontainer_failed"));
         assertTrue(source.contains("sendAutoContainerIfRequested"));
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
@@ -352,7 +355,7 @@ public final class DashboardMoveContractTest {
         if (!Files.exists(path)) {
             path = Paths.get("src/main/java/com/bydhud/app/" + fileName);
         }
-        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8);
+        return new String(Files.readAllBytes(path), StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
 
     private static String between(String source, String start, String end) {

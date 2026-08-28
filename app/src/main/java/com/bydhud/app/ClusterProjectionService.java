@@ -27,6 +27,13 @@ import android.view.SurfaceView;
 import android.view.View;
 import android.view.WindowManager;
 
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.BooleanSupplier;
+
 //anchors the ClusterProjectionService android entry point so lifecycle recovery stays separate from business logic.
 public final class ClusterProjectionService extends Service
         implements SurfaceHolder.Callback {
@@ -47,6 +54,7 @@ public final class ClusterProjectionService extends Service
     private static final String EXTRA_PACKAGE = "package";
     private static final String EXTRA_MODE = "dashboard_mode";
     private static final String EXTRA_REASON = "reason";
+    private static final AtomicLong NEXT_PROJECTION_TOKEN = new AtomicLong();
     private static ClusterProjectionService instance;
 
     private final Object lock = new Object();
@@ -60,6 +68,8 @@ public final class ClusterProjectionService extends Service
     private int projectionMode = HudPrefs.DASHBOARD_MODE_FULL;
     private boolean projectionRequested;
     private int projectionGeneration;
+    //Process-wide token prevents a recreated service from reusing an old per-instance generation.
+    private long projectionOwnerToken;
     private int surfaceGeneration;
     private int projectionWidth = VIRTUAL_WIDTH;
     private int projectionHeight = VIRTUAL_HEIGHT;
@@ -113,6 +123,36 @@ public final class ClusterProjectionService extends Service
                 reason));
     }
 
+    //Applies a widget-selected profile to the exact live owner without moving or restarting it.
+    static String applyDashboardProfileForWidget(
+            Context context,
+            String packageName,
+            int dashboardMode,
+            String reason,
+            long expectedProjectionGeneration,
+            BooleanSupplier stillCurrent) {
+        ClusterProjectionService service = instance;
+        String normalizedPackage = safe(packageName);
+        int normalizedMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
+        if (normalizedPackage.isEmpty()
+                || (normalizedMode != HudPrefs.DASHBOARD_MODE_PARTIAL
+                && normalizedMode != HudPrefs.DASHBOARD_MODE_FULL)) {
+            return "invalid widget profile target";
+        }
+        if (service == null) {
+            return "projection service unavailable";
+        }
+        DashboardProjectionPolicy.Profile profile =
+                HudPrefs.dashboardProjectionProfile(service, normalizedMode);
+        return service.applyDashboardProfileForWidgetBlocking(
+                normalizedPackage,
+                normalizedMode,
+                profile,
+                reason,
+                expectedProjectionGeneration,
+                stillCurrent);
+    }
+
     //returns a read-only snapshot of the app-owned projection surface for PixelCopy.
     static ProjectedSurface projectedSurfaceForPackage(String packageName) {
         ClusterProjectionService service = instance;
@@ -129,6 +169,18 @@ public final class ClusterProjectionService extends Service
     static boolean isProjectedPackageCurrent(String packageName) {
         ClusterProjectionService service = instance;
         return service != null && service.hasCurrentProjection(packageName);
+    }
+
+    //Captures an app-owned projection generation for widget work; service recreation yields a new token.
+    static long projectedGenerationTokenForWidget(String packageName) {
+        ClusterProjectionService service = instance;
+        return service == null ? 0L : service.currentProjectionToken(packageName);
+    }
+
+    //The commit fence intentionally depends on owner and request liveness, not transient geometry state.
+    static boolean widgetResizeCommitAllowedForTest(
+            boolean expectedOwner, boolean requestCurrent) {
+        return expectedOwner && requestCurrent;
     }
 
     //exposes whether any app still owns the compositor projection, regardless of package.
@@ -268,6 +320,8 @@ public final class ClusterProjectionService extends Service
                 return;
             }
             projectionGeneration++;
+            long nextToken = NEXT_PROJECTION_TOKEN.incrementAndGet();
+            projectionOwnerToken = nextToken <= 0L ? 1L : nextToken;
             projectionRequested = true;
             pendingPackage = packageName;
             projectedPackage = packageName;
@@ -465,6 +519,64 @@ public final class ClusterProjectionService extends Service
         }
     }
 
+    private String applyDashboardProfileForWidgetBlocking(
+            String packageName,
+            int dashboardMode,
+            DashboardProjectionPolicy.Profile profile,
+            String reason,
+            long expectedProjectionGeneration,
+            BooleanSupplier stillCurrent) {
+        final CountDownLatch completed = new CountDownLatch(1);
+        final AtomicBoolean gate = new AtomicBoolean(true);
+        final AtomicReference<String> result = new AtomicReference<>(
+                "profile resize timeout");
+        Runnable resize = () -> {
+            if (!gate.get()) {
+                return;
+            }
+            BooleanSupplier requestCurrent = () -> gate.get()
+                    && isCurrentWidgetResize(
+                            packageName, expectedProjectionGeneration, stillCurrent);
+            if (!gate.get()
+                    || !isCurrentWidgetRequest(
+                            packageName, expectedProjectionGeneration, stillCurrent)) {
+                result.set("stale widget operation");
+                gate.set(false);
+                completed.countDown();
+                return;
+            }
+            try {
+                result.set(resizeActiveProjectionForWidget(
+                        packageName,
+                        expectedProjectionGeneration,
+                        dashboardMode,
+                        profile,
+                        requestCurrent));
+            } finally {
+                gate.set(false);
+                completed.countDown();
+            }
+        };
+        try {
+            mainHandler.post(resize);
+        } catch (RuntimeException e) {
+            return "profile resize failed: " + safe(e.getMessage());
+        }
+        try {
+            if (!completed.await(5000L, TimeUnit.MILLISECONDS)) {
+                gate.set(false);
+                mainHandler.removeCallbacks(resize);
+                return result.get();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            gate.set(false);
+            mainHandler.removeCallbacks(resize);
+            return "profile resize interrupted";
+        }
+        return result.get();
+    }
+
     // Adjustable cluster-window geometry was inspired by BYDMate's projection controls.
     private void resizeActiveProjection(
             int dashboardMode,
@@ -598,6 +710,219 @@ public final class ClusterProjectionService extends Service
             log("profile_resize_failed error=" + e.getClass().getSimpleName()
                     + " reason=" + safe(reason));
         }
+    }
+
+    private boolean isCurrentWidgetRequest(
+            String packageName,
+            long expectedProjectionGeneration,
+            BooleanSupplier stillCurrent) {
+        if (stillCurrent == null || !stillCurrent.getAsBoolean()) {
+            return false;
+        }
+        synchronized (lock) {
+            return expectedProjectionGeneration > 0L
+                    && projectionRequested
+                    && projectionGeometryValid
+                    && projectionOwnerToken == expectedProjectionGeneration
+                    && safe(packageName).equals(safe(projectedPackage))
+                    && virtualDisplay != null
+                    && virtualDisplay.getDisplay() != null
+                    && projectionSurface != null
+                    && projectionSurface.isValid();
+        }
+    }
+
+    //Checks ownership after geometry is marked transiently invalid during an in-place resize.
+    private boolean isCurrentWidgetResize(
+            String packageName,
+            long expectedProjectionGeneration,
+            BooleanSupplier stillCurrent) {
+        if (stillCurrent == null || !stillCurrent.getAsBoolean()) {
+            return false;
+        }
+        synchronized (lock) {
+            return isExpectedWidgetProjectionLocked(packageName, expectedProjectionGeneration)
+                    && projectionSurface != null
+                    && projectionSurface.isValid();
+        }
+    }
+
+    //Resizes only the expected live owner; widget failure never moves or restarts its task.
+    private String resizeActiveProjectionForWidget(
+            String expectedPackage,
+            long expectedProjectionGeneration,
+            int dashboardMode,
+            DashboardProjectionPolicy.Profile profile,
+            BooleanSupplier stillCurrent) {
+        String packageName = safe(expectedPackage);
+        int normalizedMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
+        DashboardProjectionPolicy.Geometry geometry = DashboardProjectionPolicy.geometryForProfile(
+                DashboardProjectionPolicy.nativeProfileForMode(normalizedMode, profile));
+        VirtualDisplay display;
+        SurfaceView view;
+        WindowManager manager;
+        int oldWidth;
+        int oldHeight;
+        int oldBufferWidth;
+        int oldBufferHeight;
+        int oldLeft;
+        int oldTop;
+        synchronized (lock) {
+            if (!isCurrentWidgetRequestLocked(packageName, expectedProjectionGeneration)) {
+                return "stale projection owner";
+            }
+            if (projectionWidth == geometry.width
+                    && projectionHeight == geometry.height
+                    && projectionBufferWidth == geometry.bufferWidth
+                    && projectionBufferHeight == geometry.bufferHeight
+                    && projectionLeft == geometry.left
+                    && projectionTop == geometry.top) {
+                if (stillCurrent == null || !stillCurrent.getAsBoolean()) {
+                    return "stale widget operation";
+                }
+                projectionMode = normalizedMode;
+                log("profile_resize_skipped unchanged mode=" + normalizedMode
+                        + " identity_updated=true");
+                return "";
+            }
+            display = virtualDisplay;
+            view = overlaySurfaceView;
+            manager = overlayWindowManager;
+            oldWidth = projectionWidth;
+            oldHeight = projectionHeight;
+            oldBufferWidth = projectionBufferWidth;
+            oldBufferHeight = projectionBufferHeight;
+            oldLeft = projectionLeft;
+            oldTop = projectionTop;
+            projectionGeometryValid = false;
+            surfaceGeneration++;
+        }
+        if (!(view.getLayoutParams() instanceof WindowManager.LayoutParams)) {
+            synchronized (lock) {
+                if (virtualDisplay == display
+                        && overlaySurfaceView == view
+                        && isExpectedWidgetProjectionLocked(
+                                packageName, expectedProjectionGeneration)
+                        && packageName.equals(safe(projectedPackage))) {
+                    projectionGeometryValid = true;
+                    surfaceGeneration++;
+                }
+            }
+            return "layout params missing";
+        }
+        WindowManager.LayoutParams params = (WindowManager.LayoutParams) view.getLayoutParams();
+        if (!isCurrentWidgetResize(packageName, expectedProjectionGeneration, stillCurrent)) {
+            synchronized (lock) {
+                if (virtualDisplay == display
+                        && overlaySurfaceView == view
+                        && isExpectedWidgetProjectionLocked(
+                                packageName, expectedProjectionGeneration)
+                        && packageName.equals(safe(projectedPackage))) {
+                    projectionGeometryValid = true;
+                    surfaceGeneration++;
+                }
+            }
+            return "stale widget operation";
+        }
+        try {
+            view.getHolder().setFixedSize(geometry.bufferWidth, geometry.bufferHeight);
+            display.resize(geometry.bufferWidth, geometry.bufferHeight, geometry.density);
+            params.width = geometry.width;
+            params.height = geometry.height;
+            params.x = geometry.left;
+            params.y = geometry.top;
+            manager.updateViewLayout(view, params);
+            synchronized (lock) {
+                boolean expectedOwner = isExpectedWidgetProjectionLocked(
+                        packageName, expectedProjectionGeneration);
+                boolean requestCurrent = stillCurrent != null
+                        && stillCurrent.getAsBoolean();
+                if (!widgetResizeCommitAllowedForTest(expectedOwner, requestCurrent)
+                        || virtualDisplay != display
+                        || overlaySurfaceView != view) {
+                    throw new IllegalStateException("widget projection changed during resize");
+                }
+                projectionWidth = geometry.width;
+                projectionHeight = geometry.height;
+                projectionBufferWidth = geometry.bufferWidth;
+                projectionBufferHeight = geometry.bufferHeight;
+                projectionLeft = geometry.left;
+                projectionTop = geometry.top;
+                projectionMode = normalizedMode;
+                projectionGeometryValid = true;
+                surfaceGeneration++;
+            }
+            log("profile_resize_applied package=" + packageName
+                    + " mode=" + normalizedMode
+                    + " widget=true window=" + geometry.width + "x" + geometry.height
+                    + " buffer=" + geometry.bufferWidth + "x" + geometry.bufferHeight
+                    + " left=" + geometry.left + " top=" + geometry.top);
+            return "";
+        } catch (RuntimeException error) {
+            try {
+                view.getHolder().setFixedSize(oldBufferWidth, oldBufferHeight);
+                display.resize(oldBufferWidth, oldBufferHeight, VIRTUAL_DENSITY);
+                params.width = oldWidth;
+                params.height = oldHeight;
+                params.x = oldLeft;
+                params.y = oldTop;
+                manager.updateViewLayout(view, params);
+                synchronized (lock) {
+                    if (virtualDisplay == display
+                            && overlaySurfaceView == view
+                            && isExpectedWidgetProjectionLocked(
+                                    packageName, expectedProjectionGeneration)
+                            && packageName.equals(safe(projectedPackage))) {
+                        projectionWidth = oldWidth;
+                        projectionHeight = oldHeight;
+                        projectionBufferWidth = oldBufferWidth;
+                        projectionBufferHeight = oldBufferHeight;
+                        projectionLeft = oldLeft;
+                        projectionTop = oldTop;
+                        projectionGeometryValid = true;
+                        surfaceGeneration++;
+                    }
+                }
+            } catch (RuntimeException rollbackError) {
+                synchronized (lock) {
+                    if (virtualDisplay == display
+                            && overlaySurfaceView == view
+                            && isExpectedWidgetProjectionLocked(
+                                    packageName, expectedProjectionGeneration)
+                            && packageName.equals(safe(projectedPackage))) {
+                        projectionGeometryValid = false;
+                        surfaceGeneration++;
+                    }
+                }
+                log("profile_resize_rollback_failed widget=true error="
+                        + rollbackError.getClass().getSimpleName());
+                return "profile resize rollback failed";
+            }
+            if (stillCurrent == null || !stillCurrent.getAsBoolean()) {
+                return "stale widget operation";
+            }
+            log("profile_resize_failed widget=true error="
+                    + error.getClass().getSimpleName());
+            return "profile resize failed";
+        }
+    }
+
+    private boolean isCurrentWidgetRequestLocked(
+            String packageName, long expectedProjectionGeneration) {
+        return isExpectedWidgetProjectionLocked(packageName, expectedProjectionGeneration)
+                && projectionGeometryValid;
+    }
+
+    private boolean isExpectedWidgetProjectionLocked(
+            String packageName, long expectedProjectionGeneration) {
+        return expectedProjectionGeneration > 0L
+                && projectionRequested
+                && projectionOwnerToken == expectedProjectionGeneration
+                && safe(packageName).equals(safe(projectedPackage))
+                && virtualDisplay != null
+                && virtualDisplay.getDisplay() != null
+                && overlaySurfaceView != null
+                && overlayWindowManager != null;
     }
 
     private void recoverProjectionAfterResizeFailure(
@@ -762,6 +1087,7 @@ public final class ClusterProjectionService extends Service
             pendingPackage = "";
             projectionRequested = false;
             projectedPackage = "";
+            projectionOwnerToken = 0L;
             projectionMode = HudPrefs.DASHBOARD_MODE_FULL;
             projectionWidth = VIRTUAL_WIDTH;
             projectionHeight = VIRTUAL_HEIGHT;
@@ -831,6 +1157,22 @@ public final class ClusterProjectionService extends Service
                     && projectionSurface.isValid()
                     && projectionGeometryValid
                     && safe(projectedPackage).equals(safe(packageName));
+        }
+    }
+
+    private long currentProjectionToken(String packageName) {
+        synchronized (lock) {
+            if (!projectionRequested
+                    || projectionOwnerToken <= 0L
+                    || !projectionGeometryValid
+                    || virtualDisplay == null
+                    || virtualDisplay.getDisplay() == null
+                    || projectionSurface == null
+                    || !projectionSurface.isValid()
+                    || !safe(projectedPackage).equals(safe(packageName))) {
+                return 0L;
+            }
+            return projectionOwnerToken;
         }
     }
 

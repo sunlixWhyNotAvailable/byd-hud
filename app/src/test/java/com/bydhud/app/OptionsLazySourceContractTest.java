@@ -16,9 +16,9 @@ public final class OptionsLazySourceContractTest {
     @Test
     public void productionOptionsUseStableRowItemsAndTypedSections() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
-        String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
+        String options = between(source, "private fun OptionsTab(", "private fun WidgetNumberLine(");
 
-        assertEquals(7, occurrences(options, "optionsSection("));
+        assertEquals(9, occurrences(options, "optionsSection("));
         assertFalse(options.contains("\n            Section("));
         assertTrue(source.contains("contentType = \"options-header\""));
         assertTrue(source.contains("contentType = \"options-row\""));
@@ -34,7 +34,9 @@ public final class OptionsLazySourceContractTest {
                 "optionsSection(\"speed-limit\"",
                 "optionsSection(\"waze-features\"",
                 "optionsSection(\"extra-navigation\"",
-                "optionsSection(\"dashboard-control\"");
+                "optionsSection(\"dashboard-window-size\"",
+                "\"dashboard-widget\"",
+                "optionsSection(\"dashboard-move\"");
         assertTrue(options.contains("R.drawable.ic_options_build"));
         assertTrue(options.contains("R.drawable.ic_options_navigation"));
         assertTrue(options.contains("R.drawable.ic_options_schedule"));
@@ -48,7 +50,7 @@ public final class OptionsLazySourceContractTest {
         assertEquals(1, occurrences(options, "R.drawable.ic_options_speed"));
         assertEquals(1, occurrences(options, "R.drawable.waze_app_icon"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_settings"));
-        assertEquals(1, occurrences(options, "R.drawable.ic_options_directions_car"));
+        assertEquals(3, occurrences(options, "R.drawable.ic_options_directions_car"));
         assertTrue(source.contains("SidebarOptionsSurface("));
         assertFalse(options.contains("LazyPageSurface"));
         assertTrue(source.contains("key(selectedSection.key)"));
@@ -74,7 +76,7 @@ public final class OptionsLazySourceContractTest {
         String source = sourcePath("../byd-hud-compose-preview/compose-preview/src/main/java/com/bydhud/preview/MainActivity.kt");
         String options = between(source, "private fun MainTab(", "private data class PreviewOptionsRowSpec");
 
-        assertEquals(7, occurrences(options, "section("));
+        assertEquals(9, occurrences(options, "section("));
         assertFalse(options.contains("DashboardTile("));
         assertTrue(options.contains("buildPreviewOptionsSections"));
         assertTrue(source.contains("previewOptionsSection(selectedSection"));

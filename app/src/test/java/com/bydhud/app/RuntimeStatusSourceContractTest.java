@@ -230,7 +230,7 @@ public final class RuntimeStatusSourceContractTest {
         if (!Files.isRegularFile(file)) {
             file = root.resolve("src/main/java/com/bydhud/app/" + fileName);
         }
-        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
 
     private static String between(String source, String start, String end) {

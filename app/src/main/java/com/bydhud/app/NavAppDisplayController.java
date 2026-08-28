@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -32,6 +33,10 @@ final class NavAppDisplayController {
     private static final int AUTO_CONTAINER_PARTIAL = 17;
     private static final int AUTO_CONTAINER_FULLSCREEN = 16;
     private static final int AUTO_CONTAINER_RELEASE = 18;
+    static final int WIDGET_MODE_IPC_OFF = 0;
+    static final int WIDGET_MODE_TBT = 1;
+    static final int WIDGET_MODE_MINI = 2;
+    static final int WIDGET_MODE_FULL = 3;
     private static final long DISPLAY_CONFIRM_TIMEOUT_MS = 4000L;
     private static final long PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS = 10000L;
     private static final long DISPLAY_CONFIRM_INTERVAL_MS = 250L;
@@ -103,6 +108,32 @@ final class NavAppDisplayController {
         return autoContainerValueForMode(dashboardMode);
     }
 
+    static int widgetAutoContainerValueForTest(int mode) {
+        switch (mode) {
+            case WIDGET_MODE_IPC_OFF:
+            case WIDGET_MODE_TBT:
+                return AUTO_CONTAINER_RELEASE;
+            case WIDGET_MODE_MINI:
+                return AUTO_CONTAINER_PARTIAL;
+            case WIDGET_MODE_FULL:
+                return AUTO_CONTAINER_FULLSCREEN;
+            default:
+                return 0;
+        }
+    }
+
+    static boolean widgetModeUsesTbtProtocolForTest(int mode) {
+        return mode == WIDGET_MODE_TBT;
+    }
+
+    static int dashboardModeForWidgetForTest(int mode) {
+        return mode == WIDGET_MODE_MINI
+                ? HudPrefs.DASHBOARD_MODE_PARTIAL
+                : mode == WIDGET_MODE_FULL
+                        ? HudPrefs.DASHBOARD_MODE_FULL
+                        : HudPrefs.DASHBOARD_MODE_NONE;
+    }
+
     private static int autoContainerValueForMode(int dashboardMode) {
         switch (HudPrefs.normalizeDashboardScreenMode(dashboardMode)) {
             case HudPrefs.DASHBOARD_MODE_PARTIAL:
@@ -128,6 +159,11 @@ final class NavAppDisplayController {
     private String activeDashboardPackage = "";
     private String pendingAutoContainerLeaseTransferFrom = "";
     private long pendingAutoContainerLeaseTransferGeneration;
+    private String pendingShutdownReturnPackage = "";
+    private String pendingShutdownReturnReason = "";
+    private long widgetOperationToken;
+    private boolean widgetOperationActive;
+    private boolean widgetOperationCancelled;
     private Listener listener;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
@@ -335,6 +371,197 @@ final class NavAppDisplayController {
         worker.start();
     }
 
+    //runs explicit widget vehicle commands on the existing move gate, never on the UI thread.
+    void requestWidgetMode(int mode, boolean applyProfile, Consumer<String> completion) {
+        if (widgetAutoContainerValueForTest(mode) == 0) {
+            notifyWidgetCompletionAsync(completion, "unsupported widget mode=" + mode);
+            return;
+        }
+        final long token;
+        if (!beginMove("", "widget_mode_request mode=" + mode)) {
+            notifyWidgetCompletionAsync(completion, "widget command busy");
+            return;
+        }
+        synchronized (lock) {
+            token = ++widgetOperationToken;
+            widgetOperationActive = true;
+            widgetOperationCancelled = false;
+        }
+        Thread worker = new Thread(() -> runWidgetMode(
+                token, mode, applyProfile, completion), "BydHudWidgetModeCommand");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    //invalidates a queued widget operation before shutdown starts its explicit return.
+    void cancelWidgetModeForShutdown() {
+        synchronized (lock) {
+            if (widgetOperationActive) {
+                widgetOperationCancelled = true;
+                log("", "widget_mode_cancelled reason=shutdown");
+            }
+        }
+    }
+
+    private void runWidgetMode(
+            long token, int mode, boolean applyProfile, Consumer<String> completion) {
+        String error = "";
+        String owner = "";
+        long ownerGeneration = 0L;
+        try {
+            owner = confirmedDashboardPackage();
+            ownerGeneration = widgetProjectionGenerationForPackage(owner);
+            if (!isWidgetOperationCurrent(token)) {
+                error = widgetCancellationReason();
+            } else {
+                String commandFailure = sendWidgetAutoContainer(
+                        owner, widgetAutoContainerValueForTest(mode), token, mode);
+                if (!commandFailure.isEmpty()) {
+                    error = commandFailure;
+                } else if (widgetModeUsesTbtProtocolForTest(mode)) {
+                    String protocolFailure = StockMapProtocol30011.dispatch(
+                            context,
+                            2,
+                            () -> isWidgetOperationCurrent(token));
+                    if (!protocolFailure.isEmpty()) {
+                        error = "TBT protocol failed after AutoContainer 18: "
+                                + protocolFailure;
+                    }
+                }
+                if (error.isEmpty()
+                        && applyProfile
+                        && (mode == WIDGET_MODE_MINI || mode == WIDGET_MODE_FULL)
+                        && !owner.isEmpty()) {
+                    if (!isWidgetOperationCurrent(token)) {
+                        error = widgetCancellationReason();
+                    } else {
+                        int dashboardMode = dashboardModeForWidgetForTest(mode);
+                        String profileFailure =
+                                ClusterProjectionService.applyDashboardProfileForWidget(
+                                        context,
+                                        owner,
+                                        dashboardMode,
+                                        "widget-mode=" + mode,
+                                        ownerGeneration,
+                                        () -> isWidgetOperationCurrent(token));
+                        if (!profileFailure.isEmpty()) {
+                            error = "partial profile failure: " + profileFailure;
+                        } else if (!persistWidgetDashboardMode(
+                                owner, dashboardMode, ownerGeneration)) {
+                            error = "partial profile failure: stale projection owner";
+                        }
+                    }
+                }
+            }
+        } catch (RuntimeException e) {
+            error = "widget command failed: " + safe(e.getMessage());
+        } finally {
+            finishWidgetOperation(token);
+            endMove("");
+            notifyWidgetCompletion(completion, error);
+        }
+    }
+
+    private String sendWidgetAutoContainer(
+            String owner, int value, long token, int mode) {
+        if (!isWidgetOperationCurrent(token)) {
+            return widgetCancellationReason();
+        }
+        String normalizedOwner = normalizePackage(owner);
+        long leaseGeneration = projectionGenerationForPackage(normalizedOwner);
+        if ((value == AUTO_CONTAINER_FULLSCREEN || value == AUTO_CONTAINER_PARTIAL)
+                && !normalizedOwner.isEmpty()) {
+            String leaseOwner = persistedAutoContainerLeasePackage();
+            if (!leaseOwner.isEmpty() && !leaseOwner.equals(normalizedOwner)) {
+                return "existing AutoContainer lease retained";
+            }
+        }
+        try {
+            LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(context, value);
+            if (!result.success()) {
+                return "widget AutoContainer " + value + " failed: " + result.shortDetail();
+            }
+            log(normalizedOwner, "widget_autocontainer_sent mode=" + mode + " value=" + value);
+            // A completed side effect still needs ownership bookkeeping if Shutdown
+            // cancelled the following steps while the shell command was in flight.
+            if (leaseGeneration > 0L
+                    && projectionGenerationForPackage(normalizedOwner) == leaseGeneration) {
+                if (mode == WIDGET_MODE_IPC_OFF || mode == WIDGET_MODE_TBT) {
+                    clearAutoContainerLeaseIfExact(
+                            normalizedOwner, leaseGeneration, "widget-release");
+                } else if (mode == WIDGET_MODE_MINI || mode == WIDGET_MODE_FULL) {
+                    acquireAutoContainerLeaseIfSucceeded(
+                            normalizedOwner,
+                            dashboardModeForWidgetForTest(mode),
+                            "",
+                            "widget-mode");
+                }
+            }
+            if (!isWidgetOperationCurrent(token)) return widgetCancellationReason();
+            return "";
+        } catch (IOException | SecurityException e) {
+            return "widget AutoContainer " + value + " failed: " + safe(e.getMessage());
+        }
+    }
+
+    private boolean isWidgetOperationCurrent(long token) {
+        synchronized (lock) {
+            return widgetOperationActive
+                    && !widgetOperationCancelled
+                    && token == widgetOperationToken
+                    && moveInProgress
+                    && !HudPrefs.isUserShutdownActive(context);
+        }
+    }
+
+    private String widgetCancellationReason() {
+        return HudPrefs.isUserShutdownActive(context)
+                ? "widget command cancelled: shutdown active"
+                : "widget command cancelled: stale operation";
+    }
+
+    private void finishWidgetOperation(long token) {
+        synchronized (lock) {
+            if (widgetOperationActive && token == widgetOperationToken) {
+                widgetOperationActive = false;
+            }
+        }
+    }
+
+    private void notifyWidgetCompletion(Consumer<String> completion, String error) {
+        if (completion == null) return;
+        try {
+            completion.accept(error == null ? "" : error);
+        } catch (RuntimeException e) {
+            log("", "widget completion failed " + e.getClass().getSimpleName());
+        }
+    }
+
+    private void notifyWidgetCompletionAsync(Consumer<String> completion, String error) {
+        if (completion == null) return;
+        Thread worker = new Thread(
+                () -> notifyWidgetCompletion(completion, error),
+                "BydHudWidgetModeCompletion");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private boolean persistWidgetDashboardMode(
+            String owner, int dashboardMode, long expectedProjectionGeneration) {
+        String normalized = normalizePackage(owner);
+        synchronized (lock) {
+            if (normalized.isEmpty() || !normalized.equals(activeDashboardPackage)) {
+                return false;
+            }
+        }
+        if (ClusterProjectionService.projectedGenerationTokenForWidget(normalized)
+                != expectedProjectionGeneration) {
+            return false;
+        }
+        persistDashboardProjection(normalized, dashboardMode, "widget-profile");
+        return true;
+    }
+
     //returns the current dashboard-owned app to main before replacing or shutting down projection.
     void returnActiveDashboardToMain(String reason) {
         String active = activeDashboardPackage();
@@ -348,7 +575,21 @@ final class NavAppDisplayController {
             log("", "dashboard_return_main_failed package=missing reason=" + safe(reason));
             return;
         }
+        if (isShutdownReturnReason(reason)) {
+            synchronized (lock) {
+                if (moveInProgress) {
+                    pendingShutdownReturnPackage = active;
+                    pendingShutdownReturnReason = safe(reason);
+                    log(active, "dashboard_return_main_queued reason=" + safe(reason));
+                    return;
+                }
+            }
+        }
         moveIndependentDashboardApp(active, false, reason);
+    }
+
+    private static boolean isShutdownReturnReason(String reason) {
+        return safe(reason).toLowerCase(Locale.ROOT).contains("shutdown");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1253,13 +1494,32 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void endMove(String packageName) {
+        String deferredReturnPackage;
+        String deferredReturnReason;
         pendingAutoContainerLeaseTransferFrom = "";
         pendingAutoContainerLeaseTransferGeneration = 0L;
         synchronized (lock) {
             moveInProgress = false;
+            deferredReturnPackage = pendingShutdownReturnPackage;
+            deferredReturnReason = pendingShutdownReturnReason;
+            pendingShutdownReturnPackage = "";
+            pendingShutdownReturnReason = "";
         }
         log(packageName, "move idle");
         notifyStatusChanged();
+        if (!deferredReturnPackage.isEmpty()) {
+            moveIndependentDashboardApp(
+                    deferredReturnPackage,
+                    false,
+                    deferredReturnReason);
+        }
+    }
+
+    private long widgetProjectionGenerationForPackage(String packageName) {
+        String normalized = normalizePackage(packageName);
+        return normalized.isEmpty()
+                ? 0L
+                : ClusterProjectionService.projectedGenerationTokenForWidget(normalized);
     }
 
     //renders this UI section here so screen structure stays traceable during preview and car testing.

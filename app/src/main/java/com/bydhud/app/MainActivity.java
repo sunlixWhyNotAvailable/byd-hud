@@ -17,6 +17,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
+import android.provider.Settings;
 import android.text.InputType;
 import android.util.Log;
 import android.view.Gravity;
@@ -292,6 +293,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStart() {
         super.onStart();
+        DashboardWidgetController.onAppOpened(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-start");
         }
@@ -305,6 +307,7 @@ public final class MainActivity extends ComponentActivity {
         super.onResume();
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
+        DashboardWidgetController.refresh(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
         invalidateComposeSnapshot();
@@ -847,6 +850,8 @@ public final class MainActivity extends ComponentActivity {
                 dashboardProfile.heightPercent,
                 dashboardProfile.offsetPercent,
                 dashboardProfile.scalePercent,
+                DashboardWidgetController.snapshot(this),
+                DashboardWidgetController.hasOverlayPermission(),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 permissionStatus.settingsGranted(),
                 adbAuthorized(),
@@ -1488,6 +1493,15 @@ public final class MainActivity extends ComponentActivity {
         invalidateComposeSnapshot();
     }
 
+    public void composeSetDashboardWidgetState(DashboardWidgetState state) {
+        DashboardWidgetController.updateSettings(this, state);
+    }
+
+    public void composeRequestDashboardWidgetPermission() {
+        startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:" + getPackageName())));
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetSmallDistanceClamp(boolean enabled) {
         setSmallDistanceClamp(enabled);
@@ -1496,6 +1510,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetUaLanguage(boolean ua) {
         setUiLanguage(ua);
+        DashboardWidgetController.refresh(this);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1755,6 +1770,7 @@ public final class MainActivity extends ComponentActivity {
                         NavRuntimePermissionStatus.check(appContext);
                 boolean adbAuthorized = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
                 updateRuntimeStatusCache(refreshed, adbAuthorized);
+                DashboardWidgetController.onRuntimePermissionsRefreshed(appContext);
                 lastRuntimeStatusRefreshAtMs = SystemClock.elapsedRealtime();
                 AppEventLogger.event(appContext, "ui_runtime_status_refresh reason=" + reason
                         + " adbAuthorized=" + adbAuthorized
@@ -1769,6 +1785,12 @@ public final class MainActivity extends ComponentActivity {
                 }
             }
         }, "bydhud-runtime-status").start();
+    }
+
+    //Uses the existing asynchronous permission cache; widget UI does not query AppOps itself.
+    static boolean cachedDashboardOverlayPermission() {
+        NavRuntimePermissionStatus status = cachedNavRuntimePermissionStatus;
+        return status != null && status.settings != null && status.settings.dashboardOverlayEnabled;
     }
 
     //Publishes the same cache transition that the visible Compose snapshot must observe.
@@ -2420,6 +2442,8 @@ public final class MainActivity extends ComponentActivity {
         public final int dashboardHeightPercent;
         public final int dashboardOffsetPercent;
         public final int dashboardScalePercent;
+        public final DashboardWidgetState dashboardWidgetState;
+        public final boolean dashboardWidgetOverlayPermission;
         public final boolean smallDistanceClampEnabled;
         public final boolean settingsPermissionsGranted;
         public final boolean adbAuthorized;
@@ -2478,6 +2502,8 @@ public final class MainActivity extends ComponentActivity {
                 int dashboardScreenMode,
                 int dashboardWidthPercent, int dashboardHeightPercent,
                 int dashboardOffsetPercent, int dashboardScalePercent,
+                DashboardWidgetState dashboardWidgetState,
+                boolean dashboardWidgetOverlayPermission,
                 boolean smallDistanceClampEnabled,
                 boolean settingsPermissionsGranted,
                 boolean adbAuthorized,
@@ -2527,6 +2553,8 @@ public final class MainActivity extends ComponentActivity {
             this.dashboardHeightPercent = dashboardHeightPercent;
             this.dashboardOffsetPercent = dashboardOffsetPercent;
             this.dashboardScalePercent = dashboardScalePercent;
+            this.dashboardWidgetState = dashboardWidgetState;
+            this.dashboardWidgetOverlayPermission = dashboardWidgetOverlayPermission;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
             this.adbAuthorized = adbAuthorized;
@@ -2615,6 +2643,8 @@ public final class MainActivity extends ComponentActivity {
                     && dashboardHeightPercent == other.dashboardHeightPercent
                     && dashboardOffsetPercent == other.dashboardOffsetPercent
                     && dashboardScalePercent == other.dashboardScalePercent
+                    && Objects.equals(dashboardWidgetState, other.dashboardWidgetState)
+                    && dashboardWidgetOverlayPermission == other.dashboardWidgetOverlayPermission
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
                     && adbAuthorized == other.adbAuthorized
@@ -2669,7 +2699,8 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
-                    dashboardScalePercent, smallDistanceClampEnabled,
+                    dashboardScalePercent, dashboardWidgetState, dashboardWidgetOverlayPermission,
+                    smallDistanceClampEnabled,
                     settingsPermissionsGranted, adbAuthorized, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
                     logOnlyPackages, observedPackages, activeDashboardPackage,
@@ -3677,6 +3708,8 @@ public final class MainActivity extends ComponentActivity {
         appendStatus("shutdown requested reason=" + safeReason);
         exitRequested = true;
         HudPrefs.setUserShutdownActive(this, true);
+        NavAppDisplayController.get(this).cancelWidgetModeForShutdown();
+        DashboardWidgetController.shutdown(this);
         AppEventLogger.event(this, "shutdown requested reason=" + safeReason);
         NavNotificationListenerService.suspendForUserShutdown(this, safeReason);
         NavAccessibilityService.suspendForUserShutdown(this, safeReason);

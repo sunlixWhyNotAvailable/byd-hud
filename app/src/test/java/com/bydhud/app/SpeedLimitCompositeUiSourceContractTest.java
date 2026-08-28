@@ -46,7 +46,9 @@ public final class SpeedLimitCompositeUiSourceContractTest {
                 "optionsSection(\"speed-limit\"",
                 "optionsSection(\"waze-features\"",
                 "optionsSection(\"extra-navigation\"",
-                "optionsSection(\"dashboard-control\"");
+                "optionsSection(\"dashboard-window-size\"",
+                "\"dashboard-widget\"",
+                "optionsSection(\"dashboard-move\"");
     }
 
     @Test
@@ -174,8 +176,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 94"));
-        assertTrue(gradle.contains("versionName = \"3.0.0\""));
+        assertTrue(gradle.contains("versionCode = 95"));
+        assertTrue(gradle.contains("versionName = \"3.1.0\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- OEM reference artwork, not project-authored: BydLaunchermap.apk, capture-2026-06-06.
+     res/raw/icon_dark_public_full_screen_navi.json, final frame 24; see THIRD_PARTY_NOTICES.md.
+     Original artwork ownership is unchanged. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="32dp" android:height="32dp"
+    android:viewportWidth="32.868" android:viewportHeight="32.868">
+    <group android:translateX="-7.564" android:translateY="1.399">
+    <path android:pathData="M24.003,7.75 C27.893,7.75,31.793,8.29,35.683,9.36 C36.093,9.47,36.433,9.73,36.643,10.07 C36.853,10.41,36.943,10.83,36.873,11.25 C36.873,11.25,36.873,11.25,36.873,11.25 C36.873,11.25,35.073,20.91,35.073,20.91 C34.993,21.35,34.733,21.73,34.383,21.97 C34.043,22.2,33.603,22.31,33.163,22.23 C30.543,21.65,27.523,21.36,24.003,21.36 C20.473,21.36,17.443,21.65,14.903,22.22 C14.463,22.32,14.023,22.23,13.663,22 C13.313,21.77,13.043,21.42,12.943,20.98 C12.943,20.98,12.943,20.98,12.943,20.98 C12.943,20.98,11.133,11.25,11.133,11.25 C11.053,10.83,11.143,10.41,11.353,10.07 C11.563,9.73,11.903,9.47,12.313,9.36 C16.213,8.29,20.103,7.75,24.003,7.75 Z" android:fillColor="#00000000" android:fillAlpha="0" android:fillType="nonZero" android:strokeColor="#DAE1EB" android:strokeAlpha="1" android:strokeWidth="1.5" android:strokeLineCap="round" android:strokeLineJoin="round" />
+    <path android:pathData="M13.399,10.72 C17.239,9.95,20.789,9.56,24.049,9.56 C27.309,9.56,30.889,9.95,34.779,10.72 C35.099,10.79,35.319,11.1,35.249,11.43 C35.249,11.43,33.489,20.34,33.489,20.34 C33.429,20.66,33.109,20.87,32.789,20.81 C30.119,20.29,27.189,20.03,23.999,20.03 C20.819,20.03,17.869,20.29,15.159,20.81 C14.859,20.86,14.579,20.7,14.479,20.43 C14.479,20.43,14.449,20.32,14.449,20.32 C14.449,20.32,14.449,20.32,14.449,20.32 C14.449,20.32,12.929,11.41,12.929,11.41 C12.869,11.09,13.079,10.79,13.399,10.72 Z" android:fillColor="#DAE1EB" android:fillAlpha="1" android:fillType="nonZero" />
+    </group>
+</vector>

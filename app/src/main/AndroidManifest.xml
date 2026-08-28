@@ -77,6 +77,11 @@
             android:stopWithTask="false" />
 
         <service
+            android:name=".DashboardWidgetOverlayService"
+            android:exported="false"
+            android:stopWithTask="false" />
+
+        <service
             android:name=".NavigatorPatchWorkerService"
             android:exported="false"
             android:process=":navigator_patcher"
