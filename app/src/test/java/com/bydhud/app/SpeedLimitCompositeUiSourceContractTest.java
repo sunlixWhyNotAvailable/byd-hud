@@ -174,8 +174,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 93"));
-        assertTrue(gradle.contains("versionName = \"2.4.0-beta.11\""));
+        assertTrue(gradle.contains("versionCode = 94"));
+        assertTrue(gradle.contains("versionName = \"3.0.0\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

@@ -8,6 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
 
+- **Version:** v3.0.0
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
