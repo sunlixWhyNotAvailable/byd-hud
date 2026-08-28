@@ -6,7 +6,6 @@
 
     <uses-permission android:name="com.bydhud.app.permission.WAZE_NAVIGATION_STATE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
@@ -45,6 +44,7 @@
         <activity
             android:name=".MainActivity"
             android:autoRemoveFromRecents="true"
+            android:configChanges="density|orientation|screenSize|smallestScreenSize|uiMode"
             android:excludeFromRecents="true"
             android:exported="true"
             android:launchMode="singleTask">
@@ -54,12 +54,14 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".WazeMediaProjectionConsentActivity"
+            android:name=".WazeSurfaceActivity"
+            android:autoRemoveFromRecents="true"
+            android:configChanges="density|orientation|screenSize|smallestScreenSize|uiMode"
             android:excludeFromRecents="true"
             android:exported="false"
-            android:launchMode="singleInstance"
-            android:taskAffinity=""
-            android:theme="@android:style/Theme.Translucent.NoTitleBar" />
+            android:launchMode="singleTask"
+            android:taskAffinity="com.bydhud.app.waze_surface"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar" />
         <activity
             android:name=".WazeSdkProbeActivity"
             android:excludeFromRecents="true"
@@ -75,9 +77,9 @@
             android:stopWithTask="false" />
 
         <service
-            android:name=".WazeMediaProjectionService"
+            android:name=".NavigatorPatchWorkerService"
             android:exported="false"
-            android:foregroundServiceType="mediaProjection"
+            android:process=":navigator_patcher"
             android:stopWithTask="false" />
 
         <service

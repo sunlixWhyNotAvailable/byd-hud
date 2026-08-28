@@ -10,6 +10,7 @@ import android.content.pm.PackageManager
 import android.database.Cursor
 import android.net.Uri
 import android.os.Environment
+import android.os.SystemClock
 import androidx.core.content.FileProvider
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -251,13 +252,22 @@ object AppUpdateManager {
             .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
 
         val downloadId = manager.enqueue(request)
-        emitProgress("0%", onProgress)
-        pollDownload(manager, downloadId, onProgress)
-        val staged = stageDownloadedApk(context, destination, fileName)
+        var installHandedOff = false
+        try {
+            emitProgress("0%", onProgress)
+            pollDownload(manager, downloadId, onProgress)
+            val staged = stageDownloadedApk(context, destination, fileName)
 
-        //install downloaded APK through content URI; file:// is rejected on modern Android.
-        withContext(Dispatchers.Main) {
-            installDownloadedApk(context, staged)
+            //install downloaded APK through content URI; file:// is rejected on modern Android.
+            withContext(Dispatchers.Main) {
+                installDownloadedApk(context, staged)
+                installHandedOff = true
+            }
+        } finally {
+            if (!installHandedOff) {
+                runCatching { manager.remove(downloadId) }
+                runCatching { destination.delete() }
+            }
         }
     }
 
@@ -367,10 +377,10 @@ object AppUpdateManager {
         downloadId: Long,
         onProgress: (String) -> Unit
     ) {
-        val startedAt = System.currentTimeMillis()
+        val startedAt = SystemClock.elapsedRealtime()
         var finished = false
         while (!finished) {
-            if (System.currentTimeMillis() - startedAt > DOWNLOAD_TIMEOUT_MS) {
+            if (SystemClock.elapsedRealtime() - startedAt > DOWNLOAD_TIMEOUT_MS) {
                 throw IllegalStateException("Download timed out")
             }
             val cursor = manager.query(DownloadManager.Query().setFilterById(downloadId))

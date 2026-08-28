@@ -5,14 +5,21 @@ import org.jf.dexlib2.Opcodes;
 import org.jf.dexlib2.AccessFlags;
 import org.jf.dexlib2.builder.MethodImplementationBuilder;
 import org.jf.dexlib2.builder.MutableMethodImplementation;
+import org.jf.dexlib2.builder.Label;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction10x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11n;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction11x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction12x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction21c;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction21s;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction21t;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction22c;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction22b;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction22t;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction22x;
 import org.jf.dexlib2.builder.instruction.BuilderInstruction35c;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction3rc;
+import org.jf.dexlib2.builder.instruction.BuilderInstruction10t;
 import org.jf.dexlib2.dexbacked.DexBackedDexFile;
 import org.jf.dexlib2.iface.ClassDef;
 import org.jf.dexlib2.iface.DexFile;
@@ -23,6 +30,7 @@ import org.jf.dexlib2.iface.instruction.Instruction;
 import org.jf.dexlib2.iface.instruction.FiveRegisterInstruction;
 import org.jf.dexlib2.iface.instruction.OffsetInstruction;
 import org.jf.dexlib2.iface.instruction.OneRegisterInstruction;
+import org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction;
 import org.jf.dexlib2.iface.instruction.ReferenceInstruction;
 import org.jf.dexlib2.iface.reference.FieldReference;
 import org.jf.dexlib2.iface.reference.MethodReference;
@@ -32,6 +40,7 @@ import org.jf.dexlib2.immutable.ImmutableClassDef;
 import org.jf.dexlib2.immutable.ImmutableDexFile;
 import org.jf.dexlib2.immutable.ImmutableField;
 import org.jf.dexlib2.immutable.ImmutableMethod;
+import org.jf.dexlib2.immutable.ImmutableMethodParameter;
 import org.jf.dexlib2.immutable.ImmutableMethodImplementation;
 import org.jf.dexlib2.immutable.reference.ImmutableFieldReference;
 import org.jf.dexlib2.immutable.reference.ImmutableMethodReference;
@@ -64,9 +73,113 @@ final class WazePatchEngine {
     private static final String ROUTE_CLASS = "Lcom/waze/navigate/dt;";
     private static final String ROUTE_ENUM = "Lcom/waze/navigate/ee;";
     private static final String ROUTE_FLOW = "Lkotlinx/coroutines/b/bn;";
+    private static final String SPEED_CLASS =
+            "Lcom/waze/location/LocationSensorListener;";
+    private static final String CLUSTER_TRIP_CLASS = "Lcom/waze/car_lib/j/l;";
     private static final String BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridgeV2;";
     private static final String LEGACY_BRIDGE_CLASS = "Lcom/waze/bydhud/RouteStateBridge;";
     private static final String ALERT_SESSION_CLASS = "Lcom/waze/car_lib/e/q;";
+    private static final String ALERT_ONCE_CLASS = "Lcom/waze/alerters/a/q;";
+    private static final String ALERT_ONCE_STATE_CLASS = "Lcom/waze/alerters/a/p;";
+    private static final String ALERT_ONCE_MODE_CLASS = "Lcom/waze/alerters/a/o;";
+    private static final String LANE_FRAME_CLASS = "Lcom/waze/car_lib/s/cf;";
+    private static final String LANE_PRODUCER_CLASS = "Lcom/waze/car_lib/s/br;";
+    private static final String LANE_ADAPTER_CLASS = "Lcom/waze/i/a;";
+    private static final String NAVIGATION_LANE_LIST = "Ljava/util/List;";
+    private static final String LANE_BUILDER_CLASS =
+            "Landroidx/car/app/navigation/model/Lane$Builder;";
+    private static final String LANE_DIRECTION_CLASS =
+            "Landroidx/car/app/navigation/model/LaneDirection;";
+    private static final String NAVIGATION_LANE_CLASS =
+            "Lcom/waze/jni/protos/navigate/NavigationLane;";
+    private static final String NAVIGATION_LANE_ANGLE_CLASS =
+            "Lcom/waze/jni/protos/navigate/NavigationLaneAngle;";
+    private static final ImmutableFieldReference LANE_FRAME_FIELD =
+            new ImmutableFieldReference(LANE_FRAME_CLASS, "i", NAVIGATION_LANE_LIST);
+    private static final ImmutableMethodReference LANE_FRAME_CTOR_STOCK = method(
+            LANE_FRAME_CLASS, "<init>", java.util.Arrays.asList("I", "Lcom/waze/t/b/bw;",
+                    "Landroid/text/SpannableStringBuilder;", "Ljava/lang/String;",
+                    "Landroid/graphics/Bitmap;", "Ljava/lang/Integer;", "Ljava/util/Collection;",
+                    "Ljava/lang/Long;"), "V");
+    private static final ImmutableMethodReference LANE_FRAME_CTOR_PATCHED = method(
+            LANE_FRAME_CLASS, "<init>", java.util.Arrays.asList("I", "Lcom/waze/t/b/bw;",
+                    "Landroid/text/SpannableStringBuilder;", "Ljava/lang/String;",
+                    "Landroid/graphics/Bitmap;", "Ljava/lang/Integer;", "Ljava/util/Collection;",
+                    "Ljava/lang/Long;", NAVIGATION_LANE_LIST), "V");
+    private static final ImmutableMethodReference LANE_FRAME_GETTER = method(
+            LANE_FRAME_CLASS, "i", Collections.emptyList(), NAVIGATION_LANE_LIST);
+    private static final ImmutableMethodReference LANE_FRAME_BITMAP = method(
+            LANE_FRAME_CLASS, "b", Collections.emptyList(), "Landroid/graphics/Bitmap;");
+    private static final ImmutableMethodReference OBJECT_HASH = method(
+            "Ljava/lang/Object;", "hashCode", Collections.emptyList(), "I");
+    private static final ImmutableMethodReference OBJECT_EQUALS = method(
+            "Lh/g/b/x;", "n", java.util.Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;"), "Z");
+    private static final ImmutableMethodReference LANE_PRODUCER_TARGET = method(
+            LANE_PRODUCER_CLASS, "e", java.util.Arrays.asList("Lcom/waze/navigate/cf;",
+                    "Landroid/content/Context;", "Lcom/waze/ui/navbar/LaneGuidanceView;",
+                    "Lcom/waze/navigate/bl;", "Lcom/waze/navbar/InstructionView;", "Z"),
+            LANE_FRAME_CLASS);
+    private static final ImmutableMethodReference LANE_SOURCE = method(
+            "Lcom/waze/navigate/cf;", "b", Collections.emptyList(), "Lcom/waze/navigate/da;");
+    private static final ImmutableFieldReference LANE_SOURCE_FIELD = new ImmutableFieldReference(
+            "Lcom/waze/navigate/da;", "a", "Ljava/lang/Object;");
+    private static final ImmutableFieldReference COLLECTIONS_EMPTY_LIST = new ImmutableFieldReference(
+            "Ljava/util/Collections;", "EMPTY_LIST", NAVIGATION_LANE_LIST);
+    private static final ImmutableMethodReference LANE_ADAPTER_TARGET = method(
+            LANE_ADAPTER_CLASS, "d", java.util.Arrays.asList(LANE_FRAME_CLASS,
+                    "Landroid/content/Context;"), "Landroidx/car/app/navigation/model/Step;");
+    private static final ImmutableMethodReference LANE_HELPER = method(
+            LANE_ADAPTER_CLASS, "h", Collections.singletonList(LANE_FRAME_CLASS), NAVIGATION_LANE_LIST);
+    private static final ImmutableMethodReference LANE_ANGLE_MAPPER = method(
+            LANE_ADAPTER_CLASS, "i", Collections.singletonList("I"), "I");
+    private static final ImmutableMethodReference LANE_BUILDER_CTOR = method(
+            LANE_BUILDER_CLASS, "<init>", Collections.emptyList(), "V");
+    private static final ImmutableMethodReference LANE_DIRECTION_CREATE = method(
+            LANE_DIRECTION_CLASS, "create", java.util.Arrays.asList("I", "Z"), LANE_DIRECTION_CLASS);
+    private static final ImmutableMethodReference LANE_ADD_DIRECTION = method(
+            LANE_BUILDER_CLASS, "addDirection", Collections.singletonList(LANE_DIRECTION_CLASS),
+            LANE_BUILDER_CLASS);
+    private static final ImmutableMethodReference LANE_BUILD = method(
+            LANE_BUILDER_CLASS, "build", Collections.emptyList(),
+            "Landroidx/car/app/navigation/model/Lane;");
+    private static final ImmutableMethodReference STEP_ADD_LANE = method(
+            "Landroidx/car/app/navigation/model/Step$Builder;", "addLane",
+            Collections.singletonList("Landroidx/car/app/navigation/model/Lane;"),
+            "Landroidx/car/app/navigation/model/Step$Builder;");
+    private static final ImmutableMethodReference LIST_SIZE = method(
+            "Ljava/util/List;", "size", Collections.emptyList(), "I");
+    private static final ImmutableMethodReference LIST_ITERATOR = method(
+            "Ljava/util/List;", "iterator", Collections.emptyList(), "Ljava/util/Iterator;");
+    private static final ImmutableMethodReference ITERATOR_HAS_NEXT = method(
+            "Ljava/util/Iterator;", "hasNext", Collections.emptyList(), "Z");
+    private static final ImmutableMethodReference ITERATOR_NEXT = method(
+            "Ljava/util/Iterator;", "next", Collections.emptyList(), "Ljava/lang/Object;");
+    private static final ImmutableMethodReference LIST_ADD = method(
+            "Ljava/util/List;", "add", Collections.singletonList("Ljava/lang/Object;"), "Z");
+    private static final ImmutableMethodReference NAVIGATION_ANGLE_LIST = method(
+            NAVIGATION_LANE_CLASS, "getAngleList", Collections.emptyList(), "Ljava/util/List;");
+    private static final ImmutableMethodReference NAVIGATION_ANGLE = method(
+            NAVIGATION_LANE_ANGLE_CLASS, "getAngle", Collections.emptyList(), "I");
+    private static final ImmutableMethodReference NAVIGATION_SELECTED = method(
+            NAVIGATION_LANE_ANGLE_CLASS, "getIsSelected", Collections.emptyList(), "Z");
+    private static final ImmutableMethodReference ARRAY_LIST_CTOR = method(
+            "Ljava/util/ArrayList;", "<init>", Collections.singletonList("I"), "V");
+    private static final ImmutableFieldReference ALERT_ONCE_STATE =
+            new ImmutableFieldReference(ALERT_ONCE_CLASS, "g", ALERT_ONCE_STATE_CLASS);
+    private static final ImmutableFieldReference ALERT_ONCE_LISTENER =
+            new ImmutableFieldReference(
+                    ALERT_ONCE_CLASS, "d", "Lcom/waze/alerters/a/l;");
+    private static final ImmutableFieldReference ALERT_ONCE_VALUE =
+            new ImmutableFieldReference(ALERT_ONCE_CLASS, "a", "Lcom/waze/k;");
+    private static final ImmutableMethodReference ALERT_ONCE_MODE = new ImmutableMethodReference(
+            ALERT_ONCE_STATE_CLASS, "c", Collections.emptyList(), ALERT_ONCE_MODE_CLASS);
+    private static final ImmutableMethodReference ALERT_ONCE_UPDATE = new ImmutableMethodReference(
+            ALERT_ONCE_STATE_CLASS, "e", java.util.Arrays.asList(
+            ALERT_ONCE_STATE_CLASS, "Lcom/waze/j;", ALERT_ONCE_MODE_CLASS, "I", "I"),
+            ALERT_ONCE_STATE_CLASS);
+    private static final ImmutableMethodReference ALERT_ONCE_NATIVE_START =
+            new ImmutableMethodReference("Lcom/waze/alerters/a/l;", "d",
+                    Collections.singletonList("Lcom/waze/k;"), "V");
     private static final ImmutableFieldReference ALERT_GUARD =
             new ImmutableFieldReference(ALERT_SESSION_CLASS, "g", "Z");
     private static final ImmutableMethodReference ALERT_ANCHOR = new ImmutableMethodReference(
@@ -82,25 +195,95 @@ final class WazePatchEngine {
     private static final ImmutableMethodReference ALERT_COLLECTOR = new ImmutableMethodReference(
             "Lcom/waze/car_lib/b/f;", "h", java.util.Arrays.asList(
             "Landroidx/lifecycle/Lifecycle;", "Landroidx/car/app/CarContext;"), "V");
+    private static final ImmutableMethodReference ALERT_TRIP_PUBLISHER =
+            new ImmutableMethodReference("Lcom/waze/car_lib/j/r;", "h",
+                    java.util.Arrays.asList("Lkotlinx/coroutines/aj;",
+                            "Landroidx/lifecycle/Lifecycle;",
+                            "Landroidx/car/app/CarContext;"), "V");
     private static final ImmutableMethodReference BRIDGE_INIT = new ImmutableMethodReference(
             BRIDGE_CLASS, "init", Collections.singletonList("Landroid/content/Context;"), "V");
     private static final ImmutableMethodReference BRIDGE_EMIT = new ImmutableMethodReference(
+            BRIDGE_CLASS, "emit", java.util.Arrays.asList("Z", "I"), "V");
+    private static final ImmutableMethodReference BRIDGE_EMIT_V1 = new ImmutableMethodReference(
             BRIDGE_CLASS, "emit", Collections.singletonList("Z"), "V");
+    private static final ImmutableMethodReference BRIDGE_SPEED = new ImmutableMethodReference(
+            BRIDGE_CLASS, "emitSpeedLimit",
+            java.util.Arrays.asList("I", "Ljava/lang/String;"), "V");
+    private static final ImmutableMethodReference SPEED_STATE_CONSTRUCTOR =
+            new ImmutableMethodReference("Lcom/waze/bs/o;", "<init>",
+                    java.util.Arrays.asList("I", "Ljava/lang/String;", "I", "D"), "V");
+    private static final ImmutableMethodReference CLUSTER_OEM_EXCLUSION =
+            new ImmutableMethodReference("Lcom/waze/car_lib/r/g;", "b",
+                    java.util.Arrays.asList("Ljava/util/List;", "Lh/c/e;"),
+                    "Ljava/lang/Object;");
+    private static final ImmutableMethodReference CLUSTER_OEM_LIST_PRODUCER =
+            new ImmutableMethodReference("Lcom/waze/car_lib/e/a;", "a",
+                    Collections.emptyList(), "Ljava/util/List;");
+    private static final ImmutableMethodReference CLUSTER_EMPTY_OEM_LIST =
+            new ImmutableMethodReference("Ljava/util/Collections;", "emptyList",
+                    Collections.emptyList(), "Ljava/util/List;");
+    private static final ImmutableMethodReference BOOLEAN_VALUE =
+            new ImmutableMethodReference("Ljava/lang/Boolean;", "booleanValue",
+                    Collections.emptyList(), "Z");
+    private static final ImmutableMethodReference TRIP_ADD_DESTINATION =
+            new ImmutableMethodReference("Landroidx/car/app/navigation/model/Trip$Builder;",
+                    "addDestination", java.util.Arrays.asList(
+                    "Landroidx/car/app/navigation/model/Destination;",
+                    "Landroidx/car/app/navigation/model/TravelEstimate;"),
+                    "Landroidx/car/app/navigation/model/Trip$Builder;");
+    private static final ImmutableMethodReference TRIP_BUILD =
+            new ImmutableMethodReference("Landroidx/car/app/navigation/model/Trip$Builder;",
+                    "build", Collections.emptyList(),
+                    "Landroidx/car/app/navigation/model/Trip;");
+    private static final ImmutableMethodReference NAVIGATION_UPDATE_TRIP =
+            new ImmutableMethodReference("Landroidx/car/app/navigation/NavigationManager;",
+                    "updateTrip", Collections.singletonList(
+                    "Landroidx/car/app/navigation/model/Trip;"), "V");
     private static final ImmutableMethodReference LEGACY_BRIDGE_INIT = new ImmutableMethodReference(
             LEGACY_BRIDGE_CLASS, "init",
             Collections.singletonList("Landroid/content/Context;"), "V");
     private static final ImmutableMethodReference LEGACY_BRIDGE_EMIT = new ImmutableMethodReference(
             LEGACY_BRIDGE_CLASS, "emit", Collections.singletonList("Z"), "V");
+    private static final ImmutableMethodReference LEGACY_BRIDGE_SPEED =
+            new ImmutableMethodReference(LEGACY_BRIDGE_CLASS, "emitSpeedLimit",
+                    java.util.Arrays.asList("I", "Ljava/lang/String;"), "V");
     static final String PATCHABLE_STOCK = "PATCHABLE_STOCK";
     static final String ALREADY_PATCHED = "ALREADY_PATCHED";
+    static final String PARTIAL = "PARTIAL";
     static final String UNSUPPORTED = "UNSUPPORTED";
 
+    static final class CompositeInspection {
+        final WazeInspection allowlist;
+        final LaneInspection lane;
+        final LifecycleInspection lifecycle;
+        final AlertInspection alert;
+
+        CompositeInspection(WazeInspection allowlist, LaneInspection lane,
+                LifecycleInspection lifecycle, AlertInspection alert) {
+            this.allowlist = allowlist;
+            this.lane = lane;
+            this.lifecycle = lifecycle;
+            this.alert = alert;
+        }
+    }
+
     private WazePatchEngine() {
+    }
+
+    static CompositeInspection inspectComposite(byte[] dex) throws IOException {
+        DexBackedDexFile file = DexBackedDexFile.fromInputStream(
+                Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return new CompositeInspection(inspectWaze(file), inspectLane(file),
+                inspectLifecycle(file), inspectAlertHook(file));
     }
 
     static WazeInspection inspectWaze(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return inspectWaze(file);
+    }
+
+    private static WazeInspection inspectWaze(DexBackedDexFile file) throws IOException {
         int matches = 0;
         WazeInspection result = null;
         for (ClassDef classDef : file.getClasses()) {
@@ -146,6 +329,10 @@ final class WazePatchEngine {
     static LifecycleInspection inspectLifecycle(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return inspectLifecycle(file);
+    }
+
+    private static LifecycleInspection inspectLifecycle(DexBackedDexFile file) throws IOException {
         LifecycleInspection result = new LifecycleInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (BRIDGE_CLASS.equals(classDef.getType())) result.bridgeClassCount++;
@@ -161,8 +348,22 @@ final class WazePatchEngine {
                 if (matchesRoute(method)) {
                     result.routeTargetCount++;
                     result.routeHookCount += countCall(method, BRIDGE_EMIT);
+                    result.v1RouteHookCount += countCall(method, BRIDGE_EMIT_V1);
                     result.legacyRouteHookCount += countCall(method, LEGACY_BRIDGE_EMIT);
                     result.routeGuard = inspectRouteGuard(method);
+                }
+                if (matchesSpeed(method)) {
+                    result.speedTargetCount++;
+                    result.speedHookCount += countCall(method, BRIDGE_SPEED);
+                    result.legacySpeedHookCount += countCall(method, LEGACY_BRIDGE_SPEED);
+                    result.speedGuard = inspectSpeedGuard(method);
+                }
+                if (matchesClusterEta(method)) {
+                    result.clusterEtaTargetCount++;
+                    result.clusterEtaGuard = inspectClusterEtaGuard(method);
+                    if ("patched".equals(result.clusterEtaGuard)) {
+                        result.clusterEtaPatchCount++;
+                    }
                 }
             }
         }
@@ -174,17 +375,43 @@ final class WazePatchEngine {
                 Opcodes.forApi(29), new ByteArrayInputStream(inputDex));
         AtomicInteger applicationMatches = new AtomicInteger();
         AtomicInteger routeMatches = new AtomicInteger();
+        AtomicInteger speedMatches = new AtomicInteger();
+        AtomicInteger clusterEtaMatches = new AtomicInteger();
         DexRewriter rewriter = new DexRewriter(new RewriterModule() {
             @Override
             public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
                 return method -> {
                     if (matchesApplication(method)) {
                         applicationMatches.incrementAndGet();
+                        if (countCall(method, BRIDGE_INIT) == 1
+                                || countCall(method, LEGACY_BRIDGE_INIT) == 1) return method;
                         return injectApplicationInit(method);
                     }
                     if (matchesRoute(method)) {
                         routeMatches.incrementAndGet();
+                        if (countCall(method, BRIDGE_EMIT) == 1
+                                || countCall(method, BRIDGE_EMIT_V1) == 1
+                                || countCall(method, LEGACY_BRIDGE_EMIT) == 1) return method;
                         return injectRouteEmit(method);
+                    }
+                    if (matchesSpeed(method)) {
+                        speedMatches.incrementAndGet();
+                        if (countCall(method, BRIDGE_SPEED) == 1
+                                || countCall(method, LEGACY_BRIDGE_SPEED) == 1) return method;
+                        return injectSpeedLimit(method);
+                    }
+                    if (matchesClusterEta(method)) {
+                        clusterEtaMatches.incrementAndGet();
+                        String guard = inspectClusterEtaGuard(method);
+                        if ("patched".equals(guard)) {
+                            throw new IllegalStateException(
+                                    "Waze cluster ETA target is already patched");
+                        }
+                        if (!"stock".equals(guard)) {
+                            throw new IllegalStateException(
+                                    "Waze cluster ETA target is not stock: " + guard);
+                        }
+                        return enableClusterEta(method);
                     }
                     return method;
                 };
@@ -192,15 +419,125 @@ final class WazePatchEngine {
         });
         DexFile rewritten = rewriter.getDexFileRewriter().rewrite(input);
         DexPool.writeTo(outputDex.getAbsolutePath(), rewritten);
-        if (applicationMatches.get() > 1 || routeMatches.get() > 1) {
+        if (applicationMatches.get() > 1 || routeMatches.get() > 1
+                || speedMatches.get() > 1 || clusterEtaMatches.get() > 1) {
             throw new IOException("Waze lifecycle rewrite counts app="
-                    + applicationMatches.get() + ", route=" + routeMatches.get());
+                    + applicationMatches.get() + ", route=" + routeMatches.get()
+                    + ", speed=" + speedMatches.get()
+                    + ", clusterEta=" + clusterEtaMatches.get());
+        }
+        if (clusterEtaMatches.get() == 1) {
+            LifecycleInspection verified = inspectLifecycle(
+                    Files.readAllBytes(outputDex.toPath()));
+            if (!verified.clusterEtaPatched()) {
+                throw new IOException("Waze cluster ETA verification failed: "
+                        + verified.clusterEtaGuard);
+            }
+        }
+    }
+
+    static LaneInspection inspectLane(byte[] dex) throws IOException {
+        DexBackedDexFile file = DexBackedDexFile.fromInputStream(Opcodes.forApi(29),
+                new ByteArrayInputStream(dex));
+        return inspectLane(file);
+    }
+
+    private static LaneInspection inspectLane(DexBackedDexFile file) throws IOException {
+        LaneInspection result = new LaneInspection();
+        for (ClassDef c : file.getClasses()) {
+            if (LANE_FRAME_CLASS.equals(c.getType())) {
+                result.frameClassCount++;
+                for (Field f : c.getFields()) if (sameField(f, LANE_FRAME_FIELD)) result.frameFieldCount++;
+                for (Method m : c.getMethods()) {
+                    if (sameMethod(m, LANE_FRAME_CTOR_STOCK)) result.frameStockCtorCount++;
+                    if (sameMethod(m, LANE_FRAME_CTOR_PATCHED)) result.framePatchedCtorCount++;
+                    if (sameMethod(m, LANE_FRAME_GETTER)) result.frameGetterCount++;
+                    if ("equals".equals(m.getName()) && m.getParameterTypes().size() == 1
+                            && "Ljava/lang/Object;".equals(m.getParameterTypes().get(0).toString())
+                            && "Z".equals(m.getReturnType())) {
+                        result.frameEqualsFieldCount += countFieldOpcode(
+                                m, LANE_FRAME_FIELD, Opcode.IGET_OBJECT);
+                    }
+                    if ("hashCode".equals(m.getName()) && m.getParameterTypes().isEmpty()
+                            && "I".equals(m.getReturnType())) {
+                        result.frameHashFieldCount += countFieldOpcode(
+                                m, LANE_FRAME_FIELD, Opcode.IGET_OBJECT);
+                    }
+                }
+            } else if (LANE_PRODUCER_CLASS.equals(c.getType())) {
+                for (Method m : c.getMethods()) if (sameMethod(m, LANE_PRODUCER_TARGET)) {
+                    result.producerTargetCount++;
+                    result.producerSourceCount += countCall(m, LANE_SOURCE);
+                    result.producerFieldCount += countFieldOpcode(m, LANE_SOURCE_FIELD, Opcode.IGET_OBJECT);
+                    result.producerEmptyCount += countFieldOpcode(m, COLLECTIONS_EMPTY_LIST, Opcode.SGET_OBJECT);
+                    result.producerTypeCount += countTypeOpcode(m, NAVIGATION_LANE_LIST, Opcode.INSTANCE_OF);
+                    result.producerCastCount += countLaneCast(m);
+                    result.producerStockCtorCount += countCall(m, LANE_FRAME_CTOR_STOCK);
+                    result.producerPatchedCtorCount += countCall(m, LANE_FRAME_CTOR_PATCHED);
+                }
+            } else if (LANE_ADAPTER_CLASS.equals(c.getType())) {
+                for (Method m : c.getMethods()) {
+                    if (sameMethod(m, LANE_ADAPTER_TARGET)) {
+                        result.adapterTargetCount++;
+                        result.adapterSentinelCount += countLaneSentinel(m);
+                        result.adapterHelperCallCount += countCall(m, LANE_HELPER);
+                    }
+                    if (sameMethod(m, LANE_HELPER)) result.adapterHelperCount++;
+                    if (sameMethod(m, LANE_ANGLE_MAPPER)) result.adapterMapperCount++;
+                }
+            }
+        }
+        if (result.stockShape()) {
+            result.classification = PATCHABLE_STOCK;
+            result.reason = "exact stock Waze lane targets";
+        } else if (result.patchedShape() || result.publishedShape()) {
+            result.classification = ALREADY_PATCHED;
+            result.reason = "exact patched Waze lane targets";
+        } else {
+            boolean marker = result.frameFieldCount > 0 || result.framePatchedCtorCount > 0
+                    || result.frameGetterCount > 0 || result.frameEqualsFieldCount > 0
+                    || result.frameHashFieldCount > 0
+                    || result.producerPatchedCtorCount > 0 || result.adapterHelperCount > 0
+                    || result.adapterMapperCount > 0 || result.adapterHelperCallCount > 0;
+            result.classification = marker ? PARTIAL : UNSUPPORTED;
+            result.reason = marker ? "lane patch is partial" : "lane targets missing or ambiguous";
+        }
+        return result;
+    }
+
+    static void patchLanes(byte[] inputDex, File outputDex) throws IOException {
+        LaneInspection input = inspectLane(inputDex);
+        if (!PATCHABLE_STOCK.equals(input.classification)) {
+            throw new IOException("Waze lane target is not compatible stock: " + input.summary());
+        }
+        DexBackedDexFile file = DexBackedDexFile.fromInputStream(Opcodes.forApi(29),
+                new ByteArrayInputStream(inputDex));
+        List<ClassDef> classes = new ArrayList<>();
+        int frames = 0, producers = 0, adapters = 0;
+        for (ClassDef c : file.getClasses()) {
+            if (LANE_FRAME_CLASS.equals(c.getType())) { classes.add(rewriteLaneFrame(c)); frames++; }
+            else if (LANE_PRODUCER_CLASS.equals(c.getType())) { classes.add(rewriteLaneProducer(c)); producers++; }
+            else if (LANE_ADAPTER_CLASS.equals(c.getType())) { classes.add(rewriteLaneAdapter(c)); adapters++; }
+            else classes.add(ImmutableClassDef.of(c));
+        }
+        if (frames != 1 || producers != 1 || adapters != 1) {
+            throw new IOException("Waze lane rewrite counts frame=" + frames + ", producer="
+                    + producers + ", adapter=" + adapters);
+        }
+        DexPool.writeTo(outputDex.getAbsolutePath(), new ImmutableDexFile(file.getOpcodes(), classes));
+        LaneInspection verified = inspectLane(Files.readAllBytes(outputDex.toPath()));
+        if (!ALREADY_PATCHED.equals(verified.classification)) {
+            throw new IOException("Waze lane verification failed: " + verified.summary());
         }
     }
 
     static AlertInspection inspectAlertHook(byte[] dex) throws IOException {
         DexBackedDexFile file = DexBackedDexFile.fromInputStream(
                 Opcodes.forApi(29), new ByteArrayInputStream(dex));
+        return inspectAlertHook(file);
+    }
+
+    private static AlertInspection inspectAlertHook(DexBackedDexFile file) throws IOException {
         AlertInspection result = new AlertInspection();
         for (ClassDef classDef : file.getClasses()) {
             if (!ALERT_SESSION_CLASS.equals(classDef.getType())) continue;
@@ -227,6 +564,8 @@ final class WazePatchEngine {
                     result.helperMethodCount++;
                     result.producerCallCount += countCall(method, ALERT_PRODUCER);
                     result.collectorCallCount += countCall(method, ALERT_COLLECTOR);
+                    result.tripPublisherCallCount += countCall(
+                            method, ALERT_TRIP_PUBLISHER);
                     result.guardReadCount += countFieldOpcode(
                             method, ALERT_GUARD, Opcode.IGET_BOOLEAN);
                     result.guardWriteCount += countFieldOpcode(
@@ -236,12 +575,43 @@ final class WazePatchEngine {
                 }
             }
         }
+        for (ClassDef classDef : file.getClasses()) {
+            if (!ALERT_ONCE_CLASS.equals(classDef.getType())) continue;
+            result.alertOnceClassCount++;
+            for (Method method : classDef.getMethods()) {
+                if (matchesAlertOnceTarget(method)) {
+                    result.alertOnceTargetMethodCount++;
+                    result.alertOnceStateReadCount += countFieldOpcode(
+                            method, ALERT_ONCE_STATE, Opcode.IGET_OBJECT);
+                    result.alertOnceModeReadCount += countCall(method, ALERT_ONCE_MODE);
+                    result.alertOnceStateUpdateCount += countCall(method, ALERT_ONCE_UPDATE);
+                    result.alertOnceNativeStartCount += countCall(
+                            method, ALERT_ONCE_NATIVE_START);
+                    result.alertOnceGuardCount += countAlertOnceGuards(method);
+                    AlertOnceInspection structure = inspectAlertOnceMethod(method);
+                    if (structure.stock) result.alertOnceStockShapeCount++;
+                    if (structure.patched) result.alertOncePatchedShapeCount++;
+                }
+                if (matchesAlertOnceMethod(method, "i")
+                        || matchesAlertOnceMethod(method, "j")) {
+                    result.alertOnceUnchangedMethodCount++;
+                }
+            }
+        }
         return result;
     }
 
     static void patchAlertHook(byte[] inputDex, File outputDex) throws IOException {
+        patchAlertComponents(inputDex, outputDex, true, true);
+    }
+
+    static void patchAlertComponents(byte[] inputDex, File outputDex,
+            boolean patchUi, boolean patchAlertOnce) throws IOException {
+        if (!patchUi && !patchAlertOnce) {
+            throw new IOException("Waze alert component selection is empty");
+        }
         AlertInspection inspection = inspectAlertHook(inputDex);
-        if (!inspection.stockTargets()) {
+        if (!inspection.patchableComponents()) {
             throw new IOException("Waze alert-hook target is not compatible stock: "
                     + inspection.summary());
         }
@@ -251,23 +621,312 @@ final class WazePatchEngine {
         int rewritten = 0;
         for (ClassDef classDef : input.getClasses()) {
             if (ALERT_SESSION_CLASS.equals(classDef.getType())) {
-                classes.add(rewriteAlertClass(classDef));
-                rewritten++;
+                classes.add(patchUi && inspection.stockTargets()
+                        ? rewriteAlertClass(classDef) : ImmutableClassDef.of(classDef));
+                if (patchUi && inspection.stockTargets()) rewritten++;
+            } else if (ALERT_ONCE_CLASS.equals(classDef.getType())) {
+                classes.add(patchAlertOnce && inspection.alertOnceStockTargets()
+                        ? rewriteAlertOnceClass(classDef) : ImmutableClassDef.of(classDef));
+                if (patchAlertOnce && inspection.alertOnceStockTargets()) rewritten++;
             } else {
                 classes.add(ImmutableClassDef.of(classDef));
             }
         }
-        if (rewritten != 1) {
-            throw new IOException("Waze alert-hook class rewrite count=" + rewritten);
+        if (rewritten == 0) {
+            throw new IOException("Waze alert-hook class rewrite count=0");
         }
         DexPool.writeTo(outputDex.getAbsolutePath(),
                 new ImmutableDexFile(input.getOpcodes(), classes));
         AlertInspection verified = inspectAlertHook(Files.readAllBytes(outputDex.toPath()));
-        if (!verified.patchedTargets()) {
+        if (!verified.patchedComponents(inspection, patchUi, patchAlertOnce)) {
             throw new IOException("Waze alert-hook verification failed: " + verified.summary());
         }
     }
 
+    private static ClassDef rewriteLaneFrame(ClassDef c) {
+        List<Field> fields = new ArrayList<>(); c.getFields().forEach(fields::add);
+        fields.add(new ImmutableField(LANE_FRAME_CLASS, "i", NAVIGATION_LANE_LIST,
+                AccessFlags.PRIVATE.getValue() | AccessFlags.FINAL.getValue(), null,
+                Collections.emptySet(), Collections.emptySet()));
+        List<Method> methods = new ArrayList<>(); int count = 0;
+        for (Method m : c.getMethods()) {
+            if (sameMethod(m, LANE_FRAME_CTOR_STOCK)) { methods.add(injectLaneFrameCtor(m)); count++; }
+            else if ("equals".equals(m.getName()) && m.getParameterTypes().size() == 1
+                    && "Ljava/lang/Object;".equals(m.getParameterTypes().get(0).toString())
+                    && "Z".equals(m.getReturnType())) {
+                methods.add(injectLaneFrameEquals(m));
+            } else if ("hashCode".equals(m.getName()) && m.getParameterTypes().isEmpty()
+                    && "I".equals(m.getReturnType())) {
+                methods.add(injectLaneFrameHash(m));
+            }
+            else methods.add(ImmutableMethod.of(m));
+        }
+        if (count != 1) throw new IllegalStateException("Waze lane constructor count=" + count);
+        MethodImplementationBuilder code = new MethodImplementationBuilder(1);
+        code.addInstruction(new BuilderInstruction22c(Opcode.IGET_OBJECT, 0, 0, LANE_FRAME_FIELD));
+        code.addInstruction(new BuilderInstruction11x(Opcode.RETURN_OBJECT, 0));
+        methods.add(new ImmutableMethod(LANE_FRAME_CLASS, "i", Collections.emptyList(), NAVIGATION_LANE_LIST,
+                AccessFlags.PUBLIC.getValue() | AccessFlags.FINAL.getValue(), Collections.emptySet(),
+                Collections.emptySet(), code.getMethodImplementation()));
+        return new ImmutableClassDef(c.getType(), c.getAccessFlags(), c.getSuperclass(), c.getInterfaces(),
+                c.getSourceFile(), c.getAnnotations(), fields, methods);
+    }
+
+    private static Method injectLaneFrameCtor(Method m) {
+        MethodImplementation src = m.getImplementation(); if (src == null) throw new IllegalStateException("lane ctor body missing");
+        List<Instruction> ins = new ArrayList<>(toList(src)); int ret = -1;
+        for (int i = 0; i < ins.size(); i++) if (ins.get(i).getOpcode() == Opcode.RETURN_VOID) {
+            if (ret >= 0) throw new IllegalStateException("lane ctor return ambiguous"); ret = i;
+        }
+        if (ret < 0) throw new IllegalStateException("lane ctor return missing");
+        int params = 1; for (CharSequence t : m.getParameterTypes()) params += ("J".contentEquals(t) || "D".contentEquals(t)) ? 2 : 1;
+        int thiz = src.getRegisterCount() - params;
+        ins.add(ret, new org.jf.dexlib2.immutable.instruction.ImmutableInstruction22c(
+                Opcode.IPUT_OBJECT, src.getRegisterCount(), thiz, LANE_FRAME_FIELD));
+        return new ImmutableMethod(m.getDefiningClass(), m.getName(), laneParameters(), m.getReturnType(),
+                m.getAccessFlags(), m.getAnnotations(), m.getHiddenApiRestrictions(),
+                new ImmutableMethodImplementation(src.getRegisterCount() + 1, ins,
+                        src.getTryBlocks(), src.getDebugItems()));
+    }
+
+    private static List<ImmutableMethodParameter> laneParameters() {
+        return parameters(java.util.Arrays.asList("I", "Lcom/waze/t/b/bw;",
+                "Landroid/text/SpannableStringBuilder;", "Ljava/lang/String;", "Landroid/graphics/Bitmap;",
+                "Ljava/lang/Integer;", "Ljava/util/Collection;", "Ljava/lang/Long;", NAVIGATION_LANE_LIST));
+    }
+
+    private static Method injectLaneFrameEquals(Method m) {
+        MethodImplementation src = m.getImplementation();
+        if (src == null) throw new IllegalStateException("lane equals body missing");
+        MutableMethodImplementation out = new MutableMethodImplementation(src);
+        int thisRegister = src.getRegisterCount() - 2;
+        int otherRegister = thisRegister + 1;
+        int anchor = -1;
+        int anchors = 0;
+        for (int i = 0; i < out.getInstructions().size(); i++) {
+            Instruction x = out.getInstructions().get(i);
+            if (x.getOpcode() == Opcode.IGET_OBJECT && x instanceof ReferenceInstruction
+                    && sameField((FieldReference) ((ReferenceInstruction) x).getReference(),
+                    new ImmutableFieldReference(LANE_FRAME_CLASS, "g", "Ljava/lang/Long;"))) {
+                if (anchor < 0) anchor = i;
+                anchors++;
+            }
+        }
+        if (anchors != 2) throw new IllegalStateException("lane equals anchor count=" + anchors);
+        Label continueLabel = out.newLabelForIndex(anchor);
+        int at = anchor;
+        out.addInstruction(at++, new BuilderInstruction22c(Opcode.IGET_OBJECT, 1,
+                thisRegister, LANE_FRAME_FIELD));
+        out.addInstruction(at++, new BuilderInstruction22c(Opcode.IGET_OBJECT, 3,
+                otherRegister, LANE_FRAME_FIELD));
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_STATIC, 2,
+                1, 3, 0, 0, 0, OBJECT_EQUALS));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT, 1));
+        out.addInstruction(at++, new BuilderInstruction21t(Opcode.IF_NEZ, 1, continueLabel));
+        out.addInstruction(at, new BuilderInstruction11x(Opcode.RETURN, 2));
+        return immutable(m, out);
+    }
+
+    private static Method injectLaneFrameHash(Method m) {
+        MethodImplementation src = m.getImplementation();
+        if (src == null) throw new IllegalStateException("lane hash body missing");
+        MutableMethodImplementation out = new MutableMethodImplementation(src);
+        int thisRegister = src.getRegisterCount() - 1;
+        int anchor = -1;
+        FieldReference expected = new ImmutableFieldReference(
+                LANE_FRAME_CLASS, "g", "Ljava/lang/Long;");
+        for (int i = 0; i < out.getInstructions().size(); i++) {
+            Instruction x = out.getInstructions().get(i);
+            if (x.getOpcode() == Opcode.IGET_OBJECT && x instanceof ReferenceInstruction
+                    && sameField((FieldReference) ((ReferenceInstruction) x).getReference(), expected)) {
+                if (anchor >= 0) throw new IllegalStateException("lane hash anchor ambiguous");
+                anchor = i;
+            }
+        }
+        if (anchor < 0) throw new IllegalStateException("lane hash anchor missing");
+        int at = anchor;
+        out.addInstruction(at++, new BuilderInstruction22c(Opcode.IGET_OBJECT, 0,
+                thisRegister, LANE_FRAME_FIELD));
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL,
+                1, 0, 0, 0, 0, 0, OBJECT_HASH));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT, 0));
+        out.addInstruction(at++, new BuilderInstruction12x(Opcode.ADD_INT_2ADDR, 2, 0));
+        out.addInstruction(at, new BuilderInstruction22b(Opcode.MUL_INT_LIT8, 2, 2, 31));
+        return immutable(m, out);
+    }
+
+    private static ClassDef rewriteLaneProducer(ClassDef c) {
+        List<Method> methods = new ArrayList<>(); int count = 0;
+        for (Method m : c.getMethods()) { if (sameMethod(m, LANE_PRODUCER_TARGET)) { methods.add(injectLaneProducer(m)); count++; } else methods.add(ImmutableMethod.of(m)); }
+        if (count != 1) throw new IllegalStateException("Waze lane producer count=" + count);
+        return new ImmutableClassDef(c.getType(), c.getAccessFlags(), c.getSuperclass(), c.getInterfaces(), c.getSourceFile(), c.getAnnotations(), c.getFields(), methods);
+    }
+
+    private static Method injectLaneProducer(Method m) {
+        MethodImplementation src = m.getImplementation(); if (src == null) throw new IllegalStateException("lane producer body missing");
+        List<Instruction> original = new ArrayList<>(toList(src)); int branch = -1, ctor = -1;
+        for (int i = 0; i < original.size(); i++) {
+            Instruction x = original.get(i);
+            if (x.getOpcode() == Opcode.CONST_4 && x instanceof OneRegisterInstruction && ((OneRegisterInstruction)x).getRegisterA() == 6 && literal(x, 0)
+                    && i + 1 < original.size() && original.get(i + 1).getOpcode() == Opcode.IF_NE) { if (branch >= 0) throw new IllegalStateException("lane producer entry ambiguous"); branch = i + 1; }
+            if (isCall(x, LANE_FRAME_CTOR_STOCK)) { if (ctor >= 0) throw new IllegalStateException("lane producer ctor ambiguous"); ctor = i; }
+        }
+        if (branch < 0 || ctor < 0) throw new IllegalStateException("lane producer anchors missing");
+        MutableMethodImplementation out = new MutableMethodImplementation(src);
+        Label ready = out.newLabelForIndex(ctor);
+        int p0 = src.getRegisterCount() - 6;
+        int at = ctor;
+        out.addInstruction(at++, new BuilderInstruction21c(
+                Opcode.SGET_OBJECT, 18, COLLECTIONS_EMPTY_LIST));
+        out.addInstruction(at++, new BuilderInstruction3rc(
+                Opcode.INVOKE_VIRTUAL_RANGE, p0, 1, LANE_SOURCE));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 1));
+        out.addInstruction(at++, new BuilderInstruction21t(Opcode.IF_EQZ, 1, ready));
+        out.addInstruction(at++, new BuilderInstruction22c(Opcode.IGET_OBJECT, 0, 1, LANE_SOURCE_FIELD));
+        out.addInstruction(at++, new BuilderInstruction22c(Opcode.INSTANCE_OF, 1, 0,
+                new ImmutableTypeReference(NAVIGATION_LANE_LIST)));
+        out.addInstruction(at++, new BuilderInstruction21t(Opcode.IF_EQZ, 1, ready));
+        out.addInstruction(at++, new BuilderInstruction21c(Opcode.CHECK_CAST, 0,
+                new ImmutableTypeReference(NAVIGATION_LANE_LIST)));
+        out.addInstruction(at++, new BuilderInstruction22x(Opcode.MOVE_OBJECT_FROM16, 18, 0));
+        out.replaceInstruction(at, new BuilderInstruction3rc(Opcode.INVOKE_DIRECT_RANGE, 9, 10,
+                LANE_FRAME_CTOR_PATCHED));
+        return immutable(m, out);
+    }
+
+    private static ClassDef rewriteLaneAdapter(ClassDef c) {
+        List<Method> methods = new ArrayList<>(); int count = 0;
+        for (Method m : c.getMethods()) {
+            if (sameMethod(m, LANE_ADAPTER_TARGET)) { methods.add(injectLaneAdapter(m)); count++; }
+            else if (sameMethod(m, LANE_HELPER) || sameMethod(m, LANE_ANGLE_MAPPER)) throw new IllegalStateException("lane helper duplicate");
+            else methods.add(ImmutableMethod.of(m));
+        }
+        if (count != 1) throw new IllegalStateException("Waze lane adapter count=" + count);
+        methods.add(buildLaneHelper()); methods.add(buildLaneMapper());
+        return new ImmutableClassDef(c.getType(), c.getAccessFlags(), c.getSuperclass(), c.getInterfaces(), c.getSourceFile(), c.getAnnotations(), c.getFields(), methods);
+    }
+
+    private static Method injectLaneAdapter(Method m) {
+        MethodImplementation src = m.getImplementation(); if (src == null) throw new IllegalStateException("lane adapter body missing");
+        List<? extends Instruction> ins = toList(src); int[] s = findSentinel(ins); if (s == null) throw new IllegalStateException("lane sentinel missing");
+        int p0 = src.getRegisterCount() - 2;
+        int frameSave = -1;
+        for (int i = 0; i < s[0]; i++) {
+            if (isCall(ins.get(i), LANE_FRAME_BITMAP)) {
+                if (frameSave < 0) frameSave = i;
+            }
+        }
+        if (frameSave < 0) throw new IllegalStateException("lane frame bitmap anchor missing");
+        MutableMethodImplementation out = new MutableMethodImplementation(src);
+        out.addInstruction(frameSave, new BuilderInstruction12x(Opcode.MOVE_OBJECT, 7, p0));
+        int shift = frameSave <= s[0] ? 1 : 0;
+        s[0] += shift;
+        s[1] += shift;
+        for (int i = s[1]; i >= s[0]; i--) out.removeInstruction(i);
+        int at = s[0];
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_STATIC, 1, 7, 0, 0, 0, 0, LANE_HELPER));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 2));
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 2, 0, 0, 0, 0, LIST_ITERATOR));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 2));
+        out.addInstruction(at++, new BuilderInstruction10x(Opcode.NOP));
+        Label loop = out.newLabelForIndex(at - 1);
+        Label done = out.newLabelForIndex(at);
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 2, 0, 0, 0, 0, ITERATOR_HAS_NEXT));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT, 3));
+        out.addInstruction(at++, new BuilderInstruction21t(Opcode.IF_EQZ, 3, done));
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 2, 0, 0, 0, 0, ITERATOR_NEXT));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3));
+        out.addInstruction(at++, new BuilderInstruction21c(Opcode.CHECK_CAST, 3, new ImmutableTypeReference("Landroidx/car/app/navigation/model/Lane;")));
+        out.addInstruction(at++, new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, 0, 3, 0, 0, 0, STEP_ADD_LANE));
+        out.addInstruction(at++, new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 0));
+        out.addInstruction(at, new BuilderInstruction10t(Opcode.GOTO, loop));
+        return immutable(m, out);
+    }
+
+    private static int[] findSentinel(List<? extends Instruction> x) {
+        for (int i = 0; i + 9 < x.size(); i++) if (isType(x.get(i), LANE_BUILDER_CLASS)
+                && isCall(x.get(i + 1), LANE_BUILDER_CTOR)
+                && literal(x.get(i + 2), 6) && literal(x.get(i + 3), 1)
+                && isCall(x.get(i + 4), LANE_DIRECTION_CREATE)
+                && x.get(i + 5).getOpcode() == Opcode.MOVE_RESULT_OBJECT
+                && isCall(x.get(i + 6), LANE_ADD_DIRECTION)
+                && isCall(x.get(i + 7), LANE_BUILD)
+                && x.get(i + 8).getOpcode() == Opcode.MOVE_RESULT_OBJECT
+                && isCall(x.get(i + 9), STEP_ADD_LANE)) return new int[]{i, i + 9};
+        return null;
+    }
+
+    private static int countLaneSentinel(Method m) {
+        MethodImplementation implementation = m.getImplementation();
+        if (implementation == null) return 0;
+        List<? extends Instruction> instructions = toList(implementation);
+        int count = 0;
+        for (int i = 0; i + 9 < instructions.size(); i++) {
+            if (findSentinel(instructions.subList(i, i + 10)) != null) count++;
+        }
+        return count;
+    }
+
+    private static Method buildLaneHelper() {
+        MethodImplementationBuilder c = new MethodImplementationBuilder(10);
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, 9, 0, 0, 0, 0, LANE_FRAME_GETTER));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 9));
+        c.addInstruction(new BuilderInstruction21c(Opcode.NEW_INSTANCE, 0, new ImmutableTypeReference("Ljava/util/ArrayList;")));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 9, 0, 0, 0, 0, LIST_SIZE));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 1));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_DIRECT, 2, 0, 1, 0, 0, 0, method("Ljava/util/ArrayList;", "<init>", Collections.singletonList("I"), "V")));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 9, 0, 0, 0, 0, LIST_ITERATOR));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 1)); c.addLabel("outer");
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 1, 0, 0, 0, 0, ITERATOR_HAS_NEXT));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 2)); c.addInstruction(new BuilderInstruction21t(Opcode.IF_EQZ, 2, c.getLabel("done")));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 1, 0, 0, 0, 0, ITERATOR_NEXT));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 2)); c.addInstruction(new BuilderInstruction21c(Opcode.CHECK_CAST, 2, new ImmutableTypeReference(NAVIGATION_LANE_CLASS)));
+        c.addInstruction(new BuilderInstruction21c(Opcode.NEW_INSTANCE, 3, new ImmutableTypeReference(LANE_BUILDER_CLASS)));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, 3, 0, 0, 0, 0, LANE_BUILDER_CTOR));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, 2, 0, 0, 0, 0, NAVIGATION_ANGLE_LIST));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 4));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 4, 0, 0, 0, 0, LIST_SIZE));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 6));
+        c.addInstruction(new BuilderInstruction21t(Opcode.IF_NEZ, 6, c.getLabel("angleIterator")));
+        c.addInstruction(new BuilderInstruction11n(Opcode.CONST_4, 6, 1));
+        c.addInstruction(new BuilderInstruction11n(Opcode.CONST_4, 7, 0));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_STATIC, 2, 6, 7, 0, 0, 0, LANE_DIRECTION_CREATE));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 6));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, 3, 6, 0, 0, 0, LANE_ADD_DIRECTION));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3));
+        c.addLabel("angleIterator");
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 4, 0, 0, 0, 0, LIST_ITERATOR));
+        c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 5)); c.addLabel("angles");
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 5, 0, 0, 0, 0, ITERATOR_HAS_NEXT)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 6));
+        c.addInstruction(new BuilderInstruction21t(Opcode.IF_EQZ, 6, c.getLabel("angleDone")));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 5, 0, 0, 0, 0, ITERATOR_NEXT)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 6));
+        c.addInstruction(new BuilderInstruction21c(Opcode.CHECK_CAST, 6, new ImmutableTypeReference(NAVIGATION_LANE_ANGLE_CLASS)));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, 6, 0, 0, 0, 0, NAVIGATION_ANGLE)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 7));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_STATIC, 1, 7, 0, 0, 0, 0, LANE_ANGLE_MAPPER)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 7));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, 6, 0, 0, 0, 0, NAVIGATION_SELECTED)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 8));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_STATIC, 2, 7, 8, 0, 0, 0, LANE_DIRECTION_CREATE)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 6));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, 3, 6, 0, 0, 0, LANE_ADD_DIRECTION)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 3));
+        c.addInstruction(new BuilderInstruction10t(Opcode.GOTO, c.getLabel("angles"))); c.addLabel("angleDone");
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, 3, 0, 0, 0, 0, LANE_BUILD)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 2));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 2, 0, 2, 0, 0, 0, LIST_ADD)); c.addInstruction(new BuilderInstruction10t(Opcode.GOTO, c.getLabel("outer"))); c.addLabel("done");
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 1, 0, 0, 0, 0, 0, LIST_SIZE)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT, 1));
+        c.addInstruction(new BuilderInstruction21t(Opcode.IF_NEZ, 1, c.getLabel("return")));
+        c.addInstruction(new BuilderInstruction21c(Opcode.NEW_INSTANCE, 1, new ImmutableTypeReference(LANE_BUILDER_CLASS))); c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_DIRECT, 1, 1, 0, 0, 0, 0, LANE_BUILDER_CTOR));
+        c.addInstruction(new BuilderInstruction11n(Opcode.CONST_4, 2, 1)); c.addInstruction(new BuilderInstruction11n(Opcode.CONST_4, 3, 0)); c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_STATIC, 2, 2, 3, 0, 0, 0, LANE_DIRECTION_CREATE)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 2));
+        c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 2, 1, 2, 0, 0, 0, LANE_ADD_DIRECTION)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 1)); c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_VIRTUAL, 1, 1, 0, 0, 0, 0, LANE_BUILD)); c.addInstruction(new BuilderInstruction11x(Opcode.MOVE_RESULT_OBJECT, 1)); c.addInstruction(new BuilderInstruction35c(Opcode.INVOKE_INTERFACE, 2, 0, 1, 0, 0, 0, LIST_ADD)); c.addLabel("return"); c.addInstruction(new BuilderInstruction11x(Opcode.RETURN_OBJECT, 0));
+        return new ImmutableMethod(LANE_ADAPTER_CLASS, "h", parameters(Collections.singletonList(LANE_FRAME_CLASS)), NAVIGATION_LANE_LIST, AccessFlags.PRIVATE.getValue() | AccessFlags.STATIC.getValue(), Collections.emptySet(), Collections.emptySet(), c.getMethodImplementation());
+    }
+
+    private static Method buildLaneMapper() {
+        MethodImplementationBuilder c = new MethodImplementationBuilder(2);
+        c.addInstruction(new BuilderInstruction21t(Opcode.IF_LTZ, 1, c.getLabel("neg"))); c.addInstruction(new BuilderInstruction21t(Opcode.IF_EQZ, 1, c.getLabel("straight")));
+        c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, 89)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_LE, 1, 0, c.getLabel("slightR"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, 90)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_EQ, 1, 0, c.getLabel("normalR"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, 179)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_LE, 1, 0, c.getLabel("sharpR"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, 180)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_EQ, 1, 0, c.getLabel("uturnR"))); c.addInstruction(new BuilderInstruction10t(Opcode.GOTO, c.getLabel("unknown")));
+        c.addLabel("neg"); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, -180)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_EQ, 1, 0, c.getLabel("uturnL"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, -179)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_LT, 1, 0, c.getLabel("unknown"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, -91)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_LE, 1, 0, c.getLabel("sharpL"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, -90)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_EQ, 1, 0, c.getLabel("normalL"))); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, -1)); c.addInstruction(new BuilderInstruction22t(Opcode.IF_LE, 1, 0, c.getLabel("slightL"))); c.addInstruction(new BuilderInstruction10t(Opcode.GOTO, c.getLabel("unknown")));
+        addMapperReturn(c, "unknown", 1); addMapperReturn(c, "straight", 2); addMapperReturn(c, "slightL", 3); addMapperReturn(c, "slightR", 4); addMapperReturn(c, "normalL", 5); addMapperReturn(c, "normalR", 6); addMapperReturn(c, "sharpL", 7); addMapperReturn(c, "sharpR", 8); addMapperReturn(c, "uturnL", 9); addMapperReturn(c, "uturnR", 10);
+        return new ImmutableMethod(LANE_ADAPTER_CLASS, "i", parameters(Collections.singletonList("I")), "I", AccessFlags.PRIVATE.getValue() | AccessFlags.STATIC.getValue(), Collections.emptySet(), Collections.emptySet(), c.getMethodImplementation());
+    }
+
+    private static void addMapperReturn(MethodImplementationBuilder c, String label, int value) { c.addLabel(label); c.addInstruction(new BuilderInstruction21s(Opcode.CONST_16, 0, value)); c.addInstruction(new BuilderInstruction11x(Opcode.RETURN, 0)); }
     private static ClassDef rewriteAlertClass(ClassDef classDef) {
         List<Field> fields = new ArrayList<>();
         classDef.getFields().forEach(fields::add);
@@ -293,6 +952,115 @@ final class WazePatchEngine {
                 classDef.getType(), classDef.getAccessFlags(), classDef.getSuperclass(),
                 classDef.getInterfaces(), classDef.getSourceFile(), classDef.getAnnotations(),
                 fields, methods);
+    }
+
+    private static ClassDef rewriteAlertOnceClass(ClassDef classDef) {
+        List<Method> methods = new ArrayList<>();
+        int targetCount = 0;
+        for (Method method : classDef.getMethods()) {
+            if (matchesAlertOnceTarget(method)) {
+                methods.add(injectAlertOnceGuard(method));
+                targetCount++;
+            } else {
+                methods.add(ImmutableMethod.of(method));
+            }
+        }
+        if (targetCount != 1) {
+            throw new IllegalStateException("Waze alert-once target count=" + targetCount);
+        }
+        return new ImmutableClassDef(
+                classDef.getType(), classDef.getAccessFlags(), classDef.getSuperclass(),
+                classDef.getInterfaces(), classDef.getSourceFile(), classDef.getAnnotations(),
+                classDef.getFields(), methods);
+    }
+
+    private static Method injectAlertOnceGuard(Method method) {
+        AlertOnceInspection inspection = inspectAlertOnceMethod(method);
+        if (!inspection.stock) {
+            throw new IllegalStateException(
+                    "Waze alert-once target is not compatible stock: " + inspection.reason);
+        }
+        MethodImplementation source = method.getImplementation();
+        MutableMethodImplementation mutable = new MutableMethodImplementation(source);
+        int thisRegister = source.getRegisterCount() - 1;
+        mutable.addInstruction(0, new BuilderInstruction22c(
+                Opcode.IGET_OBJECT, 4, thisRegister, ALERT_ONCE_STATE));
+        mutable.addInstruction(1, new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 1, 4, 0, 0, 0, 0, ALERT_ONCE_MODE));
+        mutable.addInstruction(2, new BuilderInstruction11x(
+                Opcode.MOVE_RESULT_OBJECT, 4));
+
+        int update = -1;
+        int nativeStart = -1;
+        for (int index = 0; index < mutable.getInstructions().size(); index++) {
+            Instruction instruction = mutable.getInstructions().get(index);
+            if (isCall(instruction, ALERT_ONCE_UPDATE)) {
+                if (update >= 0) throw new IllegalStateException("Waze alert-once update is ambiguous");
+                update = index;
+            }
+            if (isCall(instruction, ALERT_ONCE_NATIVE_START)) {
+                if (nativeStart >= 0) {
+                    throw new IllegalStateException("Waze alert-once native start is ambiguous");
+                }
+                nativeStart = index;
+            }
+        }
+        if (update < 1 || nativeStart < 1) {
+            throw new IllegalStateException("Waze alert-once update or native start is missing");
+        }
+        Instruction updateInstruction = mutable.getInstructions().get(update);
+        if (!(updateInstruction instanceof FiveRegisterInstruction)) {
+            throw new IllegalStateException("Waze alert-once update register shape mismatch");
+        }
+        FiveRegisterInstruction updateRegisters = (FiveRegisterInstruction) updateInstruction;
+        if (updateRegisters.getRegisterD() != 4) {
+            throw new IllegalStateException("Waze alert-once update does not use stock null register");
+        }
+        mutable.replaceInstruction(update, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, updateRegisters.getRegisterCount(),
+                updateRegisters.getRegisterC(), 2, updateRegisters.getRegisterE(),
+                updateRegisters.getRegisterF(), updateRegisters.getRegisterG(),
+                ALERT_ONCE_UPDATE));
+        int nullRegister = -1;
+        for (int index = update - 1; index >= 0; index--) {
+            Instruction instruction = mutable.getInstructions().get(index);
+            if (instruction.getOpcode() == Opcode.CONST_4
+                    && instruction instanceof org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction
+                    && ((org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction) instruction)
+                    .getNarrowLiteral() == 0
+                    && instruction instanceof OneRegisterInstruction
+                    && ((OneRegisterInstruction) instruction).getRegisterA() == 4) {
+                nullRegister = index;
+                break;
+            }
+        }
+        if (nullRegister < 0) {
+            throw new IllegalStateException("Waze alert-once null register is missing");
+        }
+        mutable.removeInstruction(nullRegister);
+        if (nullRegister < nativeStart) nativeStart--;
+
+        int listenerLoad = nativeStart - 2;
+        if (listenerLoad < 0
+                || !isAlertOnceFieldLoad(
+                mutable.getInstructions().get(listenerLoad), ALERT_ONCE_LISTENER, 0, thisRegister)
+                || !isAlertOnceFieldLoad(
+                mutable.getInstructions().get(listenerLoad + 1),
+                ALERT_ONCE_VALUE, thisRegister, thisRegister)) {
+            throw new IllegalStateException("Waze alert-once native receiver shape mismatch");
+        }
+        Label skip = mutable.newLabelForIndex(nativeStart + 1);
+        mutable.addInstruction(listenerLoad, new BuilderInstruction21c(
+                Opcode.SGET_OBJECT, 0,
+                new ImmutableFieldReference(ALERT_ONCE_MODE_CLASS, "b", ALERT_ONCE_MODE_CLASS)));
+        mutable.addInstruction(listenerLoad + 1, new BuilderInstruction22t(
+                Opcode.IF_EQ, 4, 0, skip));
+        mutable.addInstruction(listenerLoad + 2, new BuilderInstruction21c(
+                Opcode.SGET_OBJECT, 0,
+                new ImmutableFieldReference(ALERT_ONCE_MODE_CLASS, "c", ALERT_ONCE_MODE_CLASS)));
+        mutable.addInstruction(listenerLoad + 3, new BuilderInstruction22t(
+                Opcode.IF_EQ, 4, 0, skip));
+        return immutable(method, mutable);
     }
 
     private static Method injectAlertHelperCall(Method method) {
@@ -362,6 +1130,9 @@ final class WazePatchEngine {
         addKoinLookup(code, 3, 4, 5, 4, true, "Lcom/waze/car_lib/b/ap;");
         code.addInstruction(new BuilderInstruction35c(
                 Opcode.INVOKE_VIRTUAL, 3, 4, 0, 2, 0, 0, ALERT_PRODUCER));
+        addKoinLookup(code, 3, 4, 5, 4, false, "Lcom/waze/car_lib/j/r;");
+        code.addInstruction(new BuilderInstruction35c(
+                Opcode.INVOKE_VIRTUAL, 4, 4, 2, 1, 0, 0, ALERT_TRIP_PUBLISHER));
         addKoinLookup(code, 3, 4, 5, 3, false, "Lcom/waze/car_lib/b/f;");
         code.addInstruction(new BuilderInstruction35c(
                 Opcode.INVOKE_VIRTUAL, 3, 3, 1, 0, 0, 0, ALERT_COLLECTOR));
@@ -416,7 +1187,9 @@ final class WazePatchEngine {
     }
 
     private static Method injectApplicationInit(Method method) {
-        if (countCall(method, BRIDGE_INIT) != 0 || method.getImplementation() == null) {
+        if (countCall(method, BRIDGE_INIT) != 0
+                || countCall(method, LEGACY_BRIDGE_INIT) != 0
+                || method.getImplementation() == null) {
             throw new IllegalStateException("Waze application lifecycle hook is not stock");
         }
         MutableMethodImplementation mutable = new MutableMethodImplementation(
@@ -428,17 +1201,58 @@ final class WazePatchEngine {
     }
 
     private static Method injectRouteEmit(Method method) {
-        if (countCall(method, BRIDGE_EMIT) != 0 || !"ok".equals(inspectRouteGuard(method))) {
+        if (countCall(method, BRIDGE_EMIT) != 0
+                || countCall(method, BRIDGE_EMIT_V1) != 0
+                || countCall(method, LEGACY_BRIDGE_EMIT) != 0
+                || !"ok".equals(inspectRouteGuard(method))) {
             throw new IllegalStateException("Waze route lifecycle hook is not stock");
         }
         MethodImplementation source = method.getImplementation();
         MutableMethodImplementation mutable = new MutableMethodImplementation(source);
         int parameterBase = source.getRegisterCount() - 3;
         int stateRegister = parameterBase + 1;
-        int insertAfter = routeAnchorIndex(method, false) + 1;
-        if (insertAfter <= 0) throw new IllegalStateException("Waze route transition missing");
-        mutable.addInstruction(insertAfter, new BuilderInstruction35c(
-                Opcode.INVOKE_STATIC, 1, stateRegister, 0, 0, 0, 0, BRIDGE_EMIT));
+        int reasonRegister = parameterBase + 2;
+        if (routeAnchorIndex(method, false) < 0) {
+            throw new IllegalStateException("Waze route transition missing");
+        }
+        // The stock method reuses the reason register for its state-change result.
+        mutable.addInstruction(0, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 2, stateRegister, reasonRegister, 0, 0, 0,
+                BRIDGE_EMIT));
+        return immutable(method, mutable);
+    }
+
+    private static Method injectSpeedLimit(Method method) {
+        if (countCall(method, BRIDGE_SPEED) != 0
+                || countCall(method, LEGACY_BRIDGE_SPEED) != 0
+                || !"ok".equals(inspectSpeedGuard(method))) {
+            throw new IllegalStateException("Waze speed-limit hook is not stock");
+        }
+        MethodImplementation source = method.getImplementation();
+        MutableMethodImplementation mutable = new MutableMethodImplementation(source);
+        int parameterBase = source.getRegisterCount() - 6;
+        int unitRegister = parameterBase + 2;
+        int limitRegister = parameterBase + 3;
+        mutable.addInstruction(0, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 2, limitRegister, unitRegister, 0, 0, 0, BRIDGE_SPEED));
+        return immutable(method, mutable);
+    }
+
+    private static Method enableClusterEta(Method method) {
+        if (!"stock".equals(inspectClusterEtaGuard(method))) {
+            throw new IllegalStateException("Waze cluster ETA target is not stock");
+        }
+        int producerIndex = clusterEtaListProducerIndex(
+                method, CLUSTER_OEM_LIST_PRODUCER);
+        if (producerIndex < 0) {
+            throw new IllegalStateException("Waze cluster ETA OEM-list producer missing");
+        }
+        MutableMethodImplementation mutable = new MutableMethodImplementation(
+                method.getImplementation());
+        mutable.removeInstruction(producerIndex);
+        // Both invoke forms occupy three code units, so every stock branch offset stays intact.
+        mutable.addInstruction(producerIndex, new BuilderInstruction35c(
+                Opcode.INVOKE_STATIC, 0, 0, 0, 0, 0, 0, CLUSTER_EMPTY_OEM_LIST));
         return immutable(method, mutable);
     }
 
@@ -465,6 +1279,152 @@ final class WazePatchEngine {
                 && "V".equals(method.getReturnType());
     }
 
+    private static boolean matchesSpeed(Method method) {
+        return SPEED_CLASS.equals(method.getDefiningClass())
+                && "updateSpeedometer".equals(method.getName())
+                && method.getParameterTypes().size() == 4
+                && "I".equals(method.getParameterTypes().get(0).toString())
+                && "Ljava/lang/String;".equals(method.getParameterTypes().get(1).toString())
+                && "I".equals(method.getParameterTypes().get(2).toString())
+                && "D".equals(method.getParameterTypes().get(3).toString())
+                && "V".equals(method.getReturnType());
+    }
+
+    private static boolean matchesClusterEta(Method method) {
+        return CLUSTER_TRIP_CLASS.equals(method.getDefiningClass())
+                && "invokeSuspend".equals(method.getName())
+                && method.getParameterTypes().size() == 1
+                && "Ljava/lang/Object;".equals(
+                method.getParameterTypes().get(0).toString())
+                && "Ljava/lang/Object;".equals(method.getReturnType());
+    }
+
+    private static String inspectSpeedGuard(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null || implementation.getRegisterCount() < 6) {
+            return "missing implementation";
+        }
+        int constructor = countCall(method, SPEED_STATE_CONSTRUCTOR);
+        int stateFlow = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (!(instruction instanceof ReferenceInstruction)) continue;
+            Object reference = ((ReferenceInstruction) instruction).getReference();
+            if (!(reference instanceof FieldReference)) continue;
+            FieldReference field = (FieldReference) reference;
+            if (SPEED_CLASS.equals(field.getDefiningClass())
+                    && "speedometerStateFlow".equals(field.getName())
+                    && ROUTE_FLOW.equals(field.getType())) stateFlow++;
+        }
+        return constructor == 1 && stateFlow == 1
+                ? "ok" : "speed guard mismatch constructor=" + constructor
+                + ", stateFlow=" + stateFlow;
+    }
+
+    static String inspectClusterEtaGuard(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return "missing implementation";
+        int exclusion = countCall(method, CLUSTER_OEM_EXCLUSION);
+        int stockProducer = countCall(method, CLUSTER_OEM_LIST_PRODUCER);
+        int emptyProducer = countCall(method, CLUSTER_EMPTY_OEM_LIST);
+        int addDestination = countCall(method, TRIP_ADD_DESTINATION);
+        int tripBuild = countCall(method, TRIP_BUILD);
+        int updateTrip = countCall(method, NAVIGATION_UPDATE_TRIP);
+        if (exclusion != 1 || addDestination != 1 || tripBuild != 1 || updateTrip != 1) {
+            return "cluster ETA guard mismatch exclusion=" + exclusion
+                    + ", addDestination=" + addDestination
+                    + ", tripBuild=" + tripBuild + ", updateTrip=" + updateTrip;
+        }
+        int branch = clusterEtaBranchIndex(method);
+        if (branch < 0) {
+            return clusterEtaLegacyNopIndex(method) >= 0
+                    ? "legacy NOP patch" : "cluster ETA decision sequence missing";
+        }
+        if (stockProducer == 1 && emptyProducer == 0
+                && clusterEtaListProducerIndex(method, CLUSTER_OEM_LIST_PRODUCER) >= 0) {
+            return "stock";
+        }
+        if (stockProducer == 0 && emptyProducer == 1
+                && clusterEtaListProducerIndex(method, CLUSTER_EMPTY_OEM_LIST) >= 0) {
+            return "patched";
+        }
+        return "cluster ETA producer mismatch stock=" + stockProducer
+                + ", empty=" + emptyProducer;
+    }
+
+    private static int clusterEtaListProducerIndex(
+            Method method, MethodReference producer) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return -1;
+        List<? extends Instruction> instructions = toList(implementation);
+        int producerIndex = uniqueCallIndex(instructions, producer);
+        int exclusionIndex = uniqueCallIndex(instructions, CLUSTER_OEM_EXCLUSION);
+        if (producerIndex < 0 || exclusionIndex < 0 || producerIndex >= exclusionIndex
+                || producerIndex + 1 >= instructions.size()) return -1;
+        Instruction call = instructions.get(producerIndex);
+        Instruction result = instructions.get(producerIndex + 1);
+        Instruction exclusion = instructions.get(exclusionIndex);
+        if (!(call instanceof FiveRegisterInstruction)
+                || !(result instanceof OneRegisterInstruction)
+                || !(exclusion instanceof FiveRegisterInstruction)
+                || result.getOpcode() != Opcode.MOVE_RESULT_OBJECT
+                || call.getCodeUnits() != 3) return -1;
+        FiveRegisterInstruction callRegisters = (FiveRegisterInstruction) call;
+        FiveRegisterInstruction exclusionRegisters = (FiveRegisterInstruction) exclusion;
+        boolean stock = sameMethod(producer, CLUSTER_OEM_LIST_PRODUCER);
+        if (stock && (call.getOpcode() != Opcode.INVOKE_INTERFACE
+                || callRegisters.getRegisterCount() != 1)) return -1;
+        if (!stock && (call.getOpcode() != Opcode.INVOKE_STATIC
+                || callRegisters.getRegisterCount() != 0)) return -1;
+        return ((OneRegisterInstruction) result).getRegisterA()
+                == exclusionRegisters.getRegisterD() ? producerIndex : -1;
+    }
+
+    private static int clusterEtaBranchIndex(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return -1;
+        List<? extends Instruction> instructions = toList(implementation);
+        int[] addresses = instructionAddresses(instructions);
+        int addDestination = uniqueCallIndex(instructions, TRIP_ADD_DESTINATION);
+        int tripBuild = uniqueCallIndex(instructions, TRIP_BUILD);
+        int exclusion = uniqueCallIndex(instructions, CLUSTER_OEM_EXCLUSION);
+        if (exclusion < 0 || addDestination < 0 || tripBuild < 0
+                || !(exclusion < addDestination && addDestination < tripBuild)) return -1;
+        for (int index = exclusion + 2; index + 2 < addDestination; index++) {
+            if (!isCall(instructions.get(index), BOOLEAN_VALUE)) continue;
+            Instruction result = instructions.get(index + 1);
+            Instruction branch = instructions.get(index + 2);
+            if (result.getOpcode() != Opcode.MOVE_RESULT
+                    || !(result instanceof OneRegisterInstruction)
+                    || branch.getOpcode() != Opcode.IF_NEZ
+                    || !(branch instanceof OneRegisterInstruction)
+                    || !(branch instanceof OffsetInstruction)
+                    || ((OneRegisterInstruction) result).getRegisterA()
+                    != ((OneRegisterInstruction) branch).getRegisterA()) continue;
+            int targetAddress = addresses[index + 2]
+                    + ((OffsetInstruction) branch).getCodeOffset();
+            if (targetAddress == addresses[tripBuild]) return index + 2;
+        }
+        return -1;
+    }
+
+    private static int clusterEtaLegacyNopIndex(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return -1;
+        List<? extends Instruction> instructions = toList(implementation);
+        int addDestination = uniqueCallIndex(instructions, TRIP_ADD_DESTINATION);
+        int exclusion = uniqueCallIndex(instructions, CLUSTER_OEM_EXCLUSION);
+        if (exclusion < 0 || addDestination < 0 || exclusion >= addDestination) return -1;
+        for (int index = exclusion + 2; index + 2 < addDestination; index++) {
+            if (!isCall(instructions.get(index), BOOLEAN_VALUE)) continue;
+            Instruction result = instructions.get(index + 1);
+            if (result.getOpcode() == Opcode.MOVE_RESULT
+                    && instructions.get(index + 2).getOpcode() == Opcode.NOP) {
+                return index + 2;
+            }
+        }
+        return -1;
+    }
+
     private static boolean matchesAlertTarget(Method method) {
         return ALERT_SESSION_CLASS.equals(method.getDefiningClass())
                 && "onCreateScreen".equals(method.getName())
@@ -481,6 +1441,202 @@ final class WazePatchEngine {
                 && "V".equals(method.getReturnType());
     }
 
+    private static boolean matchesAlertOnceTarget(Method method) {
+        return matchesAlertOnceMethod(method, "k");
+    }
+
+    private static boolean matchesAlertOnceMethod(Method method, String name) {
+        return ALERT_ONCE_CLASS.equals(method.getDefiningClass())
+                && name.equals(method.getName())
+                && method.getParameterTypes().isEmpty()
+                && "V".equals(method.getReturnType());
+    }
+
+    private static AlertOnceInspection inspectAlertOnceMethod(Method method) {
+        AlertOnceInspection result = new AlertOnceInspection();
+        if (!matchesAlertOnceTarget(method)) {
+            result.reason = "alert-once target method missing";
+            return result;
+        }
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) {
+            result.reason = "alert-once target has no implementation";
+            return result;
+        }
+        result.stateReadCount = countFieldOpcode(method, ALERT_ONCE_STATE, Opcode.IGET_OBJECT);
+        result.modeReadCount = countCall(method, ALERT_ONCE_MODE);
+        result.stateUpdateCount = countCall(method, ALERT_ONCE_UPDATE);
+        result.nativeStartCount = countCall(method, ALERT_ONCE_NATIVE_START);
+        result.guardCount = countAlertOnceGuards(method);
+        result.stock = implementation.getRegisterCount() == 6
+                && result.stateReadCount == 2
+                && result.modeReadCount == 0
+                && result.stateUpdateCount == 1
+                && result.nativeStartCount == 1
+                && result.guardCount == 0
+                && hasAlertOnceStockNullUpdate(method);
+        result.patched = implementation.getRegisterCount() == 6
+                && result.stateReadCount == 3
+                && result.modeReadCount == 1
+                && result.stateUpdateCount == 1
+                && result.nativeStartCount == 1
+                && result.guardCount == 2
+                && hasAlertOnceModeSnapshot(method)
+                && hasAlertOncePatchedUpdate(method);
+        result.reason = result.stock ? "stock alert-once target"
+                : result.patched ? "patched alert-once target"
+                : "alert-once structural guard mismatch: stateRead=" + result.stateReadCount
+                + ", modeRead=" + result.modeReadCount + ", update=" + result.stateUpdateCount
+                + ", nativeStart=" + result.nativeStartCount + ", guards=" + result.guardCount;
+        return result;
+    }
+
+    private static int countAlertOnceGuards(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        List<? extends Instruction> instructions = toList(implementation);
+        int nativeStart = uniqueCallIndex(instructions, ALERT_ONCE_NATIVE_START);
+        if (nativeStart < 6 || nativeStart + 1 >= instructions.size()) return 0;
+        if (!isAlertOnceModeField(instructions.get(nativeStart - 6), "b")
+                || !isAlertOnceModeField(instructions.get(nativeStart - 4), "c")
+                || !isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 2), ALERT_ONCE_LISTENER, 0, 5)
+                || !isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 1), ALERT_ONCE_VALUE, 5, 5)) {
+            return 0;
+        }
+        Instruction first = instructions.get(nativeStart - 5);
+        Instruction second = instructions.get(nativeStart - 3);
+        if (!isAlertOnceGuard(first) || !isAlertOnceGuard(second)) return 0;
+        List<Integer> addresses = new ArrayList<>();
+        int address = 0;
+        for (Instruction instruction : instructions) {
+            addresses.add(address);
+            address += instruction.getCodeUnits();
+        }
+        int firstTarget = addresses.get(nativeStart - 5)
+                + ((OffsetInstruction) first).getCodeOffset();
+        int secondTarget = addresses.get(nativeStart - 3)
+                + ((OffsetInstruction) second).getCodeOffset();
+        int skipTarget = addresses.get(nativeStart + 1);
+        return firstTarget == secondTarget && firstTarget == skipTarget ? 2 : 0;
+    }
+
+    private static boolean isAlertOnceGuard(Instruction instruction) {
+        return instruction.getOpcode() == Opcode.IF_EQ
+                && instruction instanceof org.jf.dexlib2.iface.instruction.TwoRegisterInstruction
+                && ((org.jf.dexlib2.iface.instruction.TwoRegisterInstruction) instruction)
+                .getRegisterA() == 4
+                && ((org.jf.dexlib2.iface.instruction.TwoRegisterInstruction) instruction)
+                .getRegisterB() == 0
+                && instruction instanceof OffsetInstruction;
+    }
+
+    private static boolean isAlertOnceModeField(Instruction instruction, String name) {
+        if (instruction.getOpcode() != Opcode.SGET_OBJECT
+                || !(instruction instanceof ReferenceInstruction)) return false;
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        if (!(reference instanceof FieldReference)) return false;
+        FieldReference field = (FieldReference) reference;
+        return ALERT_ONCE_MODE_CLASS.equals(field.getDefiningClass())
+                && name.equals(field.getName())
+                && ALERT_ONCE_MODE_CLASS.equals(field.getType());
+    }
+
+    private static boolean isAlertOnceFieldLoad(
+            Instruction instruction, FieldReference expected,
+            int destinationRegister, int objectRegister) {
+        if (instruction.getOpcode() != Opcode.IGET_OBJECT
+                || !(instruction instanceof org.jf.dexlib2.iface.instruction.TwoRegisterInstruction)
+                || !(instruction instanceof ReferenceInstruction)) return false;
+        org.jf.dexlib2.iface.instruction.TwoRegisterInstruction registers =
+                (org.jf.dexlib2.iface.instruction.TwoRegisterInstruction) instruction;
+        Object reference = ((ReferenceInstruction) instruction).getReference();
+        return registers.getRegisterA() == destinationRegister
+                && registers.getRegisterB() == objectRegister
+                && reference instanceof FieldReference
+                && sameField((FieldReference) reference, expected);
+    }
+
+    private static boolean hasAlertOnceStockNullUpdate(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return false;
+        List<? extends Instruction> instructions = toList(implementation);
+        int update = uniqueCallIndex(instructions, ALERT_ONCE_UPDATE);
+        return update >= 1
+                && hasAlertOnceUpdateRegisters(instructions.get(update), 4)
+                && isConst4(instructions.get(update - 1), 4, 0)
+                && hasAlertOnceNativeReceiver(instructions);
+    }
+
+    private static boolean hasAlertOncePatchedUpdate(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return false;
+        List<? extends Instruction> instructions = toList(implementation);
+        int update = uniqueCallIndex(instructions, ALERT_ONCE_UPDATE);
+        return update >= 0
+                && hasAlertOnceUpdateRegisters(instructions.get(update), 2)
+                && countConst4(instructions, 4, 0) == 0;
+    }
+
+    private static boolean hasAlertOnceModeSnapshot(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return false;
+        List<? extends Instruction> instructions = toList(implementation);
+        if (instructions.size() < 3
+                || !isAlertOnceFieldLoad(instructions.get(0), ALERT_ONCE_STATE, 4, 5)
+                || !isCall(instructions.get(1), ALERT_ONCE_MODE)
+                || !(instructions.get(1) instanceof FiveRegisterInstruction)
+                || ((FiveRegisterInstruction) instructions.get(1)).getRegisterCount() != 1
+                || ((FiveRegisterInstruction) instructions.get(1)).getRegisterC() != 4) {
+            return false;
+        }
+        Instruction result = instructions.get(2);
+        return result.getOpcode() == Opcode.MOVE_RESULT_OBJECT
+                && result instanceof OneRegisterInstruction
+                && ((OneRegisterInstruction) result).getRegisterA() == 4;
+    }
+
+    private static boolean hasAlertOnceNativeReceiver(
+            List<? extends Instruction> instructions) {
+        int nativeStart = uniqueCallIndex(instructions, ALERT_ONCE_NATIVE_START);
+        return nativeStart >= 2
+                && isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 2), ALERT_ONCE_LISTENER, 0, 5)
+                && isAlertOnceFieldLoad(
+                instructions.get(nativeStart - 1), ALERT_ONCE_VALUE, 5, 5);
+    }
+
+    private static boolean hasAlertOnceUpdateRegisters(
+            Instruction instruction, int nullableArgumentRegister) {
+        if (!(instruction instanceof FiveRegisterInstruction)) return false;
+        FiveRegisterInstruction call = (FiveRegisterInstruction) instruction;
+        return call.getRegisterCount() == 5
+                && call.getRegisterC() == 1
+                && call.getRegisterD() == nullableArgumentRegister
+                && call.getRegisterE() == 0
+                && call.getRegisterF() == 2
+                && call.getRegisterG() == 3;
+    }
+
+    private static boolean isConst4(Instruction instruction, int register, int value) {
+        return instruction.getOpcode() == Opcode.CONST_4
+                && instruction instanceof OneRegisterInstruction
+                && ((OneRegisterInstruction) instruction).getRegisterA() == register
+                && instruction instanceof org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction
+                && ((org.jf.dexlib2.iface.instruction.NarrowLiteralInstruction) instruction)
+                .getNarrowLiteral() == value;
+    }
+
+    private static int countConst4(List<? extends Instruction> instructions, int register, int value) {
+        int count = 0;
+        for (Instruction instruction : instructions) {
+            if (!isConst4(instruction, register, value)) continue;
+            count++;
+        }
+        return count;
+    }
+
     private static String inspectRouteGuard(Method method) {
         MethodImplementation implementation = method.getImplementation();
         if (implementation == null || implementation.getRegisterCount() < 3) {
@@ -492,14 +1648,25 @@ final class WazePatchEngine {
             if (isField(instruction, ROUTE_ENUM, "b")) activeEnumCount++;
             if (isField(instruction, ROUTE_ENUM, "a")) inactiveEnumCount++;
         }
+        int v2Calls = countCall(method, BRIDGE_EMIT);
+        int v1Calls = countCall(method, BRIDGE_EMIT_V1);
+        int legacyCalls = countCall(method, LEGACY_BRIDGE_EMIT);
+        boolean bridgeCallValid = v2Calls + v1Calls + legacyCalls == 0
+                || v2Calls == 1 && v1Calls == 0 && legacyCalls == 0
+                && countExactRouteCall(method, BRIDGE_EMIT, true) == 1
+                || v2Calls == 0 && v1Calls == 1 && legacyCalls == 0
+                && countExactRouteCall(method, BRIDGE_EMIT_V1, false) == 1
+                || v2Calls == 0 && v1Calls == 0 && legacyCalls == 1
+                && countExactRouteCall(method, LEGACY_BRIDGE_EMIT, false) == 1;
         int anchor = routeAnchorIndex(method, true);
         int legacyAnchor = legacyRouteAnchorIndex(method);
         return (anchor >= 0 || legacyAnchor >= 0)
-                && activeEnumCount == 1 && inactiveEnumCount == 1
+                && activeEnumCount == 1 && inactiveEnumCount == 1 && bridgeCallValid
                 ? "ok"
                 : "route guard mismatch anchor=" + (anchor >= 0 ? 1 : 0)
                 + ", legacyAnchor=" + (legacyAnchor >= 0 ? 1 : 0)
-                + ", active=" + activeEnumCount + ", inactive=" + inactiveEnumCount;
+                + ", active=" + activeEnumCount + ", inactive=" + inactiveEnumCount
+                + ", v2=" + v2Calls + ", v1=" + v1Calls + ", legacy=" + legacyCalls;
     }
 
     private static int legacyRouteAnchorIndex(Method method) {
@@ -556,6 +1723,7 @@ final class WazePatchEngine {
             int next = index + 1;
             if (allowBridge && next < instructions.size()
                     && (isCall(instructions.get(next), BRIDGE_EMIT)
+                    || isCall(instructions.get(next), BRIDGE_EMIT_V1)
                     || isCall(instructions.get(next), LEGACY_BRIDGE_EMIT))) next++;
             if (next >= instructions.size() || !isRouteStateField(instructions.get(next))) {
                 continue;
@@ -564,6 +1732,27 @@ final class WazePatchEngine {
             match = index;
         }
         return match;
+    }
+
+    private static int countExactRouteCall(
+            Method method, MethodReference expected, boolean includesReason) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null || implementation.getRegisterCount() < 3) return 0;
+        int stateRegister = implementation.getRegisterCount() - 2;
+        int reasonRegister = implementation.getRegisterCount() - 1;
+        int count = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (!isCall(instruction, expected) || !(instruction instanceof FiveRegisterInstruction)) {
+                continue;
+            }
+            FiveRegisterInstruction registers = (FiveRegisterInstruction) instruction;
+            if (registers.getRegisterCount() == (includesReason ? 2 : 1)
+                    && registers.getRegisterC() == stateRegister
+                    && (!includesReason || registers.getRegisterD() == reasonRegister)) {
+                count++;
+            }
+        }
+        return count;
     }
 
     private static boolean isRouteFlowUpdate(Instruction instruction) {
@@ -638,6 +1827,45 @@ final class WazePatchEngine {
         return count;
     }
 
+    private static int countTypeOpcode(Method method, String expectedType, Opcode opcode) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        int count = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (instruction.getOpcode() != opcode || !(instruction instanceof ReferenceInstruction)) {
+                continue;
+            }
+            Object reference = ((ReferenceInstruction) instruction).getReference();
+            if (reference instanceof TypeReference
+                    && expectedType.equals(((TypeReference) reference).getType())) count++;
+        }
+        return count;
+    }
+
+    private static int countLaneCast(Method method) {
+        MethodImplementation implementation = method.getImplementation();
+        if (implementation == null) return 0;
+        boolean checked = false;
+        int count = 0;
+        for (Instruction instruction : implementation.getInstructions()) {
+            if (instruction.getOpcode() == Opcode.INSTANCE_OF && instruction instanceof ReferenceInstruction
+                    && ((ReferenceInstruction) instruction).getReference() instanceof TypeReference
+                    && NAVIGATION_LANE_LIST.equals(((TypeReference) ((ReferenceInstruction) instruction).getReference()).getType())) {
+                checked = true;
+            } else if (instruction.getOpcode() == Opcode.CHECK_CAST && instruction instanceof ReferenceInstruction
+                    && ((ReferenceInstruction) instruction).getReference() instanceof TypeReference
+                    && NAVIGATION_LANE_LIST.equals(((TypeReference) ((ReferenceInstruction) instruction).getReference()).getType())) {
+                if (checked) count++;
+            }
+        }
+        return count;
+    }
+
+    private static boolean literal(Instruction instruction, int expected) {
+        return instruction instanceof NarrowLiteralInstruction
+                && ((NarrowLiteralInstruction) instruction).getNarrowLiteral() == expected;
+    }
+
     private static int countString(Method method, String expected) {
         MethodImplementation implementation = method.getImplementation();
         if (implementation == null) return 0;
@@ -658,16 +1886,55 @@ final class WazePatchEngine {
                 && first.getReturnType().equals(second.getReturnType());
     }
 
+    private static boolean sameMethod(Method first, MethodReference second) {
+        return first != null && sameMethod((MethodReference) first, second);
+    }
+
     private static boolean sameField(FieldReference first, FieldReference second) {
         return first.getDefiningClass().equals(second.getDefiningClass())
                 && first.getName().equals(second.getName())
                 && first.getType().equals(second.getType());
     }
 
+    private static boolean sameField(Field first, FieldReference second) {
+        return first != null && first.getDefiningClass().equals(second.getDefiningClass())
+                && first.getName().equals(second.getName())
+                && first.getType().equals(second.getType());
+    }
+
+    private static List<ImmutableMethodParameter> parameters(List<String> types) {
+        List<ImmutableMethodParameter> result = new ArrayList<>();
+        for (String type : types) {
+            result.add(new ImmutableMethodParameter(type, Collections.emptySet(), null));
+        }
+        return result;
+    }
+
     private static List<? extends Instruction> toList(MethodImplementation implementation) {
         List<Instruction> result = new ArrayList<>();
         implementation.getInstructions().forEach(result::add);
         return result;
+    }
+
+    private static int[] instructionAddresses(List<? extends Instruction> instructions) {
+        int[] addresses = new int[instructions.size()];
+        int address = 0;
+        for (int index = 0; index < instructions.size(); index++) {
+            addresses[index] = address;
+            address += instructions.get(index).getCodeUnits();
+        }
+        return addresses;
+    }
+
+    private static int uniqueCallIndex(
+            List<? extends Instruction> instructions, MethodReference expected) {
+        int match = -1;
+        for (int index = 0; index < instructions.size(); index++) {
+            if (!isCall(instructions.get(index), expected)) continue;
+            if (match >= 0) return -1;
+            match = index;
+        }
+        return match;
     }
 
     private static WazeInspection inspectWazeMethod(Method method) {
@@ -864,6 +2131,100 @@ final class WazePatchEngine {
         }
     }
 
+    static final class LaneInspection {
+        int frameClassCount;
+        int frameFieldCount;
+        int frameStockCtorCount;
+        int framePatchedCtorCount;
+        int frameGetterCount;
+        int frameEqualsFieldCount;
+        int frameHashFieldCount;
+        int producerTargetCount;
+        int producerSourceCount;
+        int producerFieldCount;
+        int producerEmptyCount;
+        int producerTypeCount;
+        int producerCastCount;
+        int producerStockCtorCount;
+        int producerPatchedCtorCount;
+        int adapterTargetCount;
+        int adapterSentinelCount;
+        int adapterHelperCallCount;
+        int adapterHelperCount;
+        int adapterMapperCount;
+        String classification = UNSUPPORTED;
+        String reason = "not found";
+
+        boolean stockShape() {
+            return frameClassCount == 1 && frameFieldCount == 0
+                    && frameStockCtorCount == 1 && framePatchedCtorCount == 0
+                    && frameGetterCount == 0
+                    && frameEqualsFieldCount == 0 && frameHashFieldCount == 0
+                    && producerTargetCount == 1 && producerSourceCount == 1
+                    && producerFieldCount == 1 && producerEmptyCount == 0
+                    && producerTypeCount == 0 && producerCastCount == 0
+                    && producerStockCtorCount == 1 && producerPatchedCtorCount == 0
+                    && adapterTargetCount == 1 && adapterSentinelCount == 1
+                    && adapterHelperCallCount == 0 && adapterHelperCount == 0
+                    && adapterMapperCount == 0;
+        }
+
+        boolean patchedShape() {
+            return frameClassCount == 1 && frameFieldCount == 1
+                    && frameStockCtorCount == 0 && framePatchedCtorCount == 1
+                    && frameGetterCount == 1
+                    && frameEqualsFieldCount == 2 && frameHashFieldCount == 1
+                    && producerTargetCount == 1 && producerSourceCount == 2
+                    && producerFieldCount == 2 && producerEmptyCount == 1
+                    && producerTypeCount == 1 && producerCastCount == 1
+                    && producerStockCtorCount == 0 && producerPatchedCtorCount == 1
+                    && adapterTargetCount == 1 && adapterSentinelCount == 0
+                    && adapterHelperCallCount == 1 && adapterHelperCount == 1
+                    && adapterMapperCount == 1;
+        }
+
+        boolean publishedShape() {
+            return frameClassCount == 1 && frameFieldCount == 1
+                    && frameStockCtorCount == 0 && framePatchedCtorCount == 1
+                    && frameGetterCount == 1
+                    && frameEqualsFieldCount == 2 && frameHashFieldCount == 1
+                    && producerTargetCount == 1 && producerSourceCount == 1
+                    && producerFieldCount == 1 && producerEmptyCount == 1
+                    && producerTypeCount == 0 && producerCastCount == 0
+                    && producerStockCtorCount == 0 && producerPatchedCtorCount == 1
+                    && adapterTargetCount == 1 && adapterSentinelCount == 0
+                    && adapterHelperCallCount == 1 && adapterHelperCount == 1
+                    && adapterMapperCount == 1;
+        }
+
+        boolean stockTargets() {
+            return PATCHABLE_STOCK.equals(classification);
+        }
+
+        boolean patchedTargets() {
+            return ALREADY_PATCHED.equals(classification);
+        }
+
+        boolean patchable() {
+            return stockTargets();
+        }
+
+        String summary() {
+            return "frame=" + frameClassCount + "/" + frameFieldCount
+                    + "/" + frameStockCtorCount + "/" + framePatchedCtorCount
+                    + "/" + frameGetterCount + "/" + frameEqualsFieldCount
+                    + "/" + frameHashFieldCount
+                    + ", producer=" + producerTargetCount + "/" + producerSourceCount
+                    + "/" + producerFieldCount + "/" + producerEmptyCount
+                    + "/" + producerTypeCount + "/" + producerCastCount
+                    + "/" + producerStockCtorCount + "/" + producerPatchedCtorCount
+                    + ", adapter=" + adapterTargetCount + "/" + adapterSentinelCount
+                    + "/" + adapterHelperCallCount + "/" + adapterHelperCount
+                    + "/" + adapterMapperCount + ", classification=" + classification
+                    + ", reason=" + reason;
+        }
+    }
+
     static final class LifecycleInspection {
         int applicationTargetCount;
         int applicationHookCount;
@@ -871,16 +2232,38 @@ final class WazePatchEngine {
         String applicationGuard = "not found";
         int routeTargetCount;
         int routeHookCount;
+        int v1RouteHookCount;
         int legacyRouteHookCount;
         String routeGuard = "not found";
+        int speedTargetCount;
+        int speedHookCount;
+        int legacySpeedHookCount;
+        String speedGuard = "not found";
+        int clusterEtaTargetCount;
+        int clusterEtaPatchCount;
+        String clusterEtaGuard = "not found";
         int bridgeClassCount;
         int legacyBridgeClassCount;
+
+        boolean clusterEtaStock() {
+            return clusterEtaTargetCount == 1 && clusterEtaPatchCount == 0
+                    && "stock".equals(clusterEtaGuard);
+        }
+
+        boolean clusterEtaPatched() {
+            return clusterEtaTargetCount == 1 && clusterEtaPatchCount == 1
+                    && "patched".equals(clusterEtaGuard);
+        }
 
         boolean stockTargets() {
             return applicationTargetCount == 1 && applicationHookCount == 0
                     && "ok".equals(applicationGuard)
                     && routeTargetCount == 1 && routeHookCount == 0
+                    && v1RouteHookCount == 0 && legacyRouteHookCount == 0
                     && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 0
+                    && legacySpeedHookCount == 0
+                    && "ok".equals(speedGuard)
                     && bridgeClassCount == 0;
         }
 
@@ -888,7 +2271,23 @@ final class WazePatchEngine {
             return applicationTargetCount == 1 && applicationHookCount == 1
                     && "ok".equals(applicationGuard)
                     && routeTargetCount == 1 && routeHookCount == 1
+                    && v1RouteHookCount == 0 && legacyRouteHookCount == 0
                     && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 1
+                    && legacySpeedHookCount == 0
+                    && "ok".equals(speedGuard)
+                    && bridgeClassCount == 1;
+        }
+
+        boolean v1PatchedTargets() {
+            return applicationTargetCount == 1 && applicationHookCount == 1
+                    && "ok".equals(applicationGuard)
+                    && routeTargetCount == 1 && routeHookCount == 0
+                    && v1RouteHookCount == 1 && legacyRouteHookCount == 0
+                    && "ok".equals(routeGuard)
+                    && speedTargetCount == 1 && speedHookCount == 1
+                    && legacySpeedHookCount == 0
+                    && "ok".equals(speedGuard)
                     && bridgeClassCount == 1;
         }
     }
@@ -904,9 +2303,20 @@ final class WazePatchEngine {
         int helperMethodCount;
         int producerCallCount;
         int collectorCallCount;
+        int tripPublisherCallCount;
         int guardReadCount;
         int guardWriteCount;
         int logMarkerCount;
+        int alertOnceClassCount;
+        int alertOnceTargetMethodCount;
+        int alertOnceStateReadCount;
+        int alertOnceModeReadCount;
+        int alertOnceStateUpdateCount;
+        int alertOnceNativeStartCount;
+        int alertOnceGuardCount;
+        int alertOnceUnchangedMethodCount;
+        int alertOnceStockShapeCount;
+        int alertOncePatchedShapeCount;
 
         boolean stockTargets() {
             return classCount == 1 && fieldAnchorCount == 1 && guardFieldCount == 0
@@ -919,8 +2329,46 @@ final class WazePatchEngine {
                     && targetMethodCount == 1 && anchorCount == 1
                     && hookCallCount == 1 && hookAfterAnchorCount == 1
                     && helperMethodCount == 1 && producerCallCount == 1
-                    && collectorCallCount == 1 && guardReadCount == 1
+                    && collectorCallCount == 1 && tripPublisherCallCount == 1
+                    && guardReadCount == 1
                     && guardWriteCount == 1 && logMarkerCount == 1;
+        }
+
+        boolean alertOnceStockTargets() {
+            return alertOnceClassCount == 1 && alertOnceTargetMethodCount == 1
+                    && alertOnceUnchangedMethodCount == 2
+                    && alertOnceStockShapeCount == 1
+                    && alertOnceStateReadCount == 2 && alertOnceModeReadCount == 0
+                    && alertOnceStateUpdateCount == 1 && alertOnceNativeStartCount == 1
+                    && alertOnceGuardCount == 0;
+        }
+
+        boolean alertOncePatchedTargets() {
+            return alertOnceClassCount == 1 && alertOnceTargetMethodCount == 1
+                    && alertOnceUnchangedMethodCount == 2
+                    && alertOncePatchedShapeCount == 1
+                    && alertOnceStateReadCount == 3 && alertOnceModeReadCount == 1
+                    && alertOnceStateUpdateCount == 1 && alertOnceNativeStartCount == 1
+                    && alertOnceGuardCount == 2;
+        }
+
+        boolean patchableComponents() {
+            boolean uiKnown = classCount == 0 || stockTargets() || patchedTargets();
+            boolean onceKnown = alertOnceClassCount == 0
+                    || alertOnceStockTargets() || alertOncePatchedTargets();
+            return uiKnown && onceKnown
+                    && (stockTargets() || alertOnceStockTargets());
+        }
+
+        boolean patchedComponents(AlertInspection input, boolean patchUi,
+                boolean patchAlertOnce) {
+            boolean uiDone = classCount == 0
+                    || (input.stockTargets() ? (!patchUi || patchedTargets()) : patchedTargets());
+            boolean onceDone = alertOnceClassCount == 0
+                    || (input.alertOnceStockTargets()
+                    ? (!patchAlertOnce || alertOncePatchedTargets())
+                    : alertOncePatchedTargets());
+            return uiDone && onceDone;
         }
 
         String summary() {
@@ -929,8 +2377,29 @@ final class WazePatchEngine {
                     + ", target=" + targetMethodCount + ", anchor=" + anchorCount
                     + ", hook=" + hookCallCount + ", adjacent=" + hookAfterAnchorCount
                     + ", helper=" + helperMethodCount + ", producer=" + producerCallCount
-                    + ", collector=" + collectorCallCount + ", guardRead=" + guardReadCount
-                    + ", guardWrite=" + guardWriteCount + ", marker=" + logMarkerCount;
+                    + ", collector=" + collectorCallCount
+                    + ", trip=" + tripPublisherCallCount
+                    + ", guardRead=" + guardReadCount
+                    + ", guardWrite=" + guardWriteCount + ", marker=" + logMarkerCount
+                    + ", alertOnceClass=" + alertOnceClassCount
+                    + ", alertOnceTarget=" + alertOnceTargetMethodCount
+                    + ", alertOnceStateRead=" + alertOnceStateReadCount
+                    + ", alertOnceModeRead=" + alertOnceModeReadCount
+                    + ", alertOnceUpdate=" + alertOnceStateUpdateCount
+                    + ", alertOnceNativeStart=" + alertOnceNativeStartCount
+                    + ", alertOnceGuards=" + alertOnceGuardCount;
         }
+    }
+
+    static final class AlertOnceInspection {
+        int stateReadCount;
+        int modeReadCount;
+        int stateUpdateCount;
+        int nativeStartCount;
+        int guardCount;
+        boolean stock;
+        boolean patched;
+        String reason = "not found";
+
     }
 }

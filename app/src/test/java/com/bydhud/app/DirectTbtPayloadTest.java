@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -8,8 +9,52 @@ import org.junit.Test;
 
 import java.util.Collections;
 import java.util.Calendar;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class DirectTbtPayloadTest {
+    @Test
+    public void currentFrameWireBytesStayStable() {
+        assertArrayEquals(new byte[]{
+                        0x0a, 0x28, 0x10, 0x07, 0x28, 0x01, 0x30, 0x06,
+                        0x3a, 0x03, 0x04, 0x05, 0x06, 0x42, 0x03, 0x01,
+                        0x02, 0x03, 0x48, 0x78, 0x52, 0x04, 0x52, 0x6f,
+                        0x61, 0x64, (byte) 0x80, 0x01, 0x02, (byte) 0xd2,
+                        0x01, 0x00, (byte) 0xe0, 0x01, 0x09, (byte) 0xea,
+                        0x01, 0x04, 0x34, 0x2c, 0x34, 0x7c},
+                DirectTbtPayload.build(
+                        frame(11, 9, DirectTbtFrame.AlertOverlay.inactive()),
+                        7, DirectTbtPayload.Options.ALL));
+    }
+
+    @Test
+    public void clearWireBytesStayStable() {
+        assertArrayEquals(new byte[]{
+                        0x0a, 0x08, 0x10, 0x02, 0x30, (byte) 0xff,
+                        0x01, (byte) 0x80, 0x01, 0x01},
+                DirectTbtPayload.buildClear());
+    }
+
+    @Test
+    public void outputOptionsSnapshotRetriesWhenRevisionChangesDuringRead() {
+        AtomicInteger revision = new AtomicInteger();
+        AtomicInteger value = new AtomicInteger(10);
+        AtomicInteger reads = new AtomicInteger();
+
+        DirectTbtPayload.RevisionedSnapshot<Integer> snapshot =
+                DirectTbtPayload.readStableSnapshot(revision::get, () -> {
+                    int read = value.get();
+                    if (reads.getAndIncrement() == 0) {
+                        value.set(20);
+                        revision.incrementAndGet();
+                    }
+                    return read;
+                });
+
+        assertEquals(1, snapshot.revision);
+        assertEquals(20, snapshot.values.intValue());
+        assertEquals(2, reads.get());
+    }
+
     @Test
     public void activeAlertUsesBlankNativeAndKeepsLanes() {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
@@ -18,6 +63,8 @@ public final class DirectTbtPayloadTest {
                 DirectTbtPayload.Options.ALL);
 
         assertEquals(99, prepared.nativeManeuver());
+        assertEquals(25, prepared.distanceMeters());
+        assertEquals("Camera", prepared.displayText());
         assertEquals(1, prepared.laneCount());
         assertEquals(3, prepared.lanePngBytes());
         assertEquals(2, prepared.maneuverPngBytes());
@@ -35,43 +82,86 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
-    public void activeAlertUsesRouteNativeWhenPolicyAllowsIt() {
+    public void routeWinnerUsesTheCompleteRouteFrame() {
         DirectTbtFrame.AlertOverlay alert = DirectTbtFrame.AlertOverlay.active(
-                7, 25, "Camera", new byte[]{8, 9}).withRouteNative(true);
+                7, 250, "Camera", new byte[]{8, 9}).withRouteFrame(true);
 
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame(11, 9, 80, alert), DirectTbtPayload.Options.ALL);
 
         assertEquals(9, prepared.nativeManeuver());
-        assertEquals(2, prepared.maneuverPngBytes());
+        assertEquals(80, prepared.distanceMeters());
+        assertEquals("Road", prepared.displayText());
+        assertEquals(3, prepared.maneuverPngBytes());
         assertEquals(1, prepared.laneCount());
+        assertEquals("current", prepared.maneuverMode());
     }
 
     @Test
-    public void alertNativePolicyCoversOrderingNearnessAndUnknowns() {
+    public void closestCandidatePolicyCoversEqualityZeroAndUnknowns() {
         DirectTbtFrame.AlertOverlay alert250 = DirectTbtFrame.AlertOverlay.active(
                 7, 250, "Camera", new byte[]{8, 9});
         DirectTbtFrame.AlertOverlay alert25 = DirectTbtFrame.AlertOverlay.active(
                 7, 25, "Camera", new byte[]{8, 9});
-        DirectTbtFrame.AlertOverlay unknownAlertDistance = DirectTbtFrame.AlertOverlay.active(
+        DirectTbtFrame.AlertOverlay zeroAlertDistance = DirectTbtFrame.AlertOverlay.active(
                 7, 0, "Camera", new byte[]{8, 9});
+        DirectTbtFrame.AlertOverlay unknownAlertDistance = DirectTbtFrame.AlertOverlay.active(
+                7, -1, "Camera", new byte[]{8, 9});
 
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 9, 200, alert250), true, alert250));
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 100, alert25), true, alert25));
-        assertTrue(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 0, alert25), true, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
-                frame(11, 9, 101, alert25), true, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 250, alert250), true, alert250));
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 251, alert250), true, alert250));
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 0, zeroAlertDistance), true, zeroAlertDistance));
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
+                frame(11, 9, 1, zeroAlertDistance), true, zeroAlertDistance));
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 9, 0, alert25), false, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertTrue(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 9, 101, unknownAlertDistance), true, unknownAlertDistance));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(-1, 9, 50, alert25), true, alert25));
-        assertFalse(WazeDirectChannel.shouldUseRouteNativeDuringAlert(
+        assertFalse(WazeDirectChannel.shouldUseRouteFrameDuringAlert(
                 frame(11, 99, 50, alert25), true, alert25));
+    }
+
+    @Test
+    public void everyAlertAndRouteSnapshotReevaluatesTheWholeCandidate() {
+        DirectTbtFrame.AlertOverlay next = DirectTbtFrame.AlertOverlay.active(
+                8, 180, "Camera", new byte[]{8, 9});
+
+        DirectTbtFrame.AlertOverlay selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                next, frame(11, 9, 190, next), true);
+
+        assertFalse(selected.useRouteFrame());
+        DirectTbtFrame.AlertOverlay refreshed = DirectTbtFrame.AlertOverlay.active(
+                9, 200, "Camera", new byte[]{8, 9});
+        selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                refreshed, frame(11, 9, 190, refreshed), true);
+        assertTrue(selected.useRouteFrame());
+        selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                selected, frame(11, 9, 210, selected), true);
+        assertFalse(selected.useRouteFrame());
+    }
+
+    @Test
+    public void unknownAlertDistanceUsesAlertOnlyWhenNoValidRouteExists() {
+        DirectTbtFrame.AlertOverlay unknown = DirectTbtFrame.AlertOverlay.active(
+                7, -1, "Camera", new byte[]{8, 9});
+        DirectTbtFrame.AlertOverlay selected = WazeDirectChannel.selectAlertOverlayCandidate(
+                unknown, frame(-1, 9, 120, unknown), false);
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame(-1, 9, 120, selected), DirectTbtPayload.Options.ALL);
+
+        assertFalse(unknown.isDistanceKnown());
+        assertFalse(selected.useRouteFrame());
+        assertEquals(99, prepared.nativeManeuver());
+        assertEquals(0, prepared.distanceMeters());
+        assertEquals("Camera", prepared.displayText());
     }
 
     @Test
@@ -112,6 +202,18 @@ public final class DirectTbtPayloadTest {
                 true, true, true, true, true, true, true);
 
         assertEquals(11, DirectTbtPayload.prepare(frame, options).distanceMeters());
+    }
+
+    @Test
+    public void activeAlertKeepsItsOwnDistanceAfterManeuverClamp() {
+        DirectTbtFrame frame = HudDisplayPolicy.applyActiveFrame(
+                frame(11, 9, 10, DirectTbtFrame.AlertOverlay.active(
+                        7, 25, "Camera", new byte[]{8, 9})), true);
+        DirectTbtPayload.Options options = new DirectTbtPayload.Options(
+                true, true, true, true, true, true, true);
+
+        assertEquals(11, frame.getDistanceMeters());
+        assertEquals(25, DirectTbtPayload.prepare(frame, options).distanceMeters());
     }
 
     @Test
@@ -161,6 +263,35 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void nextStopPreferenceFallsBackPerUnavailableField() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                new DirectTbtFrame.TripMetrics(
+                        new DirectTbtFrame.TravelMetrics(-1, -1, -1),
+                        new DirectTbtFrame.TravelMetrics(
+                                localTime(13, 40), 1069, 10310)));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, metricOptions(false, true, true, true, true, true));
+
+        assertEquals("[ETA: 13:40 | 18 min | 10.3 km] Road", prepared.displayText());
+    }
+
+    @Test
+    public void requestedMetricScopeWinsWhenBothFieldsExist() {
+        DirectTbtFrame frame = frameWithMetrics(
+                "Road",
+                new DirectTbtFrame.TripMetrics(
+                        new DirectTbtFrame.TravelMetrics(-1, 601, 5100),
+                        new DirectTbtFrame.TravelMetrics(-1, 1069, 10310)));
+
+        assertEquals("[11 min | 5.1 km] Road", DirectTbtPayload.prepare(
+                frame, metricOptions(false, false, true, true, true, true)).displayText());
+        assertEquals("[18 min | 10.3 km] Road", DirectTbtPayload.prepare(
+                frame, metricOptions(true, false, true, true, true, true)).displayText());
+    }
+
+    @Test
     public void etaUsesNavigatorSuppliedZoneOffset() {
         DirectTbtFrame frame = frameWithMetrics(
                 "Road",
@@ -186,6 +317,222 @@ public final class DirectTbtPayloadTest {
                 frame, metricOptions(false, true, true, true, true, true));
 
         assertEquals("Camera", prepared.displayText());
+    }
+
+    @Test
+    public void speedLimitPlacementRespectsFreeFieldsAndFallback() {
+        DirectTbtFrame frame = frame(
+                11, 9, DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_NONE,
+                DirectTbtPayload.speedPlacement(frame, speedOptions(
+                        HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_FALLBACK_OFF)));
+        DirectTbtPayload.Options fallback = speedOptions(
+                HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_FALLBACK_MANEUVER);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(frame, fallback));
+        assertTrue(DirectTbtPayload.speedOverlaysOccupiedField(frame, fallback));
+    }
+
+    @Test
+    public void compositePlacementUsesNamedAndOnlyFreeFields() {
+        DirectTbtFrame bothOccupied = speedFrame(new byte[]{1}, new byte[]{2});
+        DirectTbtFrame bothFree = speedFrame(new byte[0], new byte[0]);
+        DirectTbtFrame maneuverOnly = speedFrame(new byte[]{1}, new byte[0]);
+        DirectTbtFrame lanesOnly = speedFrame(new byte[0], new byte[]{2});
+
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(bothOccupied, compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY)));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(bothFree, compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_LANES_ONLY)));
+
+        DirectTbtPayload.Options freeOrManeuver = compositeOptions(
+                HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_MANEUVER);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(maneuverOnly, freeOrManeuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(lanesOnly, freeOrManeuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(bothFree, freeOrManeuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(bothOccupied, freeOrManeuver));
+
+        DirectTbtPayload.Options freeOrLanes = compositeOptions(
+                HudPrefs.SPEED_LIMIT_COMPOSITE_FREE_OR_LANES);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(bothFree, freeOrLanes));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(bothOccupied, freeOrLanes));
+        assertFalse(DirectTbtPayload.speedOverlaysOccupiedField(
+                bothOccupied, freeOrLanes));
+    }
+
+    @Test
+    public void legacyOptionsKeepCompositeDefaults() {
+        DirectTbtPayload.Options options = speedOptions(
+                HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_FALLBACK_OFF);
+
+        assertEquals(HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY,
+                options.speedLimitCompositePlacement);
+        assertEquals(64, options.speedLimitManeuverOverlaySize);
+        assertEquals(36, options.speedLimitLaneOverlaySize);
+    }
+
+    @Test
+    public void speedLimitPreferenceNormalizersClampBoundaries() {
+        assertEquals(0, HudPrefs.normalizeSpeedLimitMode(-1));
+        assertEquals(0, HudPrefs.normalizeSpeedLimitMode(0));
+        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(4));
+        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(5));
+
+        assertEquals(0, HudPrefs.normalizeSpeedLimitCompositePlacement(-1));
+        assertEquals(0, HudPrefs.normalizeSpeedLimitCompositePlacement(0));
+        assertEquals(3, HudPrefs.normalizeSpeedLimitCompositePlacement(3));
+        assertEquals(3, HudPrefs.normalizeSpeedLimitCompositePlacement(4));
+
+        assertEquals(1, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(0));
+        assertEquals(1, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(1));
+        assertEquals(103, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(103));
+        assertEquals(103, HudPrefs.normalizeSpeedLimitManeuverOverlaySize(104));
+
+        assertEquals(1, HudPrefs.normalizeSpeedLimitLaneOverlaySize(0));
+        assertEquals(1, HudPrefs.normalizeSpeedLimitLaneOverlaySize(1));
+        assertEquals(36, HudPrefs.normalizeSpeedLimitLaneOverlaySize(36));
+        assertEquals(36, HudPrefs.normalizeSpeedLimitLaneOverlaySize(37));
+    }
+
+    @Test
+    public void compositeCacheKeyUsesFullBytesAndEveryOption() {
+        byte[] base = {1, 2, 3};
+        assertTrue(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, new byte[]{1, 2, 3}, 50, 64, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, new byte[]{1, 2, 4}, 50, 64, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, base, 60, 64, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, base, 50, 36, false));
+        assertFalse(SpeedLimitPng.isSameCompositeKey(
+                base, 50, 64, false, base, 50, 64, true));
+    }
+
+    @Test
+    public void freeFieldStandaloneSignPolicyIs96Pixels() {
+        assertEquals(96, SpeedLimitPng.STANDALONE_SIZE_PX);
+    }
+
+    @Test
+    public void compositeFailureAndMissingLaneBitmapPreserveGuidance() {
+        DirectTbtPayload.Prepared maneuver = DirectTbtPayload.prepare(
+                speedFrame(new byte[]{1, 2, 3}, new byte[0]), compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_MANEUVER_ONLY));
+        DirectTbtFrame structuredLanes = new DirectTbtFrame(
+                11, 3, 9, 120, "Road", "Turn right", "Road",
+                new byte[]{1, 2, 3}, new byte[0],
+                Collections.singletonList(new DirectTbtFrame.Lane(2, true, "R")),
+                DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+        DirectTbtPayload.Prepared lanes = DirectTbtPayload.prepare(
+                structuredLanes, compositeOptions(
+                        HudPrefs.SPEED_LIMIT_COMPOSITE_LANES_ONLY));
+
+        assertEquals(3, maneuver.maneuverPngBytes());
+        assertEquals("current", maneuver.maneuverMode());
+        assertEquals(1, lanes.laneCount());
+        assertEquals(0, lanes.lanePngBytes());
+    }
+
+    @Test
+    public void explicitManeuverSpeedDoesNotOverwriteActiveAlert() {
+        DirectTbtFrame frame = frame(
+                11, 9, DirectTbtFrame.AlertOverlay.active(
+                        7, 25, "Camera", new byte[]{8, 9})).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, speedOptions(
+                        HudPrefs.SPEED_LIMIT_MANEUVER,
+                        HudPrefs.SPEED_LIMIT_FALLBACK_OFF));
+
+        assertEquals("alert", prepared.maneuverMode());
+        assertEquals(2, prepared.maneuverPngBytes());
+    }
+
+    @Test
+    public void failedLaneSpeedPngKeepsStructuredLanes() {
+        DirectTbtFrame frame = new DirectTbtFrame(
+                11, 3, 9, 120, "Road", "Turn right", "Road",
+                new byte[]{1, 2, 3}, new byte[0],
+                Collections.singletonList(new DirectTbtFrame.Lane(2, true, "R")),
+                DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
+
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame, speedOptions(
+                        HudPrefs.SPEED_LIMIT_LANES,
+                        HudPrefs.SPEED_LIMIT_FALLBACK_OFF));
+
+        assertEquals(1, prepared.laneCount());
+        assertEquals(0, prepared.lanePngBytes());
+    }
+
+    @Test
+    public void compositeGeometryKeepsMarginsAndUsesRightOnTies() {
+        assertEquals(38, SpeedLimitPng.compositeCanvasSize(20, 36));
+        assertEquals(100, SpeedLimitPng.compositeCanvasSize(100, 36));
+        assertEquals(63, SpeedLimitPng.compositeBottomY(100, 36));
+        assertEquals(40, SpeedLimitPng.chooseManeuverX(105, 64, 3, 3));
+        assertEquals(1, SpeedLimitPng.chooseManeuverX(105, 64, 2, 3));
+    }
+
+    @Test
+    public void laneGeometryUsesActualColumnRunsAndLeastOverlapGap() {
+        assertArrayEquals(new int[]{1, 2, 5, 5, 8, 10},
+                SpeedLimitPng.occupiedColumnRuns(new boolean[]{
+                        false, true, true, false, false, true,
+                        false, false, true, true, true}));
+        int[] runs = {2, 6, 30, 35, 70, 75};
+        assertEquals(42, SpeedLimitPng.chooseLaneX(100, 20, runs, new int[]{3, 3}));
+        assertEquals(8, SpeedLimitPng.chooseLaneX(100, 20, runs, new int[]{1, 2}));
+        assertEquals(79, SpeedLimitPng.chooseLaneX(
+                100, 20, new int[]{2, 6, 30, 35}, new int[]{0}));
+    }
+
+    @Test
+    public void speedLimitStoreNormalizesMphAndDeduplicates() {
+        assertTrue(DirectSpeedLimitStore.update("com.waze", 30, -1, "mph", 10L));
+        DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot("com.waze");
+        assertEquals(30, speed.getDisplayValue());
+        assertEquals(48, speed.getKph());
+        assertFalse(DirectSpeedLimitStore.update("com.waze", 30, -1, "mph", 20L));
+        assertTrue(DirectSpeedLimitStore.clear("com.waze"));
+        assertFalse(DirectSpeedLimitStore.snapshot("com.waze").isActive());
+    }
+
+    private static DirectTbtPayload.Options speedOptions(int mode, int fallback) {
+        return new DirectTbtPayload.Options(
+                true, true, true, true, true, true, false,
+                HudPrefs.ROUTE_METRICS_OFF, false, false, false,
+                mode, fallback, 5, new byte[]{7, 2});
+    }
+
+    private static DirectTbtPayload.Options compositeOptions(int placement) {
+        return new DirectTbtPayload.Options(
+                true, true, true, true, true, true, false,
+                HudPrefs.ROUTE_METRICS_OFF, false, false, false,
+                HudPrefs.SPEED_LIMIT_COMPOSITE, HudPrefs.SPEED_LIMIT_FALLBACK_OFF,
+                5, placement, 64, 36, new byte[]{7, 2});
+    }
+
+    private static DirectTbtFrame speedFrame(byte[] maneuverPng, byte[] lanePng) {
+        return new DirectTbtFrame(
+                11, 3, 9, 120, "Road", "Turn right", "Road",
+                maneuverPng, lanePng, Collections.emptyList(),
+                DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L));
     }
 
     private static DirectTbtPayload.Options metricOptions(

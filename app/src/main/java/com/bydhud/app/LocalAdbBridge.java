@@ -46,11 +46,14 @@ final class LocalAdbBridge {
     private static final Object PERMISSION_GRANT_LOCK = new Object();
     private static final Object RUNTIME_CONNECTION_LOCK = new Object();
     private static final Object KEY_PAIR_LOCK = new Object();
-    private static final long RUNTIME_IDLE_CLOSE_MS = 30000L;
+    //Retain an idle transport for real command bursts; status checks never touch it.
+    private static final long RUNTIME_IDLE_CLOSE_MS = 30L * 60L * 1000L;
     private static final long POST_SETTINGS_POLL_TIMEOUT_MS = 3000L;
     private static final long POST_GRANT_POLL_TIMEOUT_MS = 30000L;
     private static final long POST_GRANT_POLL_INTERVAL_MS = 250L;
     private static final long ACCESSIBILITY_REBIND_STEP_DELAY_MS = 300L;
+    private static final int MAX_DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
+    private static final int DIAGNOSTIC_OUTPUT_TAIL_BYTES = 64;
     private static final String KEY_DIR = "adb_keys";
     private static volatile boolean permissionGrantInProgress;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
@@ -61,19 +64,13 @@ final class LocalAdbBridge {
     private static final String EXIT_MARKER = "__BYDHUD_EXIT__:";
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
-    private static final String CAPTURE_SHELL_ROOT =
-            "((/sdcard|/storage/emulated/0)/Documents/BYD-HUD"
-                    + "|(/sdcard|/storage/emulated/0)/Android/data/com\\.bydhud\\.app/files/BYD-HUD)";
-    private static final String CAPTURE_SESSION_PATH =
-            "/[0-9]{8}/waze-crop/[A-Za-z0-9_.-]{1,80}/screen_[0-9]{4}\\.png";
-    private static final Pattern WAZE_SCREENSHOT_COMMAND = Pattern.compile(
-            "screencap -d [0-9]{1,3} -p "
-                    + CAPTURE_SHELL_ROOT
-                    + CAPTURE_SESSION_PATH);
-    private static final Pattern APP_LOCAL_RM_COMMAND = Pattern.compile(
-            "rm "
-                    + CAPTURE_SHELL_ROOT
-                    + CAPTURE_SESSION_PATH);
+    private static final Pattern AUTO_CONTAINER_COMMAND = Pattern.compile(
+            "service call (?:auto_container|AutoContainer) 2 i32 1000 i32 (?:16|17|18) s16 '\"\"'");
+    private static final Pattern DIAGNOSTIC_LOGCAT_COMMAND = Pattern.compile(
+            "logcat -b all -v threadtime -T '[0-9]{2}-[0-9]{2} "
+                    + "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}' -d");
+    private static final Pattern DIAGNOSTIC_PROC_STAT_COMMAND = Pattern.compile(
+            "cat /proc/[0-9]{1,10}/stat");
     private static final Pattern VEHICLE_CONFIG_PROPERTY_COMMAND = Pattern.compile(
             "getprop (?:ro\\.(?:build\\.(?:fingerprint|display\\.id)|product\\."
                     + "(?:brand|device|manufacturer|model|name)|hardware|board\\.platform|"
@@ -285,6 +282,7 @@ final class LocalAdbBridge {
             }
 
             NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
+                    appContext,
                     normalizedPackage,
                     notification.output,
                     accessibility.output,
@@ -292,6 +290,9 @@ final class LocalAdbBridge {
                     grantAccessibilityService,
                     grantAccessibilityMaster,
                     grantDashboardOverlay);
+            if (!plan.isValid()) {
+                return Result.failed("ADB grant plan rejected: " + plan.error);
+            }
             for (String command : plan.shellCommands) {
                 AppEventLogger.event(appContext, "adb_bridge targeted_command " + command);
                 ShellResult result = connection.shellWithExit(command);
@@ -308,8 +309,13 @@ final class LocalAdbBridge {
                     grantStorageWrite,
                     authorizationPromptMode == AuthorizationPromptMode.FORCE);
             if (grantNotificationListener) {
+                String notificationCommand = notificationAllowListenerCommand(
+                        appContext, normalizedPackage);
+                if (notificationCommand.isEmpty()) {
+                    return Result.failed("Notification listener command plan rejected");
+                }
                 ShellResult notificationAllow = connection.shellWithExit(
-                        notificationAllowListenerCommand(normalizedPackage));
+                        notificationCommand);
                 if (notificationAllow.success()) {
                     AppEventLogger.event(appContext,
                             "adb_bridge notification_allow_listener success");
@@ -324,9 +330,7 @@ final class LocalAdbBridge {
                 NavNotificationListenerService.requestRuntimeRebind(appContext, "adb-grant");
             }
             Result accessibilityRebindResult = rebindAccessibilityRuntimeIfNeeded(
-                    connection,
-                    appContext,
-                    plan.accessibilityServicesValue);
+                    connection, appContext, normalizedPackage, accessibility.output);
             if (accessibilityRebindResult != null) {
                 return accessibilityRebindResult;
             }
@@ -408,6 +412,372 @@ final class LocalAdbBridge {
         if (!isAllowedRuntimeShellCommand(safeCommand)) {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
+        return runTrustedRuntimeShellCommand(context, safeCommand);
+    }
+
+    //keeps AutoContainer values behind the same authenticated allowlist as task moves.
+    static ShellResult runAutoContainer(Context context, int value) throws IOException {
+        if (value != 16 && value != 17 && value != 18) {
+            throw new SecurityException("Unsupported AutoContainer value: " + value);
+        }
+        ShellResult lowercase = normalizeAutoContainerResult(runRuntimeShellCommand(
+                context, autoContainerCommand("auto_container", value)));
+        if (lowercase.success() || !isUnknownServiceResult(lowercase)) {
+            return lowercase;
+        }
+        return normalizeAutoContainerResult(runRuntimeShellCommand(
+                context, autoContainerCommand("AutoContainer", value)));
+    }
+
+    //uses the proven service-call shape without accepting arbitrary shell text.
+    static String autoContainerCommandForTest(String service, int value) {
+        return autoContainerCommand(service, value);
+    }
+
+    private static String autoContainerCommand(String service, int value) {
+        if (!("auto_container".equals(service) || "AutoContainer".equals(service))
+                || (value != 16 && value != 17 && value != 18)) {
+            throw new IllegalArgumentException("Unsupported AutoContainer request");
+        }
+        return "service call " + service + " 2 i32 1000 i32 " + value + " s16 '\"\"'";
+    }
+
+    private static boolean isUnknownServiceResult(ShellResult result) {
+        if (result == null || result.success()) {
+            return false;
+        }
+        String detail = result.shortDetail().toLowerCase(java.util.Locale.ROOT);
+        return detail.contains("unknown service")
+                || detail.contains("service not found")
+                || detail.contains("can't find service")
+                || detail.contains("cannot find service")
+                || detail.contains("not found");
+    }
+
+    private static ShellResult normalizeAutoContainerResult(ShellResult result) {
+        if (result == null || !result.success()) return result;
+        if (isSuccessfulAutoContainerResponse(result.exitCode, result.output)) {
+            return result;
+        }
+        return new ShellResult(result.output, 1, result.raw,
+                result.truncated, result.droppedBytes);
+    }
+
+    static boolean isSuccessfulAutoContainerResponse(int exitCode, String output) {
+        if (exitCode != 0) return false;
+        String safe = output == null ? "" : output.toLowerCase(java.util.Locale.ROOT);
+        return !safe.contains("exception") && !safe.contains("does not exist")
+                && !safe.contains("not found") && !safe.contains("unknown service");
+    }
+
+    static ShellResult runDiagnosticShellCommand(Context context, String command)
+            throws IOException {
+        String safeCommand = command == null ? "" : command.trim();
+        if (!isAllowedDiagnosticShellCommand(safeCommand)) {
+            throw new SecurityException("ADB diagnostic command is not allowed: " + safeCommand);
+        }
+        return runTrustedRuntimeShellCommand(
+                context, safeCommand, MAX_DIAGNOSTIC_OUTPUT_BYTES);
+    }
+
+    static boolean isAllowedDiagnosticShellCommandForTest(String command) {
+        return isAllowedDiagnosticShellCommand(command == null ? "" : command.trim());
+    }
+
+    static ShellResult boundedDiagnosticOutputForTest(String raw, int maxBytes)
+            throws IOException {
+        OutputAccumulator output = new OutputAccumulator(maxBytes);
+        output.append((raw == null ? "" : raw).getBytes(StandardCharsets.UTF_8));
+        ShellCapture capture = output.capture();
+        return ShellResult.parse(capture.raw, capture.truncated, capture.droppedBytes);
+    }
+
+    static ShellResult launchInstrumentProxy(
+            Context context, String apkPath, long generation, String nonce,
+            int appUid, String launchToken, int appVersionCode)
+            throws IOException {
+        String command = instrumentProxyLaunchCommand(
+                apkPath, generation, nonce, appUid, launchToken, appVersionCode);
+        return runTrustedRuntimeShellCommand(context, command);
+    }
+
+    static int instrumentProxyPid(ShellResult launchResult) {
+        if (launchResult == null || !launchResult.success()) return -1;
+        String output = launchResult.output == null ? "" : launchResult.output.trim();
+        for (String value : output.split("\\s+")) {
+            if (!value.matches("[0-9]{1,10}")) continue;
+            try {
+                int pid = Integer.parseInt(value);
+                if (pid > 0) return pid;
+            } catch (NumberFormatException ignored) {
+                return -1;
+            }
+        }
+        return -1;
+    }
+
+    static ShellResult stopInstrumentProxy(
+            Context context, InstrumentProxyStore.Identity expected) throws IOException {
+        if (expected == null || !expected.isValid()) return new ShellResult("", 0, "");
+        String output;
+        ShellResult lookup;
+        if (expected.pid > 0) {
+            output = Integer.toString(expected.pid);
+            lookup = new ShellResult(output, 0, "");
+        } else {
+            lookup = runTrustedRuntimeShellCommand(
+                    context, "pidof " + expected.processName);
+            if (lookup.exitCode == 126) return lookup;
+            output = lookup.output.trim();
+            if (output.isEmpty()) return new ShellResult("", 0, lookup.raw);
+        }
+        StringBuilder command = new StringBuilder("kill -9");
+        for (String value : output.split("\\s+")) {
+            if (!value.matches("[0-9]{1,10}")) {
+                throw new IOException("Unexpected Instrument proxy pid: " + value);
+            }
+            ShellResult status = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/status");
+            if (!status.success()) {
+                ShellResult recheck = runTrustedRuntimeShellCommand(
+                        context, "pidof " + expected.processName);
+                if (recheck.exitCode == 126) return recheck;
+                if (!containsPid(recheck.output, value)) continue;
+            }
+            ShellResult cmdline = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/cmdline");
+            if (!cmdline.success()) {
+                ShellResult recheck = runTrustedRuntimeShellCommand(
+                        context, "pidof " + expected.processName);
+                if (recheck.exitCode == 126) return recheck;
+                if (!containsPid(recheck.output, value)) continue;
+            }
+            ShellResult stat = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/stat");
+            if (!stat.success()) {
+                ShellResult recheck = runTrustedRuntimeShellCommand(
+                        context, "pidof " + expected.processName);
+                if (recheck.exitCode == 126) return recheck;
+                if (!containsPid(recheck.output, value)) continue;
+            }
+            int pid = Integer.parseInt(value);
+            InstrumentProcessIdentity identity = InstrumentProcessIdentity.parse(
+                    status.output, cmdline.output, stat.output);
+            if (!status.success() || !cmdline.success() || !stat.success()
+                    || !identity.isVerifiable()) {
+                throw new IOException("Unable to verify Instrument proxy identity pid="
+                        + value + " name=" + identity.name
+                        + " uid=" + identity.uidSummary
+                        + " startTicks=" + identity.startTimeTicks
+                        + " cmdline=" + identity.sanitizedCmdline());
+            }
+            if (!identity.matches(expected, pid)) {
+                AppEventLogger.event(context,
+                        "instrument_proxy cleanup_identity_not_owned pid=" + pid
+                                + " name=" + identity.name
+                                + " uid=" + identity.uidSummary.replaceAll("\\s+", ",")
+                                + " startTicks=" + identity.startTimeTicks
+                                + " generation=" + expected.generation);
+                continue;
+            }
+            AppEventLogger.event(context, "instrument_proxy cleanup_identity pid=" + pid
+                    + " name=" + identity.name
+                    + " uid=" + identity.uidSummary.replaceAll("\\s+", ",")
+                    + " startTicks=" + identity.startTimeTicks
+                    + " generation=" + expected.generation);
+            command.append(' ').append(value);
+        }
+        if ("kill -9".contentEquals(command)) return new ShellResult("", 0, lookup.raw);
+        ShellResult killed = runTrustedRuntimeShellCommand(context, command.toString());
+        if (killed.success() || killed.exitCode == 126) return killed;
+        ShellResult recheck = runTrustedRuntimeShellCommand(
+                context, "pidof " + expected.processName);
+        return recheck.output.trim().isEmpty()
+                ? new ShellResult("", 0, killed.raw + recheck.raw)
+                : killed;
+    }
+
+    static ShellResult stopLegacyInstrumentProxy(Context context, int appUid)
+            throws IOException {
+        String processName = InstrumentProxyContract.legacyProcessName(appUid);
+        ShellResult lookup = runTrustedRuntimeShellCommand(context, "pidof " + processName);
+        if (lookup.exitCode == 126) return lookup;
+        if (lookup.output.trim().isEmpty()) {
+            return new ShellResult("", 0, lookup.raw);
+        }
+        StringBuilder command = new StringBuilder("kill -9");
+        for (String value : lookup.output.trim().split("\\s+")) {
+            if (!value.matches("[0-9]{1,10}")) {
+                throw new IOException("Unexpected legacy Instrument proxy pid: " + value);
+            }
+            ShellResult status = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/status");
+            ShellResult cmdline = runTrustedRuntimeShellCommand(
+                    context, "cat /proc/" + value + "/cmdline");
+            InstrumentProcessIdentity identity = InstrumentProcessIdentity.parse(
+                    status.output, cmdline.output, "");
+            if (!status.success() || !cmdline.success()
+                    || !identity.matchesLegacy(processName)) {
+                throw new IOException("Refusing unexpected legacy Instrument proxy identity pid="
+                        + value + " name=" + identity.name
+                        + " uid=" + identity.uidSummary
+                        + " cmdline=" + identity.sanitizedCmdline());
+            }
+            command.append(' ').append(value);
+        }
+        return "kill -9".contentEquals(command)
+                ? new ShellResult("", 0, lookup.raw)
+                : runTrustedRuntimeShellCommand(context, command.toString());
+    }
+
+    private static boolean containsPid(String output, String expectedPid) {
+        String safeOutput = output == null ? "" : output.trim();
+        for (String value : safeOutput.split("\\s+")) {
+            if (expectedPid.equals(value)) return true;
+        }
+        return false;
+    }
+
+    static boolean hasExpectedInstrumentProxyIdentityForTest(
+            String status, String processName) {
+        return hasExpectedInstrumentProxyIdentity(status, processName);
+    }
+
+    private static boolean hasExpectedInstrumentProxyIdentity(
+            String status, String processName) {
+        String safeStatus = status == null ? "" : status;
+        String safeName = processName == null ? "" : processName.trim();
+        if (!safeName.matches("bydh[0-9]{5,10}")) return false;
+        boolean nameMatches = Pattern.compile(
+                "(?m)^Name:\\s*" + Pattern.quote(safeName) + "\\s*$")
+                .matcher(safeStatus).find();
+        boolean uidMatches = Pattern.compile(
+                "(?m)^Uid:\\s*2000(?:\\s+2000){3}\\s*$")
+                .matcher(safeStatus).find();
+        return nameMatches && uidMatches;
+    }
+
+    static boolean hasExpectedInstrumentProxyIdentityForTest(
+            String status, String cmdline, String stat,
+            InstrumentProxyStore.Identity expected, int actualPid) {
+        return InstrumentProcessIdentity.parse(status, cmdline, stat)
+                .matches(expected, actualPid);
+    }
+
+    static boolean hasExpectedLegacyInstrumentProxyIdentityForTest(
+            String status, String cmdline, String processName) {
+        return InstrumentProcessIdentity.parse(status, cmdline, "")
+                .matchesLegacy(processName);
+    }
+
+    private static final class InstrumentProcessIdentity {
+        final String name;
+        final String uidSummary;
+        final boolean shellUid;
+        final String cmdline;
+        final long startTimeTicks;
+
+        private InstrumentProcessIdentity(String name, String uidSummary,
+                boolean shellUid, String cmdline, long startTimeTicks) {
+            this.name = name;
+            this.uidSummary = uidSummary;
+            this.shellUid = shellUid;
+            this.cmdline = cmdline;
+            this.startTimeTicks = startTimeTicks;
+        }
+
+        static InstrumentProcessIdentity parse(
+                String status, String rawCmdline, String stat) {
+            String safeStatus = status == null ? "" : status;
+            String name = capture(safeStatus, "(?m)^Name:\\s*([^\\r\\n]+)$");
+            String uid = capture(safeStatus, "(?m)^Uid:\\s*([^\\r\\n]+)$");
+            boolean shellUid = uid.matches("2000(?:\\s+2000){3}");
+            String cmdline = rawCmdline == null ? ""
+                    : rawCmdline.replace('\0', ' ').trim().replaceAll("\\s+", " ");
+            return new InstrumentProcessIdentity(name, uid, shellUid, cmdline,
+                    InstrumentProxyContract.processStartTimeTicks(stat));
+        }
+
+        boolean matches(InstrumentProxyStore.Identity expected, int actualPid) {
+            if (expected == null || !expected.isValid() || !shellUid) return false;
+            if (expected.pid > 0 && expected.pid != actualPid) return false;
+            if (!cmdline.equals(expected.processName)
+                    && !cmdline.startsWith(expected.processName + " ")) return false;
+            return expected.startTimeTicks <= 0L
+                    || expected.startTimeTicks == startTimeTicks;
+        }
+
+        boolean isVerifiable() {
+            return !uidSummary.isEmpty() && !cmdline.isEmpty() && startTimeTicks > 0L;
+        }
+
+        boolean matchesLegacy(String processName) {
+            String expected = processName == null ? "" : processName.trim();
+            return expected.matches("bydh[0-9]{5,10}")
+                    && shellUid
+                    && cmdline.equals(expected);
+        }
+
+        String sanitizedCmdline() {
+            String sanitized = cmdline.replaceAll(
+                    "--nonce=[0-9a-f]{32}", "--nonce=<redacted>");
+            return sanitized.length() <= 180 ? sanitized : sanitized.substring(0, 180);
+        }
+
+        private static String capture(String value, String pattern) {
+            java.util.regex.Matcher matcher = Pattern.compile(pattern).matcher(value);
+            return matcher.find() ? matcher.group(1).trim() : "";
+        }
+    }
+
+    static String instrumentProxyLaunchCommandForTest(
+            String apkPath, long generation, String nonce, int appUid,
+            String launchToken, int appVersionCode) {
+        return instrumentProxyLaunchCommand(
+                apkPath, generation, nonce, appUid, launchToken, appVersionCode);
+    }
+
+    private static String instrumentProxyLaunchCommand(
+            String apkPath, long generation, String nonce, int appUid,
+            String launchToken, int appVersionCode) {
+        String safePath = apkPath == null ? "" : apkPath.trim();
+        String safeNonce = nonce == null ? "" : nonce.trim();
+        String safeToken = launchToken == null ? "" : launchToken.trim();
+        if (safePath.contains("..")
+                || !safePath.matches("/data/app/[A-Za-z0-9_./+=:~-]{1,500}/base\\.apk")
+                || generation <= 0L
+                || !safeNonce.matches("[0-9a-f]{32}")
+                || appUid < 10_000
+                || !InstrumentProxyContract.validLaunchToken(safeToken)
+                || appVersionCode <= 0) {
+            throw new SecurityException("Invalid Instrument proxy launch parameters");
+        }
+        String classPath = "/system/framework/services.jar:"
+                + "/system/framework/dilink-services.jar:" + safePath;
+        String libraryPath = "/system/lib64:/product/lib64:"
+                + safePath + "!/lib/arm64-v8a";
+        String processName = InstrumentProxyContract.processName(appUid, safeToken);
+        return "nohup /system/bin/app_process"
+                + " -Djava.class.path=" + classPath
+                + " -Djava.library.path=" + libraryPath
+                + " /system/bin"
+                + " --nice-name=" + processName
+                + " com.bydhud.app.InstrumentProxyEntryPoint"
+                + " --generation=" + generation
+                + " --nonce=" + safeNonce
+                + " --app-uid=" + appUid
+                + " --launch-token=" + safeToken
+                + " --version-code=" + appVersionCode
+                + " >/dev/null 2>&1 </dev/null & echo $!";
+    }
+
+    private static ShellResult runTrustedRuntimeShellCommand(
+            Context context, String safeCommand) throws IOException {
+        return runTrustedRuntimeShellCommand(context, safeCommand, 0);
+    }
+
+    private static ShellResult runTrustedRuntimeShellCommand(
+            Context context, String safeCommand, int maxOutputBytes) throws IOException {
         Context appContext = context.getApplicationContext();
         synchronized (RUNTIME_CONNECTION_LOCK) {
             try {
@@ -415,7 +785,7 @@ final class LocalAdbBridge {
                 if (connection == null) {
                     return unauthorizedRuntimeShellResult();
                 }
-                ShellResult result = connection.shellWithExit(safeCommand);
+                ShellResult result = connection.shellWithExit(safeCommand, maxOutputBytes);
                 runtimeLastUsedMs = android.os.SystemClock.elapsedRealtime();
                 return result;
             } catch (IOException e) {
@@ -425,7 +795,7 @@ final class LocalAdbBridge {
                     if (connection == null) {
                         return unauthorizedRuntimeShellResult();
                     }
-                    ShellResult result = connection.shellWithExit(safeCommand);
+                    ShellResult result = connection.shellWithExit(safeCommand, maxOutputBytes);
                     runtimeLastUsedMs = android.os.SystemClock.elapsedRealtime();
                     return result;
                 } catch (IOException retry) {
@@ -448,7 +818,8 @@ final class LocalAdbBridge {
     private static Result rebindAccessibilityRuntimeIfNeeded(
             Connection connection,
             Context appContext,
-            String targetAccessibilityServicesValue) throws IOException, InterruptedException {
+            String packageName,
+            String currentAccessibilityServices) throws IOException, InterruptedException {
         ShellResult accessibilityDump = connection.shellWithExit("dumpsys accessibility");
         if (!accessibilityDump.success()) {
             AppEventLogger.event(appContext, "adb_bridge accessibility_dump_failed "
@@ -466,9 +837,12 @@ final class LocalAdbBridge {
                 + " enabled=" + accessibilityRuntime.accessibilityEnabledInDumpsys
                 + " bound=" + accessibilityRuntime.accessibilityBoundInDumpsys
                 + " crashed=" + accessibilityRuntime.accessibilityCrashedInDumpsys);
-        for (String command : NavPermissionGrantPlan.accessibilityRuntimeRebindCommands(
-                appContext.getPackageName(),
-                targetAccessibilityServicesValue)) {
+        List<String> commands = NavPermissionGrantPlan.accessibilityRuntimeRebindCommands(
+                appContext, packageName, currentAccessibilityServices);
+        if (commands.isEmpty()) {
+            return Result.failed("Accessibility runtime rebind plan rejected");
+        }
+        for (String command : commands) {
             ShellResult result = connection.shellWithExit(command);
             if (!result.success()) {
                 return Result.partial("Accessibility runtime rebind command failed: "
@@ -491,12 +865,35 @@ final class LocalAdbBridge {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isAllowedRuntimeShellCommand(String command) {
-        return "dumpsys display".equals(command)
+        return "id".equals(command)
+                || "dumpsys display".equals(command)
                 || "dumpsys activity activities".equals(command)
                 || isVehicleConfigurationCommand(command)
                 || MOVE_STACK_COMMAND.matcher(command).matches()
-                || WAZE_SCREENSHOT_COMMAND.matcher(command).matches()
-                || APP_LOCAL_RM_COMMAND.matcher(command).matches();
+                || AUTO_CONTAINER_COMMAND.matcher(command).matches();
+    }
+
+    private static boolean isAllowedDiagnosticShellCommand(String command) {
+        if (DIAGNOSTIC_LOGCAT_COMMAND.matcher(command).matches()
+                || DIAGNOSTIC_PROC_STAT_COMMAND.matcher(command).matches()) {
+            return true;
+        }
+        switch (command) {
+            case "logcat -g -b all":
+            case "dumpsys gfxinfo com.bydhud.app reset":
+            case "dumpsys gfxinfo com.bydhud.app framestats":
+            case "dumpsys accessibility":
+            case "dumpsys activity activities":
+            case "dumpsys window windows":
+            case "dumpsys cpuinfo":
+            case "dumpsys thermalservice":
+            case "dumpsys meminfo com.bydhud.app":
+            case "dumpsys package com.bydhud.app":
+            case "cat /proc/loadavg":
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static boolean isVehicleConfigurationCommand(String command) {
@@ -521,7 +918,10 @@ final class LocalAdbBridge {
             case "ip neigh":
             case "ss -a -n -p":
             case "dumpsys package com.ts.car.someip.service":
-            case "dumpsys activity services com.ts.car.someip.service":
+              case "dumpsys activity services com.ts.car.someip.service":
+              case "dumpsys activity services com.waze":
+              case "dumpsys activity services com.google.android.apps.maps":
+              case "dumpsys activity services app.revanced.android.apps.maps":
             case "find /system/etc /vendor/etc /product/etc /odm/etc -type f":
             case "find /system/lib /system/lib64 /vendor/lib /vendor/lib64 "
                     + "/product/lib /product/lib64 /odm/lib /odm/lib64 -type f":
@@ -718,7 +1118,26 @@ final class LocalAdbBridge {
                 false,
                 false,
                 false);
-        return "cmd notification allow_listener " + plan.notificationService;
+        return plan.isValid()
+                ? "cmd notification allow_listener '" + plan.notificationService + "'"
+                : "";
+    }
+
+    //uses the installed canonical notification component for the live grant path.
+    private static String notificationAllowListenerCommand(
+            Context context, String packageName) {
+        NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
+                context,
+                packageName,
+                "",
+                "",
+                false,
+                false,
+                false,
+                false);
+        return plan.isValid()
+                ? "cmd notification allow_listener '" + plan.notificationService + "'"
+                : "";
     }
 
     //defines the OpenResult module boundary so related behavior stays readable inside one unit.
@@ -874,16 +1293,21 @@ final class LocalAdbBridge {
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         ShellResult shellWithExit(String command) throws IOException {
+            return shellWithExit(command, 0);
+        }
+
+        //keeps diagnostic output bounded while retaining the shell exit marker at the tail.
+        ShellResult shellWithExit(String command, int maxOutputBytes) throws IOException {
             String wrapped = command + "; echo " + EXIT_MARKER + "$?";
-            String output = shell(wrapped);
-            return ShellResult.parse(output);
+            ShellCapture capture = shell(wrapped, maxOutputBytes);
+            return ShellResult.parse(capture.raw, capture.truncated, capture.droppedBytes);
         }
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
-        private String shell(String command) throws IOException {
+        private ShellCapture shell(String command, int maxOutputBytes) throws IOException {
             int localId = nextLocalId++;
             int remoteId = 0;
-            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            OutputAccumulator output = new OutputAccumulator(maxOutputBytes);
             AdbPacket.write(out, AdbPacket.A_OPEN, localId, 0, nulPayload("shell:" + command));
             while (true) {
                 AdbPacket packet = AdbPacket.read(in);
@@ -897,14 +1321,14 @@ final class LocalAdbBridge {
                     if (remoteId == 0) {
                         remoteId = packet.arg0;
                     }
-                    output.write(packet.payload, 0, packet.payload.length);
+                    output.append(packet.payload);
                     AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
                 } else if (packet.command == AdbPacket.A_CLSE) {
                     if (remoteId == 0) {
                         remoteId = packet.arg0;
                     }
                     AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
-                    return output.toString("UTF-8");
+                    return output.capture();
                 }
             }
         }
@@ -924,17 +1348,99 @@ final class LocalAdbBridge {
         }
     }
 
+    private static final class ShellCapture {
+        final String raw;
+        final boolean truncated;
+        final long droppedBytes;
+
+        ShellCapture(String raw, boolean truncated, long droppedBytes) {
+            this.raw = raw == null ? "" : raw;
+            this.truncated = truncated;
+            this.droppedBytes = Math.max(0L, droppedBytes);
+        }
+    }
+
+    private static final class OutputAccumulator {
+        private final int maxBytes;
+        private final int prefixLimit;
+        private final int tailLimit;
+        private final ByteArrayOutputStream prefix = new ByteArrayOutputStream();
+        private final ByteArrayOutputStream tail = new ByteArrayOutputStream();
+        private long totalBytes;
+
+        OutputAccumulator(int maxBytes) {
+            this.maxBytes = Math.max(0, maxBytes);
+            tailLimit = Math.min(DIAGNOSTIC_OUTPUT_TAIL_BYTES, this.maxBytes);
+            prefixLimit = this.maxBytes == 0
+                    ? 0
+                    : this.maxBytes - tailLimit;
+        }
+
+        void append(byte[] bytes) {
+            if (bytes == null || bytes.length == 0) return;
+            totalBytes += bytes.length;
+            if (maxBytes == 0) {
+                prefix.write(bytes, 0, bytes.length);
+                return;
+            }
+            int remaining = prefixLimit - prefix.size();
+            if (remaining > 0) {
+                int keep = Math.min(remaining, bytes.length);
+                prefix.write(bytes, 0, keep);
+                if (keep == bytes.length) return;
+                appendTail(bytes, keep, bytes.length - keep);
+                return;
+            }
+            appendTail(bytes, 0, bytes.length);
+        }
+
+        private void appendTail(byte[] bytes, int offset, int length) {
+            int newLength = Math.min(length, tailLimit);
+            byte[] old = tail.toByteArray();
+            int oldLength = Math.min(old.length, tailLimit - newLength);
+            tail.reset();
+            if (oldLength > 0) {
+                tail.write(old, old.length - oldLength, oldLength);
+            }
+            if (newLength > 0) {
+                tail.write(bytes, offset + length - newLength, newLength);
+            }
+        }
+
+        ShellCapture capture() throws IOException {
+            ByteArrayOutputStream raw = new ByteArrayOutputStream(
+                    prefix.size() + tail.size());
+            raw.write(prefix.toByteArray());
+            raw.write(tail.toByteArray());
+            if (maxBytes == 0 || totalBytes <= maxBytes) {
+                return new ShellCapture(raw.toString("UTF-8"), false, 0L);
+            }
+            long dropped = Math.max(0L, totalBytes - prefix.size() - tail.size());
+            return new ShellCapture(raw.toString("UTF-8"), true, dropped);
+        }
+    }
+
     //defines the ShellResult module boundary so related behavior stays readable inside one unit.
     static final class ShellResult {
         final String output;
         final int exitCode;
         final String raw;
+        final boolean truncated;
+        final long droppedBytes;
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         private ShellResult(String output, int exitCode, String raw) {
+            this(output, exitCode, raw, false, 0L);
+        }
+
+        private ShellResult(
+                String output, int exitCode, String raw,
+                boolean truncated, long droppedBytes) {
             this.output = output == null ? "" : output;
             this.exitCode = exitCode;
             this.raw = raw == null ? "" : raw;
+            this.truncated = truncated;
+            this.droppedBytes = Math.max(0L, droppedBytes);
         }
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -948,15 +1454,21 @@ final class LocalAdbBridge {
             if (trimmed.length() > 160) {
                 trimmed = trimmed.substring(0, 160) + "...";
             }
-            return "exit=" + exitCode + " output=" + trimmed;
+            return "exit=" + exitCode + " output=" + trimmed
+                    + (truncated ? " truncatedBytes=" + droppedBytes : "");
         }
 
         //parses source data here so downstream HUD code receives normalized navigation fields.
         static ShellResult parse(String raw) {
+            return parse(raw, false, 0L);
+        }
+
+        static ShellResult parse(String raw, boolean truncated, long droppedBytes) {
             String safeRaw = raw == null ? "" : raw;
             int markerIndex = safeRaw.lastIndexOf(EXIT_MARKER);
             if (markerIndex < 0) {
-                return new ShellResult(safeRaw.trim(), -1, safeRaw);
+                return new ShellResult(safeRaw.trim(), -1, safeRaw,
+                        truncated, droppedBytes);
             }
             int codeStart = markerIndex + EXIT_MARKER.length();
             int codeEnd = codeStart;
@@ -971,7 +1483,7 @@ final class LocalAdbBridge {
                 exitCode = -1;
             }
             String output = safeRaw.substring(0, markerIndex).trim();
-            return new ShellResult(output, exitCode, safeRaw);
+            return new ShellResult(output, exitCode, safeRaw, truncated, droppedBytes);
         }
     }
 
@@ -1170,12 +1682,14 @@ final class LocalAdbBridge {
                         verifiedFingerprintThisProcess)
                 .apply();
         AppEventLogger.event(context, "adb_bridge authorized key=" + keyFingerprint);
+        MainActivity.requestRuntimeStatusRefresh(context, true, "adb-authorization-verified");
     }
 
     private static void clearAuthorizedFingerprint(Context context, String keyFingerprint) {
         verifiedFingerprintThisProcess = "";
         prefs(context).edit().remove(KEY_AUTHORIZED_FINGERPRINT).apply();
         AppEventLogger.event(context, "adb_bridge authorization_revoked key=" + keyFingerprint);
+        MainActivity.requestRuntimeStatusRefresh(context, true, "adb-authorization-rejected");
     }
 
     //tracks only the socket blocked on RSA consent so shell sessions remain untouched.

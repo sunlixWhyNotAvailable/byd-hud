@@ -40,6 +40,8 @@ final class NavAppTaskScanner {
             Pattern.compile(".*Task\\{[^#]*#([0-9]+).*");
     private static final Pattern PACKAGE_PATTERN =
             Pattern.compile("(?<![A-Za-z0-9_])([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=[/\\s}:,]|$)");
+    private static final Pattern FOREGROUND_SERVICE_PATTERN = Pattern.compile(
+            "(?im)\\b(?:isForeground|foregroundService|foreground)\\s*=\\s*true\\b");
     private static final SimpleDateFormat TIME_FORMAT =
             new SimpleDateFormat("HH:mm:ss", Locale.US);
 
@@ -82,18 +84,27 @@ final class NavAppTaskScanner {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     Snapshot forceScanIfIdle() {
-        if (!scanInProgress.compareAndSet(false, true)) {
-            return null;
+        synchronized (lock) {
+            if (!scanInProgress.compareAndSet(false, true)) {
+                return null;
+            }
         }
+        boolean completed = false;
         try {
             Snapshot scanned = scanWithTasks();
             synchronized (lock) {
                 snapshot = preferredSnapshot(snapshot, scanned);
                 revision = Math.max(revision + 1L, System.currentTimeMillis());
+                scanInProgress.set(false);
+                completed = true;
                 return snapshot;
             }
         } finally {
-            scanInProgress.set(false);
+            if (!completed) {
+                synchronized (lock) {
+                    scanInProgress.set(false);
+                }
+            }
         }
     }
 
@@ -215,6 +226,49 @@ final class NavAppTaskScanner {
             boolean currentVisible,
             boolean candidateVisible) {
         return !hasCurrent || (!currentVisible && candidateVisible);
+    }
+
+    static TeardownEvidence confirmTeardown(Context context, String packageName) {
+        String normalized = normalizePackage(packageName);
+        if (!isSupportedTeardownPackage(normalized)) {
+            return TeardownEvidence.unavailable("unsupported package");
+        }
+        try {
+            LocalAdbBridge.ShellResult activities = LocalAdbBridge.runRuntimeShellCommand(
+                    context, COMMAND);
+            LocalAdbBridge.ShellResult services = LocalAdbBridge.runRuntimeShellCommand(
+                    context, "dumpsys activity services " + normalized);
+            if (!activities.success() || !services.success()) {
+                return TeardownEvidence.unavailable(
+                        "adb unavailable activities=" + activities.shortDetail()
+                                + " services=" + services.shortDetail());
+            }
+            NavAppTaskScanner scanner = new NavAppTaskScanner(context.getApplicationContext());
+            Map<String, RowBuilder> rows = new HashMap<>();
+            scanner.parseTaskRows(activities.output, rows);
+            RowBuilder row = rows.get(normalized);
+            boolean taskPresent = row != null && row.hasTask;
+            boolean foregroundService = FOREGROUND_SERVICE_PATTERN
+                    .matcher(services.output == null ? "" : services.output)
+                    .find();
+            return new TeardownEvidence(
+                    true, taskPresent, foregroundService,
+                    "task=" + taskPresent + " foregroundService=" + foregroundService
+                            + " process=ignored");
+        } catch (IOException | SecurityException error) {
+            return TeardownEvidence.unavailable(error.getClass().getSimpleName());
+        }
+    }
+
+    static boolean isTeardownPositiveForTest(
+            boolean adbAvailable, boolean taskPresent, boolean foregroundService) {
+        return adbAvailable && !taskPresent && !foregroundService;
+    }
+
+    private static boolean isSupportedTeardownPackage(String packageName) {
+        return "com.waze".equals(packageName)
+                || "com.google.android.apps.maps".equals(packageName)
+                || "app.revanced.android.apps.maps".equals(packageName);
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
@@ -394,6 +448,30 @@ final class NavAppTaskScanner {
 
         boolean hasAuthoritativeTaskState() {
             return "task".equals(source) && "ok".equals(status);
+        }
+    }
+
+    static final class TeardownEvidence {
+        final boolean adbAvailable;
+        final boolean taskPresent;
+        final boolean foregroundServicePresent;
+        final String reason;
+
+        private TeardownEvidence(boolean adbAvailable, boolean taskPresent,
+                boolean foregroundServicePresent, String reason) {
+            this.adbAvailable = adbAvailable;
+            this.taskPresent = taskPresent;
+            this.foregroundServicePresent = foregroundServicePresent;
+            this.reason = reason == null ? "" : reason;
+        }
+
+        static TeardownEvidence unavailable(String reason) {
+            return new TeardownEvidence(false, true, true, reason);
+        }
+
+        boolean positive() {
+            return isTeardownPositiveForTest(adbAvailable, taskPresent,
+                    foregroundServicePresent);
         }
     }
 

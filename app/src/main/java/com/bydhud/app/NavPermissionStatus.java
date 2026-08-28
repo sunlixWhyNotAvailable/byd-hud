@@ -44,7 +44,7 @@ final class NavPermissionStatus {
     static NavPermissionStatus check(Context context) {
         String packageName = context.getPackageName();
         NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
-                packageName, "", "");
+                context, packageName, "", "", false, false, false, false);
         String notificationListeners = Settings.Secure.getString(
                 context.getContentResolver(),
                 NavPermissionGrantPlan.NOTIFICATION_LISTENERS);

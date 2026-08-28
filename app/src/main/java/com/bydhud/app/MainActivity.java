@@ -15,6 +15,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.Process;
 import android.os.SystemClock;
 import android.text.InputType;
 import android.util.Log;
@@ -44,23 +45,29 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
 //anchors MainActivity UI orchestration so controls and diagnostics are wired from one place.
 public final class MainActivity extends ComponentActivity {
     private static final String TAG = "BydHudTest";
     private static final long SEND_INTERVAL_MS = 1000L;
-    private static final int START_BIND_RETRY_LIMIT = 30;
-    private static final long START_BIND_RETRY_MS = 200L;
     private static final int STATUS_LOG_MAX_LINES = 35;
     private static final int NAV_RUNTIME_RECONNECT_RETRY_LIMIT = 2;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
+    private static final long RUNTIME_UI_REFRESH_INTERVAL_MS = 5L * 60L * 1000L;
+    private static final long RUNTIME_STATUS_REFRESH_INTERVAL_MS = 5L * 60L * 1000L;
+    private static final long PATCH_UI_REFRESH_INTERVAL_MS = 1000L;
+    private static final long ASSET_UI_REFRESH_INTERVAL_MS = 1000L;
+    private static final long LOGCAT_STOP_TIMEOUT_MS = 90000L;
     private static final boolean BACKGROUND_MODE = true;
     private static final String GMAPS_OFFICIAL_PACKAGE = "com.google.android.apps.maps";
     private static final String GMAPS_REVANCED_PACKAGE = "app.revanced.android.apps.maps";
@@ -74,15 +81,50 @@ public final class MainActivity extends ComponentActivity {
     private static final String THEME_WARNING_TAG = "theme_warning";
     private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
     private static final AtomicBoolean SHARE_OPERATION = new AtomicBoolean(false);
-    private static final AtomicReference<File> PENDING_SHARE_FILE = new AtomicReference<>();
+    private static final AtomicLong STORAGE_SHARE_OPERATION_SEQUENCE = new AtomicLong();
+    private static final Object STORAGE_SHARE_COMPLETION_LOCK = new Object();
+    private static final AtomicReference<PendingShare> PENDING_SHARE = new AtomicReference<>();
+    private static final AtomicReference<ShareLaunchEvent> SHARE_LAUNCH_EVENT =
+            new AtomicReference<>(ShareLaunchEvent.empty());
+    private static final AtomicLong SHARE_LAUNCH_SEQUENCE = new AtomicLong();
     private static final AtomicReference<MainActivity> RESUMED_ACTIVITY = new AtomicReference<>();
+    private static final AtomicBoolean STORAGE_SCAN_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean STORAGE_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
+    private static final AtomicBoolean APP_SCAN_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean APP_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
+    private static final AtomicBoolean RUNTIME_STATUS_REFRESH_IN_PROGRESS =
+            new AtomicBoolean(false);
+    private static final AtomicBoolean RUNTIME_STATUS_REFRESH_PENDING =
+            new AtomicBoolean(false);
+    private static final AtomicBoolean PATCH_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
+    private static final AtomicLong UI_STATE_REVISION = new AtomicLong();
+    private static final Object PATCH_REFRESH_GATE_LOCK = new Object();
+    private static final Object PACKAGE_METADATA_CACHE_LOCK = new Object();
+    private static final Map<String, String> APP_LABEL_CACHE = new HashMap<>();
+    private static final Map<String, Boolean> INSTALLED_PACKAGE_CACHE = new HashMap<>();
+    private static final Object NAV_RUNTIME_PERMISSION_CACHE_LOCK = new Object();
+    private static volatile StorageCacheState storageCacheState = StorageCacheState.empty();
+    private static volatile Map<String, String> appVersionNames = Collections.emptyMap();
+    private static volatile List<ComposeNavigatorPatchRow> navigatorPatchRows =
+            Collections.emptyList();
+    private static volatile List<NavigatorAssetManager.AssetSnapshot> navigatorAssetSnapshots =
+            Collections.emptyList();
+    private static volatile boolean navigatorPatchRowsReady;
+    private static volatile boolean appScanCacheAvailable;
+    private static volatile String appScanStatus = "";
+    private static volatile NavRuntimePermissionStatus cachedNavRuntimePermissionStatus;
+    private static volatile boolean cachedAdbAuthorizationKnown;
+    private static volatile boolean cachedAdbAuthorizationStatusAvailable;
+    private static volatile long lastRuntimeUiRefreshAtMs;
+    private static volatile long lastRuntimeStatusRefreshAtMs;
+    private static volatile long lastPatchUiRefreshAtMs;
+    private static volatile long lastAssetUiRefreshAtMs;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final HudState state = new HudState();
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
-    private final AtomicBoolean storageScanInProgress = new AtomicBoolean(false);
-    private final AtomicBoolean storageForceRefreshPending = new AtomicBoolean(false);
-    private volatile StorageCacheState storageCacheState = StorageCacheState.empty();
-    private volatile Map<String, String> appVersionNames = Collections.emptyMap();
+    private volatile Runnable composeSnapshotInvalidationListener;
     private HudOutputCoordinator hudOutput;
 
     private TextView statusView;
@@ -111,7 +153,6 @@ public final class MainActivity extends ComponentActivity {
     private Button disconnectButton;
     private Switch bootSwitch;
     private Switch smallDistanceClampSwitch;
-    private Switch roundaboutLeftHandSwitch;
     private Switch pngOutputSwitch;
     private Switch nativeOutputSwitch;
     private Switch laneOutputSwitch;
@@ -121,7 +162,6 @@ public final class MainActivity extends ComponentActivity {
     private int selectedTabIndex = 0;
     private CompoundButton.OnCheckedChangeListener bootSwitchListener;
     private CompoundButton.OnCheckedChangeListener smallDistanceClampSwitchListener;
-    private CompoundButton.OnCheckedChangeListener roundaboutLeftHandSwitchListener;
     private CompoundButton.OnCheckedChangeListener pngOutputSwitchListener;
     private CompoundButton.OnCheckedChangeListener nativeOutputSwitchListener;
     private CompoundButton.OnCheckedChangeListener laneOutputSwitchListener;
@@ -173,7 +213,7 @@ public final class MainActivity extends ComponentActivity {
     private boolean mainUiReady;
     private boolean activityResumed;
     private boolean activityWindowFocused;
-    private volatile boolean composeAppsTabSelected;
+    private boolean dashboardMoveInProgress;
     private String composeBlockingUiFlow = "compose-starting";
     private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean exitRequested;
@@ -182,8 +222,6 @@ public final class MainActivity extends ComponentActivity {
     private boolean nativeVisible = true;
     private int lastVisiblePngSourceId = 9;
     private int lastVisibleNativeId = 11;
-    private boolean startAfterBindPending;
-    private int startBindAttempts;
     private int sendCount;
     private int curatedIndex = HudArrowComboCatalog.defaultIndex();
     private String cachedPayloadKey = "";
@@ -195,37 +233,9 @@ public final class MainActivity extends ComponentActivity {
     private String cachedTurnFieldDescriptor = "";
     private String cachedTurnResource = "";
     private int cachedDisplayDistance;
-    private Runnable pendingStartAfterBindRunnable;
     private Runnable pendingNavPermissionSelfCheckRunnable;
     private Runnable pendingAutoAdbStartRunnable;
     private final Random random = new Random();
-
-    private final Runnable startAfterBindRunnable = new Runnable() {
-        @Override
-        //keeps this step explicit so callers can rely on one documented behavior boundary.
-        public void run() {
-            pendingStartAfterBindRunnable = null;
-            if (!startAfterBindPending) {
-                return;
-            }
-            if (hudOutput.isBound()) {
-                startAfterBindPending = false;
-                appendStatus("start pending: SomeIP connected");
-                startSending();
-                return;
-            }
-            if (startBindAttempts >= START_BIND_RETRY_LIMIT) {
-                startAfterBindPending = false;
-                HudDeliveryStatus.recordFailure();
-                appendStatus("start pending failed: SomeIP bind timeout");
-                refreshControls();
-                return;
-            }
-            startBindAttempts++;
-            hudOutput.ensureBound("manual-start-retry");
-            scheduleStartAfterBind();
-        }
-    };
 
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
@@ -245,17 +255,29 @@ public final class MainActivity extends ComponentActivity {
             AppEventLogger.event(this, "storage_share_cleanup files=" + staleShareArtifacts);
         }
         NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
-        NavigatorPackageInstaller.reconcile(this);
         if (HudPrefs.isBootEnabled(this)) {
             HudRuntimeSupervisor.ensureStarted(this, "activity-create");
         } else {
             HudRuntimeWatchdog.cancel(this);
         }
         hudOutput = HudOutputCoordinator.get(this);
-        NavAppDisplayController.get(this).setListener(() -> runOnUiThread(() -> {
-            refreshControls();
-            scheduleAppScan();
+        NavAppDisplayController displayController = NavAppDisplayController.get(this);
+        dashboardMoveInProgress = displayController.setListener(moveInProgress -> runOnUiThread(() -> {
+            if (destroyed) {
+                return;
+            }
+            boolean moveFinished = dashboardMoveInProgress && !moveInProgress;
+            dashboardMoveInProgress = moveInProgress;
+            if (moveInProgress || moveFinished) {
+                //The Apps rows are cache-backed; publish only the move gate/status change here.
+                publishSharedUiStateChange();
+            }
+            if (moveFinished) {
+                scheduleAppScan();
+            }
         }));
+        requestActivityLocalStatusRefresh("activity-create");
+        requestInitialUiStateRefresh(this, "activity-create");
         BydHudRuntimeCompose.install(this);
         appendStatus(buildSafetyBanner());
         appendStatus("idle: Boot controls runtime; Apps tab controls Start HUD / Start only log");
@@ -285,9 +307,9 @@ public final class MainActivity extends ComponentActivity {
         RESUMED_ACTIVITY.set(this);
         maybeStartPendingAdbAuthorization();
         refreshControls();
-        if (composeAppsTabSelected) {
-            scheduleAppScan();
-        }
+        invalidateComposeSnapshot();
+        requestActivityLocalStatusRefresh("activity-resume");
+        requestRuntimeUiStateRefresh(this, true, "activity-resume");
         notifyPendingShare();
     }
 
@@ -315,6 +337,9 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStop() {
         super.onStop();
+        if (!isChangingConfigurations()) {
+            NavHudLiveSender.stopHudCheckIfRunning("hud-check-background");
+        }
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
             return;
@@ -333,11 +358,9 @@ public final class MainActivity extends ComponentActivity {
         }
         cancelPendingAutoAdbStart();
         NavAppDisplayController.get(this).setListener(null);
-        if (isFinishing()) {
-            stopImmediately("destroy", false, true);
-        } else {
-            appendStatus("destroy without finish: keep sender state");
-        }
+        appendStatus((exitRequested || HudPrefs.isUserShutdownActive(this))
+                ? "destroy after explicit exit"
+                : "destroy without explicit exit: keep sender state");
         super.onDestroy();
     }
 
@@ -450,12 +473,6 @@ public final class MainActivity extends ComponentActivity {
                 setSmallDistanceClamp(checked);
         smallDistanceClampSwitch = switchRow(mainRoot, "Small distance clamp",
                 HudPrefs.isSmallDistanceClampEnabled(this), smallDistanceClampSwitchListener);
-        roundaboutLeftHandSwitchListener = (buttonView, checked) ->
-                setRoundaboutLeftHandTraffic(checked);
-        roundaboutLeftHandSwitch = switchRow(mainRoot, "Roundabout left-hand traffic",
-                HudPrefs.isRoundaboutLeftHandTraffic(this), roundaboutLeftHandSwitchListener);
-        mainRoot.addView(label("Roundabout left-hand traffic: Changes roundabout assets for PNG output",
-                13, false));
 
         logRoot.addView(section("Logcat"));
         logcatRecorderStatusView = label(LogcatRecorder.STATUS_WAITING, 14, false);
@@ -549,7 +566,7 @@ public final class MainActivity extends ComponentActivity {
         manualRoot.addView(row(button("Apply Guide", v -> applyNavigationFieldsAndSend())));
 
         appsRoot.addView(section("Supported apps"));
-        appsRoot.addView(warningLabel("SUPPORTED APPS: Google Maps, Waze, ABRP"));
+        appsRoot.addView(warningLabel("SUPPORTED APPS: Google Maps, Waze"));
         appsRoot.addView(warningLabel("Unsupported apps are logging only"));
         capturePackagesView = label("", 14, false);
         appsRoot.addView(capturePackagesView);
@@ -613,10 +630,11 @@ public final class MainActivity extends ComponentActivity {
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startLogcatRecording() {
         setLogcatRecorderStatus(LogcatRecorder.STATUS_RECORDING);
-        LogcatRecorder.Result result = LogcatRecorder.start(this);
-        appendStatus("logcat start " + result.detail
-                + " file=" + filePath(result.file));
-        refreshLogcatControls();
+        if (logcatStartButton != null) logcatStartButton.setEnabled(false);
+        Thread worker = new Thread(() -> reportLogcatResult(
+                "start", LogcatRecorder.start(this)), "BydHudRecorderStart");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -628,9 +646,15 @@ public final class MainActivity extends ComponentActivity {
         if (logcatStopButton != null) {
             logcatStopButton.setEnabled(false);
         }
+        Thread worker = new Thread(() -> reportLogcatResult(
+                "stop", LogcatRecorder.stop(this)), "BydHudRecorderStop");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void reportLogcatResult(String action, LogcatRecorder.Result result) {
         handler.post(() -> {
-            LogcatRecorder.Result result = LogcatRecorder.stop(this);
-            appendStatus("logcat stop " + result.detail
+            appendStatus("system recorder " + action + " " + result.detail
                     + " file=" + filePath(result.file));
             refreshLogcatControls();
         });
@@ -662,21 +686,22 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String logPathsText() {
-        return "Logcat:\n"
+        return "System recorder:\n"
                 + NavigationLogStorage.publicLogcatPath()
-                + "\nFiles: logcat_*.txt"
+                + "\nFiles: system_*/manifest.json, logcat-*.log, snapshots"
                 + "\n\nDaily logs:\n"
                 + NavigationLogStorage.publicLogsPath()
-                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, someip_tx.jsonl"
-                + "\n\nWaze crop:\n"
+                + "\nFiles: events.log, raw_nav_events.jsonl, nav_snapshots.jsonl, "
+                + "someip_tx.jsonl, tbt_tx.jsonl"
+                + "\n\nHistorical Waze crop sessions:\n"
                 + NavigationLogStorage.publicWazeCropPath()
-                + "\nProbe channels: notification_large_icon, unsupported_start_hud, waze_crop, nav_app_display";
+                + "\nProbe channels: notification_large_icon, unsupported_start_hud, nav_app_display";
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private StorageCacheState scanStorageState() {
+    private static StorageCacheState scanStorageState(Context context) {
         NavigationLogStorage.StorageSnapshot snapshot =
-                NavigationLogStorage.snapshotAccessibleStorage(this);
+                NavigationLogStorage.snapshotAccessibleStorage(context);
         List<ComposeStorageDay> days = new ArrayList<>();
         List<String> paths = new ArrayList<>();
         SimpleDateFormat labelFormat = new SimpleDateFormat("yyyy-MM-dd", Locale.US);
@@ -704,40 +729,57 @@ public final class MainActivity extends ComponentActivity {
 
     //guards Storage tab responsiveness by moving recursive folder scans off the UI snapshot path.
     public void composeRequestStorageRefresh(boolean force) {
+        requestStorageRefresh(getApplicationContext(), force, "compose");
+    }
+
+    private static void requestStorageRefresh(Context context, boolean force, String reason) {
+        Context appContext = context.getApplicationContext();
         StorageCacheState current = storageCacheState;
         long now = SystemClock.elapsedRealtime();
         boolean stale = current.scannedAtMs <= 0L
                 || now - current.scannedAtMs >= STORAGE_SCAN_CACHE_TTL_MS;
+        if (!force && current.calculating) {
+            return;
+        }
         if (!force && !stale) {
             return;
         }
-        if (!storageScanInProgress.compareAndSet(false, true)) {
+        if (!STORAGE_SCAN_IN_PROGRESS.compareAndSet(false, true)) {
             if (force) {
-                storageForceRefreshPending.set(true);
+                STORAGE_FORCE_REFRESH_PENDING.set(true);
             }
-            storageCacheState = current.withCalculating(true);
+            if (!current.hasCache()) {
+                storageCacheState = current.withCalculating(true);
+                publishSharedUiStateChange();
+            }
             return;
         }
-        storageCacheState = current.withCalculating(true);
+        if (!current.hasCache()) {
+            storageCacheState = current.withCalculating(true);
+            publishSharedUiStateChange();
+        }
         Thread worker = new Thread(() -> {
             StorageCacheState next;
             try {
-                next = scanStorageState();
+                next = scanStorageState(appContext);
             } catch (RuntimeException e) {
-                next = storageCacheState.withCalculating(false);
-                AppEventLogger.event(this, "storage_scan failed "
+                String detail = e.getClass().getSimpleName() + ": "
+                        + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' ');
+                next = storageCacheState.withScanError(detail);
+                AppEventLogger.event(appContext, "storage_scan failed "
                         + e.getClass().getSimpleName() + " "
                         + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
             } finally {
-                storageScanInProgress.set(false);
+                STORAGE_SCAN_IN_PROGRESS.set(false);
             }
             storageCacheState = next;
-            handler.post(() -> {
-                refreshControls();
-                if (storageForceRefreshPending.getAndSet(false)) {
-                    composeRequestStorageRefresh(true);
-                }
-            });
+            AppEventLogger.event(appContext, "ui_storage_refresh reason=" + reason
+                    + " roots=" + next.rootPaths.size()
+                    + " days=" + next.storageDays.size());
+            publishSharedUiStateChange();
+            if (STORAGE_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                requestStorageRefresh(appContext, true, "pending-force");
+            }
         }, "BydHudStorageScan");
         worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
@@ -745,13 +787,18 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public ComposeSnapshot composeSnapshot() {
-        NavRuntimePermissionStatus permissionStatus = NavRuntimePermissionStatus.check(this);
+        NavRuntimePermissionStatus permissionStatus = navRuntimePermissionStatus();
+        boolean uaLanguage = HudPrefs.isUaLanguage(this);
         NavAppDisplayController displayController = NavAppDisplayController.get(this);
         Set<String> capturePackages = NavCapturePrefs.getCapturePackages(this);
         Set<String> observedPackages = NavCapturePrefs.getObservedPackages(this);
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         Set<String> logOnlyPackages = NavCapturePrefs.getLogOnlyPackages(this);
         NavAppTaskScanner.Snapshot appScan = NavAppTaskScanner.get(this).currentSnapshot();
+        boolean appCacheAvailable = appScanCacheAvailable
+                || (appScan.scannedAtMs > 0L && !"initial".equals(appScan.status));
+        String effectiveAppScanStatus = appScanStatusForTest(
+                APP_SCAN_IN_PROGRESS.get(), appScanStatus, appScan);
         List<ActiveAppRow> rawApps = activeRowsFromScan(appScan.rows);
         List<ActiveAppRow> supportedApps = loadCuratedApps(rawApps, capturePackages, observedPackages);
         List<ComposeAppRow> supportedRows = composeRows(
@@ -764,6 +811,10 @@ public final class MainActivity extends ComponentActivity {
             }
         }
         StorageCacheState storage = storageCacheState;
+        ShareLaunchEvent shareLaunchEvent = SHARE_LAUNCH_EVENT.get();
+        int dashboardScreenMode = HudPrefs.dashboardScreenMode(this);
+        DashboardProjectionPolicy.Profile dashboardProfile =
+                HudPrefs.dashboardProjectionProfile(this, dashboardScreenMode);
         return new ComposeSnapshot(
                 HudPrefs.isUaLanguage(this),
                 HudPrefs.isDarkTheme(this),
@@ -774,22 +825,35 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isLaneOutputEnabled(this),
                 HudPrefs.isDistanceOutputEnabled(this),
                 HudPrefs.isStreetOutputEnabled(this),
+                HudPrefs.transliterationMode(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
+                HudPrefs.isTbtWithoutHudOutputEnabled(this),
+                HudPrefs.isSwitchToTbtOnHudStartEnabled(this),
                 HudPrefs.isWholeRouteMetricsEnabled(this),
+                HudPrefs.routeMetricsMode(this),
                 HudPrefs.isEtaOutputEnabled(this),
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
-                HudPrefs.isWazeScreenCaptureEnabled(this),
-                HudPrefs.isFullscreenDashboardEnabled(this),
-                HudPrefs.dashboardHeightPercent(this),
+                HudPrefs.speedLimitMode(this),
+                HudPrefs.speedLimitFreeFallback(this),
+                HudPrefs.speedLimitOverlaySeconds(this),
+                HudPrefs.speedLimitCompositePlacement(this),
+                HudPrefs.speedLimitManeuverOverlaySize(this),
+                HudPrefs.speedLimitLaneOverlaySize(this),
+                HudPrefs.isWazeCustomSurfaceEnabled(this),
+                dashboardScreenMode,
+                dashboardProfile.widthPercent,
+                dashboardProfile.heightPercent,
+                dashboardProfile.offsetPercent,
+                dashboardProfile.scalePercent,
                 HudPrefs.isSmallDistanceClampEnabled(this),
-                HudPrefs.isRoundaboutLeftHandTraffic(this),
                 permissionStatus.settingsGranted(),
+                adbAuthorized(),
                 permissionStatus.readyForCapture(),
                 permissionStatus.summary(),
                 LocalAdbBridge.adbKeyFingerprint(this),
-                hudStatus(permissionStatus),
+                hudStatus(),
                 hudPackage,
                 formatCapturePackages(logOnlyPackages),
                 formatCapturePackages(observedPackages),
@@ -799,27 +863,65 @@ public final class MainActivity extends ComponentActivity {
                 LogcatRecorder.statusText(),
                 logPathsText(),
                 composeApplicationState(permissionStatus),
-                manualModeEnabled,
-                arrowCuratedMode,
-                curatedIndex,
-                HudArrowComboCatalog.size(),
-                state.turnBitmapId,
-                state.maneuverId,
-                state.distanceToIntersection,
-                state.roadName == null ? "" : state.roadName,
-                state.laneString == null ? "" : state.laneString,
+                NavHudLiveSender.hudCheckSnapshot(),
+                NavHudLiveSender.hudCheckStatus(uaLanguage),
                 appScan.lastScanText,
                 appScan.hasAuthoritativeTaskState(),
+                APP_SCAN_IN_PROGRESS.get(),
+                appCacheAvailable,
+                effectiveAppScanStatus,
                 HudPrefs.storageLimitGb(this),
                 storage.rootPaths,
                 storage.calculating,
+                storage.hasCache(),
+                storage.scanError,
                 storage.totalSessions,
                 storage.navCaptureFolderBytes,
                 storage.storageDays,
                 supportedRows,
                 allRows,
                 patchRows,
-                composePatchOperation());
+                localizedNavigatorAssetSnapshots(uaLanguage),
+                composePatchOperations(),
+                shareLaunchEvent.id,
+                shareLaunchEvent.storageDays);
+    }
+
+    private static List<NavigatorAssetManager.AssetSnapshot> localizedNavigatorAssetSnapshots(
+            boolean ukrainian) {
+        List<NavigatorAssetManager.AssetSnapshot> cached = navigatorAssetSnapshots;
+        if (cached.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<NavigatorAssetManager.AssetSnapshot> localized = new ArrayList<>(cached.size());
+        for (NavigatorAssetManager.AssetSnapshot asset : cached) {
+            localized.add(asset.localized(ukrainian));
+        }
+        return Collections.unmodifiableList(localized);
+    }
+
+    public void composeStartNavigatorAssetDownload(String assetId) throws Exception {
+        NavigatorAssetManager.startDownload(this, assetId);
+        requestPatchUiStateRefresh(this, true, "asset-download-start");
+        refreshControls();
+    }
+
+    public boolean composeNavigatorAssetRequiresDestructiveConfirm(String assetId)
+            throws Exception {
+        return NavigatorAssetManager.requiresDestructiveConfirmation(this, assetId);
+    }
+
+    public void composeInstallNavigatorAsset(String assetId, boolean destructiveApproved)
+            throws Exception {
+        NavigatorAssetManager.install(this, assetId, destructiveApproved);
+        requestPatchUiStateRefresh(this, true, "asset-install");
+        refreshControls();
+    }
+
+    public void composeRestoreNavigatorAsset(String assetId) throws Exception {
+        NavigatorAssetManager.restore(this, assetId);
+        requestPatchUiStateRefresh(this, true, "asset-restore");
+        refreshControls();
     }
 
     public String composePatchSourceDisplayName(Uri uri) {
@@ -848,6 +950,7 @@ public final class MainActivity extends ComponentActivity {
                 ? "selected" : displayName.trim();
         NavigatorPatchStore.Profile actual = NavigatorPatchPipeline.inspectSelectedPackage(
                 this, expected, uri, name);
+        requestPatchUiStateRefresh(this, true, "patch-source-selected");
         return actual.id;
     }
 
@@ -856,13 +959,15 @@ public final class MainActivity extends ComponentActivity {
         if (profile != null) {
             NavigatorPatchStore.clearExternal(this, profile);
             NavigatorPatchStore.transition(this, profile, NavigatorPatchStore.IDLE, "");
+            requestPatchUiStateRefresh(this, true, "patch-source-cleared");
         }
     }
 
     public void composeCheckNavigatorPatch(String profileId) throws Exception {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
-        NavigatorPatchPipeline.scan(this, profile);
+        NavigatorPatchPipeline.scanViaWorker(this, profile);
+        requestPatchUiStateRefresh(this, true, "patch-scan");
     }
 
     public void composeApplyNavigatorPatch(String profileId, boolean destructiveApproved)
@@ -870,7 +975,7 @@ public final class MainActivity extends ComponentActivity {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
         NavigatorPatchPipeline.PreparedPatch prepared =
-                NavigatorPatchPipeline.prepare(this, profile);
+                NavigatorPatchPipeline.prepareViaWorker(this, profile);
         if (prepared.destructive && !destructiveApproved) {
             NavigatorPatchPipeline.discardPrepared(this, prepared,
                     "Installed signer changed; destructive confirmation is required");
@@ -880,13 +985,25 @@ public final class MainActivity extends ComponentActivity {
         try {
             NavigatorPackageInstaller.begin(this, prepared);
         } catch (Exception error) {
-            NavigatorPatchStore.transition(this, profile,
-                    prepared.destructive && !NavigatorPackageInstaller.isInstalled(
-                            this, profile.packageName)
-                            ? NavigatorPatchStore.RECOVERY_REQUIRED
-                            : NavigatorPatchStore.FAILED,
-                    error.getMessage());
+            String phase = NavigatorPatchStore.operation(this, profile).phase;
+            if (NavigatorPatchStore.isCancellationRequested(this, profile)
+                    || NavigatorPatchStore.CANCEL_REQUESTED.equals(phase)
+                    || NavigatorPatchStore.CANCELLED.equals(phase)
+                    || error instanceof NavigatorPatchPipeline.OperationCancelledException) {
+                if (!NavigatorPatchStore.CANCELLED.equals(phase)) {
+                    NavigatorPatchPipeline.finishQueuedCancellation(
+                            this, profile, "Patch installation cancelled");
+                }
+            } else {
+                NavigatorPatchStore.transition(this, profile,
+                        NavigatorPatchStore.requiresRecovery(this, profile)
+                                ? NavigatorPatchStore.RECOVERY_REQUIRED
+                                : NavigatorPatchStore.FAILED,
+                        error.getMessage());
+            }
             throw error;
+        } finally {
+            requestPatchUiStateRefresh(this, true, "patch-apply");
         }
     }
 
@@ -894,6 +1011,21 @@ public final class MainActivity extends ComponentActivity {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
         NavigatorPackageInstaller.beginRestore(this, profile);
+        requestPatchUiStateRefresh(this, true, "patch-restore");
+    }
+
+    public boolean composeCancelNavigatorPatch(String profileId) {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        boolean cancelled = profile != null && NavigatorPatchPipeline.cancel(this, profile);
+        if (cancelled) requestPatchUiStateRefresh(this, true, "patch-cancel");
+        return cancelled;
+    }
+
+    public boolean composeDismissNavigatorPatch(String profileId) {
+        NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        boolean dismissed = profile != null && NavigatorPatchPipeline.dismiss(this, profile);
+        if (dismissed) requestPatchUiStateRefresh(this, true, "patch-dismiss");
+        return dismissed;
     }
 
     public boolean composeCanInstallNavigatorApks() {
@@ -988,46 +1120,79 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean isPackageInstalled(String packageName) {
+        String normalized = normalizePackage(packageName);
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            Boolean cached = INSTALLED_PACKAGE_CACHE.get(normalized);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        boolean installed;
         try {
             getPackageManager().getApplicationInfo(packageName, 0);
-            return true;
+            installed = true;
         } catch (PackageManager.NameNotFoundException ignored) {
-            return false;
+            installed = false;
         }
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            INSTALLED_PACKAGE_CACHE.put(normalized, installed);
+        }
+        return installed;
     }
 
     private List<ComposeNavigatorPatchRow> composeNavigatorPatchRows() {
-        List<ComposeNavigatorPatchRow> rows = new ArrayList<>();
-        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
-            NavigatorPatchStore.ProfileSnapshot value =
-                    NavigatorPatchStore.snapshot(this, profile);
-            if (!value.installed && !value.externalSource) continue;
-            rows.add(new ComposeNavigatorPatchRow(
-                    profile.id, value.label, profile.packageName,
-                    value.installedVersion, value.installed,
-                    value.externalSource, value.sourceName, value.sourceVersion,
-                    value.directState, value.optionalState, profile.optionalLabel,
-                    value.alertState, profile.alertLabel,
-                    value.reason, value.patchEnabled));
-        }
-        return rows;
+        return navigatorPatchRows;
     }
 
-    private ComposePatchOperation composePatchOperation() {
-        NavigatorPatchStore.OperationSnapshot value = NavigatorPatchStore.operation(this);
-        return new ComposePatchOperation(
-                value.profile == null ? "" : value.profile.id,
-                value.kind, value.phase, value.detail, value.destructive,
-                value.busy(), NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase));
+    private List<ComposePatchOperation> composePatchOperations() {
+        List<ComposePatchOperation> result = new ArrayList<>();
+        for (NavigatorPatchStore.OperationSnapshot value : NavigatorPatchStore.operations(this)) {
+            if (value == null || value.profile == null || value.kind.isEmpty()) continue;
+            result.add(new ComposePatchOperation(
+                    value.profile.id, value.kind, value.phase, value.detail,
+                    value.operationToken, value.startedAt, value.progress, value.error,
+                    value.readyAt, value.destructive, value.busy(),
+                    NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase),
+                    NavigatorPatchStore.canCancel(value), value.terminal(), value.acknowledged));
+        }
+        result.sort((left, right) -> Long.compare(left.startedAt, right.startedAt));
+        return Collections.unmodifiableList(result);
     }
 
     //keeps Google Maps variants as one UI target while leaving parser package support unchanged.
     private boolean isInstalledPackage(String packageName) {
-        if (!isGoogleMapsAlias(packageName)) {
-            return isPackageInstalled(packageName);
+        String normalized = normalizePackage(packageName);
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            Boolean cached = INSTALLED_PACKAGE_CACHE.get(normalized);
+            if (cached != null) {
+                return cached;
+            }
         }
-        return isPackageInstalled(GMAPS_REVANCED_PACKAGE)
-                || isPackageInstalled(GMAPS_OFFICIAL_PACKAGE);
+        boolean installed = isGoogleMapsAlias(normalized)
+                ? isPackageInstalled(GMAPS_REVANCED_PACKAGE)
+                || isPackageInstalled(GMAPS_OFFICIAL_PACKAGE)
+                : isPackageInstalled(normalized);
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            INSTALLED_PACKAGE_CACHE.put(normalized, installed);
+        }
+        return installed;
+    }
+
+    private NavRuntimePermissionStatus navRuntimePermissionStatus() {
+        synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
+            if (cachedNavRuntimePermissionStatus != null) {
+                return cachedNavRuntimePermissionStatus;
+            }
+            cachedNavRuntimePermissionStatus = NavRuntimePermissionStatus.check(this);
+            return cachedNavRuntimePermissionStatus;
+        }
+    }
+
+    //returns persisted key evidence without opening a socket or running a shell command.
+    private boolean adbAuthorized() {
+        return cachedAdbAuthorizationStatusAvailable
+                ? cachedAdbAuthorizationKnown
+                : LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
     }
 
     //keeps alias checks centralized so HUD/log row state cannot drift between Maps variants.
@@ -1067,17 +1232,8 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String hudStatus(NavRuntimePermissionStatus permissionStatus) {
-        if (HudDeliveryStatus.hasTransportFailure()) {
-            return "failed";
-        }
-        if (HudDeliveryStatus.isRunning()) {
-            return "running";
-        }
-        if (!permissionStatus.readyForCapture()) {
-            return "failed";
-        }
-        return "idle";
+    private String hudStatus() {
+        return HudDeliveryStatus.uiStatus();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1086,7 +1242,6 @@ public final class MainActivity extends ComponentActivity {
         return "HUD package: " + (hudPackage.isEmpty() ? "(none)" : hudPackage)
                 + "\nLog-only: " + formatCapturePackages(NavCapturePrefs.getLogOnlyPackages(this))
                 + "\nObserved: " + formatCapturePackages(NavCapturePrefs.getObservedPackages(this))
-                + "\nWaze crop: " + (WazeCropCapture.get(this).isRunning() ? "active session" : "idle")
                 + "\nRuntime service: "
                 + HudRuntimeState.summary(this, SystemClock.elapsedRealtime())
                 + "\nPermissions: " + permissionStatus.summary();
@@ -1173,6 +1328,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this Compose helper focused so UI state changes remain easy to audit.
     public void composeSetDetailedDebugArtifactsEnabled(boolean enabled) {
         HudPrefs.setDetailedDebugArtifactsEnabled(this, enabled);
+        TbtTxLog.onDetailedModeChanged(this, enabled);
         appendStatus("Detailed debug artifacts " + (enabled ? "enabled" : "disabled"));
         refreshControls();
     }
@@ -1202,6 +1358,10 @@ public final class MainActivity extends ComponentActivity {
         setStreetOutputEnabled(enabled);
     }
 
+    public void composeSetTransliterationMode(int mode) {
+        setTransliterationMode(mode);
+    }
+
     public void composeSetTextDirectionOutputEnabled(boolean enabled) {
         setTextDirectionOutputEnabled(enabled);
     }
@@ -1210,8 +1370,25 @@ public final class MainActivity extends ComponentActivity {
         setWazeAlertsEnabled(enabled);
     }
 
+    public void composeSetTbtWithoutHudOutputEnabled(boolean enabled) {
+        HudPrefs.setTbtWithoutHudOutputEnabled(this, enabled);
+        NavHudLiveSender.get(this).refreshTbtObservers();
+        appendStatus("TBT without HUD output " + (enabled ? "enabled" : "disabled"));
+        refreshControls();
+    }
+
+    public void composeSetSwitchToTbtOnHudStartEnabled(boolean enabled) {
+        HudPrefs.setSwitchToTbtOnHudStartEnabled(this, enabled);
+        appendStatus("Switch to TBT on HUD start " + (enabled ? "enabled" : "disabled"));
+        refreshControls();
+    }
+
     public void composeSetWholeRouteMetricsEnabled(boolean enabled) {
         setWholeRouteMetricsEnabled(enabled);
+    }
+
+    public void composeSetRouteMetricsMode(int mode) {
+        setRouteMetricsMode(mode);
     }
 
     public void composeSetEtaOutputEnabled(boolean enabled) {
@@ -1226,32 +1403,94 @@ public final class MainActivity extends ComponentActivity {
         setRemainingDistanceOutputEnabled(enabled);
     }
 
-    public void composeSetWazeScreenCaptureEnabled(boolean enabled) {
-        setWazeScreenCaptureEnabled(enabled);
+    public void composeSetSpeedLimitMode(int mode) {
+        setSpeedLimitMode(mode);
     }
 
-    public void composeSetFullscreenDashboardEnabled(boolean enabled) {
-        HudPrefs.setFullscreenDashboardEnabled(this, enabled);
-        appendStatus("Fullscreen dashboard " + (enabled ? "enabled" : "disabled"));
+    public void composeSetSpeedLimitFreeFallback(int mode) {
+        setSpeedLimitFreeFallback(mode);
+    }
+
+    public void composeSetSpeedLimitOverlaySeconds(int seconds) {
+        setSpeedLimitOverlaySeconds(seconds);
+    }
+
+    public void composeSetSpeedLimitCompositePlacement(int placement) {
+        setSpeedLimitCompositePlacement(placement);
+    }
+
+    public void composeSetSpeedLimitManeuverOverlaySize(int size) {
+        setSpeedLimitManeuverOverlaySize(size);
+    }
+
+    public void composeSetSpeedLimitLaneOverlaySize(int size) {
+        setSpeedLimitLaneOverlaySize(size);
+    }
+
+    public void composeSetWazeCustomSurfaceEnabled(boolean enabled) {
+        HudPrefs.setWazeCustomSurfaceEnabled(this, enabled);
+        appendStatus("Waze custom surface " + (enabled ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui waze_custom_surface=" + enabled);
         refreshControls();
     }
 
-    public void composeSetDashboardHeightPercent(int percent) {
-        HudPrefs.setDashboardHeightPercent(this, percent);
-        int persistedPercent = HudPrefs.dashboardHeightPercent(this);
-        ClusterProjectionService.applyDashboardHeight(
-                this, persistedPercent, "options-height-release");
-        appendStatus("Dashboard height " + persistedPercent + "%");
+    public void composeSetDashboardScreenMode(int mode) {
+        int persistedMode = HudPrefs.normalizeDashboardScreenMode(mode);
+        HudPrefs.setDashboardScreenMode(this, persistedMode);
+        appendStatus("Dashboard screen mode " + persistedMode);
+        refreshControls();
+    }
+
+    public void composeSetDashboardWidthPercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardWidthPercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "width",
+                HudPrefs.dashboardProjectionProfile(this, mode).widthPercent);
+    }
+
+    public void composeSetDashboardHeightPercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardHeightPercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "height",
+                HudPrefs.dashboardProjectionProfile(this, mode).heightPercent);
+    }
+
+    public void composeSetDashboardOffsetPercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardOffsetPercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "offset",
+                HudPrefs.dashboardProjectionProfile(this, mode).offsetPercent);
+    }
+
+    public void composeSetDashboardScalePercent(int editedMode, int percent) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardScalePercent(this, mode, percent);
+        finishDashboardProfileChange(mode, "scale",
+                HudPrefs.dashboardProjectionProfile(this, mode).scalePercent);
+    }
+
+    private void finishDashboardProfileChange(int mode, String field, int persistedValue) {
+        ClusterProjectionService.applyDashboardProfile(this, mode,
+                "options-" + field + "-release");
+        appendStatus("Dashboard " + field + " " + persistedValue + "%");
+        invalidateComposeSnapshot();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetSmallDistanceClamp(boolean enabled) {
         setSmallDistanceClamp(enabled);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSetRoundaboutLeftHandTraffic(boolean enabled) {
-        setRoundaboutLeftHandTraffic(enabled);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1273,7 +1512,9 @@ public final class MainActivity extends ComponentActivity {
         }
         HudPrefs.setStorageLimitGb(this, next);
         appendStatus("Storage limit " + HudPrefs.storageLimitGb(this) + " GB");
-        storageCacheState = storageCacheState.withCalculating(true);
+        if (!storageCacheState.hasCache()) {
+            storageCacheState = storageCacheState.withCalculating(true);
+        }
         refreshControls();
         NavigationLogStorage.forceNavCaptureRetention(
                 this,
@@ -1287,24 +1528,25 @@ public final class MainActivity extends ComponentActivity {
             return new ComposeDeleteDayResult(day, false, false, "invalid day");
         }
 
-        boolean active = NavigationLogStorage.isActiveNavCaptureDay(day);
-        WazeCropCapture crop = WazeCropCapture.get(this);
-        boolean restartCrop = active && crop.isRunning();
-        boolean restartLogcat = active
-                && LogcatRecorder.isRecording()
+        boolean restartLogcat = LogcatRecorder.isRecording()
                 && day.equals(LogcatRecorder.activeStartDay());
-        boolean cropRebaseStarted = false;
-        if (active) {
-            cropRebaseStarted = crop.beginStorageDayRebase("storage-day-rebase");
-            if (!cropRebaseStarted) {
-                crop.finishStorageDayRebase(
-                        restartCrop, "storage-day-rebase-after-timeout");
+        boolean logcatUsesDay = LogcatRecorder.hasSessionForDay(day);
+        boolean logcatStopped = false;
+        if (logcatUsesDay) {
+            CountDownLatch logcatStop = new CountDownLatch(1);
+            LogcatRecorder.stopAsync(this, logcatStop::countDown);
+            try {
+                if (!logcatStop.await(LOGCAT_STOP_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+                        || LogcatRecorder.hasSessionForDay(day)) {
+                    return new ComposeDeleteDayResult(
+                            day, false, false, "logcat did not stop; deletion aborted");
+                }
+                logcatStopped = true;
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
                 return new ComposeDeleteDayResult(
-                        day, false, false, "crop worker did not stop; deletion aborted");
+                        day, false, false, "logcat stop wait interrupted; deletion aborted");
             }
-        }
-        if (restartLogcat) {
-            LogcatRecorder.stop(this);
         }
 
         NavigationLogStorage.DayRetirement retirement;
@@ -1312,10 +1554,7 @@ public final class MainActivity extends ComponentActivity {
         try {
             retirement = NavigationLogStorage.retireStorageDay(this, day);
         } finally {
-            if (cropRebaseStarted) {
-                crop.finishStorageDayRebase(restartCrop, "storage-day-rebase");
-            }
-            if (restartLogcat) {
+            if (restartLogcat && logcatStopped) {
                 logcatRestart = LogcatRecorder.restartAfterRebase(this);
             }
         }
@@ -1342,9 +1581,8 @@ public final class MainActivity extends ComponentActivity {
             deleted &= tombstone != null && !tombstone.exists();
         }
         return new ComposeDeleteDayResult(day, deleted, false,
-                appendLogcatRestartFailure(deleted
-                        ? (active ? "deleted and live writers rebased" : "deleted")
-                        : "delete incomplete", logcatRestart));
+                appendLogcatRestartFailure(
+                        deleted ? "deleted" : "delete incomplete", logcatRestart));
     }
 
     //Runs one retained batch so Activity recreation cannot abandon the remaining selected days.
@@ -1375,6 +1613,7 @@ public final class MainActivity extends ComponentActivity {
             return results;
         } finally {
             STORAGE_DELETE_OPERATION.set(false);
+            requestStorageRefreshAfterMutation(this, "delete");
         }
     }
 
@@ -1392,44 +1631,359 @@ public final class MainActivity extends ComponentActivity {
         appendStatus(text);
     }
 
+    public void composeSetSnapshotInvalidationListener(Runnable listener) {
+        composeSnapshotInvalidationListener = listener;
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeRefreshApps() {
-        scheduleAppScan();
+        requestRuntimeUiStateRefresh(this, true, "apps-manual");
     }
 
-    public void composeReportAppsTabSelected(boolean selected) {
-        composeAppsTabSelected = selected;
+    public long composeUiStateRevision() {
+        return UI_STATE_REVISION.get();
     }
 
-    public long composeAppsScanRevision() {
-        return NavAppTaskScanner.get(this).revision();
+    public void composeRequestRuntimeUiStateRefresh(boolean force, String reason) {
+        requestRuntimeUiStateRefresh(this, force, reason);
+    }
+
+    public void composeRequestPatchUiStateRefresh(String reason) {
+        requestPatchUiStateRefresh(this, true, reason);
+    }
+
+    public void composeRequestPatchUiStateRefresh(boolean force, String reason) {
+        requestPatchUiStateRefresh(this, force, reason);
+    }
+
+    public void composeRequestNavigatorAssetUiStateRefresh(String reason) {
+        requestNavigatorAssetUiStateRefresh(this, reason);
+    }
+
+    static String appScanStatusForTest(boolean scanInProgress, String localStatus,
+            NavAppTaskScanner.Snapshot snapshot) {
+        String safeLocal = localStatus == null ? "" : localStatus;
+        if (scanInProgress || snapshot == null || snapshot.scannedAtMs <= 0L
+                || "initial".equals(snapshot.status)) {
+            return safeLocal;
+        }
+        return "ok".equals(snapshot.status) ? "" : snapshot.status;
     }
 
     public String composeHudDeliveryStatus() {
-        if (HudDeliveryStatus.hasTransportFailure()) {
-            return "failed";
+        return HudDeliveryStatus.uiStatus();
+    }
+
+    private static int lowerCurrentThreadPriority() {
+        int tid = Process.myTid();
+        int previous = Process.getThreadPriority(tid);
+        if (previous != Process.THREAD_PRIORITY_BACKGROUND) {
+            Process.setThreadPriority(Process.THREAD_PRIORITY_BACKGROUND);
         }
-        return HudDeliveryStatus.isRunning() ? "running" : "idle";
+        return previous;
+    }
+
+    private static void restoreCurrentThreadPriority(int previous) {
+        if (Process.getThreadPriority(Process.myTid()) != previous) {
+            Process.setThreadPriority(previous);
+        }
+    }
+
+    private void invalidateComposeSnapshot() {
+        Runnable listener = composeSnapshotInvalidationListener;
+        if (listener != null) {
+            handler.post(listener);
+        }
+    }
+
+    static void publishSharedUiStateChange() {
+        UI_STATE_REVISION.incrementAndGet();
+        MainActivity activity = RESUMED_ACTIVITY.get();
+        if (activity != null && !activity.destroyed) {
+            activity.invalidateComposeSnapshot();
+        }
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void scheduleAppScan() {
-        Context appContext = getApplicationContext();
-        new Thread(() -> {
-            NavAppTaskScanner.Snapshot scan =
-                    NavAppTaskScanner.get(appContext).forceScanIfIdle();
-            if (scan == null) {
-                return;
+        requestRuntimeUiStateRefresh(this, true, "activity-app-scan");
+    }
+
+    //uses the shared local-only status path for every Activity visibility transition.
+    private void requestActivityLocalStatusRefresh(String reason) {
+        requestRuntimeStatusRefresh(this, true, reason);
+    }
+
+    static void requestInitialUiStateRefresh(Context context, String reason) {
+        requestStorageRefresh(context, false, reason + "-storage");
+        requestRuntimeStatusRefresh(context, false, reason + "-status");
+        requestRuntimeUiStateRefresh(context, false, reason + "-runtime");
+        requestPatchUiStateRefresh(context, false, reason + "-patch");
+    }
+
+    //boot/runtime service bootstrap keeps mutable status local-only; app scans belong to UI open.
+    static void requestBackgroundUiStateRefresh(Context context, String reason) {
+        requestStorageRefresh(context, false, reason + "-storage");
+        requestRuntimeStatusRefresh(context, false, reason + "-status");
+        requestPatchUiStateRefresh(context, false, reason + "-patch");
+    }
+
+    static void requestStorageRefreshAfterMutation(Context context, String reason) {
+        requestStorageRefresh(context, true, "mutation-" + reason);
+    }
+
+    //refreshes only current key evidence and Android grants; this path never opens ADB.
+    static void requestRuntimeStatusRefresh(Context context, boolean force, String reason) {
+        Context appContext = context.getApplicationContext();
+        long now = SystemClock.elapsedRealtime();
+        boolean cacheFresh = cachedNavRuntimePermissionStatus != null
+                && cachedAdbAuthorizationStatusAvailable
+                && lastRuntimeStatusRefreshAtMs > 0L
+                && now - lastRuntimeStatusRefreshAtMs < RUNTIME_STATUS_REFRESH_INTERVAL_MS;
+        if (!force && cacheFresh) {
+            return;
+        }
+        if (!RUNTIME_STATUS_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+            if (force) {
+                RUNTIME_STATUS_REFRESH_PENDING.set(true);
             }
-            appVersionNames = scanInstalledAppVersions(scan);
-            AppEventLogger.event(appContext, "apps_refresh source=" + scan.source
-                    + " rows=" + scan.rows.size()
-                    + " status=" + scan.status);
-            handler.post(this::refreshActiveAppsList);
+            return;
+        }
+        new Thread(() -> {
+            try {
+                NavRuntimePermissionStatus refreshed =
+                        NavRuntimePermissionStatus.check(appContext);
+                boolean adbAuthorized = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
+                updateRuntimeStatusCache(refreshed, adbAuthorized);
+                lastRuntimeStatusRefreshAtMs = SystemClock.elapsedRealtime();
+                AppEventLogger.event(appContext, "ui_runtime_status_refresh reason=" + reason
+                        + " adbAuthorized=" + adbAuthorized
+                        + " settingsGranted=" + refreshed.settingsGranted());
+            } catch (RuntimeException error) {
+                AppEventLogger.event(appContext, "ui_runtime_status_refresh failed "
+                        + error.getClass().getSimpleName());
+            } finally {
+                RUNTIME_STATUS_REFRESH_IN_PROGRESS.set(false);
+                if (RUNTIME_STATUS_REFRESH_PENDING.getAndSet(false)) {
+                    requestRuntimeStatusRefresh(appContext, true, "pending-force");
+                }
+            }
+        }, "bydhud-runtime-status").start();
+    }
+
+    //Publishes the same cache transition that the visible Compose snapshot must observe.
+    static void updateRuntimeStatusCache(
+            NavRuntimePermissionStatus refreshed, boolean adbAuthorized) {
+        boolean changed;
+        synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
+            changed = !sameRuntimePermissionStatus(cachedNavRuntimePermissionStatus, refreshed)
+                    || !cachedAdbAuthorizationStatusAvailable
+                    || cachedAdbAuthorizationKnown != adbAuthorized;
+            cachedNavRuntimePermissionStatus = refreshed;
+            cachedAdbAuthorizationKnown = adbAuthorized;
+            cachedAdbAuthorizationStatusAvailable = true;
+        }
+        if (changed) {
+            publishSharedUiStateChange();
+        }
+    }
+
+    //keeps the cache comparison local so a status heartbeat publishes only actual changes.
+    private static boolean sameRuntimePermissionStatus(
+            NavRuntimePermissionStatus left, NavRuntimePermissionStatus right) {
+        if (left == right) {
+            return true;
+        }
+        if (left == null || right == null) {
+            return false;
+        }
+        if (left.settings == null || right.settings == null) {
+            return left.settings == right.settings
+                    && left.notificationListenerConnected == right.notificationListenerConnected
+                    && left.accessibilityServiceConnected == right.accessibilityServiceConnected
+                    && left.accessibilityServiceCrashed == right.accessibilityServiceCrashed;
+        }
+        return left.settingsGranted() == right.settingsGranted()
+                && left.notificationListenerConnected == right.notificationListenerConnected
+                && left.accessibilityServiceConnected == right.accessibilityServiceConnected
+                && left.accessibilityServiceCrashed == right.accessibilityServiceCrashed
+                && left.settings.notificationListenerEnabled
+                == right.settings.notificationListenerEnabled
+                && left.settings.accessibilityServiceEnabled
+                == right.settings.accessibilityServiceEnabled
+                && left.settings.accessibilityMasterEnabled
+                == right.settings.accessibilityMasterEnabled
+                && left.settings.dashboardOverlayEnabled
+                == right.settings.dashboardOverlayEnabled
+                && left.settings.storageReadEnabled == right.settings.storageReadEnabled
+                && left.settings.storageWriteEnabled == right.settings.storageWriteEnabled;
+    }
+
+    static void requestRuntimeUiStateRefresh(Context context, boolean force, String reason) {
+        Context appContext = context.getApplicationContext();
+        long now = SystemClock.elapsedRealtime();
+        boolean cacheFresh = cachedNavRuntimePermissionStatus != null
+                && lastRuntimeUiRefreshAtMs > 0L
+                && now - lastRuntimeUiRefreshAtMs < RUNTIME_UI_REFRESH_INTERVAL_MS;
+        if (!force && cacheFresh) {
+            return;
+        }
+        if (!APP_SCAN_IN_PROGRESS.compareAndSet(false, true)) {
+            if (force) {
+                APP_FORCE_REFRESH_PENDING.set(true);
+            }
+            return;
+        }
+        appScanStatus = "scanning";
+        if (!appScanCacheAvailable) {
+            publishSharedUiStateChange();
+        }
+        new Thread(() -> {
+            try {
+                NavAppTaskScanner scanner = NavAppTaskScanner.get(appContext);
+                long previousRevision = scanner.revision();
+                NavAppTaskScanner.Snapshot scan = scanner.forceScanIfIdle();
+                if (scan == null) {
+                    for (int attempt = 0; attempt < 100
+                            && scanner.revision() == previousRevision; attempt++) {
+                        Thread.sleep(100L);
+                    }
+                    scan = scanner.currentSnapshot();
+                }
+                appVersionNames = scanInstalledAppVersions(appContext, scan);
+                refreshPackageMetadataCache(appContext, scan);
+                synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
+                    cachedNavRuntimePermissionStatus =
+                            NavRuntimePermissionStatus.check(appContext);
+                }
+                appScanCacheAvailable = appScanCacheAvailable
+                        || scan.hasAuthoritativeTaskState() || !scan.rows.isEmpty();
+                appScanStatus = "ok".equals(scan.status) ? "" : scan.status;
+                lastRuntimeUiRefreshAtMs = SystemClock.elapsedRealtime();
+                AppEventLogger.event(appContext, "ui_runtime_refresh reason=" + reason
+                        + " source=" + scan.source
+                        + " rows=" + scan.rows.size()
+                        + " status=" + scan.status);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                appScanStatus = "scan interrupted";
+            } catch (RuntimeException e) {
+                String detail = e.getMessage() == null ? "" : ": "
+                        + e.getMessage().replace('\n', ' ').replace('\r', ' ');
+                appScanStatus = "failed: " + e.getClass().getSimpleName()
+                        + detail;
+                AppEventLogger.event(appContext, "apps_refresh failed "
+                        + e.getClass().getSimpleName());
+            } finally {
+                APP_SCAN_IN_PROGRESS.set(false);
+                publishSharedUiStateChange();
+                if (APP_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                    requestRuntimeUiStateRefresh(appContext, true, "pending-force");
+                }
+            }
         }, "bydhud-app-scan").start();
     }
 
-    private Map<String, String> scanInstalledAppVersions(NavAppTaskScanner.Snapshot scan) {
+    static void requestPatchUiStateRefresh(Context context, boolean force, String reason) {
+        Context appContext = context.getApplicationContext();
+        long now = SystemClock.elapsedRealtime();
+        boolean cacheFresh = navigatorPatchRowsReady
+                && lastPatchUiRefreshAtMs > 0L
+                && now - lastPatchUiRefreshAtMs < PATCH_UI_REFRESH_INTERVAL_MS;
+        if (!force && cacheFresh) {
+            return;
+        }
+        synchronized (PATCH_REFRESH_GATE_LOCK) {
+            if (ASSET_REFRESH_IN_PROGRESS.get()
+                    || !PATCH_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+                if (force) {
+                    PATCH_FORCE_REFRESH_PENDING.set(true);
+                }
+                return;
+            }
+            lastPatchUiRefreshAtMs = now;
+        }
+        new Thread(() -> {
+            int previousPriority = lowerCurrentThreadPriority();
+            try {
+                NavAppTaskScanner.Snapshot scan =
+                        NavAppTaskScanner.get(appContext).currentSnapshot();
+                appVersionNames = scanInstalledAppVersions(appContext, scan);
+                refreshPackageMetadataCache(appContext, scan);
+                NavigatorPackageInstaller.reconcile(appContext);
+                NavigatorAssetManager.reconcile(appContext);
+                NavigatorAssetManager.refreshInstalledMatches(appContext);
+                navigatorAssetSnapshots = NavigatorAssetManager.snapshots(appContext, false);
+                navigatorPatchRows = scanNavigatorPatchRows(appContext);
+                navigatorPatchRowsReady = true;
+                for (NavigatorPatchStore.OperationSnapshot operation
+                        : NavigatorPatchStore.operations(appContext)) {
+                    if (NavigatorPatchStore.VERIFIED.equals(operation.phase)) {
+                        NavigatorPatchPipeline.dismiss(appContext, operation.profile);
+                    }
+                }
+                AppEventLogger.event(appContext, "ui_patch_refresh reason=" + reason
+                        + " rows=" + navigatorPatchRows.size());
+            } catch (RuntimeException e) {
+                AppEventLogger.event(appContext, "ui_patch_refresh failed reason=" + reason
+                        + " error=" + e.getClass().getSimpleName());
+            } finally {
+                try {
+                    PATCH_REFRESH_IN_PROGRESS.set(false);
+                    publishSharedUiStateChange();
+                    if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                        requestPatchUiStateRefresh(appContext, true, "pending-force");
+                    }
+                } finally {
+                    restoreCurrentThreadPriority(previousPriority);
+                }
+            }
+        }, "BydHudPatchState").start();
+    }
+
+    static void requestNavigatorAssetUiStateRefresh(Context context, String reason) {
+        Context appContext = context.getApplicationContext();
+        long now = SystemClock.elapsedRealtime();
+        if (lastAssetUiRefreshAtMs > 0L
+                && now - lastAssetUiRefreshAtMs < ASSET_UI_REFRESH_INTERVAL_MS) {
+            return;
+        }
+        synchronized (PATCH_REFRESH_GATE_LOCK) {
+            if (PATCH_REFRESH_IN_PROGRESS.get()
+                    || !ASSET_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+                return;
+            }
+            lastAssetUiRefreshAtMs = now;
+        }
+        new Thread(() -> {
+            int previousPriority = lowerCurrentThreadPriority();
+            try {
+                List<NavigatorAssetManager.AssetSnapshot> next =
+                        NavigatorAssetManager.snapshots(appContext, false);
+                if (!next.equals(navigatorAssetSnapshots)) {
+                    navigatorAssetSnapshots = next;
+                    AppEventLogger.event(appContext,
+                            "ui_asset_refresh reason=" + reason);
+                    publishSharedUiStateChange();
+                }
+            } catch (RuntimeException e) {
+                AppEventLogger.event(appContext, "ui_asset_refresh failed reason=" + reason
+                        + " error=" + e.getClass().getSimpleName());
+            } finally {
+                try {
+                    ASSET_REFRESH_IN_PROGRESS.set(false);
+                    if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
+                        requestPatchUiStateRefresh(appContext, true, "pending-force");
+                    }
+                } finally {
+                    restoreCurrentThreadPriority(previousPriority);
+                }
+            }
+        }, "BydHudAssetState").start();
+    }
+
+    private static Map<String, String> scanInstalledAppVersions(
+            Context context, NavAppTaskScanner.Snapshot scan) {
         Set<String> packages = new HashSet<>(NavAppFilter.curatedNavigationPackages());
         if (scan != null) {
             for (NavAppTaskScanner.Row row : scan.rows) {
@@ -1437,7 +1991,7 @@ public final class MainActivity extends ComponentActivity {
             }
         }
         Map<String, String> versions = new HashMap<>();
-        PackageManager packageManager = getPackageManager();
+        PackageManager packageManager = context.getPackageManager();
         for (String packageName : packages) {
             try {
                 PackageInfo packageInfo = packageManager.getPackageInfo(packageName, 0);
@@ -1447,6 +2001,56 @@ public final class MainActivity extends ComponentActivity {
             }
         }
         return Collections.unmodifiableMap(versions);
+    }
+
+    private static void refreshPackageMetadataCache(
+            Context context, NavAppTaskScanner.Snapshot scan) {
+        Set<String> packages = new HashSet<>(NavAppFilter.curatedNavigationPackages());
+        if (scan != null) {
+            for (NavAppTaskScanner.Row row : scan.rows) {
+                packages.add(row.packageName);
+            }
+        }
+        Map<String, String> labels = new HashMap<>();
+        Map<String, Boolean> installed = new HashMap<>();
+        PackageManager packageManager = context.getPackageManager();
+        for (String packageName : packages) {
+            String normalized = normalizePackage(packageName);
+            try {
+                ApplicationInfo info = packageManager.getApplicationInfo(packageName, 0);
+                CharSequence label = packageManager.getApplicationLabel(info);
+                labels.put(normalized,
+                        label == null || label.length() == 0 ? packageName : label.toString());
+                installed.put(normalized, true);
+            } catch (PackageManager.NameNotFoundException ignored) {
+                labels.put(normalized, packageName);
+                installed.put(normalized, false);
+            }
+        }
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            APP_LABEL_CACHE.clear();
+            APP_LABEL_CACHE.putAll(labels);
+            INSTALLED_PACKAGE_CACHE.clear();
+            INSTALLED_PACKAGE_CACHE.putAll(installed);
+        }
+    }
+
+    private static List<ComposeNavigatorPatchRow> scanNavigatorPatchRows(Context context) {
+        List<ComposeNavigatorPatchRow> rows = new ArrayList<>();
+        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
+            NavigatorPatchStore.ProfileSnapshot value =
+                    NavigatorPatchStore.snapshot(context, profile);
+            if (!value.installed && !value.externalSource) continue;
+            rows.add(new ComposeNavigatorPatchRow(
+                    profile.id, value.label, profile.packageName,
+                    value.installedVersion, value.installed,
+                    value.externalSource, value.sourceName, value.sourceVersion,
+                    value.directState, value.gmsCoreState, profile.gmsCoreLabel,
+                    value.optionalState, profile.optionalLabel,
+                    value.alertState, profile.alertLabel,
+                    value.reason, value.patchEnabled));
+        }
+        return Collections.unmodifiableList(rows);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1465,20 +2069,24 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //Creates one bounded ZIP off the UI thread, then posts a read-only Android share chooser.
-    public String composeShareStorageDays(List<String> days) {
+    public String composeShareStorageDays(List<String> days, long operationToken) {
         if (!SHARE_OPERATION.compareAndSet(false, true)) {
             return "failed: share already running";
         }
+        List<String> selectedDays = immutableStorageDays(days);
         try {
-            LogShareZip.Result result = LogShareZip.create(this, days);
+            LogShareZip.Result result = LogShareZip.create(this, selectedDays);
             if (!result.ok || result.file == null) {
                 return "failed: " + result.detail;
             }
-            PENDING_SHARE_FILE.set(result.file);
-            notifyPendingShare();
+            if (!queuePendingShareIfCurrent(operationToken, result.file, selectedDays)) {
+                LogShareZip.deleteArtifact(result.file);
+                return "cancelled";
+            }
             return "ready " + result.file.getName() + " " + result.detail;
         } finally {
             SHARE_OPERATION.set(false);
+            requestStorageRefreshAfterMutation(this, "share");
         }
     }
 
@@ -1490,12 +2098,14 @@ public final class MainActivity extends ComponentActivity {
 
     //Creates and uploads the same complete-day ZIP only after explicit in-app consent.
     public ComposeSentryUploadResult composeUploadStorageDaysToSentry(
-            List<String> days, Runnable uploadStarted) {
+            List<String> days, long operationToken, Runnable uploadStarted) {
         if (!SHARE_OPERATION.compareAndSet(false, true)) {
             return new ComposeSentryUploadResult(false, "", "share already running");
         }
+        List<String> submittedDays = immutableStorageDays(days);
+        String uploadId = SentryLogUploader.newUploadId();
         try {
-            LogShareZip.Result archive = LogShareZip.create(this, days);
+            LogShareZip.Result archive = LogShareZip.create(this, submittedDays, uploadId);
             if (!archive.ok || archive.file == null) {
                 return new ComposeSentryUploadResult(false, "", archive.detail);
             }
@@ -1508,10 +2118,16 @@ public final class MainActivity extends ComponentActivity {
                 return new ComposeSentryUploadResult(false, "",
                         error.getClass().getSimpleName() + ": " + error.getMessage());
             }
-            SentryLogUploader.Result upload = SentryLogUploader.upload(this, archive.file, days);
+            SentryLogUploader.Result upload = SentryLogUploader.upload(
+                    this, archive.file, submittedDays, uploadId);
+            if (upload.ok && !publishShareCompletionIfCurrent(
+                    operationToken, submittedDays)) {
+                return new ComposeSentryUploadResult(false, "", "cancelled");
+            }
             return new ComposeSentryUploadResult(upload.ok, upload.eventId, upload.detail);
         } finally {
             SHARE_OPERATION.set(false);
+            requestStorageRefreshAfterMutation(this, "sentry-share");
         }
     }
 
@@ -1525,8 +2141,7 @@ public final class MainActivity extends ComponentActivity {
             if (!result.ok || result.file == null) {
                 return "failed: " + result.detail;
             }
-            PENDING_SHARE_FILE.set(result.file);
-            notifyPendingShare();
+            queuePendingShare(result.file, Collections.emptyList());
             return "ready " + result.file.getName() + " " + result.detail;
         } finally {
             SHARE_OPERATION.set(false);
@@ -1561,10 +2176,67 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
+    private static List<String> immutableStorageDays(List<String> days) {
+        if (days == null || days.isEmpty()) {
+            return Collections.emptyList();
+        }
+        return Collections.unmodifiableList(new ArrayList<>(days));
+    }
+
+    public long composeBeginStorageShareOperation() {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            return STORAGE_SHARE_OPERATION_SEQUENCE.incrementAndGet();
+        }
+    }
+
+    public void composeCancelStorageShareOperation(long operationToken) {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            if (operationToken != 0L
+                    && STORAGE_SHARE_OPERATION_SEQUENCE.get() == operationToken) {
+                STORAGE_SHARE_OPERATION_SEQUENCE.incrementAndGet();
+            }
+        }
+    }
+
+    private static boolean queuePendingShareIfCurrent(
+            long operationToken, File file, List<String> storageDays) {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            if (operationToken == 0L
+                    || STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken) {
+                return false;
+            }
+            queuePendingShare(file, storageDays);
+            return true;
+        }
+    }
+
+    private static boolean publishShareCompletionIfCurrent(
+            long operationToken, List<String> storageDays) {
+        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
+            if (operationToken == 0L
+                    || STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken) {
+                return false;
+            }
+            publishShareCompletion(storageDays);
+            return true;
+        }
+    }
+
+    private static void queuePendingShare(File file, List<String> storageDays) {
+        if (file == null) {
+            return;
+        }
+        PENDING_SHARE.set(new PendingShare(
+                file,
+                SHARE_LAUNCH_SEQUENCE.incrementAndGet(),
+                immutableStorageDays(storageDays)));
+        notifyPendingShare();
+    }
+
     //Delivers a completed archive to the current Activity after recreation or foreground return.
     private void deliverPendingShare() {
-        File file = PENDING_SHARE_FILE.get();
-        if (file == null) {
+        PendingShare pending = PENDING_SHARE.get();
+        if (pending == null) {
             return;
         }
         MainActivity current = RESUMED_ACTIVITY.get();
@@ -1574,27 +2246,45 @@ public final class MainActivity extends ComponentActivity {
             }
             return;
         }
-        if (!file.isFile()) {
-            PENDING_SHARE_FILE.compareAndSet(file, null);
+        if (!pending.file.isFile()) {
+            PENDING_SHARE.compareAndSet(pending, null);
             return;
         }
         try {
             android.net.Uri uri = FileProvider.getUriForFile(
                     this,
                     getPackageName() + ".fileprovider",
-                    file);
+                    pending.file);
             Intent send = new Intent(Intent.ACTION_SEND)
                     .setType("application/zip")
                     .putExtra(Intent.EXTRA_STREAM, uri)
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            send.setClipData(ClipData.newRawUri(file.getName(), uri));
+            send.setClipData(ClipData.newRawUri(pending.file.getName(), uri));
             startActivity(Intent.createChooser(send, null));
-            PENDING_SHARE_FILE.compareAndSet(file, null);
+            PENDING_SHARE.compareAndSet(pending, null);
+            publishShareCompletion(pending.launchId, pending.storageDays);
         } catch (RuntimeException e) {
-            PENDING_SHARE_FILE.compareAndSet(file, null);
+            PENDING_SHARE.compareAndSet(pending, null);
             AppEventLogger.event(this, "share_chooser_failed error="
                     + e.getClass().getSimpleName() + " "
                     + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
+        }
+    }
+
+    private static void publishShareCompletion(List<String> storageDays) {
+        publishShareCompletion(SHARE_LAUNCH_SEQUENCE.incrementAndGet(), storageDays);
+    }
+
+    private static void publishShareCompletion(long eventId, List<String> storageDays) {
+        SHARE_LAUNCH_EVENT.set(new ShareLaunchEvent(eventId, storageDays));
+        publishSharedUiStateChange();
+    }
+
+    public void composeAcknowledgeShareLaunch(long launchId) {
+        ShareLaunchEvent current = SHARE_LAUNCH_EVENT.get();
+        if (current.id == launchId && launchId != 0L
+                && SHARE_LAUNCH_EVENT.compareAndSet(current, ShareLaunchEvent.empty())) {
+            publishSharedUiStateChange();
         }
     }
 
@@ -1607,12 +2297,12 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStartLogcat() {
-        startLogcatRecording();
+        reportLogcatResult("start", LogcatRecorder.start(this));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStopLogcat() {
-        stopLogcatRecording();
+        reportLogcatResult("stop", LogcatRecorder.stop(this));
     }
 
     //stops all active runtime work after explicit user shutdown so auto-start stays blocked until the next manual open.
@@ -1620,88 +2310,81 @@ public final class MainActivity extends ComponentActivity {
         shutdownAndExit("ui-shutdown");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSetManualMode(boolean enabled) {
-        setManualMode(enabled);
-        if (enabled) {
-            arrowCuratedMode = true;
-            if (!hudOutput.isBound()) {
-                appendStatus("manual mode: connect/start requested");
-                startAfterBindPending = true;
-                startBindAttempts = 0;
-                hudOutput.ensureBound("manual-mode");
-                scheduleStartAfterBind();
-            } else if (!sending) {
-                startSending();
-            }
-        } else {
-            stopSending(true);
-        }
-        refreshControls();
+    public void composeHudCheckSelectMode(HudCheckState.Mode mode) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.selectMode(mode), "hud-check-mode");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeStepCurated(int delta) {
-        arrowCuratedMode = true;
-        curatedIndex = delta >= 0
-                ? HudArrowComboCatalog.next(curatedIndex)
-                : HudArrowComboCatalog.prev(curatedIndex);
-        applyCuratedCombo(canUseManualHud());
+    public void composeHudCheckStep(HudCheckState.Field field, int delta) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.step(field, delta), "hud-check-step");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSendRaw(int pngSourceId, int nativeId, int distanceMeters,
-            String street, String lanes) {
-        arrowCuratedMode = false;
-        state.turnBitmapId = clamp(pngSourceId, 1, 99);
-        state.maneuverId = clamp(nativeId, 1, 99);
-        state.distanceToIntersection = clamp(distanceMeters, 0, 99999);
-        state.roadName = street == null ? "" : street;
-        state.laneString = lanes == null ? "" : lanes.trim();
-        state.numOfLanes = countLaneTokens(state.laneString);
-        state.includeLaneBitmap = state.numOfLanes > 1;
-        pngVisible = state.turnBitmapId != HudState.TURN_BITMAP_BLANK_SOURCE_ID;
-        nativeVisible = state.maneuverId != HudState.NATIVE_BLANK_ID;
-        applyArrowVisibility();
-        if (canUseManualHud()) {
-            sendCurrentState("manual-raw-compose");
-        } else {
-            appendStatus("manual raw updated; enable Manual mode to send");
-            refreshControls();
-        }
+    public void composeHudCheckToggleRunning() {
+        // A delayed visual click must not restart a test after the Activity left the foreground.
+        if (!activityResumed || destroyed || exitRequested) return;
+        NavHudLiveSender.get(this).updateHudCheck(
+                HudCheckState::toggleRun, "hud-check-run");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSendManualLane(String lanes) {
-        state.laneString = lanes == null ? "" : lanes.trim();
-        state.numOfLanes = countLaneTokens(state.laneString);
-        state.includeLaneBitmap = state.numOfLanes > 1;
-        if (canUseManualHud()) {
-            sendCurrentState("manual-lanes-compose");
-        } else {
-            appendStatus("manual lanes updated; enable Manual mode to send");
-            refreshControls();
-        }
+    public void composeHudCheckSetAutomatic(boolean automatic) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withAutomatic(automatic), "hud-check-auto-mode");
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private int countLaneTokens(String lanes) {
-        if (lanes == null || lanes.trim().isEmpty()) {
-            return 0;
-        }
-        String[] parts = lanes.split("\\|");
-        int count = 0;
-        for (String part : parts) {
-            if (!part.trim().isEmpty()) {
-                count++;
-            }
-        }
-        return count;
+    public void composeHudCheckSetManeuverBitmap(boolean bitmap) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withManeuverBitmap(bitmap), "hud-check-maneuver-mode");
+    }
+
+    public void composeHudCheckSetLaneBitmap(boolean bitmap) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withLaneBitmap(bitmap), "hud-check-lane-mode");
+    }
+
+    public void composeHudCheckSetTransliterate(boolean transliterate) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.withTransliterate(transliterate), "hud-check-transliteration");
+    }
+
+    public void composeHudCheckStepExtended(int delta) {
+        NavHudLiveSender.get(this).updateHudCheck(
+                current -> current.stepExtended(delta), "hud-check-extended-step");
+    }
+
+    public void composeHudCheckStop(String reason) {
+        NavHudLiveSender.stopHudCheckIfRunning(reason);
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static int clamp(int value, int min, int max) {
         return Math.max(min, Math.min(max, value));
+    }
+
+    private static final class PendingShare {
+        final File file;
+        final long launchId;
+        final List<String> storageDays;
+
+        PendingShare(File file, long launchId, List<String> storageDays) {
+            this.file = file;
+            this.launchId = launchId;
+            this.storageDays = immutableStorageDays(storageDays);
+        }
+    }
+
+    public static final class ShareLaunchEvent {
+        public final long id;
+        public final List<String> storageDays;
+
+        ShareLaunchEvent(long id, List<String> storageDays) {
+            this.id = Math.max(0L, id);
+            this.storageDays = immutableStorageDays(storageDays);
+        }
+
+        static ShareLaunchEvent empty() {
+            return new ShareLaunchEvent(0L, Collections.emptyList());
+        }
     }
 
     //models ComposeSnapshot data here so transport and parser layers share a stable contract.
@@ -1715,18 +2398,31 @@ public final class MainActivity extends ComponentActivity {
         public final boolean laneOutputEnabled;
         public final boolean distanceOutputEnabled;
         public final boolean streetOutputEnabled;
+        public final int transliterationMode;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
+        public final boolean tbtWithoutHudOutputEnabled;
+        public final boolean switchToTbtOnHudStartEnabled;
         public final boolean wholeRouteMetricsEnabled;
+        public final int routeMetricsMode;
         public final boolean etaOutputEnabled;
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
-        public final boolean wazeScreenCaptureEnabled;
-        public final boolean fullscreenDashboardEnabled;
+        public final int speedLimitMode;
+        public final int speedLimitFreeFallback;
+        public final int speedLimitOverlaySeconds;
+        public final int speedLimitCompositePlacement;
+        public final int speedLimitManeuverOverlaySize;
+        public final int speedLimitLaneOverlaySize;
+        public final boolean wazeCustomSurfaceEnabled;
+        public final int dashboardScreenMode;
+        public final int dashboardWidthPercent;
         public final int dashboardHeightPercent;
+        public final int dashboardOffsetPercent;
+        public final int dashboardScalePercent;
         public final boolean smallDistanceClampEnabled;
-        public final boolean roundaboutLeftHandTraffic;
         public final boolean settingsPermissionsGranted;
+        public final boolean adbAuthorized;
         public final boolean captureReady;
         public final String permissionSummary;
         public final String adbKeyFingerprint;
@@ -1740,54 +2436,66 @@ public final class MainActivity extends ComponentActivity {
         public final String logcatStatus;
         public final String logPaths;
         public final String applicationState;
-        public final boolean manualModeEnabled;
-        public final boolean arrowCuratedMode;
-        public final int curatedIndex;
-        public final int curatedCount;
-        public final int pngSourceId;
-        public final int nativeManeuverId;
-        public final int distanceMeters;
-        public final String streetText;
-        public final String laneBitmap;
+        public final HudCheckState hudCheck;
+        public final String hudCheckStatus;
         public final String lastScanText;
         public final boolean appRuntimeStatusKnown;
+        public final boolean appScanInProgress;
+        public final boolean appScanCacheAvailable;
+        public final String appScanStatus;
         public final int storageLimitGb;
         public final List<String> navCaptureFolderPaths;
         public final boolean storageCalculating;
+        public final boolean storageCacheAvailable;
+        public final String storageScanError;
         public final int storageSessionCount;
         public final long navCaptureFolderBytes;
         public final List<ComposeStorageDay> storageDays;
         public final List<ComposeAppRow> supportedApps;
         public final List<ComposeAppRow> allApps;
         public final List<ComposeNavigatorPatchRow> patchRows;
+        public final List<NavigatorAssetManager.AssetSnapshot> navigatorAssets;
+        public final List<ComposePatchOperation> patchOperations;
         public final ComposePatchOperation patchOperation;
+        public final long shareLaunchId;
+        public final List<String> shareLaunchDays;
 
         ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
+                int transliterationMode,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
-                boolean wholeRouteMetricsEnabled, boolean etaOutputEnabled,
-                boolean remainingTimeOutputEnabled, boolean remainingDistanceOutputEnabled,
-                boolean wazeScreenCaptureEnabled,
-                boolean fullscreenDashboardEnabled,
-                int dashboardHeightPercent,
+                boolean tbtWithoutHudOutputEnabled,
+                boolean switchToTbtOnHudStartEnabled,
+                boolean wholeRouteMetricsEnabled, int routeMetricsMode,
+                boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
+                boolean remainingDistanceOutputEnabled, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize,
+                boolean wazeCustomSurfaceEnabled,
+                int dashboardScreenMode,
+                int dashboardWidthPercent, int dashboardHeightPercent,
+                int dashboardOffsetPercent, int dashboardScalePercent,
                 boolean smallDistanceClampEnabled,
-                boolean roundaboutLeftHandTraffic, boolean settingsPermissionsGranted,
+                boolean settingsPermissionsGranted,
+                boolean adbAuthorized,
                 boolean captureReady, String permissionSummary, String adbKeyFingerprint,
                 String hudStatus, String hudPackage, String logOnlyPackages,
                 String observedPackages, String activeDashboardPackage,
                 boolean dashboardMoveInProgress, boolean logcatRecording, String logcatStatus,
-                String logPaths, String applicationState, boolean manualModeEnabled,
-                boolean arrowCuratedMode, int curatedIndex, int curatedCount,
-                int pngSourceId, int nativeManeuverId, int distanceMeters, String streetText,
-                String laneBitmap, String lastScanText, boolean appRuntimeStatusKnown,
-                int storageLimitGb,
-                List<String> navCaptureFolderPaths, boolean storageCalculating,
+                String logPaths, String applicationState, HudCheckState hudCheck,
+                String hudCheckStatus, String lastScanText, boolean appRuntimeStatusKnown,
+                boolean appScanInProgress, boolean appScanCacheAvailable, String appScanStatus,
+                int storageLimitGb, List<String> navCaptureFolderPaths, boolean storageCalculating,
+                boolean storageCacheAvailable, String storageScanError,
                 int storageSessionCount, long navCaptureFolderBytes, List<ComposeStorageDay> storageDays,
                 List<ComposeAppRow> supportedApps, List<ComposeAppRow> allApps,
                 List<ComposeNavigatorPatchRow> patchRows,
-                ComposePatchOperation patchOperation) {
+                List<NavigatorAssetManager.AssetSnapshot> navigatorAssets,
+                List<ComposePatchOperation> patchOperations,
+                long shareLaunchId, List<String> shareLaunchDays) {
             this.uaLanguage = uaLanguage;
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
@@ -1797,19 +2505,31 @@ public final class MainActivity extends ComponentActivity {
             this.laneOutputEnabled = laneOutputEnabled;
             this.distanceOutputEnabled = distanceOutputEnabled;
             this.streetOutputEnabled = streetOutputEnabled;
+            this.transliterationMode = HudPrefs.normalizeTransliterationMode(transliterationMode);
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
+            this.tbtWithoutHudOutputEnabled = tbtWithoutHudOutputEnabled;
+            this.switchToTbtOnHudStartEnabled = switchToTbtOnHudStartEnabled;
             this.wholeRouteMetricsEnabled = wholeRouteMetricsEnabled;
+            this.routeMetricsMode = routeMetricsMode;
             this.etaOutputEnabled = etaOutputEnabled;
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
-            this.wazeScreenCaptureEnabled = wazeScreenCaptureEnabled;
-            this.fullscreenDashboardEnabled = fullscreenDashboardEnabled;
-            this.dashboardHeightPercent = DashboardProjectionPolicy.clampHeightPercent(
-                    dashboardHeightPercent);
+            this.speedLimitMode = speedLimitMode;
+            this.speedLimitFreeFallback = speedLimitFreeFallback;
+            this.speedLimitOverlaySeconds = speedLimitOverlaySeconds;
+            this.speedLimitCompositePlacement = speedLimitCompositePlacement;
+            this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
+            this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
+            this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
+            this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
+            this.dashboardWidthPercent = dashboardWidthPercent;
+            this.dashboardHeightPercent = dashboardHeightPercent;
+            this.dashboardOffsetPercent = dashboardOffsetPercent;
+            this.dashboardScalePercent = dashboardScalePercent;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
-            this.roundaboutLeftHandTraffic = roundaboutLeftHandTraffic;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
+            this.adbAuthorized = adbAuthorized;
             this.captureReady = captureReady;
             this.permissionSummary = permissionSummary == null ? "" : permissionSummary;
             this.adbKeyFingerprint = adbKeyFingerprint == null ? "" : adbKeyFingerprint;
@@ -1823,33 +2543,144 @@ public final class MainActivity extends ComponentActivity {
             this.logcatStatus = logcatStatus == null ? "" : logcatStatus;
             this.logPaths = logPaths == null ? "" : logPaths;
             this.applicationState = applicationState == null ? "" : applicationState;
-            this.manualModeEnabled = manualModeEnabled;
-            this.arrowCuratedMode = arrowCuratedMode;
-            this.curatedIndex = curatedIndex;
-            this.curatedCount = curatedCount;
-            this.pngSourceId = pngSourceId;
-            this.nativeManeuverId = nativeManeuverId;
-            this.distanceMeters = distanceMeters;
-            this.streetText = streetText == null ? "" : streetText;
-            this.laneBitmap = laneBitmap == null ? "" : laneBitmap;
+            this.hudCheck = hudCheck;
+            this.hudCheckStatus = hudCheckStatus;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
             this.appRuntimeStatusKnown = appRuntimeStatusKnown;
+            this.appScanInProgress = appScanInProgress;
+            this.appScanCacheAvailable = appScanCacheAvailable;
+            this.appScanStatus = appScanStatus == null ? "" : appScanStatus;
             this.storageLimitGb = Math.max(1, Math.min(10, storageLimitGb));
             this.navCaptureFolderPaths = navCaptureFolderPaths == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(navCaptureFolderPaths));
             this.storageCalculating = storageCalculating;
+            this.storageCacheAvailable = storageCacheAvailable;
+            this.storageScanError = storageScanError == null ? "" : storageScanError;
             this.storageSessionCount = Math.max(0, storageSessionCount);
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
-            this.storageDays = storageDays == null ? Collections.emptyList() : storageDays;
-            this.supportedApps = supportedApps == null ? Collections.emptyList() : supportedApps;
-            this.allApps = allApps == null ? Collections.emptyList() : allApps;
+            this.storageDays = storageDays == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(storageDays));
+            this.supportedApps = supportedApps == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(supportedApps));
+            this.allApps = allApps == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(allApps));
             this.patchRows = patchRows == null ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(patchRows));
-            this.patchOperation = patchOperation == null
-                    ? new ComposePatchOperation("", "", NavigatorPatchStore.IDLE,
-                    "", false, false, false)
-                    : patchOperation;
+            this.navigatorAssets = navigatorAssets == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(navigatorAssets));
+            this.patchOperations = patchOperations == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(patchOperations));
+            this.patchOperation = this.patchOperations.isEmpty()
+                    ? ComposePatchOperation.idle()
+                    : this.patchOperations.get(this.patchOperations.size() - 1);
+            this.shareLaunchId = Math.max(0L, shareLaunchId);
+            this.shareLaunchDays = shareLaunchDays == null ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(shareLaunchDays));
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeSnapshot)) return false;
+            ComposeSnapshot other = (ComposeSnapshot) value;
+            return uaLanguage == other.uaLanguage
+                    && darkTheme == other.darkTheme
+                    && bootEnabled == other.bootEnabled
+                    && detailedDebugArtifactsEnabled == other.detailedDebugArtifactsEnabled
+                    && pngOutputEnabled == other.pngOutputEnabled
+                    && nativeOutputEnabled == other.nativeOutputEnabled
+                    && laneOutputEnabled == other.laneOutputEnabled
+                    && distanceOutputEnabled == other.distanceOutputEnabled
+                    && streetOutputEnabled == other.streetOutputEnabled
+                    && transliterationMode == other.transliterationMode
+                    && textDirectionOutputEnabled == other.textDirectionOutputEnabled
+                    && wazeAlertsEnabled == other.wazeAlertsEnabled
+                    && tbtWithoutHudOutputEnabled == other.tbtWithoutHudOutputEnabled
+                    && switchToTbtOnHudStartEnabled == other.switchToTbtOnHudStartEnabled
+                    && wholeRouteMetricsEnabled == other.wholeRouteMetricsEnabled
+                    && routeMetricsMode == other.routeMetricsMode
+                    && etaOutputEnabled == other.etaOutputEnabled
+                    && remainingTimeOutputEnabled == other.remainingTimeOutputEnabled
+                    && remainingDistanceOutputEnabled == other.remainingDistanceOutputEnabled
+                    && speedLimitMode == other.speedLimitMode
+                    && speedLimitFreeFallback == other.speedLimitFreeFallback
+                    && speedLimitOverlaySeconds == other.speedLimitOverlaySeconds
+                    && speedLimitCompositePlacement == other.speedLimitCompositePlacement
+                    && speedLimitManeuverOverlaySize == other.speedLimitManeuverOverlaySize
+                    && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
+                    && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
+                    && dashboardScreenMode == other.dashboardScreenMode
+                    && dashboardWidthPercent == other.dashboardWidthPercent
+                    && dashboardHeightPercent == other.dashboardHeightPercent
+                    && dashboardOffsetPercent == other.dashboardOffsetPercent
+                    && dashboardScalePercent == other.dashboardScalePercent
+                    && smallDistanceClampEnabled == other.smallDistanceClampEnabled
+                    && settingsPermissionsGranted == other.settingsPermissionsGranted
+                    && adbAuthorized == other.adbAuthorized
+                    && captureReady == other.captureReady
+                    && dashboardMoveInProgress == other.dashboardMoveInProgress
+                    && logcatRecording == other.logcatRecording
+                    && Objects.equals(hudCheck, other.hudCheck)
+                    && Objects.equals(hudCheckStatus, other.hudCheckStatus)
+                    && appRuntimeStatusKnown == other.appRuntimeStatusKnown
+                    && appScanInProgress == other.appScanInProgress
+                    && appScanCacheAvailable == other.appScanCacheAvailable
+                    && storageLimitGb == other.storageLimitGb
+                    && storageCalculating == other.storageCalculating
+                    && storageCacheAvailable == other.storageCacheAvailable
+                    && storageSessionCount == other.storageSessionCount
+                    && navCaptureFolderBytes == other.navCaptureFolderBytes
+                    && Objects.equals(permissionSummary, other.permissionSummary)
+                    && Objects.equals(adbKeyFingerprint, other.adbKeyFingerprint)
+                    && Objects.equals(hudStatus, other.hudStatus)
+                    && Objects.equals(hudPackage, other.hudPackage)
+                    && Objects.equals(logOnlyPackages, other.logOnlyPackages)
+                    && Objects.equals(observedPackages, other.observedPackages)
+                    && Objects.equals(activeDashboardPackage, other.activeDashboardPackage)
+                    && Objects.equals(logcatStatus, other.logcatStatus)
+                    && Objects.equals(logPaths, other.logPaths)
+                    && Objects.equals(applicationState, other.applicationState)
+                    && Objects.equals(lastScanText, other.lastScanText)
+                    && Objects.equals(appScanStatus, other.appScanStatus)
+                    && Objects.equals(navCaptureFolderPaths, other.navCaptureFolderPaths)
+                    && Objects.equals(storageScanError, other.storageScanError)
+                    && Objects.equals(storageDays, other.storageDays)
+                    && Objects.equals(supportedApps, other.supportedApps)
+                    && Objects.equals(allApps, other.allApps)
+                    && Objects.equals(patchRows, other.patchRows)
+                    && Objects.equals(navigatorAssets, other.navigatorAssets)
+                    && Objects.equals(patchOperations, other.patchOperations)
+                    && shareLaunchId == other.shareLaunchId
+                    && Objects.equals(shareLaunchDays, other.shareLaunchDays);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(
+                    uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
+                    pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
+                    distanceOutputEnabled, streetOutputEnabled, transliterationMode,
+                    textDirectionOutputEnabled,
+                    wazeAlertsEnabled, tbtWithoutHudOutputEnabled,
+                    switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
+                    etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
+                    speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
+                    speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
+                    speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
+                    dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
+                    dashboardScalePercent, smallDistanceClampEnabled,
+                    settingsPermissionsGranted, adbAuthorized, captureReady,
+                    permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,
+                    logOnlyPackages, observedPackages, activeDashboardPackage,
+                    dashboardMoveInProgress, logcatRecording, logcatStatus, logPaths,
+                    applicationState, hudCheck, hudCheckStatus,
+                    lastScanText, appRuntimeStatusKnown, appScanInProgress,
+                    appScanCacheAvailable, appScanStatus, storageLimitGb,
+                    navCaptureFolderPaths, storageCalculating, storageCacheAvailable,
+                    storageScanError, storageSessionCount, navCaptureFolderBytes, storageDays,
+                    supportedApps, allApps, patchRows, navigatorAssets, patchOperations,
+                    shareLaunchId, shareLaunchDays);
         }
     }
 
@@ -1888,6 +2719,24 @@ public final class MainActivity extends ComponentActivity {
             this.hasPublicStorage = hasPublicStorage;
             this.hasPrivateStorage = hasPrivateStorage;
         }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeStorageDay)) return false;
+            ComposeStorageDay other = (ComposeStorageDay) value;
+            return sessions == other.sessions && bytes == other.bytes && active == other.active
+                    && hasPublicStorage == other.hasPublicStorage
+                    && hasPrivateStorage == other.hasPrivateStorage
+                    && Objects.equals(name, other.name)
+                    && Objects.equals(createdLabel, other.createdLabel);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(name, createdLabel, sessions, bytes, active,
+                    hasPublicStorage, hasPrivateStorage);
+        }
     }
 
     public interface ComposeDeleteProgressListener {
@@ -1902,10 +2751,11 @@ public final class MainActivity extends ComponentActivity {
         final int totalSessions;
         final long scannedAtMs;
         final boolean calculating;
+        final String scanError;
 
         private StorageCacheState(long navCaptureFolderBytes, int totalSessions,
                 List<String> rootPaths, List<ComposeStorageDay> storageDays,
-                long scannedAtMs, boolean calculating) {
+                long scannedAtMs, boolean calculating, String scanError) {
             this.navCaptureFolderBytes = Math.max(0L, navCaptureFolderBytes);
             this.storageDays = storageDays == null
                     ? Collections.emptyList()
@@ -1916,23 +2766,35 @@ public final class MainActivity extends ComponentActivity {
             this.totalSessions = Math.max(0, totalSessions);
             this.scannedAtMs = Math.max(0L, scannedAtMs);
             this.calculating = calculating;
+            this.scanError = scanError == null ? "" : scanError;
         }
 
         static StorageCacheState empty() {
             return new StorageCacheState(
-                    0L, 0, Collections.emptyList(), Collections.emptyList(), 0L, false);
+                    0L, 0, Collections.emptyList(), Collections.emptyList(), 0L, false, "");
         }
 
         static StorageCacheState scanned(long navCaptureFolderBytes, int totalSessions,
                 List<String> rootPaths, List<ComposeStorageDay> storageDays, long scannedAtMs) {
             return new StorageCacheState(navCaptureFolderBytes, totalSessions,
-                    rootPaths, storageDays, scannedAtMs, false);
+                    rootPaths, storageDays, scannedAtMs, false, "");
         }
 
         StorageCacheState withCalculating(boolean nextCalculating) {
             return new StorageCacheState(
                     navCaptureFolderBytes, totalSessions,
-                    rootPaths, storageDays, scannedAtMs, nextCalculating);
+                    rootPaths, storageDays, scannedAtMs, nextCalculating,
+                    nextCalculating ? "" : scanError);
+        }
+
+        StorageCacheState withScanError(String error) {
+            return new StorageCacheState(
+                    navCaptureFolderBytes, totalSessions,
+                    rootPaths, storageDays, scannedAtMs, false, error);
+        }
+
+        boolean hasCache() {
+            return scannedAtMs > 0L;
         }
     }
 
@@ -1946,6 +2808,8 @@ public final class MainActivity extends ComponentActivity {
         public final String sourceName;
         public final String sourceVersion;
         public final String directState;
+        public final String gmsCoreState;
+        public final String gmsCoreLabel;
         public final String optionalState;
         public final String optionalLabel;
         public final String alertState;
@@ -1956,6 +2820,18 @@ public final class MainActivity extends ComponentActivity {
         ComposeNavigatorPatchRow(String profileId, String label, String packageName,
                 String installedVersion, boolean installed, boolean externalSource,
                 String sourceName, String sourceVersion, String directState,
+                String optionalState, String optionalLabel, String alertState,
+                String alertLabel, String reason, boolean patchEnabled) {
+            this(profileId, label, packageName, installedVersion, installed, externalSource,
+                    sourceName, sourceVersion, directState, NavigatorPatchStore.NOT_CHECKED,
+                    "", optionalState, optionalLabel, alertState, alertLabel, reason,
+                    patchEnabled);
+        }
+
+        ComposeNavigatorPatchRow(String profileId, String label, String packageName,
+                String installedVersion, boolean installed, boolean externalSource,
+                String sourceName, String sourceVersion, String directState,
+                String gmsCoreState, String gmsCoreLabel,
                 String optionalState, String optionalLabel, String alertState,
                 String alertLabel, String reason,
                 boolean patchEnabled) {
@@ -1968,12 +2844,45 @@ public final class MainActivity extends ComponentActivity {
             this.sourceName = sourceName == null ? "" : sourceName;
             this.sourceVersion = sourceVersion == null ? "" : sourceVersion;
             this.directState = directState == null ? NavigatorPatchStore.NOT_CHECKED : directState;
+            this.gmsCoreState = gmsCoreState == null ? NavigatorPatchStore.NOT_CHECKED : gmsCoreState;
+            this.gmsCoreLabel = gmsCoreLabel == null ? "" : gmsCoreLabel;
             this.optionalState = optionalState == null ? NavigatorPatchStore.NOT_CHECKED : optionalState;
             this.optionalLabel = optionalLabel == null ? "" : optionalLabel;
             this.alertState = alertState == null ? NavigatorPatchStore.NOT_CHECKED : alertState;
             this.alertLabel = alertLabel == null ? "" : alertLabel;
             this.reason = reason == null ? "" : reason;
             this.patchEnabled = patchEnabled;
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeNavigatorPatchRow)) return false;
+            ComposeNavigatorPatchRow other = (ComposeNavigatorPatchRow) value;
+            return installed == other.installed && externalSource == other.externalSource
+                    && patchEnabled == other.patchEnabled
+                    && Objects.equals(profileId, other.profileId)
+                    && Objects.equals(label, other.label)
+                    && Objects.equals(packageName, other.packageName)
+                    && Objects.equals(installedVersion, other.installedVersion)
+                    && Objects.equals(sourceName, other.sourceName)
+                    && Objects.equals(sourceVersion, other.sourceVersion)
+                    && Objects.equals(directState, other.directState)
+                    && Objects.equals(gmsCoreState, other.gmsCoreState)
+                    && Objects.equals(gmsCoreLabel, other.gmsCoreLabel)
+                    && Objects.equals(optionalState, other.optionalState)
+                    && Objects.equals(optionalLabel, other.optionalLabel)
+                    && Objects.equals(alertState, other.alertState)
+                    && Objects.equals(alertLabel, other.alertLabel)
+                    && Objects.equals(reason, other.reason);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(profileId, label, packageName, installedVersion, installed,
+                    externalSource, sourceName, sourceVersion, directState, gmsCoreState,
+                    gmsCoreLabel, optionalState, optionalLabel, alertState, alertLabel,
+                    reason, patchEnabled);
         }
     }
 
@@ -2011,19 +2920,76 @@ public final class MainActivity extends ComponentActivity {
         public final String kind;
         public final String phase;
         public final String detail;
+        public final String operationToken;
+        public final long startedAt;
+        public final int progress;
+        public final String error;
+        public final long readyAt;
         public final boolean destructive;
         public final boolean busy;
         public final boolean recoveryRequired;
+        public final boolean cancelAllowed;
+        public final boolean terminal;
+        public final boolean acknowledged;
 
         ComposePatchOperation(String profileId, String kind, String phase, String detail,
-                boolean destructive, boolean busy, boolean recoveryRequired) {
+                String operationToken, long startedAt, int progress, String error, long readyAt,
+                boolean destructive, boolean busy, boolean recoveryRequired,
+                boolean cancelAllowed, boolean terminal) {
+            this(profileId, kind, phase, detail, operationToken, startedAt, progress, error,
+                    readyAt, destructive, busy, recoveryRequired, cancelAllowed, terminal, false);
+        }
+
+        ComposePatchOperation(String profileId, String kind, String phase, String detail,
+                String operationToken, long startedAt, int progress, String error, long readyAt,
+                boolean destructive, boolean busy, boolean recoveryRequired,
+                boolean cancelAllowed, boolean terminal, boolean acknowledged) {
             this.profileId = profileId == null ? "" : profileId;
             this.kind = kind == null ? "" : kind;
             this.phase = phase == null ? NavigatorPatchStore.IDLE : phase;
             this.detail = detail == null ? "" : detail;
+            this.operationToken = operationToken == null ? "" : operationToken;
+            this.startedAt = startedAt;
+            this.progress = Math.max(0, Math.min(100, progress));
+            this.error = error == null ? "" : error;
+            this.readyAt = readyAt;
             this.destructive = destructive;
             this.busy = busy;
             this.recoveryRequired = recoveryRequired;
+            this.cancelAllowed = cancelAllowed;
+            this.terminal = terminal;
+            this.acknowledged = acknowledged;
+        }
+
+        static ComposePatchOperation idle() {
+            return new ComposePatchOperation("", "", NavigatorPatchStore.IDLE, "",
+                    "", 0L, 0, "", 0L, false, false, false, false, true);
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposePatchOperation)) return false;
+            ComposePatchOperation other = (ComposePatchOperation) value;
+            return startedAt == other.startedAt && progress == other.progress
+                    && readyAt == other.readyAt
+                    && destructive == other.destructive && busy == other.busy
+                    && recoveryRequired == other.recoveryRequired
+                    && cancelAllowed == other.cancelAllowed && terminal == other.terminal
+                    && acknowledged == other.acknowledged
+                    && Objects.equals(profileId, other.profileId)
+                    && Objects.equals(kind, other.kind)
+                    && Objects.equals(phase, other.phase)
+                    && Objects.equals(detail, other.detail)
+                    && Objects.equals(operationToken, other.operationToken)
+                    && Objects.equals(error, other.error);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(profileId, kind, phase, detail, operationToken, startedAt,
+                    progress, error, readyAt, destructive, busy, recoveryRequired,
+                    cancelAllowed, terminal, acknowledged);
         }
     }
 
@@ -2069,6 +3035,33 @@ public final class MainActivity extends ComponentActivity {
             this.processName = processName == null ? "" : processName;
             this.importance = importance;
         }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposeAppRow)) return false;
+            ComposeAppRow other = (ComposeAppRow) value;
+            return installed == other.installed && runtimeBacked == other.runtimeBacked
+                    && observed == other.observed && supportedHud == other.supportedHud
+                    && supportedSection == other.supportedSection
+                    && hudEnabled == other.hudEnabled && logOnlyEnabled == other.logOnlyEnabled
+                    && onDashboard == other.onDashboard
+                    && dashboardStateKnown == other.dashboardStateKnown
+                    && dashboardMoveInProgress == other.dashboardMoveInProgress
+                    && importance == other.importance
+                    && Objects.equals(label, other.label)
+                    && Objects.equals(packageName, other.packageName)
+                    && Objects.equals(packageVersions, other.packageVersions)
+                    && Objects.equals(processName, other.processName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(label, packageName, packageVersions, installed, runtimeBacked,
+                    observed, supportedHud, supportedSection, hudEnabled, logOnlyEnabled,
+                    onDashboard, dashboardStateKnown, dashboardMoveInProgress, processName,
+                    importance);
+        }
     }
 
     public static final class ComposePackageVersion {
@@ -2078,6 +3071,20 @@ public final class MainActivity extends ComponentActivity {
         ComposePackageVersion(String packageName, String versionName) {
             this.packageName = packageName == null ? "" : packageName;
             this.versionName = versionName == null ? "" : versionName;
+        }
+
+        @Override
+        public boolean equals(Object value) {
+            if (this == value) return true;
+            if (!(value instanceof ComposePackageVersion)) return false;
+            ComposePackageVersion other = (ComposePackageVersion) value;
+            return Objects.equals(packageName, other.packageName)
+                    && Objects.equals(versionName, other.versionName);
+        }
+
+        @Override
+        public int hashCode() {
+            return Objects.hash(packageName, versionName);
         }
     }
 
@@ -2113,7 +3120,7 @@ public final class MainActivity extends ComponentActivity {
                 appsCuratedListRoot.addView(activeAppView(app,
                         app.packageName.equals(hudPackage),
                         logOnlyPackages.contains(app.packageName),
-                        true));
+                        isSupportedHudPackage(app.packageName)));
             }
         }
         List<ActiveAppRow> allApps = new ArrayList<>();
@@ -2374,17 +3381,11 @@ public final class MainActivity extends ComponentActivity {
         controller.moveIndependentDashboardApp(
                 normalized,
                 toDashboard,
-                HudPrefs.isFullscreenDashboardEnabled(this),
+                HudPrefs.dashboardScreenMode(this),
                 "ui-independent-dashboard-explicit");
         appendStatus((toDashboard ? "sending " : "returning ")
                 + normalized
                 + (toDashboard ? " to dashboard" : " to main"));
-        refreshAppsSoon();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshAppsSoon() {
-        handler.postDelayed(this::refreshControls, 250L);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2409,10 +3410,6 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("nav capture ignored: system package " + normalized);
             return;
         }
-        if (enabled && requiresLegacyCaptureRuntimeReady(normalized)
-                && !ensureNavCaptureRuntimeReadyForStart("hud", normalized)) {
-            return;
-        }
         if (enabled && !isSupportedHudPackage(normalized)) {
             NavCapturePrefs.setLogOnlyEnabled(this, normalized, true);
             NavCapturePrefs.setHudEnabled(this, normalized, false);
@@ -2428,7 +3425,6 @@ public final class MainActivity extends ComponentActivity {
         String previousHudPackage = NavCapturePrefs.getHudPackage(this);
         if (enabled && !previousHudPackage.isEmpty() && !previousHudPackage.equals(normalized)) {
             returnPreviousHudAppToMain(previousHudPackage, normalized);
-            NavHudLiveSender.get(this).stop(previousHudPackage, "ui-switch", true);
             appendStatus("nav live HUD switched off: " + previousHudPackage);
         }
         if (enabled && hudOutput.isBound()) {
@@ -2442,11 +3438,10 @@ public final class MainActivity extends ComponentActivity {
             NavNotificationListenerService.requestActiveNotificationScan(
                     this, "ui-start-hud-" + normalized);
             appendStatus("nav live HUD start: waiting for navigation payload");
+            NavHudLiveSender.get(this).refreshTbtObservers();
         } else {
-            NavHudLiveSender.get(this).stop(normalized, "ui-stop", true);
-            if ("com.waze".equals(normalized)) {
-                WazeCropCapture.get(this).stop("ui-stop-hud");
-            }
+            NavHudLiveSender.get(this).demoteHudToTbtObserver(
+                    normalized, "ui-stop", true);
             appendStatus("nav live HUD stop requested");
         }
         refreshActiveAppsList();
@@ -2458,9 +3453,6 @@ public final class MainActivity extends ComponentActivity {
         if (previous.isEmpty()) {
             return;
         }
-        if ("com.waze".equals(previous)) {
-            WazeCropCapture.get(this).stop("hud-switch");
-        }
         NavAppDisplayController controller = NavAppDisplayController.get(this);
         appendStatus("return previous HUD app to main: " + previous);
         controller.moveToMain(previous, "hud-switch-to-" + normalizePackage(nextPackage));
@@ -2469,12 +3461,6 @@ public final class MainActivity extends ComponentActivity {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isSupportedHudPackage(String packageName) {
         return NavCapturePrefs.isSupportedHudPackage(packageName);
-    }
-
-    static boolean requiresLegacyCaptureRuntimeReady(String packageName) {
-        String normalized = normalizePackage(packageName);
-        return !"com.waze".equals(normalized)
-                && !GMapsDirectChannel.PACKAGE_NAME.equals(normalized);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2491,15 +3477,20 @@ public final class MainActivity extends ComponentActivity {
         if (enabled && !ensureNavCaptureRuntimeReadyForStart("log-only", normalized)) {
             return;
         }
-        if (enabled && NavCapturePrefs.isHudEnabled(this, normalized)) {
-            NavHudLiveSender.get(this).stop(normalized, "ui-log-only", true);
-        }
+        boolean demoteHudToObserver = enabled
+                && NavCapturePrefs.isHudEnabled(this, normalized);
         NavCapturePrefs.setLogOnlyEnabled(this, normalized, enabled);
         appendStatus("nav log-only " + (enabled ? "start " : "stop ") + normalized);
         AppEventLogger.event(this, "nav_log_only " + (enabled ? "start " : "stop ") + normalized);
         if (enabled) {
             NavNotificationListenerService.requestActiveNotificationScan(
                     this, "ui-start-log-only-" + normalized);
+        }
+        if (demoteHudToObserver) {
+            NavHudLiveSender.get(this).demoteHudToTbtObserver(
+                    normalized, "ui-log-only", true);
+        } else {
+            NavHudLiveSender.get(this).refreshTbtObservers();
         }
         refreshActiveAppsList();
     }
@@ -2512,9 +3503,6 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         NavHudLiveSender.get(this).stop(normalized, "ui-stop", true);
-        if ("com.waze".equals(normalized)) {
-            WazeCropCapture.get(this).stop("ui-stop");
-        }
         if (NavCapturePrefs.isHudEnabled(this, normalized)) {
             NavCapturePrefs.setHudEnabled(this, normalized, false);
             appendStatus("nav live HUD stop requested");
@@ -2530,17 +3518,28 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private String appLabel(String packageName) {
+        String normalized = normalizePackage(packageName);
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            String cached = APP_LABEL_CACHE.get(normalized);
+            if (cached != null) {
+                return cached;
+            }
+        }
         PackageManager packageManager = getPackageManager();
+        String resolved = packageName;
         try {
             ApplicationInfo info = packageManager.getApplicationInfo(packageName, 0);
             CharSequence label = packageManager.getApplicationLabel(info);
             if (label != null && label.length() > 0) {
-                return label.toString();
+                resolved = label.toString();
             }
         } catch (PackageManager.NameNotFoundException ignored) {
             //guards label lookup because packages can disappear between process listing and UI rendering.
         }
-        return packageName;
+        synchronized (PACKAGE_METADATA_CACHE_LOCK) {
+            APP_LABEL_CACHE.put(normalized, resolved);
+        }
+        return resolved;
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
@@ -2574,17 +3573,16 @@ public final class MainActivity extends ComponentActivity {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startSending() {
-        if (!hudOutput.isBound()) {
-            appendStatus("start blocked: Connect first");
-            refreshControls();
-            return;
-        }
         if (sending) {
             appendStatus("start skipped: already sending");
             refreshControls();
             return;
         }
-        applyNavigationFields();
+        if (!applyNavigationFields()) {
+            appendStatus("start waiting: numeric fields are incomplete");
+            refreshControls();
+            return;
+        }
         HudDeliveryStatus.reset();
         arrowCuratedMode = true;
         curatedIndex = HudArrowComboCatalog.defaultIndex();
@@ -2593,29 +3591,20 @@ public final class MainActivity extends ComponentActivity {
         exitRequested = false;
         sendCount = 0;
         cancelPendingHudCallbacks();
-        hudOutput.publishManual(state, "manual-start");
-        hudOutput.setManualEnabled(true, "manual-start");
+        NavHudLiveSender.get(this).startManual(state, "manual-start");
         appendStatus("sending=true intervalMs=" + SEND_INTERVAL_MS
-                + " backgroundMode=" + BACKGROUND_MODE);
+                + " backgroundMode=" + BACKGROUND_MODE
+                + " output=HUD+TBT");
         refreshControls();
-    }
-
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    private void scheduleStartAfterBind() {
-        if (pendingStartAfterBindRunnable != null) {
-            handler.removeCallbacks(pendingStartAfterBindRunnable);
-        }
-        pendingStartAfterBindRunnable = startAfterBindRunnable;
-        handler.postDelayed(pendingStartAfterBindRunnable, START_BIND_RETRY_MS);
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopSending(boolean clearHud) {
         sending = false;
         HudDeliveryStatus.reset();
-        startAfterBindPending = false;
         cancelPendingHudCallbacks();
-        hudOutput.setManualEnabled(false, clearHud ? "manual-stop-clear" : "manual-stop");
+        NavHudLiveSender.get(this).stopManual(
+                clearHud ? "manual-stop-clear" : "manual-stop");
         appendStatus("sending=false reason=stop");
         refreshControls();
     }
@@ -2629,9 +3618,14 @@ public final class MainActivity extends ComponentActivity {
             HudDeliveryStatus.reset();
         }
         cancelPendingHudCallbacks();
-        hudOutput.setManualEnabled(false, reason + (clearHud ? "-clear" : ""));
-        if (unbindClient && !NavHudLiveSender.get(this).isRunning()) {
-            hudOutput.shutdown(reason);
+        NavHudLiveSender sender = NavHudLiveSender.get(this);
+        String stopReason = reason + (clearHud ? "-clear" : "");
+        if (unbindClient) {
+            sender.stopManual(stopReason, false, () -> {
+                if (!sender.isRunning()) hudOutput.shutdown(reason);
+            });
+        } else {
+            sender.stopManual(stopReason, false);
         }
         appendStatus("sending=false reason=" + reason);
         refreshControls();
@@ -2639,9 +3633,18 @@ public final class MainActivity extends ComponentActivity {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void cancelPendingHudCallbacks() {
-        startAfterBindPending = false;
-        cancelRunnable(pendingStartAfterBindRunnable);
-        pendingStartAfterBindRunnable = null;
+    }
+
+    private void stopRecorderAsync(String action, Runnable continuation) {
+        boolean hadSession = !LogcatRecorder.activeStartDay().isEmpty();
+        LogcatRecorder.stopAsync(this, () -> {
+            if (hadSession) {
+                appendStatus("logcat saved on " + action + " " + LogcatRecorder.statusText());
+            }
+            if (continuation != null) {
+                continuation.run();
+            }
+        });
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
@@ -2653,20 +3656,23 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void exitAndFinish() {
+        if (exitRequested) {
+            return;
+        }
         appendStatus("exit requested");
         exitRequested = true;
         cancelActiveAdbAuthorization("exit", false);
-        if (LogcatRecorder.isRecording()) {
-            LogcatRecorder.Result result = LogcatRecorder.stop(this);
-            appendStatus("logcat saved on exit " + result.detail
-                    + " file=" + filePath(result.file));
-        }
-        stopImmediately("exit", true, true);
-        finishAfterStop();
+        stopRecorderAsync("exit", () -> {
+            stopImmediately("exit", true, true);
+            finishAfterStop();
+        });
     }
 
     //stops runtime-owned work without deleting stored HUD/log selections.
     private void shutdownAndExit(String reason) {
+        if (exitRequested) {
+            return;
+        }
         String safeReason = reason == null ? "shutdown" : reason;
         appendStatus("shutdown requested reason=" + safeReason);
         exitRequested = true;
@@ -2685,25 +3691,19 @@ public final class MainActivity extends ComponentActivity {
 
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         NavHudLiveSender.get(this).stop(hudPackage, safeReason, true);
-        WazeCropCapture.get(this).stop(safeReason);
-        WazeMediaProjectionController.resetForRuntimeReinit(this, safeReason);
 
         NavAppDisplayController.get(this).returnActiveDashboardToMain(safeReason);
 
-        if (LogcatRecorder.isRecording()) {
-            LogcatRecorder.Result result = LogcatRecorder.stop(this);
-            appendStatus("logcat saved on shutdown " + result.detail
-                    + " file=" + filePath(result.file));
-        }
+        stopRecorderAsync("shutdown", () -> {
+            manualModeEnabled = false;
+            HudRuntimeWatchdog.cancel(this);
+            HudRuntimeService.stopPersistent(this, safeReason);
+            HudPrefs.setRuntimeServiceRunning(this, false);
+            HudRuntimeState.markStopped(this, safeReason);
 
-        manualModeEnabled = false;
-        HudRuntimeWatchdog.cancel(this);
-        HudRuntimeService.stopPersistent(this, safeReason);
-        HudPrefs.setRuntimeServiceRunning(this, false);
-        HudRuntimeState.markStopped(this, safeReason);
-
-        stopImmediately(safeReason, true, true);
-        finishAfterStop();
+            stopImmediately(safeReason, true, true);
+            finishAfterStop();
+        });
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2761,17 +3761,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setRoundaboutLeftHandTraffic(boolean enabled) {
-        HudPrefs.setRoundaboutLeftHandTraffic(this, enabled);
-        cachedPayloadKey = "";
-        appendStatus("Roundabout traffic " + (enabled
-                ? "LEFT: Waze exits use S60-S69"
-                : "RIGHT: Waze exits use S50-S59"));
-        AppEventLogger.event(this, "ui roundabout_left_hand_traffic=" + enabled);
-        refreshControls();
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setPngOutputEnabled(boolean enabled) {
         HudPrefs.setPngOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -2816,6 +3805,15 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
+    private void setTransliterationMode(int mode) {
+        HudPrefs.setTransliterationMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.transliterationMode(this);
+        appendStatus("Text transliteration mode " + persisted);
+        AppEventLogger.event(this, "ui text_transliteration=" + persisted);
+        refreshControls();
+    }
+
     private void setTextDirectionOutputEnabled(boolean enabled) {
         HudPrefs.setTextDirectionOutputEnabled(this, enabled);
         cachedPayloadKey = "";
@@ -2837,6 +3835,15 @@ public final class MainActivity extends ComponentActivity {
         cachedPayloadKey = "";
         appendStatus("Whole route metrics " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui whole_route_metrics=" + enabled);
+        refreshControls();
+    }
+
+    private void setRouteMetricsMode(int mode) {
+        HudPrefs.setRouteMetricsMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.routeMetricsMode(this);
+        appendStatus("Route metrics mode " + persisted);
+        AppEventLogger.event(this, "ui route_metrics_mode=" + persisted);
         refreshControls();
     }
 
@@ -2864,11 +3871,57 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
-    private void setWazeScreenCaptureEnabled(boolean enabled) {
-        HudPrefs.setWazeScreenCaptureEnabled(this, enabled);
-        NavHudLiveSender.get(this).onWazeScreenCapturePreferenceChanged(enabled);
-        appendStatus("Waze screen capture " + (enabled ? "ON" : "OFF"));
-        AppEventLogger.event(this, "ui waze_screen_capture=" + enabled);
+    private void setSpeedLimitMode(int mode) {
+        HudPrefs.setSpeedLimitMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitMode(this);
+        appendStatus("Speed limit mode " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_mode=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitFreeFallback(int mode) {
+        HudPrefs.setSpeedLimitFreeFallback(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitFreeFallback(this);
+        appendStatus("Speed limit free fallback " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_free_fallback=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitOverlaySeconds(int seconds) {
+        HudPrefs.setSpeedLimitOverlaySeconds(this, seconds);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitOverlaySeconds(this);
+        appendStatus("Speed limit overlay seconds " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_overlay_seconds=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitCompositePlacement(int placement) {
+        HudPrefs.setSpeedLimitCompositePlacement(this, placement);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitCompositePlacement(this);
+        appendStatus("Speed limit composite placement " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_composite_placement=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitManeuverOverlaySize(int size) {
+        HudPrefs.setSpeedLimitManeuverOverlaySize(this, size);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitManeuverOverlaySize(this);
+        appendStatus("Speed limit maneuver overlay size " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_maneuver_overlay_size=" + persisted);
+        refreshControls();
+    }
+
+    private void setSpeedLimitLaneOverlaySize(int size) {
+        HudPrefs.setSpeedLimitLaneOverlaySize(this, size);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.speedLimitLaneOverlaySize(this);
+        appendStatus("Speed limit lane overlay size " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_lane_overlay_size=" + persisted);
         refreshControls();
     }
 
@@ -3011,9 +4064,9 @@ public final class MainActivity extends ComponentActivity {
             case "Status Log":
                 return "Журнал стану";
             case "Start Logcat":
-                return "Старт Logcat";
+                return "Почати Logcat";
             case "Stop Logcat":
-                return "Стоп Logcat";
+                return "Зупинити Logcat";
             case "Clear Logcat":
                 return "Очистити Logcat";
             case "Manual HUD Output":
@@ -3090,8 +4143,8 @@ public final class MainActivity extends ComponentActivity {
                 return "Підтримувані";
             case "All apps":
                 return "Всі";
-            case "SUPPORTED APPS: Google Maps, Waze, ABRP":
-                return "ПІДТРИМУВАНІ: Google Maps, Waze, ABRP";
+            case "SUPPORTED APPS: Google Maps, Waze":
+                return "ПІДТРИМУВАНІ: Google Maps, Waze";
             case "Unsupported apps are logging only":
                 return "Непідтримувані застосунки тільки логуються";
             case "No supported navigation apps visible":
@@ -3161,9 +4214,9 @@ public final class MainActivity extends ComponentActivity {
                 return "Navigation Logs";
             case "Журнал стану":
                 return "Status Log";
-            case "Старт Logcat":
+            case "Почати Logcat":
                 return "Start Logcat";
-            case "Стоп Logcat":
+            case "Зупинити Logcat":
                 return "Stop Logcat";
             case "Очистити Logcat":
                 return "Clear Logcat";
@@ -3239,8 +4292,8 @@ public final class MainActivity extends ComponentActivity {
                 return "Apply Guide";
             case "Всі":
                 return "All apps";
-            case "ПІДТРИМУВАНІ: Google Maps, Waze, ABRP":
-                return "SUPPORTED APPS: Google Maps, Waze, ABRP";
+            case "ПІДТРИМУВАНІ: Google Maps, Waze":
+                return "SUPPORTED APPS: Google Maps, Waze";
             case "Непідтримувані застосунки тільки логуються":
                 return "Unsupported apps are logging only";
             case "Підтримувані навігатори не знайдені":
@@ -3517,7 +4570,7 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void runNavPermissionSelfCheck(boolean autoGrant) {
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
+        NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         String adbKey = LocalAdbBridge.adbKeyFingerprint(this);
         boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(this);
         boolean autoAttemptFinished = autoAdbAuthorizationState
@@ -3556,7 +4609,7 @@ public final class MainActivity extends ComponentActivity {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private boolean ensureNavCaptureRuntimeReadyForStart(String mode, String packageName) {
-        NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
+        NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         if (status.readyForCapture()) {
             navRuntimeReconnectAttemptsThisLaunch = 0;
             if (!LocalAdbBridge.canShortCircuitReadyForCapture(
@@ -3653,6 +4706,7 @@ public final class MainActivity extends ComponentActivity {
         if (authorizationPromptMode != LocalAdbBridge.AuthorizationPromptMode.NEVER) {
             autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.RUNNING;
         }
+        //Grant decisions must not consume the cache transition before it is published.
         NavRuntimePermissionStatus runningStatus = NavRuntimePermissionStatus.check(this);
         if (runningStatus.needsAdbGrant()) {
             updateAdbBridgeStatus(
@@ -3719,6 +4773,9 @@ public final class MainActivity extends ComponentActivity {
         adbGrantInProgress = false;
         NavRuntimePermissionStatus status = NavRuntimePermissionStatus.check(this);
         boolean keyVerified = LocalAdbBridge.isCurrentKeyVerifiedThisProcess(this);
+        if (keyVerified) {
+            InstrumentProxyManager.get(this).onAuthorizationVerified();
+        }
         boolean repairCollision = automatic
                 && result.code == LocalAdbBridge.Result.Code.PARTIAL
                 && NavRuntimePermissionRepair.RESULT_ALREADY_RUNNING.equals(result.message);
@@ -3793,6 +4850,7 @@ public final class MainActivity extends ComponentActivity {
             updateAdbBridgeStatus(prefix + ": " + result.message
                     + "\n" + permissionSummary);
         }
+        requestRuntimeStatusRefresh(this, true, "adb-grant-result");
         refreshControls();
         if (!status.readyForCapture() && status.settingsGranted()
                 && result.shouldRecheckPermissions()) {
@@ -3826,16 +4884,16 @@ public final class MainActivity extends ComponentActivity {
 
     //sends encoded data here so transport side effects stay behind a single boundary.
     private void sendCurrentState(String reason) {
-        if (!"loop".equals(reason)) {
-            applyNavigationFields();
+        if (!"loop".equals(reason) && !reason.endsWith("-compose")) {
+            if (!applyNavigationFields()) {
+                appendStatus("manual send waiting: numeric fields are incomplete");
+                refreshControls();
+                return;
+            }
         }
         refreshStateView();
-        if (!hudOutput.isBound()) {
-            appendStatus("send blocked: service not connected; tap Connect first");
-            return;
-        }
         PayloadSnapshot payload = getPayloadSnapshot();
-        hudOutput.publishManual(state, reason);
+        NavHudLiveSender.get(this).publishManual(state, reason);
         sendCount++;
         appendStatus("manual payload=" + payload.bytes.length
                 + " reason=" + reason
@@ -3977,8 +5035,9 @@ public final class MainActivity extends ComponentActivity {
             lastVisibleNativeId = combo.nativeId;
         }
         applyArrowVisibility();
+        state.roadName = combo.roadLabel();
         if (roadNameEdit != null) {
-            roadNameEdit.setText(combo.roadLabel());
+            roadNameEdit.setText(state.roadName);
         }
         syncRawEditsFromState();
         appendStatus("curated " + (curatedIndex + 1) + "/" + HudArrowComboCatalog.size()
@@ -3998,7 +5057,13 @@ public final class MainActivity extends ComponentActivity {
             refreshControls();
             return;
         }
-        int current = parseInt(rawPngIdEdit, state.turnBitmapId, 0, 99);
+        Integer currentValue = parseIntOrNull(rawPngIdEdit, 0, 99);
+        if (currentValue == null) {
+            appendStatus("raw png step waiting: numeric field is incomplete");
+            refreshControls();
+            return;
+        }
+        int current = currentValue;
         rawPngIdEdit.setText(String.valueOf(HudArrowComboCatalog.wrapRaw(current + delta)));
         applyRawArrowsAndSend();
     }
@@ -4010,7 +5075,13 @@ public final class MainActivity extends ComponentActivity {
             refreshControls();
             return;
         }
-        int current = parseInt(rawNativeIdEdit, state.maneuverId, 0, 99);
+        Integer currentValue = parseIntOrNull(rawNativeIdEdit, 0, 99);
+        if (currentValue == null) {
+            appendStatus("raw native step waiting: numeric field is incomplete");
+            refreshControls();
+            return;
+        }
+        int current = currentValue;
         rawNativeIdEdit.setText(String.valueOf(HudArrowComboCatalog.wrapRaw(current + delta)));
         applyRawArrowsAndSend();
     }
@@ -4022,8 +5093,15 @@ public final class MainActivity extends ComponentActivity {
             refreshControls();
             return;
         }
-        int sourceId = parseInt(rawPngIdEdit, state.turnBitmapId, 0, 99);
-        int nativeId = parseInt(rawNativeIdEdit, state.maneuverId, 0, 99);
+        Integer sourceValue = parseIntOrNull(rawPngIdEdit, 0, 99);
+        Integer nativeValue = parseIntOrNull(rawNativeIdEdit, 0, 99);
+        if (sourceValue == null || nativeValue == null) {
+            appendStatus("raw apply waiting: numeric fields are incomplete");
+            refreshControls();
+            return;
+        }
+        int sourceId = sourceValue;
+        int nativeId = nativeValue;
         rawPngIdEdit.setText(String.valueOf(sourceId));
         rawNativeIdEdit.setText(String.valueOf(nativeId));
         state.turnBitmapId = sourceId;
@@ -4036,8 +5114,9 @@ public final class MainActivity extends ComponentActivity {
         }
         applyArrowVisibility();
         if (roadNameEdit != null) {
-            roadNameEdit.setText("RAW N" + HudArrowComboCatalog.two(nativeId)
-                    + " S" + HudArrowComboCatalog.two(sourceId));
+            state.roadName = "RAW N" + HudArrowComboCatalog.two(nativeId)
+                    + " S" + HudArrowComboCatalog.two(sourceId);
+            roadNameEdit.setText(state.roadName);
         }
         appendStatus("raw apply png=S" + HudArrowComboCatalog.two(sourceId)
                 + " native=N" + HudArrowComboCatalog.two(nativeId)
@@ -4142,9 +5221,10 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyDistanceAndSend() {
-        if (distanceEdit != null) {
-            state.distanceToIntersection = parseInt(distanceEdit, state.distanceToIntersection, 0, 99999);
-            distanceEdit.setText(String.valueOf(state.distanceToIntersection));
+        if (!applyNavigationFields()) {
+            appendStatus("distance waiting: numeric fields are incomplete");
+            refreshControls();
+            return;
         }
         refreshStateView();
         sendCurrentState("distance");
@@ -4172,7 +5252,13 @@ public final class MainActivity extends ComponentActivity {
             refreshControls();
             return;
         }
-        int count = parseLaneCount();
+        Integer countValue = parseLaneCountOrNull();
+        if (countValue == null) {
+            appendStatus("lanes waiting: numeric field is incomplete");
+            refreshControls();
+            return;
+        }
+        int count = countValue;
         state.numOfLanes = count;
         state.includeLaneBitmap = count > 0;
         String laneString = buildStraightLaneString(count);
@@ -4190,7 +5276,13 @@ public final class MainActivity extends ComponentActivity {
             refreshControls();
             return;
         }
-        int count = parseLaneCount();
+        Integer countValue = parseLaneCountOrNull();
+        if (countValue == null) {
+            appendStatus("lanes waiting: numeric field is incomplete");
+            refreshControls();
+            return;
+        }
+        int count = countValue;
         state.numOfLanes = count;
         state.includeLaneBitmap = count > 0;
         String laneString = buildRandomLaneString(count);
@@ -4202,8 +5294,11 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
-    private int parseLaneCount() {
-        int count = parseInt(laneCountEdit, state.numOfLanes, 0, 8);
+    private Integer parseLaneCountOrNull() {
+        Integer count = parseIntOrNull(laneCountEdit, 0, 8);
+        if (count == null) {
+            return null;
+        }
         if (laneCountEdit != null) {
             laneCountEdit.setText(String.valueOf(count));
         }
@@ -4244,36 +5339,52 @@ public final class MainActivity extends ComponentActivity {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private boolean canUseManualHud() {
         return manualModeEnabled
-                && hudOutput != null
-                && hudOutput.isBound()
                 && sending;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyTextFieldsAndSend() {
-        applyNavigationFields();
+        if (!applyNavigationFields()) {
+            appendStatus("text fields waiting: numeric fields are incomplete");
+            refreshControls();
+            return;
+        }
         refreshStateView();
         sendCurrentState("fields");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyNavigationFieldsAndSend() {
-        applyNavigationFields();
+        if (!applyNavigationFields()) {
+            appendStatus("fields waiting: numeric fields are incomplete");
+            refreshControls();
+            return;
+        }
         refreshStateView();
         sendCurrentState("fields");
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyNavigationFields() {
-        if (distanceEdit != null) {
-            state.distanceToIntersection = parseInt(distanceEdit, state.distanceToIntersection, 0, 99999);
-            distanceEdit.setText(String.valueOf(state.distanceToIntersection));
+    private boolean applyNavigationFields() {
+        Integer distance = distanceEdit == null
+                ? clamp(state.distanceToIntersection, 0, 99999)
+                : parseIntOrNull(distanceEdit, 0, 99999);
+        Integer laneCount = laneCountEdit == null
+                ? clamp(state.numOfLanes, 0, 8)
+                : parseIntOrNull(laneCountEdit, 0, 8);
+        if (distance == null || laneCount == null) {
+            return false;
         }
+        state.distanceToIntersection = distance;
+        if (distanceEdit != null) {
+            distanceEdit.setText(String.valueOf(distance));
+        }
+        state.numOfLanes = laneCount;
         if (laneCountEdit != null) {
-            state.numOfLanes = parseInt(laneCountEdit, state.numOfLanes, 0, 8);
-            laneCountEdit.setText(String.valueOf(state.numOfLanes));
+            laneCountEdit.setText(String.valueOf(laneCount));
         }
         applyTextFields();
+        return true;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -4303,7 +5414,6 @@ public final class MainActivity extends ComponentActivity {
                         + " | navLogOnly=" + formatCapturePackages(NavCapturePrefs.getLogOnlyPackages(this))
                         + " | navDisplay=" + NavAppDisplayController.get(this)
                                 .lastState(NavCapturePrefs.getHudPackage(this)).displayId
-                        + " | wazeCrop=" + WazeCropCapture.get(this).isRunning()
                         + " | smallDistClamp=" + HudPrefs.isSmallDistanceClampEnabled(this)
                         + " | arrowMode=" + (arrowCuratedMode ? "curated" : "raw")
                         + " | curated=" + (curatedIndex + 1) + "/" + HudArrowComboCatalog.size()
@@ -4342,11 +5452,6 @@ public final class MainActivity extends ComponentActivity {
             smallDistanceClampSwitch.setOnCheckedChangeListener(null);
             smallDistanceClampSwitch.setChecked(HudPrefs.isSmallDistanceClampEnabled(this));
             smallDistanceClampSwitch.setOnCheckedChangeListener(smallDistanceClampSwitchListener);
-        }
-        if (roundaboutLeftHandSwitch != null) {
-            roundaboutLeftHandSwitch.setOnCheckedChangeListener(null);
-            roundaboutLeftHandSwitch.setChecked(HudPrefs.isRoundaboutLeftHandTraffic(this));
-            roundaboutLeftHandSwitch.setOnCheckedChangeListener(roundaboutLeftHandSwitchListener);
         }
         if (pngOutputSwitch != null) {
             pngOutputSwitch.setOnCheckedChangeListener(null);
@@ -4538,16 +5643,20 @@ public final class MainActivity extends ComponentActivity {
         return editText;
     }
 
-    //parses source data here so downstream HUD code receives normalized navigation fields.
-    private int parseInt(EditText editText, int fallback, int min, int max) {
+    //keeps incomplete user input out of the transport path until it is parseable.
+    private Integer parseIntOrNull(EditText editText, int min, int max) {
         if (editText == null) {
-            return fallback;
+            return null;
+        }
+        String text = editText.getText().toString().trim();
+        if (text.isEmpty() || "+".equals(text) || "-".equals(text)) {
+            return null;
         }
         try {
-            int value = Integer.parseInt(editText.getText().toString().trim());
+            int value = Integer.parseInt(text);
             return Math.max(min, Math.min(max, value));
         } catch (NumberFormatException e) {
-            return fallback;
+            return null;
         }
     }
 

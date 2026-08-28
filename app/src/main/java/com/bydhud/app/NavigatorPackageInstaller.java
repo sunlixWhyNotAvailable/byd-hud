@@ -13,10 +13,17 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 final class NavigatorPackageInstaller {
     private static final long INTERRUPTED_TIMEOUT_MS = 10L * 60L * 1000L;
     private static final AtomicBoolean VERIFY_RUNNING = new AtomicBoolean();
+    private static final ExecutorService INSTALL_QUEUE = Executors.newSingleThreadExecutor(r -> {
+        Thread worker = new Thread(r, "NavigatorPatchDrain");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        return worker;
+    });
     static final String EXTRA_OPERATION = "navigator_patch_operation";
     static final String EXTRA_PROFILE = "navigator_patch_profile";
     static final String EXTRA_TOKEN = "navigator_patch_token";
@@ -35,17 +42,32 @@ final class NavigatorPackageInstaller {
     static void begin(Context context, NavigatorPatchPipeline.PreparedPatch prepared)
             throws Exception {
         if (!canInstall(context)) throw new IOException("APK install permission is not granted");
-        verifyInstallTargetUnchanged(context, prepared);
-        File patched = new File(prepared.directory, "patched-set");
-        int sessionId = prepareSession(context, prepared.profile, patched);
-        NavigatorPatchStore.setSessionId(context, sessionId);
+        if (!NavigatorPatchStore.claimInstall(context, prepared.profile)) {
+            NavigatorPatchStore.transition(context, prepared.profile,
+                    NavigatorPatchStore.READY_TO_INSTALL,
+                    "Queued behind another navigator install");
+            return;
+        }
+        File patched;
+        int sessionId;
         try {
+            verifyInstallTargetUnchanged(context, prepared);
+            patched = new File(prepared.directory, "patched-set");
+            verifyPatchedSetUnchanged(context, prepared, patched);
+            sessionId = prepareSession(context, prepared.profile, patched);
+        } catch (Exception error) {
+            NavigatorPatchStore.releaseInstall(context, prepared.profile);
+            throw error;
+        }
+        NavigatorPatchStore.setSessionId(context, prepared.profile, sessionId);
+        try {
+            verifyPatchedSetUnchanged(context, prepared, patched);
             verifyInstallTargetUnchanged(context, prepared);
             NavHudLiveSender.get(context).stop(
                     prepared.profile.packageName, "navigator-patch", true);
             if (prepared.destructive && isInstalled(context, prepared.profile.packageName)) {
                 verifyInstallTargetUnchanged(context, prepared);
-                NavigatorPatchStore.expectCallback(context, OP_UNINSTALL);
+                NavigatorPatchStore.expectCallback(context, prepared.profile, OP_UNINSTALL);
                 NavigatorPatchStore.transition(context, prepared.profile,
                         NavigatorPatchStore.UNINSTALL_REQUESTED,
                         "Waiting for removal confirmation");
@@ -56,8 +78,54 @@ final class NavigatorPackageInstaller {
                 commitPreparedSession(context, prepared.profile, OP_INSTALL);
             }
         } catch (Exception error) {
-            abandonPreparedSession(context);
+            abandonPreparedSession(context, prepared.profile);
+            NavigatorPatchStore.releaseInstall(context, prepared.profile);
             throw error;
+        }
+    }
+
+    static void drainInstallQueue(Context context) {
+        Context appContext = context.getApplicationContext();
+        INSTALL_QUEUE.execute(() -> drainInstallQueueNow(appContext));
+    }
+
+    private static void drainInstallQueueNow(Context context) {
+        if (!canInstall(context)) return;
+        NavigatorPatchStore.OperationSnapshot global =
+                NavigatorPatchStore.operation(context, null);
+        if (NavigatorPatchStore.OP_RECOVERY.equals(global.kind)
+                && (global.busy() || NavigatorPatchStore.RECOVERY_REQUIRED.equals(global.phase))) {
+            return;
+        }
+        NavigatorPatchStore.Profile next = null;
+        long nextReadyAt = Long.MAX_VALUE;
+        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
+            NavigatorPatchStore.OperationSnapshot operation =
+                    NavigatorPatchStore.operation(context, profile);
+            if (NavigatorPatchStore.RECOVERY_REQUIRED.equals(operation.phase)) return;
+            if (NavigatorPatchStore.READY_TO_INSTALL.equals(operation.phase)
+                    && operation.readyAt > 0L && operation.readyAt < nextReadyAt) {
+                next = profile;
+                nextReadyAt = operation.readyAt;
+            }
+        }
+        if (next == null) return;
+        try {
+            begin(context, NavigatorPatchPipeline.resumePrepared(context, next));
+        } catch (Exception error) {
+            NavigatorPatchStore.OperationSnapshot current =
+                    NavigatorPatchStore.operation(context, next);
+            if (NavigatorPatchStore.CANCELLED.equals(current.phase)) return;
+            if (NavigatorPatchStore.isCancellationRequested(context, next)
+                    || error instanceof NavigatorPatchPipeline.OperationCancelledException) {
+                NavigatorPatchPipeline.finishQueuedCancellation(
+                        context, next, "Queued installation cancelled");
+                return;
+            }
+            NavigatorPatchStore.transition(context, next, NavigatorPatchStore.FAILED,
+                    error.getMessage() == null ? "Queued install failed" : error.getMessage());
+            NavigatorPatchStore.releaseInstall(context, next);
+            MainActivity.publishSharedUiStateChange();
         }
     }
 
@@ -76,11 +144,14 @@ final class NavigatorPackageInstaller {
             String failedExpectedFingerprint = NavigatorPatchStore.expectedSha(context);
             PackageInfo initialInstalled = null;
             NavigatorPatchPipeline.ScanResult initialArtifact = null;
+            String initialInstalledIdentity = "";
             if (isInstalled(context, profile.packageName)) {
-                initialArtifact = NavigatorPatchPipeline.inspectInstalled(context, profile);
+                initialInstalledIdentity = NavigatorPatchStore.installedIdentity(context, profile);
+                initialArtifact = NavigatorPatchPipeline.inspectInstalledMetadata(
+                        context, profile);
                 if (sameArtifact(expected, initialArtifact)) {
                     completeRestore(context, profile, initialArtifact,
-                            "Original APK is already installed");
+                            "Original APK is already installed", initialInstalledIdentity);
                     return;
                 }
                 if (failedExpectedFingerprint.isEmpty()
@@ -101,7 +172,7 @@ final class NavigatorPackageInstaller {
             NavigatorPatchStore.setSessionId(context, sessionId);
             NavHudLiveSender.get(context).stop(profile.packageName, "navigator-restore", true);
             if (isInstalled(context, profile.packageName)) {
-                if (!initialInstalledTargetUnchanged(context, profile)) {
+                if (!initialRestoreTargetUnchanged(context, profile)) {
                     throw new IOException("Installed navigator changed during recovery staging");
                 }
                 NavigatorPatchStore.expectCallback(context, OP_UNINSTALL_RESTORE);
@@ -124,11 +195,11 @@ final class NavigatorPackageInstaller {
 
     static void commitPreparedSession(Context context, NavigatorPatchStore.Profile profile,
             String operation) throws Exception {
-        int sessionId = NavigatorPatchStore.sessionId(context);
+        int sessionId = NavigatorPatchStore.sessionId(context, profile);
         if (sessionId < 0) throw new IOException("Prepared installer session is missing");
         PackageInstaller installer = context.getPackageManager().getPackageInstaller();
         try (PackageInstaller.Session session = installer.openSession(sessionId)) {
-            NavigatorPatchStore.expectCallback(context, operation);
+            NavigatorPatchStore.expectCallback(context, profile, operation);
             NavigatorPatchStore.transition(context, profile,
                     NavigatorPatchStore.COMMITTING, "Submitting installer session");
             session.commit(callback(context, profile, operation).getIntentSender());
@@ -147,38 +218,63 @@ final class NavigatorPackageInstaller {
     }
 
     static void verifyInstalledAsync(Context context, NavigatorPatchStore.Profile profile) {
+        Context appContext = context.getApplicationContext();
         if (!VERIFY_RUNNING.compareAndSet(false, true)) return;
         NavigatorPatchStore.transition(
-                context, profile, NavigatorPatchStore.OUTPUT_VERIFY, "Verifying installed APK");
+                appContext, profile, NavigatorPatchStore.INSTALLED_VERIFY,
+                "Verifying installed APK");
+        AtomicBoolean retry = new AtomicBoolean();
         Thread worker = new Thread(() -> {
+            String installedIdentity = "";
             try {
-                if (!NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName)) {
+                installedIdentity = NavigatorPatchStore.installedIdentity(appContext, profile);
+                if (!NavigatorSigningKey.installedUsesLocalKey(appContext, profile.packageName)) {
                     throw new IOException("Installed signer does not match local patcher key");
                 }
                 NavigatorPatchPipeline.ScanResult result =
-                        NavigatorPatchPipeline.inspectInstalled(context, profile);
-                verifyExpected(context, result, true);
+                        NavigatorPatchPipeline.inspectInstalled(appContext, profile);
+                verifyExpected(appContext, profile, result, true);
                 NavigatorPatchPipeline.ScanResult visibleResult =
-                        withExpectedOptionalFailure(context, result);
-                PackageInfo info = context.getPackageManager().getPackageInfo(
+                        withExpectedOptionalFailure(appContext, profile, result);
+                PackageInfo info = appContext.getPackageManager().getPackageInfo(
                         profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
-                File transaction = NavigatorPatchStore.transactionDirectory(context);
-                NavigatorPatchStore.clearExternal(context, profile);
-                NavigatorPatchStore.saveScan(context, visibleResult);
+                File transaction = NavigatorPatchStore.transactionDirectory(appContext, profile);
+                if (!installedIdentity.equals(
+                        NavigatorPatchStore.installedIdentity(appContext, profile))) {
+                    throw new IOException("Installed navigator changed during verification");
+                }
+                NavigatorPatchStore.clearExternal(appContext, profile);
+                NavigatorPatchStore.saveScan(appContext, visibleResult);
                 NavigatorPatchStore.recordInstalledVerification(
-                        context, profile, info.lastUpdateTime, info.getLongVersionCode(),
+                        appContext, profile, info.lastUpdateTime, info.getLongVersionCode(),
                         visibleResult.sha256, visibleResult.directState,
+                        visibleResult.gmsCoreState,
                         visibleResult.optionalState, visibleResult.alertState);
                 NavigatorPatchStore.transition(
-                        context, profile, NavigatorPatchStore.VERIFIED, "Installed and verified");
-                NavigatorPatchStore.clearTransactionMetadata(context);
+                        appContext, profile, NavigatorPatchStore.VERIFIED, "Installed and verified");
+                NavigatorPatchStore.clearTransactionMetadata(appContext, profile);
+                NavigatorPatchStore.releaseInstall(appContext, profile);
                 NavigatorPatchPipeline.deleteTree(transaction);
+                MainActivity.requestPatchUiStateRefresh(appContext, true, "patch-verified");
+                drainInstallQueue(appContext);
             } catch (Exception error) {
-                NavigatorPatchStore.transition(context, profile,
-                        NavigatorPatchStore.RECOVERY_REQUIRED,
-                        error.getMessage());
+                if (isFinalVerificationRetryable(error)
+                        && NavigatorPatchStore.finalVerificationTransactionMatches(
+                        appContext, profile, installedIdentity)
+                        && NavigatorPatchStore.consumeFinalVerificationRetry(appContext, profile)) {
+                    AppEventLogger.event(appContext,
+                            "navigator_patch final_verification_retry profile=" + profile.id);
+                    retry.set(true);
+                    return;
+                }
+                NavigatorPatchStore.transition(appContext, profile,
+                        NavigatorPatchStore.RECOVERY_REQUIRED, error.getMessage());
+                NavigatorPatchStore.releaseInstall(appContext, profile);
+                MainActivity.requestPatchUiStateRefresh(appContext, true, "patch-recovery");
+                drainInstallQueue(appContext);
             } finally {
                 VERIFY_RUNNING.set(false);
+                if (retry.get()) verifyInstalledAsync(appContext, profile);
             }
         }, "NavigatorPatchVerify");
         worker.setPriority(Thread.MIN_PRIORITY);
@@ -186,28 +282,89 @@ final class NavigatorPackageInstaller {
     }
 
     static void verifyRestoredAsync(Context context, NavigatorPatchStore.Profile profile) {
+        Context appContext = context.getApplicationContext();
         if (!VERIFY_RUNNING.compareAndSet(false, true)) return;
         NavigatorPatchStore.transition(
-                context, profile, NavigatorPatchStore.OUTPUT_VERIFY, "Verifying restored APK");
+                appContext, profile, NavigatorPatchStore.INSTALLED_VERIFY,
+                "Verifying restored APK");
+        AtomicBoolean retry = new AtomicBoolean();
         Thread worker = new Thread(() -> {
+            String installedIdentity = "";
             try {
+                installedIdentity = NavigatorPatchStore.installedIdentity(appContext, profile);
                 NavigatorPatchPipeline.ScanResult result =
-                        NavigatorPatchPipeline.inspectInstalled(context, profile);
-                verifyExpected(context, result, false);
-                completeRestore(context, profile, result, "Original APK restored");
+                        NavigatorPatchPipeline.inspectInstalledMetadata(appContext, profile);
+                verifyExpected(appContext, profile, result, false);
+                completeRestore(appContext, profile, result, "Original APK restored",
+                        installedIdentity);
             } catch (Exception error) {
-                NavigatorPatchStore.transition(context, profile,
+                if (isFinalVerificationRetryable(error)
+                        && NavigatorPatchStore.finalVerificationTransactionMatches(
+                        appContext, profile, installedIdentity)
+                        && NavigatorPatchStore.consumeFinalVerificationRetry(appContext, profile)) {
+                    AppEventLogger.event(appContext,
+                            "navigator_patch final_restore_verification_retry profile=" + profile.id);
+                    retry.set(true);
+                    return;
+                }
+                NavigatorPatchStore.transition(appContext, profile,
                         NavigatorPatchStore.RECOVERY_REQUIRED, error.getMessage());
             } finally {
                 VERIFY_RUNNING.set(false);
+                if (retry.get()) verifyRestoredAsync(appContext, profile);
             }
         }, "NavigatorRestoreVerify");
         worker.setPriority(Thread.MIN_PRIORITY);
         worker.start();
     }
 
+    static boolean isFinalVerificationRetryable(Exception error) {
+        String message = error == null || error.getMessage() == null
+                ? "" : error.getMessage().toLowerCase(java.util.Locale.ROOT);
+        return !message.contains("does not match")
+                && !message.contains("changed during")
+                && !message.contains("signer")
+                && !message.contains("missing")
+                && !message.contains("rejected");
+    }
+
+    private static void migrateKnownReceiverContextFailure(
+            Context context, NavigatorPatchStore.Profile profile) {
+        NavigatorPatchStore.OperationSnapshot operation =
+                NavigatorPatchStore.operation(context, profile);
+        if (!NavigatorPatchStore.RECOVERY_REQUIRED.equals(operation.phase)
+                || !NavigatorPatchStore.isRestrictedReceiverContextFailure(operation.error)
+                || VERIFY_RUNNING.get()
+                || !NavigatorPackageInstaller.isInstalled(context, profile.packageName)) return;
+        try {
+            String installedIdentity = NavigatorPatchStore.installedIdentity(context, profile);
+            if (!NavigatorPatchStore.finalVerificationTransactionMatches(
+                    context, profile, installedIdentity)
+                    || !NavigatorPatchStore.consumeFinalVerificationRetry(context, profile)) return;
+        } catch (Exception ignored) {
+            return;
+        }
+        AppEventLogger.event(context,
+                "navigator_patch migrate_receiver_context_failure profile=" + profile.id);
+        if (NavigatorPatchStore.expectedDirect(context, profile).isEmpty()) {
+            verifyRestoredAsync(context, profile);
+        } else {
+            verifyInstalledAsync(context, profile);
+        }
+    }
+
     static void reconcile(Context context) {
-        NavigatorPatchStore.OperationSnapshot operation = NavigatorPatchStore.operation(context);
+        Context appContext = context.getApplicationContext();
+        reconcileGlobal(appContext);
+        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
+            migrateKnownReceiverContextFailure(appContext, profile);
+            reconcileLocal(appContext, profile);
+        }
+        drainInstallQueue(appContext);
+    }
+
+    private static void reconcileGlobal(Context context) {
+        NavigatorPatchStore.OperationSnapshot operation = NavigatorPatchStore.operation(context, null);
         NavigatorPatchStore.Profile profile = operation.profile;
         if (profile == null) {
             if (!NavigatorPatchStore.IDLE.equals(operation.phase)
@@ -221,11 +378,13 @@ final class NavigatorPackageInstaller {
         if (NavigatorPatchStore.IDLE.equals(operation.phase)
                 || NavigatorPatchStore.VERIFIED.equals(operation.phase)
                 || NavigatorPatchStore.FAILED.equals(operation.phase)
+                || NavigatorPatchStore.CANCELLED.equals(operation.phase)
                 || NavigatorPatchStore.RECOVERY_REQUIRED.equals(operation.phase)) {
             return;
         }
         boolean installed = isInstalled(context, profile.packageName);
-        if (NavigatorPatchStore.OUTPUT_VERIFY.equals(operation.phase)
+        if ((NavigatorPatchStore.INSTALLED_VERIFY.equals(operation.phase)
+                || NavigatorPatchStore.OUTPUT_VERIFY.equals(operation.phase))
                 && !NavigatorPatchStore.expectedSha(context).isEmpty()) {
             if (!installed) {
                 NavigatorPatchStore.transition(context, profile,
@@ -287,6 +446,71 @@ final class NavigatorPackageInstaller {
                 "Interrupted before the installed navigator was changed");
     }
 
+    private static void reconcileLocal(Context context, NavigatorPatchStore.Profile profile) {
+        //A same-process worker owns this operation; only an absent worker is a restart orphan.
+        if (NavigatorPatchPipeline.hasActiveWorker(profile)) return;
+        NavigatorPatchStore.OperationSnapshot operation =
+                NavigatorPatchStore.operation(context, profile);
+        if (operation.kind.isEmpty() || operation.terminal()) return;
+        if (NavigatorPatchStore.CANCEL_REQUESTED.equals(operation.phase)) {
+            abandonPreparedSession(context, profile);
+            File transaction = NavigatorPatchStore.transactionDirectory(context, profile);
+            NavigatorPatchStore.markCancelled(context, profile, "Cancelled after restart");
+            NavigatorPatchPipeline.deleteTree(transaction);
+            NavigatorPatchStore.clearTransactionMetadata(context, profile);
+            NavigatorPatchStore.releaseInstall(context, profile);
+            return;
+        }
+        if (NavigatorPatchStore.READY_TO_INSTALL.equals(operation.phase)) return;
+        if (NavigatorPatchStore.isInstalledVerificationPhase(operation.phase)
+                && !NavigatorPatchStore.expectedSha(context, profile).isEmpty()) {
+            if (!isInstalled(context, profile.packageName)) {
+                NavigatorPatchStore.transition(context, profile,
+                        NavigatorPatchStore.RECOVERY_REQUIRED,
+                        "Navigator is missing during installed APK verification");
+            } else {
+                verifyInstalledAsync(context, profile);
+            }
+            return;
+        }
+        if (NavigatorPatchStore.OUTPUT_VERIFY.equals(operation.phase)) {
+            File transaction = NavigatorPatchStore.transactionDirectory(context, profile);
+            NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.FAILED,
+                    "Interrupted during staged output verification");
+            NavigatorPatchStore.clearTransactionMetadata(context, profile);
+            NavigatorPatchPipeline.deleteTree(transaction);
+            return;
+        }
+        long age = Math.max(0L, System.currentTimeMillis()
+                - NavigatorPatchStore.stateAt(context, profile));
+        boolean sessionExists = installerSessionExists(
+                context, NavigatorPatchStore.sessionId(context, profile));
+        boolean installPhase = NavigatorPatchStore.INSTALL_REQUESTED.equals(operation.phase)
+                || NavigatorPatchStore.COMMITTING.equals(operation.phase)
+                || NavigatorPatchStore.UNINSTALL_REQUESTED.equals(operation.phase);
+        if (installPhase) {
+            if (sessionExists && age < INTERRUPTED_TIMEOUT_MS) return;
+            if (sessionExists) abandonPreparedSession(context, profile);
+            boolean installed = isInstalled(context, profile.packageName);
+            if (installed && initialInstalledTargetUnchanged(context, profile)) {
+                finishUnchangedFailure(context, profile, "Install did not change the navigator");
+            } else if (installed) {
+                verifyInstalledAsync(context, profile);
+            } else {
+                NavigatorPatchStore.transition(context, profile,
+                        NavigatorPatchStore.RECOVERY_REQUIRED,
+                        "Navigator is missing after interrupted install");
+            }
+            return;
+        }
+        File transaction = NavigatorPatchStore.transactionDirectory(context, profile);
+        abandonPreparedSession(context, profile);
+        NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.FAILED,
+                "Interrupted before the installed navigator was changed");
+        NavigatorPatchStore.clearTransactionMetadata(context, profile);
+        NavigatorPatchPipeline.deleteTree(transaction);
+    }
+
     static boolean isInstalled(Context context, String packageName) {
         try {
             context.getPackageManager().getPackageInfo(packageName, 0);
@@ -328,7 +552,7 @@ final class NavigatorPackageInstaller {
 
     private static PendingIntent callback(Context context,
             NavigatorPatchStore.Profile profile, String operation) {
-        String token = NavigatorPatchStore.transactionToken(context);
+        String token = NavigatorPatchStore.transactionToken(context, profile);
         Intent intent = new Intent(context, NavigatorPackageResultReceiver.class)
                 .putExtra(EXTRA_OPERATION, operation)
                 .putExtra(EXTRA_PROFILE, profile.id)
@@ -349,46 +573,68 @@ final class NavigatorPackageInstaller {
     }
 
     static void abandonPreparedSession(Context context) {
-        int sessionId = NavigatorPatchStore.sessionId(context);
+        abandonPreparedSession(context, null);
+    }
+
+    static void abandonPreparedSession(Context context, NavigatorPatchStore.Profile profile) {
+        int sessionId = NavigatorPatchStore.sessionId(context, profile);
         if (sessionId < 0) return;
         try {
             context.getPackageManager().getPackageInstaller().abandonSession(sessionId);
         } catch (RuntimeException ignored) {
         }
-        NavigatorPatchStore.setSessionId(context, -1);
+        NavigatorPatchStore.setSessionId(context, profile, -1);
     }
 
-    private static void verifyExpected(Context context,
+    private static void verifyExpected(Context context, NavigatorPatchStore.Profile profile,
             NavigatorPatchPipeline.ScanResult actual, boolean includeComponents)
             throws IOException {
-        if (!NavigatorPatchStore.expectedSha(context).equals(actual.sha256)
-                || NavigatorPatchStore.expectedVersionCode(context) != actual.versionCode
-                || !NavigatorPatchStore.expectedSigner(context).equals(actual.signerSha256)) {
+        if (!NavigatorPatchStore.expectedSha(context, profile).equals(actual.sha256)
+                || NavigatorPatchStore.expectedVersionCode(context, profile) != actual.versionCode
+                || !NavigatorPatchStore.expectedSigner(context, profile).equals(actual.signerSha256)) {
             throw new IOException("Installed APK does not match the staged artifact");
         }
-        String expectedOptional = NavigatorPatchStore.expectedOptional(context);
-        String expectedAlert = NavigatorPatchStore.expectedAlert(context);
+        String expectedOptional = NavigatorPatchStore.expectedOptional(context, profile);
+        String expectedGmsCore = NavigatorPatchStore.expectedGmsCore(context, profile);
+        String expectedAlert = NavigatorPatchStore.expectedAlert(context, profile);
+        boolean gmsCoreMatches = expectedGmsCore.equals(actual.gmsCoreState)
+                || (NavigatorPatchStore.FAILED.equals(expectedGmsCore)
+                && NavigatorPatchStore.PATCHABLE.equals(actual.gmsCoreState));
         boolean optionalMatches = expectedOptional.equals(actual.optionalState)
                 || (NavigatorPatchStore.FAILED.equals(expectedOptional)
                 && NavigatorPatchStore.PATCHABLE.equals(actual.optionalState));
+        boolean auxiliaryMatches = expectedAlert.equals(actual.alertState)
+                || (NavigatorPatchStore.FAILED.equals(expectedAlert)
+                && NavigatorPatchStore.PATCHABLE.equals(actual.alertState));
         if (includeComponents
-                && (!NavigatorPatchStore.expectedDirect(context).equals(actual.directState)
-                || !optionalMatches || !expectedAlert.equals(actual.alertState))) {
+                && (!NavigatorPatchStore.expectedDirect(context, profile).equals(actual.directState)
+                || !gmsCoreMatches
+                || !optionalMatches || !auxiliaryMatches)) {
             throw new IOException("Installed patch components do not match staged output");
         }
     }
 
     private static NavigatorPatchPipeline.ScanResult withExpectedOptionalFailure(
-            Context context, NavigatorPatchPipeline.ScanResult actual) {
-        if (!NavigatorPatchStore.FAILED.equals(
-                NavigatorPatchStore.expectedOptional(context))
-                || !NavigatorPatchStore.PATCHABLE.equals(actual.optionalState)) {
+            Context context, NavigatorPatchStore.Profile profile,
+            NavigatorPatchPipeline.ScanResult actual) {
+        boolean optionalFailed = NavigatorPatchStore.FAILED.equals(
+                NavigatorPatchStore.expectedOptional(context, profile))
+                && NavigatorPatchStore.PATCHABLE.equals(actual.optionalState);
+        boolean gmsCoreFailed = NavigatorPatchStore.FAILED.equals(
+                NavigatorPatchStore.expectedGmsCore(context, profile))
+                && NavigatorPatchStore.PATCHABLE.equals(actual.gmsCoreState);
+        boolean auxiliaryFailed = NavigatorPatchStore.FAILED.equals(
+                NavigatorPatchStore.expectedAlert(context, profile))
+                && NavigatorPatchStore.PATCHABLE.equals(actual.alertState);
+        if (!gmsCoreFailed && !optionalFailed && !auxiliaryFailed) {
             return actual;
         }
         return new NavigatorPatchPipeline.ScanResult(
                 actual.profile, actual.sha256, actual.versionName, actual.versionCode,
-                actual.signerSha256, actual.directState, NavigatorPatchStore.FAILED,
-                actual.alertState,
+                actual.signerSha256, actual.directState,
+                gmsCoreFailed ? NavigatorPatchStore.FAILED : actual.gmsCoreState,
+                optionalFailed ? NavigatorPatchStore.FAILED : actual.optionalState,
+                auxiliaryFailed ? NavigatorPatchStore.FAILED : actual.alertState,
                 "Optional patch attempt failed");
     }
 
@@ -400,28 +646,64 @@ final class NavigatorPackageInstaller {
     }
 
     private static void completeRestore(Context context, NavigatorPatchStore.Profile profile,
-            NavigatorPatchPipeline.ScanResult result, String detail) {
+            NavigatorPatchPipeline.ScanResult result, String detail,
+            String installedIdentity) throws Exception {
         File transaction = NavigatorPatchStore.transactionDirectory(context);
+        String recoveryOwner = NavigatorPatchStore.recoveryOwner(context);
+        String transactionName = transaction.getName();
+        String expectedFingerprint = NavigatorPatchStore.expectedSha(context);
+        if (!installedIdentity.equals(
+                NavigatorPatchStore.installedIdentity(context, profile))) {
+            throw new IOException("Installed navigator changed during recovery verification");
+        }
+        if (!NavigatorAssetManager.recordAuthoritativeRestoreVerified(
+                context, profile, recoveryOwner, transactionName, expectedFingerprint)) {
+            throw new IOException("Asset recovery completion receipt was rejected");
+        }
+        if (!installedIdentity.equals(
+                NavigatorPatchStore.installedIdentity(context, profile))) {
+            throw new IOException("Installed navigator changed during recovery verification");
+        }
         NavigatorPatchStore.clearExternal(context, profile);
         NavigatorPatchStore.saveScan(context, result);
-        NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.IDLE, detail);
-        NavigatorPatchStore.clearTransactionMetadata(context);
+        NavigatorPatchStore.completeRestoreTransaction(context, profile, detail);
+        if (!NavigatorAssetManager.finishAuthoritativeRestoreVerified(
+                context, profile, recoveryOwner, transactionName, expectedFingerprint)) {
+            AppEventLogger.event(context,
+                    "navigator_asset recovery_finalize_pending owner=" + recoveryOwner);
+            return;
+        }
         NavigatorPatchPipeline.deleteTree(transaction);
     }
 
     private static boolean initialInstalledTargetUnchanged(Context context,
             NavigatorPatchStore.Profile profile) {
+        return initialInstalledTargetUnchanged(context, profile, false);
+    }
+
+    private static boolean initialRestoreTargetUnchanged(Context context,
+            NavigatorPatchStore.Profile profile) {
+        return initialInstalledTargetUnchanged(context, profile, true);
+    }
+
+    private static boolean initialInstalledTargetUnchanged(Context context,
+            NavigatorPatchStore.Profile profile, boolean metadataOnly) {
         try {
             PackageInfo info = context.getPackageManager().getPackageInfo(
                     profile.packageName, PackageManager.GET_SIGNING_CERTIFICATES);
-            return NavigatorPatchStore.initialUpdateTime(context) == info.lastUpdateTime
-                    && NavigatorPatchStore.initialVersionCode(context)
-                    == info.getLongVersionCode()
-                    && NavigatorPatchStore.initialSigner(context).equals(
+            if (NavigatorPatchStore.initialUpdateTime(context, profile) != info.lastUpdateTime
+                    || NavigatorPatchStore.initialVersionCode(context, profile)
+                    != info.getLongVersionCode()
+                    || !NavigatorPatchStore.initialSigner(context, profile).equals(
                     NavigatorSigningKey.installedCertificateSha256(
-                            context, profile.packageName))
-                    && NavigatorPatchStore.initialFingerprint(context).equals(
-                    NavigatorApkSet.inspectInstalled(context, profile).fingerprint);
+                        context, profile.packageName))) {
+                return false;
+            }
+            NavigatorPatchPipeline.ScanResult installed = metadataOnly
+                    ? NavigatorPatchPipeline.inspectInstalledMetadata(context, profile)
+                    : NavigatorPatchPipeline.inspectInstalled(context, profile);
+            return NavigatorPatchStore.initialFingerprint(context, profile).equals(
+                    installed.sha256);
         } catch (Exception ignored) {
             return false;
         }
@@ -429,9 +711,10 @@ final class NavigatorPackageInstaller {
 
     private static void finishUnchangedFailure(Context context,
             NavigatorPatchStore.Profile profile, String detail) {
-        File transaction = NavigatorPatchStore.transactionDirectory(context);
+        File transaction = NavigatorPatchStore.transactionDirectory(context, profile);
         NavigatorPatchStore.transition(context, profile, NavigatorPatchStore.FAILED, detail);
-        NavigatorPatchStore.clearTransactionMetadata(context);
+        NavigatorPatchStore.clearTransactionMetadata(context, profile);
+        NavigatorPatchStore.releaseInstall(context, profile);
         NavigatorPatchPipeline.deleteTree(transaction);
     }
 
@@ -456,8 +739,40 @@ final class NavigatorPackageInstaller {
                 NavigatorSigningKey.installedCertificateSha256(
                         context, prepared.profile.packageName))
                 || !prepared.installedFingerprint.equals(
-                NavigatorApkSet.inspectInstalled(context, prepared.profile).fingerprint)) {
+                NavigatorPatchPipeline.inspectInstalled(context, prepared.profile).sha256)) {
             throw new IOException("Installed navigator changed after staging");
         }
+    }
+
+    private static void verifyPatchedSetUnchanged(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared, File patched) throws Exception {
+        NavigatorApkSet.SetInfo actual = NavigatorApkSet.readDirectory(
+                context, prepared.profile, patched);
+        if (!matchesPreparedOutputForTest(
+                prepared.output.sha256,
+                prepared.output.versionName,
+                prepared.output.versionCode,
+                prepared.output.signerSha256,
+                actual.fingerprint,
+                actual.versionName,
+                actual.versionCode,
+                actual.signerSha256)) {
+            throw new IOException("Staged patched APK-set changed before installation");
+        }
+    }
+
+    static boolean matchesPreparedOutputForTest(
+            String expectedFingerprint, String expectedVersionName,
+            long expectedVersionCode, String expectedSigner,
+            String actualFingerprint, String actualVersionName,
+            long actualVersionCode, String actualSigner) {
+        return safeEquals(expectedFingerprint, actualFingerprint)
+                && safeEquals(expectedVersionName, actualVersionName)
+                && expectedVersionCode == actualVersionCode
+                && safeEquals(expectedSigner, actualSigner);
+    }
+
+    private static boolean safeEquals(String first, String second) {
+        return first == null ? second == null : first.equals(second);
     }
 }

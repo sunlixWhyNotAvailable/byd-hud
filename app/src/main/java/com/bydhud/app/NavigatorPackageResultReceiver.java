@@ -8,6 +8,9 @@ import android.content.pm.PackageInstaller;
 public final class NavigatorPackageResultReceiver extends BroadcastReceiver {
     @Override
     public void onReceive(Context context, Intent intent) {
+        // PackageInstaller delivers this callback through a restricted receiver context.
+        // Normalize once before any continuation can reach the isolated worker service.
+        Context appContext = context.getApplicationContext();
         String operation = intent.getStringExtra(NavigatorPackageInstaller.EXTRA_OPERATION);
         String token = intent.getStringExtra(NavigatorPackageInstaller.EXTRA_TOKEN);
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(
@@ -21,39 +24,39 @@ public final class NavigatorPackageResultReceiver extends BroadcastReceiver {
                 || confirmation == null;
         int sessionId = intent.getIntExtra(PackageInstaller.EXTRA_SESSION_ID, -1);
         if (!NavigatorPatchStore.acceptCallback(
-                context, profile, token, operation, sessionId, terminal)) {
-            AppEventLogger.event(context, "navigator_patch stale_callback operation=" + operation);
+                appContext, profile, token, operation, sessionId, terminal)) {
+            AppEventLogger.event(appContext, "navigator_patch stale_callback operation=" + operation);
             return;
         }
         if (status == PackageInstaller.STATUS_PENDING_USER_ACTION) {
             if (confirmation != null) {
                 confirmation.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-                context.startActivity(confirmation);
+                appContext.startActivity(confirmation);
             } else {
-                fail(context, profile, operation, "Installer confirmation is missing");
+                fail(appContext, profile, operation, "Installer confirmation is missing");
             }
             return;
         }
         if (status != PackageInstaller.STATUS_SUCCESS || operation == null) {
-            fail(context, profile, operation,
+            fail(appContext, profile, operation,
                     message == null ? "Package operation failed" : message);
             return;
         }
         try {
             if (NavigatorPackageInstaller.OP_UNINSTALL.equals(operation)) {
                 NavigatorPackageInstaller.commitAfterUninstall(
-                        context, profile, NavigatorPackageInstaller.OP_INSTALL);
+                        appContext, profile, NavigatorPackageInstaller.OP_INSTALL);
             } else if (NavigatorPackageInstaller.OP_UNINSTALL_RESTORE.equals(operation)) {
                 NavigatorPackageInstaller.commitAfterUninstall(
-                        context, profile, NavigatorPackageInstaller.OP_INSTALL_RESTORE);
+                        appContext, profile, NavigatorPackageInstaller.OP_INSTALL_RESTORE);
             } else if (NavigatorPackageInstaller.OP_INSTALL.equals(operation)) {
                 NavigatorPackageInstaller.verifyInstalledAsync(
-                        context, profile);
+                        appContext, profile);
             } else if (NavigatorPackageInstaller.OP_INSTALL_RESTORE.equals(operation)) {
-                NavigatorPackageInstaller.verifyRestoredAsync(context, profile);
+                NavigatorPackageInstaller.verifyRestoredAsync(appContext, profile);
             }
         } catch (Exception error) {
-            fail(context, profile, operation, error.getMessage());
+            fail(appContext, profile, operation, error.getMessage());
         }
     }
 
@@ -62,17 +65,17 @@ public final class NavigatorPackageResultReceiver extends BroadcastReceiver {
         if (profile == null) return;
         if (NavigatorPackageInstaller.OP_UNINSTALL.equals(operation)
                 || NavigatorPackageInstaller.OP_UNINSTALL_RESTORE.equals(operation)) {
-            NavigatorPackageInstaller.abandonPreparedSession(context);
+            NavigatorPackageInstaller.abandonPreparedSession(context, profile);
         }
         boolean restore = NavigatorPackageInstaller.OP_UNINSTALL_RESTORE.equals(operation)
                 || NavigatorPackageInstaller.OP_INSTALL_RESTORE.equals(operation);
-        boolean destructive = NavigatorPatchStore.operation(context).destructive;
-        boolean missing = !NavigatorPackageInstaller.isInstalled(
-                context, profile.packageName);
         NavigatorPatchStore.transition(context, profile,
-                restore || (destructive && missing)
+                restore || NavigatorPatchStore.requiresRecovery(context, profile)
                         ? NavigatorPatchStore.RECOVERY_REQUIRED
                         : NavigatorPatchStore.FAILED,
                 message == null ? "Package operation failed" : message);
+        NavigatorPatchStore.releaseInstall(context, profile);
+        MainActivity.requestPatchUiStateRefresh(context, true, "patch-failed");
+        NavigatorPackageInstaller.drainInstallQueue(context);
     }
 }

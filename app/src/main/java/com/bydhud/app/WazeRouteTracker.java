@@ -85,15 +85,6 @@ final class WazeRouteTracker {
         routeStore.clearRoute(WAZE_PACKAGE, reason, nowElapsedMs);
     }
 
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    void onVisualRouteEvidence(String reason, long nowElapsedMs) {
-        routeStore.updateFromVisualRouteEvidence(
-                WAZE_PACKAGE,
-                "waze_crop_visual",
-                reason,
-                nowElapsedMs);
-    }
-
     void onDirectRouteEvidence(String reason, long nowElapsedMs) {
         routeStore.updateFromVisualRouteEvidence(
                 WAZE_PACKAGE,

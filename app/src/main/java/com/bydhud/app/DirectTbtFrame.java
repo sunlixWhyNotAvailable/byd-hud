@@ -8,6 +8,8 @@ import java.util.List;
 public final class DirectTbtFrame {
     private final int rawManeuverType;
     private final int amapManeuver;
+    private final int amapBroadcastManeuver;
+    private final int roundaboutExitNumber;
     private final int bydManeuver;
     private final int distanceMeters;
     private final String roadText;
@@ -18,6 +20,7 @@ public final class DirectTbtFrame {
     private final List<Lane> lanes;
     private final AlertOverlay alertOverlay;
     private final TripMetrics tripMetrics;
+    private final SpeedLimit speedLimit;
 
     public DirectTbtFrame(
             int rawManeuverType,
@@ -33,7 +36,8 @@ public final class DirectTbtFrame {
             AlertOverlay alertOverlay) {
         this(rawManeuverType, amapManeuver, bydManeuver, distanceMeters,
                 roadText, cueText, displayText, maneuverPng, lanePng, lanes,
-                alertOverlay, TripMetrics.empty());
+                alertOverlay, TripMetrics.empty(), SpeedLimit.inactive(),
+                amapManeuver, 0);
     }
 
     public DirectTbtFrame(
@@ -49,8 +53,32 @@ public final class DirectTbtFrame {
             List<Lane> lanes,
             AlertOverlay alertOverlay,
             TripMetrics tripMetrics) {
+        this(rawManeuverType, amapManeuver, bydManeuver, distanceMeters,
+                roadText, cueText, displayText, maneuverPng, lanePng, lanes,
+                alertOverlay, tripMetrics, SpeedLimit.inactive(),
+                amapManeuver, 0);
+    }
+
+    DirectTbtFrame(
+            int rawManeuverType,
+            int amapManeuver,
+            int bydManeuver,
+            int distanceMeters,
+            String roadText,
+            String cueText,
+            String displayText,
+            byte[] maneuverPng,
+            byte[] lanePng,
+            List<Lane> lanes,
+            AlertOverlay alertOverlay,
+            TripMetrics tripMetrics,
+            SpeedLimit speedLimit,
+            int amapBroadcastManeuver,
+            int roundaboutExitNumber) {
         this.rawManeuverType = rawManeuverType;
         this.amapManeuver = Math.max(0, amapManeuver);
+        this.amapBroadcastManeuver = Math.max(0, amapBroadcastManeuver);
+        this.roundaboutExitNumber = clamp(roundaboutExitNumber, 0, 10);
         this.bydManeuver = Math.max(0, bydManeuver);
         this.distanceMeters = Math.max(0, distanceMeters);
         this.roadText = safeText(roadText);
@@ -62,6 +90,7 @@ public final class DirectTbtFrame {
                 lanes == null ? Collections.emptyList() : lanes));
         this.alertOverlay = alertOverlay == null ? AlertOverlay.inactive() : alertOverlay;
         this.tripMetrics = tripMetrics == null ? TripMetrics.empty() : tripMetrics;
+        this.speedLimit = speedLimit == null ? SpeedLimit.inactive() : speedLimit;
     }
 
     public static DirectTbtFrame empty() {
@@ -75,6 +104,14 @@ public final class DirectTbtFrame {
 
     public int getAmapManeuver() {
         return amapManeuver;
+    }
+
+    public int getAmapBroadcastManeuver() {
+        return amapBroadcastManeuver;
+    }
+
+    public int getRoundaboutExitNumber() {
+        return roundaboutExitNumber;
     }
 
     public int getBydManeuver() {
@@ -121,16 +158,22 @@ public final class DirectTbtFrame {
         return tripMetrics;
     }
 
+    public SpeedLimit getSpeedLimit() {
+        return speedLimit;
+    }
+
     DirectTbtFrame withAlertOverlay(AlertOverlay overlay) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
-                lanes, overlay, tripMetrics);
+                lanes, overlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
     }
 
     DirectTbtFrame withManeuverPng(byte[] png) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, png, lanePng,
-                lanes, alertOverlay, tripMetrics);
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
     }
 
     boolean hasLaneGuidance() {
@@ -141,13 +184,87 @@ public final class DirectTbtFrame {
         if (other == null || !other.hasLaneGuidance()) return this;
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng,
-                other.lanePng, other.lanes, alertOverlay, tripMetrics);
+                other.lanePng, other.lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
     }
 
     DirectTbtFrame withTripMetrics(TripMetrics metrics) {
         return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
                 distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
-                lanes, alertOverlay, metrics);
+                lanes, alertOverlay, metrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
+    }
+
+    DirectTbtFrame withSpeedLimit(SpeedLimit value) {
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, value,
+                amapBroadcastManeuver, roundaboutExitNumber);
+    }
+
+    DirectTbtFrame withDistanceMeters(int value) {
+        int normalized = Math.max(0, value);
+        if (normalized == distanceMeters) return this;
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                normalized, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
+    }
+
+    DirectTbtFrame withNavigationText(String road, String cue) {
+        if (road.equals(roadText) && cue.equals(cueText)) return this;
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, road, cue, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                amapBroadcastManeuver, roundaboutExitNumber);
+    }
+
+    DirectTbtFrame withVehicleTbt(int broadcastManeuver, int exitNumber) {
+        return new DirectTbtFrame(rawManeuverType, amapManeuver, bydManeuver,
+                distanceMeters, roadText, cueText, displayText, maneuverPng, lanePng,
+                lanes, alertOverlay, tripMetrics, speedLimit,
+                broadcastManeuver, exitNumber);
+    }
+
+    /** Canonical direct-channel speed-limit state; zero is an explicit clear. */
+    public static final class SpeedLimit {
+        private static final SpeedLimit INACTIVE = new SpeedLimit(0, 0, "", 0L);
+
+        private final int displayValue;
+        private final int kph;
+        private final String unit;
+        private final long eventElapsedMs;
+
+        public SpeedLimit(int displayValue, int kph, String unit, long eventElapsedMs) {
+            this.displayValue = displayValue > 0 && displayValue <= 300 ? displayValue : 0;
+            this.kph = kph > 0 && kph <= 300 ? kph : 0;
+            this.unit = this.displayValue == 0 ? "" : safeText(unit);
+            this.eventElapsedMs = Math.max(0L, eventElapsedMs);
+        }
+
+        public static SpeedLimit inactive() {
+            return INACTIVE;
+        }
+
+        public boolean isActive() {
+            return displayValue > 0;
+        }
+
+        public int getDisplayValue() {
+            return displayValue;
+        }
+
+        public int getKph() {
+            return kph;
+        }
+
+        public String getUnit() {
+            return unit;
+        }
+
+        public long getEventElapsedMs() {
+            return eventElapsedMs;
+        }
     }
 
     /** Structured trip totals carried independently from the current maneuver. */
@@ -252,16 +369,34 @@ public final class DirectTbtFrame {
         return value == null ? "" : value;
     }
 
+    private static int clamp(int value, int minimum, int maximum) {
+        return Math.max(minimum, Math.min(maximum, value));
+    }
+
     /** Lane metadata used by field 29 of the cluster payload. */
     public static final class Lane {
+        public static final int NO_RECOMMENDATION = 255;
         private final int direction;
         private final boolean recommended;
         private final String rawDirections;
+        private final int amapCode;
+        private final int amapRecommendationCode;
 
         public Lane(int direction, boolean recommended, String rawDirections) {
             this.direction = direction;
             this.recommended = recommended;
             this.rawDirections = safeText(rawDirections);
+            this.amapCode = legacyAmapCode(direction);
+            this.amapRecommendationCode = recommended ? this.amapCode : NO_RECOMMENDATION;
+        }
+
+        /** Creates a lane with the complete and selected Instrument direction codes. */
+        public Lane(int amapCode, int amapRecommendationCode, String rawDirections) {
+            this.direction = amapCode;
+            this.recommended = amapRecommendationCode != NO_RECOMMENDATION;
+            this.rawDirections = safeText(rawDirections);
+            this.amapCode = amapCode;
+            this.amapRecommendationCode = amapRecommendationCode;
         }
 
         public int getDirection() {
@@ -277,33 +412,70 @@ public final class DirectTbtFrame {
         }
 
         public int getAmapCode() {
+            return amapCode;
+        }
+
+        public int getAmapRecommendationCode() {
+            return amapRecommendationCode;
+        }
+
+        static int legacyAmapCode(int direction) {
             if (direction == 3) return 3;
             if (direction == 2) return 4;
             return 0;
         }
+
+        /** Instrument's compact lane vocabulary; returns -1 for an unrepresentable set. */
+        static int instrumentCodeForMask(int mask) {
+            switch (mask) {
+                case 1: return 0; // S
+                case 2: return 1; // L
+                case 3: return 2; // S+L
+                case 4: return 3; // R
+                case 5: return 4; // S+R
+                case 8: return 5; // U-left
+                case 6: return 6; // L+R
+                case 7: return 7; // S+L+R
+                case 16: return 8; // U-right
+                case 9: return 9; // S+U-left
+                case 17: return 10; // S+U-right
+                case 10: return 11; // L+U-left
+                case 20: return 12; // R+U-right
+                case 11: return 16; // S+L+U-left
+                case 12: return 17; // R+U-left
+                case 14: return 18; // L+R+U-left
+                case 13: return 19; // S+R+U-left
+                case 18: return 20; // L+U-right
+                default: return -1;
+            }
+        }
+
     }
 
     /** Alert state is an overlay; navigation lanes remain on the parent frame. */
     public static final class AlertOverlay {
         private static final AlertOverlay INACTIVE =
-                new AlertOverlay(false, -1, 0, "", null, false);
+                new AlertOverlay(false, -1, 0, false, "", null, false);
 
         private final boolean active;
         private final int id;
         private final int distanceMeters;
+        private final boolean distanceKnown;
         private final String displayText;
         private final byte[] maneuverPng;
-        private final boolean useRouteNative;
+        private final boolean useRouteFrame;
 
         private AlertOverlay(boolean active, int id, int distanceMeters,
+                             boolean distanceKnown,
                              String displayText, byte[] maneuverPng,
-                             boolean useRouteNative) {
+                             boolean useRouteFrame) {
             this.active = active;
             this.id = id;
             this.distanceMeters = Math.max(0, distanceMeters);
+            this.distanceKnown = distanceKnown;
             this.displayText = safeText(displayText);
             this.maneuverPng = cloneBytes(maneuverPng);
-            this.useRouteNative = useRouteNative;
+            this.useRouteFrame = useRouteFrame;
         }
 
         public static AlertOverlay inactive() {
@@ -312,12 +484,14 @@ public final class DirectTbtFrame {
 
         public static AlertOverlay active(
                 int id, int distanceMeters, String displayText, byte[] maneuverPng) {
-            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng, false);
+            return new AlertOverlay(true, id, distanceMeters, distanceMeters >= 0,
+                    displayText, maneuverPng, false);
         }
 
-        AlertOverlay withRouteNative(boolean enabled) {
-            if (!active || useRouteNative == enabled) return this;
-            return new AlertOverlay(true, id, distanceMeters, displayText, maneuverPng, enabled);
+        AlertOverlay withRouteFrame(boolean enabled) {
+            if (!active || useRouteFrame == enabled) return this;
+            return new AlertOverlay(true, id, distanceMeters, distanceKnown,
+                    displayText, maneuverPng, enabled);
         }
 
         public boolean isActive() {
@@ -332,6 +506,10 @@ public final class DirectTbtFrame {
             return distanceMeters;
         }
 
+        public boolean isDistanceKnown() {
+            return distanceKnown;
+        }
+
         public String getDisplayText() {
             return displayText;
         }
@@ -340,8 +518,8 @@ public final class DirectTbtFrame {
             return maneuverPng.clone();
         }
 
-        public boolean useRouteNative() {
-            return useRouteNative;
+        public boolean useRouteFrame() {
+            return useRouteFrame;
         }
     }
 }

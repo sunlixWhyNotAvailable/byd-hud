@@ -170,11 +170,6 @@ final class WazeAccessibilityParser {
     }
 
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
-    static WazeAccessibilityGeometry geometry(String payload) {
-        return WazeAccessibilityGeometry.fromPayload(payload);
-    }
-
-    //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static NavParserResult arrivalResult(String packageName, String destination,
             String fallbackRoad, String reason, int confidence) {
         String cleanDestination = cap(

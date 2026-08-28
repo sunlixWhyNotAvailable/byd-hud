@@ -21,6 +21,7 @@ final class NavCaptureStore {
     private static final String RAW_EVENTS_FILE = "raw_nav_events.jsonl";
     private static final String SNAPSHOTS_FILE = "nav_snapshots.jsonl";
     private static final String SOMEIP_TX_FILE = "someip_tx.jsonl";
+    private static final String TBT_TX_FILE = "tbt_tx.jsonl";
     private static final SimpleDateFormat LOCAL_TS_FORMAT =
             new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSZ", Locale.US);
     static final long MAX_LOG_BYTES = 2L * 1024L * 1024L;
@@ -88,6 +89,10 @@ final class NavCaptureStore {
 
     static void writeSomeIpTx(Context context, String targetDay, String line) {
         append(context, targetDay, SOMEIP_TX_FILE, line);
+    }
+
+    static void writeTbtTx(Context context, String targetDay, String line) {
+        append(context, targetDay, TBT_TX_FILE, line);
     }
 
     //keeps elapsed and wall-clock times together so pulled raw logs can be correlated without anchor math.

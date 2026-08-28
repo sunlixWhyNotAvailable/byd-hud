@@ -24,6 +24,50 @@ public final class ShareShutdownSourceContractTest {
     }
 
     @Test
+    public void shareUsesBoundedCheckpointAndStableStaging() throws IOException {
+        String source = source("LogShareZip.java");
+        String create = between(source,
+                "static synchronized Result create(",
+                "//Removes completed and partial archives");
+        String writer = source("WazeCaptureDebugWriter.java");
+
+        assertTrue(source.contains("WRITER_CHECKPOINT_TIMEOUT_MS = 2_000L"));
+        assertTrue(writer.contains("boolean awaitCheckpoint(long timeoutMs)"));
+        assertTrue(writer.contains("TimeUnit.MILLISECONDS"));
+        assertTrue(writer.contains("boolean awaitIdle()"));
+        assertTrue(create.contains("awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS)"));
+        assertTrue(create.contains("copySnapshotToStaging"));
+        assertFalse(create.contains("lockTopologyRead"));
+        assertTrue(create.indexOf("unlockTopologyWrite")
+                < create.indexOf("writeZip(part, snapshot)"));
+        assertTrue(create.contains("deleteTree(staging)"));
+        assertTrue(source.contains("checkCancelled();"));
+    }
+
+    @Test
+    public void shareUiIsCancellableAndCopyIsCompact() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String begin = between(source,
+                "fun beginStorageShare(days: List<String>)",
+                "fun runLogcatAction(");
+        String shareEffect = between(source,
+                "LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination)",
+                "LaunchedEffect(configurationShareBusy, configurationShareDestination)");
+        assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
+        assertFalse(shareEffect.contains("NonCancellable"));
+        assertTrue(shareEffect.contains("runInterruptible(Dispatchers.IO)"));
+        assertTrue(source.contains("OperationProgressStack("));
+        assertTrue(source.contains("storageShareTerminalPhase = \"CANCELLED\""));
+        assertTrue(source.contains("waitingForWrites = \"Очікування записів\""));
+        assertTrue(source.contains("archiving = \"Archiving\""));
+        assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));
+        assertTrue(source.contains("patchWazeAlerts = \"Alerts\""));
+        assertTrue(source.contains("patchNotChecked = \"перевір\""));
+        assertTrue(source.contains("patchNotChecked = \"check\""));
+        assertTrue(source.contains("\"Стабільність\" else \"Stability\""));
+    }
+
+    @Test
     public void persistentRuntimeStopDoesNotStartService() throws IOException {
         String source = source("HudRuntimeService.java");
         String method = between(source,
@@ -47,6 +91,42 @@ public final class ShareShutdownSourceContractTest {
     }
 
     @Test
+    public void shutdownAndExitWaitsForRecorderWithoutBlockingMain() throws IOException {
+        String source = source("MainActivity.java");
+        String shutdown = between(source,
+                "private void shutdownAndExit(",
+                "private void finishAfterStop(");
+        String exit = between(source,
+                "private void exitAndFinish()",
+                "//stops runtime-owned work");
+
+        assertTrue(source.contains("private void stopRecorderAsync(String action,"));
+        assertTrue(shutdown.contains("stopRecorderAsync(\"shutdown\", () ->"));
+        assertTrue(exit.contains("stopRecorderAsync(\"exit\", () ->"));
+        assertTrue(shutdown.contains("if (exitRequested)"));
+        assertTrue(exit.contains("if (exitRequested)"));
+        assertFalse(shutdown.contains("LogcatRecorder.stop(this)"));
+        assertFalse(exit.contains("LogcatRecorder.stop(this)"));
+    }
+
+    @Test
+    public void storageRetirementStopsRecorderBeforeDeletingItsDay() throws IOException {
+        String source = source("MainActivity.java");
+        String method = between(source,
+                "public ComposeDeleteDayResult composeDeleteStorageDay(",
+                "//Runs one retained batch");
+
+        assertTrue(method.contains("LogcatRecorder.hasSessionForDay(day)"));
+        assertTrue(method.contains("LogcatRecorder.stopAsync(this"));
+        assertTrue(method.contains("boolean logcatUsesDay"));
+        assertTrue(method.contains("boolean restartLogcat"));
+        assertTrue(method.indexOf("logcatStop.await")
+                < method.indexOf("NavigationLogStorage.retireStorageDay"));
+        assertTrue(method.contains("logcat did not stop; deletion aborted"));
+        assertTrue(method.contains("if (restartLogcat && logcatStopped)"));
+    }
+
+    @Test
     public void wazeRouteGenerationDoesNotInvalidateBoundCarHost() throws IOException {
         String source = source("WazeDirectChannel.java");
         String terminal = between(source,
@@ -63,10 +143,17 @@ public final class ShareShutdownSourceContractTest {
     }
 
     private static String source(String fileName) throws IOException {
+        return sourcePath("app/src/main/java/com/bydhud/app/" + fileName);
+    }
+
+    private static String sourcePath(String relativePath) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
-        Path file = root.resolve("app/src/main/java/com/bydhud/app").resolve(fileName);
+        Path file = root.resolve(relativePath);
         if (!Files.isRegularFile(file)) {
-            file = root.resolve("src/main/java/com/bydhud/app").resolve(fileName);
+            String withoutApp = relativePath.startsWith("app/")
+                    ? relativePath.substring("app/".length())
+                    : relativePath;
+            file = root.resolve(withoutApp);
         }
         return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
     }

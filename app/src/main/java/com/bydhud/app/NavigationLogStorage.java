@@ -21,7 +21,6 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.locks.ReentrantReadWriteLock;
@@ -53,10 +52,6 @@ final class NavigationLogStorage {
     private static final long RETENTION_BATCH_TIME_MS = 150L;
     private static final long RETENTION_BATCH_PAUSE_MS = 20L;
     private static final long PUBLIC_DIR_CACHE_TTL_MS = 30000L;
-    private static final String SCREEN_PREFIX = "screen_";
-    private static final String PNG_SUFFIX = ".png";
-    private static final String MISSING_MANEUVERS_DIR = "missing-maneuvers";
-    private static final String MISSING_LANES_DIR = "missing-lanes";
     private static boolean retentionWorkerRunning;
     private static RetentionRequest pendingRetentionRequest;
     private static boolean tombstoneCleanupRunning;
@@ -337,13 +332,12 @@ final class NavigationLogStorage {
         }
         String activeDay = activeNavCaptureDay();
         String activeLogcatDay = LogcatRecorder.activeStartDay();
-        WazeCropCapture.RetentionState crop = WazeCropCapture.currentRetentionState();
-        String activeCropDay = crop.active ? crop.day : "";
-        return withWriteLock(() -> snapshotAccessibleStorageLocked(
-                context.getApplicationContext(), activeDay, activeLogcatDay, activeCropDay));
+        Context app = context.getApplicationContext();
+        List<StorageRoot> roots = withWriteLock(() -> accessibleRootsLocked(app));
+        return withReadLock(() -> snapshotAccessibleStorageLocked(
+                roots, activeDay, activeLogcatDay));
     }
 
-    //Caller stops active Waze/logcat first; Waze restart must replace its cached sessionDir.
     //Atomically disconnects every accessible fragment before any recursive deletion begins.
     static DayRetirement retireStorageDay(Context context, String day) {
         String safeDay = day == null ? "" : day.trim();
@@ -399,17 +393,23 @@ final class NavigationLogStorage {
         }
         Context app = context.getApplicationContext();
         Thread worker = new Thread(() -> {
+            boolean changed = false;
             try {
                 List<File> tombstones = new ArrayList<>();
                 for (File root : rootFiles(accessibleRootsLocked(app))) {
                     tombstones.addAll(findRetiredTombstones(root));
                 }
+                changed = !tombstones.isEmpty();
                 for (File tombstone : tombstones) {
                     deleteRecursively(tombstone, tombstone.getParentFile(), null);
                 }
             } finally {
                 synchronized (TOMBSTONE_CLEANUP_LOCK) {
                     tombstoneCleanupRunning = false;
+                }
+                if (changed) {
+                    MainActivity.requestStorageRefreshAfterMutation(
+                            app, "retired-day-cleanup");
                 }
             }
         }, "BydHudTombstoneCleanup");
@@ -437,7 +437,7 @@ final class NavigationLogStorage {
         return publicLogsPath();
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
+    //keeps historical crop sessions discoverable after their runtime was retired.
     static String publicWazeCropPath() {
         return PUBLIC_ROOT + "/<yyyymmdd>/" + WAZE_CROP_DIR
                 + "/<session>/screen_*.png";
@@ -450,22 +450,18 @@ final class NavigationLogStorage {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isActiveNavCaptureDay(String day) {
-        WazeCropCapture.RetentionState crop = WazeCropCapture.currentRetentionState();
         return isActiveNavCaptureDayForTest(
                 day,
                 activeNavCaptureDay(),
-                LogcatRecorder.activeStartDay(),
-                crop.active ? crop.day : "");
+                LogcatRecorder.activeStartDay());
     }
 
     static boolean isActiveNavCaptureDayForTest(
             String day,
             String currentDay,
-            String activeLogcatDay,
-            String activeCropDay) {
+            String activeLogcatDay) {
         return day != null && (day.equals(currentDay)
                 || day.equals(activeLogcatDay)
-                || day.equals(activeCropDay)
                 || hasActiveDirectSessionForDay(day, activeDirectSessionsSnapshot()));
     }
 
@@ -481,35 +477,8 @@ final class NavigationLogStorage {
                 context.getApplicationContext(),
                 activeNavCaptureDay(),
                 LogcatRecorder.activeStartDay(),
-                "",
-                "",
-                "",
                 retentionLimitBytes(context),
                 "general",
-                null));
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    static void enforceNavCaptureRetention(
-            Context context,
-            String activeSessionDir,
-            String activeSessionName,
-            String preserveScreenshotName) {
-        if (context == null) {
-            return;
-        }
-        if (!shouldRunRetentionNow()) {
-            return;
-        }
-        scheduleNavCaptureRetention(new RetentionRequest(
-                context.getApplicationContext(),
-                activeNavCaptureDay(),
-                LogcatRecorder.activeStartDay(),
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
-                retentionLimitBytes(context),
-                "active-session",
                 null));
     }
 
@@ -522,56 +491,24 @@ final class NavigationLogStorage {
                 context.getApplicationContext(),
                 activeNavCaptureDay(),
                 LogcatRecorder.activeStartDay(),
-                "",
-                "",
-                "",
                 retentionLimitBytes(context),
                 safePathSegment(reason, "manual"),
                 onComplete));
     }
 
     //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    static void enforceNavCaptureRetentionForTest(
-            File root,
-            String activeDay,
-            String activeSessionDir,
-            String activeSessionName,
-            String preserveScreenshotName,
-            long maxBytes) {
-        runNavCaptureRetention(
-                root,
-                activeDay,
-                "",
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
-                maxBytes,
-                null);
-    }
-
     //exposes active-logcat protection to host-side retention probes.
     static void enforceNavCaptureRetentionForTest(
             File root,
             String activeDay,
             String activeLogcatDay,
-            String activeSessionDir,
-            String activeSessionName,
-            String preserveScreenshotName,
             long maxBytes) {
         runNavCaptureRetention(
                 root,
                 activeDay,
                 activeLogcatDay,
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
                 maxBytes,
                 null);
-    }
-
-    //marks active frame work so retention can avoid deleting during parser-critical sections.
-    static void beginCaptureFrame() {
-        lockTopologyRead();
     }
 
     //captures one coalesced retention request so worker threads do not touch UI or capture state.
@@ -579,9 +516,6 @@ final class NavigationLogStorage {
         final Context context;
         final String activeDay;
         final String activeLogcatDay;
-        final String activeSessionDir;
-        final String activeSessionName;
-        final String preserveScreenshotName;
         final long maxBytes;
         final String reason;
         final Runnable onComplete;
@@ -590,18 +524,12 @@ final class NavigationLogStorage {
                 Context context,
                 String activeDay,
                 String activeLogcatDay,
-                String activeSessionDir,
-                String activeSessionName,
-                String preserveScreenshotName,
                 long maxBytes,
                 String reason,
                 Runnable onComplete) {
             this.context = context;
             this.activeDay = activeDay;
             this.activeLogcatDay = activeLogcatDay;
-            this.activeSessionDir = activeSessionDir;
-            this.activeSessionName = activeSessionName;
-            this.preserveScreenshotName = preserveScreenshotName;
             this.maxBytes = maxBytes;
             this.reason = safePathSegment(reason, "unknown");
             this.onComplete = onComplete;
@@ -702,33 +630,18 @@ final class NavigationLogStorage {
     private static final class ActiveRetentionState {
         final String activeDay;
         final String activeLogcatDay;
-        final String activeCropDay;
-        final String activeCropSession;
-        final String preserveScreenshotName;
         final Set<String> activeDirectSessions;
 
         ActiveRetentionState(
                 String activeDay,
                 String activeLogcatDay,
-                String activeCropDay,
-                String activeCropSession,
-                String preserveScreenshotName,
                 Set<String> activeDirectSessions) {
             this.activeDay = activeDay == null ? "" : activeDay;
             this.activeLogcatDay = activeLogcatDay == null ? "" : activeLogcatDay;
-            this.activeCropDay = activeCropDay == null ? "" : activeCropDay;
-            this.activeCropSession = activeCropSession == null ? "" : activeCropSession;
-            this.preserveScreenshotName = preserveScreenshotName == null
-                    ? "" : preserveScreenshotName;
             this.activeDirectSessions = activeDirectSessions == null
                     ? Collections.emptySet()
                     : Collections.unmodifiableSet(new HashSet<>(activeDirectSessions));
         }
-    }
-
-    //marks frame completion so deferred retention can run during quieter periods.
-    static void endCaptureFrame() {
-        unlockTopologyRead();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -862,45 +775,37 @@ final class NavigationLogStorage {
         if (beforeBytes <= request.maxBytes) {
             return;
         }
-        RetentionStats stats = new RetentionStats(
-                request.context, beforeBytes, request.maxBytes);
-        WazeCropCapture.RetentionState liveCrop = WazeCropCapture.currentRetentionState();
-        String activeDay = activeNavCaptureDay();
-        String activeLogcatDay = LogcatRecorder.retentionActiveStartDay();
-        String activeSessionDay = liveCrop.active ? liveCrop.day : request.activeDay;
-        String activeSessionDir = liveCrop.active
-                ? WAZE_CROP_DIR
-                : request.activeSessionDir;
-        String activeSessionName = liveCrop.active
-                ? liveCrop.sessionName
-                : request.activeSessionName;
-        String preserveScreenshotName = liveCrop.active
-                ? liveCrop.preserveScreenshotName
-                : request.preserveScreenshotName;
-        runNavCaptureRetention(
-                roots,
-                activeDay,
-                activeLogcatDay,
-                activeSessionDay,
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
-                activeDirectSessionsSnapshot(),
-                request.maxBytes,
-                stats);
-        RetentionOutcome outcome = new RetentionOutcome(
-                beforeBytes,
-                Math.max(0L, beforeBytes - stats.deletedBytes),
-                stats);
-        logRetention(request.context, "retention_start reason=" + request.reason
-                + " bytes=" + outcome.beforeBytes
-                + " maxBytes=" + request.maxBytes);
-        logRetention(request.context, "retention_end reason=" + request.reason
-                + " files=" + outcome.stats.deletedFiles
-                + " bytesDeleted=" + outcome.stats.deletedBytes
-                + " beforeBytes=" + outcome.beforeBytes
-                + " afterBytes=" + outcome.afterBytes
-                + " elapsedMs=" + outcome.stats.elapsedMs());
+        try {
+            RetentionStats stats = new RetentionStats(
+                    request.context, beforeBytes, request.maxBytes);
+            String activeDay = activeNavCaptureDay();
+            String activeLogcatDay = LogcatRecorder.retentionActiveStartDay();
+            runNavCaptureRetention(
+                    roots,
+                    activeDay,
+                    activeLogcatDay,
+                    activeDirectSessionsSnapshot(),
+                    request.maxBytes,
+                    stats);
+            RetentionOutcome outcome = new RetentionOutcome(
+                    beforeBytes,
+                    Math.max(0L, beforeBytes - stats.deletedBytes),
+                    stats);
+            logRetention(request.context, "retention_start reason=" + request.reason
+                    + " bytes=" + outcome.beforeBytes
+                    + " maxBytes=" + request.maxBytes);
+            logRetention(request.context, "retention_end reason=" + request.reason
+                    + " files=" + outcome.stats.deletedFiles
+                    + " bytesDeleted=" + outcome.stats.deletedBytes
+                    + " beforeBytes=" + outcome.beforeBytes
+                    + " afterBytes=" + outcome.afterBytes
+                    + " elapsedMs=" + outcome.stats.elapsedMs());
+        } finally {
+            if (request.onComplete == null) {
+                MainActivity.requestStorageRefreshAfterMutation(
+                        request.context, "retention-" + request.reason);
+            }
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -908,9 +813,6 @@ final class NavigationLogStorage {
             File root,
             String activeDay,
             String activeLogcatDay,
-            String activeSessionDir,
-            String activeSessionName,
-            String preserveScreenshotName,
             long maxBytes,
             RetentionStats stats) {
         if (root == null) {
@@ -922,10 +824,6 @@ final class NavigationLogStorage {
                 roots,
                 activeDay,
                 activeLogcatDay,
-                activeDay,
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
                 activeDirectSessionsSnapshot(),
                 maxBytes,
                 stats);
@@ -935,10 +833,6 @@ final class NavigationLogStorage {
             List<File> roots,
             String activeDay,
             String activeLogcatDay,
-            String activeSessionDay,
-            String activeSessionDir,
-            String activeSessionName,
-            String preserveScreenshotName,
             Set<String> activeDirectSessions,
             long maxBytes,
             RetentionStats stats) {
@@ -953,28 +847,13 @@ final class NavigationLogStorage {
                 roots,
                 activeDay,
                 activeLogcatDay,
-                activeSessionDay,
-                activeSessionDir,
-                activeSessionName,
-                preserveScreenshotName,
-                activeDirectSessions);
-        ActiveRetentionState plannedActive = new ActiveRetentionState(
-                safePathSegment(activeDay, ""),
-                safePathSegment(activeLogcatDay, ""),
-                WAZE_CROP_DIR.equals(safePathSegment(activeSessionDir, ""))
-                        ? safePathSegment(activeSessionDay, "")
-                        : "",
-                WAZE_CROP_DIR.equals(safePathSegment(activeSessionDir, ""))
-                        ? safePathSegment(activeSessionName, "")
-                        : "",
-                safePathSegment(preserveScreenshotName, ""),
                 activeDirectSessions);
         long accountedBytes = beforeBytes;
         for (RetentionCandidate candidate : candidates) {
             if (accountedBytes <= maxBytes) {
                 return;
             }
-            DetachedCandidate detached = detachRetentionCandidate(candidate, plannedActive);
+            DetachedCandidate detached = detachRetentionCandidate(candidate);
             if (detached == null) {
                 continue;
             }
@@ -998,21 +877,12 @@ final class NavigationLogStorage {
             List<File> roots,
             String activeDay,
             String activeLogcatDay,
-            String activeSessionDay,
-            String activeSessionDir,
-            String activeSessionName,
-            String preserveScreenshotName,
             Set<String> activeDirectSessions) {
         String safeActiveDay = safePathSegment(activeDay, "");
         String safeActiveLogcatDay = safePathSegment(activeLogcatDay, "");
-        String safeActiveSessionDay = safePathSegment(activeSessionDay, "");
-        String safeSessionDir = safePathSegment(activeSessionDir, "");
-        String safeSessionName = safePathSegment(activeSessionName, "");
-        String safePreserveScreenshot = safePathSegment(preserveScreenshotName, "");
         List<RetentionCandidate> days = new ArrayList<>();
         List<RetentionCandidate> directSessions = new ArrayList<>();
         List<RetentionCandidate> cropSessions = new ArrayList<>();
-        List<RetentionCandidate> screenshots = new ArrayList<>();
 
         for (File root : roots) {
             File[] children = root == null ? null : root.listFiles();
@@ -1024,7 +894,6 @@ final class NavigationLogStorage {
                         || !isCanonicalDescendant(root, child, true)
                         || child.getName().equals(safeActiveDay)
                         || child.getName().equals(safeActiveLogcatDay)
-                        || child.getName().equals(safeActiveSessionDay)
                         || hasActiveDirectSessionForDay(child.getName(), activeDirectSessions)) {
                     continue;
                 }
@@ -1040,50 +909,7 @@ final class NavigationLogStorage {
                         root, day, WAZE_DIRECT_DIR, activeDirectSessions, directSessions);
                 collectDirectSessionCandidates(
                         root, day, GMAPS_DIRECT_DIR, activeDirectSessions, directSessions);
-            }
-        }
-
-        if (WAZE_CROP_DIR.equals(safeSessionDir) && !safeActiveSessionDay.isEmpty()
-                && !safeSessionName.isEmpty()) {
-            for (File root : roots) {
-                File parent = new File(
-                        new File(root, safeActiveSessionDay), WAZE_CROP_DIR);
-                File[] sessions = parent.listFiles();
-                if (sessions == null || !isCanonicalDescendant(root, parent, false)) {
-                    continue;
-                }
-                for (File session : sessions) {
-                    if (session != null && session.isDirectory()
-                            && !session.getName().equals(safeSessionName)
-                            && isCanonicalDescendant(parent, session, true)) {
-                        cropSessions.add(candidateForDirectory(
-                                root,
-                                session,
-                                safeActiveSessionDay,
-                                "crop-session",
-                                safeActiveSessionDay + "/" + WAZE_CROP_DIR
-                                        + "/" + session.getName()));
-                    }
-                }
-
-                File activeSession = new File(parent, safeSessionName);
-                File[] files = activeSession.listFiles();
-                if (files == null || !isCanonicalDescendant(parent, activeSession, true)) {
-                    continue;
-                }
-                for (File file : files) {
-                    if (file == null || !file.isFile()
-                            || !isCaptureFramePng(file.getName())
-                            || file.getName().equals(safePreserveScreenshot)
-                            || !isCanonicalDescendant(activeSession, file, true)) {
-                        continue;
-                    }
-                    screenshots.add(candidateForScreenshot(
-                            root,
-                            safeActiveSessionDay,
-                            activeSession,
-                            file));
-                }
+                collectHistoricalCropSessionCandidates(root, day, cropSessions);
             }
         }
 
@@ -1093,13 +919,12 @@ final class NavigationLogStorage {
         days.sort(oldestFirst);
         directSessions.sort(oldestFirst);
         cropSessions.sort(oldestFirst);
-        screenshots.sort(oldestFirst);
+
         List<RetentionCandidate> result = new ArrayList<>(
-                days.size() + directSessions.size() + cropSessions.size() + screenshots.size());
+                days.size() + directSessions.size() + cropSessions.size());
         result.addAll(days);
         result.addAll(directSessions);
         result.addAll(cropSessions);
-        result.addAll(screenshots);
         return result;
     }
 
@@ -1128,6 +953,25 @@ final class NavigationLogStorage {
         }
     }
 
+    private static void collectHistoricalCropSessionCandidates(
+            File root,
+            File day,
+            List<RetentionCandidate> candidates) {
+        File parent = new File(day, WAZE_CROP_DIR);
+        File[] sessions = parent.listFiles();
+        if (sessions == null || !isCanonicalDescendant(day, parent, true)) {
+            return;
+        }
+        for (File session : sessions) {
+            if (session == null || !session.isDirectory()
+                    || !isCanonicalDescendant(parent, session, true)) {
+                continue;
+            }
+            candidates.add(candidateForDirectory(
+                    root, session, day.getName(), "crop-session", ""));
+        }
+    }
+
     private static RetentionCandidate candidateForDirectory(
             File root,
             File directory,
@@ -1144,69 +988,13 @@ final class NavigationLogStorage {
                 directory.lastModified());
     }
 
-    private static RetentionCandidate candidateForScreenshot(
-            File root,
-            String day,
-            File activeSession,
-            File screenshot) {
-        List<File> members = new ArrayList<>();
-        members.add(screenshot);
-        addScreenshotArtifactMembers(
-                new File(activeSession, MISSING_MANEUVERS_DIR), screenshot.getName(), members);
-        addScreenshotArtifactMembers(
-                new File(activeSession, MISSING_LANES_DIR), screenshot.getName(), members);
-        long bytes = 0L;
-        long lastModified = screenshot.lastModified();
-        for (File member : members) {
-            bytes = saturatedAdd(bytes, Math.max(0L, member.length()));
-            lastModified = Math.min(lastModified, member.lastModified());
-        }
-        return new RetentionCandidate(
-                root,
-                members,
-                day,
-                "screenshot",
-                day + "/" + WAZE_CROP_DIR + "/" + activeSession.getName(),
-                bytes,
-                lastModified);
-    }
-
-    private static void addScreenshotArtifactMembers(
-            File bucketDir,
-            String screenshotName,
-            List<File> members) {
-        if (bucketDir == null || !bucketDir.isDirectory()) {
-            return;
-        }
-        String base = stripPngSuffix(screenshotName) + ".cell_";
-        File copiedScreenshot = new File(bucketDir, screenshotName);
-        if (copiedScreenshot.isFile()
-                && isCanonicalDescendant(bucketDir, copiedScreenshot, true)) {
-            members.add(copiedScreenshot);
-        }
-        File[] files = bucketDir.listFiles();
-        if (files == null) {
-            return;
-        }
-        for (File file : files) {
-            if (file != null && file.isFile() && file.getName().startsWith(base)
-                    && isCanonicalDescendant(bucketDir, file, true)) {
-                members.add(file);
-            }
-        }
-    }
-
     private static DetachedCandidate detachRetentionCandidate(
-            RetentionCandidate candidate,
-            ActiveRetentionState plannedActive) {
+            RetentionCandidate candidate) {
         if (candidate == null || candidate.members.isEmpty()) {
             return null;
         }
         return withWriteLock(() -> {
-            ActiveRetentionState active = currentActiveRetentionState(
-                    plannedActive.activeCropDay,
-                    plannedActive.activeCropSession,
-                    plannedActive.preserveScreenshotName);
+            ActiveRetentionState active = currentActiveRetentionState();
             if (isProtectedRetentionCandidate(candidate, active)) {
                 return null;
             }
@@ -1240,21 +1028,10 @@ final class NavigationLogStorage {
         });
     }
 
-    private static ActiveRetentionState currentActiveRetentionState(
-            String fallbackCropDay,
-            String fallbackCropSession,
-            String fallbackPreserveScreenshot) {
-        WazeCropCapture.RetentionState crop = WazeCropCapture.currentRetentionState();
-        String cropDay = crop.active ? crop.day : fallbackCropDay;
-        String cropSession = crop.active ? crop.sessionName : fallbackCropSession;
-        String preserveScreenshot = crop.active
-                ? crop.preserveScreenshotName : fallbackPreserveScreenshot;
+    private static ActiveRetentionState currentActiveRetentionState() {
         return new ActiveRetentionState(
                 activeNavCaptureDay(),
                 LogcatRecorder.retentionActiveStartDay(),
-                cropDay,
-                cropSession,
-                preserveScreenshot,
                 activeDirectSessionsSnapshot());
     }
 
@@ -1264,26 +1041,11 @@ final class NavigationLogStorage {
         if ("day".equals(candidate.kind)) {
             return candidate.day.equals(active.activeDay)
                     || candidate.day.equals(active.activeLogcatDay)
-                    || candidate.day.equals(active.activeCropDay)
                     || hasActiveDirectSessionForDay(
                             candidate.day, active.activeDirectSessions);
         }
         if ("direct-session".equals(candidate.kind)) {
             return active.activeDirectSessions.contains(candidate.directSessionKey);
-        }
-        if ("crop-session".equals(candidate.kind)) {
-            File primary = candidate.primary();
-            File session = primary;
-            return session != null
-                    && active.activeCropDay.equals(candidate.day)
-                    && active.activeCropSession.equals(session.getName());
-        }
-        if ("screenshot".equals(candidate.kind)) {
-            File primary = candidate.primary();
-            return primary != null
-                    && active.activeCropDay.equals(candidate.day)
-                    && active.activeCropSession.equals(primary.getParentFile().getName())
-                    && active.preserveScreenshotName.equals(primary.getName());
         }
         return false;
     }
@@ -1438,21 +1200,6 @@ final class NavigationLogStorage {
                 : day + "/" + sessionDir + "/" + safeSessionName;
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean isCaptureFramePng(String name) {
-        String lower = name == null ? "" : name.toLowerCase(Locale.US);
-        return lower.endsWith(PNG_SUFFIX)
-                && (name.startsWith(SCREEN_PREFIX) || name.startsWith("source_frame_"));
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static String stripPngSuffix(String fileName) {
-        if (fileName != null && fileName.toLowerCase(Locale.US).endsWith(PNG_SUFFIX)) {
-            return fileName.substring(0, fileName.length() - PNG_SUFFIX.length());
-        }
-        return fileName == null ? "" : fileName;
-    }
-
     private static List<StorageRoot> accessibleRootsLocked(Context context) {
         File publicRoot = publicRootDir();
         File privateRoot = privateRootDir(context);
@@ -1471,11 +1218,9 @@ final class NavigationLogStorage {
     }
 
     private static StorageSnapshot snapshotAccessibleStorageLocked(
-            Context context,
+            List<StorageRoot> roots,
             String activeDay,
-            String activeLogcatDay,
-            String activeCropDay) {
-        List<StorageRoot> roots = accessibleRootsLocked(context);
+            String activeLogcatDay) {
         Set<String> activeDirectSessions = activeDirectSessionsSnapshot();
         Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
         long totalBytes = 0L;
@@ -1517,7 +1262,6 @@ final class NavigationLogStorage {
                     day.bytes,
                     day.name.equals(activeDay)
                             || day.name.equals(activeLogcatDay)
-                            || day.name.equals(activeCropDay)
                             || hasActiveDirectSessionForDay(
                                     day.name, activeDirectSessions),
                     day.hasPublicStorage,

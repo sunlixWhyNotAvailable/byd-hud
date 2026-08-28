@@ -4,6 +4,8 @@ import static org.junit.Assert.assertEquals;
 
 import org.junit.Test;
 
+import java.util.Collections;
+
 public final class HudDisplayPolicyTest {
     @Test
     public void clampsOnlyZeroThroughTen() {
@@ -16,8 +18,28 @@ public final class HudDisplayPolicyTest {
     }
 
     @Test
+    public void activeDirectFrameUsesSharedDistanceBoundaries() {
+        int[] source = {0, 10, 11, 12};
+        int[] clamped = {11, 11, 11, 12};
+        for (int index = 0; index < source.length; index++) {
+            DirectTbtFrame frame = frame(source[index]);
+            assertEquals(clamped[index],
+                    HudDisplayPolicy.applyActiveFrame(frame, true).getDistanceMeters());
+            assertEquals(source[index],
+                    HudDisplayPolicy.applyActiveFrame(frame, false).getDistanceMeters());
+        }
+    }
+
+    @Test
     public void clearStateKeepsZeroDistance() {
         HudState clear = new HudState().copyForClear();
         assertEquals(0, HudDisplayPolicy.apply(clear, true).distanceToIntersection);
+    }
+
+    private static DirectTbtFrame frame(int distanceMeters) {
+        return new DirectTbtFrame(
+                11, 3, 9, distanceMeters, "Road", "Turn right", "Road",
+                new byte[]{1}, new byte[0], Collections.emptyList(),
+                DirectTbtFrame.AlertOverlay.inactive());
     }
 }

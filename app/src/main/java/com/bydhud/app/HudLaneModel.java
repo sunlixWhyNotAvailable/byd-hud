@@ -57,9 +57,11 @@ final class HudLaneModel {
         LaneSpec[] lanes = parse(state);
         StringBuilder out = new StringBuilder();
         for (LaneSpec lane : lanes) {
-            out.append(lane.iconId)
+            int code = lane.instrumentCode();
+            if (code < 0) return "";
+            out.append(code)
                     .append(',')
-                    .append(lane.recommended ? lane.iconId : 255)
+                    .append(lane.recommendationCode())
                     .append('|');
         }
         return out.toString();
@@ -105,6 +107,14 @@ final class HudLaneModel {
             if (lane.hasCustomLaneResource()) {
                 return true;
             }
+        }
+        return false;
+    }
+
+    static boolean hasUnrepresentableSemanticDirections(HudState state) {
+        LaneSpec[] lanes = parse(state);
+        for (LaneSpec lane : lanes) {
+            if (lane.instrumentCode() < 0) return true;
         }
         return false;
     }
@@ -248,6 +258,12 @@ final class HudLaneModel {
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private static int compoundIconId(LanePart[] parts) {
+        // Bitmap resource IDs are a separate catalog. Preserve its existing
+        // U-turn fallback; numeric output uses the complete set in parts.
+        for (LanePart part : parts) {
+            if (part.is("UL")) return 5;
+            if (part.is("UR")) return 8;
+        }
         if (parts.length == 2) {
             LanePart left = parts[0];
             LanePart right = parts[1];
@@ -278,7 +294,7 @@ final class HudLaneModel {
             if (left.is("Ls") && right.is("R")) {
                 return ICON_SMOOTH_LEFT;
             }
-            return -1;
+            return instrumentCodeForParts(parts);
         }
         if (parts.length == 3
                 && parts[0].is("S")
@@ -286,7 +302,26 @@ final class HudLaneModel {
                 && parts[2].is("R")) {
             return 7;
         }
-        return -1;
+        return instrumentCodeForParts(parts);
+    }
+
+    private static int instrumentCodeForParts(LanePart[] parts) {
+        int mask = 0;
+        for (LanePart part : parts) {
+            mask |= part.instrumentMask();
+        }
+        return DirectTbtFrame.Lane.instrumentCodeForMask(mask);
+    }
+
+    private static int recommendationCodeForParts(LanePart[] parts) {
+        int mask = 0;
+        for (LanePart part : parts) {
+            if (part.recommended) {
+                mask |= part.instrumentMask();
+            }
+        }
+        int code = DirectTbtFrame.Lane.instrumentCodeForMask(mask);
+        return code < 0 ? DirectTbtFrame.Lane.NO_RECOMMENDATION : code;
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -331,6 +366,21 @@ final class HudLaneModel {
             this.label = label;
             this.parts = parts == null ? new LanePart[0] : parts;
             this.customResourceName = customResourceName == null ? "" : customResourceName;
+        }
+
+        int instrumentCode() {
+            if (parts.length > 0) {
+                return instrumentCodeForParts(parts);
+            }
+            return iconId >= 0 && iconId <= 8 ? iconId : -1;
+        }
+
+        int recommendationCode() {
+            if (parts.length == 0) {
+                int code = instrumentCode();
+                return recommended && code >= 0 ? code : DirectTbtFrame.Lane.NO_RECOMMENDATION;
+            }
+            return recommendationCodeForParts(parts);
         }
 
         //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -390,8 +440,10 @@ final class HudLaneModel {
                     || raw.endsWith("*") || raw.endsWith("!");
             String token = raw.replace("*", "").replace("!", "");
             token = canonicalToken(token);
+            if ("U".equals(token) || "UTURN".equals(token)) token = "UL";
             if (!"S".equals(token) && !"L".equals(token) && !"R".equals(token)
-                    && !"Ls".equals(token) && !"Rs".equals(token)) {
+                    && !"Ls".equals(token) && !"Rs".equals(token)
+                    && !"UL".equals(token) && !"UR".equals(token)) {
                 return null;
             }
             return new LanePart(token, recommended);
@@ -410,6 +462,15 @@ final class HudLaneModel {
         //keeps this predicate explicit so safety checks can be audited without tracing callers.
         boolean isSmooth() {
             return "Ls".equals(token) || "Rs".equals(token);
+        }
+
+        int instrumentMask() {
+            if ("S".equals(token)) return 1;
+            if ("L".equals(token) || "Ls".equals(token)) return 2;
+            if ("R".equals(token) || "Rs".equals(token)) return 4;
+            if ("UL".equals(token)) return 8;
+            if ("UR".equals(token)) return 16;
+            return 0;
         }
     }
 

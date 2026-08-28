@@ -46,6 +46,7 @@ final class HudState {
     double navigationRatio = 0.250d;
     boolean includeNativeArrow = true;
     boolean includeLaneBitmap = false;
+    HudCheckState hudCheck;
     boolean turnBitmapHiddenLocked = false;
     int turnBitmapHiddenMode = TURN_BITMAP_BLANK_TRANSPARENT_1;
 
@@ -75,6 +76,7 @@ final class HudState {
         state.navigationRatio = navigationRatio;
         state.includeNativeArrow = includeNativeArrow;
         state.includeLaneBitmap = includeLaneBitmap;
+        state.hudCheck = hudCheck;
         state.turnBitmapHiddenLocked = turnBitmapHiddenLocked;
         state.turnBitmapHiddenMode = turnBitmapHiddenMode;
         return state;
@@ -108,6 +110,7 @@ final class HudState {
         state.navigationRatio = 0.0d;
         state.includeNativeArrow = true;
         state.includeLaneBitmap = false;
+        state.hudCheck = null;
         return state;
     }
 

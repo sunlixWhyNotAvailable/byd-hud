@@ -3,7 +3,11 @@ package com.bydhud.app;
 import android.content.Context;
 
 import java.io.File;
+import java.util.Collections;
 import java.util.List;
+import java.util.UUID;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipFile;
 
 import io.sentry.Attachment;
@@ -12,8 +16,10 @@ import io.sentry.Sentry;
 import io.sentry.SentryEvent;
 import io.sentry.SentryLevel;
 import io.sentry.android.core.SentryAndroid;
+import io.sentry.hints.SubmissionResult;
 import io.sentry.protocol.Message;
 import io.sentry.protocol.SentryId;
+import io.sentry.util.HintUtils;
 
 // Sends only an explicitly selected diagnostic archive; no automatic telemetry is enabled.
 final class SentryLogUploader {
@@ -31,30 +37,59 @@ final class SentryLogUploader {
         }
     }
 
+    static final class SubmissionResultTracker implements SubmissionResult {
+        private final CountDownLatch completion = new CountDownLatch(1);
+        private volatile boolean success;
+
+        @Override
+        public void setResult(boolean result) {
+            success = result;
+            completion.countDown();
+        }
+
+        @Override
+        public boolean isSuccess() {
+            return success;
+        }
+
+        boolean await(long timeoutMs) throws InterruptedException {
+            return completion.await(timeoutMs, TimeUnit.MILLISECONDS);
+        }
+    }
+
     private SentryLogUploader() {
     }
 
+    static String newUploadId() {
+        return UUID.randomUUID().toString().substring(0, 8);
+    }
+
     static Result upload(Context context, File archive, List<String> days) {
+        return upload(context, archive, days, "");
+    }
+
+    static Result upload(Context context, File archive, List<String> days, String uploadId) {
         return upload(context, archive,
                 "BYD HUD manual navigation log upload",
                 "navigation_logs",
-                days == null ? "" : String.join(",", days));
+                days == null ? "" : String.join(",", days), uploadId);
     }
 
     static Result uploadConfiguration(Context context, File archive) {
         return upload(context, archive,
                 "BYD HUD manual vehicle configuration upload",
                 "vehicle_configuration",
-                "");
+                "", "");
     }
 
     private static Result upload(Context context, File archive, String messageText,
-            String uploadType, String selectedDays) {
+            String uploadType, String selectedDays, String uploadId) {
         String validation = validate(BuildConfig.SENTRY_DSN, archive);
         if (!validation.isEmpty()) {
             LogShareZip.deleteArtifact(archive);
             return new Result(false, "", validation);
         }
+        boolean transportSucceeded = false;
         try {
             SentryAndroid.init(context.getApplicationContext(), options -> {
                 options.setDsn(BuildConfig.SENTRY_DSN);
@@ -81,31 +116,54 @@ final class SentryLogUploader {
             });
 
             SentryEvent event = buildManualUploadEvent(
-                    messageText, uploadType, selectedDays);
+                    messageText, uploadType, selectedDays, uploadId);
 
             Hint hint = new Hint();
             hint.addAttachment(new Attachment(
                     archive.getAbsolutePath(), archive.getName(), "application/zip"));
+            SubmissionResultTracker submissionResult = new SubmissionResultTracker();
+            HintUtils.setTypeCheckHint(hint, submissionResult);
             SentryId eventId = Sentry.captureEvent(event, hint);
             if (SentryId.EMPTY_ID.equals(eventId)) {
-                return new Result(false, "", "Sentry did not accept the upload");
+                return new Result(false, "", "Sentry did not accept the upload; archive retained: "
+                        + archive.getName());
             }
-            Sentry.flush(30_000L);
+            boolean callbackCompleted = submissionResult.await(30_000L);
+            if (!callbackCompleted || !submissionResult.isSuccess()) {
+                String detail = callbackCompleted
+                        ? "Sentry did not deliver the upload"
+                        : "Sentry upload timed out";
+                return new Result(false, "", detail + "; archive retained: "
+                        + archive.getName());
+            }
+            transportSucceeded = true;
             return new Result(true, eventId.toString(), "uploaded");
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return new Result(false, "", "Upload interrupted; archive retained: "
+                    + archive.getName());
         } catch (Throwable error) {
             return new Result(false, "", error.getClass().getSimpleName() + ": "
-                    + String.valueOf(error.getMessage()));
+                    + String.valueOf(error.getMessage()) + "; archive retained: "
+                    + archive.getName());
         } finally {
             try {
                 Sentry.close();
             } catch (Throwable ignored) {
             }
-            LogShareZip.deleteArtifact(archive);
+            if (transportSucceeded) {
+                LogShareZip.deleteArtifact(archive);
+            }
         }
     }
 
     static SentryEvent buildManualUploadEvent(
             String messageText, String uploadType, String selectedDays) {
+        return buildManualUploadEvent(messageText, uploadType, selectedDays, "");
+    }
+
+    static SentryEvent buildManualUploadEvent(
+            String messageText, String uploadType, String selectedDays, String uploadId) {
         SentryEvent event = new SentryEvent();
         Message message = new Message();
         message.setMessage(messageText);
@@ -117,6 +175,10 @@ final class SentryLogUploader {
         event.setTag("upload_type", uploadType);
         if (selectedDays != null && !selectedDays.isEmpty()) {
             event.setTag("selected_days", selectedDays);
+        }
+        if (uploadId != null && !uploadId.isEmpty()) {
+            event.setTag("upload_id", uploadId);
+            event.setFingerprints(Collections.singletonList("manual-navigation-upload:" + uploadId));
         }
         return event;
     }

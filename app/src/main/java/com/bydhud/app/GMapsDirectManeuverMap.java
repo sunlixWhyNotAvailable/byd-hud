@@ -20,7 +20,8 @@ final class GMapsDirectManeuverMap {
         switch (name) {
             case "DEPART":
                 clearRoundaboutSequence();
-                return result(wireValue, name, 0, SOURCE_BLANK);
+                // DEPART is blank on RoadInfo, but the dashboard contract uses AMap 20.
+                return result(wireValue, name, 20, SOURCE_BLANK);
             case "NAME_CHANGE":
             case "STRAIGHT":
             case "FERRY_BOAT":
@@ -109,15 +110,15 @@ final class GMapsDirectManeuverMap {
             case "ROUNDABOUT_ENTER_AND_EXIT_CCW_U_TURN":
                 return exactRoundabout(wireValue, name, false, 24);
             case "ROUNDABOUT_EXIT_CW":
-                return result(wireValue, name, 22, lastClockwiseRoundaboutSource);
+                return result(wireValue, name, 22, lastClockwiseRoundaboutSource, 18);
             case "ROUNDABOUT_EXIT_CCW":
-                return result(wireValue, name, 25, lastCounterClockwiseRoundaboutSource);
+                return result(wireValue, name, 25, lastCounterClockwiseRoundaboutSource, 12);
             case "ROUNDABOUT_ENTER_AND_EXIT_CW":
             case "ROUNDABOUT_ENTER_CW":
-                return result(wireValue, name, 22, SOURCE_BLANK);
+                return result(wireValue, name, 22, SOURCE_BLANK, 17);
             case "ROUNDABOUT_ENTER_AND_EXIT_CCW":
             case "ROUNDABOUT_ENTER_CCW":
-                return result(wireValue, name, 25, SOURCE_BLANK);
+                return result(wireValue, name, 25, SOURCE_BLANK, 11);
             default:
                 clearRoundaboutSequence();
                 return result(wireValue, name, 0, SOURCE_BLANK);
@@ -136,11 +137,17 @@ final class GMapsDirectManeuverMap {
             lastCounterClockwiseRoundaboutSource = source;
             lastClockwiseRoundaboutSource = SOURCE_BLANK;
         }
-        return result(wireValue, name, clockwise ? 22 : 25, source);
+        return result(wireValue, name, clockwise ? 22 : 25, source, source);
     }
 
     private static Result result(int wireValue, String name, int intermediate, int source) {
-        return new Result(wireValue, name, intermediate, source, nativeFor(intermediate));
+        return result(wireValue, name, intermediate, source, intermediate);
+    }
+
+    private static Result result(int wireValue, String name, int intermediate,
+            int source, int amapBroadcastManeuver) {
+        return new Result(wireValue, name, intermediate, source, nativeFor(intermediate),
+                amapBroadcastManeuver, 0);
     }
 
     /*
@@ -179,14 +186,19 @@ final class GMapsDirectManeuverMap {
         final int intermediate;
         final int fallbackSource;
         final int nativeManeuver;
+        final int amapBroadcastManeuver;
+        final int roundaboutExitNumber;
 
         Result(int wireValue, String maneuverName, int intermediate,
-               int fallbackSource, int nativeManeuver) {
+               int fallbackSource, int nativeManeuver,
+               int amapBroadcastManeuver, int roundaboutExitNumber) {
             this.wireValue = wireValue;
             this.maneuverName = maneuverName;
             this.intermediate = intermediate;
             this.fallbackSource = fallbackSource;
             this.nativeManeuver = nativeManeuver;
+            this.amapBroadcastManeuver = amapBroadcastManeuver;
+            this.roundaboutExitNumber = roundaboutExitNumber;
         }
     }
 }

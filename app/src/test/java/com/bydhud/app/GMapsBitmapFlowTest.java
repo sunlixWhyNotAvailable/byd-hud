@@ -7,9 +7,24 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 import java.util.Collections;
 
 public final class GMapsBitmapFlowTest {
+    @Test
+    public void turnPngBuildersShareTheHudGraphicPayloadClassMonitor() throws Exception {
+        Method oemBuilder = HudGraphicPayload.class.getDeclaredMethod(
+                "buildOemTurnPng", int.class);
+        Method turnBuilder = HudGraphicPayload.class.getDeclaredMethod(
+                "buildTurnPng", HudState.class);
+
+        assertTrue(Modifier.isStatic(oemBuilder.getModifiers()));
+        assertTrue(Modifier.isSynchronized(oemBuilder.getModifiers()));
+        assertTrue(Modifier.isStatic(turnBuilder.getModifiers()));
+        assertTrue(Modifier.isSynchronized(turnBuilder.getModifiers()));
+    }
+
     @Test
     public void departSelectsCachedGoogleBitmapWithoutViewIdFilter() {
         byte[] google = png(36, 36, 1);
@@ -71,6 +86,60 @@ public final class GMapsBitmapFlowTest {
         assertFalse(stale.isNewerThan(current));
         assertFalse(current.isNewerThan(current));
         assertTrue(newer.isNewerThan(current));
+    }
+
+    @Test
+    public void preFrameBitmapOnlyMatchesItsOrderedFrame() {
+        byte[] google = png(36, 36, 15);
+        byte[] fallback = png(72, 72, 16);
+        GMapsDirectChannel.ManeuverBitmap future =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "bqyl", google, 36, 36, 1_000L,
+                        7L, 1L, 3L, 9L);
+
+        assertEquals("fallback", GMapsDirectChannel.BitmapSelection.select(
+                8L, "DEPART", future, fallback, 1_000L, "matched").selected);
+        assertEquals("google", GMapsDirectChannel.BitmapSelection.select(
+                9L, "DEPART", future, fallback, 1_000L, "matched").selected);
+    }
+
+    @Test
+    public void renderGenerationRejectsStaleProducerFramesEvenWithNewerClock() {
+        byte[] oldPng = png(36, 36, 21);
+        byte[] newPng = png(36, 36, 22);
+        GMapsDirectChannel.ManeuverBitmap current =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", oldPng, 36, 36, 1_001L,
+                        7L, 12L);
+        GMapsDirectChannel.ManeuverBitmap stale =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", newPng, 36, 36, 9_999L,
+                        7L, 11L);
+        GMapsDirectChannel.ManeuverBitmap restart =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", newPng, 36, 36, 1L,
+                        8L, 1L);
+
+        assertFalse(stale.isNewerThan(current));
+        assertTrue(restart.isNewerThan(current));
+    }
+
+    @Test
+    public void legacyV3BitmapUsesBoundedTimestampWatermark() {
+        GMapsDirectChannel.ManeuverBitmap current =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", png(36, 36, 31), 36, 36, 2_000L,
+                        40L, 9L, 7L);
+        GMapsDirectChannel.ManeuverBitmap newerClock =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", png(36, 36, 32), 36, 36, 2_001L,
+                        1L, 1L, -1L);
+        GMapsDirectChannel.ManeuverBitmap staleClock =
+                new GMapsDirectChannel.ManeuverBitmap(
+                        "DEPART", "maneuver_image", png(36, 36, 33), 36, 36, 1_999L,
+                        99L, 99L, -1L);
+        assertTrue(newerClock.isNewerThan(current, false));
+        assertFalse(staleClock.isNewerThan(current, false));
     }
 
     @Test

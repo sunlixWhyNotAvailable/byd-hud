@@ -24,6 +24,7 @@ import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -39,8 +40,11 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
 import androidx.compose.material3.HorizontalDivider
@@ -53,6 +57,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -63,31 +68,53 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntRect
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupPositionProvider
+import androidx.compose.ui.window.PopupProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -114,20 +141,12 @@ private enum class RuntimeTab {
     Apps,
     Storage,
     Patch,
-    Logs,
-    Manual
+    HudCheck
 }
 
 private enum class Language {
     Ua,
     En
-}
-
-//defines class UI/state support so Compose code can keep rendering intent explicit.
-private enum class ManualMode {
-    Supported,
-    Lanes,
-    Raw
 }
 
 //models UpdateCheckState data here so transport and parser layers share a stable contract.
@@ -155,6 +174,8 @@ private enum class SentryUploadPhase {
     Success,
     Failure
 }
+
+private const val SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L
 
 //defines Palette UI/state support so Compose code can keep rendering intent explicit.
 private data class Palette(
@@ -186,8 +207,7 @@ private data class Copy(
     val subtitle: String,
     val main: String,
     val apps: String,
-    val logs: String,
-    val manual: String,
+    val hudCheck: String,
     val hudRunning: String,
     val hudIdle: String,
     val hudFailed: String,
@@ -223,8 +243,6 @@ private data class Copy(
     val betaTestingHint: String,
     val shutdown: String,
     val shutdownHint: String,
-    val screenCaptureChannel: String,
-    val screenCaptureChannelHint: String,
     val updateTitle: String,
     val updateCurrentVersion: String,
     val updateAvailableVersion: String,
@@ -239,7 +257,6 @@ private data class Copy(
     val notice: String,
     val wazeDirectNotice: String,
     val wazeSupportedVersions: String,
-    val screenCaptureUnsupportedNotice: String,
     val pngOutput: String,
     val pngHint: String,
     val nativeOutput: String,
@@ -250,10 +267,16 @@ private data class Copy(
     val distanceHint: String,
     val streetOutput: String,
     val streetHint: String,
+    val textTransliteration: String,
+    val textTransliterationHint: String,
     val textDirectionOutput: String,
     val textDirectionOutputHint: String,
     val showWazeAlerts: String,
     val showWazeAlertsHint: String,
+    val tbtWithoutHudOutput: String,
+    val tbtWithoutHudOutputHint: String,
+    val switchToTbtOnHudStart: String,
+    val switchToTbtOnHudStartHint: String,
     val showWholeRouteMetrics: String,
     val showWholeRouteMetricsHint: String,
     val showEta: String,
@@ -262,14 +285,18 @@ private data class Copy(
     val showRemainingTimeHint: String,
     val showRemainingDistance: String,
     val showRemainingDistanceHint: String,
-    val fullscreenDashboard: String,
-    val fullscreenDashboardHint: String,
+    val dashboardScreenMode: String,
+    val dashboardScreenModeHint: String,
+    val dashboardWidth: String,
+    val dashboardWidthHint: String,
     val dashboardHeight: String,
     val dashboardHeightHint: String,
+    val dashboardOffset: String,
+    val dashboardOffsetHint: String,
+    val dashboardScale: String,
+    val dashboardScaleHint: String,
     val smallDistanceClamp: String,
     val smallDistanceHint: String,
-    val roundaboutLeft: String,
-    val roundaboutHint: String,
     val appsHint: String,
     val lastScan: String,
     val refreshApps: String,
@@ -282,26 +309,30 @@ private data class Copy(
     val supported: String,
     val dashboardUnavailable: String,
     val logCandidate: String,
+    val navigatorAssetsNotice: String,
+    val navigatorAssetDownload: String,
+    val navigatorAssetInstall: String,
+    val navigatorAssetInstalled: String,
+    val navigatorAssetRetry: String,
+    val navigatorAssetRestore: String,
+    val navigatorAssetInstalling: String,
+    val navigatorAssetVerifying: String,
+    val navigatorAssetConfirmTitle: String,
+    val navigatorAssetConfirmText: String,
+    val navigatorAssetConfirmOk: String,
+    val navigatorAssetConfirmCancel: String,
+    val wazeFeatures: String,
+    val customSurface: String,
+    val customSurfaceHint: String,
     val hud: String,
     val log: String,
     val sendDashboard: String,
     val sendMain: String,
     val startAppFirst: String,
     val noBackgroundApps: String,
-    val logsHint: String,
-    val logcatRecorder: String,
-    val recorderStatus: String,
-    val waiting: String,
-    val logcatWaiting: String,
-    val logcatRecording: String,
-    val logcatSaving: String,
-    val logcatSaved: String,
     val startLogcat: String,
     val stopLogcat: String,
     val shareConfiguration: String,
-    val applicationState: String,
-    val navigationLogs: String,
-    val pathHint: String,
     val storage: String,
     val storageHint: String,
     val storageSettings: String,
@@ -365,26 +396,38 @@ private data class Copy(
     val patchConfirmText: String,
     val patchConfirmOk: String,
     val patchConfirmCancel: String,
-    val manualHint: String,
-    val manualHudOutput: String,
-    val supportedArrows: String,
-    val supportedArrowsHint: String,
-    val manualLanes: String,
-    val manualLanesHint: String,
-    val rawManeuverIds: String,
-    val rawManeuverHint: String,
-    val manualMode: String,
-    val manualModeHint: String,
-    val pngNumber: String,
-    val nativeNumber: String,
-    val distance: String,
-    val street: String,
-    val laneBitmap: String,
+    val hudCheckHint: String,
+    val basicOutput: String,
+    val basicOutputHint: String,
+    val extendedOutput: String,
+    val extendedOutputHint: String,
+    val checkManeuvers: String,
+    val checkManeuversHint: String,
+    val checkManeuversChannels: String,
+    val checkLanes: String,
+    val checkLanesHint: String,
+    val distanceMeters: String,
+    val checkDistanceHint: String,
+    val streetText: String,
+    val checkStreetHint: String,
+    val checkTransliteration: String,
+    val checkTrafficLight: String,
+    val checkTrafficLightHint: String,
+    val stockImage: String,
+    val bitmapImage: String,
+    val hudCheckRunning: String,
+    val hudCheckStopped: String,
+    val hudCheckStart: String,
+    val hudCheckStop: String,
+    val checkBaseline: String,
+    val currentField: String,
+    val checkAutomatic: String,
+    val checkManualCycle: String,
+    val checkManualCycleHint: String,
+    val checkCycle: String,
+    val checkExtendedNotice: String,
     val previous: String,
     val next: String,
-    val randomize: String,
-    val currentSelection: String,
-    val manualPreview: String
 )
 
 private data class ShareCopy(
@@ -396,6 +439,9 @@ private data class ShareCopy(
     val shareToSentry: String,
     val shareToAnotherApp: String,
     val cancel: String,
+    val waitingForWrites: String,
+    val copying: String,
+    val archiving: String,
     val uploadTitle: String,
     val preparing: String,
     val uploading: String,
@@ -408,6 +454,21 @@ private data class ShareCopy(
     val configurationUploadTitle: String,
     val configurationSuccess: String,
     val configurationFailure: String
+)
+
+private data class OperationCardSpec(
+    val key: String,
+    val title: String,
+    val phase: String,
+    val detail: String,
+    val startedAt: Long,
+    val busy: Boolean,
+    val stopEnabled: Boolean,
+    val closeEnabled: Boolean,
+    val failed: Boolean,
+    val success: Boolean,
+    val onStop: () -> Unit,
+    val onClose: () -> Unit
 )
 
 //defines PressFeedback UI/state support so Compose code can keep rendering intent explicit.
@@ -425,6 +486,8 @@ private const val SWITCH_CENTER_BEFORE_ACTION_MS = 120L
 
 //guards stalled switch actions so controls never stay blocked indefinitely.
 private const val SWITCH_PENDING_TIMEOUT_MS = 2_000L
+
+private const val FOREGROUND_UI_REFRESH_REQUEST_MS = 30_000L
 
 private const val PROJECT_REPOSITORY_URL = "https://github.com/sunlixWhyNotAvailable/byd-hud"
 
@@ -492,6 +555,7 @@ private fun ModalInputBlocker() {
                 indication = null,
                 onClick = {}
             )
+            .clearAndSetSemantics {}
     )
 }
 
@@ -500,8 +564,10 @@ private fun ModalInputBlocker() {
 private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var snapshot by remember { mutableStateOf(activity.composeSnapshot()) }
     var selectedTab by rememberSaveable { mutableStateOf(initialTab) }
+    var previousTab by remember { mutableStateOf(initialTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
@@ -514,9 +580,16 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         mutableStateOf<MainActivity.ComposeStorageShareSummary?>(null)
     }
     var storageShareDestination by remember { mutableStateOf<StorageShareDestination?>(null) }
+    var storageSharePhase by remember { mutableStateOf<LogShareZip.Phase?>(null) }
+    var storageShareStartedAt by rememberSaveable { mutableStateOf(0L) }
+    var storageShareOperationToken by rememberSaveable { mutableStateOf(0L) }
+    var storageShareTerminalPhase by rememberSaveable { mutableStateOf("") }
+    var storageShareTerminalDetail by rememberSaveable { mutableStateOf("") }
     var sentryUploadPhase by remember { mutableStateOf<SentryUploadPhase?>(null) }
     var sentryUploadEventId by remember { mutableStateOf("") }
     var sentryUploadError by remember { mutableStateOf("") }
+    var sentryUploadCooldownUntilMs by rememberSaveable { mutableStateOf(0L) }
+    var sentryUploadCooldownRemaining by remember { mutableIntStateOf(0) }
     var sentryUploadingConfiguration by remember { mutableStateOf(false) }
     var configurationShareBusy by remember { mutableStateOf(false) }
     var configurationShareVisible by rememberSaveable { mutableStateOf(false) }
@@ -524,9 +597,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         mutableStateOf<StorageShareDestination?>(null)
     }
     var logcatBusy by remember { mutableStateOf(false) }
-    var lastAppsScanRevision by remember { mutableStateOf(activity.composeAppsScanRevision()) }
     var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
-    var lastStorageRefreshRequestMs by remember { mutableStateOf(0L) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var betaChannelEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isBetaChannelEnabled(activity)) }
@@ -538,34 +609,50 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var pendingPatchFileConfirmProfile by rememberSaveable { mutableStateOf("") }
     var pendingPatchFilePickerProfile by rememberSaveable { mutableStateOf("") }
     var patchSourceError by rememberSaveable { mutableStateOf("") }
-    var patchActionPending by remember { mutableStateOf(false) }
+    var patchActionPendingProfiles by remember { mutableStateOf(emptySet<String>()) }
+    var pendingNavigatorAssetId by rememberSaveable { mutableStateOf("") }
+    var navigatorAssetActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
     val latestAutoUpdateCheckEnabled by rememberUpdatedState(autoUpdateCheckEnabled)
     val latestAppInForeground by rememberUpdatedState(appInForeground)
     val latestShowSetupDialog by rememberUpdatedState(showSetupDialog)
     val latestShowUpdateDialog by rememberUpdatedState(showUpdateDialog)
-    val palette = if (snapshot.darkTheme) darkPalette() else lightPalette()
-    val copy = if (snapshot.uaLanguage) uaCopy() else enCopy()
-    val shareCopy = shareCopy(copy.language)
+    val latestSelectedTab by rememberUpdatedState(selectedTab)
+    val palette = remember(snapshot.darkTheme) {
+        if (snapshot.darkTheme) darkPalette() else lightPalette()
+    }
+    val copy = remember(snapshot.uaLanguage) {
+        if (snapshot.uaLanguage) uaCopy() else enCopy()
+    }
+    val shareCopy = remember(copy.language) { shareCopy(copy.language) }
     val blockingUiFlow = when {
         showSetupDialog -> "setup"
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
-        storageShareBusy || storageShareSummary != null
-            || (sentryUploadPhase != null && !sentryUploadingConfiguration) -> "storage-share"
         configurationShareVisible || configurationShareBusy
             || (sentryUploadPhase != null && sentryUploadingConfiguration) -> "configuration-share"
-        pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty() -> "patch"
-        pendingPatchProfile.isNotEmpty() || patchActionPending || snapshot.patchOperation.busy -> "patch"
+        pendingNavigatorAssetId.isNotEmpty() || navigatorAssetActionPending -> "navigator-asset"
+        pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty()
+            || pendingPatchProfile.isNotEmpty() -> "patch"
         else -> ""
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun refresh() {
         val refreshed = activity.composeSnapshot()
-        snapshot = refreshed
-        liveHudStatus = refreshed.hudStatus
+        if (snapshot != refreshed) snapshot = refreshed
+        if (liveHudStatus != refreshed.hudStatus) liveHudStatus = refreshed.hudStatus
+    }
+
+    fun requestTabStateRefresh(tab: RuntimeTab, reason: String) {
+        when (tab) {
+            RuntimeTab.Apps -> activity.composeRequestRuntimeUiStateRefresh(false, reason)
+            RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
+            RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(reason)
+            RuntimeTab.Options,
+            RuntimeTab.HudCheck -> Unit
+        }
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -574,11 +661,71 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         refresh()
     }
 
+    fun startNavigatorAssetDownload(assetId: String) {
+        if (navigatorAssetActionPending) return
+        try {
+            activity.composeStartNavigatorAssetDownload(assetId)
+            refresh()
+        } catch (error: Exception) {
+            activity.composeAppendStatus("Navigator download failed: ${error.message}")
+            refresh()
+        }
+    }
+
+    fun installNavigatorAsset(assetId: String) {
+        if (navigatorAssetActionPending) return
+        if (!activity.composeCanInstallNavigatorApks()) {
+            activity.composeOpenNavigatorInstallPermission()
+            return
+        }
+        navigatorAssetActionPending = true
+        updateScope.launch {
+            try {
+                val destructive = withContext(Dispatchers.IO) {
+                    activity.composeNavigatorAssetRequiresDestructiveConfirm(assetId)
+                }
+                if (destructive) {
+                    pendingNavigatorAssetId = assetId
+                } else {
+                    withContext(Dispatchers.IO) {
+                        activity.composeInstallNavigatorAsset(assetId, false)
+                    }
+                }
+            } catch (error: Exception) {
+                activity.composeAppendStatus("Navigator install check failed: ${error.message}")
+            } finally {
+                navigatorAssetActionPending = false
+                refresh()
+            }
+        }
+    }
+
+    fun restoreNavigatorAsset(assetId: String) {
+        if (navigatorAssetActionPending) return
+        if (!activity.composeCanInstallNavigatorApks()) {
+            activity.composeOpenNavigatorInstallPermission()
+            return
+        }
+        navigatorAssetActionPending = true
+        updateScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    activity.composeRestoreNavigatorAsset(assetId)
+                }
+            } catch (error: Exception) {
+                activity.composeAppendStatus("Navigator restore failed: ${error.message}")
+            } finally {
+                navigatorAssetActionPending = false
+                refresh()
+            }
+        }
+    }
+
     val apkPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val profileId = pendingPatchFilePickerProfile
         pendingPatchFilePickerProfile = ""
         if (uri == null) {
-            patchActionPending = false
+            patchActionPendingProfiles = patchActionPendingProfiles - profileId
             return@rememberLauncherForActivityResult
         }
         if (profileId.isEmpty()) return@rememberLauncherForActivityResult
@@ -587,7 +734,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 val displayName = withContext(Dispatchers.IO) {
                     activity.composePatchSourceDisplayName(uri)
                 }
-                patchActionPending = true
+                patchActionPendingProfiles = patchActionPendingProfiles + profileId
                 withContext(Dispatchers.IO) {
                     activity.composeSelectPatchSource(profileId, uri, displayName)
                 }
@@ -599,7 +746,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     message.ifEmpty { copy.patchSelectionErrorText }
                 }
             } finally {
-                patchActionPending = false
+                patchActionPendingProfiles = patchActionPendingProfiles - profileId
             }
             refresh()
         }
@@ -659,9 +806,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
             return
         }
-        if (!activity.composeTryStartBlockingUiFlow("storage-share")) {
-            return
-        }
+        storageShareTerminalPhase = ""
+        storageShareTerminalDetail = ""
         storageShareDays = days
         storageShareBusy = true
         storageShareDestination = null
@@ -714,6 +860,24 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
+    LaunchedEffect(sentryUploadCooldownUntilMs) {
+        val deadline = sentryUploadCooldownUntilMs
+        if (deadline <= 0L) {
+            sentryUploadCooldownRemaining = 0
+            return@LaunchedEffect
+        }
+        while (true) {
+            val remainingMs = deadline - SystemClock.elapsedRealtime()
+            if (remainingMs <= 0L) break
+            sentryUploadCooldownRemaining = ((remainingMs + 999L) / 1000L)
+                .toInt()
+                .coerceIn(1, 30)
+            delay(minOf(1000L, remainingMs))
+        }
+        sentryUploadCooldownRemaining = 0
+        sentryUploadCooldownUntilMs = 0L
+    }
+
     LaunchedEffect(blockingUiFlow) {
         activity.composeReportMainUiState(blockingUiFlow)
     }
@@ -730,24 +894,48 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     }
 
     LaunchedEffect(selectedTab) {
-        activity.composeReportAppsTabSelected(selectedTab == RuntimeTab.Apps)
-        if (selectedTab == RuntimeTab.Apps) {
-            lastAppsScanRevision = activity.composeAppsScanRevision()
-            activity.composeRefreshApps()
+        if (previousTab == RuntimeTab.HudCheck && selectedTab != RuntimeTab.HudCheck) {
+            runAction { activity.composeHudCheckStop("tab-change") }
         }
-        if (selectedTab == RuntimeTab.Storage) {
-            activity.composeRequestStorageRefresh(false)
-            lastStorageRefreshRequestMs = SystemClock.elapsedRealtime()
-            refresh()
+        previousTab = selectedTab
+        val reason = "tab-${selectedTab.name.lowercase(Locale.ROOT)}"
+        requestTabStateRefresh(selectedTab, reason)
+    }
+
+    LaunchedEffect(snapshot.shareLaunchId, snapshot.shareLaunchDays) {
+        val launchId = snapshot.shareLaunchId
+        if (launchId <= handledStorageShareLaunchId || launchId == 0L) {
+            return@LaunchedEffect
         }
+        val sharedDays = snapshot.shareLaunchDays.toSet()
+        if (sharedDays.isNotEmpty()) {
+            selectedStorageDays = selectedStorageDays.filterNot { it in sharedDays }
+        }
+        handledStorageShareLaunchId = launchId
+        activity.composeAcknowledgeShareLaunch(launchId)
     }
 
     DisposableEffect(activity) {
+        activity.composeSetSnapshotInvalidationListener { refresh() }
         appInForeground = activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         val observer = LifecycleEventObserver { _, event ->
             //guard auto-check so background launches do not show update UI over a hidden app.
             when (event) {
-                Lifecycle.Event.ON_RESUME -> appInForeground = true
+                Lifecycle.Event.ON_RESUME -> {
+                    appInForeground = true
+                    when (latestSelectedTab) {
+                        RuntimeTab.Storage -> activity.composeRequestStorageRefresh(false)
+                        RuntimeTab.Patch -> activity.composeRequestPatchUiStateRefresh(
+                            false,
+                            "activity-resume-patch"
+                        )
+                        RuntimeTab.Apps -> activity.composeRequestPatchUiStateRefresh(
+                            "activity-resume-apps"
+                        )
+                        RuntimeTab.Options,
+                        RuntimeTab.HudCheck -> Unit
+                    }
+                }
                 Lifecycle.Event.ON_PAUSE,
                 Lifecycle.Event.ON_STOP,
                 Lifecycle.Event.ON_DESTROY -> appInForeground = false
@@ -755,7 +943,10 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             }
         }
         activity.lifecycle.addObserver(observer)
-        onDispose { activity.lifecycle.removeObserver(observer) }
+        onDispose {
+            activity.lifecycle.removeObserver(observer)
+            activity.composeSetSnapshotInvalidationListener(null)
+        }
     }
 
     LaunchedEffect(
@@ -786,33 +977,38 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
-    LaunchedEffect(Unit) {
+    LaunchedEffect(appInForeground) {
+        if (!appInForeground) {
+            return@LaunchedEffect
+        }
+        var lastBackgroundRequestAt = SystemClock.elapsedRealtime()
         while (true) {
             delay(1000L)
-            val now = SystemClock.elapsedRealtime()
-            if (selectedTab == RuntimeTab.Apps) {
-                val scanRevision = activity.composeAppsScanRevision()
-                if (scanRevision != lastAppsScanRevision) {
-                    lastAppsScanRevision = scanRevision
-                    refresh()
-                }
-                val deliveryStatus = activity.composeHudDeliveryStatus()
-                val nextHudStatus = if (deliveryStatus == "idle" && !snapshot.captureReady) {
-                    "failed"
-                } else {
-                    deliveryStatus
-                }
-                if (liveHudStatus != nextHudStatus) {
-                    liveHudStatus = nextHudStatus
-                }
-            } else {
-                refresh()
+            val assetStateChanging = snapshot.navigatorAssets.any {
+                    it.state == NavigatorAssetManager.DOWNLOADING
+                            || it.state == NavigatorAssetManager.VERIFYING
+                            || it.state == NavigatorAssetManager.INSTALL_REQUESTED
+                            || it.state == NavigatorAssetManager.UNINSTALL_REQUESTED
             }
-            if (selectedTab == RuntimeTab.Storage && !storageDeleteBusy) {
-                if (now - lastStorageRefreshRequestMs >= 5000L) {
-                    activity.composeRequestStorageRefresh(false)
-                    lastStorageRefreshRequestMs = now
+            val patchWasBusy = snapshot.patchOperations.any { it.busy }
+            val assetCacheMissing = snapshot.navigatorAssets.isEmpty()
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastBackgroundRequestAt >= FOREGROUND_UI_REFRESH_REQUEST_MS) {
+                activity.composeRequestRuntimeUiStateRefresh(false, "foreground-periodic")
+                if (assetCacheMissing) {
+                    activity.composeRequestPatchUiStateRefresh(
+                        false,
+                        "foreground-asset-bootstrap"
+                    )
                 }
+                lastBackgroundRequestAt = now
+            }
+            if (assetStateChanging || patchWasBusy) {
+                activity.composeRequestNavigatorAssetUiStateRefresh("foreground-asset-periodic")
+            }
+            val deliveryStatus = activity.composeHudDeliveryStatus()
+            if (liveHudStatus != deliveryStatus) {
+                liveHudStatus = deliveryStatus
             }
         }
     }
@@ -849,20 +1045,33 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         storageDeleteStep = 0
         storageDeleteTotal = 0
         selectedStorageDays = emptyList()
-        activity.composeRequestStorageRefresh(true)
         refresh()
     }
 
     LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination) {
         val destination = storageShareDestination
+        val operationToken = storageShareOperationToken
         if (!storageShareBusy || destination == null) {
             return@LaunchedEffect
         }
         try {
             if (destination == StorageShareDestination.Sentry) {
-                val result = withContext(Dispatchers.IO + NonCancellable) {
-                    activity.composeUploadStorageDaysToSentry(storageShareDays) {
-                        activity.runOnUiThread { sentryUploadPhase = SentryUploadPhase.Uploading }
+                val result = runInterruptible(Dispatchers.IO) {
+                    LogShareZip.attachProgressListener { phase ->
+                        activity.runOnUiThread { storageSharePhase = phase }
+                    }
+                    try {
+                        activity.composeUploadStorageDaysToSentry(
+                            storageShareDays,
+                            operationToken
+                        ) {
+                            activity.runOnUiThread {
+                                storageSharePhase = null
+                                sentryUploadPhase = SentryUploadPhase.Uploading
+                            }
+                        }
+                    } finally {
+                        LogShareZip.clearProgressListener()
                     }
                 }
                 sentryUploadEventId = result.eventId
@@ -874,22 +1083,42 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 }
                 activity.composeAppendStatus("Sentry log upload: ${result.detail}")
             } else {
-                val detail = withContext(Dispatchers.IO + NonCancellable) {
-                    activity.composeShareStorageDays(storageShareDays)
+                val detail = runInterruptible(Dispatchers.IO) {
+                    LogShareZip.attachProgressListener { phase ->
+                        activity.runOnUiThread { storageSharePhase = phase }
+                    }
+                    try {
+                        activity.composeShareStorageDays(storageShareDays, operationToken)
+                    } finally {
+                        LogShareZip.clearProgressListener()
+                    }
                 }
                 activity.composeAppendStatus("Storage share: $detail")
             }
+        } catch (cancelled: CancellationException) {
+            storageShareTerminalPhase = "CANCELLED"
+            storageShareTerminalDetail = if (copy.language == Language.Ua) {
+                "Операцію скасовано"
+            } else {
+                "Operation cancelled"
+            }
+            activity.composeAppendStatus("Storage share cancelled")
+            throw cancelled
         } catch (error: Exception) {
             val detail = error.message ?: error.javaClass.simpleName
+            storageShareTerminalPhase = "FAILED"
+            storageShareTerminalDetail = detail
             if (destination == StorageShareDestination.Sentry) {
                 sentryUploadError = detail
                 sentryUploadPhase = SentryUploadPhase.Failure
             }
             activity.composeAppendStatus("Storage share failed: $detail")
         } finally {
+            storageSharePhase = null
             storageShareBusy = false
             storageShareDays = emptyList()
             storageShareDestination = null
+            storageShareOperationToken = 0L
             refresh()
         }
     }
@@ -984,14 +1213,33 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         },
                         onShutdownClick = { runAction { activity.composeShutdownAndExit() } }
                     )
-                    RuntimeTab.Apps -> AppsTab(copy, palette, snapshot, activity, ::runAction)
+                    RuntimeTab.Apps -> AppsTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        activity = activity,
+                        runAction = ::runAction,
+                        onDownloadAsset = ::startNavigatorAssetDownload,
+                        onInstallAsset = ::installNavigatorAsset,
+                        onRestoreAsset = ::restoreNavigatorAsset
+                    )
                     RuntimeTab.Storage -> StorageTab(
                         copy = copy,
                         palette = palette,
                         snapshot = snapshot,
+                        configurationShareBusy = configurationShareBusy,
+                        logcatBusy = logcatBusy,
+                        onStartLogcat = { runLogcatAction(true) },
+                        onStopLogcat = { runLogcatAction(false) },
+                        onShareConfiguration = {
+                            if (!configurationShareBusy
+                                && activity.composeTryStartBlockingUiFlow("configuration-share")) {
+                                configurationShareVisible = true
+                            }
+                        },
                         sortOldestFirst = storageSortOldestFirst,
                         selectedDays = selectedStorageDays,
-                        storageBusy = storageDeleteBusy || storageShareBusy,
+                        storageActionBusy = storageDeleteBusy || storageShareBusy,
                         storageSortBusy = storageDeleteBusy,
                         onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },
                         onSortOldestFirst = { storageSortOldestFirst = it },
@@ -1009,36 +1257,22 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         },
                         onShareSelected = ::beginStorageShare
                     )
-                    RuntimeTab.Logs -> LogsTab(
-                        copy = copy,
-                        palette = palette,
-                        snapshot = snapshot,
-                        activity = activity,
-                        configurationShareBusy = configurationShareBusy,
-                        logcatBusy = logcatBusy,
-                        onStartLogcat = { runLogcatAction(true) },
-                        onStopLogcat = { runLogcatAction(false) },
-                        onShareConfiguration = {
-                            if (!configurationShareBusy
-                                && activity.composeTryStartBlockingUiFlow("configuration-share")) {
-                                configurationShareVisible = true
-                            }
-                        }
-                    )
                     RuntimeTab.Patch -> PatchTab(
                         copy = copy,
                         palette = palette,
                         snapshot = snapshot,
-                        actionPending = patchActionPending,
+                        actionPendingProfiles = patchActionPendingProfiles,
                         onSelectFile = { profileId ->
-                            if (!patchActionPending) pendingPatchFileConfirmProfile = profileId
+                            if (!patchActionPendingProfiles.contains(profileId)) {
+                                pendingPatchFileConfirmProfile = profileId
+                            }
                         },
                         onClear = { profileId ->
                             runAction { activity.composeClearPatchSource(profileId) }
                         },
                         onCheck = { profileId ->
-                            if (!patchActionPending) {
-                                patchActionPending = true
+                            if (!patchActionPendingProfiles.contains(profileId)) {
+                                patchActionPendingProfiles = patchActionPendingProfiles + profileId
                                 updateScope.launch {
                                     try {
                                         withContext(Dispatchers.IO) {
@@ -1047,7 +1281,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                                     } catch (error: Exception) {
                                         activity.composeAppendStatus("Patch check failed: ${error.message}")
                                     } finally {
-                                        patchActionPending = false
+                                        patchActionPendingProfiles =
+                                            patchActionPendingProfiles - profileId
                                     }
                                     refresh()
                                 }
@@ -1065,8 +1300,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         onRestore = { profileId ->
                             if (!activity.composeCanInstallNavigatorApks()) {
                                 activity.composeOpenNavigatorInstallPermission()
-                            } else if (!patchActionPending) {
-                                patchActionPending = true
+                            } else if (!patchActionPendingProfiles.contains(profileId)) {
+                                patchActionPendingProfiles = patchActionPendingProfiles + profileId
                                 updateScope.launch {
                                     try {
                                         withContext(Dispatchers.IO) {
@@ -1075,19 +1310,71 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                                     } catch (error: Exception) {
                                         activity.composeAppendStatus("Restore failed: ${error.message}")
                                     } finally {
-                                        patchActionPending = false
+                                        patchActionPendingProfiles =
+                                            patchActionPendingProfiles - profileId
                                     }
                                     refresh()
                                 }
                             }
                         }
                     )
-                    RuntimeTab.Manual -> ManualTab(copy, palette, snapshot, activity, ::runAction)
+                    RuntimeTab.HudCheck -> HudCheckTab(
+                        copy = copy,
+                        palette = palette,
+                        snapshot = snapshot,
+                        activity = activity,
+                        runAction = ::runAction
+                    )
                 }
             }
 
             BottomTabs(copy, palette, selectedTab) { selectedTab = it }
         }
+
+        OperationProgressStack(
+            copy = copy,
+            shareCopy = shareCopy,
+            palette = palette,
+            patchOperations = snapshot.patchOperations,
+            storageSharePhase = storageSharePhase,
+            storageShareTerminalPhase = storageShareTerminalPhase,
+            storageShareTerminalDetail = storageShareTerminalDetail,
+            storageShareStartedAt = storageShareStartedAt,
+            onCancelShare = {
+                activity.composeCancelStorageShareOperation(storageShareOperationToken)
+                storageShareTerminalPhase = "CANCELLED"
+                storageShareTerminalDetail = if (copy.language == Language.Ua) {
+                    "Операцію скасовано"
+                } else {
+                    "Operation cancelled"
+                }
+                storageShareBusy = false
+                if (sentryUploadPhase == SentryUploadPhase.Preparing) {
+                    sentryUploadPhase = null
+                }
+            },
+            onCloseShare = {
+                storageShareTerminalPhase = ""
+                storageShareTerminalDetail = ""
+                storageShareStartedAt = 0L
+            },
+            onCancelPatch = { profileId ->
+                updateScope.launch {
+                    withContext(Dispatchers.IO) {
+                        activity.composeCancelNavigatorPatch(profileId)
+                    }
+                    refresh()
+                }
+            },
+            onDismissPatch = { profileId ->
+                updateScope.launch {
+                    withContext(Dispatchers.IO) {
+                        activity.composeDismissNavigatorPatch(profileId)
+                    }
+                    refresh()
+                }
+            }
+        )
 
         if (showSetupDialog) {
             SetupReminderOverlay(
@@ -1137,11 +1424,11 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 navigator = row?.label ?: pendingPatchProfile,
                 destructive = pendingPatchDestructive,
                 onConfirm = {
-                    if (!patchActionPending) {
+                    if (!patchActionPendingProfiles.contains(pendingPatchProfile)) {
                         val profileId = pendingPatchProfile
                         val destructiveApproved = pendingPatchDestructive
                         pendingPatchProfile = ""
-                        patchActionPending = true
+                        patchActionPendingProfiles = patchActionPendingProfiles + profileId
                         updateScope.launch {
                             try {
                                 withContext(Dispatchers.IO) {
@@ -1153,7 +1440,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                             } catch (error: Exception) {
                                 activity.composeAppendStatus("Patch failed: ${error.message}")
                             } finally {
-                                patchActionPending = false
+                                patchActionPendingProfiles =
+                                    patchActionPendingProfiles - profileId
                             }
                             refresh()
                         }
@@ -1161,6 +1449,39 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 },
                 onDismiss = { pendingPatchProfile = "" }
             )
+        }
+
+        if (pendingNavigatorAssetId.isNotEmpty()) {
+            val asset = snapshot.navigatorAssets.firstOrNull { it.id == pendingNavigatorAssetId }
+            if (asset != null) {
+                NavigatorAssetConfirmOverlay(
+                    copy = copy,
+                    palette = palette,
+                    asset = asset,
+                    onConfirm = {
+                        if (!navigatorAssetActionPending) {
+                            val assetId = pendingNavigatorAssetId
+                            pendingNavigatorAssetId = ""
+                            navigatorAssetActionPending = true
+                            updateScope.launch {
+                                try {
+                                    withContext(Dispatchers.IO) {
+                                        activity.composeInstallNavigatorAsset(assetId, true)
+                                    }
+                                } catch (error: Exception) {
+                                    activity.composeAppendStatus(
+                                        "Navigator install failed: ${error.message}"
+                                    )
+                                } finally {
+                                    navigatorAssetActionPending = false
+                                }
+                                refresh()
+                            }
+                        }
+                    },
+                    onDismiss = { pendingNavigatorAssetId = "" }
+                )
+            }
         }
 
         if (pendingPatchFileConfirmProfile.isNotEmpty()) {
@@ -1190,10 +1511,6 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             )
         }
 
-        if (snapshot.patchOperation.busy) {
-            PatchProgressOverlay(copy, palette, snapshot.patchOperation)
-        }
-
         if (pendingStorageDeleteDays.isNotEmpty()) {
             StorageDeleteConfirmOverlay(
                 copy = copy,
@@ -1205,23 +1522,48 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
 
         storageShareSummary?.let { summary ->
+            val sentryCooldownActive = sentryUploadCooldownUntilMs > SystemClock.elapsedRealtime()
+            val sentryButtonRemaining = if (sentryCooldownActive) {
+                sentryUploadCooldownRemaining.coerceAtLeast(1)
+            } else {
+                0
+            }
             StorageShareDestinationOverlay(
                 copy = copy,
                 shareCopy = shareCopy,
                 palette = palette,
                 summary = summary,
                 onSentry = {
-                    storageShareSummary = null
-                    sentryUploadingConfiguration = false
-                    sentryUploadEventId = ""
-                    sentryUploadError = ""
-                    sentryUploadPhase = SentryUploadPhase.Preparing
-                    storageShareDestination = StorageShareDestination.Sentry
-                    storageShareBusy = true
+                    val now = SystemClock.elapsedRealtime()
+                    if (sentryUploadCooldownUntilMs <= now) {
+                        sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
+                        sentryUploadCooldownRemaining = 30
+                        storageShareSummary = null
+                        sentryUploadingConfiguration = false
+                        sentryUploadEventId = ""
+                        sentryUploadError = ""
+                        sentryUploadPhase = SentryUploadPhase.Preparing
+                        storageShareDestination = StorageShareDestination.Sentry
+                        storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
+                        storageShareStartedAt = System.currentTimeMillis()
+                        storageShareOperationToken = activity.composeBeginStorageShareOperation()
+                        storageShareTerminalPhase = ""
+                        storageShareBusy = true
+                    }
                 },
+                sentryButtonText = if (sentryButtonRemaining > 0) {
+                    sentryButtonRemaining.toString()
+                } else {
+                    shareCopy.shareToSentry
+                },
+                sentryButtonEnabled = sentryButtonRemaining == 0,
                 onAnotherApp = {
                     storageShareSummary = null
                     storageShareDestination = StorageShareDestination.Android
+                    storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
+                    storageShareStartedAt = System.currentTimeMillis()
+                    storageShareOperationToken = activity.composeBeginStorageShareOperation()
+                    storageShareTerminalPhase = ""
                     storageShareBusy = true
                 },
                 onCancel = {
@@ -1232,6 +1574,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
 
         sentryUploadPhase?.let { phase ->
+            if (storageSharePhase != null && !sentryUploadingConfiguration) return@let
             SentryUploadOverlay(
                 copy = shareCopy,
                 palette = palette,
@@ -1308,13 +1651,13 @@ private fun Header(
         }
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             HudStatusPill(hudStatus, copy, palette)
-            //guard top-bar adb status so OK means grant-backed capture permissions are already present.
-            Pill(if (snapshot.settingsPermissionsGranted) copy.adbOk else copy.adbNotGranted,
+            // ADB reflects persisted authorization evidence; Permissions reflects current grants.
+            Pill(if (snapshot.adbAuthorized) copy.adbOk else copy.adbNotGranted,
+                if (snapshot.adbAuthorized) palette.green else palette.red,
+                if (snapshot.adbAuthorized) palette.greenSoft else palette.redSoft)
+            Pill(if (snapshot.settingsPermissionsGranted) copy.permissionsOk else copy.permissionsMissing,
                 if (snapshot.settingsPermissionsGranted) palette.green else palette.red,
                 if (snapshot.settingsPermissionsGranted) palette.greenSoft else palette.redSoft)
-            Pill(if (snapshot.captureReady) copy.permissionsOk else copy.permissionsMissing,
-                if (snapshot.captureReady) palette.green else palette.red,
-                if (snapshot.captureReady) palette.greenSoft else palette.redSoft)
             Segmented(copy.ukr, copy.eng, snapshot.uaLanguage, palette,
                 onLeft = { onLanguage(true) },
                 onRight = { onLanguage(false) })
@@ -1341,83 +1684,127 @@ private fun OptionsTab(
     onDisableBgApps: () -> Unit,
     onShutdownClick: () -> Unit
 ) {
-    LazyPageSurface(copy.main, copy.mainHint, palette) {
-        item(key = "notice") {
-            Section(copy.notice, palette) {
-                Text(
-                    text = buildAnnotatedString {
-                        append(copy.wazeDirectNotice)
-                        append(" ")
-                        withStyle(SpanStyle(color = palette.yellow, fontWeight = FontWeight.SemiBold)) {
-                            append(copy.wazeSupportedVersions)
-                        }
-                    },
-                    color = palette.text,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                    modifier = Modifier.padding(14.dp)
-                )
-                Text(
-                    text = copy.screenCaptureUnsupportedNotice,
-                    color = palette.muted,
-                    fontSize = 14.sp,
-                    lineHeight = 20.sp,
-                    modifier = Modifier.padding(horizontal = 14.dp).padding(bottom = 14.dp)
-                )
+    val ua = copy.language == Language.Ua
+    val routeMetricModes = if (ua) {
+        listOf("Вимкнений", "До зупинки", "Весь маршрут")
+    } else {
+        listOf("Off", "Next stop", "Entire route")
+    }
+    val textTransliterationModes = if (ua) {
+        listOf("Вимкнено", "Українська", "Універсальна")
+    } else {
+        listOf("Off", "Ukrainian", "Universal")
+    }
+    val speedLimitModes = if (ua) {
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний")
+    } else {
+        listOf("Off", "In maneuver field", "In lane field", "In a free field", "Composite")
+    }
+    val speedLimitFallbackModes = if (ua) {
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами")
+    } else {
+        listOf("Off", "In maneuver field", "In lane field")
+    }
+    val speedLimitCompositePlacementModes = if (ua) {
+        listOf("Тільки маневру", "Тільки смуг", "Вільне або маневру", "Вільне або смуг")
+    } else {
+        listOf("Maneuver only", "Lanes only", "Free or maneuver", "Free or lanes")
+    }
+    val dashboardScreenModes = if (ua) {
+        listOf("Немає", "Частковий", "Повний")
+    } else {
+        listOf("None", "Partial", "Full")
+    }
+    val routeMetricsTitle = if (ua) {
+        "Режим виводу ЕТА/часу/дистанції"
+    } else {
+        "ETA/time/distance output mode"
+    }
+    val routeMetricsHint = if (ua) {
+        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze підтримує весь маршрут і використовує доступне значення до зупинки, якщо окремий показник маршруту відсутній."
+    } else {
+        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze supports the whole route and uses an available next-stop value when an individual route metric is missing."
+    }
+    val speedLimitModeHint = if (ua) {
+        "Показувати поточне обмеження швидкості у вибраному полі HUD."
+    } else {
+        "Show the current speed limit in the selected HUD field."
+    }
+    val freeFallbackHint = if (ua) {
+        "Визначає, чи можна тимчасово перекрити зайняте поле, коли вільного поля немає."
+    } else {
+        "Choose whether to temporarily replace an occupied field when no field is free."
+    }
+    val overlaySecondsHint = if (ua) {
+        "Кількість секунд показу обмеження поверх активного маневру або смуг. Ціле число від 1 до 10."
+    } else {
+        "Seconds to show the speed limit over an active maneuver or lane output. Whole numbers from 1 to 10."
+    }
+    val compositePlacementHint = if (ua) {
+        "Визначає поле для композитного знаку та пріоритет, коли одне з полів вільне."
+    } else {
+        "Choose the composite sign field and its priority when one field is free."
+    }
+    val compositeManeuverSizeHint = if (ua) {
+        "Розмір композитного знаку у пікселях для зображення маневру. Дозволено ціле число від 1 до 103."
+    } else {
+        "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only."
+    }
+    val compositeLaneSizeHint = if (ua) {
+        "Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36."
+    } else {
+        "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only."
+    }
+    val freeFallbackEnabled = snapshot.speedLimitMode == 3
+    val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE
+    val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
+            || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
+
+    val sections = buildOptionsSections {
+        optionsSection("runtime-permissions", copy.permissionsRuntime, R.drawable.ic_options_build) {
+            row("adb-permissions") {
+                SettingRow(copy.adbPermissions, copy.adbHint, palette) {
+                    HudButton(copy.grantAdb, palette, primary = true, width = 190.dp) {
+                        runAction { activity.composeGrantAdb() }
+                    }
+                }
             }
-        }
-        item(key = "runtime-permissions") {
-            Section(copy.permissionsRuntime, palette) {
-                SettingRow(
-                title = copy.adbPermissions,
-                hint = copy.adbHint,
-                palette = palette,
-                action = { HudButton(copy.grantAdb, palette, primary = true, width = 190.dp) { runAction { activity.composeGrantAdb() } } }
-                )
-                Divider(palette)
-                SettingRow(
-                title = copy.backgroundApps,
-                hint = copy.backgroundHint,
-                palette = palette,
-                action = { HudButton(copy.disableBgApps, palette, width = 190.dp, onClick = onDisableBgApps) }
-                )
-                Divider(palette)
+            row("background-apps") {
+                SettingRow(copy.backgroundApps, copy.backgroundHint, palette) {
+                    HudButton(copy.disableBgApps, palette, width = 190.dp, onClick = onDisableBgApps)
+                }
+            }
+            row("boot-runtime") {
                 SwitchRow(copy.bootRuntime, copy.bootRuntimeHint, snapshot.bootEnabled, palette) {
                     runAction { activity.composeSetBootEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("diagnostic-artifacts") {
                 SwitchRow(
-                copy.saveScreenshotsLogs,
-                copy.saveScreenshotsLogsHint,
-                snapshot.detailedDebugArtifactsEnabled,
-                palette
+                    copy.saveScreenshotsLogs,
+                    copy.saveScreenshotsLogsHint,
+                    snapshot.detailedDebugArtifactsEnabled,
+                    palette
                 ) {
                     runAction { activity.composeSetDetailedDebugArtifactsEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("check-for-updates") {
                 UpdateCheckLine(
-                title = copy.checkForUpdates,
-                hint = copy.checkForUpdatesHint,
-                buttonText = copy.checkForUpdatesButton,
-                checked = autoUpdateCheckEnabled,
-                onCheckedChange = onAutoUpdateCheckChange,
-                onCheckClick = onManualUpdateCheck,
-                palette = palette
+                    title = copy.checkForUpdates,
+                    hint = copy.checkForUpdatesHint,
+                    buttonText = copy.checkForUpdatesButton,
+                    checked = autoUpdateCheckEnabled,
+                    onCheckedChange = onAutoUpdateCheckChange,
+                    onCheckClick = onManualUpdateCheck,
+                    palette = palette
                 )
-                Divider(palette)
-                SwitchRow(
-                copy.betaTesting,
-                copy.betaTestingHint,
-                betaChannelEnabled,
-                palette,
-                onBetaChannelChange
-                )
-                Divider(palette)
-                SettingRow(
-                title = copy.shutdown,
-                hint = copy.shutdownHint,
-                palette = palette,
-                action = {
+            }
+            row("beta-testing") {
+                SwitchRow(copy.betaTesting, copy.betaTestingHint, betaChannelEnabled, palette, onChecked = onBetaChannelChange)
+            }
+            row("shutdown") {
+                SettingRow(copy.shutdown, copy.shutdownHint, palette) {
                     HudIconButton(
                         icon = R.drawable.ic_shutdown,
                         contentDescription = copy.shutdown,
@@ -1425,122 +1812,272 @@ private fun OptionsTab(
                         tint = palette.red,
                         onClick = onShutdownClick
                     )
-                    }
-                )
-                Divider(palette)
-                SwitchRow(
-                    copy.screenCaptureChannel,
-                    copy.screenCaptureChannelHint,
-                    snapshot.wazeScreenCaptureEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetWazeScreenCaptureEnabled(it) }
                 }
             }
         }
-
-        item(key = "basic-navigation") {
-            Section(copy.basicNavigationOutput, palette) {
+        optionsSection("basic-navigation", copy.basicNavigationOutput, R.drawable.ic_options_navigation) {
+            row("png-output") {
                 SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
                     runAction { activity.composeSetPngOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("native-output") {
                 SwitchRow(copy.nativeOutput, copy.nativeHint, snapshot.nativeOutputEnabled, palette) {
                     runAction { activity.composeSetNativeOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("lane-output") {
                 SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette) {
                     runAction { activity.composeSetLaneOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("street-output") {
                 SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
                     runAction { activity.composeSetStreetOutputEnabled(it) }
                 }
-                Divider(palette)
+            }
+            row("text-transliteration") {
+                SettingRow(copy.textTransliteration, copy.textTransliterationHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.transliterationMode,
+                        options = textTransliterationModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetTransliterationMode(mode) } }
+                    )
+                }
+            }
+            row("distance-output") {
                 SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
                     runAction { activity.composeSetDistanceOutputEnabled(it) }
                 }
             }
         }
-
-        item(key = "extra-navigation") {
-            Section(copy.extraNavigationOptions, palette) {
-                SwitchRow(
-                copy.textDirectionOutput,
-                copy.textDirectionOutputHint,
-                snapshot.textDirectionOutputEnabled,
-                palette
-                ) {
-                    runAction { activity.composeSetTextDirectionOutputEnabled(it) }
+        optionsSection("route-eta", if (ua) "ЕТА маршруту" else "Route ETA", R.drawable.ic_options_schedule) {
+            row("route-metrics-mode") {
+                SettingRow(routeMetricsTitle, routeMetricsHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.routeMetricsMode,
+                        options = routeMetricModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetRouteMetricsMode(mode) } }
+                    )
                 }
-                Divider(palette)
-                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
-                    runAction { activity.composeSetWazeAlertsEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(
-                    copy.showWholeRouteMetrics,
-                    copy.showWholeRouteMetricsHint,
-                    snapshot.wholeRouteMetricsEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetWholeRouteMetricsEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette) {
+            }
+            row("eta-output") {
+                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
                     runAction { activity.composeSetEtaOutputEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                    copy.showRemainingTime,
-                    copy.showRemainingTimeHint,
-                    snapshot.remainingTimeOutputEnabled,
-                    palette
-                ) {
+            }
+            row("remaining-time-output") {
+                SwitchRow(copy.showRemainingTime, copy.showRemainingTimeHint, snapshot.remainingTimeOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
                     runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
                 }
-                Divider(palette)
-                SwitchRow(
-                    copy.showRemainingDistance,
-                    copy.showRemainingDistanceHint,
-                    snapshot.remainingDistanceOutputEnabled,
-                    palette
-                ) {
+            }
+            row("remaining-distance-output") {
+                SwitchRow(copy.showRemainingDistance, copy.showRemainingDistanceHint, snapshot.remainingDistanceOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
                     runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
-                }
-                Divider(palette)
-                SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
-                    runAction { activity.composeSetSmallDistanceClamp(it) }
-                }
-                Divider(palette)
-                SwitchRow(copy.roundaboutLeft, copy.roundaboutHint, snapshot.roundaboutLeftHandTraffic, palette) {
-                    runAction { activity.composeSetRoundaboutLeftHandTraffic(it) }
                 }
             }
         }
-
-        item(key = "dashboard-control") {
-            Section(copy.dashboardControl, palette) {
-                SwitchRow(
-                    copy.fullscreenDashboard,
-                    copy.fullscreenDashboardHint,
-                    snapshot.fullscreenDashboardEnabled,
-                    palette
-                ) {
-                    runAction { activity.composeSetFullscreenDashboardEnabled(it) }
+        optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", R.drawable.ic_options_speed) {
+            row("speed-limit-mode") {
+                SettingRow(if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode", speedLimitModeHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.speedLimitMode,
+                        options = speedLimitModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetSpeedLimitMode(mode) } }
+                    )
                 }
-                Divider(palette)
-                DashboardHeightRow(
-                    copy.dashboardHeight,
-                    copy.dashboardHeightHint,
-                    snapshot.dashboardHeightPercent,
-                    palette
+            }
+            row("speed-limit-fallback") {
+                SettingRow(
+                    if (ua) "Накладання у режимі «У вільному полі»" else "Overlay in \"In a free field\" mode",
+                    freeFallbackHint,
+                    palette,
+                    enabled = freeFallbackEnabled
                 ) {
-                    runAction { activity.composeSetDashboardHeightPercent(it) }
+                    HudDropdown(
+                        selectedIndex = snapshot.speedLimitFreeFallback,
+                        options = speedLimitFallbackModes,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = freeFallbackEnabled,
+                        onSelected = { mode -> runAction { activity.composeSetSpeedLimitFreeFallback(mode) } }
+                    )
+                }
+            }
+            row("speed-limit-overlay-seconds") {
+                SettingRow(
+                    if (ua) "Час показу при накладанні" else "Display time when overlapping",
+                    overlaySecondsHint,
+                    palette,
+                    enabled = overlaySecondsEnabled
+                ) {
+                    HudIntegerStepper(
+                        value = snapshot.speedLimitOverlaySeconds,
+                        palette = palette,
+                        enabled = overlaySecondsEnabled,
+                        onValueChange = { seconds -> runAction { activity.composeSetSpeedLimitOverlaySeconds(seconds) } }
+                    )
+                }
+            }
+            row("speed-limit-composite-placement") {
+                SettingRow(
+                    if (ua) "Поле для виводу у композитному режимі" else "Composite output field",
+                    compositePlacementHint,
+                    palette,
+                    enabled = compositeEnabled
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.speedLimitCompositePlacement,
+                        options = speedLimitCompositePlacementModes,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = compositeEnabled,
+                        onSelected = { placement -> runAction { activity.composeSetSpeedLimitCompositePlacement(placement) } }
+                    )
+                }
+            }
+            row("speed-limit-maneuver-size") {
+                SettingRow(
+                    if (ua) "Розмір знаку у полі маневру" else "Sign size in maneuver field",
+                    compositeManeuverSizeHint,
+                    palette,
+                    enabled = compositeEnabled
+                ) {
+                    HudIntegerStepper(
+                        value = snapshot.speedLimitManeuverOverlaySize,
+                        palette = palette,
+                        enabled = compositeEnabled,
+                        maxValue = 103,
+                        fallbackValue = 64,
+                        onValueChange = { size -> runAction { activity.composeSetSpeedLimitManeuverOverlaySize(size) } }
+                    )
+                }
+            }
+            row("speed-limit-lane-size") {
+                SettingRow(
+                    if (ua) "Розмір знаку у полі для смуг" else "Sign size in lane field",
+                    compositeLaneSizeHint,
+                    palette,
+                    enabled = compositeEnabled
+                ) {
+                    HudIntegerStepper(
+                        value = snapshot.speedLimitLaneOverlaySize,
+                        palette = palette,
+                        enabled = compositeEnabled,
+                        maxValue = 36,
+                        fallbackValue = 36,
+                        onValueChange = { size -> runAction { activity.composeSetSpeedLimitLaneOverlaySize(size) } }
+                    )
+                }
+            }
+        }
+        optionsSection("waze-features", copy.wazeFeatures, R.drawable.waze_app_icon) {
+            row("waze-alerts") {
+                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
+                    runAction { activity.composeSetWazeAlertsEnabled(it) }
+                }
+            }
+            row("waze-custom-surface") {
+                SwitchRow(copy.customSurface, copy.customSurfaceHint, snapshot.wazeCustomSurfaceEnabled, palette) {
+                    runAction { activity.composeSetWazeCustomSurfaceEnabled(it) }
+                }
+            }
+        }
+        optionsSection("extra-navigation", copy.extraNavigationOptions, R.drawable.ic_options_settings) {
+            row("tbt-without-hud") {
+                SwitchRow(copy.tbtWithoutHudOutput, copy.tbtWithoutHudOutputHint, snapshot.tbtWithoutHudOutputEnabled, palette) {
+                    runAction { activity.composeSetTbtWithoutHudOutputEnabled(it) }
+                }
+            }
+            row("switch-to-tbt-on-hud-start") {
+                SwitchRow(copy.switchToTbtOnHudStart, copy.switchToTbtOnHudStartHint, snapshot.switchToTbtOnHudStartEnabled, palette) {
+                    runAction { activity.composeSetSwitchToTbtOnHudStartEnabled(it) }
+                }
+            }
+            row("text-direction") {
+                SwitchRow(copy.textDirectionOutput, copy.textDirectionOutputHint, snapshot.textDirectionOutputEnabled, palette) {
+                    runAction { activity.composeSetTextDirectionOutputEnabled(it) }
+                }
+            }
+            row("small-distance-clamp") {
+                SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
+                    runAction { activity.composeSetSmallDistanceClamp(it) }
+                }
+            }
+        }
+        optionsSection("dashboard-control", copy.dashboardControl, R.drawable.ic_options_directions_car) {
+            row("dashboard-screen-mode") {
+                SettingRow(copy.dashboardScreenMode, copy.dashboardScreenModeHint, palette) {
+                    HudDropdown(
+                        selectedIndex = snapshot.dashboardScreenMode,
+                        options = dashboardScreenModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetDashboardScreenMode(mode) } }
+                    )
+                }
+            }
+            if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE) {
+                row("dashboard-width") {
+                    DashboardPercentRow(copy.dashboardWidth, copy.dashboardWidthHint,
+                        snapshot.dashboardWidthPercent,
+                        DashboardProjectionPolicy.MIN_WIDTH_PERCENT,
+                        DashboardProjectionPolicy.MAX_WIDTH_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardWidthPercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
+                }
+                row("dashboard-height") {
+                    DashboardPercentRow(copy.dashboardHeight, copy.dashboardHeightHint,
+                        snapshot.dashboardHeightPercent,
+                        DashboardProjectionPolicy.MIN_HEIGHT_PERCENT,
+                        DashboardProjectionPolicy.MAX_HEIGHT_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardHeightPercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
+                }
+                row("dashboard-offset") {
+                    DashboardPercentRow(copy.dashboardOffset, copy.dashboardOffsetHint,
+                        snapshot.dashboardOffsetPercent,
+                        DashboardProjectionPolicy.MIN_OFFSET_PERCENT,
+                        DashboardProjectionPolicy.MAX_OFFSET_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardOffsetPercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
+                }
+                row("dashboard-scale") {
+                    DashboardPercentRow(copy.dashboardScale, copy.dashboardScaleHint,
+                        snapshot.dashboardScalePercent,
+                        DashboardProjectionPolicy.MIN_SCALE_PERCENT,
+                        DashboardProjectionPolicy.MAX_SCALE_PERCENT, palette) {
+                        runAction {
+                            activity.composeSetDashboardScalePercent(
+                                snapshot.dashboardScreenMode, it)
+                        }
+                    }
                 }
             }
         }
     }
+    SidebarOptionsSurface(
+        title = copy.main,
+        hint = copy.mainHint,
+        categoriesLabel = if (ua) "Категорії" else "Categories",
+        sections = sections,
+        palette = palette
+    )
 }
 
 @Composable
@@ -1915,6 +2452,8 @@ private fun StorageShareDestinationOverlay(
     palette: Palette,
     summary: MainActivity.ComposeStorageShareSummary,
     onSentry: () -> Unit,
+    sentryButtonText: String,
+    sentryButtonEnabled: Boolean,
     onAnotherApp: () -> Unit,
     onCancel: () -> Unit
 ) {
@@ -1985,9 +2524,10 @@ private fun StorageShareDestinationOverlay(
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
             ) {
                 HudButton(
-                    shareCopy.shareToSentry,
+                    sentryButtonText,
                     palette,
                     primary = true,
+                    enabled = sentryButtonEnabled,
                     width = 210.dp,
                     onClick = onSentry
                 )
@@ -1998,6 +2538,172 @@ private fun StorageShareDestinationOverlay(
                     onClick = onAnotherApp
                 )
                 HudButton(shareCopy.cancel, palette, width = 138.dp, onClick = onCancel)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OperationProgressStack(
+    copy: Copy,
+    shareCopy: ShareCopy,
+    palette: Palette,
+    patchOperations: List<MainActivity.ComposePatchOperation>,
+    storageSharePhase: LogShareZip.Phase?,
+    storageShareTerminalPhase: String,
+    storageShareTerminalDetail: String,
+    storageShareStartedAt: Long,
+    onCancelShare: () -> Unit,
+    onCloseShare: () -> Unit,
+    onCancelPatch: (String) -> Unit,
+    onDismissPatch: (String) -> Unit
+) {
+    val cards = buildList {
+        if (storageShareTerminalPhase.isNotEmpty()) {
+            add(OperationCardSpec(
+                key = "share",
+                title = shareCopy.shareLogsTitle,
+                phase = if (storageShareTerminalPhase == "CANCELLED") {
+                    if (copy.language == Language.Ua) "Скасовано" else "Cancelled"
+                } else {
+                    shareCopy.failure
+                },
+                detail = storageShareTerminalDetail,
+                startedAt = storageShareStartedAt,
+                busy = false,
+                stopEnabled = false,
+                closeEnabled = true,
+                failed = storageShareTerminalPhase == "FAILED",
+                success = false,
+                onStop = {},
+                onClose = onCloseShare
+            ))
+        } else if (storageSharePhase != null) {
+            val phaseText = when (storageSharePhase) {
+                LogShareZip.Phase.WAITING_FOR_WRITES -> shareCopy.waitingForWrites
+                LogShareZip.Phase.COPYING -> shareCopy.copying
+                LogShareZip.Phase.ARCHIVING -> shareCopy.archiving
+            }
+            add(OperationCardSpec(
+                key = "share",
+                title = shareCopy.shareLogsTitle,
+                phase = phaseText,
+                detail = "",
+                startedAt = storageShareStartedAt,
+                busy = true,
+                stopEnabled = true,
+                closeEnabled = false,
+                failed = false,
+                success = false,
+                onStop = onCancelShare,
+                onClose = {}
+            ))
+        }
+        patchOperations.filter {
+            it.kind.isNotEmpty() && it.phase != "IDLE"
+                    && !(it.recoveryRequired && it.acknowledged)
+        }.forEach { operation ->
+            val navigator = if (operation.profileId == "waze") "Waze" else "Google Maps"
+            val phase = patchStepLabel(operation, copy.language).let { label ->
+                if (operation.progress in 1..99) "$label · ${operation.progress}%" else label
+            }
+            add(OperationCardSpec(
+                key = "patch-${operation.profileId}",
+                title = "$navigator · ${patchProgressTitle(operation, copy)}",
+                phase = phase,
+                detail = operation.error.ifEmpty { operation.detail },
+                startedAt = operation.startedAt,
+                busy = operation.busy,
+                stopEnabled = operation.cancelAllowed,
+                closeEnabled = operation.phase == "FAILED" || operation.phase == "CANCELLED"
+                        || operation.recoveryRequired,
+                failed = operation.phase == "FAILED" || operation.recoveryRequired,
+                success = operation.phase == "VERIFIED",
+                onStop = { onCancelPatch(operation.profileId) },
+                onClose = { onDismissPatch(operation.profileId) }
+            ))
+        }
+    }.sortedByDescending { it.startedAt }.take(3)
+
+    if (cards.isEmpty()) return
+    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
+        Column(
+            modifier = Modifier.padding(end = 24.dp, bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            cards.forEach { card ->
+                OperationProgressCard(card, shareCopy, palette, copy.language)
+            }
+        }
+    }
+}
+
+@Composable
+private fun OperationProgressCard(
+    card: OperationCardSpec,
+    copy: ShareCopy,
+    palette: Palette,
+    language: Language
+) {
+    Column(
+        modifier = Modifier
+            .width(460.dp)
+            .height(170.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .background(palette.surface)
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        Text(
+            card.title,
+            color = palette.text,
+            fontSize = 18.sp,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Row(
+            modifier = Modifier.weight(1f),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            if (card.busy) LoadingSpinner(palette)
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    card.phase,
+                    color = when {
+                        card.failed -> palette.red
+                        card.success -> palette.green
+                        else -> palette.text
+                    },
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis
+                )
+                if (card.detail.isNotEmpty()) {
+                    Text(
+                        card.detail,
+                        color = palette.muted,
+                        fontSize = 12.sp,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+        }
+        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+            if (card.busy) {
+                HudButton(
+                    if (language == Language.Ua) "Зупинити" else "Stop",
+                    palette,
+                    enabled = card.stopEnabled,
+                    width = 138.dp,
+                    onClick = card.onStop
+                )
+            } else if (card.closeEnabled) {
+                HudButton(copy.close, palette, width = 138.dp, onClick = card.onClose)
             }
         }
     }
@@ -2324,31 +3030,198 @@ private fun SetupInstructionBlock(
 }
 
 @Composable
+private fun NavigatorAssetList(
+    copy: Copy,
+    palette: Palette,
+    assets: List<NavigatorAssetManager.AssetSnapshot>,
+    onDownload: (String) -> Unit,
+    onInstall: (String) -> Unit,
+    onRestore: (String) -> Unit
+) {
+    Section("${copy.notice}: ${copy.navigatorAssetsNotice}", palette) {
+        Row(
+            modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min).padding(14.dp),
+            horizontalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            NavigatorAssetColumn(
+                title = "Waze",
+                assets = assets.filter { it.packageName == "com.waze" },
+                copy = copy,
+                palette = palette,
+                modifier = Modifier.weight(1f),
+                onDownload = onDownload,
+                onInstall = onInstall,
+                onRestore = onRestore
+            )
+            Box(Modifier.width(1.dp).fillMaxHeight().background(palette.border))
+            NavigatorAssetColumn(
+                title = "Google Maps ReVanced",
+                assets = assets.filter {
+                    it.packageName == "app.revanced.android.apps.maps"
+                },
+                copy = copy,
+                palette = palette,
+                modifier = Modifier.weight(1f),
+                onDownload = onDownload,
+                onInstall = onInstall,
+                onRestore = onRestore
+            )
+        }
+    }
+}
+
+@Composable
+private fun NavigatorAssetColumn(
+    title: String,
+    assets: List<NavigatorAssetManager.AssetSnapshot>,
+    copy: Copy,
+    palette: Palette,
+    modifier: Modifier,
+    onDownload: (String) -> Unit,
+    onInstall: (String) -> Unit,
+    onRestore: (String) -> Unit
+) {
+    Column(modifier = modifier) {
+        Text(title, color = palette.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(2.dp))
+        assets.forEach { asset ->
+            val variant = asset.label.removePrefix("$title ").removePrefix("Waze ").trim()
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                    if (variant.isEmpty() || variant == title) asset.versionName
+                    else "$variant ${asset.versionName}",
+                color = palette.muted,
+                    fontSize = 13.sp,
+                    lineHeight = 18.sp,
+                    modifier = Modifier.weight(1f),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+                NavigatorAssetAction(copy, palette, asset, onDownload, onInstall, onRestore)
+            }
+        }
+    }
+}
+
+@Composable
+private fun NavigatorAssetAction(
+    copy: Copy,
+    palette: Palette,
+    asset: NavigatorAssetManager.AssetSnapshot,
+    onDownload: (String) -> Unit,
+    onInstall: (String) -> Unit,
+    onRestore: (String) -> Unit
+) {
+    val label = when (asset.state) {
+        NavigatorAssetManager.DOWNLOADING -> asset.progress
+        NavigatorAssetManager.VERIFYING -> copy.navigatorAssetVerifying
+        NavigatorAssetManager.READY -> copy.navigatorAssetInstall
+        NavigatorAssetManager.INSTALL_REQUESTED,
+        NavigatorAssetManager.UNINSTALL_REQUESTED -> copy.navigatorAssetInstalling
+        NavigatorAssetManager.INSTALLED -> copy.navigatorAssetInstalled
+        NavigatorAssetManager.RECOVERY_REQUIRED -> copy.navigatorAssetRestore
+        NavigatorAssetManager.ERROR -> copy.navigatorAssetRetry
+        else -> copy.navigatorAssetDownload
+    }
+    val enabled = asset.state != NavigatorAssetManager.DOWNLOADING
+            && asset.state != NavigatorAssetManager.VERIFYING
+            && asset.state != NavigatorAssetManager.INSTALL_REQUESTED
+            && asset.state != NavigatorAssetManager.UNINSTALL_REQUESTED
+            && asset.state != NavigatorAssetManager.INSTALLED
+    Text(
+        text = label,
+        color = when {
+            asset.state == NavigatorAssetManager.RECOVERY_REQUIRED -> palette.red
+            enabled -> palette.accent
+            else -> palette.muted
+        },
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        modifier = Modifier
+            .clip(RoundedCornerShape(4.dp))
+            .clickable(enabled = enabled) {
+                when (asset.state) {
+                    NavigatorAssetManager.READY -> onInstall(asset.id)
+                    NavigatorAssetManager.RECOVERY_REQUIRED -> onRestore(asset.id)
+                    else -> onDownload(asset.id)
+                }
+            }
+            .padding(horizontal = 8.dp, vertical = 6.dp)
+    )
+}
+
+@Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun AppsTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
-    runAction: (() -> Unit) -> Unit
+    runAction: (() -> Unit) -> Unit,
+    onDownloadAsset: (String) -> Unit,
+    onInstallAsset: (String) -> Unit,
+    onRestoreAsset: (String) -> Unit
 ) {
+    val scanningLabel = if (copy.language == Language.Ua) "Сканування" else "Scanning"
+    val scanFailedLabel = if (copy.language == Language.Ua) "Помилка сканування" else "Scan failed"
+    val scanStatusText = when {
+        snapshot.appScanInProgress -> scanningLabel
+        snapshot.appScanStatus.isNotBlank() -> "$scanFailedLabel: ${snapshot.appScanStatus}"
+        else -> "${copy.lastScan}: ${snapshot.lastScanText}"
+    }
+    val scanStatusColor = if (snapshot.appScanStatus.isNotBlank() && !snapshot.appScanInProgress) {
+        palette.red to palette.redSoft
+    } else {
+        palette.muted to palette.disabled
+    }
     LazyPageSurface(copy.apps, copy.appsHint, palette, headerAction = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-            Pill("${copy.lastScan}: ${snapshot.lastScanText}", palette.muted, palette.disabled)
+            Pill(scanStatusText, scanStatusColor.first, scanStatusColor.second, Modifier.width(230.dp))
             HudButton(copy.refreshApps, palette, primary = true, width = 178.dp) {
                 runAction { activity.composeRefreshApps() }
             }
         }
-    }) {
-        item(key = "supported-apps") {
-            Section(copy.supportedApps, palette) {
-                snapshot.supportedApps.forEachIndexed { index, row ->
-                    if (index > 0) Divider(palette)
+    }, itemSpacing = 0.dp) {
+        item(key = "apps-page-gap") {
+            Spacer(Modifier.height(10.dp))
+        }
+
+        item(key = "navigator-assets") {
+            NavigatorAssetList(
+                copy = copy,
+                palette = palette,
+                assets = snapshot.navigatorAssets,
+                onDownload = onDownloadAsset,
+                onInstall = onInstallAsset,
+                onRestore = onRestoreAsset
+            )
+        }
+
+        item(key = "supported-apps-gap") {
+            Spacer(Modifier.height(10.dp))
+        }
+        item(key = "supported-apps-header") {
+            AppSectionHeader(
+                copy.supportedApps,
+                palette,
+                bottom = snapshot.appScanCacheAvailable && snapshot.supportedApps.isEmpty()
+            )
+        }
+        if (!snapshot.appScanCacheAvailable) {
+            item(key = "supported-apps-status") {
+                AppSectionMessage(scanStatusText, palette)
+            }
+        } else {
+            items(
+                count = snapshot.supportedApps.size,
+                key = { index -> snapshot.supportedApps[index].packageName }
+            ) { index ->
+                AppSectionRow(index, snapshot.supportedApps.lastIndex, palette) {
                     AppRow(
-                        row,
+                        snapshot.supportedApps[index],
                         copy,
                         palette,
-                        supported = true,
+                        supported = snapshot.supportedApps[index].supportedHud,
                         runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
                         activity = activity,
                         runAction = runAction
@@ -2357,27 +3230,178 @@ private fun AppsTab(
             }
         }
 
-        item(key = "all-apps") {
-            Section(copy.allApps, palette) {
-                if (snapshot.allApps.isEmpty()) {
-                    Text(copy.noBackgroundApps, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
-                } else {
-                    snapshot.allApps.forEachIndexed { index, row ->
-                        if (index > 0) Divider(palette)
-                        AppRow(
-                            row,
-                            copy,
-                            palette,
-                            supported = false,
-                            runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
-                            activity = activity,
-                            runAction = runAction
-                        )
-                    }
+        item(key = "all-apps-gap") {
+            Spacer(Modifier.height(10.dp))
+        }
+        item(key = "all-apps-header") {
+            AppSectionHeader(copy.allApps, palette)
+        }
+        if (!snapshot.appScanCacheAvailable) {
+            item(key = "all-apps-status") {
+                AppSectionMessage(scanStatusText, palette)
+            }
+        } else if (snapshot.allApps.isEmpty()) {
+            item(key = "all-apps-empty") {
+                AppSectionMessage(copy.noBackgroundApps, palette)
+            }
+        } else {
+            items(
+                count = snapshot.allApps.size,
+                key = { index -> snapshot.allApps[index].packageName }
+            ) { index ->
+                AppSectionRow(index, snapshot.allApps.lastIndex, palette) {
+                    AppRow(
+                        snapshot.allApps[index],
+                        copy,
+                        palette,
+                        supported = false,
+                        runtimeStatusKnown = snapshot.appRuntimeStatusKnown,
+                        activity = activity,
+                        runAction = runAction
+                    )
                 }
             }
         }
     }
+}
+
+@Composable
+private fun AppSectionHeader(title: String, palette: Palette, bottom: Boolean = false) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = bottom)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
+    ) {
+        Text(
+            title.uppercase(),
+            color = palette.muted,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 13.sp
+        )
+    }
+}
+
+@Composable
+private fun AppSectionMessage(text: String, palette: Palette) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
+    ) {
+        Text(text, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
+    }
+}
+
+@Composable
+private fun AppSectionRow(
+    index: Int,
+    lastIndex: Int,
+    palette: Palette,
+    content: @Composable () -> Unit
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appSectionSegmentFrame(
+                palette,
+                palette.panel,
+                top = false,
+                bottom = index == lastIndex
+            )
+    ) {
+        if (index > 0) Divider(palette)
+        content()
+    }
+}
+
+private fun Modifier.appSectionSegmentFrame(
+    palette: Palette,
+    background: Color,
+    top: Boolean,
+    bottom: Boolean
+): Modifier {
+    val shape = RoundedCornerShape(
+        topStart = if (top) 8.dp else 0.dp,
+        topEnd = if (top) 8.dp else 0.dp,
+        bottomStart = if (bottom) 8.dp else 0.dp,
+        bottomEnd = if (bottom) 8.dp else 0.dp
+    )
+    return clip(shape)
+        .background(background)
+        .drawBehind {
+            val strokeWidth = 1.dp.toPx()
+            val halfStroke = strokeWidth / 2f
+            val radius = 8.dp.toPx()
+            val arcSize = Size(radius * 2f - strokeWidth, radius * 2f - strokeWidth)
+            val sideTop = if (top) radius else 0f
+            val sideBottom = if (bottom) size.height - radius else size.height
+            drawLine(
+                palette.border,
+                Offset(halfStroke, sideTop),
+                Offset(halfStroke, sideBottom),
+                strokeWidth
+            )
+            drawLine(
+                palette.border,
+                Offset(size.width - halfStroke, sideTop),
+                Offset(size.width - halfStroke, sideBottom),
+                strokeWidth
+            )
+            if (top) {
+                drawLine(
+                    palette.border,
+                    Offset(radius, halfStroke),
+                    Offset(size.width - radius, halfStroke),
+                    strokeWidth
+                )
+                drawArc(
+                    palette.border,
+                    180f,
+                    90f,
+                    false,
+                    Offset(halfStroke, halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+                drawArc(
+                    palette.border,
+                    270f,
+                    90f,
+                    false,
+                    Offset(size.width - radius * 2f + halfStroke, halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+            }
+            if (bottom) {
+                drawLine(
+                    palette.border,
+                    Offset(radius, size.height - halfStroke),
+                    Offset(size.width - radius, size.height - halfStroke),
+                    strokeWidth
+                )
+                drawArc(
+                    palette.border,
+                    90f,
+                    90f,
+                    false,
+                    Offset(halfStroke, size.height - radius * 2f + halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+                drawArc(
+                    palette.border,
+                    0f,
+                    90f,
+                    false,
+                    Offset(size.width - radius * 2f + halfStroke,
+                        size.height - radius * 2f + halfStroke),
+                    arcSize,
+                    style = Stroke(strokeWidth)
+                )
+            }
+        }
 }
 
 @Composable
@@ -2464,92 +3488,18 @@ private fun AppRow(
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun LogsTab(
-    copy: Copy,
-    palette: Palette,
-    snapshot: MainActivity.ComposeSnapshot,
-    activity: MainActivity,
-    configurationShareBusy: Boolean,
-    logcatBusy: Boolean,
-    onStartLogcat: () -> Unit,
-    onStopLogcat: () -> Unit,
-    onShareConfiguration: () -> Unit
-) {
-    LazyPageSurface(copy.logs, copy.logsHint, palette) {
-        item(key = "log-status") {
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-                Section(copy.logcatRecorder, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Column(Modifier.weight(1f)) {
-                        Text(copy.recorderStatus, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-                        Text(localizedLogcatStatus(snapshot.logcatStatus, copy), color = palette.muted, fontSize = 13.sp)
-                    }
-                    Pill(if (snapshot.logcatRecording) "recording" else copy.waiting, palette.yellow, palette.yellowSoft)
-                }
-                Divider(palette)
-                Row(
-                    modifier = Modifier.padding(14.dp),
-                    horizontalArrangement = Arrangement.spacedBy(12.dp)
-                ) {
-                    HudButton(
-                        copy.startLogcat,
-                        palette,
-                        primary = !snapshot.logcatRecording,
-                        enabled = !snapshot.logcatRecording && !logcatBusy,
-                        width = 0.dp,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        onStartLogcat()
-                    }
-                    HudButton(
-                        copy.stopLogcat,
-                        palette,
-                        primary = snapshot.logcatRecording,
-                        enabled = snapshot.logcatRecording && !logcatBusy,
-                        width = 0.dp,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        onStopLogcat()
-                    }
-                    HudButton(
-                        copy.shareConfiguration,
-                        palette,
-                        primary = false,
-                        enabled = !configurationShareBusy,
-                        width = 0.dp,
-                        modifier = Modifier.weight(1f),
-                        onClick = onShareConfiguration
-                    )
-                }
-                }
-                Section(copy.applicationState, palette, modifier = Modifier.weight(1f).heightIn(min = 204.dp)) {
-                    CodeBlock(snapshot.applicationState, palette, compact = true, modifier = Modifier.padding(14.dp))
-                }
-            }
-        }
-
-        item(key = "navigation-log-paths") {
-            Section(copy.navigationLogs, palette) {
-                CodeBlock(snapshot.logPaths + "\n\n" + copy.pathHint, palette, compact = true, modifier = Modifier.padding(14.dp))
-            }
-        }
-    }
-}
-
-@Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun StorageTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
+    configurationShareBusy: Boolean,
+    logcatBusy: Boolean,
+    onStartLogcat: () -> Unit,
+    onStopLogcat: () -> Unit,
+    onShareConfiguration: () -> Unit,
     sortOldestFirst: Boolean,
     selectedDays: List<String>,
-    storageBusy: Boolean,
+    storageActionBusy: Boolean,
     storageSortBusy: Boolean,
     onStorageLimitGb: (Int) -> Unit,
     onSortOldestFirst: (Boolean) -> Unit,
@@ -2557,6 +3507,21 @@ private fun StorageTab(
     onDeleteSelected: (List<String>) -> Unit,
     onShareSelected: (List<String>) -> Unit
 ) {
+    val storageScanText = if (copy.language == Language.Ua) {
+        "Сканування сховища..."
+    } else {
+        "Scanning storage..."
+    }
+    val storageScanFailureText = if (copy.language == Language.Ua) {
+        "Помилка сканування"
+    } else {
+        "Scan failed"
+    }
+    val coldStorageText = if (snapshot.storageScanError.isNotBlank()) {
+        "$storageScanFailureText: ${snapshot.storageScanError}"
+    } else {
+        storageScanText
+    }
     var draftLimit by rememberSaveable(snapshot.storageLimitGb) {
         mutableIntStateOf(snapshot.storageLimitGb)
     }
@@ -2605,21 +3570,40 @@ private fun StorageTab(
                 palette = palette,
                 action = {
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                        if (snapshot.storageCalculating) {
-                            Pill(copy.storageCalculating, palette.muted, palette.disabled)
+                        if (!snapshot.storageCacheAvailable) {
+                            Pill(
+                                coldStorageText,
+                                if (snapshot.storageScanError.isNotBlank()) palette.red else palette.muted,
+                                if (snapshot.storageScanError.isNotBlank()) palette.redSoft else palette.disabled
+                            )
+                        } else {
+                            if (snapshot.storageCalculating) {
+                                Pill(copy.storageCalculating, palette.muted, palette.disabled)
+                            }
+                            if (snapshot.storageScanError.isNotBlank()) {
+                                Pill(storageScanFailureText, palette.red, palette.redSoft)
+                            }
+                            val usageColors = storageUsageColors(
+                                snapshot.navCaptureFolderBytes,
+                                snapshot.storageLimitGb,
+                                palette
+                            )
+                            Pill(
+                                formatStorageUsage(
+                                    snapshot.navCaptureFolderBytes,
+                                    snapshot.storageLimitGb,
+                                    copy
+                                ),
+                                usageColors.first,
+                                usageColors.second
+                            )
+                            Text(
+                                "(${snapshot.storageSessionCount} ${copy.storageSessionsShort})",
+                                color = palette.muted,
+                                fontSize = 13.sp,
+                                fontWeight = FontWeight.SemiBold
+                            )
                         }
-                        val usageColors = storageUsageColors(snapshot.navCaptureFolderBytes, snapshot.storageLimitGb, palette)
-                        Pill(
-                            formatStorageUsage(snapshot.navCaptureFolderBytes, snapshot.storageLimitGb, copy),
-                            usageColors.first,
-                            usageColors.second
-                        )
-                        Text(
-                            "(${snapshot.storageSessionCount} ${copy.storageSessionsShort})",
-                            color = palette.muted,
-                            fontSize = 13.sp,
-                            fontWeight = FontWeight.SemiBold
-                        )
                     }
                     }
                 )
@@ -2631,38 +3615,86 @@ private fun StorageTab(
                 Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    .padding(14.dp),
+                verticalAlignment = Alignment.Top,
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
-                Column(modifier = Modifier.weight(1f)) {
-                    snapshot.navCaptureFolderPaths.forEachIndexed { index, path ->
-                        if (index > 0) Spacer(Modifier.height(6.dp))
-                        ReadOnlyPathField(path, palette, modifier = Modifier.fillMaxWidth())
+                CodeBlock(
+                    text = if (!snapshot.storageCacheAvailable) {
+                        coldStorageText
+                    } else {
+                        snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
+                            val location = if (path.trimEnd('/').endsWith(
+                                    "/Documents/BYD-HUD", ignoreCase = true
+                                )) {
+                                copy.publicStorageLocation
+                            } else {
+                                copy.privateStorageLocation
+                            }
+                            "$location:\n$path"
+                        }.ifBlank { copy.storageNoDayFolders }
+                    },
+                    palette = palette,
+                    compact = true,
+                    modifier = Modifier.width(430.dp)
+                )
+                Column(
+                    modifier = Modifier.width(300.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    HudButton(
+                        if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
+                        palette,
+                        primary = true,
+                        enabled = !storageActionBusy && !logcatBusy,
+                        width = 0.dp,
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()
+                    }
+                    HudButton(
+                        copy.shareConfiguration,
+                        palette,
+                        primary = false,
+                        enabled = !storageActionBusy && !configurationShareBusy,
+                        width = 0.dp,
+                        modifier = Modifier.fillMaxWidth(),
+                        onClick = onShareConfiguration
+                    )
+                }
+                Row(
+                    modifier = Modifier
+                        .width(232.dp)
+                        .align(Alignment.CenterVertically),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+                ) {
+                    HudIconButton(
+                        icon = R.drawable.ic_share,
+                        contentDescription = copy.shareSelected,
+                        palette = palette,
+                        tint = palette.accent,
+                        enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
+                        onClick = { onShareSelected(selectedDayNames) }
+                    )
+                    HudButton(
+                        if (sortOldestFirst) copy.sortByName else copy.sortByDate,
+                        palette,
+                        primary = false,
+                        enabled = snapshot.storageCacheAvailable && !storageSortBusy,
+                        width = 180.dp
+                    ) {
+                        onSortOldestFirst(!sortOldestFirst)
                     }
                 }
-                HudIconButton(
-                    icon = R.drawable.ic_share,
-                    contentDescription = copy.shareSelected,
-                    palette = palette,
-                    tint = palette.accent,
-                    enabled = selectedDayNames.isNotEmpty() && !storageBusy,
-                    onClick = { onShareSelected(selectedDayNames) }
-                )
-                HudButton(
-                    if (sortOldestFirst) copy.sortByName else copy.sortByDate,
-                    palette,
-                    primary = false,
-                    enabled = !storageSortBusy,
-                    width = 190.dp
-                ) {
-                    onSortOldestFirst(!sortOldestFirst)
-                }
-                }
+            }
                 if (days.isEmpty()) {
                     Divider(palette)
                     Text(
-                        copy.storageNoDayFolders,
+                        when {
+                            !snapshot.storageCacheAvailable -> coldStorageText
+                            else -> copy.storageNoDayFolders
+                        },
                         color = palette.muted,
                         fontSize = 14.sp,
                         modifier = Modifier.padding(14.dp)
@@ -2681,7 +3713,7 @@ private fun StorageTab(
                 copy = copy,
                 palette = palette,
                 selected = selectedDays.contains(day.name),
-                enabled = !storageBusy,
+                enabled = !storageSortBusy,
                 onToggle = { onToggleDay(day.name) }
             )
         }
@@ -2696,7 +3728,7 @@ private fun StorageTab(
                 HudButton(
                     copy.deleteSelected,
                     palette,
-                    enabled = selectedDayNames.isNotEmpty() && !storageBusy,
+                    enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
                     primary = true,
                     width = 190.dp,
                     onClick = { onDeleteSelected(selectedDayNames) }
@@ -2711,14 +3743,13 @@ private fun PatchTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
-    actionPending: Boolean,
+    actionPendingProfiles: Set<String>,
     onSelectFile: (String) -> Unit,
     onClear: (String) -> Unit,
     onCheck: (String) -> Unit,
     onPatch: (String) -> Unit,
     onRestore: (String) -> Unit
 ) {
-    val busy = actionPending || snapshot.patchOperation.busy
     LazyPageSurface(copy.patchTab, copy.patchHint, palette) {
         item(key = "patch-warning") {
             Section(copy.patchWarning, palette) {
@@ -2748,6 +3779,12 @@ private fun PatchTab(
                     }
                 } else {
                     snapshot.patchRows.forEach { row ->
+                        val operation = snapshot.patchOperations.firstOrNull {
+                            it.profileId == row.profileId
+                        }
+                        val busy = actionPendingProfiles.contains(row.profileId)
+                                || operation?.busy == true
+                                || operation?.recoveryRequired == true
                         Divider(palette)
                         Row(
                             modifier = Modifier
@@ -2795,29 +3832,27 @@ private fun PatchTab(
                             }
                             val componentStates = buildList {
                                 add(copy.patchDirectChannel to row.directState)
+                                if (row.gmsCoreLabel.isNotEmpty()) {
+                                    add(patchSecondaryLabel(row, copy.language) to row.gmsCoreState)
+                                }
                                 add(patchOptionalLabel(row, copy.language) to row.optionalState)
                                 if (row.alertLabel.isNotEmpty()) {
                                     add(patchAlertLabel(row, copy.language, copy) to row.alertState)
                                 }
                             }
-                            val allPatched = componentStates.all { (_, state) -> state == "PATCHED" }
                             Row(
                                 modifier = Modifier.weight(1f),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.Top
                             ) {
-                                if (allPatched) {
-                                    StatusChip(copy.patchPatched, ChipKind.Green, palette, width = 240.dp)
-                                } else {
-                                    componentStates.chunked(2).forEach { columnStates ->
-                                        Column(
-                                            modifier = Modifier.weight(1f),
-                                            verticalArrangement = Arrangement.spacedBy(6.dp),
-                                            horizontalAlignment = Alignment.Start
-                                        ) {
-                                            columnStates.forEach { (label, state) ->
-                                                PatchComponentChip(label, state, copy, palette)
-                                            }
+                                componentStates.chunked(2).forEach { columnStates ->
+                                    Column(
+                                        modifier = Modifier.weight(1f),
+                                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                                        horizontalAlignment = Alignment.Start
+                                    ) {
+                                        columnStates.forEach { (label, state) ->
+                                            PatchComponentChip(label, state, copy, palette)
                                         }
                                     }
                                 }
@@ -2832,6 +3867,7 @@ private fun PatchTab(
                                             version = selectedPatchVersion(row),
                                             copy = copy,
                                             palette = palette,
+                                            enabled = !busy,
                                             onClear = { onClear(row.profileId) }
                                         )
                                     } else {
@@ -2866,8 +3902,8 @@ private fun PatchTab(
             }
         }
 
-        if (snapshot.patchOperation.recoveryRequired) {
-            item(key = "patch-recovery") {
+        snapshot.patchOperations.filter { it.recoveryRequired }.forEach { operation ->
+            item(key = "patch-recovery-${operation.profileId}") {
                 Section(copy.patchRecovery, palette) {
                     Row(
                         modifier = Modifier
@@ -2877,7 +3913,7 @@ private fun PatchTab(
                         horizontalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         Text(
-                            snapshot.patchOperation.detail,
+                            operation.detail,
                             color = palette.red,
                             fontSize = 14.sp,
                             modifier = Modifier.weight(1f)
@@ -2886,9 +3922,9 @@ private fun PatchTab(
                             copy.patchRestore,
                             palette,
                             primary = true,
-                            enabled = !busy,
+                            enabled = !actionPendingProfiles.contains(operation.profileId),
                             width = 190.dp,
-                            onClick = { onRestore(snapshot.patchOperation.profileId) }
+                            onClick = { onRestore(operation.profileId) }
                         )
                     }
                 }
@@ -2896,18 +3932,6 @@ private fun PatchTab(
         }
 
     }
-}
-
-private fun localizedLogcatStatus(status: String, copy: Copy): String {
-    val lines = status.split('\n', limit = 2)
-    val localized = when (lines.firstOrNull()) {
-        LogcatRecorder.STATUS_WAITING, "" -> copy.logcatWaiting
-        LogcatRecorder.STATUS_RECORDING -> copy.logcatRecording
-        LogcatRecorder.STATUS_SAVING -> copy.logcatSaving
-        LogcatRecorder.STATUS_SAVED -> copy.logcatSaved
-        else -> lines.first()
-    }
-    return if (lines.size == 1) localized else "$localized\n${lines[1]}"
 }
 
 private fun selectedPatchVersion(row: MainActivity.ComposeNavigatorPatchRow): String {
@@ -2920,8 +3944,20 @@ private fun patchOptionalLabel(
     row: MainActivity.ComposeNavigatorPatchRow,
     language: Language
 ): String {
-    if (language != Language.Ua) return row.optionalLabel
-    return if (row.profileId == "waze") "Стабільна сесія" else "Аудіоканал"
+    if (row.profileId == "waze") {
+        return if (language == Language.Ua) "Стабільність" else "Stability"
+    }
+    return if (language == Language.Ua) "Аудіоканал" else row.optionalLabel
+}
+
+private fun patchSecondaryLabel(
+    row: MainActivity.ComposeNavigatorPatchRow,
+    language: Language
+): String {
+    if (row.profileId == "waze") {
+        return if (language == Language.Ua) "Смуги" else "Lanes"
+    }
+    return row.gmsCoreLabel
 }
 
 private fun patchAlertLabel(
@@ -2930,7 +3966,7 @@ private fun patchAlertLabel(
     copy: Copy
 ): String {
     if (row.profileId != "waze") return row.alertLabel
-    return if (language == Language.Ua) copy.patchWazeAlerts else row.alertLabel
+    return copy.patchWazeAlerts
 }
 
 @Composable
@@ -2973,6 +4009,7 @@ private fun SelectedPatchFileField(
     version: String,
     copy: Copy,
     palette: Palette,
+    enabled: Boolean,
     onClear: () -> Unit
 ) {
     Row(
@@ -2999,6 +4036,7 @@ private fun SelectedPatchFileField(
             contentDescription = copy.patchClearSelection,
             palette = palette,
             tint = palette.muted,
+            enabled = enabled,
             modifier = Modifier.width(40.dp).height(44.dp),
             onClick = onClear
         )
@@ -3107,6 +4145,59 @@ private fun highlightPatchSelectionText(
 }
 
 @Composable
+private fun NavigatorAssetConfirmOverlay(
+    copy: Copy,
+    palette: Palette,
+    asset: NavigatorAssetManager.AssetSnapshot,
+    onConfirm: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(620.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                copy.navigatorAssetConfirmTitle.replace("%s", asset.label),
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Text(
+                copy.navigatorAssetConfirmText,
+                color = palette.yellow,
+                fontSize = 15.sp,
+                lineHeight = 21.sp
+            )
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End
+            ) {
+                HudButton(copy.navigatorAssetConfirmCancel, palette, onClick = onDismiss)
+                Spacer(Modifier.width(10.dp))
+                HudButton(
+                    copy.navigatorAssetConfirmOk,
+                    palette,
+                    primary = true,
+                    onClick = onConfirm
+                )
+            }
+        }
+    }
+}
+
+@Composable
 private fun PatchConfirmOverlay(
     copy: Copy,
     palette: Palette,
@@ -3169,46 +4260,6 @@ private fun PatchConfirmOverlay(
     }
 }
 
-@Composable
-private fun PatchProgressOverlay(
-    copy: Copy,
-    palette: Palette,
-    operation: MainActivity.ComposePatchOperation
-) {
-    Box(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
-        contentAlignment = Alignment.Center
-    ) {
-        ModalInputBlocker()
-        Column(
-            modifier = Modifier
-                .width(520.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.surface)
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
-                .padding(22.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            LoadingSpinner(palette)
-            Text(
-                patchProgressTitle(operation, copy),
-                color = palette.text,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                patchStepLabel(operation, copy.language),
-                color = palette.muted,
-                fontSize = 14.sp,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-        }
-    }
-}
-
 private fun patchProgressTitle(
     operation: MainActivity.ComposePatchOperation,
     copy: Copy
@@ -3260,9 +4311,18 @@ private fun patchPhaseLabel(phase: String, language: Language): String {
             "REPACKING" -> "Перепакування APK"
             "SIGNING" -> "Підпис APK"
             "OUTPUT_VERIFY" -> "Перевірка результату"
+            "INSTALLED_VERIFY" -> "Перевірка встановленого APK"
+            "READY_TO_INSTALL" -> "Очікування черги встановлення"
+            "AWAITING_PERMISSION" -> "Очікування дозволу"
+            "CANCEL_REQUESTED" -> "Зупинка операції"
+            "INSTALL_PREPARING" -> "Підготовка системного інсталятора"
             "COMMITTING" -> "Передавання APK системному інсталятору"
             "UNINSTALL_REQUESTED" -> "Очікування видалення"
             "INSTALL_REQUESTED" -> "Очікування встановлення"
+            "RECOVERY_REQUIRED" -> "Потрібне відновлення"
+            "FAILED" -> "Помилка"
+            "CANCELLED" -> "Скасовано"
+            "VERIFIED" -> "Перевірено"
             else -> "Підготовка операції"
         }
     }
@@ -3274,9 +4334,18 @@ private fun patchPhaseLabel(phase: String, language: Language): String {
         "REPACKING" -> "Repacking APK"
         "SIGNING" -> "Signing APK"
         "OUTPUT_VERIFY" -> "Verifying result"
+        "INSTALLED_VERIFY" -> "Verifying installed APK"
+        "READY_TO_INSTALL" -> "Waiting in install queue"
+        "AWAITING_PERMISSION" -> "Waiting for permission"
+        "CANCEL_REQUESTED" -> "Stopping operation"
+        "INSTALL_PREPARING" -> "Preparing Android installer"
         "COMMITTING" -> "Submitting APK to Android installer"
         "UNINSTALL_REQUESTED" -> "Waiting for removal"
         "INSTALL_REQUESTED" -> "Waiting for installation"
+        "RECOVERY_REQUIRED" -> "Recovery required"
+        "FAILED" -> "Failed"
+        "CANCELLED" -> "Cancelled"
+        "VERIFIED" -> "Verified"
         else -> phase.lowercase(Locale.ROOT).replace('_', ' ')
     }
 }
@@ -3310,29 +4379,6 @@ private fun ReadOnlyValueField(
         ) {
             Text(value, color = palette.text, fontSize = 18.sp, fontWeight = FontWeight.SemiBold)
         }
-    }
-}
-
-@Composable
-//renders the public storage path without implying it is editable.
-private fun ReadOnlyPathField(text: String, palette: Palette, modifier: Modifier = Modifier) {
-    Box(
-        modifier = modifier
-            .height(42.dp)
-            .clip(RoundedCornerShape(7.dp))
-            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-            .background(palette.field)
-            .padding(horizontal = 10.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text,
-            color = palette.muted,
-            fontFamily = FontFamily.Monospace,
-            fontSize = 13.sp,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis
-        )
     }
 }
 
@@ -3373,14 +4419,16 @@ private fun storageLimitFromSliderValue(value: Float): Int =
     value.roundToInt().coerceIn(1, 10)
 
 @Composable
-private fun DashboardHeightRow(
+private fun DashboardPercentRow(
     title: String,
     hint: String,
     percent: Int,
+    minPercent: Int,
+    maxPercent: Int,
     palette: Palette,
     onPercent: (Int) -> Unit
 ) {
-    val coerced = percent.coerceIn(20, 100)
+    val coerced = percent.coerceIn(minPercent, maxPercent)
     var sliderValue by remember(coerced) { mutableStateOf(coerced.toFloat()) }
     Column(
         modifier = Modifier
@@ -3406,17 +4454,17 @@ private fun DashboardHeightRow(
                 fontSize = 15.sp
             )
         }
-        Text(hint, color = palette.muted, fontSize = 13.sp)
+        Text(rowExplanation(hint), color = palette.muted, fontSize = 13.sp)
         Slider(
             value = sliderValue,
-            onValueChange = { sliderValue = it.coerceIn(20f, 100f) },
+            onValueChange = { sliderValue = it.coerceIn(minPercent.toFloat(), maxPercent.toFloat()) },
             onValueChangeFinished = {
-                val next = sliderValue.roundToInt().coerceIn(20, 100)
+                val next = sliderValue.roundToInt().coerceIn(minPercent, maxPercent)
                 sliderValue = next.toFloat()
                 onPercent(next)
             },
-            valueRange = 20f..100f,
-            steps = 79,
+            valueRange = minPercent.toFloat()..maxPercent.toFloat(),
+            steps = (maxPercent - minPercent) - 1,
             colors = SliderDefaults.colors(
                 thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
                 activeTrackColor = palette.accent,
@@ -3483,277 +4531,372 @@ private fun StorageDayRow(
 }
 
 private fun storageLocationLabel(day: MainActivity.ComposeStorageDay, copy: Copy): String = when {
-    day.hasPublicStorage && day.hasPrivateStorage -> copy.bothStorageLocations
-    day.hasPublicStorage -> copy.publicStorageLocation
-    else -> copy.privateStorageLocation
+    day.hasPublicStorage && day.hasPrivateStorage -> copy.bothStorageLocations.lowercase(Locale.ROOT)
+    day.hasPublicStorage -> copy.publicStorageLocation.lowercase(Locale.ROOT)
+    else -> copy.privateStorageLocation.lowercase(Locale.ROOT)
 }
 
 @Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun ManualTab(
+//keeps HUD checks on the shared runtime snapshot; the worker owns cadence and payload sends.
+private fun HudCheckTab(
     copy: Copy,
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
 ) {
-    var mode by rememberSaveable { mutableStateOf(ManualMode.Supported) }
-    var pngNumber by rememberSaveable(snapshot.pngSourceId) { mutableStateOf(snapshot.pngSourceId.coerceIn(1, 99).toString()) }
-    var nativeNumber by rememberSaveable(snapshot.nativeManeuverId) { mutableStateOf(snapshot.nativeManeuverId.coerceIn(1, 99).toString()) }
-    var distance by rememberSaveable(snapshot.distanceMeters) { mutableStateOf(snapshot.distanceMeters.coerceIn(0, 99999).toString()) }
-    var street by rememberSaveable(snapshot.streetText) { mutableStateOf(snapshot.streetText.ifBlank { "TESTER" }) }
-    var rawLane by rememberSaveable(snapshot.laneBitmap) { mutableStateOf(snapshot.laneBitmap.ifBlank { defaultLanePayload }) }
-    var manualLane by rememberSaveable { mutableStateOf(defaultLanePayload) }
-    var laneIndex by rememberSaveable { mutableIntStateOf(0) }
-
-    //sends encoded data here so transport side effects stay behind a single boundary.
-    fun sendRaw() {
-        if (snapshot.manualModeEnabled) {
-            activity.composeSendRaw(
-                manualNumber(pngNumber, 5),
-                manualNumber(nativeNumber, 5),
-                distance.toIntOrNull()?.coerceIn(0, 99999) ?: 230,
-                street,
-                rawLane
-            )
-        }
+    val state = snapshot.hudCheck
+    val ukrainian = snapshot.uaLanguage
+    val statusText = if (state.running) copy.hudCheckRunning else copy.hudCheckStopped
+    val deliveryStatus = snapshot.hudCheckStatus.trim()
+    val statusIsError = deliveryStatus.contains("error", ignoreCase = true)
+        || deliveryStatus.contains("failed", ignoreCase = true)
+        || deliveryStatus.contains("помил", ignoreCase = true)
+    val statusColor = when {
+        statusIsError -> palette.red to palette.redSoft
+        state.running -> palette.green to palette.greenSoft
+        else -> palette.muted to palette.disabled
     }
+    fun step(field: HudCheckState.Field, delta: Int) =
+        runAction { activity.composeHudCheckStep(field, delta) }
 
-    //sends encoded data here so transport side effects stay behind a single boundary.
-    fun sendManualLane(value: String) {
-        if (snapshot.manualModeEnabled) {
-            activity.composeSendManualLane(value)
-        }
-    }
-
-    LazyPageSurface(copy.manual, copy.manualHint, palette) {
-        item(key = "manual-hud-output") {
-            Section(copy.manualHudOutput, palette) {
-                Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(14.dp),
-                horizontalArrangement = Arrangement.spacedBy(14.dp)
-            ) {
-                ManualModeTile(copy.supportedArrows, copy.supportedArrowsHint, mode == ManualMode.Supported, palette, Modifier.weight(1f)) {
-                    mode = ManualMode.Supported
-                }
-                ManualModeTile(copy.manualLanes, copy.manualLanesHint, mode == ManualMode.Lanes, palette, Modifier.weight(1f)) {
-                    mode = ManualMode.Lanes
-                }
-                ManualModeTile(copy.rawManeuverIds, copy.rawManeuverHint, mode == ManualMode.Raw, palette, Modifier.weight(1f)) {
-                    mode = ManualMode.Raw
-                }
-                }
-                SwitchRow(copy.manualMode, copy.manualModeHint, snapshot.manualModeEnabled, palette) {
-                    runAction { activity.composeSetManualMode(it) }
-                }
-                Divider(palette)
-
-                when (mode) {
-                ManualMode.Supported -> ActionRow(
-                    copy.supportedArrows,
-                    copy.supportedArrowsHint,
+    LazyPageSurface(
+        title = copy.hudCheck,
+        hint = copy.hudCheckHint,
+        palette = palette,
+        headerAction = {
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                Pill(statusText, statusColor.first, statusColor.second)
+                HudButton(
+                    if (state.running) copy.hudCheckStop else copy.hudCheckStart,
                     palette,
-                    left = {
-                        HudButton(copy.previous, palette, width = 150.dp) {
-                            runAction { activity.composeStepCurated(-1) }
-                        }
-                    },
-                    right = {
-                        HudButton(copy.next, palette, width = 150.dp) {
-                            runAction { activity.composeStepCurated(1) }
+                    primary = true,
+                    width = 180.dp
+                ) { runAction { activity.composeHudCheckToggleRunning() } }
+            }
+        }
+    ) {
+        item(key = "hud-check-mode") {
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp), modifier = Modifier.fillMaxWidth()) {
+                HudCheckModeTile(
+                    copy.basicOutput,
+                    copy.basicOutputHint,
+                    state.mode == HudCheckState.Mode.BASIC,
+                    palette,
+                    Modifier.weight(1f)
+                ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.BASIC) } }
+                HudCheckModeTile(
+                    copy.extendedOutput,
+                    copy.extendedOutputHint,
+                    state.mode == HudCheckState.Mode.EXTENDED,
+                    palette,
+                    Modifier.weight(1f)
+                ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.EXTENDED) } }
+            }
+        }
+        item(key = "hud-check-status") {
+            if (state.running && deliveryStatus.isNotBlank()) {
+                Text(
+                    deliveryStatus,
+                    color = if (statusIsError) palette.red else palette.muted,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 12.sp,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        }
+        if (state.mode == HudCheckState.Mode.BASIC) {
+            item(key = "hud-check-basic") {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                        .background(palette.panel)
+                ) {
+                    HudCheckRow(copy.checkManeuvers, copy.checkManeuversHint, state.maneuverLabel(ukrainian), palette,
+                        onPrevious = { step(HudCheckState.Field.MANEUVER, -1) },
+                        onNext = { step(HudCheckState.Field.MANEUVER, 1) },
+                        option = {
+                            OutputImageChoice(
+                                bitmap = state.maneuverBitmap,
+                                stockText = copy.stockImage,
+                                bitmapText = copy.bitmapImage,
+                                palette = palette
+                            ) { runAction { activity.composeHudCheckSetManeuverBitmap(it) } }
+                        })
+                    Divider(palette)
+                    HudCheckRow(copy.checkLanes, copy.checkLanesHint, state.lanes(), palette, monospace = true,
+                        onPrevious = { step(HudCheckState.Field.LANES, -1) },
+                        onNext = { step(HudCheckState.Field.LANES, 1) },
+                        option = {
+                            OutputImageChoice(
+                                bitmap = state.laneBitmap,
+                                stockText = copy.stockImage,
+                                bitmapText = copy.bitmapImage,
+                                palette = palette
+                            ) { runAction { activity.composeHudCheckSetLaneBitmap(it) } }
+                        })
+                    Divider(palette)
+                    HudCheckRow(copy.distanceMeters, copy.checkDistanceHint, state.distance().toString(), palette,
+                        onPrevious = { step(HudCheckState.Field.DISTANCE, -1) },
+                        onNext = { step(HudCheckState.Field.DISTANCE, 1) })
+                    Divider(palette)
+                    HudCheckRow(copy.streetText, copy.checkStreetHint, state.effectiveStreet(), palette,
+                        onPrevious = { step(HudCheckState.Field.STREET, -1) },
+                        onNext = { step(HudCheckState.Field.STREET, 1) },
+                        option = {
+                            CompactSwitchBox(
+                                label = copy.checkTransliteration,
+                                checked = state.transliterate,
+                                palette = palette,
+                                width = 230.dp
+                            ) { runAction { activity.composeHudCheckSetTransliterate(it) } }
+                        })
+                    Divider(palette)
+                    HudCheckRow(copy.checkTrafficLight, copy.checkTrafficLightHint, state.trafficLightLabel(ukrainian), palette,
+                        onPrevious = { step(HudCheckState.Field.TRAFFIC_LIGHT, -1) },
+                        onNext = { step(HudCheckState.Field.TRAFFIC_LIGHT, 1) })
+                }
+            }
+        } else {
+            item(key = "hud-check-baseline") {
+                Section(copy.checkBaseline, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
+                    val baseline = listOf(
+                        "${copy.checkManeuvers} · ${copy.checkManeuversChannels}" to
+                            "${if (ukrainian) "Прямо" else "Straight"} · ${copy.stockImage}",
+                        copy.checkLanes to "S* | S | S* | S | S* · ${copy.stockImage}",
+                        copy.distanceMeters to "77",
+                        copy.streetText to "Continue straight"
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
+                        baseline.forEach { (title, value) ->
+                            Column(Modifier.weight(1f)) {
+                                Text(title, color = palette.muted, fontSize = 13.sp)
+                                Spacer(Modifier.height(4.dp))
+                                Text(value, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                            }
                         }
                     }
-                )
-                ManualMode.Lanes -> {
-                    ActionRow(
-                        copy.manualLanes,
-                        copy.manualLanesHint,
-                        palette,
-                        left = {
-                            HudButton(previousPlural(copy), palette, width = 150.dp) {
-                                val next = stepLane(manualLane, laneIndex, -1)
-                                laneIndex = next.first
-                                manualLane = next.second
-                                sendManualLane(manualLane)
-                            }
-                        },
-                        right = {
-                            HudButton(nextPlural(copy), palette, width = 150.dp) {
-                                val next = stepLane(manualLane, laneIndex, 1)
-                                laneIndex = next.first
-                                manualLane = next.second
-                                sendManualLane(manualLane)
+                }
+            }
+            item(key = "hud-check-extended") {
+                Section(copy.currentField, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(20.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(Modifier.weight(1f)) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth(0.7f)
+                                    .heightIn(min = 100.dp)
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(palette.field)
+                                    .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                                    .padding(12.dp),
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Text(state.extendedLabel(ukrainian), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                                Spacer(Modifier.height(8.dp))
+                                Text(state.extendedValue(), color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
                             }
                         }
-                    )
-                    ManualLaneFieldRow(copy, palette, manualLane, { manualLane = it }, onPrevious = {
-                        val next = stepLane(manualLane, laneIndex, -1)
-                        laneIndex = next.first
-                        manualLane = next.second
-                        sendManualLane(manualLane)
-                    }, onNext = {
-                        val next = stepLane(manualLane, laneIndex, 1)
-                        laneIndex = next.first
-                        manualLane = next.second
-                        sendManualLane(manualLane)
-                    }, onRandom = {
-                        val next = stepLane(manualLane, laneIndex, 1)
-                        laneIndex = next.first
-                        manualLane = next.second
-                        sendManualLane(manualLane)
-                    })
-                }
-                ManualMode.Raw -> {
-                    RawFields(
-                        copy = copy,
-                        palette = palette,
-                        pngNumber = pngNumber,
-                        onPng = { pngNumber = it },
-                        nativeNumber = nativeNumber,
-                        onNative = { nativeNumber = it },
-                        distance = distance,
-                        onDistance = { distance = it },
-                        street = street,
-                        onStreet = { street = it },
-                        lane = rawLane,
-                        onLane = { rawLane = it },
-                        onPngPrev = {
-                            pngNumber = stepNumber(pngNumber, -1, 5)
-                            sendRaw()
-                        },
-                        onPngNext = {
-                            pngNumber = stepNumber(pngNumber, 1, 5)
-                            sendRaw()
-                        },
-                        onNativePrev = {
-                            nativeNumber = stepNumber(nativeNumber, -1, 5)
-                            sendRaw()
-                        },
-                        onNativeNext = {
-                            nativeNumber = stepNumber(nativeNumber, 1, 5)
-                            sendRaw()
-                        },
-                        onLanePrev = {
-                            val next = stepLane(rawLane, laneIndex, -1)
-                            laneIndex = next.first
-                            rawLane = next.second
-                            sendRaw()
-                        },
-                        onLaneNext = {
-                            val next = stepLane(rawLane, laneIndex, 1)
-                            laneIndex = next.first
-                            rawLane = next.second
-                            sendRaw()
-                        },
-                        onRandom = {
-                            val next = stepLane(rawLane, laneIndex, 1)
-                            laneIndex = next.first
-                            rawLane = next.second
-                            sendRaw()
+                        Column(Modifier.width(280.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                            CompactSwitchBox(
+                                label = if (state.automatic) copy.checkAutomatic else copy.checkManualCycle,
+                                checked = state.automatic,
+                                palette = palette,
+                                width = 280.dp
+                            ) { runAction { activity.composeHudCheckSetAutomatic(it) } }
+                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                                HudChevronButton(
+                                    direction = ChevronDirection.Left,
+                                    contentDescription = copy.previous,
+                                    palette = palette,
+                                    enabled = !state.automatic
+                                ) { runAction { activity.composeHudCheckStepExtended(-1) } }
+                                Text(
+                                    "${state.extendedIndex + 1} / ${HudCheckState.extendedCount()}",
+                                    color = palette.text,
+                                    fontWeight = FontWeight.SemiBold,
+                                    fontSize = 15.sp,
+                                    modifier = Modifier.weight(1f),
+                                    textAlign = TextAlign.Center
+                                )
+                                HudChevronButton(
+                                    direction = ChevronDirection.Right,
+                                    contentDescription = copy.next,
+                                    palette = palette,
+                                    enabled = !state.automatic
+                                ) { runAction { activity.composeHudCheckStepExtended(1) } }
+                            }
                         }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (state.automatic) copy.checkCycle else copy.checkManualCycleHint,
+                        color = palette.text,
+                        fontSize = 13.sp
                     )
+                    Text(copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
                 }
-                }
-
-                Divider(palette)
-                CurrentSelection(copy, palette, when (mode) {
-                    ManualMode.Supported -> "#${snapshot.curatedIndex + 1}/${snapshot.curatedCount}: S${snapshot.pngSourceId.toString().padStart(2, '0')} / N${snapshot.nativeManeuverId.toString().padStart(2, '0')}"
-                    ManualMode.Lanes -> manualLane
-                    ManualMode.Raw -> "Raw ${manualId("S", pngNumber, 5)} / ${manualId("N", nativeNumber, 5)} / ${distance}m / $street"
-                })
             }
         }
     }
 }
 
 @Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun RawFields(
-    copy: Copy,
-    palette: Palette,
-    pngNumber: String,
-    onPng: (String) -> Unit,
-    nativeNumber: String,
-    onNative: (String) -> Unit,
-    distance: String,
-    onDistance: (String) -> Unit,
-    street: String,
-    onStreet: (String) -> Unit,
-    lane: String,
-    onLane: (String) -> Unit,
-    onPngPrev: () -> Unit,
-    onPngNext: () -> Unit,
-    onNativePrev: () -> Unit,
-    onNativeNext: () -> Unit,
-    onLanePrev: () -> Unit,
-    onLaneNext: () -> Unit,
-    onRandom: () -> Unit
-) {
-    Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-            LabeledInput(copy.pngNumber, pngNumber, onPng, palette, Modifier.weight(1f))
-            LabeledInput(copy.nativeNumber, nativeNumber, onNative, palette, Modifier.weight(1f))
-            LabeledInput(copy.distance, distance, onDistance, palette, Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(8.dp))
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                HudButton(copy.previous, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onPngPrev)
-                HudButton(copy.next, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onPngNext)
-            }
-            Row(Modifier.weight(1f), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                HudButton(copy.previous, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onNativePrev)
-                HudButton(copy.next, palette, width = 0.dp, modifier = Modifier.weight(1f), onClick = onNativeNext)
-            }
-            LabeledInput(copy.street, street, onStreet, palette, Modifier.weight(1f))
-        }
-        Spacer(Modifier.height(8.dp))
-        ManualLaneFieldRow(copy, palette, lane, onLane, onLanePrev, onLaneNext, onRandom)
-    }
-}
-
-@Composable
-//renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun ManualLaneFieldRow(
-    copy: Copy,
-    palette: Palette,
+private fun HudCheckRow(
+    title: String,
+    hint: String,
     value: String,
-    onValue: (String) -> Unit,
+    palette: Palette,
+    monospace: Boolean = false,
     onPrevious: () -> Unit,
     onNext: () -> Unit,
-    onRandom: () -> Unit
+    option: @Composable () -> Unit = {}
 ) {
-    Row(
+    ActionRow(title, hint, palette, verticalPadding = 6.dp) {
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+            HudChevronButton(ChevronDirection.Left, "$title: previous", palette, onClick = onPrevious)
+            Box(
+                modifier = Modifier
+                    .width(310.dp)
+                    .height(44.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                    .background(palette.field)
+                    .padding(horizontal = 8.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    value,
+                    color = palette.text,
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    fontFamily = if (monospace) FontFamily.Monospace else FontFamily.Default,
+                    textAlign = TextAlign.Center,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
+            HudChevronButton(ChevronDirection.Right, "$title: next", palette, onClick = onNext)
+        }
+        Spacer(Modifier.width(20.dp))
+        Box(Modifier.width(230.dp), contentAlignment = Alignment.CenterEnd) { option() }
+    }
+}
+
+private enum class ChevronDirection { Left, Right }
+
+@Composable
+private fun HudChevronButton(
+    direction: ChevronDirection,
+    contentDescription: String,
+    palette: Palette,
+    enabled: Boolean = true,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback(enabled)
+    val visualClick = rememberVisualFirstClick(onClick)
+    Box(
         modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(10.dp),
-        verticalAlignment = Alignment.Bottom
+            .width(44.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(pressBackground(if (enabled) palette.panelAlt else palette.disabled, palette, press.pressed))
+            .then(press.modifier)
+            .clickable(
+                enabled = enabled,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
+            .semantics { this.contentDescription = contentDescription },
+        contentAlignment = Alignment.Center
     ) {
-        LabeledInput(copy.laneBitmap, value, onValue, palette, Modifier.weight(1f))
-        HudButton(previousPlural(copy), palette, width = 150.dp, onClick = onPrevious)
-        HudButton(nextPlural(copy), palette, width = 150.dp, onClick = onNext)
-        HudButton(copy.randomize, palette, width = 150.dp, onClick = onRandom)
+        Canvas(Modifier.size(20.dp)) {
+            val color = if (enabled) palette.text else palette.muted.copy(alpha = 0.55f)
+            val centerY = size.height / 2f
+            val edgeX = if (direction == ChevronDirection.Left) size.width * 0.68f else size.width * 0.32f
+            val tipX = if (direction == ChevronDirection.Left) size.width * 0.32f else size.width * 0.68f
+            drawLine(color, Offset(edgeX, centerY - size.height * 0.28f), Offset(tipX, centerY), strokeWidth = 2.2f, cap = StrokeCap.Round)
+            drawLine(color, Offset(tipX, centerY), Offset(edgeX, centerY + size.height * 0.28f), strokeWidth = 2.2f, cap = StrokeCap.Round)
+        }
     }
 }
 
 @Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun CurrentSelection(copy: Copy, palette: Palette, value: String) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .height(66.dp)
+private fun HudCheckModeTile(
+    title: String,
+    hint: String,
+    selected: Boolean,
+    palette: Palette,
+    modifier: Modifier,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback()
+    val visualClick = rememberVisualFirstClick(onClick)
+    val background = if (selected) palette.active else palette.panelAlt
+    Column(
+        modifier = modifier
+            .height(74.dp)
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
+            .background(pressBackground(background, palette, press.pressed))
+            .then(press.modifier)
+            .selectable(
+                selected = selected,
+                role = Role.RadioButton,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
             .padding(horizontal = 14.dp),
-        verticalAlignment = Alignment.CenterVertically
+        verticalArrangement = Arrangement.Center
     ) {
-        Column(Modifier.weight(1f)) {
-            Text(copy.currentSelection, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Text(value, color = palette.muted, fontSize = 14.sp)
+        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        Text(rowExplanation(hint), color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    }
+}
+
+@Composable
+private fun OutputImageChoice(
+    bitmap: Boolean,
+    stockText: String,
+    bitmapText: String,
+    palette: Palette,
+    onChange: (Boolean) -> Unit
+) {
+    Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.width(230.dp)) {
+        HudButton(
+            stockText,
+            palette,
+            primary = !bitmap,
+            width = 0.dp,
+            modifier = Modifier.weight(1f).semantics {
+                selected = !bitmap
+                role = Role.RadioButton
+            }
+        ) {
+            onChange(false)
         }
-        Pill(copy.manualPreview, palette.muted, palette.disabled)
+        HudButton(
+            bitmapText,
+            palette,
+            primary = bitmap,
+            width = 0.dp,
+            modifier = Modifier.weight(1f).semantics {
+                selected = bitmap
+                role = Role.RadioButton
+            }
+        ) {
+            onChange(true)
+        }
     }
 }
 
@@ -3763,6 +4906,7 @@ private fun LazyPageSurface(
     hint: String,
     palette: Palette,
     headerAction: (@Composable () -> Unit)? = null,
+    itemSpacing: Dp = 10.dp,
     content: LazyListScope.() -> Unit
 ) {
     LazyColumn(
@@ -3772,7 +4916,7 @@ private fun LazyPageSurface(
             .border(1.dp, palette.border, RoundedCornerShape(8.dp))
             .background(palette.panel),
         contentPadding = PaddingValues(14.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp)
+        verticalArrangement = Arrangement.spacedBy(itemSpacing)
     ) {
         item(key = "page-header") {
             PageSurfaceHeader(title, hint, palette, headerAction)
@@ -3798,12 +4942,214 @@ private fun PageSurfaceHeader(
     }
 }
 
+private data class OptionsRowSpec(
+    val key: String,
+    val content: @Composable () -> Unit
+)
+
+private class OptionsSectionScope {
+    val rows = mutableListOf<OptionsRowSpec>()
+
+    fun row(key: String, content: @Composable () -> Unit) {
+        rows += OptionsRowSpec(key, content)
+    }
+}
+
+private data class OptionsSectionSpec(
+    val key: String,
+    val title: String,
+    @DrawableRes val icon: Int,
+    val rows: List<OptionsRowSpec>
+)
+
+private class OptionsSectionsScope {
+    val sections = mutableListOf<OptionsSectionSpec>()
+
+    fun optionsSection(
+        key: String,
+        title: String,
+        @DrawableRes icon: Int,
+        content: OptionsSectionScope.() -> Unit
+    ) {
+        sections += OptionsSectionSpec(
+            key = key,
+            title = title,
+            icon = icon,
+            rows = OptionsSectionScope().apply(content).rows.toList()
+        )
+    }
+}
+
+private fun buildOptionsSections(
+    content: OptionsSectionsScope.() -> Unit
+): List<OptionsSectionSpec> = OptionsSectionsScope().apply(content).sections.toList()
+
+@Composable
+private fun SidebarOptionsSurface(
+    title: String,
+    hint: String,
+    categoriesLabel: String,
+    sections: List<OptionsSectionSpec>,
+    palette: Palette
+) {
+    var selectedKey by rememberSaveable { mutableStateOf(sections.first().key) }
+    val selectedSection = sections.firstOrNull { it.key == selectedKey } ?: sections.first()
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+            .background(palette.panel)
+            .padding(14.dp)
+    ) {
+        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
+        Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Spacer(Modifier.height(8.dp))
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            Column(
+                modifier = Modifier
+                    .width(260.dp)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(12.dp))
+                    .border(1.dp, palette.border, RoundedCornerShape(12.dp))
+                    .background(palette.panelAlt)
+                    .padding(horizontal = 8.dp, vertical = 6.dp)
+            ) {
+                Text(
+                    text = categoriesLabel.uppercase(Locale.ROOT),
+                    color = palette.muted,
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 2.dp)
+                )
+                Spacer(Modifier.height(2.dp))
+                LazyColumn(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(2.dp)
+                ) {
+                    items(
+                        count = sections.size,
+                        key = { index -> sections[index].key },
+                        contentType = { "options-category" }
+                    ) { index ->
+                        val section = sections[index]
+                        SidebarOptionsCategoryItem(
+                            section = section,
+                            selected = section.key == selectedSection.key,
+                            palette = palette,
+                            onClick = { selectedKey = section.key }
+                        )
+                    }
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+            ) {
+                key(selectedSection.key) {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, palette.border, RoundedCornerShape(12.dp))
+                            .background(palette.surface),
+                        contentPadding = PaddingValues(12.dp)
+                    ) {
+                        sidebarOptionsSection(selectedSection, palette)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun SidebarOptionsCategoryItem(
+    section: OptionsSectionSpec,
+    selected: Boolean,
+    palette: Palette,
+    onClick: () -> Unit
+) {
+    val foreground = if (selected) palette.accent else palette.muted
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (selected) palette.accent.copy(alpha = 0.14f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Image(
+            painter = painterResource(section.icon),
+            contentDescription = null,
+            contentScale = ContentScale.Fit,
+            colorFilter = ColorFilter.tint(foreground),
+            modifier = Modifier.size(22.dp)
+        )
+        Spacer(Modifier.width(12.dp))
+        Text(
+            text = section.title,
+            color = foreground,
+            fontSize = 14.sp,
+            fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+private fun LazyListScope.sidebarOptionsSection(
+    section: OptionsSectionSpec,
+    palette: Palette
+) {
+    item(key = "${section.key}:header", contentType = "options-header") {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
+                .padding(horizontal = 14.dp, vertical = 10.dp)
+        ) {
+            Text(section.title.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        }
+    }
+    section.rows.forEachIndexed { index, row ->
+        item(key = "${section.key}:${row.key}", contentType = "options-row") {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .appSectionSegmentFrame(
+                        palette,
+                        palette.panel,
+                        top = false,
+                        bottom = index == section.rows.lastIndex
+                    )
+            ) {
+                if (index > 0) Divider(palette)
+                row.content()
+            }
+        }
+    }
+}
+
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun Section(
     title: String,
     palette: Palette,
     modifier: Modifier = Modifier,
+    bodyPadding: Dp = 0.dp,
+    headerVerticalPadding: Dp = 10.dp,
     content: @Composable () -> Unit
 ) {
     Column(
@@ -3817,13 +5163,17 @@ private fun Section(
             modifier = Modifier
                 .fillMaxWidth()
                 .background(palette.panelAlt)
-                .padding(horizontal = 14.dp, vertical = 10.dp)
+                .padding(horizontal = 14.dp, vertical = headerVerticalPadding)
         ) {
             Text(title.uppercase(), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
         }
-        content()
+        Column(modifier = Modifier.padding(bodyPadding)) {
+            content()
+        }
     }
 }
+
+private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(".")
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
@@ -3831,6 +5181,7 @@ private fun SettingRow(
     title: String,
     hint: String,
     palette: Palette,
+    enabled: Boolean = true,
     action: @Composable () -> Unit
 ) {
     Row(
@@ -3840,14 +5191,235 @@ private fun SettingRow(
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+            Text(
+                title,
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
+            )
             if (hint.isNotBlank()) {
-                Text(hint, color = palette.muted, fontSize = 13.sp)
+                Text(
+                    rowExplanation(hint),
+                    color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
+                    fontSize = 13.sp
+                )
             }
         }
         action()
     }
 }
+
+@Composable
+private fun HudDropdown(
+    selectedIndex: Int,
+    options: List<String>,
+    palette: Palette,
+    width: Dp,
+    enabled: Boolean = true,
+    onSelected: (Int) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val safeIndex = selectedIndex.coerceIn(options.indices)
+    val rowHeight = 40.dp
+    val selectedBackground = palette.accent.copy(alpha = if (palette.dark) 0.78f else 0.08f)
+    val selectedContent = if (palette.dark) Color.White else palette.text
+    val fieldBackground = if (enabled) selectedBackground else palette.panelAlt
+    val fieldBorder = if (enabled) palette.accent else palette.borderStrong
+    val fieldContent = if (enabled) selectedContent else palette.muted.copy(alpha = 0.62f)
+
+    Box(modifier = Modifier.width(width)) {
+        Box(
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(rowHeight)
+                .clip(RoundedCornerShape(6.dp))
+                .border(1.dp, fieldBorder, RoundedCornerShape(6.dp))
+                .background(fieldBackground)
+                .clickable(enabled = enabled) { expanded = true }
+                .padding(horizontal = 8.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Text(
+                text = options[safeIndex],
+                color = fieldContent,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                textAlign = TextAlign.Center,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 24.dp)
+            )
+            Text(
+                text = "▾",
+                color = fieldContent.copy(alpha = 0.78f),
+                fontSize = 18.sp,
+                modifier = Modifier.align(Alignment.CenterEnd)
+            )
+        }
+        if (expanded && enabled) {
+            Popup(
+                popupPositionProvider = HudDropdownPositionProvider,
+                onDismissRequest = { expanded = false },
+                properties = PopupProperties(focusable = true)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .width(width)
+                        .clip(RoundedCornerShape(6.dp))
+                        .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
+                        .background(palette.panel)
+                ) {
+                    options.forEachIndexed { index, option ->
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(rowHeight)
+                                .background(if (index == safeIndex) selectedBackground else Color.Transparent)
+                                .clickable {
+                                    onSelected(index)
+                                    expanded = false
+                                },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                text = option,
+                                color = if (index == safeIndex && palette.dark) Color.White else palette.text,
+                                fontSize = 14.sp,
+                                fontWeight = if (index == safeIndex) FontWeight.SemiBold else FontWeight.Normal,
+                                textAlign = TextAlign.Center,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 8.dp)
+                            )
+                            if (index < options.lastIndex) {
+                                Box(
+                                    modifier = Modifier
+                                        .align(Alignment.BottomCenter)
+                                        .fillMaxWidth()
+                                        .height(1.dp)
+                                        .background(palette.border)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+private object HudDropdownPositionProvider : PopupPositionProvider {
+    override fun calculatePosition(
+        anchorBounds: IntRect,
+        windowSize: IntSize,
+        layoutDirection: LayoutDirection,
+        popupContentSize: IntSize
+    ): IntOffset {
+        val maxX = (windowSize.width - popupContentSize.width).coerceAtLeast(0)
+        val anchoredX = if (layoutDirection == LayoutDirection.Ltr) {
+            anchorBounds.left
+        } else {
+            anchorBounds.right - popupContentSize.width
+        }
+        val below = anchorBounds.bottom
+        val above = anchorBounds.top - popupContentSize.height
+        val maxY = (windowSize.height - popupContentSize.height).coerceAtLeast(0)
+        val y = when {
+            below + popupContentSize.height <= windowSize.height -> below
+            above >= 0 -> above
+            else -> below.coerceIn(0, maxY)
+        }
+        return IntOffset(anchoredX.coerceIn(0, maxX), y)
+    }
+}
+
+@Composable
+private fun HudIntegerStepper(
+    value: Int,
+    palette: Palette,
+    enabled: Boolean,
+    minValue: Int = 1,
+    maxValue: Int? = 10,
+    fallbackValue: Int = 5,
+    onValueChange: (Int) -> Unit
+) {
+    val current = value.takeIf { isValidHudInteger(it, minValue, maxValue) }
+        ?: fallbackValue
+    var textValue by remember(value, minValue, maxValue, fallbackValue) {
+        mutableStateOf(current.toString())
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        HudButton(
+            text = "-",
+            palette = palette,
+            width = 42.dp,
+            enabled = enabled && current > minValue,
+            onClick = { onValueChange(current - 1) }
+        )
+        BasicTextField(
+            value = textValue,
+            onValueChange = { rawValue ->
+                val candidate = rawValue.filter(Char::isDigit)
+                if (candidate.isEmpty() || isValidHudInteger(
+                        candidate.toIntOrNull(), minValue, maxValue
+                    )) {
+                    textValue = candidate
+                    candidate.toIntOrNull()?.let(onValueChange)
+                }
+            },
+            enabled = enabled,
+            singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+            textStyle = TextStyle(
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                textAlign = TextAlign.Center
+            ),
+            modifier = Modifier
+                .width(52.dp)
+                .onFocusChanged { focusState ->
+                    if (enabled && !focusState.isFocused && !isValidHudInteger(
+                            textValue.toIntOrNull(), minValue, maxValue
+                        )) {
+                        textValue = fallbackValue.toString()
+                        onValueChange(fallbackValue)
+                    }
+                },
+            decorationBox = { innerTextField ->
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(44.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .border(
+                            1.dp,
+                            if (enabled) palette.borderStrong else palette.border,
+                            RoundedCornerShape(7.dp)
+                        )
+                        .background(if (enabled) palette.field else palette.panelAlt),
+                    contentAlignment = Alignment.Center
+                ) {
+                    innerTextField()
+                }
+            }
+        )
+        HudButton(
+            text = "+",
+            palette = palette,
+            width = 42.dp,
+            enabled = enabled && current < (maxValue ?: Int.MAX_VALUE),
+            onClick = { onValueChange(current + 1) }
+        )
+    }
+}
+
+private fun isValidHudInteger(value: Int?, minValue: Int, maxValue: Int?): Boolean =
+    value != null && value >= minValue && (maxValue == null || value <= maxValue)
 
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
@@ -3856,10 +5428,55 @@ private fun SwitchRow(
     hint: String,
     checked: Boolean,
     palette: Palette,
+    enabled: Boolean = true,
     onChecked: (Boolean) -> Unit
 ) {
-    SettingRow(title, hint, palette) {
-        HudSwitch(checked, onChecked, palette)
+    val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
+    val rowEnabled = enabled && switchControl.value?.pending != true
+    val press = rememberPressFeedback(rowEnabled)
+    val visualClick = rememberVisualFirstClick {
+        switchControl.value?.trigger?.invoke()
+    }
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 14.dp, vertical = 14.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(pressBackground(Color.Transparent, palette, press.pressed))
+            .then(press.modifier)
+            .toggleable(
+                value = checked,
+                enabled = rowEnabled,
+                role = Role.Switch,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onValueChange = { visualClick() }
+            )
+            .semantics(mergeDescendants = true) {},
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(
+                title,
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
+            )
+            if (hint.isNotBlank()) {
+                Text(
+                    rowExplanation(hint),
+                    color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
+                    fontSize = 13.sp
+                )
+            }
+        }
+        HudSwitch(
+            checked,
+            onChecked,
+            palette,
+            enabled = enabled,
+            externalControl = switchControl
+        )
     }
 }
 
@@ -3888,93 +5505,31 @@ private fun ActionRow(
     title: String,
     hint: String,
     palette: Palette,
-    left: @Composable () -> Unit,
-    right: @Composable () -> Unit
+    verticalPadding: Dp = 12.dp,
+    enabled: Boolean = true,
+    action: @Composable () -> Unit
 ) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 12.dp),
+            .padding(horizontal = 14.dp, vertical = verticalPadding),
         verticalAlignment = Alignment.CenterVertically
     ) {
         Column(Modifier.weight(1f)) {
-            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
-            Text(hint, color = palette.muted, fontSize = 13.sp)
-        }
-        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            left()
-            right()
-        }
-    }
-}
-
-@Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun ManualModeTile(
-    title: String,
-    hint: String,
-    selected: Boolean,
-    palette: Palette,
-    modifier: Modifier,
-    onClick: () -> Unit
-) {
-    val press = rememberPressFeedback()
-    val visualClick = rememberVisualFirstClick(onClick)
-    val baseBackground = if (selected) palette.active else palette.panelAlt
-    Column(
-        modifier = modifier
-            .height(74.dp)
-            .clip(RoundedCornerShape(8.dp))
-            .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
-            .background(pressBackground(baseBackground, palette, press.pressed))
-            .then(press.modifier)
-            .clickable(
-                interactionSource = press.interactionSource,
-                indication = null,
-                onClick = visualClick
+            Text(
+                title,
+                color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp
             )
-            .padding(horizontal = 14.dp),
-        verticalArrangement = Arrangement.Center
-    ) {
-        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-        Text(hint, color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
-    }
-}
-
-@Composable
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun LabeledInput(
-    label: String,
-    value: String,
-    onValue: (String) -> Unit,
-    palette: Palette,
-    modifier: Modifier = Modifier
-) {
-    Column(modifier) {
-        Text(label, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
-        Spacer(Modifier.height(5.dp))
-        BasicTextField(
-            value = value,
-            onValueChange = onValue,
-            singleLine = true,
-            textStyle = TextStyle(color = palette.text, fontSize = 15.sp, fontFamily = FontFamily.Monospace),
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(42.dp)
-                .clip(RoundedCornerShape(7.dp))
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-                .background(palette.field),
-            decorationBox = { inner ->
-                Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 11.dp),
-                    contentAlignment = Alignment.CenterStart
-                ) {
-                    inner()
-                }
-            }
-        )
+            Text(
+                rowExplanation(hint),
+                color = palette.muted.copy(alpha = if (enabled) 1f else 0.52f),
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.width(10.dp))
+        action()
     }
 }
 
@@ -4121,11 +5676,15 @@ private fun CompactSwitchBox(
             .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
             .background(pressBackground(palette.panelAlt, palette, press.pressed))
             .then(press.modifier)
-            .clickable(
+            .toggleable(
+                value = checked,
                 enabled = rowEnabled,
+                role = Role.Switch,
                 interactionSource = press.interactionSource,
-                indication = null
-            ) { visualClick() }
+                indication = null,
+                onValueChange = { visualClick() }
+            )
+            .semantics(mergeDescendants = true) {}
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -4141,6 +5700,7 @@ private fun HudSwitch(
     onChecked: (Boolean) -> Unit,
     palette: Palette,
     compact: Boolean = false,
+    enabled: Boolean = true,
     externalControl: MutableState<SwitchExternalControl?>? = null
 ) {
     val width = if (compact) 42.dp else 56.dp
@@ -4151,13 +5711,13 @@ private fun HudSwitch(
     val pendingHolder = remember { mutableStateOf<SwitchPendingState?>(null) }
     val pendingState = pendingHolder.value
     val isPending = pendingState != null
-    val press = rememberPressFeedback(!isPending)
+    val press = rememberPressFeedback(enabled && !isPending)
     val scope = rememberCoroutineScope()
     val latestOnChecked by rememberUpdatedState(onChecked)
     val latestChecked by rememberUpdatedState(checked)
-    val triggerToggle = remember(scope) {
+    val triggerToggle = remember(scope, enabled) {
         {
-            if (pendingHolder.value == null) {
+            if (enabled && pendingHolder.value == null) {
                 val from = latestChecked
                 val target = !from
                 pendingHolder.value = SwitchPendingState(
@@ -4207,13 +5767,23 @@ private fun HudSwitch(
         modifier = Modifier
             .size(width = width, height = height)
             .clip(RoundedCornerShape(100.dp))
-            .background(pressBackground(if (trackChecked) palette.accent else palette.disabled, palette, press.pressed))
+            .background(
+                pressBackground(
+                    if (enabled && trackChecked) palette.accent else palette.disabled,
+                    palette,
+                    press.pressed
+                )
+            )
             .then(press.modifier)
-            .clickable(
-                enabled = !isPending,
+            .toggleable(
+                value = trackChecked,
+                enabled = enabled && !isPending,
+                role = Role.Switch,
                 interactionSource = press.interactionSource,
-                indication = null
-            ) { triggerToggle() }
+                indication = null,
+                onValueChange = { triggerToggle() }
+            )
+            .then(if (externalControl != null) Modifier.clearAndSetSemantics {} else Modifier)
             .padding(0.dp),
         contentAlignment = Alignment.CenterStart
     ) {
@@ -4222,7 +5792,13 @@ private fun HudSwitch(
                 .size(knobSize)
                 .offset(x = knobOffset, y = 0.dp)
                 .clip(RoundedCornerShape(100.dp))
-                .background(if (trackChecked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE))
+                .background(
+                    if (enabled) {
+                        if (trackChecked) Color(0xFFD9ECFF) else Color(0xFFD8E3EE)
+                    } else {
+                        palette.muted.copy(alpha = 0.45f)
+                    }
+                )
         )
     }
 }
@@ -4284,7 +5860,14 @@ private fun Pill(text: String, color: Color, background: Color, modifier: Modifi
             .padding(horizontal = 11.dp, vertical = 6.dp),
         contentAlignment = Alignment.Center
     ) {
-        Text(text, color = color, fontWeight = FontWeight.Bold, fontSize = 12.sp, maxLines = 1)
+        Text(
+            text,
+            color = color,
+            fontWeight = FontWeight.Bold,
+            fontSize = 12.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
     }
 }
 
@@ -4342,8 +5925,7 @@ private fun BottomTabs(copy: Copy, palette: Palette, selected: RuntimeTab, onSel
         TabButton(copy.main, RuntimeTab.Options, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.storage, RuntimeTab.Storage, selected, palette, Modifier.weight(1f), onSelect)
         TabButton(copy.patch, RuntimeTab.Patch, selected, palette, Modifier.weight(1f), onSelect)
-        TabButton(copy.logs, RuntimeTab.Logs, selected, palette, Modifier.weight(1f), onSelect)
-        TabButton(copy.manual, RuntimeTab.Manual, selected, palette, Modifier.weight(1f), onSelect)
+        TabButton(copy.hudCheck, RuntimeTab.HudCheck, selected, palette, Modifier.weight(1f), onSelect)
     }
 }
 
@@ -4396,10 +5978,9 @@ private fun TabIcon(tab: RuntimeTab, palette: Palette, active: Boolean) {
 private fun iconFor(tab: RuntimeTab): Int = when (tab) {
     RuntimeTab.Options -> R.drawable.ic_tab_options
     RuntimeTab.Apps -> R.drawable.ic_tab_apps
-    RuntimeTab.Logs -> R.drawable.ic_tab_logs
     RuntimeTab.Storage -> R.drawable.ic_tab_storage
     RuntimeTab.Patch -> R.drawable.ic_tab_patch
-    RuntimeTab.Manual -> R.drawable.ic_tab_manual
+    RuntimeTab.HudCheck -> R.drawable.ic_tab_manual
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -4411,42 +5992,6 @@ private fun appLabel(row: MainActivity.ComposeAppRow): String {
         else -> row.label.ifBlank { row.packageName }
     }
 }
-
-private const val defaultLanePayload = "S* | S | S* | S | S*"
-
-private val lanePayloadSamples = listOf(
-    defaultLanePayload,
-    "L | S* | S*+R",
-    "S | S | Rs*",
-    "Ls | S*+Ls | S* | S*+R",
-    "L | S*+L | S* | S* | R"
-)
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun validLane(value: String): Boolean {
-    val cells = value.split("|").map { it.trim() }
-    return cells.isNotEmpty() && cells.all { it.isNotEmpty() }
-}
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun stepLane(current: String, index: Int, delta: Int): Pair<Int, String> {
-    val base = if (validLane(current)) index else 0
-    val next = (base + delta + lanePayloadSamples.size) % lanePayloadSamples.size
-    return next to lanePayloadSamples[next]
-}
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun manualNumber(value: String, defaultValue: Int): Int =
-    value.trim().toIntOrNull()?.takeIf { it in 1..99 } ?: defaultValue
-
-private fun stepNumber(value: String, delta: Int, defaultValue: Int): String {
-    val zeroBased = manualNumber(value, defaultValue) - 1
-    return ((zeroBased + delta + 99) % 99 + 1).toString()
-}
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun manualId(prefix: String, value: String, defaultValue: Int): String =
-    "$prefix${manualNumber(value, defaultValue).toString().padStart(2, '0')}"
 
 private fun sanitizeStorageLimitInput(value: String): String {
     val digits = value.filter { it.isDigit() }.take(2)
@@ -4503,13 +6048,6 @@ private fun sessionLabel(count: Int, copy: Copy): String {
 }
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun previousPlural(copy: Copy): String =
-    if (copy.language == Language.Ua) "Попередні" else copy.previous
-
-private fun nextPlural(copy: Copy): String =
-    if (copy.language == Language.Ua) "Наступні" else copy.next
-
-//keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun darkPalette() = Palette(
     dark = true,
     background = Color(0xFF080D12),
@@ -4562,9 +6100,8 @@ private fun enCopy() = Copy(
     subtitle = "HUD navigation output | v${BuildConfig.VERSION_NAME}",
     main = "Options",
     apps = "Apps",
-    logs = "Logs",
     patch = "Patch",
-    manual = "Manual",
+    hudCheck = "HUD check",
     hudRunning = "HUD: running",
     hudIdle = "HUD: idle",
     hudFailed = "HUD: failed",
@@ -4576,7 +6113,7 @@ private fun enCopy() = Copy(
     eng = "Англ",
     dark = "Dark",
     light = "Light",
-    mainHint = "Runtime controls and quick navigation diagnostics",
+    mainHint = "Navigation settings",
     permissionsRuntime = "Permissions and Runtime",
     adbPermissions = "ADB permissions",
     adbHint = "Self-check grants required nav capture permissions automatically when ADB is authorized.",
@@ -4600,8 +6137,6 @@ private fun enCopy() = Copy(
     betaTestingHint = "Check for experimental version. Usage may be unstable or broken",
     shutdown = "Shutdown",
     shutdownHint = "Stop the app until it is opened again",
-    screenCaptureChannel = "Screen capture channel (legacy)",
-    screenCaptureChannelHint = "Allows screen capture for maneuver output. No longer supported",
     updateTitle = "Update",
     updateCurrentVersion = "Current version:",
     updateAvailableVersion = "Available version:",
@@ -4616,7 +6151,6 @@ private fun enCopy() = Copy(
     notice = "Notice",
     wazeDirectNotice = "Waze HUD output works best through the direct channel. Supported versions:",
     wazeSupportedVersions = "stock 4.95.0.3 / patched 5.20.0.1",
-    screenCaptureUnsupportedNotice = "The screen capture channel is no longer supported by the developer.",
     pngOutput = "PNG output",
     pngHint = "Send maneuver source image payload.",
     nativeOutput = "Native output",
@@ -4627,27 +6161,37 @@ private fun enCopy() = Copy(
     distanceHint = "Send distance-to-maneuver field in live navigation payload.",
     streetOutput = "Street output",
     streetHint = "Send next road or Waze street text when available.",
+    textTransliteration = "Text transliteration",
+    textTransliterationHint = "Convert Ukrainian Cyrillic or other scripts to Latin characters for street names and directions if the HUD does not display them correctly.",
     textDirectionOutput = "Text direction output",
     textDirectionOutputHint = "Send text direction in street output (\"Continue straight\") if no street text available. Street output has priority.",
     showWazeAlerts = "Show Waze alerts",
     showWazeAlertsHint = "Display Waze alerts on the HUD.",
+    tbtWithoutHudOutput = "Create a TBT card even for an active navigator session without HUD output",
+    tbtWithoutHudOutputHint = "The TBT card is also created for an active navigator not selected for HUD output.\nIf two navigators are active, priority goes to the navigator with HUD output, or to the most recently started navigator when no HUD output is selected.",
+    switchToTbtOnHudStart = "Switch to the TBT card when HUD output starts",
+    switchToTbtOnHudStartHint = "Automatically open the TBT card when navigation output to the HUD starts.",
     showWholeRouteMetrics = "Show ETA/time/distance for entire route",
-    showWholeRouteMetricsHint = "When supported, show values for the entire route. Waze currently shows values to the next stop.",
+    showWholeRouteMetricsHint = "Prefer whole-route values. Waze falls back to an available next-stop value when an individual whole-route metric is missing.",
     showEta = "Show ETA",
     showEtaHint = "Prepend the estimated arrival time to the street text.",
     showRemainingTime = "Show remaining time",
     showRemainingTimeHint = "Prepend the remaining trip time to the street text.",
     showRemainingDistance = "Show remaining distance",
     showRemainingDistanceHint = "Prepend the remaining trip distance to the street text.",
-    fullscreenDashboard = "Fullscreen dashboard",
-    fullscreenDashboardHint = "Use fullscreen dashboard mode.",
+    dashboardScreenMode = "Dashboard screen mode",
+    dashboardScreenModeHint = "Choose the dashboard screen mode",
+    dashboardWidth = "Width",
+    dashboardWidthHint = "Window width as a percentage of the dashboard width.",
     dashboardHeight = "Height",
     dashboardHeightHint = "Window height as a percentage of the dashboard height.",
+    dashboardOffset = "Horizontal offset",
+    dashboardOffsetHint = "Position within the remaining horizontal space: 0% left, 50% center, 100% right.",
+    dashboardScale = "Scale",
+    dashboardScaleHint = "Scale the projected dashboard content inside the window.",
     smallDistanceClamp = "Small distance clamp",
     smallDistanceHint = "Send 11 m for distances from 0 to 10 m instead of the OEM close marker.",
-    roundaboutLeft = "Roundabout left-hand traffic",
-    roundaboutHint = "Changes roundabout assets for PNG output. (Legacy with screen capture channel)",
-    appsHint = "Supported apps can be armed before launch. Dashboard actions require a running background app.",
+    appsHint = "Manage navigator output to the HUD and dashboard.",
     lastScan = "Last scan",
     refreshApps = "Refresh apps",
     supportedApps = "Supported navigation apps",
@@ -4659,37 +6203,41 @@ private fun enCopy() = Copy(
     supported = "supported",
     dashboardUnavailable = "dashboard unavailable",
     logCandidate = "log candidate",
+    navigatorAssetsNotice = "Direct HUD output works best with these supported navigator builds",
+    navigatorAssetDownload = "Download",
+    navigatorAssetInstall = "Install",
+    navigatorAssetInstalled = "Installed",
+    navigatorAssetRetry = "Retry",
+    navigatorAssetRestore = "Restore",
+    navigatorAssetInstalling = "Installing...",
+    navigatorAssetVerifying = "Verifying...",
+    navigatorAssetConfirmTitle = "Replace %s?",
+    navigatorAssetConfirmText = "The installed navigator will be removed before this APK is installed. Its local data may be lost. The previous APK-set is staged for recovery.",
+    navigatorAssetConfirmOk = "Replace",
+    navigatorAssetConfirmCancel = "Cancel",
+    wazeFeatures = "Waze features",
+    customSurface = "Start with custom surface",
+    customSurfaceHint = "Open Waze's navigation surface only after a route starts. Use ordinary Waze for search and route setup.",
     hud = "HUD",
     log = "Log",
     sendDashboard = "Send to dashboard",
     sendMain = "Send to main",
     startAppFirst = "Start app first",
     noBackgroundApps = "Supported apps are not duplicated here. This list shows only current non-system background apps.",
-    logsHint = "Capture logs and tester-facing navigation artifact paths.",
-    logcatRecorder = "Logcat recorder",
-    recorderStatus = "Recorder status",
-    waiting = "waiting",
-    logcatWaiting = "Waiting to record",
-    logcatRecording = "Recording log",
-    logcatSaving = "Saving log",
-    logcatSaved = "Log saved",
-    startLogcat = "Record Logcat",
+    startLogcat = "Start Logcat",
     stopLogcat = "Stop Logcat",
     shareConfiguration = "Share configuration",
-    applicationState = "Application state",
-    navigationLogs = "Navigation logs",
-    pathHint = "Path to navigation logs on tablet.",
-    storage = "Storage",
-    storageHint = "Navigation log retention and cleanup controls.",
+    storage = "Storage and logs",
+    storageHint = "Navigation log recording, sharing, retention, and cleanup controls.",
     storageSettings = "Storage settings",
     navLogsFolderLimit = "Navigation logs folder limit",
     navLogsFolderLimitHint = "Old data is deleted while the app is running when this folder exceeds the limit.",
     storageLimitGb = "Limit, GB",
     currentNavLogsSize = "Current navigation logs folder size",
     navigationLogsFolder = "Navigation logs folder",
-    privateStorageLocation = "private folder",
-    publicStorageLocation = "public folder",
-    bothStorageLocations = "public and private folders",
+    privateStorageLocation = "Private folder",
+    publicStorageLocation = "Public folder",
+    bothStorageLocations = "Public and private folders",
     shareSelected = "Share selected",
     sortByDate = "Newest first",
     sortByName = "Oldest first",
@@ -4713,23 +6261,23 @@ private fun enCopy() = Copy(
     patchTab = "APPLICATION PATCH",
     patchHint = "Patch navigation apps to enable direct HUD output.",
     patchWarning = "Warning",
-    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components are patched locally and verified before Android asks you to install the result. Only known original, project, or confirmed device-local patch signers are accepted. Report unsupported versions for analysis:",
+    patchWarningText = "Select an installed navigator or an APK/APKM/APKS/APK-only XAPK file. Compatible components are patched locally and verified before Android asks you to install the result. Patch eligibility uses package, archive topology, manifest, and exact DEX structure; a repository signer is not required. A signer mismatch may require removing the installed app and can lose local data. Report unsupported versions for analysis:",
     patchRiskWarning = "Proceed at your own risk. App developer is not responsible for any data loss or errors.",
     availableNavigators = "Available navigation apps",
     noSupportedNavigators = "No supported navigation apps",
     appVersion = "Version",
-    patchNotChecked = "not checked",
+    patchNotChecked = "check",
     patchDirectChannel = "Direct channel",
-    patchWazeAlerts = "Waze alerts",
+    patchWazeAlerts = "Alerts",
     patchClearSelection = "Clear selected file",
     patchSelectFile = "Optionally select file",
     patchSelectFileTitle = "Select another app version?",
     patchSelectFileText = "Select another downloaded version of the app that will replace the currently installed version.",
     patchUnsupportedFileText = "Only APK, APKM, APKS, and APK-only XAPK files are supported.",
     patchSelectionErrorText = "The selected source could not be used.",
-    patchPatchable = "can patch",
-    patchPatched = "patched",
-    patchFailed = "unavailable",
+    patchPatchable = "patch",
+    patchPatched = "ready",
+    patchFailed = "failed",
     patchSource = "Source",
     patchInstalledSource = "installed app",
     patchProgress = "Applying navigator patch",
@@ -4741,26 +6289,38 @@ private fun enCopy() = Copy(
     patchConfirmText = "The installed navigation app must be removed before the patched package can be installed. Its local data will be lost. The selected source package is kept for recovery.",
     patchConfirmOk = "OK",
     patchConfirmCancel = "Cancel",
-    manualHint = "Direct manual payload checks for HUD output.",
-    manualHudOutput = "Manual HUD output",
-    supportedArrows = "Supported arrows",
-    supportedArrowsHint = "Prev / Next sends supported PNG+Native combo",
-    manualLanes = "Manual lanes",
-    manualLanesHint = "Prev / Next sends lane bitmap immediately",
-    rawManeuverIds = "Raw maneuver IDs",
-    rawManeuverHint = "Number fields send Sxx / Nxx payload IDs immediately",
-    manualMode = "Manual mode",
-    manualModeHint = "When enabled, Manual controls send HUD payload immediately. Turning it off clears manual output and returns to live navigation output.",
-    pngNumber = "PNG number",
-    nativeNumber = "Native number",
-    distance = "Distance, m",
-    street = "Street text",
-    laneBitmap = "Lane bitmap",
+    hudCheckHint = "Direct payload checks for HUD and dashboard TBT output",
+    basicOutput = "Basic output",
+    basicOutputHint = "Independent controls for the main output fields",
+    extendedOutput = "Extended output",
+    extendedOutputHint = "Constant basic packet · automatic or manual cycle",
+    checkManeuvers = "Maneuvers",
+    checkManeuversHint = "PNG and native follow the same maneuver",
+    checkManeuversChannels = "OEM + native",
+    checkLanes = "Lanes",
+    checkLanesHint = "Recommended and combined lane directions",
+    distanceMeters = "Distance, m",
+    checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
+    streetText = "Street",
+    checkStreetHint = "Latin and Cyrillic words · only Cyrillic is transliterated",
+    checkTransliteration = "Transliteration",
+    checkTrafficLight = "Traffic-light field",
+    checkTrafficLightHint = "Directions, colors, numbers and stock symbols",
+    stockImage = "Stock",
+    bitmapImage = "Bitmap",
+    hudCheckRunning = "Running",
+    hudCheckStopped = "Stopped",
+    hudCheckStart = "Start",
+    hudCheckStop = "Stop",
+    checkBaseline = "Constant basic packet",
+    currentField = "Expected additional output",
+    checkAutomatic = "Auto",
+    checkManualCycle = "Manual",
+    checkManualCycleHint = "Use the arrows to change fields · Auto resumes from this step",
+    checkCycle = "One step every 500 ms · turn Auto off to hold the current step",
+    checkExtendedNotice = "The basic packet stays unchanged · additional field visibility depends on the vehicle",
     previous = "Previous",
     next = "Next",
-    randomize = "Randomize",
-    currentSelection = "Current selection",
-    manualPreview = "manual output preview"
 )
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -4769,9 +6329,8 @@ private fun uaCopy() = enCopy().copy(
     subtitle = "Виведення навігації на HUD | v${BuildConfig.VERSION_NAME}",
     main = "Налаштування",
     apps = "Застосунки",
-    logs = "Логи",
     patch = "Патч",
-    manual = "Ручний",
+    hudCheck = "Перевірка HUD",
     hudRunning = "HUD: працює",
     hudIdle = "HUD: очікує",
     hudFailed = "HUD: помилка",
@@ -4780,7 +6339,7 @@ private fun uaCopy() = enCopy().copy(
     permissionsMissing = "Права: немає",
     dark = "Темна",
     light = "Світла",
-    mainHint = "Керування службою та швидка діагностика навігації",
+    mainHint = "Налаштування навігації",
     permissionsRuntime = "Дозволи та служба",
     adbPermissions = "Дозволи ADB",
     adbHint = "Самоперевірка автоматично видає потрібні дозволи, коли ADB авторизований.",
@@ -4804,8 +6363,6 @@ private fun uaCopy() = enCopy().copy(
     betaTestingHint = "Перевіряти наявність експериментальних версій. Може бути нестабільна або зламана робота",
     shutdown = "Вимкнути",
     shutdownHint = "Завершити роботу застосунку до наступного відкриття",
-    screenCaptureChannel = "Канал захоплення екрану (сумісність)",
-    screenCaptureChannelHint = "Дозволяє використання захоплення екрану для виводу маневрів. Більше не підтримується",
     updateTitle = "Оновлення",
     updateCurrentVersion = "Поточна версія:",
     updateAvailableVersion = "Доступна версія:",
@@ -4816,11 +6373,10 @@ private fun uaCopy() = enCopy().copy(
     updateAction = "Оновити",
     basicNavigationOutput = "Базовий вивід навігації",
     extraNavigationOptions = "Додаткові функції навігації",
-    dashboardControl = "Керування дашбордом",
+    dashboardControl = "Керування приборкою",
     notice = "Примітка",
     wazeDirectNotice = "Вивід Waze на HUD найкраще працює через прямий канал. Підтримувані версії:",
     wazeSupportedVersions = "стокова 4.95.0.3 / патчена 5.20.0.1",
-    screenCaptureUnsupportedNotice = "Канал захоплення екрану більше не підтримується розробником.",
     pngOutput = "Вивід PNG",
     pngHint = "Надсилати зображення маневру.",
     nativeOutput = "Вивід штатного маневру",
@@ -4831,27 +6387,37 @@ private fun uaCopy() = enCopy().copy(
     distanceHint = "Надсилати дистанцію до маневру в даних активної навігації.",
     streetOutput = "Вивід вулиці",
     streetHint = "Надсилати наступну дорогу або назву вулиці з Waze, коли вона доступна.",
+    textTransliteration = "Транслітерація тексту",
+    textTransliterationHint = "Перетворювати українську кирилицю або інші системи письма на латиницю для вулиць/напрямків, якщо HUD не відображає назви коректно.",
     textDirectionOutput = "Вивід напрямків текстом",
     textDirectionOutputHint = "Виводити у поле для вулиці текстові напрямки (\"Прямуйте далі\"), якщо відсутній текст вулиці. Вивід вулиці має пріоритет.",
     showWazeAlerts = "Показувати попередження Waze",
     showWazeAlertsHint = "Відображати попередження Waze на HUD.",
+    tbtWithoutHudOutput = "Формувати TBT-картку навіть для активної сесії навігатора без виводу на HUD",
+    tbtWithoutHudOutputHint = "TBT-картка формуватиметься і для активного навігатора, не вибраного для виводу на HUD.\nЯкщо одночасно активні два навігатори, пріоритет має навігатор з активним виводом на HUD або останній запущений навігатор, якщо вивід на HUD не вибрано.",
+    switchToTbtOnHudStart = "Перемикатися на TBT-картку при початку виводу на HUD",
+    switchToTbtOnHudStartHint = "Автоматично відкривати TBT-картку, коли починається вивід навігації на HUD.",
     showWholeRouteMetrics = "Показувати ETA/час/дистанцію всього маршруту",
-    showWholeRouteMetricsHint = "Якщо навігатор підтримує, показувати значення для всього маршруту. Waze наразі показує значення до наступної зупинки.",
+    showWholeRouteMetricsHint = "Надавати перевагу значенням усього маршруту. Waze використовує доступне значення до зупинки, якщо окремий показник усього маршруту відсутній.",
     showEta = "Показувати час прибуття",
     showEtaHint = "Додавати очікуваний час прибуття перед назвою вулиці.",
     showRemainingTime = "Показувати залишок часу",
     showRemainingTimeHint = "Додавати залишок часу поїздки перед назвою вулиці.",
     showRemainingDistance = "Показувати залишок дистанції",
     showRemainingDistanceHint = "Додавати залишок дистанції поїздки перед назвою вулиці.",
-    fullscreenDashboard = "Повний екран приборки",
-    fullscreenDashboardHint = "Використовувати повноекранний режим приборки.",
+    dashboardScreenMode = "Режим екрану на приборці",
+    dashboardScreenModeHint = "Оберіть режим екрану на приборці",
+    dashboardWidth = "Ширина",
+    dashboardWidthHint = "Ширина вікна у відсотках від ширини приборки.",
     dashboardHeight = "Висота",
     dashboardHeightHint = "Висота вікна у відсотках від висоти приборки.",
+    dashboardOffset = "Горизонтальне зміщення",
+    dashboardOffsetHint = "Положення у вільному просторі: 0% ліворуч, 50% по центру, 100% праворуч.",
+    dashboardScale = "Масштаб",
+    dashboardScaleHint = "Масштаб проєктованого вмісту приборки всередині вікна.",
     smallDistanceClamp = "Обрізка малої дистанції",
     smallDistanceHint = "Передавати 11 м для дистанцій від 0 до 10 м замість штатного маркера близької відстані.",
-    roundaboutLeft = "Лівосторонній рух на кільці",
-    roundaboutHint = "Використовувати зображення кільця для лівостороннього руху у виводі PNG. (Сумісність з каналом захоплення екрану)",
-    appsHint = "Підтримувані застосунки можна активувати до запуску. Для приборки застосунок має бути у фоні.",
+    appsHint = "Керування виводом навігаторів на HUD та приборку.",
     lastScan = "Останнє сканування",
     refreshApps = "Оновити застосунки",
     supportedApps = "Підтримувані навігатори",
@@ -4863,36 +6429,40 @@ private fun uaCopy() = enCopy().copy(
     supported = "підтримується",
     dashboardUnavailable = "приборка недоступна",
     logCandidate = "кандидат для логів",
+    navigatorAssetsNotice = "Вивід на HUD найкраще працює з цими підтримуваними збірками навігаторів",
+    navigatorAssetDownload = "Скачати",
+    navigatorAssetInstall = "Встановити",
+    navigatorAssetInstalled = "Встановлено",
+    navigatorAssetRetry = "Повторити",
+    navigatorAssetRestore = "Відновити",
+    navigatorAssetInstalling = "Встановлення...",
+    navigatorAssetVerifying = "Перевірка...",
+    navigatorAssetConfirmTitle = "Замінити %s?",
+    navigatorAssetConfirmText = "Перед встановленням цього APK установлений навігатор буде видалено. Його локальні дані може бути втрачено. Попередній APK-set збережено для відновлення.",
+    navigatorAssetConfirmOk = "Замінити",
+    navigatorAssetConfirmCancel = "Скасувати",
+    wazeFeatures = "Функції Waze",
+    customSurface = "Запускати з власним surface",
+    customSurfaceHint = "Відкривати навігаційний surface Waze лише після початку маршруту. Для пошуку та побудови маршруту використовуйте звичайний Waze.",
     log = "Лог",
     sendDashboard = "На приборку",
     sendMain = "На основний екран",
     startAppFirst = "Спочатку запусти",
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
-    logsHint = "Збір логів і шляхів до навігаційних логів для тестерів.",
-    logcatRecorder = "Запис logcat",
-    recorderStatus = "Стан запису",
-    waiting = "очікування",
-    logcatWaiting = "Очікування запису",
-    logcatRecording = "Йде запис логу",
-    logcatSaving = "Збереження логу",
-    logcatSaved = "Лог збережено",
-    startLogcat = "Записати Logcat",
-    stopLogcat = "Зупинити logcat",
+    startLogcat = "Почати Logcat",
+    stopLogcat = "Зупинити Logcat",
     shareConfiguration = "Поділитись конф-єю",
-    applicationState = "Стан застосунку",
-    navigationLogs = "Навігаційні логи",
-    pathHint = "Шлях до навігаційних логів на планшеті.",
-    storage = "Сховище",
-    storageHint = "Зберігання й очищення навігаційних логів.",
+    storage = "Сховище та логи",
+    storageHint = "Запис, поширення, зберігання й очищення навігаційних логів.",
     storageSettings = "Налаштування сховища",
     navLogsFolderLimit = "Ліміт теки з журналом навігації",
     navLogsFolderLimitHint = "Старі дані видаляються під час роботи застосунку, коли тека перевищує ліміт.",
     storageLimitGb = "Ліміт, ГБ",
     currentNavLogsSize = "Поточний розмір теки з журналом навігації",
     navigationLogsFolder = "Тека журналу навігації",
-    privateStorageLocation = "приватна тека",
-    publicStorageLocation = "публічна тека",
-    bothStorageLocations = "публічна та приватна теки",
+    privateStorageLocation = "Приватна тека",
+    publicStorageLocation = "Публічна тека",
+    bothStorageLocations = "Публічна та приватна теки",
     shareSelected = "Поділитися вибраним",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
@@ -4916,54 +6486,66 @@ private fun uaCopy() = enCopy().copy(
     patchTab = "ПАТЧ ЗАСТОСУНКУ",
     patchHint = "Патч навігатора для підтримки прямого каналу виводу на HUD.",
     patchWarning = "Попередження",
-    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Приймаються лише відомі оригінальні, проєктні або підтверджені локальні ключі патчу цього пристрою. Повідомляйте про непідтримувані версії для аналізу:",
+    patchWarningText = "Оберіть установлений навігатор або файл APK/APKM/APKS/XAPK без OBB. Сумісні компоненти буде пропатчено локально та перевірено до системного запиту на встановлення. Сумісність визначається package, структурою архіву, manifest і точною DEX-структурою; ключ репозиторію не потрібен. Невідповідність підпису може вимагати видалення встановленого застосунку та призвести до втрати локальних даних. Повідомляйте про непідтримувані версії для аналізу:",
     patchRiskWarning = "Дійте на власний ризик. Розробник застосунку не несе відповідальності за втрату даних та помилки.",
     availableNavigators = "Доступні навігатори",
     noSupportedNavigators = "Немає підтримуваних навігаторів",
     appVersion = "Версія",
-    patchNotChecked = "не перевірено",
+    patchNotChecked = "перевір",
     patchDirectChannel = "Прямий канал",
-    patchWazeAlerts = "Попередження Waze",
+    patchWazeAlerts = "Попередження",
     patchClearSelection = "Скасувати вибір файла",
     patchSelectFile = "Опційно обрати файл",
     patchSelectFileTitle = "Обрати іншу версію застосунку?",
     patchSelectFileText = "Обрати іншу завантажену версію застосунку, яка замінить поточну встановлену версію застосунку.",
     patchUnsupportedFileText = "Підтримуються лише файли APK, APKM, APKS та XAPK без OBB.",
     patchSelectionErrorText = "Обране джерело неможливо використати.",
-    patchPatchable = "можна патчити",
-    patchPatched = "пропатчено",
-    patchFailed = "недоступно",
+    patchPatchable = "патчити",
+    patchPatched = "готово",
+    patchFailed = "помилка",
     patchSource = "Джерело",
     patchInstalledSource = "установлений застосунок",
     patchProgress = "Застосування патчу навігатора",
     patchRecovery = "Потрібне відновлення",
     patchRestore = "Відновити вихідний пакет",
-    checkPatch = "Перевірити",
+    checkPatch = "Перевір",
     applyPatch = "Пропатчити",
     patchConfirmTitle = "Пропатчити %s?",
     patchConfirmText = "Перед встановленням пропатченого пакета установлений навігатор потрібно видалити. Його локальні дані буде втрачено. Обраний вихідний пакет зберігається для відновлення.",
     patchConfirmOk = "Ок",
     patchConfirmCancel = "Скасувати",
-    manualHint = "Пряма ручна перевірка даних для HUD.",
-    manualHudOutput = "Ручний вивід на HUD",
-    supportedArrows = "Підтримувані стрілки",
-    supportedArrowsHint = "Попередній / Наступний одразу надсилає пару PNG і штатного маневру",
-    manualLanes = "Ручні смуги",
-    manualLanesHint = "Попередні / Наступні одразу надсилають зображення смуг",
-    rawManeuverIds = "Сирі ID маневрів",
-    rawManeuverHint = "Числові поля одразу формують ідентифікатори Sxx / Nxx",
-    manualMode = "Ручний режим",
-    manualModeHint = "Коли увімкнено, ручні елементи одразу надсилають дані на HUD. Вимкнення очищає ручний вивід і повертає активну навігацію.",
-    pngNumber = "PNG номер",
-    nativeNumber = "Номер штатного маневру",
-    distance = "Дистанція, м",
-    street = "Текст вулиці",
-    laneBitmap = "Зображення смуг",
+    hudCheckHint = "Пряма перевірка даних HUD і TBT-картки приборки",
+    basicOutput = "Базовий вивід",
+    basicOutputHint = "Незалежне керування основними полями виводу",
+    extendedOutput = "Розширений вивід",
+    extendedOutputHint = "Постійний базовий пакет · цикл авто або ручний",
+    checkManeuvers = "Маневри",
+    checkManeuversHint = "PNG і native відповідають одному маневру",
+    checkManeuversChannels = "OEM + native",
+    checkLanes = "Смуги",
+    checkLanesHint = "Рекомендовані та суміщені напрямки",
+    distanceMeters = "Дистанція, м",
+    checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
+    streetText = "Вулиця",
+    checkStreetHint = "Латиниця й кирилиця · транслітерація лише кирилиці",
+    checkTransliteration = "Транслітерація",
+    checkTrafficLight = "Поле світлофора",
+    checkTrafficLightHint = "Напрямки, кольори, числа та штатні символи",
+    stockImage = "Штатне",
+    bitmapImage = "Bitmap",
+    hudCheckRunning = "Працює",
+    hudCheckStopped = "Зупинено",
+    hudCheckStart = "Почати",
+    hudCheckStop = "Зупинити",
+    checkBaseline = "Постійний базовий пакет",
+    currentField = "Додатково має відображатись",
+    checkAutomatic = "Авто",
+    checkManualCycle = "Ручний",
+    checkManualCycleHint = "Стрілки змінюють поле · Авто продовжує з цього кроку",
+    checkCycle = "Один крок кожні 500 мс · вимкніть Авто, щоб утримати крок",
+    checkExtendedNotice = "Базовий пакет не змінюється · відображення додаткового поля залежить від автомобіля",
     previous = "Попередній",
     next = "Наступний",
-    randomize = "Випадково",
-    currentSelection = "Поточний вибір",
-    manualPreview = "попередній перегляд ручного виводу"
 )
 
 private fun shareCopy(language: Language) = if (language == Language.Ua) {
@@ -4976,6 +6558,9 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         shareToSentry = "Надіслати розробнику",
         shareToAnotherApp = "Інший застосунок",
         cancel = "Скасувати",
+        waitingForWrites = "Очікування записів",
+        copying = "Копіювання",
+        archiving = "Архівація",
         uploadTitle = "Надсилання логів розробнику",
         preparing = "Готуємо архів...",
         uploading = "Надсилаємо архів...",
@@ -4999,6 +6584,9 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         shareToSentry = "Send to developer",
         shareToAnotherApp = "Another app",
         cancel = "Cancel",
+        waitingForWrites = "Waiting for writes",
+        copying = "Copying",
+        archiving = "Archiving",
         uploadTitle = "Sending logs to developer",
         preparing = "Preparing the archive...",
         uploading = "Uploading the archive...",

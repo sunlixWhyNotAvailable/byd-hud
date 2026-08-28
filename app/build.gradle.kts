@@ -12,8 +12,8 @@ android {
         applicationId = "com.bydhud.app"
         minSdk = 29
         targetSdk = 29
-        versionCode = 82
-        versionName = "2.3.0"
+        versionCode = 94
+        versionName = "3.0.0"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",
@@ -30,7 +30,6 @@ android {
             "SENTRY_DSN",
             "\"https://4f2ef57219c6c022c2155b02c14ae05c@o4511845885149184.ingest.de.sentry.io/4511845917982800\""
         )
-        buildConfigField("boolean", "WAZE_FRAME_CAPTURE_BETA", "true")
     }
 
     lint {
@@ -38,6 +37,7 @@ android {
     }
 
     buildFeatures {
+        aidl = true
         buildConfig = true
         compose = true
     }
@@ -45,6 +45,15 @@ android {
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
+    }
+
+    buildTypes {
+        create("performance") {
+            initWith(getByName("release"))
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("debug")
+        }
     }
 }
 
@@ -70,14 +79,13 @@ dependencies {
     testImplementation("junit:junit:4.13.2")
 }
 
-//keeps a stable local release-candidate APK outside app/build so Gradle clean does not remove it.
-val copyDebugApkToBuildOutputs by tasks.registering(Copy::class) {
-    dependsOn("packageDebug")
-    from(layout.buildDirectory.file("outputs/apk/debug/app-debug.apk"))
+val copyPerformanceApkToBuildOutputs by tasks.registering(Copy::class) {
+    dependsOn("packagePerformance")
+    from(layout.buildDirectory.file("outputs/apk/performance/app-performance.apk"))
     into(rootProject.layout.projectDirectory.dir("build_outputs"))
     rename { "byd-hud-v${android.defaultConfig.versionName}.apk" }
 }
 
-tasks.matching { it.name == "assembleDebug" }.configureEach {
-    finalizedBy(copyDebugApkToBuildOutputs)
+tasks.matching { it.name == "assemblePerformance" }.configureEach {
+    finalizedBy(copyPerformanceApkToBuildOutputs)
 }
