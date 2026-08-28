@@ -324,9 +324,13 @@ The `HUD check` tab tests the vehicle's supported navigation displays without an
 
 `Stop`, leaving the tab, putting BYD HUD in the background or switching between Basic and Extended ends the test and clears its output. Any still-active eligible navigation resumes. Starting again retains the selected example. Test choices do not alter the settings used by Waze or Google Maps. Authorized ADB enables the additional vehicle interface required for stock lanes and some other fields on supported cars; unavailable outputs do not prevent the others from being tested. The TBT card uses its own maneuver and text layout, not a copy of the HUD lane or bitmap image.
 
-The image below shows the previous test layout; updated HUD check screenshots are pending.
+### Basic output
 
-<p align="center"><img src="docs/screenshots/en/manual.png" alt="Manual HUD payload testing" width="100%"></p>
+<p align="center"><img src="docs/screenshots/en/hud-check-basic.png" alt="HUD check: Basic output" width="100%"></p>
+
+### Extended output
+
+<p align="center"><img src="docs/screenshots/en/hud-check-extended.png" alt="HUD check: Extended output" width="100%"></p>
 
 ## Installation
 
