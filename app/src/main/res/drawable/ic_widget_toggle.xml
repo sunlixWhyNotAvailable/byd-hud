@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- The frame outline is adapted from the noticed OEM FULL widget artwork.
+     The paired launcher-style arrows are project-authored; see THIRD_PARTY_NOTICES.md.
+     Original artwork ownership is unchanged. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="32dp"
+    android:height="32dp"
+    android:viewportWidth="32"
+    android:viewportHeight="32">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M16.439,9.149 C20.329,9.149 24.229,9.689 28.119,10.759 C28.529,10.869 28.869,11.129 29.079,11.469 C29.289,11.809 29.379,12.229 29.309,12.649 C29.309,12.649 28.961,14.519 28.570,16.614"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M16.439,22.759 C12.909,22.759 9.879,23.049 7.339,23.619 C6.899,23.719 6.459,23.629 6.099,23.399 C5.749,23.169 5.479,22.819 5.379,22.379 L3.569,12.649 C3.489,12.229 3.579,11.809 3.789,11.469 C3.999,11.129 4.339,10.869 4.749,10.759 C8.649,9.689 12.539,9.149 16.439,9.149"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M23,17.9 L20.75,20.15 H29"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M20.75,22.75 H29 L26.75,25"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeWidth="1.5"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round" />
+</vector>

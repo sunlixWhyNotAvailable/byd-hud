@@ -193,7 +193,6 @@ private enum class SentryUploadPhase {
 }
 
 private const val SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L
-private const val DASHBOARD_WIDGET_INACTIVITY_TIMEOUT_MS = 5_000L
 
 //defines Palette UI/state support so Compose code can keep rendering intent explicit.
 private data class Palette(
@@ -1746,8 +1745,9 @@ private fun OptionsTab(
         }
     }
     DisposableEffect(showSteeringButtonCapture) {
+        val wasVisible = showSteeringButtonCapture
         onDispose {
-            if (showSteeringButtonCapture) {
+            if (wasVisible) {
                 activity.composeCancelSteeringButtonLearning()
             }
         }
@@ -2623,7 +2623,15 @@ private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, pale
                 .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)),
             contentAlignment = Alignment.Center
         ) {
-            if (state.enabled) DashboardWidgetGraphic(state)
+            if (state.enabled) DashboardWidgetGraphic(state) {
+                val foreground = if (Color(state.fillArgb).luminance() > 0.5f) Color.Black else Color.White
+                Icon(
+                    painterResource(R.drawable.ic_widget_toggle),
+                    contentDescription = null,
+                    modifier = Modifier.size(state.sizeDp.dp),
+                    tint = foreground
+                )
+            }
             else Text(if (ua) "Вимкнено" else "Off", color = palette.muted, fontSize = 14.sp)
         }
         Text(
@@ -2652,48 +2660,35 @@ private class DashboardWidgetPointerGesture {
 
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
-internal fun DashboardWidgetOverlayContent(
+internal fun DashboardWidgetAnchorContent(
     state: DashboardWidgetState,
     windowSizeDp: Offset,
     ua: Boolean,
-    busy: Boolean,
     onChange: (DashboardWidgetState) -> Unit,
     onHide: () -> Unit,
-    onMode: (DashboardWidgetMode) -> Unit,
-    onPositionSettled: () -> Unit
+    onPositionSettled: () -> Unit,
+    onInteraction: () -> Unit
 ) {
     val latestState by rememberUpdatedState(state)
     val latestOnChange by rememberUpdatedState(onChange)
     val latestOnHide by rememberUpdatedState(onHide)
-    val latestOnMode by rememberUpdatedState(onMode)
     val latestOnPositionSettled by rememberUpdatedState(onPositionSettled)
+    val latestOnInteraction by rememberUpdatedState(onInteraction)
     val density = androidx.compose.ui.platform.LocalDensity.current
     val viewConfiguration = LocalViewConfiguration.current
     val gestureScope = rememberCoroutineScope()
     val gesture = remember { DashboardWidgetPointerGesture() }
-    var inactivityGeneration by remember { mutableIntStateOf(0) }
-    val markActivity = { inactivityGeneration++ }
-    LaunchedEffect(state.expanded, state.autoCollapseAfterInactivity, inactivityGeneration) {
-        if (state.expanded && state.autoCollapseAfterInactivity) {
-            delay(DASHBOARD_WIDGET_INACTIVITY_TIMEOUT_MS)
-            val current = latestState
-            if (current.expanded && current.autoCollapseAfterInactivity) {
-                latestOnChange(current.copy(expanded = false))
-            }
-        }
-    }
     var pressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (pressed) 0.97f else 1f, label = "widget-press")
     val latestWindow by rememberUpdatedState(windowSizeDp)
-    val layout = state.layout(windowSizeDp.x, windowSizeDp.y)
-    val graphicSize = minOf(state.sizeDp.toFloat(), layout.cellSize).dp
+    val graphicSize = state.sizeDp.dp
     val foreground = if (Color(state.fillArgb).luminance() > 0.5f) Color.Black else Color.White
     val anchorInteraction = Modifier
         .semantics {
             role = Role.Button
             contentDescription = if (ua) "Плаваючий віджет приборки" else "Floating dashboard widget"
             onClick(if (state.expanded) { if (ua) "Згорнути" else "Collapse" } else { if (ua) "Розкрити" else "Expand" }) {
-                markActivity()
+                latestOnInteraction()
                 val next = latestState.toggleExpanded()
                 latestOnChange(next)
                 latestOnPositionSettled()
@@ -2716,7 +2711,7 @@ internal fun DashboardWidgetOverlayContent(
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     gesture.reset()
-                    markActivity()
+                    latestOnInteraction()
                     gesture.down = raw
                     gesture.previous = raw
                     pressed = true
@@ -2741,7 +2736,7 @@ internal fun DashboardWidgetOverlayContent(
                         pressed = false
                     }
                     if (gesture.dragging) {
-                        markActivity()
+                        latestOnInteraction()
                         dragBy(raw - gesture.previous)
                         gesture.previous = raw
                     }
@@ -2755,7 +2750,7 @@ internal fun DashboardWidgetOverlayContent(
                         if (!gesture.dragging) dragBy(raw - gesture.previous)
                         latestOnPositionSettled()
                     } else if (!gesture.longPressTriggered) {
-                        markActivity()
+                        latestOnInteraction()
                         val next = latestState.toggleExpanded()
                         latestOnChange(next)
                         latestOnPositionSettled()
@@ -2773,37 +2768,70 @@ internal fun DashboardWidgetOverlayContent(
                 else -> true
             }
         }
+    Box(
+        Modifier.size(graphicSize).then(anchorInteraction),
+        contentAlignment = Alignment.Center
+    ) {
+        DashboardWidgetGraphic(
+            state,
+            Modifier.graphicsLayer { scaleX = scale; scaleY = scale },
+            size = graphicSize
+        ) {
+            if (state.expanded) {
+                WidgetCloseIcon(graphicSize * 0.45f, foreground)
+            } else {
+                Icon(
+                    painterResource(R.drawable.ic_widget_toggle),
+                    contentDescription = null,
+                    modifier = Modifier.size(graphicSize),
+                    tint = foreground
+                )
+            }
+        }
+    }
+}
+
+@Composable
+internal fun DashboardWidgetMenuContent(
+    state: DashboardWidgetState,
+    layout: DashboardWidgetMenuLayout,
+    busy: Boolean,
+    onMode: (DashboardWidgetMode) -> Unit,
+    onInteraction: () -> Unit
+) {
+    val latestOnMode by rememberUpdatedState(onMode)
+    val latestOnInteraction by rememberUpdatedState(onInteraction)
+    val graphicSize = layout.cellSize.dp
+    val foreground = if (Color(state.fillArgb).luminance() > 0.5f) Color.Black else Color.White
     val fields: @Composable () -> Unit = {
-        state.fields(layout.expandForward).forEach { mode ->
+        state.fields(layout.expandForward).filterNotNull().forEach { mode ->
             key(mode) {
                 val interaction = remember { MutableInteractionSource() }
                 val modePressed by interaction.collectIsPressedAsState()
                 Box(
-                    Modifier.size(layout.cellSize.dp).then(
-                        if (mode == null) anchorInteraction
-                        else Modifier.clickable(enabled = !busy, interactionSource = interaction, indication = null, role = Role.Button) {
-                            markActivity()
+                    Modifier.size(graphicSize).clickable(
+                        enabled = !busy,
+                        interactionSource = interaction,
+                        indication = null,
+                        role = Role.Button
+                    ) {
+                            latestOnInteraction()
                             latestOnMode(mode)
-                        }
-                    ),
+                    },
                     contentAlignment = Alignment.Center
                 ) {
                     DashboardWidgetGraphic(
                         state,
-                        Modifier.graphicsLayer { scaleX = if (mode == null) scale else if (modePressed && !busy) 0.97f else 1f; scaleY = scaleX },
+                        Modifier.graphicsLayer { scaleX = if (modePressed && !busy) 0.97f else 1f; scaleY = scaleX },
                         size = graphicSize
                     ) {
-                        if (mode == null) {
-                            if (state.expanded) WidgetCloseIcon(graphicSize * 0.45f, foreground)
-                        } else {
-                            val resource = when (mode) {
-                                DashboardWidgetMode.IpcOff -> R.drawable.ic_widget_ipc_off
-                                DashboardWidgetMode.Tbt -> R.drawable.ic_widget_tbt
-                                DashboardWidgetMode.Mini -> R.drawable.ic_widget_mini
-                                DashboardWidgetMode.Full -> R.drawable.ic_widget_full
-                            }
-                            Icon(painterResource(resource), mode.label, Modifier.size(graphicSize * 0.8f), tint = foreground)
+                        val resource = when (mode) {
+                            DashboardWidgetMode.IpcOff -> R.drawable.ic_widget_ipc_off
+                            DashboardWidgetMode.Tbt -> R.drawable.ic_widget_tbt
+                            DashboardWidgetMode.Mini -> R.drawable.ic_widget_mini
+                            DashboardWidgetMode.Full -> R.drawable.ic_widget_full
                         }
+                        Icon(painterResource(resource), mode.label, Modifier.size(graphicSize * 0.8f), tint = foreground)
                     }
                 }
             }

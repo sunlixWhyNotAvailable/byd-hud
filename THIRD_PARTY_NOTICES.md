@@ -2,11 +2,11 @@
 
 ## Dashboard mode pictures
 
-The four `app/src/main/res/drawable/ic_widget_*.xml` files are static vector
-snapshots of frame 24 from BYD's stock LauncherMap artwork, approved as the
-widget pictures in the preview. They are not project-authored artwork, and
-their original ownership is unchanged. This notice does not relicense them
-under the project's source-code license.
+The four dashboard-mode resources listed below are static vector snapshots of
+frame 24 from BYD's stock LauncherMap artwork, approved as the widget pictures
+in the preview. They are not project-authored artwork, and their original
+ownership is unchanged. This notice does not relicense them under the
+project's source-code license.
 
 Source capture, relative to the parent workspace:
 `references/byd/system-apps/bydlaunchermap/capture-2026-06-06/BydLaunchermap.apk`.
@@ -21,3 +21,7 @@ SHA-256: `AC729DEAD6B6D30D3836DF0D9C993B6A140161D9EC4DE75EB07C3C645C6341AB`.
 
 Only static paths and final transforms are retained, with centered padding.
 No animation runtime or executable code from the stock map is included.
+
+`ic_widget_toggle.xml` derives its open frame outline from the noticed FULL
+resource above. Its paired launcher-style arrows are project-authored. The
+source artwork ownership and licensing status are unchanged.

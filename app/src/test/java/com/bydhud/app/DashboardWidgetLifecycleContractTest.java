@@ -19,20 +19,39 @@ public final class DashboardWidgetLifecycleContractTest {
         assertTrue(service.contains("TYPE_APPLICATION_OVERLAY"));
         assertTrue(service.contains("FLAG_NOT_FOCUSABLE"));
         assertTrue(service.contains("FLAG_NOT_TOUCH_MODAL"));
-        assertTrue(service.contains("windows.removeViewImmediate(view)"));
+        assertTrue(service.contains("windows.removeViewImmediate(anchorView)"));
+        assertTrue(service.contains("windows.removeViewImmediate(menuView)"));
+        assertTrue(service.contains("private var anchorAttached = false"));
+        assertTrue(service.contains("private var menuAttached = false"));
+        assertTrue(service.contains("if (menu == null) detachMenu()"));
+        String detachMenu = service.substring(service.indexOf("private fun detachMenu()"),
+                service.indexOf("internal fun removeOverlay()"));
+        assertFalse(detachMenu.contains("closing = true"));
         assertTrue(service.contains("closing = true"));
         assertTrue(service.contains("!closing && DashboardWidgetController.state.visible"));
-        assertTrue(service.contains("SideEffect { updateWindow(widgetState) }"));
+        assertTrue(service.contains("SideEffect { updateWindows(widgetState) }"));
         assertTrue(service.contains("windowAnimations = 0"));
         assertTrue(service.contains("setViewTreeLifecycleOwner"));
         assertTrue(service.contains("setViewTreeSavedStateRegistryOwner"));
-        assertTrue(service.contains("view.disposeComposition()"));
+        assertTrue(service.contains("anchorView.disposeComposition()"));
+        assertTrue(service.contains("menuView.disposeComposition()"));
         assertTrue(service.contains("Display.DEFAULT_DISPLAY"));
         assertTrue(service.contains("return START_STICKY"));
         assertTrue(service.contains("!HudPrefs.isUserShutdownActive(this)"));
         assertTrue(service.contains("DashboardWidgetController.hasOverlayPermission()"));
         assertFalse(service.contains("Settings.canDrawOverlays"));
         assertFalse(service.contains("NavHudLiveSender"));
+    }
+
+    @Test public void anchorAndMenuShareOneServiceOwnedInactivityTimer() throws Exception {
+        String service = source("DashboardWidgetOverlayService.kt");
+        assertTrue(service.contains("DashboardWidgetAnchorContent("));
+        assertTrue(service.contains("DashboardWidgetMenuContent("));
+        assertEquals(2, service.split("onInteraction = \\{ markInteraction\\(\\) \\}", -1).length - 1);
+        assertTrue(service.contains("private val inactivityCallback = Runnable"));
+        assertTrue(service.contains("main.removeCallbacks(inactivityCallback)"));
+        assertTrue(service.contains("main.postDelayed(inactivityCallback, INACTIVITY_TIMEOUT_MS)"));
+        assertTrue(service.contains("state.copy(expanded = false)"));
     }
 
     @Test public void onlyExplicitModeTapDispatchesAndShutdownInvalidatesPendingCallback() throws Exception {

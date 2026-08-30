@@ -77,22 +77,66 @@ class DashboardWidgetStateTest {
                 orientation = orientation, expandForward = forward, xFraction = 0.5f, yFraction = 0.5f)
             val collapsed = state.layout(1000f, 700f)
             val expanded = state.toggleExpanded().layout(1000f, 700f)
-            assertEquals(collapsed.anchorX, expanded.anchorX, 0.01f)
-            assertEquals(collapsed.anchorY, expanded.anchorY, 0.01f)
+            assertEquals(collapsed.anchor, expanded.anchor)
+            assertNull(collapsed.menu)
             for (x in listOf(0f, 1f)) for (y in listOf(0f, 1f)) {
                 val edgeState = state.copy(sizeDp = 160, xFraction = x, yFraction = y)
                 val edge = edgeState.toggleExpanded().layout(350f, 220f)
                 val original = edgeState.layout(350f, 220f)
-                assertTrue(edge.left >= 0 && edge.top >= 0)
-                assertTrue(edge.left + edge.width <= 350.01f && edge.top + edge.height <= 220.01f)
-                assertEquals(original.anchorX, edge.anchorX, 0.01f)
-                assertEquals(original.anchorY, edge.anchorY, 0.01f)
-                val actualAnchorLeft = edge.left + if (!edge.expandForward &&
-                    orientation == DashboardWidgetOrientation.Horizontal) edge.width - edge.cellSize else 0f
-                val actualAnchorTop = edge.top + if (!edge.expandForward &&
-                    orientation == DashboardWidgetOrientation.Vertical) edge.height - edge.cellSize else 0f
-                assertEquals(original.left, actualAnchorLeft, 0.01f)
-                assertEquals(original.top, actualAnchorTop, 0.01f)
+                assertNotNull(edge.menu)
+                val menu = edge.menu!!
+                assertEquals(original.anchor, edge.anchor)
+                assertEquals(160f, edge.anchor.width, 0.01f)
+                assertEquals(160f, edge.anchor.height, 0.01f)
+                assertTrue(menu.left >= 0 && menu.top >= 0)
+                assertTrue(menu.left + menu.width <= 350.01f && menu.top + menu.height <= 220.01f)
+                assertTrue(menu.cellSize <= edge.anchor.width)
+                if (orientation == DashboardWidgetOrientation.Vertical) {
+                    assertTrue(menu.top + menu.height <= edge.anchor.top - DashboardWidgetState.GAP + 0.01f ||
+                        menu.top >= edge.anchor.top + edge.anchor.height + DashboardWidgetState.GAP - 0.01f)
+                } else {
+                    assertTrue(menu.left + menu.width <= edge.anchor.left - DashboardWidgetState.GAP + 0.01f ||
+                        menu.left >= edge.anchor.left + edge.anchor.width + DashboardWidgetState.GAP - 0.01f)
+                }
+            }
+        }
+    }
+
+    @Test fun menuFallsBackWithoutChangingPreferenceAndOrdersModesOutward() {
+        val preferredUpAtTop = DashboardWidgetState(shape = DashboardWidgetShape.Square,
+            orientation = DashboardWidgetOrientation.Vertical, expandForward = false,
+            xFraction = 0.4f, yFraction = 0f, expanded = true)
+        val menu = preferredUpAtTop.layout(800f, 480f).menu!!
+        assertTrue(menu.expandForward)
+        assertFalse(preferredUpAtTop.expandForward)
+        assertEquals(listOf(DashboardWidgetMode.IpcOff, DashboardWidgetMode.Tbt,
+            DashboardWidgetMode.Mini, DashboardWidgetMode.Full),
+            preferredUpAtTop.fields(menu.expandForward).filterNotNull())
+
+        val preferredLeftAtRight = preferredUpAtTop.copy(
+            orientation = DashboardWidgetOrientation.Horizontal, expandForward = false,
+            xFraction = 1f, yFraction = 0.4f)
+        val leftMenu = preferredLeftAtRight.layout(800f, 480f).menu!!
+        assertFalse(leftMenu.expandForward)
+        assertEquals(listOf(DashboardWidgetMode.Full, DashboardWidgetMode.Mini,
+            DashboardWidgetMode.Tbt, DashboardWidgetMode.IpcOff),
+            preferredLeftAtRight.fields(leftMenu.expandForward).filterNotNull())
+    }
+
+    @Test fun expandedMenuIsGapSeparatedFromPermanentAnchor() {
+        for (orientation in DashboardWidgetOrientation.entries) for (forward in listOf(false, true)) {
+            val layout = DashboardWidgetState(shape = DashboardWidgetShape.Circle,
+                orientation = orientation, expandForward = forward, expanded = true,
+                xFraction = 0.5f, yFraction = 0.5f).layout(1000f, 700f)
+            val menu = layout.menu!!
+            if (orientation == DashboardWidgetOrientation.Vertical) {
+                if (menu.expandForward) assertEquals(layout.anchor.top + layout.anchor.height + DashboardWidgetState.GAP,
+                    menu.top, 0.01f)
+                else assertEquals(menu.top + menu.height + DashboardWidgetState.GAP, layout.anchor.top, 0.01f)
+            } else {
+                if (menu.expandForward) assertEquals(layout.anchor.left + layout.anchor.width + DashboardWidgetState.GAP,
+                    menu.left, 0.01f)
+                else assertEquals(menu.left + menu.width + DashboardWidgetState.GAP, layout.anchor.left, 0.01f)
             }
         }
     }

@@ -4,15 +4,25 @@ internal enum class DashboardWidgetShape { Off, Square, Circle }
 internal enum class DashboardWidgetOrientation { Vertical, Horizontal }
 internal enum class DashboardWidgetMode(val label: String) { IpcOff("IPC OFF"), Tbt("TBT"), Mini("MINI"), Full("FULL") }
 
-internal data class DashboardWidgetLayout(
+internal data class DashboardWidgetWindowLayout(
+    val left: Float,
+    val top: Float,
+    val width: Float,
+    val height: Float
+)
+
+internal data class DashboardWidgetMenuLayout(
     val cellSize: Float,
     val left: Float,
     val top: Float,
     val width: Float,
     val height: Float,
-    val anchorX: Float,
-    val anchorY: Float,
     val expandForward: Boolean
+)
+
+internal data class DashboardWidgetLayout(
+    val anchor: DashboardWidgetWindowLayout,
+    val menu: DashboardWidgetMenuLayout?
 )
 
 /** Widget appearance and gesture state; vehicle mode is never inferred from a tap. */
@@ -87,30 +97,36 @@ internal data class DashboardWidgetState(
         // Fractions always locate the collapsed anchor, independently of menu dimensions.
         val anchorLeft = xFraction * (windowWidth - baseCell).coerceAtLeast(0f)
         val anchorTop = yFraction * (windowHeight - baseCell).coerceAtLeast(0f)
+        val anchor = DashboardWidgetWindowLayout(anchorLeft, anchorTop, baseCell, baseCell)
+        if (!expanded) return DashboardWidgetLayout(anchor, null)
+
         val axisLength = if (vertical) windowHeight else windowWidth
         val anchorAxis = if (vertical) anchorTop else anchorLeft
         val before = anchorAxis
         val after = (axisLength - anchorAxis - baseCell).coerceAtLeast(0f)
-        val extra = 4 * (baseCell + GAP)
+        val extra = MENU_CELL_COUNT * (baseCell + GAP)
         val forward = when {
-            !expanded -> expandForward
             (if (expandForward) after else before) >= extra -> expandForward
             (if (expandForward) before else after) >= extra -> !expandForward
             else -> after >= before
         }
-        // Like an anchored popup, open toward available space instead of moving the anchor.
-        val cell = if (!expanded) baseCell else minOf(baseCell,
-            if (forward) (axisLength - anchorAxis - GAP * 4) / 5
-            else (anchorAxis - GAP * 4) / 4).coerceAtLeast(1f)
-        val count = if (expanded) 5 else 1
-        val length = cell * count + GAP * (count - 1)
-        val width = if (vertical) cell else length
-        val height = if (vertical) length else cell
-        val anchorOffset = if (forward) 0f else length - cell
-        val left = (anchorLeft - if (vertical) 0f else anchorOffset).coerceAtLeast(0f)
-        val top = (anchorTop - if (vertical) anchorOffset else 0f).coerceAtLeast(0f)
-        return DashboardWidgetLayout(cell, left, top, width, height,
-            anchorLeft, anchorTop, forward)
+        val available = if (forward) after else before
+        // The anchor stays full-sized; only the transient menu may shrink near an edge.
+        val cell = minOf(baseCell,
+            (available - GAP * MENU_CELL_COUNT) / MENU_CELL_COUNT).coerceAtLeast(1f)
+        val length = cell * MENU_CELL_COUNT + GAP * (MENU_CELL_COUNT - 1)
+        val menuAxis = if (forward) anchorAxis + baseCell + GAP else anchorAxis - GAP - length
+        val crossAxis = (if (vertical) anchorLeft else anchorTop) + (baseCell - cell) / 2f
+        val left = if (vertical) crossAxis else menuAxis
+        val top = if (vertical) menuAxis else crossAxis
+        return DashboardWidgetLayout(anchor, DashboardWidgetMenuLayout(
+            cellSize = cell,
+            left = left.coerceIn(0f, (windowWidth - if (vertical) cell else length).coerceAtLeast(0f)),
+            top = top.coerceIn(0f, (windowHeight - if (vertical) length else cell).coerceAtLeast(0f)),
+            width = if (vertical) cell else length,
+            height = if (vertical) length else cell,
+            expandForward = forward
+        ))
     }
 
     fun dragBy(dx: Float, dy: Float, availableWidth: Float, availableHeight: Float) = copy(
@@ -120,6 +136,7 @@ internal data class DashboardWidgetState(
 
     companion object {
         const val GAP = 2f
+        const val MENU_CELL_COUNT = 4
         val SIZE_RANGE = 24..160
         val BORDER_RANGE = 0..16
     }

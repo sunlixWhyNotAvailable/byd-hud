@@ -43,33 +43,86 @@ public final class WidgetUiSourceContractTest {
     }
 
     @Test
-    public void overlayUsesPicturesAndDelegatesModeWithoutReadback() throws Exception {
+    public void steeringCaptureCancelsOnlyTheDisposedVisibleDialog() throws Exception {
         String source = source();
-        String overlay = between(source, "internal fun DashboardWidgetOverlayContent(", "private fun SetupReminderOverlay(");
-        assertTrue(overlay.contains("busy: Boolean"));
-        assertTrue(overlay.contains("onMode: (DashboardWidgetMode) -> Unit"));
-        assertTrue(overlay.contains("onPositionSettled: () -> Unit"));
-        assertTrue(overlay.contains("Modifier.clickable(enabled = !busy"));
-        assertTrue(overlay.contains("latestOnMode(mode)"));
-        assertTrue(overlay.contains("R.drawable.ic_widget_ipc_off"));
-        assertTrue(overlay.contains("R.drawable.ic_widget_tbt"));
-        assertTrue(overlay.contains("R.drawable.ic_widget_mini"));
-        assertTrue(overlay.contains("R.drawable.ic_widget_full"));
-        assertEquals(1, occurrences(overlay, ".pointerInteropFilter"));
-        assertTrue(overlay.contains("viewConfiguration.touchSlop"));
-        assertTrue(overlay.contains("gesture.longPressJob?.cancel()"));
-        assertTrue(overlay.contains("gesture.dragging"));
-        assertFalse(overlay.contains("motionEventSpy"));
-        assertFalse(overlay.contains("detectDragGestures"));
-        assertFalse(overlay.contains("detectTapGestures"));
-        assertFalse(overlay.contains("selectedMode"));
-        assertFalse(overlay.contains("modeDot"));
+        String options = between(source, "private fun OptionsTab(", "private fun WidgetNumberLine(");
+        String effect = between(options, "DisposableEffect(showSteeringButtonCapture)", "val routeMetricModes");
+        assertTrue(effect.contains("val wasVisible = showSteeringButtonCapture"));
+        assertTrue(effect.contains("if (wasVisible)"));
+        assertFalse(effect.contains("if (showSteeringButtonCapture)"));
+        assertTrue(options.contains("snapshot.steeringTransferRevision > steeringCaptureRevision"));
+        assertTrue(options.contains("steeringLearningRevision > steeringCaptureLearningRevision"));
+    }
+
+    @Test
+    public void anchorOwnsGesturesWhileMenuOnlyDelegatesModePictures() throws Exception {
+        String source = source();
+        String anchor = between(source, "internal fun DashboardWidgetAnchorContent(", "internal fun DashboardWidgetMenuContent(");
+        String menu = between(source, "internal fun DashboardWidgetMenuContent(", "private fun WidgetCloseIcon(");
+
+        assertTrue(anchor.contains("onPositionSettled: () -> Unit"));
+        assertTrue(anchor.contains("onInteraction: () -> Unit"));
+        assertEquals(1, occurrences(anchor, ".pointerInteropFilter"));
+        assertTrue(anchor.contains("viewConfiguration.touchSlop"));
+        assertTrue(anchor.contains("gesture.longPressJob?.cancel()"));
+        assertTrue(anchor.contains("gesture.dragging"));
+        assertTrue(anchor.contains("WidgetCloseIcon("));
+        assertTrue(anchor.contains("R.drawable.ic_widget_toggle"));
+        assertTrue(anchor.contains("modifier = Modifier.size(graphicSize)"));
+        assertFalse(anchor.contains("R.drawable.ic_widget_full"));
+        assertFalse(anchor.contains("onMode: (DashboardWidgetMode) -> Unit"));
+        assertFalse(anchor.contains("motionEventSpy"));
+        assertFalse(anchor.contains("detectDragGestures"));
+        assertFalse(anchor.contains("detectTapGestures"));
+
+        assertTrue(menu.contains("layout: DashboardWidgetMenuLayout"));
+        assertTrue(menu.contains("busy: Boolean"));
+        assertTrue(menu.contains("onMode: (DashboardWidgetMode) -> Unit"));
+        assertTrue(menu.contains("clickable("));
+        assertTrue(menu.contains("enabled = !busy"));
+        assertTrue(menu.contains("latestOnMode(mode)"));
+        assertTrue(menu.contains("R.drawable.ic_widget_ipc_off"));
+        assertTrue(menu.contains("R.drawable.ic_widget_tbt"));
+        assertTrue(menu.contains("R.drawable.ic_widget_mini"));
+        assertTrue(menu.contains("R.drawable.ic_widget_full"));
+        assertFalse(menu.contains(".pointerInteropFilter"));
+        assertFalse(menu.contains("R.drawable.ic_widget_toggle"));
+        assertFalse(menu.contains("WidgetCloseIcon("));
+        assertFalse(menu.contains("selectedMode"));
+        assertFalse(menu.contains("modeDot"));
+        assertEquals(2, occurrences(source, "painterResource(R.drawable.ic_widget_toggle)"));
+        String sample = between(source, "private fun DashboardWidgetSample(", "private class DashboardWidgetPointerGesture");
+        assertTrue(sample.contains("modifier = Modifier.size(state.sizeDp.dp)"));
+    }
+
+    @Test
+    public void disabledWidgetSliderKeepsVisibleThumbAndTracks() throws Exception {
+        String source = source();
+        String slider = between(source, "private fun WidgetNumberLine(", "private fun WidgetColorLine(");
+        assertTrue(slider.contains("disabledThumbColor = palette.muted.copy(alpha = 0.72f)"));
+        assertTrue(slider.contains("disabledActiveTrackColor = palette.borderStrong"));
+        assertTrue(slider.contains("disabledInactiveTrackColor = palette.disabled.copy(alpha = 0.72f)"));
+        assertTrue(slider.contains("enabled = enabled"));
+    }
+
+    @Test
+    public void anchorAndMenuShareOneInactivityScheduler() throws Exception {
+        String service = source("DashboardWidgetOverlayService.kt");
+        assertEquals(1, occurrences(service, "private fun markInteraction()"));
+        assertEquals(1, occurrences(service, "main.postDelayed(inactivityCallback, INACTIVITY_TIMEOUT_MS)"));
+        assertEquals(2, occurrences(service, "onInteraction = { markInteraction() }"));
+        assertTrue(service.contains("main.removeCallbacks(inactivityCallback)"));
+        assertTrue(service.contains("state.expanded && state.autoCollapseAfterInactivity"));
     }
 
     private static String source() throws Exception {
+        return source("BydHudRuntimeCompose.kt");
+    }
+
+    private static String source(String name) throws Exception {
         Path root = Paths.get(System.getProperty("user.dir"));
-        Path file = root.resolve("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
-        if (!Files.isRegularFile(file)) file = root.resolve("src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        Path file = root.resolve("app/src/main/java/com/bydhud/app/").resolve(name);
+        if (!Files.isRegularFile(file)) file = root.resolve("src/main/java/com/bydhud/app/").resolve(name);
         return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
     }
 

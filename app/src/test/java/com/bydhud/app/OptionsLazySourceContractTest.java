@@ -14,6 +14,24 @@ import org.junit.Test;
 
 public final class OptionsLazySourceContractTest {
     @Test
+    public void dashboardArtworkMatchesApprovedPreviewGeometry() throws IOException {
+        String toggle = sourcePath("app/src/main/res/drawable/ic_widget_toggle.xml");
+        assertEquals(4, occurrences(toggle, "<path"));
+        assertTrue(toggle.contains("android:viewportWidth=\"32\""));
+        assertTrue(toggle.contains("android:strokeWidth=\"1.5\""));
+        assertTrue(toggle.contains("M16.439,9.149 C20.329,9.149"));
+        assertTrue(toggle.contains("M16.439,22.759 C12.909,22.759"));
+        assertTrue(toggle.contains("M23,17.9 L20.75,20.15 H29"));
+        assertTrue(toggle.contains("M20.75,22.75 H29 L26.75,25"));
+
+        String car = sourcePath("app/src/main/res/drawable/ic_options_directions_car.xml");
+        assertTrue(car.contains("M18.92,6.01 C18.72,5.42 18.16,5 17.5,5"));
+        assertTrue(car.contains("M19,17 H5 V12 H19 V17 Z"));
+        assertTrue(car.contains("M7.5,14.5 M6,14.5 A1.5,1.5"));
+        assertTrue(car.contains("M16.5,14.5 M15,14.5 A1.5,1.5"));
+    }
+
+    @Test
     public void productionOptionsUseStableRowItemsAndTypedSections() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String options = between(source, "private fun OptionsTab(", "private fun WidgetNumberLine(");
