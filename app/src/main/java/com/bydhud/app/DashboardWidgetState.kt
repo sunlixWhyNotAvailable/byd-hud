@@ -23,9 +23,11 @@ internal data class DashboardWidgetState(
     val fillArgb: Int = 0xFF2F86F6.toInt(),
     val borderDp: Int = 2,
     val borderArgb: Int = 0xFF000000.toInt(),
+    val cornerRadiusDp: Int = 0,
     val orientation: DashboardWidgetOrientation = DashboardWidgetOrientation.Vertical,
     val expandForward: Boolean = true,
     val autoCollapse: Boolean = true,
+    val autoCollapseAfterInactivity: Boolean = true,
     val applyWindowProfile: Boolean = true,
     val expanded: Boolean = false,
     val xFraction: Float = 0.03f,
@@ -35,11 +37,19 @@ internal data class DashboardWidgetState(
     val enabled get() = shape != DashboardWidgetShape.Off
     val visible get() = enabled && !hidden
     val alpha get() = 1f - transparency.coerceIn(0, 100) / 100f
+    val openingDirectionIndex: Int get() = when {
+        orientation == DashboardWidgetOrientation.Vertical && !expandForward -> 0
+        orientation == DashboardWidgetOrientation.Horizontal && expandForward -> 1
+        orientation == DashboardWidgetOrientation.Vertical -> 2
+        else -> 3
+    }
+    val cornerRadiusRange get() = 0..(sizeDp.coerceIn(SIZE_RANGE) / 2)
 
     fun normalized() = copy(
         sizeDp = sizeDp.coerceIn(SIZE_RANGE),
         transparency = transparency.coerceIn(0, 100),
         borderDp = borderDp.coerceIn(BORDER_RANGE),
+        cornerRadiusDp = cornerRadiusDp.coerceIn(0, sizeDp.coerceIn(SIZE_RANGE) / 2),
         fillArgb = fillArgb or 0xFF000000.toInt(),
         borderArgb = borderArgb or 0xFF000000.toInt(),
         xFraction = if (xFraction.isFinite()) xFraction.coerceIn(0f, 1f) else 0.03f,
@@ -49,6 +59,17 @@ internal data class DashboardWidgetState(
     fun selectShape(value: DashboardWidgetShape) = copy(shape = value, hidden = false, expanded = false)
     fun selectOrientation(value: DashboardWidgetOrientation) = copy(orientation = value, expanded = false)
     fun selectDirection(forward: Boolean) = copy(expandForward = forward, expanded = false)
+    fun selectOpeningDirection(index: Int) = when (index.coerceIn(0, 3)) {
+        0 -> copy(orientation = DashboardWidgetOrientation.Vertical, expandForward = false, expanded = false)
+        1 -> copy(orientation = DashboardWidgetOrientation.Horizontal, expandForward = true, expanded = false)
+        2 -> copy(orientation = DashboardWidgetOrientation.Vertical, expandForward = true, expanded = false)
+        else -> copy(orientation = DashboardWidgetOrientation.Horizontal, expandForward = false, expanded = false)
+    }
+    fun resize(value: Int): DashboardWidgetState {
+        val size = value.coerceIn(SIZE_RANGE)
+        return copy(sizeDp = size, cornerRadiusDp = cornerRadiusDp.coerceIn(0, size / 2))
+    }
+    fun selectCornerRadius(value: Int) = copy(cornerRadiusDp = value.coerceIn(cornerRadiusRange))
     fun toggleExpanded() = if (visible) copy(expanded = !expanded) else this
     fun onModeClick() = if (visible && expanded) copy(expanded = !autoCollapse) else this
     fun hide() = copy(hidden = true, expanded = false)

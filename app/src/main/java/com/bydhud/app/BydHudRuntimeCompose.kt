@@ -41,6 +41,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.selection.selectable
@@ -79,6 +80,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
@@ -191,6 +193,7 @@ private enum class SentryUploadPhase {
 }
 
 private const val SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L
+private const val DASHBOARD_WIDGET_INACTIVITY_TIMEOUT_MS = 5_000L
 
 //defines Palette UI/state support so Compose code can keep rendering intent explicit.
 private data class Palette(
@@ -1714,6 +1717,41 @@ private fun OptionsTab(
 ) {
     val ua = copy.language == Language.Ua
     var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
+    var showSteeringButtonCapture by remember { mutableStateOf(false) }
+    var steeringCaptureRevision by remember { mutableStateOf(0L) }
+    var steeringCaptureLearningRevision by remember { mutableStateOf(0L) }
+    val steeringLearningRevision = NavAccessibilityService.keyLearningRevision()
+    val steeringProfiles = if (ua) {
+        listOf("Обраний профіль", "Частковий", "Повний")
+    } else {
+        listOf("Selected profile", "Partial", "Full")
+    }
+    val steeringProfileIndex = when (snapshot.steeringTransferProfile) {
+        SteeringTransferPreferences.PROFILE_PARTIAL -> 1
+        SteeringTransferPreferences.PROFILE_FULL -> 2
+        else -> 0
+    }
+    LaunchedEffect(
+        showSteeringButtonCapture,
+        snapshot.steeringTransferRevision,
+        snapshot.steeringButtonLearning,
+        steeringLearningRevision
+    ) {
+        if (showSteeringButtonCapture
+            && !snapshot.steeringButtonLearning
+            && (snapshot.steeringTransferRevision > steeringCaptureRevision
+                || steeringLearningRevision > steeringCaptureLearningRevision)
+        ) {
+            showSteeringButtonCapture = false
+        }
+    }
+    DisposableEffect(showSteeringButtonCapture) {
+        onDispose {
+            if (showSteeringButtonCapture) {
+                activity.composeCancelSteeringButtonLearning()
+            }
+        }
+    }
     val routeMetricModes = if (ua) {
         listOf("Вимкнений", "До зупинки", "Весь маршрут")
     } else {
@@ -2040,7 +2078,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("dashboard-window-size", copy.dashboardWindowSize, R.drawable.ic_options_directions_car) {
+        optionsSection("dashboard-window-profile", copy.dashboardWindowSize, R.drawable.ic_options_directions_car) {
             row("dashboard-screen-mode") {
                 SettingRow(copy.dashboardScreenMode, copy.dashboardScreenModeHint, palette) {
                     HudDropdown(
@@ -2140,6 +2178,21 @@ private fun OptionsTab(
                     )
                 }
             }
+            row("widget-auto-collapse-inactivity") {
+                SettingRow(
+                    if (ua) "Автоматично згортати віджет через 5 секунд неактивності" else "Automatically collapse the widget after 5 seconds of inactivity",
+                    "",
+                    palette,
+                    enabled = dashboardWidget.enabled
+                ) {
+                    HudSwitch(
+                        dashboardWidget.autoCollapseAfterInactivity,
+                        { onDashboardWidgetChange(dashboardWidget.copy(autoCollapseAfterInactivity = it)) },
+                        palette,
+                        enabled = dashboardWidget.enabled
+                    )
+                }
+            }
             row("widget-apply-window-profile") {
                 SettingRow(
                     if (ua) "Застосовувати профіль вікна приборки" else "Apply dashboard window profile",
@@ -2182,35 +2235,35 @@ private fun OptionsTab(
                     palette,
                     dashboardWidget.enabled,
                     showTicks = false
-                ) { value -> onDashboardWidgetChange(dashboardWidget.copy(sizeDp = value).normalized()) }
+                ) { value -> onDashboardWidgetChange(dashboardWidget.resize(value)) }
             }
-            row("widget-orientation") {
-                SettingRow(if (ua) "Орієнтація" else "Orientation", "", palette, enabled = dashboardWidget.enabled) {
+            row("widget-opening-direction") {
+                SettingRow(
+                    if (ua) "Напрямок розкриття віджету" else "Widget opening direction",
+                    "",
+                    palette,
+                    enabled = dashboardWidget.enabled
+                ) {
                     HudDropdown(
-                        selectedIndex = dashboardWidget.orientation.ordinal,
-                        options = if (ua) listOf("Вертикальна", "Горизонтальна") else listOf("Vertical", "Horizontal"),
+                        selectedIndex = dashboardWidget.openingDirectionIndex,
+                        options = if (ua) listOf("Вгору", "Вправо", "Вниз", "Вліво") else listOf("Up", "Right", "Down", "Left"),
                         palette = palette,
                         width = 190.dp,
                         enabled = dashboardWidget.enabled,
-                        onSelected = { index ->
-                            onDashboardWidgetChange(
-                                dashboardWidget.selectOrientation(DashboardWidgetOrientation.entries[index])
-                            )
-                        }
+                        onSelected = { index -> onDashboardWidgetChange(dashboardWidget.selectOpeningDirection(index)) }
                     )
                 }
             }
-            row("widget-expand-direction") {
-                SettingRow(if (ua) "Напрямок розкриття" else "Expansion direction", "", palette, enabled = dashboardWidget.enabled) {
-                    HudDropdown(
-                        selectedIndex = if (dashboardWidget.expandForward) 1 else 0,
-                        options = widgetDirectionLabels(dashboardWidget.orientation, ua),
-                        palette = palette,
-                        width = 190.dp,
-                        enabled = dashboardWidget.enabled,
-                        onSelected = { index -> onDashboardWidgetChange(dashboardWidget.selectDirection(index == 1)) }
-                    )
-                }
+            row("widget-corner-radius") {
+                WidgetNumberLine(
+                    if (ua) "Заокруглення кутів" else "Corner rounding",
+                    if (ua) "Доступне тільки для квадратного віджета" else "Available only for the square widget",
+                    dashboardWidget.cornerRadiusDp,
+                    dashboardWidget.cornerRadiusRange,
+                    "dp",
+                    palette,
+                    dashboardWidget.enabled && dashboardWidget.shape == DashboardWidgetShape.Square
+                ) { value -> onDashboardWidgetChange(dashboardWidget.selectCornerRadius(value)) }
             }
             row("widget-transparency") {
                 WidgetNumberLine(
@@ -2246,12 +2299,84 @@ private fun OptionsTab(
             }
         }
         optionsSection("dashboard-move", if (ua) "Перенесення на приборку" else "Move to dashboard", R.drawable.ic_options_open_in_new) {
-            row("move-placeholder") {
+            row("move-steering-button") {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    HudButton(
+                        if (ua) "Вибрати кнопку для перенесення" else "Select steering-wheel button",
+                        palette,
+                        primary = true,
+                        width = 250.dp
+                    ) {
+                        if (activity.composeBeginSteeringButtonLearning()) {
+                            steeringCaptureRevision = snapshot.steeringTransferRevision
+                            steeringCaptureLearningRevision =
+                                NavAccessibilityService.keyLearningRevision()
+                            showSteeringButtonCapture = true
+                        }
+                    }
+                    HudReadOnlyField(
+                        steeringButtonLabel(snapshot.steeringTransferKeyCode, ua),
+                        palette,
+                        Modifier.weight(1f)
+                    )
+                    HudButton(
+                        if (ua) "Скинути кнопку" else "Reset button",
+                        palette,
+                        enabled = snapshot.steeringTransferKeyCode >= 0,
+                        width = 145.dp
+                    ) { runAction { activity.composeResetSteeringButton() } }
+                }
+            }
+            row("move-app") {
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    HudTransferAppDropdown(
+                        entries = snapshot.steeringTransferApps,
+                        selectedPackage = snapshot.steeringTransferPackage,
+                        ua = ua,
+                        palette = palette,
+                        width = 400.dp,
+                        onSelected = { packageName ->
+                            runAction { activity.composeSetSteeringTransferPackage(packageName) }
+                        }
+                    )
+                    Spacer(Modifier.weight(1f))
+                    HudButton(
+                        if (ua) "Скинути застосунок" else "Reset app",
+                        palette,
+                        enabled = snapshot.steeringTransferPackage.isNotEmpty(),
+                        width = 170.dp
+                    ) { runAction { activity.composeResetSteeringTransferPackage() } }
+                }
+            }
+            row("move-window-profile") {
                 SettingRow(
-                    if (ua) "Налаштування перенесення" else "Move settings",
-                    if (ua) "Цей підрозділ буде доповнено наступним кроком" else "This section will be configured in the next step",
+                    if (ua) "Профіль вікна для перенесення на приборку" else "Dashboard window profile for transfer",
+                    "",
                     palette
-                ) {}
+                ) {
+                    HudDropdown(
+                        selectedIndex = steeringProfileIndex,
+                        options = steeringProfiles,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { index ->
+                            val profile = when (index) {
+                                1 -> SteeringTransferPreferences.PROFILE_PARTIAL
+                                2 -> SteeringTransferPreferences.PROFILE_FULL
+                                else -> SteeringTransferPreferences.PROFILE_SELECTED
+                            }
+                            runAction { activity.composeSetSteeringTransferProfile(profile) }
+                        }
+                    )
+                }
             }
         }
     }
@@ -2282,6 +2407,15 @@ private fun OptionsTab(
             }
         )
     }
+    if (showSteeringButtonCapture) {
+        SteeringButtonCaptureDialog(
+            ua = ua,
+            palette = palette,
+            onDismiss = {
+                showSteeringButtonCapture = false
+            }
+        )
+    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -2299,15 +2433,21 @@ private fun WidgetNumberLine(
 ) {
     val safeValue = value.coerceIn(range)
     val sliderInteraction = remember { MutableInteractionSource() }
-    val sliderColors = SliderDefaults.colors(
+    val defaultSliderColors = SliderDefaults.colors(
         thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
         activeTrackColor = palette.accent,
         inactiveTrackColor = palette.disabled,
-        disabledThumbColor = Color.Transparent,
-        disabledActiveTrackColor = palette.disabled,
-        disabledInactiveTrackColor = palette.disabled,
-        activeTickColor = if (showTicks) palette.accent else Color.Transparent,
-        inactiveTickColor = if (showTicks) palette.disabled else Color.Transparent,
+        disabledThumbColor = palette.muted.copy(alpha = 0.72f),
+        disabledActiveTrackColor = palette.borderStrong,
+        disabledInactiveTrackColor = palette.disabled.copy(alpha = 0.72f),
+        activeTickColor = palette.accent,
+        inactiveTickColor = palette.disabled,
+        disabledActiveTickColor = palette.borderStrong,
+        disabledInactiveTickColor = palette.disabled.copy(alpha = 0.72f)
+    )
+    val sliderColors = if (showTicks) defaultSliderColors else defaultSliderColors.copy(
+        activeTickColor = Color.Transparent,
+        inactiveTickColor = Color.Transparent,
         disabledActiveTickColor = Color.Transparent,
         disabledInactiveTickColor = Color.Transparent
     )
@@ -2356,14 +2496,13 @@ private fun WidgetColorLine(
     onPick: () -> Unit
 ) {
     ActionRow(title, "", palette, enabled = enabled) {
-        Row(Modifier.width(190.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Row(
-                Modifier.weight(1f).height(44.dp).clip(RoundedCornerShape(7.dp))
-                    .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp)).padding(8.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically
+        Row(Modifier.width(106.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                Modifier.width(52.dp).height(44.dp).clip(RoundedCornerShape(7.dp))
+                    .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp)),
+                contentAlignment = Alignment.Center
             ) {
-                Box(Modifier.size(24.dp).background(Color(argb), RoundedCornerShape(4.dp)).border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp)))
-                Text(String.format(Locale.ROOT, "#%06X", argb and 0xFFFFFF), color = palette.text, fontSize = 13.sp, fontFamily = FontFamily.Monospace)
+                Box(Modifier.size(28.dp).background(Color(argb), RoundedCornerShape(4.dp)).border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp)))
             }
             HudIconButton(R.drawable.ic_palette, title, palette, palette.accent, enabled = enabled, modifier = Modifier.size(44.dp), onClick = onPick)
         }
@@ -2381,6 +2520,11 @@ private fun WidgetColorPicker(
 ) {
     val ua = copy.language == Language.Ua
     var draft by remember(initialArgb) { mutableIntStateOf(initialArgb or 0xFF000000.toInt()) }
+    var hexDraft by remember(initialArgb) { mutableStateOf(String.format(Locale.ROOT, "%06X", initialArgb and 0xFFFFFF)) }
+    fun updateDraftColor(value: Int) {
+        draft = value or 0xFF000000.toInt()
+        hexDraft = String.format(Locale.ROOT, "%06X", draft and 0xFFFFFF)
+    }
     Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         Column(
             Modifier.width(560.dp).heightIn(max = 600.dp).clip(RoundedCornerShape(8.dp))
@@ -2391,21 +2535,46 @@ private fun WidgetColorPicker(
             Text(title, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
                 Box(Modifier.size(48.dp).background(Color(draft), RoundedCornerShape(7.dp)).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp)))
-                Text(String.format(Locale.ROOT, "#%06X", draft and 0xFFFFFF), color = palette.text, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
+                BasicTextField(
+                    value = hexDraft,
+                    onValueChange = { raw ->
+                        val cleaned = sanitizeWidgetHex(raw)
+                        hexDraft = cleaned
+                        parseWidgetHexArgb(cleaned)?.let { draft = it }
+                    },
+                    singleLine = true,
+                    textStyle = TextStyle(color = palette.text, fontSize = 16.sp, fontFamily = FontFamily.Monospace),
+                    modifier = Modifier.width(112.dp).height(44.dp).clip(RoundedCornerShape(7.dp))
+                        .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                        .onFocusChanged {
+                            if (!it.isFocused && hexDraft.length != 6) {
+                                hexDraft = String.format(Locale.ROOT, "%06X", draft and 0xFFFFFF)
+                            }
+                        }
+                        .padding(horizontal = 10.dp),
+                    decorationBox = { field ->
+                        Row(Modifier.fillMaxHeight(), verticalAlignment = Alignment.CenterVertically) {
+                            Text("#", color = palette.muted, fontSize = 16.sp, fontFamily = FontFamily.Monospace)
+                            field()
+                        }
+                    }
+                )
                 Spacer(Modifier.weight(1f))
-                listOf(palette.accent, palette.green, palette.yellow, palette.red, Color.White, Color.Black).forEach { color ->
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.End)) {
+                listOf(palette.accent, palette.green, palette.yellow, palette.red, Color.Gray, Color.White, Color.Black).forEach { color ->
                     val press = rememberPressFeedback(true)
                     Box(
                         Modifier.size(36.dp).then(press.modifier).clip(RoundedCornerShape(6.dp)).background(color)
                             .border(if (draft == color.toArgb()) 3.dp else 1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
                             .semantics { contentDescription = String.format(Locale.ROOT, "#%06X", color.toArgb() and 0xFFFFFF) }
-                            .clickable(interactionSource = press.interactionSource, indication = null) { draft = color.toArgb() }
+                            .clickable(interactionSource = press.interactionSource, indication = null) { updateDraftColor(color.toArgb()) }
                     )
                 }
             }
             listOf(16 to "R", 8 to "G", 0 to "B").forEach { (shift, label) ->
                 WidgetNumberLine(label, "", (draft ushr shift) and 0xFF, 0..255, "", palette, true) { value ->
-                    draft = (draft and (0xFF shl shift).inv()) or (value shl shift) or 0xFF000000.toInt()
+                    updateDraftColor((draft and (0xFF shl shift).inv()) or (value shl shift))
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -2416,12 +2585,15 @@ private fun WidgetColorPicker(
     }
 }
 
-private fun widgetDirectionLabels(orientation: DashboardWidgetOrientation, ua: Boolean): List<String> =
-    if (orientation == DashboardWidgetOrientation.Vertical) {
-        if (ua) listOf("Вгору", "Вниз") else listOf("Up", "Down")
-    } else {
-        if (ua) listOf("Вліво", "Вправо") else listOf("Left", "Right")
-    }
+private fun sanitizeWidgetHex(raw: String): String = raw.removePrefix("#")
+    .filter { it.isDigit() || it.uppercaseChar() in 'A'..'F' }
+    .take(6)
+    .uppercase()
+
+private fun parseWidgetHexArgb(raw: String): Int? = sanitizeWidgetHex(raw)
+    .takeIf { it.length == 6 }
+    ?.toIntOrNull(16)
+    ?.or(0xFF000000.toInt())
 
 @Composable
 private fun DashboardWidgetGraphic(
@@ -2430,7 +2602,9 @@ private fun DashboardWidgetGraphic(
     size: Dp = state.sizeDp.dp,
     content: @Composable BoxScope.() -> Unit = {}
 ) {
-    val shape = if (state.shape == DashboardWidgetShape.Circle) CircleShape else RoundedCornerShape(0.dp)
+    val shape = if (state.shape == DashboardWidgetShape.Circle) CircleShape else {
+        RoundedCornerShape(state.cornerRadiusDp.coerceIn(state.cornerRadiusRange).dp)
+    }
     Box(
         modifier.size(size).graphicsLayer { alpha = state.alpha }
             .background(Color(state.fillArgb), shape)
@@ -2452,7 +2626,6 @@ private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, pale
             if (state.enabled) DashboardWidgetGraphic(state)
             else Text(if (ua) "Вимкнено" else "Off", color = palette.muted, fontSize = 14.sp)
         }
-        Text("${state.sizeDp} dp · ${state.transparency}%", color = palette.muted, fontSize = 13.sp)
         Text(
             if (ua) "Натисніть віджет, щоб розкрити режими\nПеретягніть у зручне місце\nЗатисніть, щоб приховати до наступного відкриття застосунку"
             else "Tap the widget to expand the modes\nDrag to a convenient position\nLong-press to hide until the app is opened again",
@@ -2498,6 +2671,17 @@ internal fun DashboardWidgetOverlayContent(
     val viewConfiguration = LocalViewConfiguration.current
     val gestureScope = rememberCoroutineScope()
     val gesture = remember { DashboardWidgetPointerGesture() }
+    var inactivityGeneration by remember { mutableIntStateOf(0) }
+    val markActivity = { inactivityGeneration++ }
+    LaunchedEffect(state.expanded, state.autoCollapseAfterInactivity, inactivityGeneration) {
+        if (state.expanded && state.autoCollapseAfterInactivity) {
+            delay(DASHBOARD_WIDGET_INACTIVITY_TIMEOUT_MS)
+            val current = latestState
+            if (current.expanded && current.autoCollapseAfterInactivity) {
+                latestOnChange(current.copy(expanded = false))
+            }
+        }
+    }
     var pressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (pressed) 0.97f else 1f, label = "widget-press")
     val latestWindow by rememberUpdatedState(windowSizeDp)
@@ -2509,6 +2693,7 @@ internal fun DashboardWidgetOverlayContent(
             role = Role.Button
             contentDescription = if (ua) "Плаваючий віджет приборки" else "Floating dashboard widget"
             onClick(if (state.expanded) { if (ua) "Згорнути" else "Collapse" } else { if (ua) "Розкрити" else "Expand" }) {
+                markActivity()
                 val next = latestState.toggleExpanded()
                 latestOnChange(next)
                 latestOnPositionSettled()
@@ -2531,6 +2716,7 @@ internal fun DashboardWidgetOverlayContent(
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
                     gesture.reset()
+                    markActivity()
                     gesture.down = raw
                     gesture.previous = raw
                     pressed = true
@@ -2555,6 +2741,7 @@ internal fun DashboardWidgetOverlayContent(
                         pressed = false
                     }
                     if (gesture.dragging) {
+                        markActivity()
                         dragBy(raw - gesture.previous)
                         gesture.previous = raw
                     }
@@ -2568,6 +2755,7 @@ internal fun DashboardWidgetOverlayContent(
                         if (!gesture.dragging) dragBy(raw - gesture.previous)
                         latestOnPositionSettled()
                     } else if (!gesture.longPressTriggered) {
+                        markActivity()
                         val next = latestState.toggleExpanded()
                         latestOnChange(next)
                         latestOnPositionSettled()
@@ -2593,7 +2781,10 @@ internal fun DashboardWidgetOverlayContent(
                 Box(
                     Modifier.size(layout.cellSize.dp).then(
                         if (mode == null) anchorInteraction
-                        else Modifier.clickable(enabled = !busy, interactionSource = interaction, indication = null, role = Role.Button) { latestOnMode(mode) }
+                        else Modifier.clickable(enabled = !busy, interactionSource = interaction, indication = null, role = Role.Button) {
+                            markActivity()
+                            latestOnMode(mode)
+                        }
                     ),
                     contentAlignment = Alignment.Center
                 ) {
@@ -5779,6 +5970,221 @@ private fun SettingRow(
     }
 }
 
+private fun steeringButtonLabel(keyCode: Int, ua: Boolean): String {
+    if (keyCode < 0) return ""
+    val name = when (keyCode) {
+        305 -> if (ua) "Ліва зірочка" else "Left star"
+        309 -> if (ua) "Режими приборки / завершення виклику" else "Dashboard modes / end call"
+        310 -> if (ua) "Круговий огляд" else "Surround view"
+        320 -> if (ua) "Голосове керування" else "Voice control"
+        321 -> if (ua) "Ліва додаткова" else "Left auxiliary"
+        351 -> if (ua) "Права зірочка" else "Right star"
+        383 -> if (ua) "Права додаткова" else "Right auxiliary"
+        else -> return if (ua) "Кнопка (код $keyCode)" else "Button (code $keyCode)"
+    }
+    return "$name ($keyCode)"
+}
+
+@Composable
+private fun HudReadOnlyField(
+    value: String,
+    palette: Palette,
+    modifier: Modifier = Modifier
+) {
+    Box(
+        modifier
+            .height(44.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .background(palette.field)
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.CenterStart
+    ) {
+        Text(
+            value,
+            color = palette.text,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+    }
+}
+
+@Composable
+private fun HudTransferAppDropdown(
+    entries: List<InstalledTransferAppCatalog.Entry>,
+    selectedPackage: String,
+    ua: Boolean,
+    palette: Palette,
+    width: Dp,
+    onSelected: (String) -> Unit
+) {
+    var expanded by remember { mutableStateOf(false) }
+    val selected = remember(entries, selectedPackage) {
+        InstalledTransferAppCatalog.selectionOrFallback(entries, selectedPackage)
+    }
+    val hasSelection = selectedPackage.isNotBlank()
+    val fieldText = if (hasSelection) selected.label() else {
+        if (ua) "Вибрати застосунок для перенесення" else "Select app to transfer"
+    }
+    Box(Modifier.width(width)) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .height(44.dp)
+                .clip(RoundedCornerShape(7.dp))
+                .border(1.dp, palette.accent, RoundedCornerShape(7.dp))
+                .background(palette.accent.copy(alpha = if (palette.dark) 0.78f else 0.08f))
+                .clickable(enabled = entries.isNotEmpty()) { expanded = true }
+                .padding(horizontal = 10.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            if (hasSelection) {
+                TransferAppIcon(selected, palette)
+                Spacer(Modifier.width(9.dp))
+            }
+            Text(
+                fieldText,
+                color = if (palette.dark) Color.White else palette.text,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
+            Text("▾", color = palette.text.copy(alpha = 0.78f), fontSize = 18.sp)
+        }
+        if (expanded) {
+            Popup(
+                popupPositionProvider = HudDropdownPositionProvider,
+                onDismissRequest = { expanded = false },
+                properties = PopupProperties(focusable = true)
+            ) {
+                LazyColumn(
+                    Modifier
+                        .width(width)
+                        .heightIn(max = 330.dp)
+                        .clip(RoundedCornerShape(7.dp))
+                        .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                        .background(palette.panel)
+                ) {
+                    items(entries.size, key = { entries[it].packageName() }) { index ->
+                        val entry = entries[index]
+                        val selectedRow = entry.packageName() == selectedPackage
+                        Row(
+                            Modifier
+                                .fillMaxWidth()
+                                .height(56.dp)
+                                .background(
+                                    if (selectedRow) palette.accent.copy(alpha = 0.18f)
+                                    else Color.Transparent
+                                )
+                                .clickable {
+                                    onSelected(entry.packageName())
+                                    expanded = false
+                                }
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            TransferAppIcon(entry, palette)
+                            Spacer(Modifier.width(10.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(
+                                    entry.label(),
+                                    color = palette.text,
+                                    fontSize = 14.sp,
+                                    fontWeight = if (selectedRow) FontWeight.SemiBold else FontWeight.Normal,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    entry.packageName(),
+                                    color = palette.muted,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
+                        }
+                        if (index < entries.lastIndex) Divider(palette)
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferAppIcon(
+    entry: InstalledTransferAppCatalog.Entry,
+    palette: Palette
+) {
+    if (entry.isFallback()) {
+        Icon(
+            painterResource(R.drawable.ic_options_open_in_new),
+            contentDescription = null,
+            tint = palette.muted,
+            modifier = Modifier.size(30.dp)
+        )
+        return
+    }
+    val bitmap = remember(entry.packageName(), entry.icon()) {
+        entry.icon().toBitmap().asImageBitmap()
+    }
+    Image(
+        bitmap = bitmap,
+        contentDescription = null,
+        contentScale = ContentScale.Fit,
+        modifier = Modifier.size(30.dp)
+    )
+}
+
+@Composable
+private fun SteeringButtonCaptureDialog(
+    ua: Boolean,
+    palette: Palette,
+    onDismiss: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Column(
+            Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                if (ua) "Натисніть кнопку на кермі..." else "Press a steering-wheel button...",
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                if (ua) {
+                    "Під час роботи вибраного застосунку призначена кнопка не виконуватиме штатну дію"
+                } else {
+                    "While the selected app is active, the assigned button will not perform its original action"
+                },
+                color = palette.muted,
+                fontSize = 13.sp
+            )
+            HudButton(
+                if (ua) "Скасувати" else "Cancel",
+                palette,
+                width = 0.dp,
+                modifier = Modifier.fillMaxWidth(),
+                onClick = onDismiss
+            )
+        }
+    }
+}
+
 @Composable
 private fun HudDropdown(
     selectedIndex: Int,
@@ -6778,7 +7184,7 @@ private fun enCopy() = Copy(
     updateAction = "Update",
     basicNavigationOutput = "Basic navigation output",
     extraNavigationOptions = "Extra navigation options",
-    dashboardWindowSize = "Dashboard window size",
+    dashboardWindowSize = "Dashboard window profile",
     notice = "Notice",
     wazeDirectNotice = "Waze HUD output works best through the direct channel. Supported versions:",
     wazeSupportedVersions = "stock 4.95.0.3 / patched 5.20.0.1",
@@ -7005,7 +7411,7 @@ private fun uaCopy() = enCopy().copy(
     updateAction = "Оновити",
     basicNavigationOutput = "Базовий вивід навігації",
     extraNavigationOptions = "Додаткові функції навігації",
-    dashboardWindowSize = "Розміри вікна на приборці",
+    dashboardWindowSize = "Профіль вікна приборки",
     notice = "Примітка",
     wazeDirectNotice = "Вивід Waze на HUD найкраще працює через прямий канал. Підтримувані версії:",
     wazeSupportedVersions = "стокова 4.95.0.3 / патчена 5.20.0.1",

@@ -4,7 +4,10 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.os.Handler;
+import android.os.Looper;
 import android.util.Log;
+import android.widget.Toast;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -380,11 +383,72 @@ final class NavAppDisplayController {
             boolean toDashboard,
             int dashboardMode,
             String reason) {
+        moveIndependentDashboardApp(packageName, toDashboard, dashboardMode, reason, null);
+    }
+
+    //toggles a configured app only after a worker-side task/display recheck.
+    void requestSteeringToggle(String packageName, String profile, String reason) {
+        final String normalized = normalizePackage(packageName);
+        if (normalized.isEmpty()) {
+            reportSteeringFailure(normalized, "selected package missing");
+            return;
+        }
+        Thread worker = new Thread(() -> {
+            try {
+                if (HudPrefs.isUserShutdownActive(context)) {
+                    reportSteeringFailure(normalized, "shutdown active");
+                    return;
+                }
+                if (isMoveInProgress()) {
+                    reportSteeringFailure(normalized, "display move busy");
+                    return;
+                }
+                NavAppDisplayState current = checkDisplay(normalized, "steering-precheck");
+                DashboardProjectionPolicy.ObservedDisplay observed = observedDisplay(normalized);
+                if (current.taskId < 0
+                        || observed == DashboardProjectionPolicy.ObservedDisplay.UNKNOWN
+                        || observed == DashboardProjectionPolicy.ObservedDisplay.OTHER) {
+                    reportSteeringFailure(normalized, "task/display state unknown");
+                    return;
+                }
+                boolean toDashboard = observed == DashboardProjectionPolicy.ObservedDisplay.MAIN;
+                int dashboardMode = SteeringTransferPolicy.resolveDashboardMode(
+                        profile, HudPrefs.dashboardScreenMode(context));
+                if (HudPrefs.isUserShutdownActive(context)) {
+                    reportSteeringFailure(normalized, "shutdown active");
+                    return;
+                }
+                moveIndependentDashboardApp(
+                        normalized,
+                        toDashboard,
+                        dashboardMode,
+                        "steering-key " + safe(reason),
+                        error -> {
+                            if (error != null && !error.isEmpty()) {
+                                reportSteeringFailure(normalized, error);
+                            }
+                        });
+            } catch (RuntimeException error) {
+                reportSteeringFailure(
+                        normalized, "runtime " + error.getClass().getSimpleName());
+            }
+        }, "BydHudSteeringTransfer");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    private void moveIndependentDashboardApp(
+            String packageName,
+            boolean toDashboard,
+            int dashboardMode,
+            String reason,
+            Consumer<String> completion) {
         int normalizedDashboardMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
         String normalized = normalizePackage(packageName);
         String label = toDashboard ? "independent_dashboard_on" : "independent_dashboard_off";
         if (!beginMove(normalized, label + " reason=" + safe(reason))) {
             log(normalized, label + " skipped already_running reason=" + safe(reason));
+            notifyMoveCompletion(completion, "display move busy");
             return;
         }
         Thread worker = new Thread(
@@ -392,7 +456,8 @@ final class NavAppDisplayController {
                         normalized,
                         toDashboard,
                         normalizedDashboardMode,
-                        reason),
+                        reason,
+                        completion),
                 "BydHudIndependentDashboardDisplay");
         worker.start();
     }
@@ -671,7 +736,8 @@ final class NavAppDisplayController {
             String packageName,
             boolean toDashboard,
             int dashboardMode,
-            String reason) {
+            String reason,
+            Consumer<String> completion) {
         try {
             if (packageName.isEmpty()) {
                 remember(new NavAppDisplayState(
@@ -876,8 +942,40 @@ final class NavAppDisplayController {
                     false,
                     "independent dashboard failed: " + safe(e.getMessage())));
         } finally {
+            String completionError = completionErrorForState(packageName);
             endMove(packageName);
+            notifyMoveCompletion(completion, completionError);
         }
+    }
+
+    private String completionErrorForState(String packageName) {
+        String status = lastState(packageName).status.toLowerCase(Locale.ROOT);
+        return status.contains("failed") || status.contains("blocked")
+                || status.contains("unknown") || status.contains("unavailable")
+                || status.contains("not confirmed")
+                ? lastState(packageName).status
+                : "";
+    }
+
+    private void notifyMoveCompletion(Consumer<String> completion, String error) {
+        if (completion == null) return;
+        try {
+            completion.accept(error == null ? "" : error);
+        } catch (RuntimeException callbackError) {
+            log("", "move completion callback failed "
+                    + callbackError.getClass().getSimpleName());
+        }
+    }
+
+    private void reportSteeringFailure(String packageName, String detail) {
+        String safeDetail = safe(detail);
+        log(packageName, "steering_transfer_failed detail=" + safeDetail);
+        new Handler(Looper.getMainLooper()).post(() -> Toast.makeText(
+                context,
+                HudPrefs.isUaLanguage(context)
+                        ? "Не вдалося перенести застосунок"
+                        : "Unable to transfer app",
+                Toast.LENGTH_LONG).show());
     }
 
     //rejects unauthorised ADB before projection or task state can be changed.
@@ -1583,6 +1681,7 @@ final class NavAppDisplayController {
             pendingShutdownReturnReason = "";
         }
         log(packageName, "move idle");
+        NavAccessibilityService.requestSteeringTaskCacheRefresh(context, "move-complete");
         notifyStatusChanged();
         if (!deferredReturnPackage.isEmpty()) {
             moveIndependentDashboardApp(

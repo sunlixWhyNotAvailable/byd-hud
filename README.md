@@ -186,7 +186,7 @@ Waze route recovery is independent from the `HUD` switch and dashboard placement
 
 `Send to dashboard` moves a running application to the instrument cluster. `Send to main` returns it to the center display.
 
-Find the screen mode and geometry controls under `Options → Dashboard window size`.
+Find the screen mode and geometry controls under `Options → Dashboard window profile`.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
@@ -218,18 +218,26 @@ Tap to expand the four mode pictures: IPC OFF, TBT, MINI and FULL. Tap the cross
 | --- | --- | --- |
 | Widget shape | Off | Off, Square, Circle |
 | Size | 32 dp | 24–160 dp, step 1 |
-| Orientation and direction | Vertical, Down | Vertical: Up/Down; Horizontal: Left/Right |
+| Widget opening direction | Down | Up, Right, Down, Left |
 | Automatically collapse after a mode change | On | Turn off to keep the menu open |
+| Automatically collapse after inactivity | On | Collapses an expanded widget after five seconds without interaction |
 | Apply dashboard window profile | On | MINI/FULL apply the matching saved profile to an existing BYD HUD projection |
+| Corner rounding | 0 dp | Square only; 0 to half of the selected widget size |
 | Transparency | 0% | 0% visible, 100% invisible |
-| Color | Blue `#2F86F6` | Color picker |
-| Border size and color | 2 dp, black `#000000` | 0–16 dp; 0 removes the border |
+| Color | Blue `#2F86F6` | Presets or synchronized HEX/RGB entry |
+| Border size and color | 2 dp, black `#000000` | 0–16 dp; 0 removes the border; presets or synchronized HEX/RGB entry |
 
 Mode buttons require authorized ADB. They change the presentation without moving, launching or returning a navigator. With profile application off, or without an existing BYD HUD projection, only the mode is requested. Widget profile selection does not change the screen mode saved for the next `Send to dashboard` action. The widget does not mark a mode as currently active because firmware state cannot be determined reliably.
 
 Appearance and position survive restarts. Automatic startup follows `Boot runtime service`; a temporarily hidden widget stays hidden until BYD HUD is opened. `Shutdown` also removes the widget until the app is opened again. Hiding it removes its touch area rather than leaving an invisible overlay.
 
-The `Move to dashboard` Options category is reserved for a future feature; use the existing actions on the `Apps` tab to move applications.
+### Steering-wheel transfer shortcut
+
+Open `Options → Move to dashboard` to assign a steering-wheel button, choose an installed user application, and select `Selected profile`, `Partial`, or `Full`. The application list uses Android's installed-app names and icons and does not launch the selected application.
+
+The selected application must already have a running task and dashboard transfer requires authorized ADB. If the application is on the main display, one button press sends it to the dashboard with the selected profile; if it is already on the dashboard, the same button returns it to the main display. If no current task can be confirmed, BYD HUD leaves both the application and the original button action untouched. A failed or already-running transfer is not queued and is reported with a message.
+
+Button learning uses the enabled Accessibility service. Any delivered steering-wheel key can be assigned; while the selected application task is active, BYD HUD consumes that assigned key instead of its original action. Reset the button or application selection to disable the shortcut. Hardware and firmware decide which steering-wheel keys Android exposes, so some buttons may not be learnable on every vehicle.
 
 ## Navigator patcher
 

@@ -10,11 +10,13 @@ class DashboardWidgetStateTest {
         assertFalse(defaults.visible)
         assertEquals(32, defaults.sizeDp)
         assertEquals(0, defaults.transparency)
-        assertTrue(defaults.autoCollapse && defaults.applyWindowProfile)
+        assertEquals(0, defaults.cornerRadiusDp)
+        assertTrue(defaults.autoCollapse && defaults.autoCollapseAfterInactivity && defaults.applyWindowProfile)
         val customized = defaults.copy(shape = DashboardWidgetShape.Circle, sizeDp = 67,
             transparency = 31, fillArgb = 0xFF112233.toInt(), borderDp = 0,
             borderArgb = 0xFFABCDEF.toInt(), orientation = DashboardWidgetOrientation.Horizontal,
-            expandForward = false, autoCollapse = false, applyWindowProfile = false,
+            expandForward = false, autoCollapse = false, autoCollapseAfterInactivity = false,
+            applyWindowProfile = false, cornerRadiusDp = 17,
             xFraction = 0.84f, yFraction = 0.72f, hidden = true, expanded = true)
         assertEquals(customized.copy(expanded = false),
             DashboardWidgetPreferences.decode(DashboardWidgetPreferences.encode(customized)))
@@ -31,10 +33,12 @@ class DashboardWidgetStateTest {
         assertEquals(24, state.sizeDp)
         assertEquals(100, state.transparency)
         assertEquals(16, state.borderDp)
+        assertEquals(0, state.cornerRadiusDp)
         assertEquals(0xFF112233.toInt(), state.fillArgb)
         assertEquals(0.03f, state.xFraction, 0f)
         assertEquals(1f, state.yFraction, 0f)
         assertTrue(state.autoCollapse)
+        assertTrue(state.autoCollapseAfterInactivity)
     }
 
     @Test fun hideAndReopenNeverChangeShapeAndCollapseIsOptional() {
@@ -91,5 +95,16 @@ class DashboardWidgetStateTest {
                 assertEquals(original.top, actualAnchorTop, 0.01f)
             }
         }
+    }
+
+    @Test fun openingDirectionAndCornerRadiusUsePreviewContract() {
+        val base = DashboardWidgetState(shape = DashboardWidgetShape.Square)
+        assertEquals(2, base.openingDirectionIndex)
+        assertEquals(0, base.selectOpeningDirection(0).openingDirectionIndex)
+        assertEquals(1, base.selectOpeningDirection(1).openingDirectionIndex)
+        assertEquals(2, base.selectOpeningDirection(2).openingDirectionIndex)
+        assertEquals(3, base.selectOpeningDirection(3).openingDirectionIndex)
+        assertEquals(16, base.copy(sizeDp = 32).selectCornerRadius(99).cornerRadiusDp)
+        assertEquals(12, base.copy(sizeDp = 24, cornerRadiusDp = 12).resize(24).cornerRadiusDp)
     }
 }

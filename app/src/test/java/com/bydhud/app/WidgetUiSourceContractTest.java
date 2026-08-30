@@ -13,12 +13,12 @@ import org.junit.Test;
 
 public final class WidgetUiSourceContractTest {
     @Test
-    public void optionsExposeApprovedWidgetControlsAndPlaceholder() throws Exception {
+    public void optionsExposeApprovedWidgetAndSteeringTransferControls() throws Exception {
         String source = source();
         String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
-        assertTrue(options.contains("dashboard-window-size"));
-        assertTrue(source.contains("dashboardWindowSize = \"Dashboard window size\""));
-        assertTrue(source.contains("dashboardWindowSize = \"Розміри вікна на приборці\""));
+        assertTrue(options.contains("dashboard-window-profile"));
+        assertTrue(source.contains("dashboardWindowSize = \"Dashboard window profile\""));
+        assertTrue(source.contains("dashboardWindowSize = \"Профіль вікна приборки\""));
         assertTrue(options.contains("dashboard-widget"));
         assertTrue(options.contains("Dashboard widget"));
         assertTrue(options.contains("Віджет приборки"));
@@ -26,11 +26,19 @@ public final class WidgetUiSourceContractTest {
         assertTrue(options.contains("Застосовувати профіль вікна приборки"));
         assertTrue(options.contains("DashboardWidgetState.SIZE_RANGE"));
         assertTrue(options.contains("showTicks = false"));
-        assertTrue(options.contains("widgetDirectionLabels"));
+        assertTrue(options.contains("widget-opening-direction"));
+        assertTrue(options.contains("selectOpeningDirection"));
+        assertTrue(options.contains("autoCollapseAfterInactivity"));
+        assertTrue(options.contains("widget-corner-radius"));
         assertTrue(options.contains("dashboard-move"));
-        assertTrue(options.contains("This section will be configured in the next step"));
+        assertTrue(options.contains("move-steering-button"));
+        assertTrue(options.contains("HudTransferAppDropdown("));
+        assertTrue(options.contains("move-window-profile"));
+        assertTrue(options.contains("composeBeginSteeringButtonLearning"));
+        assertFalse(options.contains("This section will be configured in the next step"));
         String colorLine = between(source, "private fun WidgetColorLine(", "private fun WidgetColorPicker(");
         assertTrue(colorLine.contains("R.drawable.ic_palette"));
+        assertTrue(colorLine.contains("Modifier.width(106.dp)"));
         assertFalse(colorLine.contains("R.drawable.ic_options_settings"));
     }
 

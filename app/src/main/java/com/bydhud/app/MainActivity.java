@@ -30,6 +30,7 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
 import androidx.core.content.FileProvider;
@@ -111,6 +112,8 @@ public final class MainActivity extends ComponentActivity {
     private static volatile List<ComposeNavigatorPatchRow> navigatorPatchRows =
             Collections.emptyList();
     private static volatile List<NavigatorAssetManager.AssetSnapshot> navigatorAssetSnapshots =
+            Collections.emptyList();
+    private static volatile List<InstalledTransferAppCatalog.Entry> installedTransferApps =
             Collections.emptyList();
     private static volatile boolean navigatorPatchRowsReady;
     private static volatile boolean appScanCacheAvailable;
@@ -313,6 +316,7 @@ public final class MainActivity extends ComponentActivity {
         invalidateComposeSnapshot();
         requestActivityLocalStatusRefresh("activity-resume");
         requestRuntimeUiStateRefresh(this, true, "activity-resume");
+        NavAccessibilityService.resumeSteeringRuntime(this, "activity-resume");
         notifyPendingShare();
     }
 
@@ -320,6 +324,9 @@ public final class MainActivity extends ComponentActivity {
     protected void onPause() {
         activityResumed = false;
         activityWindowFocused = false;
+        if (NavAccessibilityService.isKeyLearning()) {
+            NavAccessibilityService.cancelKeyLearning();
+        }
         cancelPendingAutoAdbStart();
         RESUMED_ACTIVITY.compareAndSet(this, null);
         super.onPause();
@@ -355,6 +362,9 @@ public final class MainActivity extends ComponentActivity {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     protected void onDestroy() {
         destroyed = true;
+        if (NavAccessibilityService.isKeyLearning()) {
+            NavAccessibilityService.cancelKeyLearning();
+        }
         if (pendingNavPermissionSelfCheckRunnable != null) {
             handler.removeCallbacks(pendingNavPermissionSelfCheckRunnable);
             pendingNavPermissionSelfCheckRunnable = null;
@@ -852,6 +862,12 @@ public final class MainActivity extends ComponentActivity {
                 dashboardProfile.scalePercent,
                 DashboardWidgetController.snapshot(this),
                 DashboardWidgetController.hasOverlayPermission(),
+                installedTransferApps,
+                SteeringTransferPreferences.keyCode(this),
+                SteeringTransferPreferences.packageName(this),
+                SteeringTransferPreferences.profile(this),
+                SteeringTransferPreferences.revision(this),
+                NavAccessibilityService.isKeyLearning(),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 permissionStatus.settingsGranted(),
                 adbAuthorized(),
@@ -1502,6 +1518,42 @@ public final class MainActivity extends ComponentActivity {
                 Uri.parse("package:" + getPackageName())));
     }
 
+    public boolean composeBeginSteeringButtonLearning() {
+        boolean started = NavAccessibilityService.beginKeyLearning(this);
+        if (!started) {
+            Toast.makeText(
+                    this,
+                    HudPrefs.isUaLanguage(this)
+                            ? "Служба спеціальних можливостей недоступна"
+                            : "Accessibility service is unavailable",
+                    Toast.LENGTH_LONG).show();
+        }
+        invalidateComposeSnapshot();
+        return started;
+    }
+
+    public void composeCancelSteeringButtonLearning() {
+        NavAccessibilityService.cancelKeyLearning();
+        invalidateComposeSnapshot();
+    }
+
+    public void composeResetSteeringButton() {
+        SteeringTransferPreferences.setKeyCode(this, SteeringTransferPreferences.NO_KEY_CODE);
+    }
+
+    public void composeSetSteeringTransferPackage(String packageName) {
+        SteeringTransferPreferences.setPackageName(this, packageName);
+    }
+
+    public void composeResetSteeringTransferPackage() {
+        SteeringTransferPreferences.setPackageName(
+                this, SteeringTransferPreferences.EMPTY_PACKAGE);
+    }
+
+    public void composeSetSteeringTransferProfile(String profile) {
+        SteeringTransferPreferences.setProfile(this, profile);
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetSmallDistanceClamp(boolean enabled) {
         setSmallDistanceClamp(enabled);
@@ -1874,6 +1926,8 @@ public final class MainActivity extends ComponentActivity {
                 }
                 appVersionNames = scanInstalledAppVersions(appContext, scan);
                 refreshPackageMetadataCache(appContext, scan);
+                installedTransferApps = new InstalledTransferAppCatalog(appContext)
+                        .load(installedTransferApps);
                 synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
                     cachedNavRuntimePermissionStatus =
                             NavRuntimePermissionStatus.check(appContext);
@@ -2444,6 +2498,12 @@ public final class MainActivity extends ComponentActivity {
         public final int dashboardScalePercent;
         public final DashboardWidgetState dashboardWidgetState;
         public final boolean dashboardWidgetOverlayPermission;
+        public final List<InstalledTransferAppCatalog.Entry> steeringTransferApps;
+        public final int steeringTransferKeyCode;
+        public final String steeringTransferPackage;
+        public final String steeringTransferProfile;
+        public final long steeringTransferRevision;
+        public final boolean steeringButtonLearning;
         public final boolean smallDistanceClampEnabled;
         public final boolean settingsPermissionsGranted;
         public final boolean adbAuthorized;
@@ -2504,6 +2564,10 @@ public final class MainActivity extends ComponentActivity {
                 int dashboardOffsetPercent, int dashboardScalePercent,
                 DashboardWidgetState dashboardWidgetState,
                 boolean dashboardWidgetOverlayPermission,
+                List<InstalledTransferAppCatalog.Entry> steeringTransferApps,
+                int steeringTransferKeyCode, String steeringTransferPackage,
+                String steeringTransferProfile, long steeringTransferRevision,
+                boolean steeringButtonLearning,
                 boolean smallDistanceClampEnabled,
                 boolean settingsPermissionsGranted,
                 boolean adbAuthorized,
@@ -2555,6 +2619,16 @@ public final class MainActivity extends ComponentActivity {
             this.dashboardScalePercent = dashboardScalePercent;
             this.dashboardWidgetState = dashboardWidgetState;
             this.dashboardWidgetOverlayPermission = dashboardWidgetOverlayPermission;
+            this.steeringTransferApps = steeringTransferApps == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(steeringTransferApps));
+            this.steeringTransferKeyCode = steeringTransferKeyCode;
+            this.steeringTransferPackage = steeringTransferPackage == null
+                    ? "" : steeringTransferPackage;
+            this.steeringTransferProfile = steeringTransferProfile == null
+                    ? SteeringTransferPreferences.PROFILE_SELECTED : steeringTransferProfile;
+            this.steeringTransferRevision = Math.max(0L, steeringTransferRevision);
+            this.steeringButtonLearning = steeringButtonLearning;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
             this.adbAuthorized = adbAuthorized;
@@ -2645,6 +2719,12 @@ public final class MainActivity extends ComponentActivity {
                     && dashboardScalePercent == other.dashboardScalePercent
                     && Objects.equals(dashboardWidgetState, other.dashboardWidgetState)
                     && dashboardWidgetOverlayPermission == other.dashboardWidgetOverlayPermission
+                    && Objects.equals(steeringTransferApps, other.steeringTransferApps)
+                    && steeringTransferKeyCode == other.steeringTransferKeyCode
+                    && Objects.equals(steeringTransferPackage, other.steeringTransferPackage)
+                    && Objects.equals(steeringTransferProfile, other.steeringTransferProfile)
+                    && steeringTransferRevision == other.steeringTransferRevision
+                    && steeringButtonLearning == other.steeringButtonLearning
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
                     && adbAuthorized == other.adbAuthorized
@@ -2700,6 +2780,8 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
                     dashboardScalePercent, dashboardWidgetState, dashboardWidgetOverlayPermission,
+                    steeringTransferApps, steeringTransferKeyCode, steeringTransferPackage,
+                    steeringTransferProfile, steeringTransferRevision, steeringButtonLearning,
                     smallDistanceClampEnabled,
                     settingsPermissionsGranted, adbAuthorized, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,

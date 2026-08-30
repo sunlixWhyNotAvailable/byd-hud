@@ -34,7 +34,7 @@ public final class OptionsLazySourceContractTest {
                 "optionsSection(\"speed-limit\"",
                 "optionsSection(\"waze-features\"",
                 "optionsSection(\"extra-navigation\"",
-                "optionsSection(\"dashboard-window-size\"",
+                "optionsSection(\"dashboard-window-profile\"",
                 "\"dashboard-widget\"",
                 "optionsSection(\"dashboard-move\"");
         assertTrue(options.contains("R.drawable.ic_options_build"));

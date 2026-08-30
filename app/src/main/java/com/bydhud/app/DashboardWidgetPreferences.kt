@@ -27,8 +27,11 @@ internal object DashboardWidgetPreferences {
             "shape" to it.shape.name, "size" to it.sizeDp,
             "transparency" to it.transparency, "fill" to it.fillArgb,
             "border" to it.borderDp, "border_color" to it.borderArgb,
+            "corner_radius" to it.cornerRadiusDp,
             "orientation" to it.orientation.name, "forward" to it.expandForward,
-            "auto_collapse" to it.autoCollapse, "apply_profile" to it.applyWindowProfile,
+            "auto_collapse" to it.autoCollapse,
+            "auto_collapse_inactivity" to it.autoCollapseAfterInactivity,
+            "apply_profile" to it.applyWindowProfile,
             "x" to it.xFraction, "y" to it.yFraction, "hidden" to it.hidden
         )
     }
@@ -42,9 +45,12 @@ internal object DashboardWidgetPreferences {
             fillArgb = values["fill"] as? Int ?: defaults.fillArgb,
             borderDp = values["border"] as? Int ?: defaults.borderDp,
             borderArgb = values["border_color"] as? Int ?: defaults.borderArgb,
+            cornerRadiusDp = values["corner_radius"] as? Int ?: defaults.cornerRadiusDp,
             orientation = DashboardWidgetOrientation.entries.firstOrNull { it.name == values["orientation"] } ?: defaults.orientation,
             expandForward = values["forward"] as? Boolean ?: defaults.expandForward,
             autoCollapse = values["auto_collapse"] as? Boolean ?: defaults.autoCollapse,
+            autoCollapseAfterInactivity = values["auto_collapse_inactivity"] as? Boolean
+                ?: defaults.autoCollapseAfterInactivity,
             applyWindowProfile = values["apply_profile"] as? Boolean ?: defaults.applyWindowProfile,
             xFraction = values["x"] as? Float ?: defaults.xFraction,
             yFraction = values["y"] as? Float ?: defaults.yFraction,

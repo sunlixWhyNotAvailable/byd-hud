@@ -46,7 +46,7 @@ public final class SpeedLimitCompositeUiSourceContractTest {
                 "optionsSection(\"speed-limit\"",
                 "optionsSection(\"waze-features\"",
                 "optionsSection(\"extra-navigation\"",
-                "optionsSection(\"dashboard-window-size\"",
+                "optionsSection(\"dashboard-window-profile\"",
                 "\"dashboard-widget\"",
                 "optionsSection(\"dashboard-move\"");
     }
