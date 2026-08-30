@@ -45,6 +45,14 @@ public final class DashboardWidgetLifecycleContractTest {
         assertTrue(controller.contains("service?.removeOverlay()"));
         assertFalse(controller.contains("Settings.canDrawOverlays"));
         assertTrue(controller.contains("MainActivity.cachedDashboardOverlayPermission()"));
+        String hide = controller.substring(controller.indexOf("fun hide(context: Context)"),
+                controller.indexOf("fun requestMode(context: Context"));
+        assertTrue(hide.contains("if (!state.visible) return"));
+        assertTrue(hide.contains("val app = context.applicationContext"));
+        assertTrue(hide.contains("widget_hidden restore_on_app_open=true"));
+        int toast = hide.indexOf("Toast.makeText(app");
+        int refresh = hide.indexOf("refresh(app)");
+        assertTrue(toast >= 0 && refresh > toast);
         String activity = source("MainActivity.java");
         int shutdown = activity.indexOf("HudPrefs.setUserShutdownActive(this, true)");
         int invalidate = activity.indexOf("cancelWidgetModeForShutdown()", shutdown);

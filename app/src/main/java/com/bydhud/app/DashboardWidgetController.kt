@@ -87,11 +87,14 @@ internal object DashboardWidgetController {
     }
 
     fun hide(context: Context) {
+        if (!state.visible) return
+        val app = context.applicationContext
         state = state.hide()
-        DashboardWidgetPreferences.save(context, state)
-        refresh(context)
-        Toast.makeText(context, if (ukrainian) "Віджет приховано — відкрийте BYD HUD, щоб повернути його"
+        DashboardWidgetPreferences.save(app, state)
+        Log.i("DashboardWidget", "widget_hidden restore_on_app_open=true")
+        Toast.makeText(app, if (ukrainian) "Віджет приховано — відкрийте BYD HUD, щоб повернути його"
             else "Widget hidden — open BYD HUD to bring it back", Toast.LENGTH_LONG).show()
+        refresh(app)
     }
 
     fun requestMode(context: Context, mode: DashboardWidgetMode) {

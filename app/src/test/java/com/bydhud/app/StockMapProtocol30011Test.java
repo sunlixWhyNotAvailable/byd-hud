@@ -8,6 +8,7 @@ import org.junit.Test;
 public final class StockMapProtocol30011Test {
     @Test
     public void acceptsTbtOperationTwoAndExistingLayoutOperations() {
+        assertTrue(StockMapProtocol30011.isSupportedOperation(1));
         assertTrue(StockMapProtocol30011.isSupportedOperation(2));
         assertTrue(StockMapProtocol30011.isSupportedOperation(3));
         assertTrue(StockMapProtocol30011.isSupportedOperation(4));

@@ -44,13 +44,17 @@ public final class OptionsLazySourceContractTest {
         assertTrue(options.contains("R.drawable.waze_app_icon"));
         assertTrue(options.contains("R.drawable.ic_options_settings"));
         assertTrue(options.contains("R.drawable.ic_options_directions_car"));
+        assertTrue(options.contains("R.drawable.ic_options_widgets"));
+        assertTrue(options.contains("R.drawable.ic_options_open_in_new"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_build"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_navigation"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_schedule"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_speed"));
         assertEquals(1, occurrences(options, "R.drawable.waze_app_icon"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_settings"));
-        assertEquals(3, occurrences(options, "R.drawable.ic_options_directions_car"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_directions_car"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_widgets"));
+        assertEquals(1, occurrences(options, "R.drawable.ic_options_open_in_new"));
         assertTrue(source.contains("SidebarOptionsSurface("));
         assertFalse(options.contains("LazyPageSurface"));
         assertTrue(source.contains("key(selectedSection.key)"));
@@ -60,6 +64,9 @@ public final class OptionsLazySourceContractTest {
                 "private fun SidebarOptionsSurface(",
                 "private fun SidebarOptionsCategoryItem(");
         assertEquals(2, occurrences(sidebar, "LazyColumn("));
+        assertTrue(sidebar.contains("selectedSection.preview?.let"));
+        assertTrue(sidebar.contains(".width(196.dp)"));
+        assertTrue(sidebar.contains("horizontalArrangement = Arrangement.spacedBy(12.dp)"));
         assertTrue(sidebar.contains("contentType = { \"options-category\" }"));
         assertTrue(sidebar.contains(".padding(horizontal = 8.dp, vertical = 6.dp)"));
         assertTrue(sidebar.contains("verticalArrangement = Arrangement.spacedBy(2.dp)"));
@@ -67,6 +74,11 @@ public final class OptionsLazySourceContractTest {
                 "private fun SidebarOptionsCategoryItem(",
                 "private fun LazyListScope.sidebarOptionsSection(");
         assertTrue(categoryItem.contains(".padding(horizontal = 14.dp, vertical = 8.dp)"));
+        String section = between(source,
+                "private fun LazyListScope.sidebarOptionsSection(",
+                "private fun Section(");
+        assertFalse(section.contains("section.preview"));
+        assertFalse(section.contains("options-preview"));
         assertFalse(options.contains("screen-capture-channel"));
         assertFalse(options.contains("roundabout-left"));
     }

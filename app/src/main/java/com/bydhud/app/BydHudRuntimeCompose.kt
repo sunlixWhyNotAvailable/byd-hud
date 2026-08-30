@@ -3,6 +3,7 @@ package com.bydhud.app
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
 import android.os.SystemClock
+import android.view.MotionEvent
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -19,8 +20,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
@@ -117,8 +116,8 @@ import androidx.compose.ui.window.PopupPositionProvider
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.motionEventSpy
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.platform.LocalViewConfiguration
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
@@ -127,6 +126,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -2102,7 +2102,7 @@ private fun OptionsTab(
         optionsSection(
             "dashboard-widget",
             if (ua) "Віджет приборки" else "Dashboard widget",
-            R.drawable.ic_options_directions_car,
+            R.drawable.ic_options_widgets,
             preview = { DashboardWidgetSample(dashboardWidget, ua, palette) }
         ) {
             row("widget-shape") {
@@ -2245,7 +2245,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("dashboard-move", if (ua) "Перенесення на приборку" else "Move to dashboard", R.drawable.ic_options_directions_car) {
+        optionsSection("dashboard-move", if (ua) "Перенесення на приборку" else "Move to dashboard", R.drawable.ic_options_open_in_new) {
             row("move-placeholder") {
                 SettingRow(
                     if (ua) "Налаштування перенесення" else "Move settings",
@@ -2462,6 +2462,21 @@ private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, pale
     }
 }
 
+private class DashboardWidgetPointerGesture {
+    var down = Offset.Zero
+    var previous = Offset.Zero
+    var dragging = false
+    var longPressTriggered = false
+    var longPressJob: Job? = null
+
+    fun reset() {
+        longPressJob?.cancel()
+        longPressJob = null
+        dragging = false
+        longPressTriggered = false
+    }
+}
+
 @OptIn(ExperimentalComposeUiApi::class)
 @Composable
 internal fun DashboardWidgetOverlayContent(
@@ -2480,16 +2495,16 @@ internal fun DashboardWidgetOverlayContent(
     val latestOnMode by rememberUpdatedState(onMode)
     val latestOnPositionSettled by rememberUpdatedState(onPositionSettled)
     val density = androidx.compose.ui.platform.LocalDensity.current
+    val viewConfiguration = LocalViewConfiguration.current
+    val gestureScope = rememberCoroutineScope()
+    val gesture = remember { DashboardWidgetPointerGesture() }
     var pressed by remember { mutableStateOf(false) }
     val scale by animateFloatAsState(if (pressed) 0.97f else 1f, label = "widget-press")
-    var rawPointer by remember { mutableStateOf(Offset.Zero) }
-    var previousDragPointer by remember { mutableStateOf(Offset.Zero) }
     val latestWindow by rememberUpdatedState(windowSizeDp)
     val layout = state.layout(windowSizeDp.x, windowSizeDp.y)
     val graphicSize = minOf(state.sizeDp.toFloat(), layout.cellSize).dp
     val foreground = if (Color(state.fillArgb).luminance() > 0.5f) Color.Black else Color.White
     val anchorInteraction = Modifier
-        .motionEventSpy { rawPointer = Offset(it.rawX, it.rawY) }
         .semantics {
             role = Role.Button
             contentDescription = if (ua) "Плаваючий віджет приборки" else "Floating dashboard widget"
@@ -2501,33 +2516,74 @@ internal fun DashboardWidgetOverlayContent(
             }
             onLongClick(if (ua) "Приховати до відкриття застосунку" else "Hide until the app opens") { latestOnHide(); true }
         }
-        .pointerInput(Unit) {
-            detectDragGestures(
-                onDragStart = { previousDragPointer = rawPointer },
-                onDragEnd = { latestOnPositionSettled() },
-                onDragCancel = { latestOnPositionSettled() }
-            ) { change, _ ->
-                change.consume()
-                val delta = rawPointer - previousDragPointer
-                previousDragPointer = rawPointer
+        .pointerInteropFilter { event ->
+            fun dragBy(delta: Offset) {
                 val current = latestState
                 val cell = minOf(current.sizeDp.toFloat(), latestWindow.x, latestWindow.y)
-                latestOnChange(current.dragBy(delta.x / density.density, delta.y / density.density, latestWindow.x - cell, latestWindow.y - cell).normalized())
+                latestOnChange(current.dragBy(
+                    delta.x / density.density,
+                    delta.y / density.density,
+                    latestWindow.x - cell,
+                    latestWindow.y - cell
+                ).normalized())
             }
-        }
-        .pointerInput(Unit) {
-            detectTapGestures(
-                onTap = {
-                    val next = latestState.toggleExpanded()
-                    latestOnChange(next)
-                    latestOnPositionSettled()
-                },
-                onLongPress = { latestOnHide() },
-                onPress = {
+            val raw = Offset(event.rawX, event.rawY)
+            when (event.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    gesture.reset()
+                    gesture.down = raw
+                    gesture.previous = raw
                     pressed = true
-                    try { tryAwaitRelease() } finally { pressed = false }
+                    gesture.longPressJob = gestureScope.launch {
+                        delay(viewConfiguration.longPressTimeoutMillis)
+                        if (!gesture.dragging && !gesture.longPressTriggered) {
+                            gesture.longPressTriggered = true
+                            pressed = false
+                            latestOnHide()
+                        }
+                    }
+                    true
                 }
-            )
+                MotionEvent.ACTION_MOVE -> {
+                    if (!gesture.longPressTriggered
+                        && !gesture.dragging
+                        && (raw - gesture.down).getDistance() > viewConfiguration.touchSlop
+                    ) {
+                        gesture.dragging = true
+                        gesture.longPressJob?.cancel()
+                        gesture.longPressJob = null
+                        pressed = false
+                    }
+                    if (gesture.dragging) {
+                        dragBy(raw - gesture.previous)
+                        gesture.previous = raw
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    gesture.longPressJob?.cancel()
+                    pressed = false
+                    val moved = (raw - gesture.down).getDistance() > viewConfiguration.touchSlop
+                    if (!gesture.longPressTriggered && (gesture.dragging || moved)) {
+                        if (!gesture.dragging) dragBy(raw - gesture.previous)
+                        latestOnPositionSettled()
+                    } else if (!gesture.longPressTriggered) {
+                        val next = latestState.toggleExpanded()
+                        latestOnChange(next)
+                        latestOnPositionSettled()
+                    }
+                    gesture.reset()
+                    true
+                }
+                MotionEvent.ACTION_CANCEL -> {
+                    gesture.longPressJob?.cancel()
+                    pressed = false
+                    if (gesture.dragging) latestOnPositionSettled()
+                    gesture.reset()
+                    true
+                }
+                else -> true
+            }
         }
     val fields: @Composable () -> Unit = {
         state.fields(layout.expandForward).forEach { mode ->
@@ -5560,15 +5616,17 @@ private fun SidebarOptionsSurface(
                 }
             }
 
-            Box(
+            Row(
                 modifier = Modifier
                     .weight(1f)
-                    .fillMaxHeight()
+                    .fillMaxHeight(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
             ) {
                 key(selectedSection.key) {
                     LazyColumn(
                         modifier = Modifier
-                            .fillMaxSize()
+                            .weight(1f)
+                            .fillMaxHeight()
                             .clip(RoundedCornerShape(12.dp))
                             .border(1.dp, palette.border, RoundedCornerShape(12.dp))
                             .background(palette.surface),
@@ -5576,6 +5634,9 @@ private fun SidebarOptionsSurface(
                     ) {
                         sidebarOptionsSection(selectedSection, palette)
                     }
+                }
+                selectedSection.preview?.let { preview ->
+                    Box(Modifier.width(196.dp).fillMaxHeight()) { preview() }
                 }
             }
         }
@@ -5630,17 +5691,6 @@ private fun LazyListScope.sidebarOptionsSection(
                 .padding(horizontal = 14.dp, vertical = 10.dp)
         ) {
             Text(section.title.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-        }
-    }
-    section.preview?.let { preview ->
-        item(key = "${section.key}:preview", contentType = "options-preview") {
-            Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = false)
-            ) {
-                preview()
-            }
         }
     }
     section.rows.forEachIndexed { index, row ->

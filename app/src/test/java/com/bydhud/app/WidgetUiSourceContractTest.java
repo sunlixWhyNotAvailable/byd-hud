@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import java.nio.charset.StandardCharsets;
@@ -46,6 +47,13 @@ public final class WidgetUiSourceContractTest {
         assertTrue(overlay.contains("R.drawable.ic_widget_tbt"));
         assertTrue(overlay.contains("R.drawable.ic_widget_mini"));
         assertTrue(overlay.contains("R.drawable.ic_widget_full"));
+        assertEquals(1, occurrences(overlay, ".pointerInteropFilter"));
+        assertTrue(overlay.contains("viewConfiguration.touchSlop"));
+        assertTrue(overlay.contains("gesture.longPressJob?.cancel()"));
+        assertTrue(overlay.contains("gesture.dragging"));
+        assertFalse(overlay.contains("motionEventSpy"));
+        assertFalse(overlay.contains("detectDragGestures"));
+        assertFalse(overlay.contains("detectTapGestures"));
         assertFalse(overlay.contains("selectedMode"));
         assertFalse(overlay.contains("modeDot"));
     }
@@ -62,5 +70,15 @@ public final class WidgetUiSourceContractTest {
         int to = source.indexOf(end, from + start.length());
         if (from < 0 || to <= from) throw new AssertionError("missing source section");
         return source.substring(from, to);
+    }
+
+    private static int occurrences(String source, String marker) {
+        int count = 0;
+        int offset = 0;
+        while ((offset = source.indexOf(marker, offset)) >= 0) {
+            count++;
+            offset += marker.length();
+        }
+        return count;
     }
 }

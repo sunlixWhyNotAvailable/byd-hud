@@ -28,6 +28,8 @@ final class NavAppDisplayController {
             "autocontainer_lease_package";
     private static final String KEY_AUTOCONTAINER_LEASE_GENERATION =
             "autocontainer_lease_generation";
+    private static final String KEY_WIDGET_AUTOCONTAINER_VALUE =
+            "widget_autocontainer_value";
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
     private static final int AUTO_CONTAINER_PARTIAL = 17;
@@ -124,6 +126,27 @@ final class NavAppDisplayController {
 
     static boolean widgetModeUsesTbtProtocolForTest(int mode) {
         return mode == WIDGET_MODE_TBT;
+    }
+
+    static boolean widgetModeUsesAutoContainerForTest(
+            int mode, boolean releaseRequired) {
+        switch (mode) {
+            case WIDGET_MODE_IPC_OFF:
+            case WIDGET_MODE_MINI:
+            case WIDGET_MODE_FULL:
+                return true;
+            case WIDGET_MODE_TBT:
+                return releaseRequired;
+            default:
+                return false;
+        }
+    }
+
+    static boolean widgetTbtNeedsAutoContainerReleaseForTest(
+            int lastWidgetAutoContainerValue, boolean hasProjectionLease) {
+        return hasProjectionLease
+                || lastWidgetAutoContainerValue == AUTO_CONTAINER_PARTIAL
+                || lastWidgetAutoContainerValue == AUTO_CONTAINER_FULLSCREEN;
     }
 
     static int dashboardModeForWidgetForTest(int mode) {
@@ -246,7 +269,10 @@ final class NavAppDisplayController {
         }
         clearDashboardProjection("boot:" + safe(reason));
         clearAutoContainerLease("boot:" + safe(reason));
-        dashboardPrefs().edit().remove(KEY_PROJECTION_GENERATION).apply();
+        dashboardPrefs().edit()
+                .remove(KEY_PROJECTION_GENERATION)
+                .remove(KEY_WIDGET_AUTOCONTAINER_VALUE)
+                .apply();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -414,19 +440,18 @@ final class NavAppDisplayController {
             if (!isWidgetOperationCurrent(token)) {
                 error = widgetCancellationReason();
             } else {
-                String commandFailure = sendWidgetAutoContainer(
-                        owner, widgetAutoContainerValueForTest(mode), token, mode);
+                boolean releaseRequired = widgetTbtNeedsAutoContainerReleaseForTest(
+                        persistedWidgetAutoContainerValue(),
+                        hasWidgetAutoContainerLease(owner));
+                String commandFailure = widgetModeUsesAutoContainerForTest(
+                        mode, releaseRequired)
+                        ? sendWidgetAutoContainer(
+                                owner, widgetAutoContainerValueForTest(mode), token, mode)
+                        : "";
                 if (!commandFailure.isEmpty()) {
                     error = commandFailure;
                 } else if (widgetModeUsesTbtProtocolForTest(mode)) {
-                    String protocolFailure = StockMapProtocol30011.dispatch(
-                            context,
-                            2,
-                            () -> isWidgetOperationCurrent(token));
-                    if (!protocolFailure.isEmpty()) {
-                        error = "TBT protocol failed after AutoContainer 18: "
-                                + protocolFailure;
-                    }
+                    error = sendWidgetTbtProtocolEdge(token);
                 }
                 if (error.isEmpty()
                         && applyProfile
@@ -462,6 +487,54 @@ final class NavAppDisplayController {
         }
     }
 
+    private String sendWidgetTbtProtocolEdge(long token) {
+        String typeOneFailure = StockMapProtocol30011.dispatch(
+                context,
+                1,
+                () -> isWidgetOperationCurrent(token));
+        if (!typeOneFailure.isEmpty()) {
+            return "TBT protocol type 1 failed: " + typeOneFailure;
+        }
+        String typeTwoFailure = StockMapProtocol30011.dispatch(
+                context,
+                2,
+                () -> isWidgetOperationCurrent(token));
+        return typeTwoFailure.isEmpty()
+                ? ""
+                : "TBT protocol type 2 failed: " + typeTwoFailure;
+    }
+
+    private boolean hasWidgetAutoContainerLease(String owner) {
+        String normalizedOwner = normalizePackage(owner);
+        if (normalizedOwner.isEmpty()) return false;
+        SharedPreferences prefs = dashboardPrefs();
+        String leasePackage = normalizePackage(
+                prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
+        long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
+        return leaseGeneration > 0L
+                && normalizedOwner.equals(leasePackage)
+                && projectionGenerationForPackage(normalizedOwner) == leaseGeneration;
+    }
+
+    private int persistedWidgetAutoContainerValue() {
+        int value = dashboardPrefs().getInt(KEY_WIDGET_AUTOCONTAINER_VALUE, 0);
+        return value == AUTO_CONTAINER_PARTIAL || value == AUTO_CONTAINER_FULLSCREEN
+                ? value
+                : 0;
+    }
+
+    private void recordWidgetAutoContainerValue(int value) {
+        SharedPreferences.Editor editor = dashboardPrefs().edit();
+        if (value == AUTO_CONTAINER_PARTIAL || value == AUTO_CONTAINER_FULLSCREEN) {
+            editor.putInt(KEY_WIDGET_AUTOCONTAINER_VALUE, value);
+        } else if (value == AUTO_CONTAINER_RELEASE) {
+            editor.remove(KEY_WIDGET_AUTOCONTAINER_VALUE);
+        } else {
+            return;
+        }
+        editor.apply();
+    }
+
     private String sendWidgetAutoContainer(
             String owner, int value, long token, int mode) {
         if (!isWidgetOperationCurrent(token)) {
@@ -481,6 +554,7 @@ final class NavAppDisplayController {
             if (!result.success()) {
                 return "widget AutoContainer " + value + " failed: " + result.shortDetail();
             }
+            recordWidgetAutoContainerValue(value);
             log(normalizedOwner, "widget_autocontainer_sent mode=" + mode + " value=" + value);
             // A completed side effect still needs ownership bookkeeping if Shutdown
             // cancelled the following steps while the shell command was in flight.
@@ -842,6 +916,9 @@ final class NavAppDisplayController {
         try {
             LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(context, value);
             if (result.success()) {
+                if (value == AUTO_CONTAINER_RELEASE) {
+                    recordWidgetAutoContainerValue(value);
+                }
                 log(packageName, "dashboard_autocontainer_sent value=" + value
                         + " reason=" + safe(reason));
                 return "";
