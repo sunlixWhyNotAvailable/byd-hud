@@ -172,4 +172,70 @@ public final class WazeRouteLifecycleStoreTest {
                 pending, false, true, false,
                 WazeRouteLifecycleStore.REASON_UNAVAILABLE, 201L, 9L));
     }
+
+    @Test
+    public void successiveSameGenerationDestinationPairsKeepRouteActiveAndFresh() {
+        long generation = 7L;
+        WazeRouteLifecycleStore.Snapshot route = new WazeRouteLifecycleStore.Snapshot(
+                true, 100L, 0L, generation, 0);
+        // Exercise the real pure Store policies; AndroidX no-op wiring and the
+        // persisted pending-proof update are checked by the source contracts.
+        for (int replacement = 0; replacement < 5; replacement++) {
+            long transitionAt = route.eventElapsedMs + 1L;
+            assertEquals("accept", WazeRouteLifecycleStore.eventDecision(
+                    route.eventElapsedMs, transitionAt, transitionAt));
+            assertTrue(WazeRouteLifecycleStore.resolveBridgeActive(
+                    route.active, false, true, 4));
+            assertTrue(WazeRouteLifecycleStore.shouldRecordPendingFreshRoute(
+                    false, false, true, 4, generation));
+            long fence = WazeRouteLifecycleStore.terminalFenceAfterEvent(
+                    route, false, false, generation, generation, true, 4);
+            assertEquals(Long.MIN_VALUE, fence);
+            WazeRouteLifecycleStore.Snapshot pending = new WazeRouteLifecycleStore.Snapshot(
+                    true, transitionAt, 0L, generation, 0, fence,
+                    generation, transitionAt, 4);
+
+            long activeAt = transitionAt + 1L;
+            assertTrue("replacement " + replacement,
+                    WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                            pending, false, true, false,
+                            WazeRouteLifecycleStore.REASON_UNAVAILABLE, activeAt, generation));
+            assertFalse(WazeRouteLifecycleStore.terminalFenceBlocks(
+                    pending, generation, false, WazeRouteLifecycleStore.REASON_UNAVAILABLE));
+            boolean active = WazeRouteLifecycleStore.resolveBridgeActive(
+                    pending.active, true, false, WazeRouteLifecycleStore.REASON_UNAVAILABLE);
+            assertTrue(active);
+            route = new WazeRouteLifecycleStore.Snapshot(
+                    active, activeAt, 0L, generation, 0, fence);
+            assertFalse(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                    route, false, true, false,
+                    WazeRouteLifecycleStore.REASON_UNAVAILABLE, activeAt + 1L, generation));
+        }
+    }
+
+    @Test
+    public void genuineTerminalReasonsFenceStaleSnapshotsAndActiveReplay() {
+        WazeRouteLifecycleStore.Snapshot pending = new WazeRouteLifecycleStore.Snapshot(
+                true, 100L, 0L, 7L, 0, Long.MIN_VALUE, 7L, 100L, 4);
+        for (int reason : new int[] {1, 5, 6, 7}) {
+            assertTrue(WazeRouteLifecycleStore.reasonName(reason),
+                    WazeRouteLifecycleStore.isTerminalReason(reason));
+            assertFalse(WazeRouteLifecycleStore.resolveBridgeActive(
+                    pending.active, false, true, reason));
+            long fence = WazeRouteLifecycleStore.terminalFenceAfterEvent(
+                    pending, false, true, 7L, 7L, true, reason);
+            assertEquals(7L, fence);
+            WazeRouteLifecycleStore.Snapshot terminal = new WazeRouteLifecycleStore.Snapshot(
+                    false, 101L, 0L, 7L, 0, fence);
+            assertFalse(WazeRouteLifecycleStore.freshRouteAcceptedForEvent(
+                    terminal, false, true, false,
+                    WazeRouteLifecycleStore.REASON_UNAVAILABLE, 102L, 7L));
+            assertTrue(WazeRouteLifecycleStore.terminalFenceBlocks(
+                    terminal, 7L, false, WazeRouteLifecycleStore.REASON_UNAVAILABLE));
+            assertEquals("terminal_fence",
+                    WazeRouteLifecycleStore.snapshotDecision(terminal, true, 7L));
+            assertEquals("generation_regression",
+                    WazeRouteLifecycleStore.snapshotDecision(terminal, true, 6L));
+        }
+    }
 }

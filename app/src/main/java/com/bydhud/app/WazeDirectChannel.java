@@ -625,8 +625,7 @@ public final class WazeDirectChannel {
             log("navigation info=" + typeName(info));
             if (info == null) {
                 if (acceptedRouteFrame) {
-                    latchRouteTerminal("navigation_info_null");
-                    endNavigation("navigation_info_null");
+                    handleNavigationEndHint("navigation_info_null");
                 } else {
                     log("navigation info null ignored before first route frame");
                 }
@@ -816,6 +815,16 @@ public final class WazeDirectChannel {
         if (terminalRouteLatched) return;
         terminalRouteLatched = true;
         log("route terminal latch set reason=" + reason);
+    }
+
+    private void handleNavigationEndHint(String reason) {
+        // AndroidX guidance may end while the bridge keeps a replacement route active.
+        if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
+            log("navigation end hint deferred to lifecycle bridge reason=" + safeText(reason));
+            return;
+        }
+        latchRouteTerminal(reason);
+        endNavigation(reason);
     }
 
     private void endNavigation(String reason) {
@@ -1854,10 +1863,8 @@ public final class WazeDirectChannel {
 
         @Override
         public void navigationEnded() {
-            postBinder(expectedGeneration, () -> {
-                latchRouteTerminal("waze_navigation_ended");
-                endNavigation("waze_navigation_ended");
-            });
+            postBinder(expectedGeneration, () ->
+                    handleNavigationEndHint("waze_navigation_ended"));
         }
 
         @Override

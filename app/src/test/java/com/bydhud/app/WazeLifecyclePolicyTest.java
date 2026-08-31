@@ -98,6 +98,8 @@ public final class WazeLifecyclePolicyTest {
         assertFalse(NavHudLiveSender.shouldAcceptWazeFrameAfterTerminalForTest(true, true));
         assertTrue(NavHudLiveSender.shouldAcceptWazeNavigationStartAfterTerminalForTest(false));
         assertTrue(NavHudLiveSender.shouldAcceptWazeFrameAfterTerminalForTest(false, true));
+        assertFalse(NavHudLiveSender.shouldAcceptWazeFrameAfterTerminalForTest(true, false));
+        assertFalse(NavHudLiveSender.shouldAcceptWazeFrameAfterTerminalForTest(false, false));
     }
 
     @Test
@@ -169,6 +171,42 @@ public final class WazeLifecyclePolicyTest {
                             WazeRouteLifecycleStore.REASON_UNAVAILABLE, "LOCAL_DIRECT");
             NavHudLiveSender.onWazeRouteLifecycleEvent(3L, terminal);
             assertFalse(DirectSpeedLimitStore.snapshot(WAZE).isActive());
+        } finally {
+            DirectSpeedLimitStore.clear(WAZE);
+            synchronized (NavHudLiveSender.class) {
+                instance.set(null, previous);
+            }
+        }
+    }
+
+    @Test
+    public void everyGenuineBridgeEndClearsSpeedWithoutAndroidxNotification() throws Exception {
+        Field instance = NavHudLiveSender.class.getDeclaredField("instance");
+        instance.setAccessible(true);
+        Object previous;
+        synchronized (NavHudLiveSender.class) {
+            previous = instance.get(null);
+            instance.set(null, null);
+        }
+        try {
+            for (int reason : new int[] {1, 5, 6, 7}) {
+                DirectSpeedLimitStore.update(WAZE, 50, 50, "km/h", 1L);
+                assertTrue(DirectSpeedLimitStore.snapshot(WAZE).isActive());
+                boolean active = WazeRouteLifecycleStore.resolveBridgeActive(
+                        true, false, true, reason);
+                boolean terminal = !active && WazeRouteLifecycleStore.isTerminalReason(reason);
+                NavHudLiveSender.onWazeRouteLifecycleEvent(2L,
+                        new WazeRouteLifecycleStore.RecordResult(true, true,
+                                new WazeRouteLifecycleStore.Snapshot(active, 2L, 0L, 7L, 0, 7L),
+                                "test-bridge-end", terminal, false, reason,
+                                WazeRouteLifecycleStore.reasonName(reason)));
+                assertFalse(WazeRouteLifecycleStore.reasonName(reason),
+                        DirectSpeedLimitStore.snapshot(WAZE).isActive());
+                assertFalse(NavHudLiveSender.shouldAcceptWazeNavigationStartAfterTerminalForTest(
+                        terminal));
+                assertFalse(NavHudLiveSender.shouldAcceptWazeFrameAfterTerminalForTest(
+                        terminal, true));
+            }
         } finally {
             DirectSpeedLimitStore.clear(WAZE);
             synchronized (NavHudLiveSender.class) {
