@@ -53,6 +53,29 @@ final class NavHudLiveSender {
         return instance;
     }
 
+    // Only UI/user entrypoints arm this bit; get(), callbacks and saved selections do not.
+    static boolean activateUserRuntime(Context context) {
+        if (HudPrefs.isUserShutdownActive(context)) return false;
+        UserRuntimeSession.PROCESS.activate();
+        return true;
+    }
+
+    void resumeUserRuntime(String reason) {
+        if (!activateUserRuntime(context)) return;
+        handler.post(() -> {
+            if (!isRuntimeEnabled()) return;
+            String selected = NavCapturePrefs.getHudPackage(context);
+            if (NavCapturePrefs.isHudEnabled(context, selected)) startOnMain(selected, reason);
+            refreshTbtObserversOnMain();
+            requestWazeRouteStateSnapshot(reason, true);
+        });
+    }
+
+    private boolean isRuntimeEnabled() {
+        return UserRuntimeSession.PROCESS.allowsRuntime(
+                HudPrefs.isBootEnabled(context), HudPrefs.isUserShutdownActive(context));
+    }
+
     static void onOutputPreferenceChanged(String key) {
         NavHudLiveSender current;
         synchronized (NavHudLiveSender.class) {
@@ -255,6 +278,7 @@ final class NavHudLiveSender {
         handler.post(() -> {
             HudCheckState previous = hudCheckState;
             HudCheckState next = action.apply(previous);
+            if (next.running && !isRuntimeEnabled()) return;
             if (next.equals(previous)) return;
             handler.removeCallbacks(hudCheckTick);
             hudCheckState = next;
@@ -279,7 +303,7 @@ final class NavHudLiveSender {
     }
 
     private void tickHudCheck() {
-        if (!hudCheckState.running || !manualTbtActive) return;
+        if (!hudCheckState.running || !manualTbtActive || !isRuntimeEnabled()) return;
         HudCheckState previous = hudCheckState;
         hudCheckState = previous.tick();
         if (!hudCheckState.equals(previous)) {
@@ -299,6 +323,7 @@ final class NavHudLiveSender {
     }
 
     void startManual(HudState state, String reason) {
+        if (!activateUserRuntime(context)) return;
         HudState copy = state == null ? null : state.copy();
         handler.post(() -> startManualOnWorker(copy, reason));
     }
@@ -331,7 +356,7 @@ final class NavHudLiveSender {
     }
 
     private void startManualOnWorker(HudState state, String reason) {
-        if (state == null) return;
+        if (state == null || !isRuntimeEnabled()) return;
         if (!manualTbtActive) {
             manualTbtActive = true;
             manualTbtGeneration++;
@@ -350,7 +375,7 @@ final class NavHudLiveSender {
     }
 
     private void publishManualOnWorker(HudState state, String reason) {
-        if (state == null) return;
+        if (state == null || !isRuntimeEnabled()) return;
         if (!manualTbtActive) {
             startManualOnWorker(state, reason);
             return;
@@ -2538,6 +2563,7 @@ final class NavHudLiveSender {
     }
 
     private boolean selectRemainingTbtRoute(String endedPackage, String reason) {
+        if (!isRuntimeEnabled()) return false;
         String ended = normalizePackage(endedPackage);
         DirectTbtFrame wazeFrame = latestRestorableWazeFrame();
         boolean wazeAvailable = !WAZE_PACKAGE.equals(ended)
@@ -3070,9 +3096,7 @@ final class NavHudLiveSender {
         }
         boolean hudEnabled = NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE);
         boolean tbtEnabled = shouldObserveTbtWithoutHud(context, WAZE_PACKAGE);
-        if (HudPrefs.isUserShutdownActive(context)
-                || !HudPrefs.isBootEnabled(context)
-                || (!hudEnabled && !tbtEnabled)) {
+        if (!isRuntimeEnabled() || (!hudEnabled && !tbtEnabled)) {
             return;
         }
         if (!active || !WAZE_PACKAGE.equals(activePackage)) {
@@ -3154,6 +3178,7 @@ final class NavHudLiveSender {
 
     private void onOutputPreferenceChangedOnMain(String key) {
         logChangedOutputPreferences(key);
+        if (!isRuntimeEnabled()) return;
         if (!HudPrefs.KEY_TEXT_TRANSLITERATION.equals(key)) return;
 
         String reason = "text-transliteration-mode-changed";
@@ -3339,16 +3364,15 @@ final class NavHudLiveSender {
     }
 
     private void refreshTbtObserversOnMain() {
-        if (HudPrefs.isUserShutdownActive(context) || !HudPrefs.isBootEnabled(context)) {
-            stopTbtObserver(WAZE_PACKAGE, "runtime-disabled");
-            stopTbtObserver(GMapsDirectChannel.PACKAGE_NAME, "runtime-disabled");
-            return;
-        }
         refreshTbtObserver(WAZE_PACKAGE);
         refreshTbtObserver(GMapsDirectChannel.PACKAGE_NAME);
     }
 
     private void refreshTbtObserver(String packageName) {
+        if (!isRuntimeEnabled()) {
+            stopTbtObserver(packageName, "runtime-disabled");
+            return;
+        }
         reconcileTbtOwnershipForHud(packageName);
         boolean wantsObserver = shouldObserveTbtWithoutHud(context, packageName);
         boolean ownsHud = isHudOutputOwner(packageName);
@@ -3479,7 +3503,7 @@ final class NavHudLiveSender {
         boolean hudEnabled = NavCapturePrefs.isHudEnabled(context, WAZE_PACKAGE);
         boolean tbtEnabled = shouldObserveTbtWithoutHud(context, WAZE_PACKAGE);
         if (!shouldRequestWazeRouteStateForTest(
-                HudPrefs.isUserShutdownActive(context), HudPrefs.isBootEnabled(context),
+                HudPrefs.isUserShutdownActive(context), isRuntimeEnabled(),
                 hudEnabled, tbtEnabled)) {
             return;
         }
@@ -3494,8 +3518,8 @@ final class NavHudLiveSender {
     }
 
     static boolean shouldRequestWazeRouteStateForTest(boolean userShutdown,
-            boolean bootEnabled, boolean hudEnabled, boolean tbtEnabled) {
-        return !userShutdown && bootEnabled && (hudEnabled || tbtEnabled);
+            boolean runtimeEnabled, boolean hudEnabled, boolean tbtEnabled) {
+        return !userShutdown && runtimeEnabled && (hudEnabled || tbtEnabled);
     }
 
     private void confirmTbtTeardown(String packageName, long lifecycleToken) {
@@ -3694,7 +3718,8 @@ final class NavHudLiveSender {
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startOnMain(String packageName, String reason) {
-        if (packageName.isEmpty()) {
+        if (packageName.isEmpty() || !isRuntimeEnabled()
+                || !NavCapturePrefs.isHudEnabled(context, packageName)) {
             return;
         }
         if (stopInProgress) {
@@ -3840,8 +3865,7 @@ final class NavHudLiveSender {
 
     private boolean shouldRetainRouteForTbt(String packageName) {
         String normalized = normalizePackage(packageName);
-        boolean runtimeEnabled = !HudPrefs.isUserShutdownActive(context)
-                && HudPrefs.isBootEnabled(context);
+        boolean runtimeEnabled = isRuntimeEnabled();
         boolean routeActive = WAZE_PACKAGE.equals(normalized)
                 ? wazeDirectChannel.isActive() && wazeDirectNavigating
                 && !wazeDirectRouteEnded && !wazeDirectRouteTerminalFence
@@ -4267,14 +4291,15 @@ final class NavHudLiveSender {
 
     private boolean isCurrentWazeDirectCallback(String ownerPackage,
             int sessionGeneration) {
-        return (isHudOutputOwner(ownerPackage) || tbtWazeObserver)
+        return isRuntimeEnabled()
+                && (isHudOutputOwner(ownerPackage) || tbtWazeObserver)
                 && WAZE_PACKAGE.equals(ownerPackage)
                 && wazeDirectChannel.sessionGeneration() == sessionGeneration;
     }
 
     private boolean isCurrentWazeSurfaceCallback(String ownerPackage,
             int sessionGeneration) {
-        return active
+        return isRuntimeEnabled() && active
                 && WAZE_PACKAGE.equals(activePackage)
                 && WAZE_PACKAGE.equals(ownerPackage)
                 && wazeSurfaceRouteGeneration == wazeRouteGeneration
@@ -4291,7 +4316,8 @@ final class NavHudLiveSender {
 
     private boolean isCurrentGMapsDirectCallback(String ownerPackage,
             long sessionGeneration) {
-        return (isHudOutputOwner(ownerPackage) || tbtGMapsObserver)
+        return isRuntimeEnabled()
+                && (isHudOutputOwner(ownerPackage) || tbtGMapsObserver)
                 && GMapsDirectChannel.OWNER_PACKAGE.equals(ownerPackage)
                 && gmapsDirectChannel.sessionGeneration() == sessionGeneration;
     }

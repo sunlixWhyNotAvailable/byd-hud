@@ -22,8 +22,10 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.LongConsumer;
 
 /** Owns the bounded startup, handoff, liveness, and restart policy for the shell helper. */
 final class InstrumentProxyManager {
@@ -119,6 +121,8 @@ final class InstrumentProxyManager {
     private long nextRetryAtMs;
     private int rapidFailureCount;
     private boolean runtimeActive;
+    private final OutputRetry outputRetry = new OutputRetry();
+    private String startStage = "idle";
     private boolean pingInFlight;
     private long pingToken;
     private InstrumentProxyStore.Identity helperIdentity =
@@ -155,23 +159,34 @@ final class InstrumentProxyManager {
         synchronized (lock) {
             if (HudPrefs.isUserShutdownActive(context)) {
                 runtimeActive = false;
+                outputRetry.setActive(false);
+                logStartSkip(reason, "user-shutdown");
                 return;
             }
             runtimeActive = true;
             long now = SystemClock.elapsedRealtime();
             if (state == State.READY && proxyBinder != null && proxyBinder.isBinderAlive()) {
+                logStartSkip(reason, "already-ready");
                 schedulePingLocked(proxy, generation);
                 return;
             }
-            if (state == State.STARTING || state == State.BLOCKED || now < nextRetryAtMs) {
+            if (state == State.STARTING || state == State.BLOCKED) {
+                logStartSkip(reason, state == State.STARTING ? "already-starting" : "capability-blocked");
                 return;
             }
+            if (now < nextRetryAtMs) {
+                logStartSkip(reason, "backoff");
+                scheduleOutputRetryLocked();
+                return;
+            }
+            outputRetry.cancel();
             if (state == State.READY) {
                 staleProxy = proxy;
                 staleGeneration = generation;
                 clearProxyLocked();
             }
             state = State.STARTING;
+            startStage = "requested";
             generation = Math.max(1L, generationCounter.incrementAndGet());
             nonce = newNonce();
             launchToken = newLaunchToken();
@@ -183,30 +198,92 @@ final class InstrumentProxyManager {
             resetCallWorker("replace-stale");
             shutdownCandidate(staleProxy, staleGeneration);
         }
-        try {
-            registerHandoffReceiver();
-        } catch (RuntimeException error) {
-            failStart(requestGeneration, "receiver " + describe(error), false);
-            return;
-        }
         synchronized (lock) {
             if (!runtimeActive || state != State.STARTING
                     || generation != requestGeneration || !nonce.equals(requestNonce)
                     || !launchToken.equals(requestLaunchToken)) {
-                unregisterHandoffReceiver();
                 return;
             }
+            try {
+                registerHandoffReceiver();
+            } catch (RuntimeException error) {
+                failStart(requestGeneration, "receiver " + error.getClass().getSimpleName(), false);
+                return;
+            }
+            log("start requested generation=" + requestGeneration + " reason=" + safe(reason));
+            worker.execute(() -> launch(
+                    requestGeneration, requestNonce, requestLaunchToken));
+            worker.schedule(() -> handleStartTimeout(requestGeneration),
+                    START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         }
-        log("start requested generation=" + requestGeneration + " reason=" + safe(reason));
-        worker.execute(() -> launch(
-                requestGeneration, requestNonce, requestLaunchToken));
-        worker.schedule(() -> handleStartTimeout(requestGeneration),
-                START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+    }
+
+    /** Called only by accepted shared output lifecycle transitions, never by each frame. */
+    void setOutputDemand(boolean active, String reason) {
+        synchronized (lock) {
+            if (!outputRetry.setActive(active)) return;
+            log("output demand=" + active + " generation=" + generation
+                    + " reason=" + safe(reason));
+            if (!active) {
+                // Retain a healthy helper so source/manual handoffs do not recreate it.
+                // Calls already queued for final clear/status can still finish.
+                runtimeActive = false;
+                if (state == State.STARTING) {
+                    log("start cancelled generation=" + generation
+                            + " reason=no-output lastStage=" + startStage);
+                    clearProxyLocked();
+                    state = State.IDLE;
+                    generation = generationCounter.incrementAndGet();
+                    nonce = "";
+                    launchToken = "";
+                    unregisterHandoffReceiver();
+                    worker.execute(() -> cleanupHelper("output-ended"));
+                }
+                return;
+            }
+            ensureStarted("output:" + safe(reason));
+        }
+    }
+
+    private void logStartSkip(String reason, String skip) {
+        log("start skipped generation=" + generation + " trigger=" + safe(reason)
+                + " reason=" + skip);
+    }
+
+    void onRuntimeStopped(String reason, boolean forceShutdown) {
+        synchronized (lock) {
+            if (!shouldShutdownForRuntimeStop(outputRetry.isActive(), forceShutdown)) {
+                log("runtime stop retained generation=" + generation + " reason=active-output");
+                return;
+            }
+            shutdown(reason);
+        }
+    }
+
+    static boolean shouldShutdownForRuntimeStop(boolean activeOutput, boolean forceShutdown) {
+        return forceShutdown || !activeOutput;
+    }
+
+    private void scheduleOutputRetryLocked() {
+        if (!runtimeActive || state != State.IDLE) return;
+        long delay = Math.max(0L, nextRetryAtMs - SystemClock.elapsedRealtime());
+        if (outputRetry.schedule(worker, delay, generation, requestGeneration -> {
+            synchronized (lock) {
+                if (!runtimeActive || !outputRetry.isActive()
+                        || state != State.IDLE || generation != requestGeneration) return;
+                log("retry fired generation=" + requestGeneration + " trigger=output-demand");
+                ensureStarted("output-backoff-retry");
+            }
+        })) {
+            log("retry scheduled generation=" + generation + " delayMs=" + delay
+                    + " trigger=output-demand");
+        }
     }
 
     void onAuthorizationVerified() {
         synchronized (lock) {
             if (state == State.BLOCKED) return;
+            outputRetry.cancel();
             nextRetryAtMs = 0L;
             rapidFailureCount = 0;
         }
@@ -638,7 +715,8 @@ final class InstrumentProxyManager {
                 detail.append(',');
             }
         }
-        log(detail.toString());
+        // The publisher emits change-only HUD-check summaries to normal events.log.
+        Log.i(TAG, detail.toString());
     }
 
     private void handleCallTimeout(
@@ -793,6 +871,7 @@ final class InstrumentProxyManager {
                 log("handoff rejected generation=" + requestGeneration);
                 return;
             }
+            log("startup stage=handoff-received generation=" + requestGeneration);
         }
         worker.execute(() -> beginConnect(requestGeneration, requestNonce, binder));
     }
@@ -802,6 +881,7 @@ final class InstrumentProxyManager {
         long currentGeneration;
         synchronized (lock) {
             runtimeActive = false;
+            outputRetry.setActive(false);
             current = proxy;
             currentGeneration = generation;
             clearProxyLocked();
@@ -812,13 +892,13 @@ final class InstrumentProxyManager {
             nextRetryAtMs = 0L;
             rapidFailureCount = 0;
             capabilityMode = CapabilityMode.NONE;
+            startStage = "shutdown";
+            // Queue cleanup before a later lifecycle request can queue its launch.
+            if (current != null) shutdownCandidate(current, currentGeneration);
+            worker.execute(() -> cleanupHelper("shutdown"));
+            unregisterHandoffReceiver();
         }
-        unregisterHandoffReceiver();
         resetCallWorker("shutdown");
-        if (current != null) {
-            shutdownCandidate(current, currentGeneration);
-        }
-        worker.execute(() -> cleanupHelper("shutdown"));
         log("shutdown reason=" + safe(reason));
     }
 
@@ -828,16 +908,18 @@ final class InstrumentProxyManager {
             if (!runtimeActive || state != State.STARTING
                     || generation != requestGeneration || !nonce.equals(requestNonce)
                     || !launchToken.equals(requestLaunchToken)) {
-                unregisterHandoffReceiver();
                 return;
             }
         }
+        if (!observeStartStage(requestGeneration, "authorization-started")) return;
         if (!LocalAdbBridge.isCurrentKeyKnownAuthorized(context)) {
             failStart(requestGeneration, "rsa key not authorized", false);
             return;
         }
+        if (!observeStartStage(requestGeneration, "authorization-ok")) return;
         try {
             int appUid = context.getApplicationInfo().uid;
+            if (!observeStartStage(requestGeneration, "cleanup-started")) return;
             if (!migrateLegacyHelperOnce(appUid, requestGeneration)) {
                 return;
             }
@@ -846,7 +928,7 @@ final class InstrumentProxyManager {
                     LocalAdbBridge.stopInstrumentProxy(context, staleIdentity);
             if (!cleanup.success()) {
                 failStart(requestGeneration,
-                        "stale cleanup " + cleanup.shortDetail(), false);
+                        "stale cleanup exit=" + cleanup.exitCode, false);
                 return;
             }
             if (!clearHelperIdentity(staleIdentity)) {
@@ -854,6 +936,7 @@ final class InstrumentProxyManager {
                         "stale identity clear persistence failed", false);
                 return;
             }
+            if (!observeStartStage(requestGeneration, "cleanup-complete")) return;
 
             InstrumentProxyStore.Identity pending = InstrumentProxyStore.Identity.pending(
                     appUid, requestGeneration, requestNonce,
@@ -862,6 +945,7 @@ final class InstrumentProxyManager {
                 failStart(requestGeneration, "pending identity persistence failed", false);
                 return;
             }
+            if (!observeStartStage(requestGeneration, "launch-started")) return;
             LocalAdbBridge.ShellResult result = LocalAdbBridge.launchInstrumentProxy(
                     context,
                     context.getApplicationInfo().sourceDir,
@@ -872,15 +956,28 @@ final class InstrumentProxyManager {
                     BuildConfig.VERSION_CODE);
             if (!result.success()) {
                 failStart(requestGeneration,
-                        "launch " + result.shortDetail(), result.exitCode != 126);
+                        "launch exit=" + result.exitCode, result.exitCode != 126);
                 return;
             }
             int launchedPid = LocalAdbBridge.instrumentProxyPid(result);
             if (launchedPid <= 0 || !setHelperIdentity(pending.withPid(launchedPid))) {
                 failStart(requestGeneration, "launch pid persistence failed", true);
+            } else {
+                observeStartStage(requestGeneration, "launch-complete");
             }
         } catch (IOException | RuntimeException error) {
-            failStart(requestGeneration, describe(error), true);
+            failStart(requestGeneration, error.getClass().getSimpleName(), true);
+        }
+    }
+
+    private boolean observeStartStage(long requestGeneration, String stage) {
+        synchronized (lock) {
+            if (!runtimeActive || state != State.STARTING || generation != requestGeneration) {
+                return false;
+            }
+            startStage = stage;
+            log("startup stage=" + stage + " generation=" + requestGeneration);
+            return true;
         }
     }
 
@@ -891,7 +988,7 @@ final class InstrumentProxyManager {
                 LocalAdbBridge.stopLegacyInstrumentProxy(context, appUid);
         if (!result.success()) {
             failStart(requestGeneration,
-                    "legacy cleanup " + result.shortDetail(), false);
+                    "legacy cleanup exit=" + result.exitCode, false);
             return false;
         }
         if (!InstrumentProxyStore.markLegacyMigrationComplete(context, appUid)) {
@@ -909,6 +1006,7 @@ final class InstrumentProxyManager {
                 return;
             }
         }
+        if (!observeStartStage(requestGeneration, "handoff-accepted")) return;
         IInstrumentNavigationProxy candidate =
                 IInstrumentNavigationProxy.Stub.asInterface(binder);
         try {
@@ -928,6 +1026,7 @@ final class InstrumentProxyManager {
             connectingBinder = binder;
         }
         try {
+            if (!observeStartStage(requestGeneration, "connect-requested")) return;
             candidate.connect(requestGeneration, requestNonce, client);
         } catch (RemoteException | RuntimeException error) {
             failStart(requestGeneration, "handoff " + describe(error), true);
@@ -949,6 +1048,7 @@ final class InstrumentProxyManager {
             requestNonce = nonce;
             requestLaunchToken = launchToken;
         }
+        if (!observeStartStage(requestGeneration, "connect-received")) return;
         InstrumentProxyStore.Identity pendingIdentity = helperIdentitySnapshot();
         boolean expectedIdentity = InstrumentProxyContract.hasExpectedConnectionIdentity(
                 result, requestGeneration, requestNonce, SHELL_UID,
@@ -993,14 +1093,15 @@ final class InstrumentProxyManager {
                 if (generation != requestGeneration || state != State.STARTING) return;
                 clearProxyLocked();
                 state = State.BLOCKED;
+                outputRetry.cancel();
                 capabilityMode = CapabilityMode.NONE;
                 nextRetryAtMs = Long.MAX_VALUE;
+                unregisterHandoffReceiver();
+                worker.execute(() -> cleanupHelper("capability-blocked"));
             }
-            unregisterHandoffReceiver();
             log("capability circuit open generation=" + requestGeneration
                     + " capabilities=" + InstrumentProxyContract.capabilities(result)
                     + " error=" + InstrumentProxyContract.error(result));
-            worker.execute(() -> cleanupHelper("capability-blocked"));
             return;
         }
         synchronized (lock) {
@@ -1014,13 +1115,15 @@ final class InstrumentProxyManager {
             connectingProxy = null;
             connectingBinder = null;
             state = State.READY;
+            startStage = "ready";
+            outputRetry.cancel();
             helperIdentity = connectedIdentity;
             capabilityMode = connectedMode;
             trafficLightCapable = connectedTrafficLight;
             connectedAtMs = SystemClock.elapsedRealtime();
             nextRetryAtMs = 0L;
+            unregisterHandoffReceiver();
         }
-        unregisterHandoffReceiver();
         log("ready generation=" + requestGeneration
                 + " pid=" + connectedIdentity.pid
                 + " uid=" + connectedIdentity.uid
@@ -1046,16 +1149,20 @@ final class InstrumentProxyManager {
     }
 
     private void handleStartTimeout(long requestGeneration) {
+        String lastStage;
         synchronized (lock) {
             if (state != State.STARTING || generation != requestGeneration) return;
+            lastStage = startStage;
         }
-        failStart(requestGeneration, "handoff timeout", true);
+        failStart(requestGeneration, "handoff timeout lastStage=" + lastStage, true);
     }
 
     private void failStart(long requestGeneration, String error, boolean retryOnce) {
         boolean immediateRetry = false;
+        String failedStage;
         synchronized (lock) {
             if (generation != requestGeneration || state != State.STARTING) return;
+            failedStage = startStage;
             clearProxyLocked();
             state = State.IDLE;
             rapidFailureCount++;
@@ -1065,12 +1172,16 @@ final class InstrumentProxyManager {
             } else {
                 nextRetryAtMs = SystemClock.elapsedRealtime() + RETRY_DELAY_MS;
             }
+            worker.execute(() -> cleanupHelper("start-failed"));
+            unregisterHandoffReceiver();
         }
-        unregisterHandoffReceiver();
-        log("start failed generation=" + requestGeneration + " error=" + safe(error)
+        log("start failed generation=" + requestGeneration + " stage=" + failedStage
+                + " error=" + safe(error)
                 + " immediateRetry=" + immediateRetry);
-        worker.execute(() -> cleanupHelper("start-failed"));
-        if (immediateRetry) ensureStarted("bounded-retry");
+        if (immediateRetry) retryImmediately(requestGeneration, "bounded-retry");
+        else synchronized (lock) {
+            scheduleOutputRetryLocked();
+        }
     }
 
     private void handleCallFailure(
@@ -1089,6 +1200,7 @@ final class InstrumentProxyManager {
         boolean wasReady;
         synchronized (lock) {
             if (requestGeneration != generation
+                    || state == State.BLOCKED
                     || (state == State.IDLE && proxy == null)) return;
             if (requestBinder != null
                     && requestBinder != proxyBinder
@@ -1105,12 +1217,15 @@ final class InstrumentProxyManager {
             retry = shouldRetryBinder(runtimeActive, rapidFailureCount);
             nextRetryAtMs = retry ? 0L
                     : SystemClock.elapsedRealtime() + RETRY_DELAY_MS;
+            worker.execute(() -> cleanupHelper("binder-death"));
         }
         resetCallWorker("binder-death");
-        worker.execute(() -> cleanupHelper("binder-death"));
         log("binder died generation=" + requestGeneration + " immediateRetry=" + retry);
         if (wasReady) notifyUnavailable("binder-death");
-        if (retry) ensureStarted("binder-death");
+        if (retry) retryImmediately(requestGeneration, "binder-death");
+        else synchronized (lock) {
+            scheduleOutputRetryLocked();
+        }
     }
 
     private void notifyUnavailable(String reason) {
@@ -1130,20 +1245,25 @@ final class InstrumentProxyManager {
 
     private void cleanupHelper(String reason) {
         InstrumentProxyStore.Identity expected = helperIdentitySnapshot();
+        log("cleanup started generation=" + expected.generation + " reason=" + safe(reason));
         try {
             LocalAdbBridge.ShellResult result =
                     LocalAdbBridge.stopInstrumentProxy(context, expected);
             if (!result.success()) {
                 log("cleanup failed reason=" + safe(reason)
-                        + " result=" + result.shortDetail());
+                        + " generation=" + expected.generation + " exit=" + result.exitCode);
             } else {
                 if (!clearHelperIdentity(expected)) {
                     log("cleanup identity clear failed reason=" + safe(reason));
+                } else {
+                    log("cleanup complete generation=" + expected.generation
+                            + " reason=" + safe(reason));
                 }
             }
         } catch (IOException error) {
             log("cleanup failed reason=" + safe(reason)
-                    + " error=" + describe(error));
+                    + " generation=" + expected.generation
+                    + " error=" + error.getClass().getSimpleName());
         }
     }
 
@@ -1247,6 +1367,51 @@ final class InstrumentProxyManager {
 
     static boolean shouldRetryBinder(boolean runtimeActive, int failureCount) {
         return runtimeActive && failureCount == 1;
+    }
+
+    private void retryImmediately(long requestGeneration, String reason) {
+        synchronized (lock) {
+            if (!runtimeActive || generation != requestGeneration || state != State.IDLE) return;
+            ensureStarted(reason);
+        }
+    }
+
+    /** One demand-owned timer; cancellation also fences work already dequeued by the executor. */
+    static final class OutputRetry {
+        private boolean active;
+        private long token;
+        private ScheduledFuture<?> task;
+
+        synchronized boolean setActive(boolean value) {
+            if (active == value) return false;
+            active = value;
+            if (!active) cancel();
+            return true;
+        }
+
+        synchronized boolean isActive() {
+            return active;
+        }
+
+        synchronized void cancel() {
+            token++;
+            if (task != null) task.cancel(false);
+            task = null;
+        }
+
+        synchronized boolean schedule(ScheduledExecutorService worker, long delayMs,
+                long generation, LongConsumer retry) {
+            if (!active || task != null) return false;
+            long requestToken = ++token;
+            task = worker.schedule(() -> {
+                synchronized (OutputRetry.this) {
+                    if (!active || token != requestToken) return;
+                    task = null;
+                }
+                retry.accept(generation);
+            }, Math.max(0L, delayMs), TimeUnit.MILLISECONDS);
+            return true;
+        }
     }
 
     private void log(String message) {

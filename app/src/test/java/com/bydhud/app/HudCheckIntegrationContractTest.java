@@ -154,7 +154,8 @@ public final class HudCheckIntegrationContractTest {
                 tbt.indexOf("static boolean shouldPreserveAmapFallbackForTest(", unavailableStart));
         assertTrue(unavailable.contains("if (routeActive && MANUAL_OWNER.equals(ownerPackage))"));
         assertTrue(unavailable.contains("hudCheckInstrumentResult = -1"));
-        assertTrue(unavailable.contains("if (hudCheckLightIndex >= 0) hudCheckLightResult = -1"));
+        assertTrue(unavailable.contains("if (hudCheckLightIndex >= 0) {\n"
+                + "                hudCheckLightResult = -1;"));
         assertTrue(unavailable.indexOf("MainActivity.publishSharedUiStateChange()")
                 < unavailable.indexOf("if (!hasInstrumentStatus && !hasInstrumentGuidance) return"));
         assertFalse(unavailable.contains("hudCheckAmapResult ="));
@@ -186,6 +187,23 @@ public final class HudCheckIntegrationContractTest {
         assertTrue(output.contains("new ArrayList<>(hudCheckOwnedServices)"));
         assertTrue(output.contains("DEFAULT_INTERVAL_MS = 1000L"));
         assertTrue(output.contains("DIRECT_INTERVAL_MS = 50L"));
+    }
+
+    @Test
+    public void normalDiagnosticsCoverCaseChangesAndAuxiliaryFailures() throws Exception {
+        String output = source("HudOutputCoordinator.java");
+        assertTrue(output.contains("HudCheckDiagnostics.sampleKey("));
+        assertTrue(output.contains("recordHudCheck(\"roadinfo\", 0, \"sample-selected\")"));
+        assertTrue(output.contains("setHudCheckRoadResult(-1, \"bind-timeout\")"));
+        assertTrue(output.contains("setHudCheckRoadResult(1, \"sent\")"));
+        assertTrue(output.contains("\"aux-service-\""));
+        assertTrue(output.contains("\"aux-topic-\""));
+        int start = output.indexOf("private void recordHudCheck(");
+        String logging = output.substring(start, output.indexOf("\n    }", start) + 6);
+        assertTrue(logging.contains("hudCheckDiagnostics.changed("));
+        assertTrue(logging.contains("log(line)"));
+        assertFalse(logging.contains("getMessage()"));
+        assertFalse(logging.contains("logTx("));
     }
 
     private static String source(String file) throws Exception {

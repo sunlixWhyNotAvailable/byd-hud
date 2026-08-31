@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
 
-- **Version:** v3.1.0
+- **Version:** v3.1.1
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
@@ -291,6 +291,8 @@ Back up important navigator data and sign in to its account before patching. The
 | `Take part in beta-testing` | Off | Includes prereleases, which may be unstable or broken |
 
 `ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and the runtime cleanly.
+
+Turning off `Boot runtime service` disables automatic startup, not navigation you have started yourself. You can open BYD HUD and use navigation output or HUD check with this option off.
 
 <p align="center"><img src="docs/screenshots/en/settings-permissions-runtime.png" alt="Permissions, background runtime, diagnostics, and update settings" width="100%"></p>
 

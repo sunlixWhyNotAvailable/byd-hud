@@ -253,6 +253,7 @@ public final class MainActivity extends ComponentActivity {
             NavNotificationListenerService.resumeAfterUserShutdown(
                     this, "activity-create");
         }
+        NavHudLiveSender.activateUserRuntime(this);
         HudGraphicPayload.setContext(this);
         int staleShareArtifacts = LogShareZip.cleanupStaleArtifacts(this);
         if (staleShareArtifacts > 0) {
@@ -308,6 +309,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
+        if (!exitRequested) NavHudLiveSender.get(this).resumeUserRuntime("activity-resume");
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
         DashboardWidgetController.refresh(this);
@@ -1392,6 +1394,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public void composeSetTbtWithoutHudOutputEnabled(boolean enabled) {
+        if (enabled && !NavHudLiveSender.activateUserRuntime(this)) return;
         HudPrefs.setTbtWithoutHudOutputEnabled(this, enabled);
         NavHudLiveSender.get(this).refreshTbtObservers();
         appendStatus("TBT without HUD output " + (enabled ? "enabled" : "disabled"));
@@ -2399,6 +2402,7 @@ public final class MainActivity extends ComponentActivity {
     public void composeHudCheckToggleRunning() {
         // A delayed visual click must not restart a test after the Activity left the foreground.
         if (!activityResumed || destroyed || exitRequested) return;
+        if (!NavHudLiveSender.activateUserRuntime(this)) return;
         NavHudLiveSender.get(this).updateHudCheck(
                 HudCheckState::toggleRun, "hud-check-run");
     }
@@ -3536,6 +3540,7 @@ public final class MainActivity extends ComponentActivity {
             return;
         }
         String previousHudPackage = NavCapturePrefs.getHudPackage(this);
+        if (enabled && !NavHudLiveSender.activateUserRuntime(this)) return;
         if (enabled && !previousHudPackage.isEmpty() && !previousHudPackage.equals(normalized)) {
             returnPreviousHudAppToMain(previousHudPackage, normalized);
             appendStatus("nav live HUD switched off: " + previousHudPackage);
@@ -3789,6 +3794,7 @@ public final class MainActivity extends ComponentActivity {
         String safeReason = reason == null ? "shutdown" : reason;
         appendStatus("shutdown requested reason=" + safeReason);
         exitRequested = true;
+        UserRuntimeSession.PROCESS.shutdown();
         HudPrefs.setUserShutdownActive(this, true);
         NavAppDisplayController.get(this).cancelWidgetModeForShutdown();
         DashboardWidgetController.shutdown(this);
@@ -3805,7 +3811,8 @@ public final class MainActivity extends ComponentActivity {
         autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.IDLE;
 
         String hudPackage = NavCapturePrefs.getHudPackage(this);
-        NavHudLiveSender.get(this).stop(hudPackage, safeReason, true);
+        NavHudLiveSender sender = NavHudLiveSender.get(this);
+        sender.stop(hudPackage, safeReason, true, sender::refreshTbtObservers);
 
         NavAppDisplayController.get(this).returnActiveDashboardToMain(safeReason);
 

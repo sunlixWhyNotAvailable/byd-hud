@@ -143,7 +143,7 @@ public final class HudRuntimeService extends Service {
         Context appContext = context.getApplicationContext();
         clearStartRequestGate();
         HudRuntimeWatchdog.cancel(appContext);
-        InstrumentProxyManager.get(appContext).shutdown("runtime-stop:" + reason);
+        releaseInstrumentRuntime(appContext, "runtime-stop:" + reason);
         appContext.stopService(new Intent(appContext, HudRuntimeService.class));
         HudPrefs.setRuntimeServiceRunning(appContext, false);
         HudRuntimeState.markStopped(appContext, "stop:" + reason);
@@ -257,11 +257,17 @@ public final class HudRuntimeService extends Service {
         clearStartRequestGate();
         runtimeStartInitialized = false;
         runtimeActiveWork = false;
-        InstrumentProxyManager.get(this).shutdown("runtime-destroyed");
+        releaseInstrumentRuntime(this, "runtime-destroyed");
         HudPrefs.setRuntimeServiceRunning(this, false);
         HudRuntimeState.markStopped(this, "destroyed");
         log("runtime destroyed");
         super.onDestroy();
+    }
+
+    private static void releaseInstrumentRuntime(Context context, String reason) {
+        InstrumentProxyManager.get(context).onRuntimeStopped(reason,
+                HudPrefs.isUserShutdownActive(context)
+                        || HudRuntimeUpgradeGuard.hasPendingHardReset(context));
     }
 
     @Override

@@ -54,6 +54,7 @@ final class HudOutputCoordinator {
     private final Handler worker;
     private final SomeIpHudClient client;
     private final SomeIpTxLog txLog;
+    private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
 
     private boolean manualEnabled;
     private boolean directEnabled;
@@ -210,7 +211,11 @@ final class HudOutputCoordinator {
     void publishManual(HudState state, String reason) {
         HudState copy = state == null ? null : state.copy();
         worker.post(() -> {
+            boolean changed = !HudCheckDiagnostics.sampleKey(copy == null ? null : copy.hudCheck)
+                    .equals(HudCheckDiagnostics.sampleKey(
+                            manualState == null ? null : manualState.hudCheck));
             manualState = copy;
+            if (changed) recordHudCheck("roadinfo", 0, "sample-selected");
             if (activeSource == Source.MANUAL) {
                 scheduleImmediate(reason);
             }
@@ -219,7 +224,10 @@ final class HudOutputCoordinator {
 
     void setManualEnabled(boolean enabled, String reason) {
         worker.post(() -> {
+            boolean started = enabled && !manualEnabled;
+            if (manualEnabled != enabled) hudCheckDiagnostics.reset();
             manualEnabled = enabled;
+            if (started) recordHudCheck("roadinfo", 0, "sample-selected");
             if (!enabled) {
                 releaseHudCheckAuxiliary(reason);
                 preparedHudCheck = null;
@@ -478,6 +486,7 @@ final class HudOutputCoordinator {
                     || pendingTransitionClearCompletion != null;
             Runnable interruptedCompletion = takePendingClearCompletions();
             manualEnabled = false;
+            hudCheckDiagnostics.reset();
             releaseHudCheckAuxiliary(reason);
             directEnabled = false;
             manualState = null;
@@ -729,6 +738,7 @@ final class HudOutputCoordinator {
             HudDeliveryStatus.recordFailure();
             log("bind timeout generation=" + attemptGeneration
                     + " elapsedMs=" + BIND_TIMEOUT_MS);
+            if (manualEnabled) setHudCheckRoadResult(-1, "bind-timeout");
             client.unbind();
             finishBindAttempt();
             worker.postDelayed(transportRecovery, DEFAULT_INTERVAL_MS);
@@ -827,12 +837,15 @@ final class HudOutputCoordinator {
             sendDurationMs += duration;
             HudDeliveryStatus.recordNonClearResult(result);
             if (!isPayloadSuccessResult(result)) {
+                if (source == Source.MANUAL) {
+                    recordHudCheck("roadinfo-send", -1, "result:" + result);
+                }
                 handleProtocolResult("send source=" + source, result);
                 return;
             }
             recordPayloadSuccess();
             if (source == Source.MANUAL && manualState.hudCheck != null) {
-                setHudCheckRoadResult(1);
+                setHudCheckRoadResult(1, "sent");
                 publishHudCheckAuxiliary(reason);
             } else if (!hudCheckPendingClearTopics.isEmpty()) {
                 releaseHudCheckAuxiliary("hud-check-late-clear");
@@ -909,10 +922,17 @@ final class HudOutputCoordinator {
         return HudRoadPayload.build(state);
     }
 
-    private void setHudCheckRoadResult(int result) {
+    private void setHudCheckRoadResult(int result, String reason) {
+        recordHudCheck("roadinfo", result, reason);
         if (hudCheckRoadResult == result) return;
         hudCheckRoadResult = result;
         MainActivity.publishSharedUiStateChange();
+    }
+
+    private void recordHudCheck(String plane, int result, String reason) {
+        if (!manualEnabled || manualState == null) return;
+        String line = hudCheckDiagnostics.changed(manualState.hudCheck, plane, result, reason);
+        if (line != null) log(line);
     }
 
     static boolean sameHudCheckPayload(HudCheckState first, HudCheckState second) {
@@ -953,6 +973,9 @@ final class HudOutputCoordinator {
         hudCheckHasAuxiliary = !hudCheckPackets.isEmpty()
                 || !hudCheckPendingClearTopics.isEmpty();
         int outcome = success ? 1 : -1;
+        if (hudCheckHasAuxiliary) {
+            recordHudCheck("auxiliary", outcome, success ? "sent" : "service-or-send-failed");
+        }
         if (hudCheckAuxiliaryResult != outcome) {
             hudCheckAuxiliaryResult = outcome;
             MainActivity.publishSharedUiStateChange();
@@ -969,12 +992,16 @@ final class HudOutputCoordinator {
             int result = client.startAuxiliaryService(serviceId);
             txLog.recordLifecycle("service_start", "manual", "hud_check_aux", detail,
                     result, "", SystemClock.elapsedRealtime() - startedAt);
+            recordHudCheck("aux-service-" + Long.toHexString(serviceId),
+                    isStartReadyResult(result) ? 1 : -1, "start-result:" + result);
             if (!isStartReadyResult(result)) return false;
             hudCheckReadyServices.add(serviceId);
             // Do not stop an already-running provider owned by another application.
             if (result == RESULT_OK) hudCheckOwnedServices.add(serviceId);
             return true;
         } catch (RemoteException | RuntimeException error) {
+            recordHudCheck("aux-service-" + Long.toHexString(serviceId),
+                    -1, "start-" + error.getClass().getSimpleName());
             txLog.recordLifecycle("service_start", "manual", "hud_check_aux", detail,
                     null, error.getClass().getSimpleName() + ":" + safe(error.getMessage()),
                     SystemClock.elapsedRealtime() - startedAt);
@@ -987,6 +1014,8 @@ final class HudOutputCoordinator {
         long startedAt = SystemClock.elapsedRealtime();
         try {
             int result = client.sendToTopic(packet.topicId, packet.payload);
+            recordHudCheck("aux-topic-" + Long.toHexString(packet.topicId) + ":" + kind,
+                    isPayloadSuccessResult(result) ? 1 : -1, "send-result:" + result);
             txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
                     packet.payload, packet.payload, result, "",
                     SystemClock.elapsedRealtime() - startedAt);
@@ -996,6 +1025,8 @@ final class HudOutputCoordinator {
             }
             return isPayloadSuccessResult(result);
         } catch (RemoteException | RuntimeException error) {
+            recordHudCheck("aux-topic-" + Long.toHexString(packet.topicId) + ":" + kind,
+                    -1, "send-" + error.getClass().getSimpleName());
             hudCheckReadyServices.remove(packet.serviceId);
             hudCheckOwnedServices.remove(packet.serviceId);
             txLog.recordSend("manual", "hud_check_aux", packet.topicId, kind, reason,
@@ -1410,7 +1441,8 @@ final class HudOutputCoordinator {
     private void handleTransportFailure(String reason, Throwable error) {
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
-            setHudCheckRoadResult(-1);
+            setHudCheckRoadResult(-1, "transport-unavailable");
+            if (hudCheckHasAuxiliary) recordHudCheck("auxiliary", -1, "transport-unavailable");
             if (hudCheckHasAuxiliary && hudCheckAuxiliaryResult != -1) {
                 hudCheckAuxiliaryResult = -1;
                 MainActivity.publishSharedUiStateChange();
@@ -1456,7 +1488,7 @@ final class HudOutputCoordinator {
     private void handleProtocolFailure(String detail) {
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
-            setHudCheckRoadResult(-1);
+            setHudCheckRoadResult(-1, "protocol-failed");
         }
         sendScheduled = false;
         worker.removeCallbacks(sendLoop);
