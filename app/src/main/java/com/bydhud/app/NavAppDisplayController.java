@@ -178,10 +178,16 @@ final class NavAppDisplayController {
                 || normalized.contains("explicit-return");
     }
 
+    static String steeringMoveReason(boolean toDashboard, String reason) {
+        return (toDashboard ? "steering-key " : "steering-key user-return ") + safe(reason);
+    }
+
     private final Context context;
     private final Object lock = new Object();
     private final Map<String, NavAppDisplayState> states = new HashMap<>();
     private boolean moveInProgress;
+    private String movingPackage = "";
+    private Consumer<NavAppDisplayState> steeringTaskMoveCompletion;
     private String activeDashboardPackage = "";
     private String pendingAutoContainerLeaseTransferFrom = "";
     private long pendingAutoContainerLeaseTransferGeneration;
@@ -213,6 +219,13 @@ final class NavAppDisplayController {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
+    boolean isMoveInProgressFor(String packageName) {
+        String normalized = normalizePackage(packageName);
+        synchronized (lock) {
+            return SteeringTransferPolicy.isSelectedMove(moveInProgress, movingPackage, normalized);
+        }
+    }
+
     String activeDashboardPackage() {
         String current = confirmedDashboardPackage();
         return observedDisplay(current) == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD
@@ -393,14 +406,21 @@ final class NavAppDisplayController {
             reportSteeringFailure(normalized, "selected package missing");
             return;
         }
+        if (HudPrefs.isUserShutdownActive(context)) return;
+        //Reserve the common gate at key admission, before dispatching a background precheck.
+        if (!beginMove(normalized, "steering-precheck reason=" + safe(reason))) {
+            log(normalized, "steering_transfer_ignored busy");
+            return;
+        }
         Thread worker = new Thread(() -> {
+            boolean executingMove = false;
             try {
                 if (HudPrefs.isUserShutdownActive(context)) {
                     reportSteeringFailure(normalized, "shutdown active");
                     return;
                 }
-                if (isMoveInProgress()) {
-                    reportSteeringFailure(normalized, "display move busy");
+                if (!normalized.equals(SteeringTransferPreferences.packageName(context))) {
+                    log(normalized, "steering_transfer_ignored binding changed");
                     return;
                 }
                 NavAppDisplayState current = checkDisplay(normalized, "steering-precheck");
@@ -418,11 +438,14 @@ final class NavAppDisplayController {
                     reportSteeringFailure(normalized, "shutdown active");
                     return;
                 }
-                moveIndependentDashboardApp(
+                executingMove = true;
+                log(normalized, (toDashboard ? "independent_dashboard_on" : "independent_dashboard_off")
+                        + " reason=" + steeringMoveReason(toDashboard, reason));
+                moveIndependentDashboardAppBlocking(
                         normalized,
                         toDashboard,
                         dashboardMode,
-                        "steering-key " + safe(reason),
+                        steeringMoveReason(toDashboard, reason),
                         error -> {
                             if (error != null && !error.isEmpty()) {
                                 reportSteeringFailure(normalized, error);
@@ -431,10 +454,17 @@ final class NavAppDisplayController {
             } catch (RuntimeException error) {
                 reportSteeringFailure(
                         normalized, "runtime " + error.getClass().getSimpleName());
+            } finally {
+                if (!executingMove) endMove(normalized);
             }
         }, "BydHudSteeringTransfer");
-        worker.setDaemon(true);
-        worker.start();
+        try {
+            worker.setDaemon(true);
+            worker.start();
+        } catch (RuntimeException error) {
+            endMove(normalized);
+            reportSteeringFailure(normalized, "worker " + error.getClass().getSimpleName());
+        }
     }
 
     private void moveIndependentDashboardApp(
@@ -459,7 +489,12 @@ final class NavAppDisplayController {
                         reason,
                         completion),
                 "BydHudIndependentDashboardDisplay");
-        worker.start();
+        try {
+            worker.start();
+        } catch (RuntimeException error) {
+            endMove(normalized);
+            notifyMoveCompletion(completion, "worker " + error.getClass().getSimpleName());
+        }
     }
 
     //runs explicit widget vehicle commands on the existing move gate, never on the UI thread.
@@ -738,6 +773,7 @@ final class NavAppDisplayController {
             int dashboardMode,
             String reason,
             Consumer<String> completion) {
+        NavAppDisplayState confirmedTask = null;
         try {
             if (packageName.isEmpty()) {
                 remember(new NavAppDisplayState(
@@ -787,6 +823,7 @@ final class NavAppDisplayController {
                     releaseAutoContainerLeaseIfRequested(
                             packageName, returnGeneration, true, reason);
                     requestTbtAfterReturnIfRequested(packageName, true, reason);
+                    confirmedTask = current;
                     remember(new NavAppDisplayState(
                             packageName,
                             current.taskId,
@@ -831,6 +868,7 @@ final class NavAppDisplayController {
                 releaseAutoContainerLeaseIfRequested(
                         packageName, returnGeneration, projectionReleased, reason);
                 requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason);
+                if (onMain) confirmedTask = confirmed;
                 String returnStatus = onMain
                         ? surfaceReady
                                 ? projectionReleased
@@ -876,6 +914,7 @@ final class NavAppDisplayController {
                         "existing-dashboard");
                 acquireAutoContainerLeaseIfSucceeded(
                         packageName, dashboardMode, layoutFailure, "existing-dashboard");
+                confirmedTask = current;
                 remember(new NavAppDisplayState(
                         packageName,
                         current.taskId,
@@ -924,6 +963,7 @@ final class NavAppDisplayController {
                     "dashboard-confirmed");
             acquireAutoContainerLeaseIfSucceeded(
                     packageName, dashboardMode, layoutFailure, "dashboard-confirmed");
+            confirmedTask = confirmed;
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
@@ -943,7 +983,7 @@ final class NavAppDisplayController {
                     "independent dashboard failed: " + safe(e.getMessage())));
         } finally {
             String completionError = completionErrorForState(packageName);
-            endMove(packageName);
+            endMove(packageName, confirmedTask);
             notifyMoveCompletion(completion, completionError);
         }
     }
@@ -1615,18 +1655,27 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean beginMove(String packageName, String status) {
-        synchronized (lock) {
-            if (moveInProgress) {
-                return false;
-            }
-            moveInProgress = true;
-        }
+        if (!reserveMove(packageName)) return false;
+        steeringTaskMoveCompletion = NavAccessibilityService.beginSteeringTaskMove(
+                context, packageName);
         remember(new NavAppDisplayState(
                 packageName,
                 -1,
                 NavAppDisplayState.DISPLAY_UNKNOWN,
                 false,
                 status == null ? "move running" : status));
+        return true;
+    }
+
+    //The same atomic reservation is used before either UI or steering starts background work.
+    boolean reserveMove(String packageName) {
+        synchronized (lock) {
+            if (moveInProgress) {
+                return false;
+            }
+            moveInProgress = true;
+            movingPackage = normalizePackage(packageName);
+        }
         return true;
     }
 
@@ -1669,12 +1718,28 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void endMove(String packageName) {
+        endMove(packageName, null);
+    }
+
+    private void endMove(String packageName, NavAppDisplayState confirmedTask) {
         String deferredReturnPackage;
         String deferredReturnReason;
+        Consumer<NavAppDisplayState> publishTask = steeringTaskMoveCompletion;
+        steeringTaskMoveCompletion = null;
+        if (publishTask != null) {
+            try {
+                //Keep the gate busy until both UI and steering can see the confirmed result.
+                publishTask.accept(confirmedTask);
+            } catch (RuntimeException error) {
+                log(packageName, "steering_task_completion_failed "
+                        + error.getClass().getSimpleName());
+            }
+        }
         pendingAutoContainerLeaseTransferFrom = "";
         pendingAutoContainerLeaseTransferGeneration = 0L;
         synchronized (lock) {
             moveInProgress = false;
+            movingPackage = "";
             deferredReturnPackage = pendingShutdownReturnPackage;
             deferredReturnReason = pendingShutdownReturnReason;
             pendingShutdownReturnPackage = "";
