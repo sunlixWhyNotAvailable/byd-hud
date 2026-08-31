@@ -84,15 +84,6 @@ final class NavAppTaskScanner {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     Snapshot forceScanIfIdle() {
-        return forceScanIfIdle(true);
-    }
-
-    /** Returns this scan attempt rather than a retained authoritative fallback. */
-    Snapshot forceFreshScanIfIdle() {
-        return forceScanIfIdle(false);
-    }
-
-    private Snapshot forceScanIfIdle(boolean returnPreferredSnapshot) {
         synchronized (lock) {
             if (!scanInProgress.compareAndSet(false, true)) {
                 return null;
@@ -106,7 +97,7 @@ final class NavAppTaskScanner {
                 revision = Math.max(revision + 1L, System.currentTimeMillis());
                 scanInProgress.set(false);
                 completed = true;
-                return returnPreferredSnapshot ? snapshot : scanned;
+                return snapshot;
             }
         } finally {
             if (!completed) {

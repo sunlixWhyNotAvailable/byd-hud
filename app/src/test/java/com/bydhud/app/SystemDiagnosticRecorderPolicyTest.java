@@ -59,8 +59,14 @@ public final class SystemDiagnosticRecorderPolicyTest {
         assertFalse(source.contains("logcat -c"));
         assertTrue(source.contains("full_system_adb"));
         assertTrue(source.contains("app_uid_fallback"));
-        assertTrue(source.contains("SEGMENT_BYTES = 16L * 1024L * 1024L"));
-        assertTrue(source.contains("MAX_SEGMENTS = 4"));
+        assertFalse(source.contains("SEGMENT_BYTES"));
+        assertFalse(source.contains("MAX_SEGMENTS"));
+        assertFalse(source.contains("\"segmentBytes\""));
+        assertFalse(source.contains("\"maxSegments\""));
+        assertTrue(source.contains("MAX_UID_POLL_BYTES = 4 * 1024 * 1024"));
+        assertTrue(source.contains("session.logFile.append(text.getBytes(StandardCharsets.UTF_8))"));
+        assertTrue(source.contains("segments.put(session.logFile.file().getName())"));
+        assertTrue(source.contains("session.manifest.put(\"bytes\", session.logFile.bytes())"));
         assertTrue(source.contains("lockTopologyRead()"));
         assertTrue(source.contains("session.context.getCacheDir()"));
         assertTrue(source.contains("yyyyMMdd_HHmmss_SSS"));

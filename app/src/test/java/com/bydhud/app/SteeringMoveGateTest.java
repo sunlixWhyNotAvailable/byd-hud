@@ -23,22 +23,20 @@ public final class SteeringMoveGateTest {
     @Test
     public void reservedPrecheckRejectsAnotherPressBeforeAnyWorkerRuns() throws Exception {
         NavAppDisplayController controller = controller();
-        assertTrue(controller.reserveMove("com.waze"));
+        assertTrue(controller.reserveMove());
         assertTrue(controller.isMoveInProgress());
-        assertTrue(controller.isMoveInProgressFor("com.waze"));
-        assertFalse(controller.reserveMove("com.waze"));
-        assertFalse(controller.reserveMove(GMapsDirectChannel.PACKAGE_NAME));
-        assertFalse(controller.isMoveInProgressFor(GMapsDirectChannel.PACKAGE_NAME));
+        assertFalse(controller.reserveMove());
+        assertFalse(controller.reserveMove());
     }
 
     @Test
-    public void widgetReservationCannotPreserveAnUnrelatedAppsEvidence() throws Exception {
+    public void busyWidgetOrUiReservationIsVisibleToNewUiListeners() throws Exception {
         NavAppDisplayController controller = controller();
-        assertTrue(controller.reserveMove(""));
+        assertFalse(controller.setListener(null));
+        assertTrue(controller.reserveMove());
         assertTrue(controller.isMoveInProgress());
-        assertFalse(controller.isMoveInProgressFor(""));
-        assertFalse(controller.isMoveInProgressFor("com.waze"));
-        assertFalse(controller.reserveMove("com.waze"));
+        assertTrue(controller.setListener(null));
+        assertFalse(controller.reserveMove());
     }
 
     @Test
@@ -49,10 +47,9 @@ public final class SteeringMoveGateTest {
         List<Future<Boolean>> attempts = new ArrayList<>();
         try {
             for (int index = 0; index < 8; index++) {
-                String packageName = index % 2 == 0 ? "com.waze" : GMapsDirectChannel.PACKAGE_NAME;
                 attempts.add(threads.submit(() -> {
                     assertTrue(start.await(5, TimeUnit.SECONDS));
-                    return controller.reserveMove(packageName);
+                    return controller.reserveMove();
                 }));
             }
             start.countDown();
@@ -61,8 +58,7 @@ public final class SteeringMoveGateTest {
                 if (attempt.get(5, TimeUnit.SECONDS)) winners++;
             }
             assertEquals(1, winners);
-            assertTrue(controller.isMoveInProgressFor("com.waze")
-                    ^ controller.isMoveInProgressFor(GMapsDirectChannel.PACKAGE_NAME));
+            assertTrue(controller.isMoveInProgress());
         } finally {
             threads.shutdownNow();
         }

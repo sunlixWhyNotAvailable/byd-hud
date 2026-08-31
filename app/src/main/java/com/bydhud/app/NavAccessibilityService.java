@@ -15,13 +15,10 @@ import android.view.accessibility.AccessibilityNodeInfo;
 import java.util.HashSet;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.function.Consumer;
 
 //anchors the NavAccessibilityService android entry point so lifecycle recovery stays separate from business logic.
 public final class NavAccessibilityService extends AccessibilityService {
     private static final long THROTTLE_MS = 500L;
-    private static final long STEERING_TASK_CACHE_MAX_AGE_MS = 45_000L;
-    private static final long STEERING_TASK_CACHE_REFRESH_INTERVAL_MS = 30_000L;
     private static final long STEERING_KEY_TAIL_TIMEOUT_MS = 3_000L;
     private static final int MAX_DEPTH = 8;
     private static final int MAX_NODES = 80;
@@ -50,16 +47,8 @@ public final class NavAccessibilityService extends AccessibilityService {
     private volatile int capturedKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
     private volatile int suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
     private volatile boolean mappedKeyActive;
-    private volatile NavAppTaskScanner.Snapshot steeringTaskSnapshot;
-    private volatile boolean steeringTaskCacheRefreshScheduled;
-    private boolean steeringTaskCacheRefreshPending;
-    private volatile long lastSteeringTaskRefreshElapsedMs;
-    private volatile long steeringTaskEvidenceElapsedMs;
-    private long steeringTaskInvalidationEpoch;
+    private volatile long steeringRuntimeGeneration;
     private long steeringKeyTailGeneration;
-    private final Runnable steeringTaskRefreshRunnable = this::refreshSteeringTaskCache;
-    private final Runnable steeringTaskPeriodicRefreshRunnable =
-            () -> scheduleSteeringTaskCacheRefresh("periodic");
 
     @Override
     public void onCreate() {
@@ -67,7 +56,6 @@ public final class NavAccessibilityService extends AccessibilityService {
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
         NavCaptureIngressPolicy.refreshPreferencesAsync(this);
-        requestSteeringTaskCacheRefresh(this, "service-create");
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -126,11 +114,6 @@ public final class NavAccessibilityService extends AccessibilityService {
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
         }
-        synchronized (service.steeringLock) {
-            service.steeringTaskCacheRefreshScheduled = false;
-            service.steeringTaskCacheRefreshPending = false;
-        }
-        service.invalidateSteeringTaskEvidence();
         synchronized (service.captureQueueLock) {
             service.pendingPackageName = null;
             service.pendingSource = null;
@@ -170,58 +153,18 @@ public final class NavAccessibilityService extends AccessibilityService {
         return STEERING_LEARNING_REVISION.get();
     }
 
-    /** Requests a cache refresh without doing ADB work on the key callback. */
-    static void requestSteeringTaskCacheRefresh(Context context, String reason) {
-        NavAccessibilityService service = activeService;
-        if (service != null) {
-            if ("binding-changed".equals(reason)) service.invalidateSteeringTaskEvidence();
-            service.scheduleSteeringTaskCacheRefresh(reason);
-        }
-    }
-
-    /** Fences old scans and returns a completion bound to this service and selected app. */
-    static Consumer<NavAppDisplayState> beginSteeringTaskMove(Context context, String packageName) {
-        NavAccessibilityService service = activeService;
-        if (service == null || service.steeringSuspended || HudPrefs.isUserShutdownActive(context)
-                || packageName == null || packageName.isEmpty()
-                || !packageName.equals(SteeringTransferPreferences.packageName(context))) return null;
-        final long epoch;
-        final long bindingRevision = SteeringTransferPreferences.revision(context);
-        synchronized (service.steeringLock) {
-            epoch = ++service.steeringTaskInvalidationEpoch;
-        }
-        return confirmed -> {
-            synchronized (service.steeringLock) {
-                if (!SteeringTransferPolicy.canPublishTaskEvidence(
-                        activeService == service && !service.steeringSuspended,
-                        HudPrefs.isUserShutdownActive(context), true,
-                        epoch, service.steeringTaskInvalidationEpoch)
-                        || bindingRevision != SteeringTransferPreferences.revision(context)
-                        || !packageName.equals(SteeringTransferPreferences.packageName(context))) return;
-                ++service.steeringTaskInvalidationEpoch;
-                service.steeringTaskSnapshot = confirmed != null
-                        && packageName.equals(confirmed.packageName)
-                        ? SteeringTransferPolicy.confirmedTaskSnapshot(
-                                confirmed, System.currentTimeMillis()) : null;
-                service.steeringTaskEvidenceElapsedMs = service.steeringTaskSnapshot == null
-                        ? 0L : SystemClock.elapsedRealtime();
-            }
-            AppEventLogger.event(context, "steering_task_cache move-complete package=" + packageName);
-        };
+    private boolean isSteeringRequestCurrent(long runtimeGeneration, long bindingRevision) {
+        return SteeringTransferPolicy.isRequestCurrent(
+                activeService == this && !steeringSuspended,
+                HudPrefs.isUserShutdownActive(this),
+                runtimeGeneration, steeringRuntimeGeneration,
+                bindingRevision, SteeringTransferPreferences.revision(this));
     }
 
     static void resumeSteeringRuntime(Context context, String reason) {
         NavAccessibilityService service = activeService;
         if (service == null) return;
-        boolean wasSuspended = service.steeringSuspended;
         service.steeringSuspended = false;
-        if (wasSuspended || !NavAppDisplayController.get(context).isMoveInProgressFor(
-                SteeringTransferPreferences.packageName(context))) {
-            service.invalidateSteeringTaskEvidence();
-        }
-        if (!SteeringTransferPreferences.packageName(context).isEmpty()) {
-            service.scheduleSteeringTaskCacheRefresh(reason);
-        }
     }
 
     @Override
@@ -229,15 +172,15 @@ public final class NavAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         activeService = this;
+        synchronized (steeringLock) {
+            steeringRuntimeGeneration++;
+        }
         steeringSuspended = HudPrefs.isUserShutdownActive(this);
         runtimeCrashed = false;
         lastConnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "connected";
         AppEventLogger.event(this, "accessibility_service connected");
         NavCaptureIngressPolicy.refreshPreferencesAsync(this);
-        if (!steeringSuspended) {
-            requestSteeringTaskCacheRefresh(this, "service-connected");
-        }
     }
 
     @Override
@@ -245,14 +188,6 @@ public final class NavAccessibilityService extends AccessibilityService {
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null) return;
         if (steeringSuspended) return;
-        if (event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            //Outside our selected-app move, uncertainty still passes the key to the system.
-            if (!NavAppDisplayController.get(this).isMoveInProgressFor(
-                    SteeringTransferPreferences.packageName(this))) {
-                invalidateSteeringTaskEvidence();
-            }
-            requestSteeringTaskCacheRefresh(this, "window-state");
-        }
         String packageName = safe(event.getPackageName());
         if (packageName.isEmpty()) return;
         boolean newlyObserved;
@@ -275,11 +210,8 @@ public final class NavAccessibilityService extends AccessibilityService {
     @Override
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
-        invalidateSteeringTaskEvidence();
         clearSteeringTransientState();
         Handler handler = captureHandler;
-        if (handler != null) handler.removeCallbacks(steeringTaskRefreshRunnable);
-        if (handler != null) handler.removeCallbacks(steeringTaskPeriodicRefreshRunnable);
         if (activeService == this) {
             activeService = null;
         }
@@ -300,12 +232,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     @Override
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onInterrupt() {
-        invalidateSteeringTaskEvidence();
         clearSteeringTransientState();
-        if (!HudPrefs.isUserShutdownActive(this)
-                && !SteeringTransferPreferences.packageName(this).isEmpty()) {
-            scheduleSteeringTaskCacheRefresh("service-interrupt");
-        }
         Handler handler = captureHandler;
         if (handler != null) {
             handler.post(() -> NavCaptureStore.rawEvent(
@@ -316,11 +243,10 @@ public final class NavAccessibilityService extends AccessibilityService {
     @Override
     public boolean onKeyEvent(KeyEvent event) {
         if (event == null) return false;
+        if (keyLearning && HudPrefs.isUserShutdownActive(this)) {
+            cancelKeyLearningTransient();
+        }
         if (keyLearning) {
-            if (HudPrefs.isUserShutdownActive(this)) {
-                cancelKeyLearningTransient();
-                return false;
-            }
             if (SteeringTransferPolicy.isFirstDown(
                     event.getAction(), event.getRepeatCount())) {
                 int code = event.getKeyCode();
@@ -354,68 +280,35 @@ public final class NavAccessibilityService extends AccessibilityService {
             return true;
         }
 
+        final long runtimeGeneration = steeringRuntimeGeneration;
+        final long bindingRevision = SteeringTransferPreferences.revision(this);
         int configured = SteeringTransferPreferences.keyCode(this);
         if (!SteeringTransferPolicy.isMappedKey(keyCode, configured)) {
             return false;
         }
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            if (mappedKeyActive) {
-                armSteeringKeyTailTimeout();
-                return true;
-            }
-            if (event.getRepeatCount() > 0) return false;
-            String packageName = SteeringTransferPreferences.packageName(this);
-            NavAppDisplayController controller = NavAppDisplayController.get(this);
-            boolean shutdown = HudPrefs.isUserShutdownActive(this);
-            if (!shutdown && controller.isMoveInProgressFor(packageName)) {
-                synchronized (steeringLock) {
-                    mappedKeyActive = true;
-                }
-                armSteeringKeyTailTimeout();
-                AppEventLogger.event(this, "steering_key ignored busy keycode=" + keyCode);
-                return true;
-            }
-            long now = SystemClock.elapsedRealtime();
-            boolean freshTaskEvidence;
-            boolean eligible;
+            boolean startTransfer;
             synchronized (steeringLock) {
-                freshTaskEvidence = SteeringTransferPolicy.hasFreshTaskEvidence(
-                        steeringTaskSnapshot != null && steeringTaskSnapshot.hasAuthoritativeTaskState(),
-                        steeringTaskEvidenceElapsedMs, now, STEERING_TASK_CACHE_MAX_AGE_MS);
-                eligible = freshTaskEvidence && isCachedTargetEligible(packageName);
-            }
-            if (!SteeringTransferPolicy.canAdmitMappedPress(
-                    keyCode,
-                    configured,
-                    freshTaskEvidence,
-                    eligible,
-                    shutdown)) {
-                if (!freshTaskEvidence) {
-                    scheduleSteeringTaskCacheRefresh("mapped-key-stale");
-                }
-                AppEventLogger.event(this, "steering_key passed keycode=" + keyCode
-                        + " fresh=" + freshTaskEvidence + " eligible=" + eligible
-                        + " shutdown=" + shutdown);
-                return false;
-            }
-            synchronized (steeringLock) {
+                startTransfer = SteeringTransferPolicy.shouldStartTransfer(
+                        event.getAction(), event.getRepeatCount(), mappedKeyActive);
                 mappedKeyActive = true;
             }
             armSteeringKeyTailTimeout();
-            controller.requestSteeringToggle(
-                    packageName,
-                    SteeringTransferPreferences.profile(this),
-                    "steering-key");
-            return true;
-        }
-        if (event.getAction() == KeyEvent.ACTION_UP && mappedKeyActive) {
+            if (startTransfer) {
+                NavAppDisplayController.get(this).requestSteeringToggle(
+                        SteeringTransferPreferences.packageName(this),
+                        SteeringTransferPreferences.profile(this),
+                        "steering-key",
+                        () -> isSteeringRequestCurrent(runtimeGeneration, bindingRevision));
+            }
+        } else if (event.getAction() == KeyEvent.ACTION_UP) {
             synchronized (steeringLock) {
                 mappedKeyActive = false;
             }
             cancelSteeringKeyTailTimeoutIfIdle();
-            return true;
         }
-        return mappedKeyActive;
+        //The assigned key never reaches stock handling, even when no transfer can run.
+        return true;
     }
 
     private void beginKeyLearningInternal() {
@@ -449,6 +342,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     private void clearSteeringTransientState() {
         boolean changed;
         synchronized (steeringLock) {
+            steeringRuntimeGeneration++;
             changed = keyLearning;
             keyLearning = false;
             capturedKeyCode = SteeringTransferPreferences.keyCode(this);
@@ -458,110 +352,6 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
         if (changed) STEERING_LEARNING_REVISION.incrementAndGet();
         MainActivity.publishSharedUiStateChange();
-    }
-
-    private void scheduleSteeringTaskCacheRefresh(String reason) {
-        Handler handler = captureHandler;
-        if (handler == null || steeringSuspended) return;
-        long now = SystemClock.elapsedRealtime();
-        long sinceLast = now - lastSteeringTaskRefreshElapsedMs;
-        long delay = sinceLast >= 500L ? 100L : Math.max(100L, 500L - sinceLast);
-        synchronized (steeringLock) {
-            if (steeringTaskCacheRefreshScheduled) {
-                steeringTaskCacheRefreshPending = true;
-                return;
-            }
-            steeringTaskCacheRefreshScheduled = true;
-        }
-        if (!handler.postDelayed(steeringTaskRefreshRunnable, delay)) {
-            synchronized (steeringLock) {
-                steeringTaskCacheRefreshScheduled = false;
-            }
-        }
-    }
-
-    private void refreshSteeringTaskCache() {
-        boolean refreshed = false;
-        boolean scanBusy = false;
-        long scanEpoch;
-        synchronized (steeringLock) {
-            scanEpoch = steeringTaskInvalidationEpoch;
-        }
-        try {
-            if (activeService != this) return;
-            if (NavAppDisplayController.get(this).isMoveInProgressFor(
-                    SteeringTransferPreferences.packageName(this))) {
-                scanBusy = true;
-                return;
-            }
-            NavAppTaskScanner scanner = NavAppTaskScanner.get(this);
-            NavAppTaskScanner.Snapshot scanned = scanner.forceFreshScanIfIdle();
-            scanBusy = scanned == null;
-            long now = SystemClock.elapsedRealtime();
-            lastSteeringTaskRefreshElapsedMs = now;
-            boolean authoritative = scanned != null && scanned.hasAuthoritativeTaskState();
-            boolean selectedMove = NavAppDisplayController.get(this).isMoveInProgressFor(
-                    SteeringTransferPreferences.packageName(this));
-            SteeringTransferPolicy.TaskScanAction action;
-            synchronized (steeringLock) {
-                action = SteeringTransferPolicy.taskScanAction(
-                        activeService == this && !steeringSuspended,
-                        HudPrefs.isUserShutdownActive(this),
-                        scanBusy, authoritative, scanEpoch, steeringTaskInvalidationEpoch, selectedMove);
-                if (action == SteeringTransferPolicy.TaskScanAction.PUBLISH) {
-                    steeringTaskSnapshot = scanned;
-                    steeringTaskEvidenceElapsedMs = now;
-                    refreshed = true;
-                } else if (action == SteeringTransferPolicy.TaskScanAction.CLEAR) {
-                    clearSteeringTaskEvidenceLocked();
-                }
-            }
-            String result = action == SteeringTransferPolicy.TaskScanAction.PUBLISH ? "refreshed"
-                    : action == SteeringTransferPolicy.TaskScanAction.CLEAR ? "discarded" : "kept";
-            AppEventLogger.event(this, "steering_task_cache " + result + " busy=" + scanBusy);
-        } catch (RuntimeException error) {
-            boolean selectedMove = NavAppDisplayController.get(this).isMoveInProgressFor(
-                    SteeringTransferPreferences.packageName(this));
-            synchronized (steeringLock) {
-                if (SteeringTransferPolicy.taskScanAction(activeService == this && !steeringSuspended,
-                        HudPrefs.isUserShutdownActive(this), false, false,
-                        scanEpoch, steeringTaskInvalidationEpoch, selectedMove)
-                        == SteeringTransferPolicy.TaskScanAction.CLEAR) {
-                    clearSteeringTaskEvidenceLocked();
-                }
-            }
-            AppEventLogger.event(this, "steering_task_cache failed "
-                    + error.getClass().getSimpleName());
-        } finally {
-            boolean rerun;
-            synchronized (steeringLock) {
-                steeringTaskCacheRefreshScheduled = false;
-                rerun = steeringTaskCacheRefreshPending;
-                steeringTaskCacheRefreshPending = false;
-            }
-            if (rerun && activeService == this && !HudPrefs.isUserShutdownActive(this)) {
-                scheduleSteeringTaskCacheRefresh("pending-invalidation");
-            } else {
-                schedulePeriodicSteeringTaskCacheRefresh(refreshed, scanBusy);
-            }
-        }
-    }
-
-    private void schedulePeriodicSteeringTaskCacheRefresh(boolean refreshed, boolean scanBusy) {
-        Handler handler = captureHandler;
-        if (handler == null
-                || activeService != this
-                || steeringSuspended
-                || HudPrefs.isUserShutdownActive(this)) return;
-        handler.removeCallbacks(steeringTaskPeriodicRefreshRunnable);
-        String packageName = SteeringTransferPreferences.packageName(this);
-        if (scanBusy) {
-            handler.postDelayed(steeringTaskPeriodicRefreshRunnable, 500L);
-        } else if (refreshed && isCachedTargetEligible(packageName)) {
-            handler.postDelayed(
-                    steeringTaskPeriodicRefreshRunnable,
-                    STEERING_TASK_CACHE_REFRESH_INTERVAL_MS);
-        }
     }
 
     private void armSteeringKeyTailTimeout() {
@@ -592,39 +382,6 @@ public final class NavAccessibilityService extends AccessibilityService {
             steeringKeyTailGeneration++;
         }
         AppEventLogger.event(this, "steering_key_tail expired");
-    }
-
-    private void invalidateSteeringTaskEvidence() {
-        synchronized (steeringLock) {
-            clearSteeringTaskEvidenceLocked();
-            steeringTaskInvalidationEpoch++;
-            if (steeringTaskCacheRefreshScheduled) {
-                steeringTaskCacheRefreshPending = true;
-            }
-        }
-    }
-
-    private void clearSteeringTaskEvidenceLocked() {
-        steeringTaskSnapshot = null;
-        steeringTaskEvidenceElapsedMs = 0L;
-    }
-
-    private boolean isCachedTargetEligible(String packageName) {
-        String normalized = packageName == null
-                ? ""
-                : packageName.trim().toLowerCase(java.util.Locale.ROOT);
-        NavAppTaskScanner.Snapshot snapshot = steeringTaskSnapshot;
-        if (normalized.isEmpty() || snapshot == null || !snapshot.hasAuthoritativeTaskState()) {
-            return false;
-        }
-        for (NavAppTaskScanner.Row row : snapshot.rows) {
-            if (!normalized.equals(row.packageName) || !row.hasTask || row.taskId < 0) continue;
-            if (row.displayId == 0) return true;
-            NavAppDisplayController controller = NavAppDisplayController.get(this);
-            return row.displayId == controller.confirmedDashboardDisplayId()
-                    && normalized.equals(controller.confirmedDashboardPackage());
-        }
-        return false;
     }
 
     //guard active-window traversal so accessibility node trees are captured by one serialized path.

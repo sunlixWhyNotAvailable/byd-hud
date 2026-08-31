@@ -5,7 +5,7 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
-/** Guards the small, pure key-event admission contract used by the runtime service. */
+/** Key consumption is independent of worker eligibility; only a first down can request work. */
 public final class SteeringTransferPolicyTest {
     @Test
     public void learningCapturesOnlyFirstNonRepeatDown() {
@@ -18,44 +18,35 @@ public final class SteeringTransferPolicyTest {
     }
 
     @Test
-    public void taskEvidenceMustBeAuthoritativeAndFresh() {
-        assertTrue(SteeringTransferPolicy.hasFreshTaskEvidence(
-                true, 1_000L, 5_000L, 4_000L));
-        assertFalse(SteeringTransferPolicy.hasFreshTaskEvidence(
-                true, 1_000L, 5_001L, 4_000L));
-        assertFalse(SteeringTransferPolicy.hasFreshTaskEvidence(
-                false, 1_000L, 1_000L, 4_000L));
-        assertFalse(SteeringTransferPolicy.hasFreshTaskEvidence(
-                true, 0L, 1_000L, 4_000L));
+    public void anyDeliveredConfiguredRawCodeIsConsumed() {
+        for (int code : new int[] {0, 294, 304, 305, 313, 1000}) {
+            assertTrue(SteeringTransferPolicy.isMappedKey(code, code));
+            assertFalse(SteeringTransferPolicy.isMappedKey(code + 1, code));
+        }
     }
 
     @Test
-    public void taskScanCannotPublishAcrossInvalidationOrShutdown() {
-        assertTrue(SteeringTransferPolicy.canPublishTaskEvidence(
-                true, false, true, 4L, 4L));
-        assertFalse(SteeringTransferPolicy.canPublishTaskEvidence(
-                true, false, true, 4L, 5L));
-        assertFalse(SteeringTransferPolicy.canPublishTaskEvidence(
-                true, true, true, 4L, 4L));
-        assertFalse(SteeringTransferPolicy.canPublishTaskEvidence(
-                false, false, true, 4L, 4L));
+    public void repeatedDownCannotToggleAgainBeforeUpOrTailRecovery() {
+        assertTrue(SteeringTransferPolicy.shouldStartTransfer(0, 0, false));
+        assertFalse(SteeringTransferPolicy.shouldStartTransfer(0, 0, true));
+        assertFalse(SteeringTransferPolicy.shouldStartTransfer(0, 1, true));
+        assertFalse(SteeringTransferPolicy.shouldStartTransfer(1, 0, true));
+        assertTrue(SteeringTransferPolicy.shouldStartTransfer(0, 0, false));
     }
 
     @Test
-    public void noMappingOrUnknownCachePassesThrough() {
-        assertFalse(SteeringTransferPolicy.canAdmitMappedPress(
-                309, SteeringTransferPreferences.NO_KEY_CODE,
-                true, true, false));
-        assertFalse(SteeringTransferPolicy.canAdmitMappedPress(
-                309, 309, false, true, false));
-        assertFalse(SteeringTransferPolicy.canAdmitMappedPress(
-                309, 309, true, false, false));
+    public void orphanRepeatOrUpIsConsumedWithoutStartingWork() {
+        assertTrue(SteeringTransferPolicy.isMappedKey(305, 305));
+        assertFalse(SteeringTransferPolicy.shouldStartTransfer(0, 1, false));
+        assertFalse(SteeringTransferPolicy.shouldStartTransfer(0, 99, false));
+        assertFalse(SteeringTransferPolicy.shouldStartTransfer(1, 0, false));
     }
 
     @Test
-    public void shutdownBlocksMappedPress() {
-        assertFalse(SteeringTransferPolicy.canAdmitMappedPress(
-                309, 309, true, true, true));
+    public void resettingOnlyKeyAssignmentRestoresStockHandling() {
+        assertFalse(SteeringTransferPolicy.isMappedKey(305, SteeringTransferPreferences.NO_KEY_CODE));
+        assertFalse(SteeringTransferPolicy.isMappedKey(-1, SteeringTransferPreferences.NO_KEY_CODE));
+        assertTrue(SteeringTransferPolicy.isMappedKey(305, 305));
     }
 
     @Test
@@ -66,5 +57,14 @@ public final class SteeringTransferPolicyTest {
         assertTrue(SteeringTransferPolicy.resolveDashboardMode(
                 SteeringTransferPreferences.PROFILE_FULL,
                 HudPrefs.DASHBOARD_MODE_PARTIAL) == HudPrefs.DASHBOARD_MODE_FULL);
+    }
+
+    @Test
+    public void selectedProfileKeepsTheCurrentDashboardMode() {
+        for (int mode : new int[] {HudPrefs.DASHBOARD_MODE_NONE,
+                HudPrefs.DASHBOARD_MODE_PARTIAL, HudPrefs.DASHBOARD_MODE_FULL}) {
+            assertTrue(SteeringTransferPolicy.resolveDashboardMode(
+                    SteeringTransferPreferences.PROFILE_SELECTED, mode) == mode);
+        }
     }
 }

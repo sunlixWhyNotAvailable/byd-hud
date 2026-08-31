@@ -37,6 +37,24 @@ public final class LogcatRecorderConcurrencyTest {
         assertTrue(source.contains("activeSession != null || finalizingSession != null"));
     }
 
+    @Test
+    public void StopPollsBeforeFinalizingAndFailureStillWritesManifest() throws IOException {
+        String source = source();
+        String finish = section(source, "private static void finish(",
+                "private static void pollSafely(");
+        assertTrue(finish.indexOf("poll(session)") >= 0);
+        assertTrue(finish.indexOf("poll(session)")
+                < finish.indexOf("captureSnapshot(session, \"after\""));
+        assertTrue(finish.indexOf("captureSnapshot(session, \"after\"")
+                < finish.indexOf("finalizeLog(session)"));
+        String failure = section(source, "private static void fail(",
+                "private static Throwable await(");
+        assertTrue(failure.contains("log finalization failed:"));
+        assertTrue(failure.indexOf("catch (Exception error)")
+                < failure.indexOf("session.manifest.put(\"status\", \"failed\")"));
+        assertTrue(failure.contains("writeManifest(session)"));
+    }
+
     private static String source() throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/LogcatRecorder.java");

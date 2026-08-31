@@ -198,7 +198,7 @@ Find the screen mode and geometry controls under `Options → Dashboard window p
 
 The navigator must already be running and dashboard control requires authorized ADB access. BYD HUD moves the navigator window and verifies its placement first. `None` only moves the navigator and leaves the current cluster layout unchanged; its geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Changing the selector alone sends no vehicle command. A failed presentation request leaves the navigator on the dashboard and reports the failure. Use `Send to main` to return it. During an active Waze custom-surface route, the route surface follows Waze so the BYD HUD settings screen is not moved by mistake.
 
-<p align="center"><img src="docs/screenshots/en/settings-dashboard.png" alt="Dashboard screen mode and projection geometry settings" width="100%"></p>
+<p align="center"><img src="docs/screenshots/en/settings-dashboard.png" alt="Dashboard window profile with screen mode, width and height controls" width="100%"></p>
 
 <!-- Photo slot: docs/screenshots/en/dashboard.jpg
 Use a landscape photo showing the real instrument cluster. Place it here.
@@ -231,13 +231,17 @@ Mode buttons require authorized ADB. They change the presentation without moving
 
 Appearance and position survive restarts. Automatic startup follows `Boot runtime service`; a temporarily hidden widget stays hidden until BYD HUD is opened. `Shutdown` also removes the widget until the app is opened again. Hiding it removes its touch area rather than leaving an invisible overlay.
 
+<p align="center"><img src="docs/screenshots/en/settings-dashboard-widget.png" alt="Dashboard widget settings with a separate preview on the right" width="100%"></p>
+
 ### Steering-wheel transfer shortcut
 
 Open `Options → Move to dashboard` to assign a steering-wheel button, choose an installed user application, and select `Selected profile`, `Partial`, or `Full`. The application list uses Android's installed-app names and icons and does not launch the selected application.
 
-The selected application must already have a running task and dashboard transfer requires authorized ADB. If the application is on the main display, one button press sends it to the dashboard with the selected profile; if it is already on the dashboard, the same button returns it to the main display. If no current task can be confirmed, BYD HUD leaves both the application and the original button action untouched. Repeated presses during a transfer are ignored, not queued. After completion, a new press uses the application's actual display, including transfers started from the Apps tab. A failed transfer is reported with a message.
+The selected application must already be running and dashboard transfer requires authorized ADB. Each new press checks its current window and display: an application on the main display moves to the dashboard with the selected profile; one already on the dashboard returns to the main display. If no running window can be confirmed, nothing is moved or launched. Repeated presses during a transfer are ignored, not queued. This also works after transfers started from the Apps tab. A failed transfer is reported with a message.
 
-Button learning uses the enabled Accessibility service. Any delivered steering-wheel key can be assigned; while the selected application task is active, BYD HUD consumes that assigned key instead of its original action. Reset the button or application selection to disable the shortcut. Hardware and firmware decide which steering-wheel keys Android exposes, so some buttons may not be learnable on every vehicle.
+Button learning and interception require the enabled Accessibility service. BYD HUD always consumes an assigned key that reaches the service, even when the selected application is closed, no application is selected, a transfer is busy, or a check fails. Its original action is not performed. Reset the button assignment to restore the original action; resetting only the application selection stops transfers but keeps the button assigned. Hardware and firmware decide which steering-wheel keys Android exposes, so some buttons may not be learnable on every vehicle.
+
+<p align="center"><img src="docs/screenshots/en/settings-dashboard-transfer.png" alt="Move to dashboard settings with a steering-wheel button, application and transfer profile" width="100%"></p>
 
 ## Navigator patcher
 
@@ -320,6 +324,8 @@ Archive preparation uses a persistent progress card that remains visible across 
 After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears exactly the day checkboxes captured for that archive. Archive, chooser, upload, or cancellation failure keeps the selection. Days selected while an upload is running remain selected.
 
 With authorized ADB, starting Logcat records all system log buffers and captures the initial performance state; stopping it adds final frame and system metrics. Without ADB, the same stateful button records the buffers and diagnostics available to the app. There are no fixed-duration presets. Configuration sharing works without ADB; an already-authorized bridge only adds more read-only system diagnostics. Sharing does not request ADB access and does not enable telemetry.
+
+Each Logcat recording writes one continuous file until stopped, without splitting, rotation, or a fixed per-recording size cap. Initial and final diagnostics remain separate files in the same recording folder. Long recordings use more storage; the normal log-folder retention settings still apply.
 
 BYD HUD does not automatically send crash reports, performance traces, screenshots, screen recordings, or navigation logs to the Sentry service. Read the complete policy in [PRIVACY.md](PRIVACY.md).
 

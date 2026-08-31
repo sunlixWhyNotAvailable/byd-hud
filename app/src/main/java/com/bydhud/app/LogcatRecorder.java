@@ -1,6 +1,6 @@
 package com.bydhud.app;
 
-// Captures bounded full-system diagnostics through the already-authorized local ADB bridge.
+// Captures full-system diagnostics with bounded polls through the authorized local ADB bridge.
 
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
@@ -48,8 +48,6 @@ final class LogcatRecorder {
 
     private static final String TAG = "BydHudLogcat";
     private static final long POLL_INTERVAL_MS = 2_000L;
-    private static final long SEGMENT_BYTES = 16L * 1024L * 1024L;
-    private static final int MAX_SEGMENTS = 4;
     private static final int MAX_UID_POLL_BYTES = 4 * 1024 * 1024;
     private static final int MAX_BOUNDARY_LINES = 4_096;
     private static final SimpleDateFormat FILE_FORMAT =
@@ -317,8 +315,6 @@ final class LogcatRecorder {
             session.manifest.put("versionCode", BuildConfig.VERSION_CODE);
             session.manifest.put("bufferClear", false);
             session.manifest.put("pollIntervalMs", POLL_INTERVAL_MS);
-            session.manifest.put("segmentBytes", SEGMENT_BYTES);
-            session.manifest.put("maxSegments", MAX_SEGMENTS);
             session.manifest.put("logcatCommand",
                     "logcat -b all -v threadtime -T <cursor> -d");
             session.manifest.put("fallbackCommand",
@@ -369,21 +365,16 @@ final class LogcatRecorder {
             }
             poll(session);
             captureSnapshot(session, "after", fullSnapshotCommands(false));
-            finalizeSegment(session);
+            finalizeLog(session);
             long endedWallMs = System.currentTimeMillis();
             session.manifest.put("status", "saved");
             session.manifest.put("endedAt", timestampForLine(endedWallMs));
             session.manifest.put("endedElapsedMs", SystemClock.elapsedRealtime());
             session.manifest.put("durationMs", Math.max(0L,
                     SystemClock.elapsedRealtime() - session.startedElapsedMs));
-            session.manifest.put("mode", session.mode);
-            session.manifest.put("fallbackReason", session.fallbackReason);
-            session.manifest.put("segments", new JSONArray(session.segmentNames));
-            session.manifest.put("bytes", session.totalBytes);
-            session.manifest.put("droppedBytes", session.droppedBytes);
-            session.manifest.put("truncated", session.truncated);
             session.manifest.put("runtimeEnd", runtimeIdentity(session.context));
             writeManifest(session);
+            long savedBytes = session.logFile.bytes();
             List<Runnable> completions;
             synchronized (LogcatRecorder.class) {
                 session.finalized = true;
@@ -392,7 +383,7 @@ final class LogcatRecorder {
                 activeStartDay = "";
                 lastSavedFile = session.manifestFile;
                 lastStatus = STATUS_SAVED;
-                lastDetail = "mode=" + session.mode + " bytes=" + session.totalBytes
+                lastDetail = "mode=" + session.mode + " bytes=" + savedBytes
                         + (session.truncated ? " truncated" : "");
                 completions = takeCompletionsLocked(session);
             }
@@ -400,7 +391,7 @@ final class LogcatRecorder {
             postCompletions(completions);
             AppEventLogger.event(session.context,
                     "system_recorder_saved id=" + session.captureId
-                            + " bytes=" + session.totalBytes
+                            + " bytes=" + savedBytes
                             + " mode=" + session.mode
                             + " truncated=" + session.truncated);
         } catch (Exception error) {
@@ -648,55 +639,16 @@ final class LogcatRecorder {
     private static void writeLog(Session session, String text) throws IOException {
         NavigationLogStorage.lockTopologyRead();
         try {
-            byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
-            int offset = 0;
-            while (offset < bytes.length) {
-                if (session.segmentIndex >= MAX_SEGMENTS) {
-                    session.truncated = true;
-                    session.droppedBytes += bytes.length - offset;
-                    return;
-                }
-                if (session.segmentOut == null) openSegment(session);
-                int writable = (int) Math.min(bytes.length - offset,
-                        SEGMENT_BYTES - session.segmentBytes);
-                session.segmentOut.write(bytes, offset, writable);
-                session.segmentOut.flush();
-                session.segmentBytes += writable;
-                session.totalBytes += writable;
-                offset += writable;
-                if (session.segmentBytes >= SEGMENT_BYTES) finalizeSegment(session);
-            }
+            session.logFile.append(text.getBytes(StandardCharsets.UTF_8));
         } finally {
             NavigationLogStorage.unlockTopologyRead();
         }
     }
 
-    private static void openSegment(Session session) throws IOException {
-        String base = String.format(Locale.US, "logcat-%03d", session.segmentIndex);
-        session.segmentPart = new File(session.directory, base + ".log.part");
-        session.segmentFinal = new File(session.directory, base + ".log");
-        session.segmentOut = new FileOutputStream(session.segmentPart, false);
-        session.segmentBytes = 0L;
-        session.segmentNames.add(session.segmentFinal.getName());
-    }
-
-    private static void finalizeSegment(Session session) throws IOException {
+    private static void finalizeLog(Session session) throws IOException {
         NavigationLogStorage.lockTopologyRead();
         try {
-            if (session.segmentOut == null) return;
-            session.segmentOut.flush();
-            session.segmentOut.close();
-            session.segmentOut = null;
-            if (session.segmentFinal.exists() && !session.segmentFinal.delete()) {
-                throw new IOException("Unable to replace " + session.segmentFinal);
-            }
-            if (!session.segmentPart.renameTo(session.segmentFinal)) {
-                throw new IOException("Unable to finalize " + session.segmentPart);
-            }
-            session.segmentPart = null;
-            session.segmentFinal = null;
-            session.segmentIndex++;
-            session.segmentBytes = 0L;
+            session.logFile.finish();
         } finally {
             NavigationLogStorage.unlockTopologyRead();
         }
@@ -706,8 +658,12 @@ final class LogcatRecorder {
         try {
             session.manifest.put("mode", session.mode);
             session.manifest.put("fallbackReason", session.fallbackReason);
-            session.manifest.put("segments", new JSONArray(session.segmentNames));
-            session.manifest.put("bytes", session.totalBytes);
+            JSONArray segments = new JSONArray();
+            if (session.logFile.file().isFile()) {
+                segments.put(session.logFile.file().getName());
+            }
+            session.manifest.put("segments", segments);
+            session.manifest.put("bytes", session.logFile.bytes());
             session.manifest.put("droppedBytes", session.droppedBytes);
             session.manifest.put("truncated", session.truncated);
             File temporary = new File(session.directory, "manifest.json.tmp");
@@ -770,7 +726,13 @@ final class LogcatRecorder {
         }
         Log.e(TAG, detail);
         try {
-            finalizeSegment(session);
+            finalizeLog(session);
+        } catch (Exception error) {
+            detail += "; log finalization failed: " + error.getClass().getSimpleName()
+                    + ": " + safe(error.getMessage());
+            Log.e(TAG, "Unable to finalize capture log", error);
+        }
+        try {
             session.manifest.put("status", "failed");
             session.manifest.put("failure", detail);
             writeManifest(session);
@@ -873,7 +835,7 @@ final class LogcatRecorder {
         final File directory;
         final File manifestFile;
         final JSONObject manifest = new JSONObject();
-        final List<String> segmentNames = new ArrayList<>();
+        final LogcatCaptureFile logFile;
         volatile ScheduledFuture<?> pollFuture;
         volatile Future<?> finishFuture;
         volatile boolean stopRequested;
@@ -882,12 +844,6 @@ final class LogcatRecorder {
         String failureDetail = "";
         final List<Runnable> completions = new ArrayList<>();
         Set<String> previousPollLines = new LinkedHashSet<>();
-        FileOutputStream segmentOut;
-        File segmentPart;
-        File segmentFinal;
-        int segmentIndex;
-        long segmentBytes;
-        long totalBytes;
         long droppedBytes;
         boolean truncated;
         long startedWallMs;
@@ -905,6 +861,7 @@ final class LogcatRecorder {
             this.captureId = captureId;
             this.directory = directory;
             this.manifestFile = new File(directory, "manifest.json");
+            this.logFile = new LogcatCaptureFile(directory);
         }
     }
 

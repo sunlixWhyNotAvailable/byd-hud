@@ -108,7 +108,7 @@ public final class SteeringReturnContractTest {
     public void sharedNavigatorNotificationKeepsExplicitReturnAndPackageGuards() throws Exception {
         String notification = between(source(),
                 "private void requestTbtAfterReturnIfRequested(",
-                "private boolean returnPreviousDashboardApp(");
+                "private String returnPreviousDashboardApp(");
         assertTrue(notification.contains(
                 "if (!onMain || !isUserRequestedReturnForTest(reason)) return;"));
         assertTrue(notification.contains(
@@ -116,6 +116,65 @@ public final class SteeringReturnContractTest {
                         + "&& !GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) return;"));
         assertTrue(notification.contains(
                 "NavHudLiveSender.get(context).onDashboardReturnConfirmed(normalized, reason);"));
+    }
+
+    @Test
+    public void cancelledSuccessorRetiresOnlyThePreviousProjectionBeforeReleasingTheGate() throws Exception {
+        String controller = source();
+        String move = between(controller, "private void moveIndependentDashboardAppBlocking(",
+                "private String completionErrorForState(");
+        String beforeReturn = between(move,
+                "if (requestCurrent != null && (!requestCurrent.getAsBoolean()",
+                "if (current.taskId < 0)");
+        assertTrue(beforeReturn.contains("return;"));
+        assertFalse(beforeReturn.contains("returnToMain("));
+        String replacement = between(move, "boolean alreadyProjected =", "if (alreadyProjected) {");
+        assertTrue(replacement.contains("String returnedPrevious = alreadyProjected ? \"\" "
+                + ": returnPreviousDashboardApp(packageName, reason, requestCurrent);"));
+        assertTrue(replacement.contains("if (returnedPrevious == null) {"));
+        String failedReturn = between(replacement, "if (returnedPrevious == null) {",
+                "if (requestCurrent != null && !requestCurrent.getAsBoolean())");
+        assertTrue(failedReturn.contains("return;"));
+        assertFalse(failedReturn.contains("returnToMain("));
+        String cancelled = replacement.substring(replacement.indexOf(
+                "if (requestCurrent != null && !requestCurrent.getAsBoolean())"));
+        assertTrue(cancelled.contains("if (!returnedPrevious.isEmpty()) {"));
+        int teardown = cancelled.indexOf(
+                "ClusterProjectionService.returnToMain(context, returnedPrevious, cancelledReason);");
+        int released = cancelled.indexOf(
+                "if (waitForProjectionRelease(returnedPrevious, cancelledReason)) {");
+        int lease = cancelled.indexOf(
+                "releaseAutoContainerLeaseAfterFailedSuccessor(packageName, cancelledReason);");
+        int aborted = cancelled.indexOf("steering transfer blocked: request changed");
+        assertTrue(teardown >= 0 && released > teardown && lease > released && aborted > lease);
+        assertTrue(cancelled.contains("return;"));
+        assertFalse(cancelled.contains("startProjection("));
+        assertFalse(cancelled.contains("returnToMain(context, packageName"));
+        assertFalse(cancelled.contains("isDirectNavigatorReplacement"));
+        assertTrue(move.indexOf("steering-successor-cancelled:") < move.indexOf("endMove(packageName);"));
+    }
+
+    @Test
+    public void cancellationCleanupUsesConfirmedPriorReturnAndUnchangedExactLeaseGuards() throws Exception {
+        String controller = source();
+        String prior = between(controller, "private String returnPreviousDashboardApp(",
+                "synchronized NavAppDisplayState moveTaskToDisplayBlocking(");
+        assertTrue(prior.contains("if (previous.isEmpty() || previous.equals(nextPackageName)) { return \"\"; }"));
+        int confirmed = prior.indexOf("if (onMain) {");
+        int pending = prior.indexOf("prepareAutoContainerLeaseTransfer(previous, nextPackageName);");
+        int surface = prior.indexOf("ensureWazeSurfaceOnDisplay(");
+        int returned = prior.indexOf("return previous;");
+        assertTrue(confirmed >= 0 && pending > confirmed && surface > pending && returned > surface);
+        assertTrue(prior.contains("clearDashboardProjection(\"return-previous-dashboard:\" + safe(reason)); return previous;"));
+
+        String cleanup = between(controller, "private void releaseAutoContainerLeaseAfterFailedSuccessor(",
+                "private boolean isOnMainDisplay(");
+        assertTrue(cleanup.contains("!previousPackage.equals(leasePackage)"));
+        assertTrue(cleanup.contains("leaseGeneration != pendingGeneration"));
+        assertTrue(cleanup.contains("!isDirectNavigatorReplacement(previousPackage, successor)"));
+        assertTrue(cleanup.contains("previousOnMain, successorOnMain, noProjectionOwner"));
+        assertTrue(cleanup.indexOf("waitForProjectionRelease(") < cleanup.indexOf("releaseAutoContainerLease("));
+        assertTrue(cleanup.contains("previousPackage, pendingGeneration, \"failed-successor-release\", reason"));
     }
 
     private static String source() throws Exception {

@@ -71,7 +71,6 @@ final class SteeringTransferPreferences {
 
     private static void put(Context context, SharedPreferences.Editor editor) {
         editor.putLong(KEY_REVISION, revision(context) + 1L).apply();
-        NavAccessibilityService.requestSteeringTaskCacheRefresh(context, "binding-changed");
         MainActivity.publishSharedUiStateChange();
     }
 
