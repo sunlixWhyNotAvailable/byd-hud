@@ -4058,11 +4058,11 @@ private fun AppSectionHeader(title: String, palette: Palette, bottom: Boolean = 
 }
 
 @Composable
-private fun AppSectionMessage(text: String, palette: Palette) {
+private fun AppSectionMessage(text: String, palette: Palette, bottom: Boolean = true) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
+            .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = bottom)
     ) {
         Text(text, color = palette.muted, fontSize = 14.sp, modifier = Modifier.padding(14.dp))
     }
@@ -4073,6 +4073,7 @@ private fun AppSectionRow(
     index: Int,
     lastIndex: Int,
     palette: Palette,
+    closeSection: Boolean = true,
     content: @Composable () -> Unit
 ) {
     Column(
@@ -4082,7 +4083,7 @@ private fun AppSectionRow(
                 palette,
                 palette.panel,
                 top = false,
-                bottom = index == lastIndex
+                bottom = closeSection && index == lastIndex
             )
     ) {
         if (index > 0) Divider(palette)
@@ -4436,47 +4437,51 @@ private fun StorageTab(
             }
         }
 
-        item(key = "storage-logs-header") {
-            Box(
-                Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
-                    .padding(horizontal = 14.dp, vertical = 10.dp)
-            ) {
-                Text(copy.logs.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
-            }
-        }
-        if (days.isEmpty()) {
-            item(key = "storage-logs-empty") {
-                AppSectionMessage(
-                    if (!snapshot.storageCacheAvailable) coldStorageText else copy.storageNoDayFolders,
-                    palette
-                )
-            }
-        }
-        items(
-            count = days.size,
-            key = { index -> "storage-day-${days[index].name}" },
-            contentType = { "storage-day" }
-        ) { index ->
-            val day = days[index]
-            AppSectionRow(index, days.lastIndex, palette) {
-                StorageDayRow(
-                    day = day,
-                    copy = copy,
-                    palette = palette,
-                    selected = selectedDays.contains(day.name),
-                    enabled = !storageSortBusy,
-                    onToggle = { onToggleDay(day.name) },
-                    segmented = true
-                )
-            }
-        }
-        item(key = "storage-logs-footer") {
-            Row(
-                modifier = Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
-                    .padding(14.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+        item(key = "storage-logs") {
+            Column {
+                Box(
+                    Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
+                        .padding(horizontal = 14.dp, vertical = 10.dp)
+                ) {
+                    Text(copy.logs.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+                }
+                if (days.isEmpty()) {
+                    AppSectionMessage(
+                        if (!snapshot.storageCacheAvailable) coldStorageText else copy.storageNoDayFolders,
+                        palette,
+                        bottom = false
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 260.dp)
+                    ) {
+                        items(
+                            count = days.size,
+                            key = { index -> "storage-day-${days[index].name}" },
+                            contentType = { "storage-day" }
+                        ) { index ->
+                            val day = days[index]
+                            AppSectionRow(index, days.lastIndex, palette, closeSection = false) {
+                                StorageDayRow(
+                                    day = day,
+                                    copy = copy,
+                                    palette = palette,
+                                    selected = selectedDays.contains(day.name),
+                                    enabled = !storageSortBusy,
+                                    onToggle = { onToggleDay(day.name) },
+                                    segmented = true
+                                )
+                            }
+                        }
+                    }
+                }
+                Box(
+                    modifier = Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
+                        .padding(14.dp),
+                    contentAlignment = Alignment.Center
+                ) {
                     HudButton(
                         copy.shareConfiguration,
                         palette,
@@ -4485,15 +4490,16 @@ private fun StorageTab(
                         width = 300.dp,
                         onClick = onShareConfiguration
                     )
+                    HudButton(
+                        copy.deleteSelected,
+                        palette,
+                        enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
+                        primary = true,
+                        width = 190.dp,
+                        modifier = Modifier.align(Alignment.CenterEnd),
+                        onClick = { onDeleteSelected(selectedDayNames) }
+                    )
                 }
-                HudButton(
-                    copy.deleteSelected,
-                    palette,
-                    enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
-                    primary = true,
-                    width = 190.dp,
-                    onClick = { onDeleteSelected(selectedDayNames) }
-                )
             }
         }
     }

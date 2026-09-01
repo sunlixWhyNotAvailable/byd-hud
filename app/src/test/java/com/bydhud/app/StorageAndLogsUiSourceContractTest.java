@@ -48,9 +48,27 @@ public final class StorageAndLogsUiSourceContractTest {
         String share = between(logControls, "ShareIconLabelButton(", "onClick = { onShareSelected");
         assertTrue(share.contains("width = 172.dp"));
         assertTrue(logControls.contains("Arrangement.spacedBy(10.dp)"));
-        assertTrue(storage.contains("storage-logs-header"));
-        assertTrue(storage.contains("storage-logs-footer"));
-        assertTrue(storage.contains("contentType = { \"storage-day\" }"));
+        String logsSection = storage.substring(storage.indexOf("item(key = \"storage-logs\")"));
+        assertEquals(1, occurrences(logsSection, "item(key = \"storage-logs\")"));
+        assertFalse(storage.contains("storage-logs-header"));
+        assertFalse(storage.contains("storage-logs-footer"));
+        assertTrue(logsSection.contains("LazyColumn("));
+        assertTrue(logsSection.contains(".heightIn(max = 260.dp)"));
+        assertTrue(logsSection.contains("contentType = { \"storage-day\" }"));
+        assertTrue(logsSection.contains("bottom = false"));
+        assertTrue(logsSection.contains("closeSection = false"));
+        int header = logsSection.indexOf("Text(copy.logs.uppercase(Locale.ROOT)");
+        int dayList = logsSection.indexOf("LazyColumn(", header);
+        int emptyMessage = logsSection.indexOf("AppSectionMessage(", header);
+        int footer = logsSection.indexOf("copy.shareConfiguration", dayList);
+        assertTrue(header >= 0);
+        assertTrue(emptyMessage > header && emptyMessage < footer);
+        assertTrue(dayList > header && dayList < footer);
+        String footerBox = logsSection.substring(logsSection.lastIndexOf("Box(", footer),
+                logsSection.indexOf("onDeleteSelected(selectedDayNames)", footer));
+        assertTrue(footerBox.contains("Modifier.fillMaxWidth()"));
+        assertTrue(footerBox.contains("contentAlignment = Alignment.Center"));
+        assertTrue(footerBox.contains("modifier = Modifier.align(Alignment.CenterEnd)"));
         assertTrue(source.contains(
                 "activity.composeTryStartBlockingUiFlow(\"configuration-share\")"));
         assertTrue(source.contains("configurationShareVisible = true"));
