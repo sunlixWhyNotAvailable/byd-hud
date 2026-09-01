@@ -304,19 +304,19 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 
 - shows current log size and the configured size limit;
 - groups navigation logs, snapshots, screenshots, and optional logcat by day;
-- shows the private and public navigation-log folder locations;
+- shows the available navigation-log folder locations below the log list;
 - shares or deletes only the selected days;
 - shows file count, archive size, and a sensitive-data warning before creating a ZIP;
 - uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
 - provides `Share configuration` for a smaller diagnostic archive containing device, permission, network, patcher, and navigation-output details.
 
-`Start Logcat` / `Stop Logcat`, `Share` and sorting sit beside the folder paths. Select days in the separate `Logs` section; its footer contains `Share configuration` and `Delete selected`. Configuration sharing does not require selected days.
+`Share logs` and sorting stay at the top of `Logs`; its bounded day list scrolls independently so the footer remains reachable. The footer contains `Start Logcat` / `Stop Logcat`, `Share configuration`, and `Delete selected`. Available folder paths are shown in `Navigation logs folder` below. Configuration sharing does not require selected days.
 
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
 
 Archive preparation uses a persistent progress card that remains visible across tabs and can be stopped safely. It stacks with Waze and Google Maps patch cards instead of overlapping them.
 
-`Share` offers two explicit destinations:
+`Share logs` offers two explicit destinations:
 
 - `Another app` opens the normal Android share chooser;
 - `Send to developer` uploads the same selected ZIP to the Sentry service once.
@@ -419,7 +419,7 @@ For a navigation-output problem:
 
 1. Reproduce it with `Save diagnostic screenshots and extended logs` enabled when possible.
 2. Open `Storage and logs` and select only the affected day.
-3. Press `Share` and choose your messenger or `Send to developer`.
+3. Press `Share logs` and choose your messenger or `Send to developer`.
 4. Disable detailed diagnostics after the test to reduce storage use.
 
 For a permission, device, patcher, or startup problem, use `Storage and logs -> Logs -> Share configuration` instead.
