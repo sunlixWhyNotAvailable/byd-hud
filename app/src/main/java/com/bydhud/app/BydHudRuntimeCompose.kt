@@ -4386,42 +4386,26 @@ private fun StorageTab(
             }
         }
 
-        item(key = "navigation-log-controls") {
-            Section(copy.navigationLogsFolder, palette) {
+        item(key = "storage-logs") {
+            Column {
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(14.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
+                        .padding(horizontal = 14.dp, vertical = 8.dp),
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    horizontalArrangement = Arrangement.SpaceBetween
                 ) {
-                    CodeBlock(
-                        text = if (!snapshot.storageCacheAvailable) coldStorageText else snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
-                            val location = if (path.trimEnd('/').endsWith("/Documents/BYD-HUD", ignoreCase = true)) copy.publicStorageLocation else copy.privateStorageLocation
-                            "$location:\n$path"
-                        }.ifBlank { copy.storageNoDayFolders },
-                        palette = palette,
-                        compact = true,
-                        modifier = Modifier.width(430.dp)
-                    )
+                    Text(copy.logs.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                     Row(
-                        modifier = Modifier.weight(1f),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        HudButton(
-                            if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
-                            palette,
-                            primary = true,
-                            enabled = !storageActionBusy && !logcatBusy,
-                            width = 180.dp
-                        ) {
-                            if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()
-                        }
-                        Spacer(Modifier.weight(1f))
                         ShareIconLabelButton(
                             label = copy.shareSelected,
                             palette = palette,
                             enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
-                            width = 172.dp,
+                            width = 190.dp,
                             onClick = { onShareSelected(selectedDayNames) }
                         )
                         HudButton(
@@ -4433,17 +4417,6 @@ private fun StorageTab(
                             onClick = { onSortOldestFirst(!sortOldestFirst) }
                         )
                     }
-                }
-            }
-        }
-
-        item(key = "storage-logs") {
-            Column {
-                Box(
-                    Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panelAlt, top = true, bottom = false)
-                        .padding(horizontal = 14.dp, vertical = 10.dp)
-                ) {
-                    Text(copy.logs.uppercase(Locale.ROOT), color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
                 }
                 if (days.isEmpty()) {
                     AppSectionMessage(
@@ -4479,15 +4452,25 @@ private fun StorageTab(
                 }
                 Box(
                     modifier = Modifier.fillMaxWidth().appSectionSegmentFrame(palette, palette.panel, top = false, bottom = true)
-                        .padding(14.dp),
-                    contentAlignment = Alignment.Center
+                        .padding(14.dp)
                 ) {
+                    HudButton(
+                        if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
+                        palette,
+                        primary = true,
+                        enabled = !storageActionBusy && !logcatBusy,
+                        width = 180.dp,
+                        modifier = Modifier.align(Alignment.CenterStart)
+                    ) {
+                        if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()
+                    }
                     HudButton(
                         copy.shareConfiguration,
                         palette,
                         primary = false,
                         enabled = !storageActionBusy && !configurationShareBusy,
                         width = 300.dp,
+                        modifier = Modifier.align(Alignment.Center),
                         onClick = onShareConfiguration
                     )
                     HudButton(
@@ -4500,6 +4483,20 @@ private fun StorageTab(
                         onClick = { onDeleteSelected(selectedDayNames) }
                     )
                 }
+            }
+        }
+
+        item(key = "navigation-log-folders") {
+            Section(copy.navigationLogsFolder, palette, bodyPadding = 14.dp) {
+                CodeBlock(
+                    text = if (!snapshot.storageCacheAvailable) coldStorageText else snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
+                        val location = if (path.trimEnd('/').endsWith("/Documents/BYD-HUD", ignoreCase = true)) copy.publicStorageLocation else copy.privateStorageLocation
+                        "$location:\n$path"
+                    }.ifBlank { copy.storageNoDayFolders },
+                    palette = palette,
+                    compact = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
             }
         }
     }
@@ -7310,7 +7307,7 @@ private fun enCopy() = Copy(
     privateStorageLocation = "Private folder",
     publicStorageLocation = "Public folder",
     bothStorageLocations = "Public and private folders",
-    shareSelected = "Share",
+    shareSelected = "Share logs",
     sortByDate = "Newest first",
     sortByName = "Oldest first",
     deleteSelected = "Delete selected",
@@ -7536,7 +7533,7 @@ private fun uaCopy() = enCopy().copy(
     privateStorageLocation = "Приватна тека",
     publicStorageLocation = "Публічна тека",
     bothStorageLocations = "Публічна та приватна теки",
-    shareSelected = "Поділитись",
+    shareSelected = "Поділитись логами",
     ukr = "Укр",
     eng = "Англ",
     sortByDate = "Нові спочатку",

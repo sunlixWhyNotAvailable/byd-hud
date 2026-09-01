@@ -54,6 +54,7 @@ final class LocalAdbBridge {
     private static final long ACCESSIBILITY_REBIND_STEP_DELAY_MS = 300L;
     private static final int MAX_DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
     private static final int DIAGNOSTIC_OUTPUT_TAIL_BYTES = 64;
+    private static final int INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES = 4 * 1024;
     private static final String KEY_DIR = "adb_keys";
     private static volatile boolean permissionGrantInProgress;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
@@ -516,6 +517,28 @@ final class LocalAdbBridge {
         return -1;
     }
 
+    static String instrumentProxyStartupDiagnostic(
+            Context context, InstrumentProxyStore.Identity expected) throws IOException {
+        if (expected == null || !expected.isValid()) return "identity=missing";
+        String path = instrumentProxyStartupDiagnosticPath(expected.uid, expected.generation);
+        String alive = expected.pid > 0
+                ? "[ -d /proc/" + expected.pid + " ] && echo pidAlive=1 || echo pidAlive=0"
+                : "echo pidAlive=unknown";
+        ShellResult result = runTrustedRuntimeShellCommand(context,
+                alive + "; if [ -f " + path + " ]; then tail -c "
+                        + INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES + " " + path
+                        + "; else echo startupLog=missing; fi; rm -f " + path,
+                INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES + 512);
+        return sanitizeInstrumentProxyStartupDiagnostic(result.output);
+    }
+
+    static void clearInstrumentProxyStartupDiagnostic(
+            Context context, InstrumentProxyStore.Identity expected) throws IOException {
+        if (expected == null || !expected.isValid()) return;
+        runTrustedRuntimeShellCommand(context, "rm -f "
+                + instrumentProxyStartupDiagnosticPath(expected.uid, expected.generation));
+    }
+
     static ShellResult stopInstrumentProxy(
             Context context, InstrumentProxyStore.Identity expected) throws IOException {
         if (expected == null || !expected.isValid()) return new ShellResult("", 0, "");
@@ -737,6 +760,10 @@ final class LocalAdbBridge {
                 apkPath, generation, nonce, appUid, launchToken, appVersionCode);
     }
 
+    static String sanitizeInstrumentProxyStartupDiagnosticForTest(String raw) {
+        return sanitizeInstrumentProxyStartupDiagnostic(raw);
+    }
+
     private static String instrumentProxyLaunchCommand(
             String apkPath, long generation, String nonce, int appUid,
             String launchToken, int appVersionCode) {
@@ -757,7 +784,8 @@ final class LocalAdbBridge {
         String libraryPath = "/system/lib64:/product/lib64:"
                 + safePath + "!/lib/arm64-v8a";
         String processName = InstrumentProxyContract.processName(appUid, safeToken);
-        return "nohup /system/bin/app_process"
+        String diagnosticPath = instrumentProxyStartupDiagnosticPath(appUid, generation);
+        return "umask 077; rm -f " + diagnosticPath + "; nohup /system/bin/app_process"
                 + " -Djava.class.path=" + classPath
                 + " -Djava.library.path=" + libraryPath
                 + " /system/bin"
@@ -768,7 +796,27 @@ final class LocalAdbBridge {
                 + " --app-uid=" + appUid
                 + " --launch-token=" + safeToken
                 + " --version-code=" + appVersionCode
-                + " >/dev/null 2>&1 </dev/null & echo $!";
+                + " >" + diagnosticPath + " 2>&1 </dev/null & echo $!";
+    }
+
+    private static String instrumentProxyStartupDiagnosticPath(int appUid, long generation) {
+        if (appUid < 10_000 || generation <= 0L) {
+            throw new SecurityException("Invalid Instrument diagnostic identity");
+        }
+        return "/data/local/tmp/bydhud-instrument-" + appUid + "-" + generation + ".log";
+    }
+
+    private static String sanitizeInstrumentProxyStartupDiagnostic(String raw) {
+        String sanitized = (raw == null ? "" : raw)
+                .replaceAll("--nonce=[^\\s]+", "--nonce=<redacted>")
+                .replaceAll("--launch-token=[^\\s]+", "--launch-token=<redacted>")
+                .replace('\0', ' ')
+                .replaceAll("\\s+", " ")
+                .trim();
+        if (sanitized.isEmpty()) return "output=empty";
+        if (sanitized.length() <= 1_600) return sanitized;
+        return sanitized.substring(0, 800) + " ... "
+                + sanitized.substring(sanitized.length() - 800);
     }
 
     private static ShellResult runTrustedRuntimeShellCommand(

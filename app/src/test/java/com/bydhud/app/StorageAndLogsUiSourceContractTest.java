@@ -14,11 +14,17 @@ import java.nio.file.Paths;
 
 public final class StorageAndLogsUiSourceContractTest {
     @Test
-    public void storageTabUsesAcceptedThreeColumnLogControls() throws IOException {
+    public void storageTabUsesAcceptedBoundedLogsLayout() throws IOException {
         String source = source();
         String storage = between(source, "private fun StorageTab(", "private fun PatchTab(");
-        String logControls = between(
-                storage, "item(key = \"navigation-log-controls\")", "items(");
+        int settingsIndex = storage.indexOf("item(key = \"storage-settings\")");
+        int logsIndex = storage.indexOf("item(key = \"storage-logs\")");
+        int foldersIndex = storage.indexOf("item(key = \"navigation-log-folders\")");
+
+        assertTrue(settingsIndex >= 0 && settingsIndex < logsIndex && logsIndex < foldersIndex);
+        String settingsSection = storage.substring(settingsIndex, logsIndex);
+        String logsSection = storage.substring(logsIndex, foldersIndex);
+        String foldersSection = storage.substring(foldersIndex);
 
         assertFalse(source.contains("private fun LogsTab("));
         assertFalse(source.contains("RuntimeTab.Logs"));
@@ -33,42 +39,96 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(source.contains("publicStorageLocation = \"Public folder\""));
         assertTrue(source.contains("privateStorageLocation = \"Приватна тека\""));
         assertTrue(source.contains("publicStorageLocation = \"Публічна тека\""));
+        assertTrue(source.contains("shareSelected = \"Share logs\""));
+        assertTrue(source.contains("shareSelected = \"Поділитись логами\""));
         assertEquals(1, occurrences(storage,
                 "if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat"));
-        assertTrue(storage.contains("copy.shareConfiguration"));
-        assertTrue(storage.contains("copy.shareSelected"));
-        assertTrue(storage.contains("copy.sortByName"));
-        assertTrue(storage.contains(".width(430.dp)"));
-        assertTrue(storage.contains("width = 300.dp"));
-        assertTrue(storage.contains("ShareIconLabelButton"));
-        assertTrue(storage.contains("width = 180.dp"));
-        assertTrue(logControls.contains("verticalAlignment = Alignment.CenterVertically"));
-        assertFalse(logControls.contains("verticalAlignment = Alignment.Top"));
-        assertTrue(logControls.contains("Spacer(Modifier.weight(1f))"));
-        String share = between(logControls, "ShareIconLabelButton(", "onClick = { onShareSelected");
-        assertTrue(share.contains("width = 172.dp"));
-        assertTrue(logControls.contains("Arrangement.spacedBy(10.dp)"));
-        String logsSection = storage.substring(storage.indexOf("item(key = \"storage-logs\")"));
-        assertEquals(1, occurrences(logsSection, "item(key = \"storage-logs\")"));
+
+        int currentSizeIndex = settingsSection.indexOf("title = copy.currentNavLogsSize");
+        assertTrue(currentSizeIndex >= 0);
+        String currentSizeRow = settingsSection.substring(currentSizeIndex);
+        assertTrue(currentSizeRow.contains("if (!snapshot.storageCacheAvailable)"));
+        assertTrue(currentSizeRow.contains("coldStorageText"));
+        assertTrue(currentSizeRow.contains("snapshot.storageScanError.isNotBlank()"));
+        assertTrue(currentSizeRow.contains("storageScanFailureText"));
+        assertTrue(currentSizeRow.contains("snapshot.storageCalculating"));
+        assertTrue(currentSizeRow.contains("copy.storageCalculating"));
+        assertTrue(currentSizeRow.contains("storageUsageColors("));
+        assertTrue(currentSizeRow.contains("formatStorageUsage("));
+        assertTrue(currentSizeRow.contains("snapshot.navCaptureFolderBytes"));
+        assertTrue(currentSizeRow.contains("snapshot.storageLimitGb"));
+        assertTrue(currentSizeRow.contains("snapshot.storageSessionCount"));
+        assertTrue(currentSizeRow.contains("copy.storageSessionsShort"));
+
+        assertEquals(1, occurrences(logsSection, "ShareIconLabelButton("));
         assertFalse(storage.contains("storage-logs-header"));
         assertFalse(storage.contains("storage-logs-footer"));
-        assertTrue(logsSection.contains("LazyColumn("));
-        assertTrue(logsSection.contains(".heightIn(max = 260.dp)"));
-        assertTrue(logsSection.contains("contentType = { \"storage-day\" }"));
-        assertTrue(logsSection.contains("bottom = false"));
-        assertTrue(logsSection.contains("closeSection = false"));
         int header = logsSection.indexOf("Text(copy.logs.uppercase(Locale.ROOT)");
+        int share = logsSection.indexOf("ShareIconLabelButton(", header);
+        int sort = logsSection.indexOf(
+                "if (sortOldestFirst) copy.sortByName else copy.sortByDate", share);
         int dayList = logsSection.indexOf("LazyColumn(", header);
         int emptyMessage = logsSection.indexOf("AppSectionMessage(", header);
-        int footer = logsSection.indexOf("copy.shareConfiguration", dayList);
+        int shareConfiguration = logsSection.indexOf("copy.shareConfiguration", dayList);
+        int footer = logsSection.lastIndexOf("Box(", shareConfiguration);
         assertTrue(header >= 0);
-        assertTrue(emptyMessage > header && emptyMessage < footer);
-        assertTrue(dayList > header && dayList < footer);
-        String footerBox = logsSection.substring(logsSection.lastIndexOf("Box(", footer),
-                logsSection.indexOf("onDeleteSelected(selectedDayNames)", footer));
+        assertTrue(share > header && sort > share && emptyMessage > sort);
+        assertTrue(dayList > emptyMessage && shareConfiguration > dayList && footer > dayList);
+
+        String shareButton = logsSection.substring(share, sort);
+        String sortButton = logsSection.substring(sort, emptyMessage);
+        assertTrue(shareButton.contains("label = copy.shareSelected"));
+        assertTrue(shareButton.contains(
+                "enabled = selectedDayNames.isNotEmpty() && !storageActionBusy"));
+        assertTrue(shareButton.contains("onClick = { onShareSelected(selectedDayNames) }"));
+        assertTrue(sortButton.contains(
+                "enabled = snapshot.storageCacheAvailable && !storageSortBusy"));
+        assertTrue(sortButton.contains(
+                "onClick = { onSortOldestFirst(!sortOldestFirst) }"));
+
+        String dayListSection = logsSection.substring(dayList, footer);
+        assertTrue(dayListSection.contains(".heightIn(max = 260.dp)"));
+        assertTrue(dayListSection.contains("contentType = { \"storage-day\" }"));
+        assertTrue(dayListSection.contains("closeSection = false"));
+        assertTrue(dayListSection.contains("selected = selectedDays.contains(day.name)"));
+        assertTrue(dayListSection.contains("enabled = !storageSortBusy"));
+        assertTrue(dayListSection.contains("onToggle = { onToggleDay(day.name) }"));
+
+        String deleteCallback = "onClick = { onDeleteSelected(selectedDayNames) }";
+        int footerEnd = logsSection.indexOf(deleteCallback, footer);
+        assertTrue(footerEnd > footer);
+        String footerBox = logsSection.substring(footer, footerEnd + deleteCallback.length());
+        assertEquals(3, occurrences(footerBox, "HudButton("));
         assertTrue(footerBox.contains("Modifier.fillMaxWidth()"));
-        assertTrue(footerBox.contains("contentAlignment = Alignment.Center"));
-        assertTrue(footerBox.contains("modifier = Modifier.align(Alignment.CenterEnd)"));
+        int startControl = footerBox.indexOf(
+                "if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat");
+        int configurationControl = footerBox.indexOf("copy.shareConfiguration", startControl);
+        int deleteControl = footerBox.indexOf("copy.deleteSelected", configurationControl);
+        assertTrue(startControl >= 0
+                && startControl < configurationControl
+                && configurationControl < deleteControl);
+        String startButton = footerBox.substring(startControl, configurationControl);
+        String configurationButton = footerBox.substring(configurationControl, deleteControl);
+        String deleteButton = footerBox.substring(deleteControl);
+        assertTrue(startButton.contains("modifier = Modifier.align(Alignment.CenterStart)"));
+        assertTrue(startButton.contains(
+                "enabled = !storageActionBusy && !logcatBusy"));
+        assertTrue(startButton.contains(
+                "if (snapshot.logcatRecording) onStopLogcat() else onStartLogcat()"));
+        assertTrue(configurationButton.contains(
+                "enabled = !storageActionBusy && !configurationShareBusy"));
+        assertTrue(configurationButton.contains("modifier = Modifier.align(Alignment.Center)"));
+        assertTrue(configurationButton.contains("onClick = onShareConfiguration"));
+        assertTrue(deleteButton.contains(
+                "enabled = selectedDayNames.isNotEmpty() && !storageActionBusy"));
+        assertTrue(deleteButton.contains("modifier = Modifier.align(Alignment.CenterEnd)"));
+        assertTrue(deleteButton.contains(deleteCallback));
+
+        assertFalse(settingsSection.contains("CodeBlock("));
+        assertFalse(logsSection.contains("CodeBlock("));
+        assertEquals(1, occurrences(foldersSection, "CodeBlock("));
+        assertTrue(foldersSection.contains("snapshot.navCaptureFolderPaths.joinToString"));
+        assertTrue(foldersSection.contains("modifier = Modifier.fillMaxWidth()"));
         assertTrue(source.contains(
                 "activity.composeTryStartBlockingUiFlow(\"configuration-share\")"));
         assertTrue(source.contains("configurationShareVisible = true"));

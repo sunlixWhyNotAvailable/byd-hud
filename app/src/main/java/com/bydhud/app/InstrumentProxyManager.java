@@ -1128,6 +1128,7 @@ final class InstrumentProxyManager {
                 + " pid=" + connectedIdentity.pid
                 + " uid=" + connectedIdentity.uid
                 + " capabilities=" + connectedMode);
+        worker.execute(() -> clearStartupDiagnostic(connectedIdentity));
         for (Runnable listener : readyListeners) {
             try {
                 listener.run();
@@ -1246,6 +1247,17 @@ final class InstrumentProxyManager {
     private void cleanupHelper(String reason) {
         InstrumentProxyStore.Identity expected = helperIdentitySnapshot();
         log("cleanup started generation=" + expected.generation + " reason=" + safe(reason));
+        if ("start-failed".equals(reason)) {
+            try {
+                log("startup diagnostic generation=" + expected.generation + " "
+                        + LocalAdbBridge.instrumentProxyStartupDiagnostic(context, expected));
+            } catch (IOException error) {
+                log("startup diagnostic unavailable generation=" + expected.generation
+                        + " error=" + error.getClass().getSimpleName());
+            }
+        } else {
+            clearStartupDiagnostic(expected);
+        }
         try {
             LocalAdbBridge.ShellResult result =
                     LocalAdbBridge.stopInstrumentProxy(context, expected);
@@ -1373,6 +1385,15 @@ final class InstrumentProxyManager {
         synchronized (lock) {
             if (!runtimeActive || generation != requestGeneration || state != State.IDLE) return;
             ensureStarted(reason);
+        }
+    }
+
+    private void clearStartupDiagnostic(InstrumentProxyStore.Identity expected) {
+        try {
+            LocalAdbBridge.clearInstrumentProxyStartupDiagnostic(context, expected);
+        } catch (IOException error) {
+            log("startup diagnostic cleanup failed generation=" + expected.generation
+                    + " error=" + error.getClass().getSimpleName());
         }
     }
 

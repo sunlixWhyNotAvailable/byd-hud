@@ -34,8 +34,28 @@ public final class InstrumentProxyLaunchPolicyTest {
         assertTrue(command.contains("--app-uid=10123"));
         assertTrue(command.contains("--launch-token=" + TOKEN));
         assertTrue(command.contains("--version-code=89"));
+        assertTrue(command.startsWith(
+                "umask 077; rm -f /data/local/tmp/bydhud-instrument-10123-42.log; "));
+        assertTrue(command.contains(
+                " >/data/local/tmp/bydhud-instrument-10123-42.log 2>&1"));
+        assertFalse(command.contains(">/dev/null 2>&1"));
         assertTrue(command.endsWith("& echo $!"));
         assertFalse(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(command));
+    }
+
+    @Test
+    public void startupDiagnosticRedactsLaunchSecretsAndStaysBounded() {
+        String raw = "pidAlive=0 --nonce=" + NONCE
+                + " --launch-token=" + TOKEN + "\n"
+                + "x".repeat(2_000);
+        String diagnostic = LocalAdbBridge
+                .sanitizeInstrumentProxyStartupDiagnosticForTest(raw);
+
+        assertFalse(diagnostic.contains(NONCE));
+        assertFalse(diagnostic.contains(TOKEN));
+        assertTrue(diagnostic.contains("--nonce=<redacted>"));
+        assertTrue(diagnostic.contains("--launch-token=<redacted>"));
+        assertTrue(diagnostic.length() <= 1_605);
     }
 
     @Test

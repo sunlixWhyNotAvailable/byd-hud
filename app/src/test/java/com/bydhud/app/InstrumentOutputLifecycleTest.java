@@ -153,7 +153,7 @@ public final class InstrumentOutputLifecycleTest {
     }
 
     @Test
-    public void managerFencesGenerationPreservesTimeoutAndLogsStagesWithoutShellOutput() throws Exception {
+    public void managerFencesGenerationPreservesTimeoutAndCapturesBoundedStartupOutput() throws Exception {
         String manager = source("InstrumentProxyManager.java");
         String retry = between(manager, "private void scheduleOutputRetryLocked()", "void onAuthorizationVerified()");
         assertTrue(retry.contains("generation != requestGeneration"));
@@ -169,6 +169,8 @@ public final class InstrumentOutputLifecycleTest {
             assertTrue(stage, manager.contains('"' + stage + '"'));
         }
         assertFalse(manager.contains(".shortDetail()"));
+        assertTrue(manager.contains("instrumentProxyStartupDiagnostic(context, expected)"));
+        assertTrue(manager.contains("clearInstrumentProxyStartupDiagnostic(context, expected)"));
         String shutdown = between(manager, "void shutdown(String reason)", "private void launch(");
         assertTrue(shutdown.indexOf("shutdownCandidate(current, currentGeneration)")
                 < shutdown.indexOf("cleanupHelper(\"shutdown\")"));
