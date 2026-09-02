@@ -69,6 +69,10 @@ public final class DashboardWidgetLifecycleContractTest {
         assertTrue(hide.contains("if (!state.visible) return"));
         assertTrue(hide.contains("val app = context.applicationContext"));
         assertTrue(hide.contains("widget_hidden restore_on_app_open=true"));
+        assertTrue(hide.contains("\"Віджет приховано — відкрийте BYD HUD, щоб повернути\""));
+        assertTrue(hide.contains("\"Widget hidden — open BYD HUD to restore\""));
+        assertFalse(hide.contains("повернути його"));
+        assertFalse(hide.contains("bring it back"));
         int toast = hide.indexOf("Toast.makeText(app");
         int refresh = hide.indexOf("refresh(app)");
         assertTrue(toast >= 0 && refresh > toast);

@@ -34,7 +34,28 @@ public final class OptionsLazySourceContractTest {
     @Test
     public void productionOptionsUseStableRowItemsAndTypedSections() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String runtime = between(source, "private fun RuntimeApp(", "fun refresh()");
         String options = between(source, "private fun OptionsTab(", "private fun WidgetNumberLine(");
+
+        assertTrue(runtime.contains(
+                "var selectedOptionsSectionKey by remember { mutableStateOf(\"runtime-permissions\") }"));
+        assertTrue(runtime.contains("val optionsCategoryScrollState = remember { LazyListState() }"));
+        assertTrue(runtime.contains("val optionsSectionScrollStates = remember {"));
+        assertFalse(runtime.contains("selectedOptionsSectionKey by rememberSaveable"));
+        assertEquals(9, occurrences(runtime, " to LazyListState()"));
+        assertOrdered(runtime,
+                "\"runtime-permissions\" to LazyListState()",
+                "\"basic-navigation\" to LazyListState()",
+                "\"route-eta\" to LazyListState()",
+                "\"speed-limit\" to LazyListState()",
+                "\"waze-features\" to LazyListState()",
+                "\"extra-navigation\" to LazyListState()",
+                "\"dashboard-window-profile\" to LazyListState()",
+                "\"dashboard-widget\" to LazyListState()",
+                "\"dashboard-move\" to LazyListState()");
+        assertTrue(source.contains("selectedSectionKey = selectedOptionsSectionKey"));
+        assertTrue(source.contains("categoryScrollState = optionsCategoryScrollState"));
+        assertTrue(source.contains("sectionScrollStates = optionsSectionScrollStates"));
 
         assertEquals(9, occurrences(options, "optionsSection("));
         assertFalse(options.contains("\n            Section("));
@@ -82,6 +103,10 @@ public final class OptionsLazySourceContractTest {
                 "private fun SidebarOptionsSurface(",
                 "private fun SidebarOptionsCategoryItem(");
         assertEquals(2, occurrences(sidebar, "LazyColumn("));
+        assertFalse(sidebar.contains("rememberSaveable"));
+        assertTrue(sidebar.contains("state = categoryScrollState"));
+        assertTrue(sidebar.contains("onClick = { onSelectedKeyChange(section.key) }"));
+        assertTrue(sidebar.contains("state = sectionScrollStates.getValue(selectedSection.key)"));
         assertTrue(sidebar.contains("selectedSection.preview?.let"));
         assertTrue(sidebar.contains(".width(196.dp)"));
         assertTrue(sidebar.contains("horizontalArrangement = Arrangement.spacedBy(12.dp)"));

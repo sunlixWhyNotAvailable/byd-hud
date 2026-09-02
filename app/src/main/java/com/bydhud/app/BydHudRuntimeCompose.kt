@@ -40,6 +40,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -581,7 +582,30 @@ private fun ModalInputBlocker() {
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
     var snapshot by remember { mutableStateOf(activity.composeSnapshot()) }
-    var selectedTab by rememberSaveable { mutableStateOf(initialTab) }
+    var selectedTab by remember(initialTab) { mutableStateOf(initialTab) }
+    val appsScrollState = remember { LazyListState() }
+    val storageScrollState = remember { LazyListState() }
+    val storageDayScrollState = remember { LazyListState() }
+    val patchScrollState = remember { LazyListState() }
+    val hudCheckScrollState = remember { LazyListState() }
+    var selectedOptionsSectionKey by remember { mutableStateOf("runtime-permissions") }
+    val optionsCategoryScrollState = remember { LazyListState() }
+    val optionsSectionScrollStates = remember {
+        mapOf(
+            "runtime-permissions" to LazyListState(),
+            "basic-navigation" to LazyListState(),
+            "route-eta" to LazyListState(),
+            "speed-limit" to LazyListState(),
+            "waze-features" to LazyListState(),
+            "extra-navigation" to LazyListState(),
+            "dashboard-window-profile" to LazyListState(),
+            "dashboard-widget" to LazyListState(),
+            "dashboard-move" to LazyListState()
+        )
+    }
+    var storageLimitDraft by remember(snapshot.storageLimitGb) {
+        mutableIntStateOf(snapshot.storageLimitGb)
+    }
     var previousTab by remember { mutableStateOf(initialTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
@@ -1213,6 +1237,10 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         snapshot = snapshot,
                         activity = activity,
                         runAction = ::runAction,
+                        selectedSectionKey = selectedOptionsSectionKey,
+                        onSelectedSectionKeyChange = { selectedOptionsSectionKey = it },
+                        categoryScrollState = optionsCategoryScrollState,
+                        sectionScrollStates = optionsSectionScrollStates,
                         autoUpdateCheckEnabled = autoUpdateCheckEnabled,
                         onAutoUpdateCheckChange = { enabled ->
                             autoUpdateCheckEnabled = enabled
@@ -1242,6 +1270,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     RuntimeTab.Apps -> AppsTab(
                         copy = copy,
                         palette = palette,
+                        scrollState = appsScrollState,
                         snapshot = snapshot,
                         activity = activity,
                         runAction = ::runAction,
@@ -1252,6 +1281,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     RuntimeTab.Storage -> StorageTab(
                         copy = copy,
                         palette = palette,
+                        scrollState = storageScrollState,
+                        dayScrollState = storageDayScrollState,
                         snapshot = snapshot,
                         configurationShareBusy = configurationShareBusy,
                         logcatBusy = logcatBusy,
@@ -1267,6 +1298,8 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                         selectedDays = selectedStorageDays,
                         storageActionBusy = storageDeleteBusy || storageShareBusy,
                         storageSortBusy = storageDeleteBusy,
+                        storageLimitDraft = storageLimitDraft,
+                        onStorageLimitDraftChange = { storageLimitDraft = it },
                         onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },
                         onSortOldestFirst = { storageSortOldestFirst = it },
                         onToggleDay = { day ->
@@ -1286,6 +1319,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     RuntimeTab.Patch -> PatchTab(
                         copy = copy,
                         palette = palette,
+                        scrollState = patchScrollState,
                         snapshot = snapshot,
                         actionPendingProfiles = patchActionPendingProfiles,
                         onSelectFile = { profileId ->
@@ -1347,6 +1381,7 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                     RuntimeTab.HudCheck -> HudCheckTab(
                         copy = copy,
                         palette = palette,
+                        scrollState = hudCheckScrollState,
                         snapshot = snapshot,
                         activity = activity,
                         runAction = ::runAction
@@ -1702,6 +1737,10 @@ private fun OptionsTab(
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit,
+    selectedSectionKey: String,
+    onSelectedSectionKeyChange: (String) -> Unit,
+    categoryScrollState: LazyListState,
+    sectionScrollStates: Map<String, LazyListState>,
     autoUpdateCheckEnabled: Boolean,
     onAutoUpdateCheckChange: (Boolean) -> Unit,
     betaChannelEnabled: Boolean,
@@ -2385,7 +2424,11 @@ private fun OptionsTab(
         hint = copy.mainHint,
         categoriesLabel = if (ua) "Категорії" else "Categories",
         sections = sections,
-        palette = palette
+        palette = palette,
+        selectedKey = selectedSectionKey,
+        onSelectedKeyChange = onSelectedSectionKeyChange,
+        categoryScrollState = categoryScrollState,
+        sectionScrollStates = sectionScrollStates
     )
     widgetColorTarget?.let { border ->
         WidgetColorPicker(
@@ -2639,7 +2682,12 @@ private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, pale
             else "Tap the widget to expand the modes\nDrag to a convenient position\nLong-press to hide until the app is opened again",
             color = palette.muted, fontSize = 13.sp
         )
-        if (state.hidden && state.enabled) Text(if (ua) "Тимчасово приховано" else "Temporarily hidden", color = palette.yellow, fontSize = 13.sp)
+        if (state.hidden && state.enabled) Text(
+            if (ua) "Віджет приховано — відкрийте BYD HUD, щоб повернути"
+            else "Widget hidden — open BYD HUD to restore",
+            color = palette.yellow,
+            fontSize = 13.sp
+        )
     }
 }
 
@@ -3930,6 +3978,7 @@ private fun NavigatorAssetAction(
 private fun AppsTab(
     copy: Copy,
     palette: Palette,
+    scrollState: LazyListState,
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit,
@@ -3949,7 +3998,7 @@ private fun AppsTab(
     } else {
         palette.muted to palette.disabled
     }
-    LazyPageSurface(copy.apps, copy.appsHint, palette, headerAction = {
+    LazyPageSurface(copy.apps, copy.appsHint, palette, scrollState, headerAction = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Pill(scanStatusText, scanStatusColor.first, scanStatusColor.second, Modifier.width(230.dp))
             HudButton(copy.refreshApps, palette, primary = true, width = 178.dp) {
@@ -4267,6 +4316,8 @@ private fun AppRow(
 private fun StorageTab(
     copy: Copy,
     palette: Palette,
+    scrollState: LazyListState,
+    dayScrollState: LazyListState,
     snapshot: MainActivity.ComposeSnapshot,
     configurationShareBusy: Boolean,
     logcatBusy: Boolean,
@@ -4277,6 +4328,8 @@ private fun StorageTab(
     selectedDays: List<String>,
     storageActionBusy: Boolean,
     storageSortBusy: Boolean,
+    storageLimitDraft: Int,
+    onStorageLimitDraftChange: (Int) -> Unit,
     onStorageLimitGb: (Int) -> Unit,
     onSortOldestFirst: (Boolean) -> Unit,
     onToggleDay: (String) -> Unit,
@@ -4298,9 +4351,6 @@ private fun StorageTab(
     } else {
         storageScanText
     }
-    var draftLimit by rememberSaveable(snapshot.storageLimitGb) {
-        mutableIntStateOf(snapshot.storageLimitGb)
-    }
     val days = if (sortOldestFirst) {
         snapshot.storageDays.sortedBy { it.name }
     } else {
@@ -4309,7 +4359,14 @@ private fun StorageTab(
     val selectedDayNames = selectedDays.filter { selected ->
         days.any { it.name == selected }
     }
-    LazyPageSurface(copy.storage, copy.storageHint, palette) {
+    val storageFolderBlocks = snapshot.navCaptureFolderPaths
+        .distinct()
+        .map { path ->
+            val public = path.trimEnd('/').endsWith("/Documents/BYD-HUD", ignoreCase = true)
+            Triple(if (public) 0 else 1, if (public) copy.publicStorageLocation else copy.privateStorageLocation, path)
+        }
+        .sortedBy { it.first }
+    LazyPageSurface(copy.storage, copy.storageHint, palette, scrollState) {
         item(key = "storage-settings") {
             Section(copy.storageSettings, palette) {
                 SettingRow(
@@ -4320,7 +4377,7 @@ private fun StorageTab(
                     Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.Bottom) {
                         ReadOnlyValueField(
                             label = copy.storageLimitGb,
-                            value = "$draftLimit ${gbUnit(copy)}",
+                            value = "$storageLimitDraft ${gbUnit(copy)}",
                             palette = palette,
                             modifier = Modifier.width(150.dp)
                         )
@@ -4328,17 +4385,15 @@ private fun StorageTab(
                             "OK",
                             palette,
                             primary = true,
-                            enabled = draftLimit != snapshot.storageLimitGb,
+                            enabled = storageLimitDraft != snapshot.storageLimitGb,
                             width = 190.dp
                         ) {
-                            onStorageLimitGb(draftLimit)
+                            onStorageLimitGb(storageLimitDraft)
                         }
                     }
                 }
                 )
-                StorageLimitSlider(draftLimit, palette) { next ->
-                    draftLimit = next
-                }
+                StorageLimitSlider(storageLimitDraft, palette, onStorageLimitDraftChange)
                 Divider(palette)
                 SettingRow(
                 title = copy.currentNavLogsSize,
@@ -4426,6 +4481,7 @@ private fun StorageTab(
                     )
                 } else {
                     LazyColumn(
+                        state = dayScrollState,
                         modifier = Modifier
                             .fillMaxWidth()
                             .heightIn(max = 260.dp)
@@ -4488,15 +4544,29 @@ private fun StorageTab(
 
         item(key = "navigation-log-folders") {
             Section(copy.navigationLogsFolder, palette, bodyPadding = 14.dp) {
-                CodeBlock(
-                    text = if (!snapshot.storageCacheAvailable) coldStorageText else snapshot.navCaptureFolderPaths.joinToString("\n\n") { path ->
-                        val location = if (path.trimEnd('/').endsWith("/Documents/BYD-HUD", ignoreCase = true)) copy.publicStorageLocation else copy.privateStorageLocation
-                        "$location:\n$path"
-                    }.ifBlank { copy.storageNoDayFolders },
-                    palette = palette,
-                    compact = true,
-                    modifier = Modifier.fillMaxWidth()
-                )
+                when {
+                    !snapshot.storageCacheAvailable ->
+                        CodeBlock(coldStorageText, palette, compact = true)
+                    storageFolderBlocks.isEmpty() ->
+                        CodeBlock(copy.storageNoDayFolders, palette, compact = true)
+                    storageFolderBlocks.size == 1 -> {
+                        val (_, label, path) = storageFolderBlocks.single()
+                        CodeBlock("$label:\n$path", palette, compact = true)
+                    }
+                    else -> Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        storageFolderBlocks.forEach { (_, label, path) ->
+                            CodeBlock(
+                                "$label:\n$path",
+                                palette,
+                                compact = true,
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+                }
             }
         }
     }
@@ -4506,6 +4576,7 @@ private fun StorageTab(
 private fun PatchTab(
     copy: Copy,
     palette: Palette,
+    scrollState: LazyListState,
     snapshot: MainActivity.ComposeSnapshot,
     actionPendingProfiles: Set<String>,
     onSelectFile: (String) -> Unit,
@@ -4514,7 +4585,7 @@ private fun PatchTab(
     onPatch: (String) -> Unit,
     onRestore: (String) -> Unit
 ) {
-    LazyPageSurface(copy.patchTab, copy.patchHint, palette) {
+    LazyPageSurface(copy.patchTab, copy.patchHint, palette, scrollState) {
         item(key = "patch-warning") {
             Section(copy.patchWarning, palette) {
                 Column(modifier = Modifier.padding(14.dp)) {
@@ -5154,17 +5225,9 @@ private fun StorageLimitSlider(
     onLimit: (Int) -> Unit
 ) {
     val coerced = limit.coerceIn(1, 10)
-    var sliderValue by remember(coerced) { mutableStateOf(coerced.toFloat()) }
     Slider(
-        value = sliderValue,
-        onValueChange = { raw ->
-            sliderValue = raw.coerceIn(1f, 10f)
-        },
-        onValueChangeFinished = {
-            val next = storageLimitFromSliderValue(sliderValue)
-            sliderValue = next.toFloat()
-            onLimit(next)
-        },
+        value = coerced.toFloat(),
+        onValueChange = { onLimit(storageLimitFromSliderValue(it)) },
         valueRange = 1f..10f,
         steps = 8,
         colors = SliderDefaults.colors(
@@ -5307,6 +5370,7 @@ private fun storageLocationLabel(day: MainActivity.ComposeStorageDay, copy: Copy
 private fun HudCheckTab(
     copy: Copy,
     palette: Palette,
+    scrollState: LazyListState,
     snapshot: MainActivity.ComposeSnapshot,
     activity: MainActivity,
     runAction: (() -> Unit) -> Unit
@@ -5330,6 +5394,7 @@ private fun HudCheckTab(
         title = copy.hudCheck,
         hint = copy.hudCheckHint,
         palette = palette,
+        state = scrollState,
         headerAction = {
             Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
                 Pill(statusText, statusColor.first, statusColor.second)
@@ -5689,11 +5754,13 @@ private fun LazyPageSurface(
     title: String,
     hint: String,
     palette: Palette,
+    state: LazyListState,
     headerAction: (@Composable () -> Unit)? = null,
     itemSpacing: Dp = 10.dp,
     content: LazyListScope.() -> Unit
 ) {
     LazyColumn(
+        state = state,
         modifier = Modifier
             .fillMaxSize()
             .clip(RoundedCornerShape(8.dp))
@@ -5777,9 +5844,12 @@ private fun SidebarOptionsSurface(
     hint: String,
     categoriesLabel: String,
     sections: List<OptionsSectionSpec>,
-    palette: Palette
+    palette: Palette,
+    selectedKey: String,
+    onSelectedKeyChange: (String) -> Unit,
+    categoryScrollState: LazyListState,
+    sectionScrollStates: Map<String, LazyListState>
 ) {
-    var selectedKey by rememberSaveable { mutableStateOf(sections.first().key) }
     val selectedSection = sections.firstOrNull { it.key == selectedKey } ?: sections.first()
 
     Column(
@@ -5817,6 +5887,7 @@ private fun SidebarOptionsSurface(
                 )
                 Spacer(Modifier.height(2.dp))
                 LazyColumn(
+                    state = categoryScrollState,
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
@@ -5832,7 +5903,7 @@ private fun SidebarOptionsSurface(
                             section = section,
                             selected = section.key == selectedSection.key,
                             palette = palette,
-                            onClick = { selectedKey = section.key }
+                            onClick = { onSelectedKeyChange(section.key) }
                         )
                     }
                 }
@@ -5846,6 +5917,7 @@ private fun SidebarOptionsSurface(
             ) {
                 key(selectedSection.key) {
                     LazyColumn(
+                        state = sectionScrollStates.getValue(selectedSection.key),
                         modifier = Modifier
                             .weight(1f)
                             .fillMaxHeight()

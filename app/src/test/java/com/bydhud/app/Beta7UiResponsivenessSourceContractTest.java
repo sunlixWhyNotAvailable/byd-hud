@@ -17,6 +17,8 @@ public final class Beta7UiResponsivenessSourceContractTest {
             throws IOException {
         String source = source("MainActivity.java");
         String onResume = between(source, "protected void onResume()", "protected void onPause()");
+        String storageScan = between(source, "private static void requestStorageRefresh(",
+                "//keeps this step explicit so callers can rely on one documented behavior boundary.");
         String runtimeScan = between(source, "static void requestRuntimeUiStateRefresh(",
                 "static void requestPatchUiStateRefresh(");
         String patchScan = between(source, "static void requestPatchUiStateRefresh(",
@@ -37,11 +39,19 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(onResume.contains("invalidateComposeSnapshot();"));
         assertTrue(onResume.contains(
                 "requestRuntimeUiStateRefresh(this, true, \"activity-resume\")"));
+        assertTrue(storageScan.contains("if (!force && !stale)"));
+        assertTrue(storageScan.contains("Thread worker = new Thread("));
+        assertTrue(storageScan.contains("worker.setPriority(Thread.MIN_PRIORITY)"));
+        assertTrue(storageScan.contains("worker.start()"));
+        assertTrue(runtimeScan.contains("new Thread(() -> {"));
+        assertTrue(runtimeScan.contains("}, \"bydhud-app-scan\").start()"));
         assertTrue(runtimeScan.contains("NavRuntimePermissionStatus.check(appContext)"));
         assertFalse(runtimeScan.contains("requestStorageRefresh("));
         assertFalse(runtimeScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
         assertFalse(runtimeScan.contains("scanNavigatorPatchRows(appContext)"));
         assertTrue(patchScan.contains("NavigatorPackageInstaller.reconcile(appContext)"));
+        assertTrue(patchScan.contains("new Thread(() -> {"));
+        assertTrue(patchScan.contains("lowerCurrentThreadPriority()"));
         assertTrue(patchScan.contains(
                 "navigatorAssetSnapshots = NavigatorAssetManager.snapshots(appContext, false)"));
         assertTrue(patchScan.contains("scanNavigatorPatchRows(appContext)"));
@@ -118,6 +128,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
     public void allTabsAreCacheFirstWhileAppRowsStayVirtualized() throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
         String activity = source("MainActivity.java");
+        String runtimeState = between(source, "private fun RuntimeApp(", "fun refresh()");
         String apps = between(source, "private fun AppsTab(", "private fun AppRow(");
         String legacyApps = between(activity,
                 "private void refreshActiveAppsList()", "private void refreshDynamicAppsUi()");
@@ -129,6 +140,17 @@ public final class Beta7UiResponsivenessSourceContractTest {
                 "LaunchedEffect(appInForeground)");
         String lifecycleObserver = between(lifecycle, "val observer =", "activity.lifecycle.addObserver");
 
+        assertTrue(runtimeState.contains(
+                "var selectedTab by remember(initialTab) { mutableStateOf(initialTab) }"));
+        assertFalse(runtimeState.contains("selectedTab by rememberSaveable"));
+        assertTrue(runtimeState.contains("val appsScrollState = remember { LazyListState() }"));
+        assertTrue(runtimeState.contains("val storageScrollState = remember { LazyListState() }"));
+        assertTrue(runtimeState.contains("val patchScrollState = remember { LazyListState() }"));
+        assertTrue(runtimeState.contains("val hudCheckScrollState = remember { LazyListState() }"));
+        assertTrue(source.contains("scrollState = appsScrollState"));
+        assertTrue(source.contains("scrollState = storageScrollState"));
+        assertTrue(source.contains("scrollState = patchScrollState"));
+        assertTrue(source.contains("scrollState = hudCheckScrollState"));
         assertTrue(source.contains("LaunchedEffect(appInForeground)"));
         assertFalse(source.contains("selectedTab != RuntimeTab.Apps || !appInForeground"));
         assertFalse(tabEffect.contains("refresh()"));

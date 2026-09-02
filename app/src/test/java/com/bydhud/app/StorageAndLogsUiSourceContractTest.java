@@ -16,7 +16,12 @@ public final class StorageAndLogsUiSourceContractTest {
     @Test
     public void storageTabUsesAcceptedBoundedLogsLayout() throws IOException {
         String source = source();
+        String runtimeState = between(source, "private fun RuntimeApp(", "fun refresh()");
+        String runtimeStorage = between(source, "RuntimeTab.Storage -> StorageTab(",
+                "RuntimeTab.Patch -> PatchTab(");
         String storage = between(source, "private fun StorageTab(", "private fun PatchTab(");
+        String slider = between(source, "private fun StorageLimitSlider(",
+                "private fun storageLimitFromSliderValue(");
         int settingsIndex = storage.indexOf("item(key = \"storage-settings\")");
         int logsIndex = storage.indexOf("item(key = \"storage-logs\")");
         int foldersIndex = storage.indexOf("item(key = \"navigation-log-folders\")");
@@ -43,6 +48,15 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(source.contains("shareSelected = \"Поділитись логами\""));
         assertEquals(1, occurrences(storage,
                 "if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat"));
+        assertTrue(runtimeState.contains(
+                "val storageDayScrollState = remember { LazyListState() }"));
+        assertFalse(runtimeState.contains("storageDayScrollState = rememberSaveable"));
+        assertTrue(runtimeStorage.contains("dayScrollState = storageDayScrollState"));
+        assertTrue(storage.contains("scrollState: LazyListState"));
+        assertTrue(storage.contains("dayScrollState: LazyListState"));
+        assertTrue(storage.contains(
+                "LazyPageSurface(copy.storage, copy.storageHint, palette, scrollState)"));
+        assertTrue(logsSection.contains("state = dayScrollState"));
 
         int currentSizeIndex = settingsSection.indexOf("title = copy.currentNavLogsSize");
         assertTrue(currentSizeIndex >= 0);
@@ -59,6 +73,26 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(currentSizeRow.contains("snapshot.storageLimitGb"));
         assertTrue(currentSizeRow.contains("snapshot.storageSessionCount"));
         assertTrue(currentSizeRow.contains("copy.storageSessionsShort"));
+
+        assertTrue(settingsSection.contains("value = \"$storageLimitDraft ${gbUnit(copy)}\""));
+        assertTrue(settingsSection.contains(
+                "enabled = storageLimitDraft != snapshot.storageLimitGb"));
+        assertTrue(settingsSection.contains("onStorageLimitGb(storageLimitDraft)"));
+        assertEquals(1, occurrences(settingsSection, "onStorageLimitGb("));
+        assertTrue(settingsSection.contains(
+                "StorageLimitSlider(storageLimitDraft, palette, onStorageLimitDraftChange)"));
+        assertTrue(runtimeState.contains(
+                "var storageLimitDraft by remember(snapshot.storageLimitGb)"));
+        assertFalse(runtimeState.contains("storageLimitDraft by rememberSaveable"));
+        assertTrue(runtimeStorage.contains(
+                "onStorageLimitDraftChange = { storageLimitDraft = it },"));
+        assertTrue(runtimeStorage.contains(
+                "onStorageLimitGb = { value -> runAction { activity.composeSetStorageLimitGb(value) } },"));
+        assertEquals(1, occurrences(runtimeStorage, "composeSetStorageLimitGb("));
+        assertTrue(slider.contains(
+                "onValueChange = { onLimit(storageLimitFromSliderValue(it)) }"));
+        assertFalse(slider.contains("onValueChangeFinished"));
+        assertFalse(slider.contains("mutableStateOf"));
 
         assertEquals(1, occurrences(logsSection, "ShareIconLabelButton("));
         assertFalse(storage.contains("storage-logs-header"));
@@ -126,9 +160,16 @@ public final class StorageAndLogsUiSourceContractTest {
 
         assertFalse(settingsSection.contains("CodeBlock("));
         assertFalse(logsSection.contains("CodeBlock("));
-        assertEquals(1, occurrences(foldersSection, "CodeBlock("));
-        assertTrue(foldersSection.contains("snapshot.navCaptureFolderPaths.joinToString"));
-        assertTrue(foldersSection.contains("modifier = Modifier.fillMaxWidth()"));
+        assertTrue(storage.contains("snapshot.navCaptureFolderPaths"));
+        assertTrue(storage.contains(".distinct()"));
+        assertTrue(foldersSection.contains("storageFolderBlocks.size == 1"));
+        assertTrue(foldersSection.contains("storageFolderBlocks.single()"));
+        assertTrue(foldersSection.contains("else -> Row("));
+        assertTrue(foldersSection.contains("Arrangement.spacedBy(12.dp)"));
+        assertTrue(foldersSection.contains("storageFolderBlocks.forEach"));
+        assertTrue(foldersSection.contains("\"$label:\\n$path\""));
+        assertTrue(foldersSection.contains("modifier = Modifier.weight(1f)"));
+        assertFalse(foldersSection.contains("joinToString"));
         assertTrue(source.contains(
                 "activity.composeTryStartBlockingUiFlow(\"configuration-share\")"));
         assertTrue(source.contains("configurationShareVisible = true"));

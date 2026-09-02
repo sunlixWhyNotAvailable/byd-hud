@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
 
-- **Version:** v3.1.1
+- **Version:** v3.1.2
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
@@ -302,9 +302,9 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 
 ### Storage and logs tab
 
-- shows current log size and the configured size limit;
+- shows the storage-limit draft immediately while the slider moves and applies it only after `OK`;
 - groups navigation logs, snapshots, screenshots, and optional logcat by day;
-- shows the available navigation-log folder locations below the log list;
+- shows one available navigation-log folder as a compact label/path block and places a second location beside it;
 - shares or deletes only the selected days;
 - shows file count, archive size, and a sensitive-data warning before creating a ZIP;
 - uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
