@@ -50,8 +50,15 @@ final class VehicleConfigurationDiagnostics {
     };
     private static final Pattern COMPONENT = Pattern.compile(
             "([A-Za-z][\\w]*(?:\\.[A-Za-z][\\w]*)+)/([.$\\w]+)");
-    private static final Pattern DISPLAY = Pattern.compile("(?:Display\\s*#|displayId=)(\\d+)");
-    private static final Pattern TASK = Pattern.compile("\\bt(\\d+)\\b");
+    private static final Pattern TASK_DISPLAY = Pattern.compile("^(\\s*)Display\\s+#(\\d+)\\s+\\(activities[^)]*\\):?\\s*$");
+    private static final Pattern ACTIVITY = Pattern.compile("^(\\s*)\\*\\s+Hist\\s+#\\d+:\\s+ActivityRecord\\{"
+            + "[^\\s{}]+\\s+u(\\d+)\\s+(" + COMPONENT.pattern() + ")\\s+t(\\d+)\\b[^}]*}");
+    private static final Pattern ACTIVITY_VISIBLE = Pattern.compile(
+            "^(?:mVisibleRequested=(?:true|false)\\s+)?(mVisible|visible)=(true|false)\\b");
+    private static final Pattern WINDOW_DISPLAY = Pattern.compile("^(\\s*)Display:\\s+mDisplayId=(\\d+)\\b");
+    private static final Pattern WINDOW_FOCUS = Pattern.compile("^\\s*(mCurrentFocus|mFocusedApp)=(.*)$");
+    private static final Pattern FOCUSED_COMPONENT = Pattern.compile("^(?:Window|ActivityRecord)\\{[^\\s{}]+\\s+u\\d+\\s+"
+            + COMPONENT.pattern());
     private static final Pattern OP = Pattern.compile(
             "^\\s*([A-Z_]+):\\s*(allow|ignore|deny|default|foreground|errored)\\b");
     private static final Set<String> OPS = new LinkedHashSet<>(Arrays.asList(
@@ -73,7 +80,7 @@ final class VehicleConfigurationDiagnostics {
         commands.put("accessibility", "dumpsys accessibility");
         commands.put("appops", "appops get com.bydhud.app");
         commands.put("tasks", "dumpsys activity activities");
-        commands.put("focus", "dumpsys window windows");
+        commands.put("focus", "dumpsys window displays");
         commands.put("audio", "dumpsys audio");
         commands.put("thermal", "dumpsys thermalservice");
         commands.put("memory", "dumpsys meminfo com.bydhud.app");
@@ -336,6 +343,8 @@ final class VehicleConfigurationDiagnostics {
     /** Parse only allowlisted structural fields; never export raw task, notification or audio payloads. */
     static JSONObject parseAdb(String name, String text) throws Exception {
         String source = text == null ? "" : text;
+        if (name.equals("tasks")) return parseTasks(source);
+        if (name.equals("focus")) return parseFocus(source);
         JSONObject result = new JSONObject();
         JSONArray entries = new JSONArray();
         if (name.equals("notification_listeners") || name.equals("accessibility_services")
@@ -345,7 +354,6 @@ final class VehicleConfigurationDiagnostics {
                     .put("namespace", name.equals("instrument_display_setting") ? "Android Settings.Global; not OEM CarSettings" : "Android Settings.Secure")
                     .put("truncated", value.length() > 16384);
         }
-        Integer displayId = null;
         boolean boundSection = false;
         Set<String> boundComponents = new LinkedHashSet<>();
         for (String line : source.split("\\r?\\n")) {
@@ -361,24 +369,6 @@ final class VehicleConfigurationDiagnostics {
                 case "appops":
                     Matcher op = OP.matcher(line);
                     if (op.find() && OPS.contains(op.group(1))) entries.put(new JSONObject().put("op", op.group(1)).put("mode", op.group(2)));
-                    break;
-                case "tasks":
-                    Matcher display = DISPLAY.matcher(line);
-                    if (display.find()) displayId = Integer.valueOf(display.group(1));
-                    if (line.contains("ActivityRecord{") && component.find() && relevant(component.group(1))) {
-                        Matcher task = TASK.matcher(line);
-                        entries.put(new JSONObject().put("component", component.group()).put("displayId", nullable(displayId))
-                                .put("taskId", task.find() ? Integer.valueOf(task.group(1)) : JSONObject.NULL)
-                                .put("visible", line.contains("visible=true") ? true : line.contains("visible=false") ? false : JSONObject.NULL));
-                    }
-                    break;
-                case "focus":
-                    if (line.contains("mCurrentFocus=") || line.contains("mFocusedApp=")) {
-                        boolean known = component.find() && relevant(component.group(1));
-                        entries.put(new JSONObject().put("field", line.contains("mCurrentFocus=") ? "currentFocus" : "focusedApp")
-                                .put("relevantComponent", known ? component.group() : JSONObject.NULL)
-                                .put("reason", known ? "parsed" : "other_window_or_unparsed"));
-                    }
                     break;
                 case "audio":
                     Matcher mode = Pattern.compile("\\b(?:mMode|mode)\\s*[:=]\\s*(MODE_[A-Z_]+|\\d+)\\b").matcher(line);
@@ -413,6 +403,119 @@ final class VehicleConfigurationDiagnostics {
         }
         return result.put("status", entries.length() == 0 ? "unsupported" : "ok").put("records", entries)
                 .put("interpretation", "Allowlisted structural fields only; missing/unparsed values remain unknown");
+    }
+
+    private static JSONObject parseTasks(String source) throws Exception {
+        JSONObject result = new JSONObject();
+        Map<String, JSONObject> records = new LinkedHashMap<>();
+        Integer displayId = null;
+        int displayIndent = -1;
+        JSONObject activity = null;
+        int activityIndent = -1;
+        for (String line : source.split("\\r?\\n")) {
+            if (line.trim().isEmpty()) continue;
+            int indent = indentation(line);
+            Matcher display = TASK_DISPLAY.matcher(line);
+            if (display.matches()) {
+                displayId = parsedInteger(display.group(2));
+                displayIndent = indent;
+                activity = null;
+                continue;
+            }
+            if (indent <= displayIndent) { displayId = null; displayIndent = -1; }
+            if (indent <= activityIndent) activity = null;
+            // Only a Hist header owns activity state; resumed/paused/orientation references do not.
+            Matcher header = ACTIVITY.matcher(line);
+            if (header.find()) {
+                activity = null;
+                Integer user = parsedInteger(header.group(2));
+                Integer task = parsedInteger(header.group(6));
+                String component = header.group(3);
+                String packageName = header.group(4);
+                String className = header.group(5);
+                if (user == null || task == null || component.length() > 1024 || !relevant(packageName)) continue;
+                String identity = user + ":" + task + ":" + packageName + "/"
+                        + (className.startsWith(".") ? packageName + className : className);
+                activity = records.get(identity);
+                if (activity == null) {
+                    if (records.size() >= MAX_ITEMS) { result.put("recordsTruncated", true); break; }
+                    activity = new JSONObject().put("component", component).put("userId", user).put("taskId", task)
+                            .put("displayId", JSONObject.NULL).put("visible", JSONObject.NULL);
+                    records.put(identity, activity);
+                }
+                activityIndent = indent;
+                mergeTaskField(activity, "displayId", displayId);
+                continue;
+            }
+            // ponytail: accept the captured two-space activity field indentation; extend only for
+            // evidenced layouts. Nested window, Task and Intent visibility must remain excluded.
+            if (activity != null && indent == activityIndent + 2) {
+                Matcher visible = ACTIVITY_VISIBLE.matcher(line.trim());
+                if (visible.find()) mergeTaskField(activity, "visible", Boolean.valueOf(visible.group(2)));
+            }
+        }
+        return result.put("status", records.isEmpty() ? "unsupported" : "ok")
+                .put("records", new JSONArray(records.values()))
+                .put("interpretation", "Activity history blocks only; missing or conflicting display/visibility remains unknown");
+    }
+
+    private static void mergeTaskField(JSONObject record, String field, Object value) throws Exception {
+        if (value == null || record.has(field + "Reason")) return;
+        if (record.isNull(field)) record.put(field, value);
+        else if (!record.get(field).equals(value)) record.put(field, JSONObject.NULL)
+                .put(field + "Reason", "conflicting_activity_blocks");
+    }
+
+    private static JSONObject parseFocus(String source) throws Exception {
+        JSONObject result = new JSONObject();
+        JSONArray records = new JSONArray();
+        Integer displayId = null;
+        int displayIndent = -1;
+        boolean displaySection = true;
+        for (String line : source.split("\\r?\\n")) {
+            if (line.trim().isEmpty()) continue;
+            if (line.startsWith("WINDOW MANAGER ")) {
+                displaySection = line.contains("(dumpsys window displays)");
+                displayId = null;
+                displayIndent = -1;
+                continue;
+            }
+            if (!displaySection) continue;
+            int indent = indentation(line);
+            Matcher display = WINDOW_DISPLAY.matcher(line);
+            if (display.find()) {
+                displayId = parsedInteger(display.group(2));
+                displayIndent = indent;
+                continue;
+            }
+            if (indent < displayIndent) { displayId = null; displayIndent = -1; }
+            Matcher focus = WINDOW_FOCUS.matcher(line);
+            if (!focus.matches() || (displayIndent >= 0 && indent != displayIndent)) continue;
+            if (records.length() >= MAX_ITEMS) { result.put("recordsTruncated", true); break; }
+            String value = focus.group(2).trim();
+            Matcher component = FOCUSED_COMPONENT.matcher(value);
+            boolean parsed = component.find() && component.group(1).length() + component.group(2).length() < 1024;
+            boolean known = parsed && relevant(component.group(1));
+            boolean explicitNull = value.equals("null");
+            records.put(new JSONObject().put("field", focus.group(1).equals("mCurrentFocus") ? "currentFocus" : "focusedApp")
+                    .put("displayId", nullable(displayId))
+                    .put("relevantComponent", known ? component.group(1) + "/" + component.group(2) : JSONObject.NULL)
+                    .put("present", explicitNull ? false : parsed ? true : JSONObject.NULL)
+                    .put("reason", explicitNull ? "explicit_null" : known ? "parsed" : parsed ? "other_component" : "unparsed"));
+        }
+        return result.put("status", records.length() == 0 ? "unsupported" : "ok").put("records", records)
+                .put("interpretation", "Display-scoped focus fields only; explicit null is not missing/unparsed focus");
+    }
+
+    private static int indentation(String line) {
+        int length = 0;
+        while (length < line.length() && Character.isWhitespace(line.charAt(length))) length++;
+        return length;
+    }
+
+    private static Integer parsedInteger(String value) {
+        try { return Integer.valueOf(value); }
+        catch (NumberFormatException malformed) { return null; }
     }
 
     private static Object matchedValue(String line, String regex) {

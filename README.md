@@ -296,6 +296,8 @@ Back up important navigator data and sign in to its account before patching. The
 
 Turning off `Boot runtime service` disables automatic startup, not navigation you have started yourself. You can open BYD HUD and use navigation output or HUD check with this option off.
 
+With automatic update checks enabled, the first check starts about 30 seconds after opening BYD HUD or an allowed background startup. An available update is shown when the app is in the foreground. Closing the window keeps it dismissed while the app process stays alive; after one hour, the next app opening or runtime startup can allow a fresh check. Manual checks remain available immediately, including after an error. `Shutdown` or a full process restart starts a new update-check session.
+
 <p align="center"><img src="docs/screenshots/en/settings-permissions-runtime.png" alt="Permissions, background runtime, diagnostics, and update settings" width="100%"></p>
 
 ## Storage, logs, and privacy

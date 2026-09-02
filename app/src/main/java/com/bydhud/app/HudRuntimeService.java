@@ -195,6 +195,7 @@ public final class HudRuntimeService extends Service {
             HudRuntimeSupervisor.hardResetAfterPackageReplace(this, "service-start:" + reason);
             return START_NOT_STICKY;
         }
+        AppUpdateManager.onSessionEntry(this);
         clearStartRequestGate();
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);

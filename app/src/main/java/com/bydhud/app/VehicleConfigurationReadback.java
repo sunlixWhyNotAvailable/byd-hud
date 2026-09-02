@@ -109,6 +109,40 @@ final class VehicleConfigurationReadback {
         return raw == -2_147_482_648d || raw == -999_999_999d;
     }
 
+    //Audited reference domains only. A returned number is not proof of target support or rendering.
+    static String semanticStatus(Read read, Number raw) {
+        if (raw == null || !Double.isFinite(raw.doubleValue()) || isSentinel(raw)) return "unknown";
+        int minimum = 1;
+        int maximum;
+        switch (read.parameter) {
+            case "hud.mode":
+            case "instrument.menuVersion":
+            case "instrument.themeVersion": maximum = 3; break;
+            case "hud.height": maximum = 21; break;
+            case "hud.navigationMapCapability": minimum = 0; maximum = 1; break;
+            case "hud.variant":
+            case "hud.theme":
+            case "hud.master":
+            case "hud.dynamicNavigation":
+            case "hud.drivingFusion":
+            case "hud.navigationFusion":
+            case "hud.navigationMap":
+            case "hud.safeDrivingFusion":
+            case "instrument.menuType": maximum = 2; break;
+            default: return "unknown";
+        }
+        return raw.doubleValue() == raw.intValue() && raw.intValue() >= minimum && raw.intValue() <= maximum
+                ? "in_reference" : "out_of_reference";
+    }
+
+    static String semanticReason(String status) {
+        switch (status) {
+            case "in_reference": return "Within the audited reference domain; target meaning/rendering not verified";
+            case "out_of_reference": return "Outside the audited reference domain; target meaning unknown";
+            default: return "No audited interpretation available; raw value and API status retained";
+        }
+    }
+
     static String launchCommand(String apkPath) {
         if (apkPath == null || apkPath.contains("..")
                 || !apkPath.matches("/data/app/[A-Za-z0-9_./+=:~-]{1,500}/base\\.apk")) {
@@ -130,7 +164,7 @@ final class VehicleConfigurationReadback {
             case "dumpsys display":
             case "dumpsys activity activities":
             case "dumpsys accessibility":
-            case "dumpsys window windows":
+            case "dumpsys window displays":
             case "dumpsys cpuinfo":
             case "dumpsys audio":
             case "dumpsys thermalservice":

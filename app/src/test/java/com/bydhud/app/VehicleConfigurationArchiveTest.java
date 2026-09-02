@@ -427,6 +427,124 @@ public final class VehicleConfigurationArchiveTest {
         }
     }
 
+    @Test public void randomizedApkMetadataPathsAreRetainedAndRejectedPathsAreExplained() throws Exception {
+        try (VehicleConfigurationZip.Collector collector = collector()) {
+            String installed = "/data/app/~~fixture==/com.bydhud.app-package==/base.apk";
+            String rejected = "/data/app/10.0.0.7/base.apk;token=private-path-token";
+            java.util.List<String> paths = collector.apkMetadataPaths("com.bydhud.app",
+                    LocalAdbBridge.ShellResult.parse("package:" + installed + "\npackage:" + rejected
+                            + "\n__BYDHUD_EXIT__:0\n"));
+            assertEquals(Arrays.asList(installed), paths);
+            String unavailable = collector.manifest().getJSONArray("unavailable").toString();
+            assertTrue(unavailable, unavailable.contains("rejected APK metadata path"));
+            assertFalse(unavailable, unavailable.contains("10.0.0.7"));
+            assertFalse(unavailable, unavailable.contains("private-path-token"));
+        }
+    }
+
+    @Test public void knownAbsentPackageIsNotConfusedWithUnknownOrDeniedQueries() throws Exception {
+        String stockMaps = "com.google.android.apps.maps";
+        try (VehicleConfigurationZip.Collector collector = collector()) {
+            collector.addJson("app/packages.json", "package-manager", new JSONObject()
+                    .put(stockMaps, new JSONObject().put("installed", false))
+                    .put("com.waze", new JSONObject().put("installed", true)));
+            LocalAdbBridge.ShellResult emptyFailure = LocalAdbBridge.ShellResult.parse("__BYDHUD_EXIT__:1\n");
+            assertTrue(collector.apkMetadataPaths(stockMaps, emptyFailure).isEmpty());
+            assertTrue(collector.apkMetadataPaths("com.waze", emptyFailure).isEmpty());
+            assertTrue(collector.apkMetadataPaths("unknown.fixture", emptyFailure).isEmpty());
+            JSONArray unavailable = collector.manifest().getJSONArray("unavailable");
+            String absent = unavailable.getJSONObject(0).getString("reason");
+            assertTrue(absent, absent.contains("not_installed (package-manager snapshot)"));
+            assertTrue(absent, absent.contains("exit=1"));
+            assertFalse(unavailable.getJSONObject(1).getString("reason").contains("not_installed"));
+            assertFalse(unavailable.getJSONObject(2).getString("reason").contains("not_installed"));
+            assertEquals("", emptyFailure.error); //The runtime parser's existing semantics stay unchanged.
+        }
+        for (LocalAdbBridge.ShellResult failed : Arrays.asList(
+                LocalAdbBridge.ShellResult.parse("Error: permission denied\n__BYDHUD_EXIT__:1\n"),
+                LocalAdbBridge.ShellResult.parse("Error: package service unavailable\n__BYDHUD_EXIT__:1\n"),
+                LocalAdbBridge.ShellResult.parse("__BYDHUD_EXIT__:126\n"),
+                LocalAdbBridge.ShellResult.parse("__BYDHUD_EXIT__:124\n"),
+                LocalAdbBridge.ShellResult.parse("__BYDHUD_EXIT__:1\n", true, 20L))) {
+            try (VehicleConfigurationZip.Collector collector = collector()) {
+                collector.addJson("app/packages.json", "package-manager", new JSONObject()
+                        .put(stockMaps, new JSONObject().put("installed", false)));
+                collector.apkMetadataPaths(stockMaps, failed);
+                String reason = collector.manifest().getJSONArray("unavailable").getJSONObject(0).getString("reason");
+                assertFalse(reason, reason.contains("not_installed"));
+                assertTrue(reason, reason.contains("exit=" + failed.exitCode));
+            }
+        }
+    }
+
+    @Test public void nonzeroFindRetainsUsefulConfigAndLibraryPathsAsPartialInventory() throws Exception {
+        try (VehicleConfigurationZip.Collector collector = collector()) {
+            LocalAdbBridge.ShellResult configs = LocalAdbBridge.ShellResult.parse(
+                    "/vendor/etc/hud/display.json\n/system/etc/someip/stack.conf\n"
+                            + "find: /odm/etc: Permission denied\n__BYDHUD_EXIT__:1\n");
+            assertEquals(2, collector.inventoryPaths("adb/config", configs, true, 256).size());
+            LocalAdbBridge.ShellResult libraries = LocalAdbBridge.ShellResult.parse(
+                    "/system/lib64/libsomeip.so\n/vendor/lib/libhud.so\n"
+                            + "find: /odm/lib64: No such file or directory\n__BYDHUD_EXIT__:1\n");
+            assertEquals(2, collector.inventoryPaths("adb/native-libraries", libraries, false, 64).size());
+            JSONArray unavailable = collector.manifest().getJSONArray("unavailable");
+            for (int index = 0; index < 2; index++) {
+                String reason = unavailable.getJSONObject(index).getString("reason");
+                assertTrue(reason, reason.contains("partial inventory; retainedPaths=2"));
+                assertTrue(reason, reason.contains("exit=1"));
+            }
+            assertTrue(unavailable.getJSONObject(0).getString("reason").contains("Permission denied"));
+            assertTrue(unavailable.getJSONObject(1).getString("reason").contains("No such file or directory"));
+            assertTrue(collector.inventoryPaths("adb/empty", LocalAdbBridge.ShellResult.parse(
+                    "find: /odm/etc: Permission denied\n__BYDHUD_EXIT__:1\n"), true, 256).isEmpty());
+            assertTrue(collector.manifest().getJSONArray("unavailable").getJSONObject(2).getString("reason")
+                    .contains("unavailable inventory; retainedPaths=0"));
+        }
+    }
+
+    @Test public void shellErrorContextIsBoundedMaskedAndDoesNotExportArbitraryPayloads() throws Exception {
+        try (VehicleConfigurationZip.Collector collector = collector()) {
+            LocalAdbBridge.ShellResult failed = LocalAdbBridge.ShellResult.parse(
+                    "/vendor/etc/hud/valid.json\nstat: 10.0.0.7: Permission denied; password='private-error-password'; detail="
+                            + repeat('\u6E2C', 2000) + "\n__BYDHUD_EXIT__:1\n");
+            String detail = collector.shellDetail(failed);
+            assertTrue(detail, detail.contains("exit=1"));
+            assertTrue(detail, detail.contains("Permission denied"));
+            assertTrue(detail, detail.contains("<IP_1>"));
+            assertTrue(detail, detail.contains("[truncated]"));
+            assertTrue(detail.getBytes(StandardCharsets.UTF_8).length <= 512);
+            assertFalse(detail.contains("\uFFFD"));
+            assertFalse(detail.contains("10.0.0.7"));
+            assertFalse(detail.contains("private-error-password"));
+            assertFalse(detail.contains("valid.json"));
+            String arbitrary = collector.shellDetail(LocalAdbBridge.ShellResult.parse(
+                    "private-navigation-content\n{\"token\":\"private-json-token\"}\n__BYDHUD_EXIT__:1\n"));
+            assertTrue(arbitrary, arbitrary.contains("unrecognized output omitted"));
+            assertFalse(arbitrary.contains("private-navigation-content"));
+            assertFalse(arbitrary.contains("private-json-token"));
+            String missingReason = collector.shellDetail(LocalAdbBridge.ShellResult.parse("__BYDHUD_EXIT__:1\n"));
+            assertTrue(missingReason, missingReason.contains("exit=1; reason=no diagnostic output"));
+            assertFalse(missingReason.toLowerCase(java.util.Locale.ROOT).contains("not found"));
+            String truncated = collector.shellDetail(LocalAdbBridge.ShellResult.parse(
+                    "stat: /system/framework/dilink-services.jar: Permission denied\n__BYDHUD_EXIT__:1\n", true, 10));
+            assertTrue(truncated, truncated.contains("exit=1; transportTruncated=true"));
+            assertTrue(truncated, truncated.contains("Permission denied"));
+        }
+    }
+
+    @Test public void exportErrorFormattingAndPartialInventoryNeverSwallowCancellation() throws Exception {
+        try (VehicleConfigurationZip.Collector collector = collector()) {
+            LocalAdbBridge.ShellResult failed = LocalAdbBridge.ShellResult.parse("Error: denied\n__BYDHUD_EXIT__:1\n");
+            Thread.currentThread().interrupt();
+            try {
+                assertThrows(InterruptedIOException.class, () -> collector.shellDetail(failed));
+                assertThrows(InterruptedIOException.class, () -> collector.inventoryPaths("adb/config", failed, true, 256));
+                assertThrows(InterruptedIOException.class, () -> collector.apkMetadataPaths("com.waze", failed));
+                assertTrue(Thread.currentThread().isInterrupted());
+            } finally { Thread.interrupted(); }
+        }
+    }
+
     public static final class FidFixture { public static final int VALUE = 42; }
 
     private static VehicleConfigurationZip.Collector collector() {

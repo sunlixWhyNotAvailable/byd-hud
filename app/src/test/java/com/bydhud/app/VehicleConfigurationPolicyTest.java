@@ -59,6 +59,24 @@ public final class VehicleConfigurationPolicyTest {
     }
 
     @Test
+    public void apkMetadataAllowsRandomizedAndroidPathsWithoutBroadeningShellAccess() {
+        String path = "/data/app/~~opaque-install==/com.bydhud.app-random_+==/base.apk";
+        assertTrue(VehicleConfigurationZip.isSafeApkMetadataPath(path));
+        assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest("stat -c %s " + path));
+        assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest("sha256sum " + path));
+        assertFalse(LocalAdbBridge.isAllowedRuntimeShellCommandForTest("cat " + path));
+        for (String rejected : Arrays.asList(
+                "/data/app/~~fixture/../base.apk", "/data/user/0/com.bydhud.app/base.apk",
+                path + ";id", path + "|id", path + "\nid", path + "$(id)",
+                "/data/app/~~fixture/file.txt", "/data/app/~~fixture/'base.apk",
+                "/data/app/~~" + new String(new char[600]).replace('\0', 'a') + "/base.apk")) {
+            assertFalse(rejected, VehicleConfigurationZip.isSafeApkMetadataPath(rejected));
+            assertFalse(rejected, LocalAdbBridge.isAllowedRuntimeShellCommandForTest("stat -c %s " + rejected));
+            assertFalse(rejected, LocalAdbBridge.isAllowedRuntimeShellCommandForTest("sha256sum " + rejected));
+        }
+    }
+
+    @Test
     public void configRedactionKeepsUsefulInventoryAndMasksCredentials() {
         String source = "{\"service\":\"someip\",\"password\":\"secret\","
                 + "\"token\":\"abc\",\"port\":52001}";

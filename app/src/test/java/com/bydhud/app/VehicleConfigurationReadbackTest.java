@@ -5,6 +5,7 @@ import static org.junit.Assert.*;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
+import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
@@ -53,10 +54,56 @@ public final class VehicleConfigurationReadbackTest {
         assertFalse(VehicleConfigurationReadback.isSentinel(-1.5));
     }
 
+    @Test public void sl07UnmappedValuesStaySeparateFromApiSuccessAndReferenceStates() throws Exception {
+        //2026-09-02 SL07 export: these getters returned, but their raw values were not decoded.
+        for (String parameter : new String[]{"hud.dynamicNavigation", "hud.drivingFusion", "hud.navigationMap",
+                "instrument.menuType", "instrument.menuVersion", "instrument.themeVersion"}) {
+            int raw = parameter.equals("hud.dynamicNavigation") || parameter.equals("hud.drivingFusion") ? 0 : 65535;
+            JSONObject record = new JSONObject().put("status", "success").put("error", JSONObject.NULL);
+            VehicleConfigurationReadbackEntryPoint.putValue(record, read(parameter), raw);
+            assertEquals(parameter, "success", record.getString("status"));
+            assertEquals(raw, record.getInt("rawValue"));
+            assertEquals("out_of_reference", record.getString("semanticStatus"));
+            assertTrue(record.getString("semanticReason").contains("target meaning unknown"));
+            assertFalse(record.has("interpretation"));
+            assertTrue(record.isNull("error"));
+        }
+        assertEquals("in_reference", VehicleConfigurationReadback.semanticStatus(read("hud.navigationMapCapability"), 0));
+        assertEquals("in_reference", VehicleConfigurationReadback.semanticStatus(read("hud.height"), 1));
+        assertEquals("in_reference", VehicleConfigurationReadback.semanticStatus(read("instrument.menuVersion"), 3));
+        assertEquals("out_of_reference", VehicleConfigurationReadback.semanticStatus(read("hud.height"), 22));
+        assertEquals("out_of_reference", VehicleConfigurationReadback.semanticStatus(read("hud.master"), 1.5));
+        for (String parameter : new String[]{"instrument.menuConfiguration", "instrument.themeContent",
+                "instrument.themeConfiguration", "instrument.leftPanel", "instrument.rightPanel", "instrument.dayNight"}) {
+            assertEquals(parameter, "unknown", VehicleConfigurationReadback.semanticStatus(read(parameter), 65535));
+        }
+        assertFalse(VehicleConfigurationReadback.isSentinel(65535));
+    }
+
+    @Test public void valueSemanticsNeverReplaceRawFailureOrInventAnOffState() throws Exception {
+        for (Number raw : new Number[]{null, -2147482648, -999999999, Double.NaN, Double.POSITIVE_INFINITY}) {
+            JSONObject record = new JSONObject().put("status", raw == null ? "unsupported" : "error");
+            VehicleConfigurationReadbackEntryPoint.putValue(record, read("hud.master"), raw);
+            assertEquals(raw == null ? "unsupported" : "error", record.getString("status"));
+            assertEquals("unknown", record.getString("semanticStatus"));
+            assertFalse(record.has("interpretation"));
+            if (raw == null) assertTrue(record.isNull("rawValue"));
+            else assertEquals(raw.toString(), record.get("rawValue").toString());
+        }
+        JSONObject known = new JSONObject().put("status", "success");
+        VehicleConfigurationReadbackEntryPoint.putValue(known, read("hud.navigationFusion"), 1);
+        assertEquals(1, known.getInt("rawValue"));
+        assertEquals("reference: off", known.getString("interpretation"));
+        assertEquals("in_reference", known.getString("semanticStatus"));
+        assertTrue(known.getString("semanticReason").contains("not verified"));
+    }
+
     @Test public void commandsExcludeEveryMutationAndExternalGetterParameter() {
         assertTrue(VehicleConfigurationReadback.isAllowedCommand("settings get secure enabled_accessibility_services"));
         assertTrue(VehicleConfigurationReadback.isAllowedCommand("getprop ro.build.system.fission_single_os"));
         assertTrue(VehicleConfigurationReadback.isAllowedCommand("dumpsys audio"));
+        assertTrue(VehicleConfigurationReadback.isAllowedCommand("dumpsys window displays"));
+        assertFalse(VehicleConfigurationReadback.isAllowedCommand("dumpsys window windows"));
         for (String packageName : new String[]{"com.example.amapservice", "com.byd.amapservice",
                 "com.byd.containerservice", "com.byd.someipsystemservice", "com.byd.clusterdebug",
                 "com.android.launcher3"}) {

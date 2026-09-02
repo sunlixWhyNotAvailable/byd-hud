@@ -92,7 +92,7 @@ final class LocalAdbBridge {
                     + "(?:etc|lib|lib64)/[A-Za-z0-9_./+@:-]{1,512}");
     private static final Pattern VEHICLE_CONFIG_APK_METADATA_COMMAND = Pattern.compile(
             "(?:stat -c %s|sha256sum) /(?:data/app|system|vendor|product|odm)/"
-                    + "[A-Za-z0-9_./+@=:-]{1,508}\\.apk");
+                    + "[A-Za-z0-9_./+@=:~-]{1,508}\\.apk");
     private static final byte[] ADB_AUTH_PADDING = new byte[]{
             0x30, 0x21, 0x30, 0x09, 0x06, 0x05, 0x2B, 0x0E,
             0x03, 0x02, 0x1A, 0x05, 0x00, 0x04, 0x14

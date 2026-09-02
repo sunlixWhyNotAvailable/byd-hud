@@ -46,6 +46,10 @@ final class VehicleConfigurationZip {
     private static final int MAX_PAYLOAD_BYTES = MAX_TOTAL_BYTES - MAX_ENTRY_BYTES;
     private static final int MAX_CONFIG_PATHS = 256;
     private static final int MAX_LIBRARY_PATHS = 64;
+    private static final int MAX_SHELL_DETAIL_BYTES = 512;
+    private static final Pattern SHELL_DIAGNOSTIC_LINE = Pattern.compile(
+            "(?i)^(?:(?:/system/bin/)?(?:find|stat|sha256sum|cat|pm|cmd|sh|error|exception):"
+                    + "|(?:[a-z0-9_$]+\\.)+[a-z0-9_$]*(?:Exception|Error)(?::|\\s)).*");
     private static final Pattern VERSION_LITERAL = Pattern.compile(
             "(?i)v?[0-9]{1,10}(?:\\.[0-9]{1,10}){0,7}"
                     + "(?:[-+](?:alpha|beta|rc|dev|debug|release|snapshot|build)"
@@ -318,6 +322,7 @@ final class VehicleConfigurationZip {
                                 result == null ? "command failed" : shellDetail(result));
                     }
                 } catch (Exception e) {
+                    checkCancelled();
                     unavailable("property:" + property, e.getClass().getSimpleName());
                 }
             }
@@ -382,13 +387,7 @@ final class VehicleConfigurationZip {
 
         private void collectRemoteConfigs() throws InterruptedIOException {
             LocalAdbBridge.ShellResult find = adb(CONFIG_FIND);
-            if (find == null) {
-                unavailable("adb/config", "find failed");
-                return;
-            }
-            if (!find.success()) unavailable("adb/config", shellDetail(find));
-            if (find.truncated) unavailable("adb/config", "configuration inventory truncated");
-            List<String> paths = filteredPaths(find.output, true, MAX_CONFIG_PATHS);
+            List<String> paths = inventoryPaths("adb/config", find, true, MAX_CONFIG_PATHS);
             if (paths.size() == MAX_CONFIG_PATHS) {
                 unavailable("adb/config", "configuration inventory limit reached; additional paths may be omitted");
             }
@@ -420,13 +419,7 @@ final class VehicleConfigurationZip {
 
         private void collectRemoteLibraries() throws InterruptedIOException {
             LocalAdbBridge.ShellResult find = adb(LIBRARY_FIND);
-            if (find == null) {
-                unavailable("adb/native-libraries", "find failed");
-                return;
-            }
-            if (!find.success()) unavailable("adb/native-libraries", shellDetail(find));
-            if (find.truncated) unavailable("adb/native-libraries", "library inventory truncated");
-            List<String> paths = filteredPaths(find.output, false, MAX_LIBRARY_PATHS);
+            List<String> paths = inventoryPaths("adb/native-libraries", find, false, MAX_LIBRARY_PATHS);
             if (paths.size() == MAX_LIBRARY_PATHS) {
                 unavailable("adb/native-libraries", "library inventory limit reached; additional paths may be omitted");
             }
@@ -439,19 +432,112 @@ final class VehicleConfigurationZip {
         private void collectPackageApkMetadata() throws InterruptedIOException {
             for (String packageName : VehicleConfigurationDiagnostics.packageNames()) {
                 LocalAdbBridge.ShellResult result = adb("pm path " + packageName);
-                if (result == null || !result.success()) {
-                    unavailable("package-apk:" + packageName,
-                            result == null ? "pm path failed" : shellDetail(result));
-                    continue;
-                }
-                if (result.truncated) unavailable("package-apk:" + packageName, "APK inventory truncated");
-                for (String line : result.output.split("\\r?\\n")) {
-                    String path = line.trim();
-                    if (path.startsWith("package:")) path = path.substring(8);
-                    if (!isSafeApkMetadataPath(path)) continue;
+                for (String path : apkMetadataPaths(packageName, result)) {
                     long size = remoteSize(path);
                     if (size >= 0L) excludeRemote(path, size, "APK not included");
                 }
+            }
+        }
+
+        List<String> inventoryPaths(String entry, LocalAdbBridge.ShellResult result,
+                boolean configs, int limit) throws InterruptedIOException {
+            checkCancelled();
+            List<String> paths = filteredPaths(result == null ? "" : result.output, configs, limit);
+            if (result == null || !result.success() || result.truncated) {
+                unavailable(entry, (paths.isEmpty() ? "unavailable inventory" : "partial inventory")
+                        + "; retainedPaths=" + paths.size() + "; " + shellDetail(result));
+            }
+            return paths;
+        }
+
+        List<String> apkMetadataPaths(String packageName, LocalAdbBridge.ShellResult result)
+                throws InterruptedIOException {
+            checkCancelled();
+            String entry = "package-apk:" + packageName;
+            List<String> paths = new ArrayList<>();
+            if (result == null) {
+                unavailable(entry, shellDetail(null));
+                return paths;
+            }
+            //An empty pm response alone is not proof of absence or a successful query.
+            if (!result.truncated && (result.exitCode == 0 || result.exitCode == 1)
+                    && result.output.trim().isEmpty() && result.error.trim().isEmpty()
+                    && packageSnapshotSaysNotInstalled(packageName)) {
+                unavailable(entry, "not_installed (package-manager snapshot); " + shellDetail(result));
+                return paths;
+            }
+            for (String line : result.output.split("\\r?\\n")) {
+                checkCancelled();
+                String path = line.trim();
+                if (path.isEmpty()) continue;
+                if (path.startsWith("package:")) path = path.substring(8);
+                else if (!path.startsWith("/") && !result.success()) continue;
+                if (!isSafeApkMetadataPath(path)) {
+                    unavailable(entry, "rejected APK metadata path: "
+                            + boundedPrivateDetail(path, MAX_SHELL_DETAIL_BYTES));
+                    continue;
+                }
+                paths.add(path);
+            }
+            if (!result.success() || result.truncated || paths.isEmpty()) {
+                unavailable(entry, (paths.isEmpty() ? "APK metadata lookup unavailable"
+                        : "partial APK metadata lookup") + "; " + shellDetail(result));
+            }
+            return paths;
+        }
+
+        private boolean packageSnapshotSaysNotInstalled(String packageName) {
+            for (ArchiveFile file : files) {
+                if (!"app/packages.json".equals(file.path)) continue;
+                try {
+                    JSONObject packageInfo = new JSONObject(new String(file.bytes, StandardCharsets.UTF_8))
+                            .optJSONObject(packageName);
+                    return packageInfo != null && Boolean.FALSE.equals(packageInfo.opt("installed"));
+                } catch (org.json.JSONException unavailableSnapshot) {
+                    return false;
+                }
+            }
+            return false;
+        }
+
+        String shellDetail(LocalAdbBridge.ShellResult result) throws InterruptedIOException {
+            checkCancelled();
+            if (result == null) return "skipped; exit=unknown; reason=command unavailable";
+            String reason = result.error;
+            if (reason.trim().isEmpty()) {
+                reason = "";
+                for (String line : result.output.split("\\r?\\n")) {
+                    checkCancelled();
+                    String candidate = line.trim();
+                    if (SHELL_DIAGNOSTIC_LINE.matcher(candidate).matches()) {
+                        reason = candidate;
+                        break;
+                    }
+                }
+                if (reason.isEmpty()) reason = result.output.trim().isEmpty()
+                        ? "no diagnostic output" : "unrecognized output omitted";
+            }
+            if (reason.contains("-----BEGIN")) reason = "[REDACTED PEM]";
+            String prefix = safe(result.status) + "; exit=" + result.exitCode
+                    + (result.truncated ? "; transportTruncated=true" : "") + "; reason=";
+            return prefix + boundedPrivateDetail(reason,
+                    MAX_SHELL_DETAIL_BYTES - prefix.getBytes(StandardCharsets.UTF_8).length);
+        }
+
+        private String boundedPrivateDetail(String detail, int limit) throws InterruptedIOException {
+            checkCancelled();
+            try {
+                byte[] bytes = safe(maskString(detail)).getBytes(StandardCharsets.UTF_8);
+                checkCancelled();
+                if (bytes.length <= limit) return new String(bytes, StandardCharsets.UTF_8);
+                String marker = "...[truncated]";
+                return new String(utf8Prefix(bytes, limit - marker.length()),
+                        StandardCharsets.UTF_8) + marker;
+            } catch (InterruptedIOException cancelled) {
+                throw cancelled;
+            } catch (IOException privacyFailure) {
+                checkCancelled();
+                return "diagnostic context omitted: privacy masking failed";
             }
         }
 
@@ -818,10 +904,6 @@ final class VehicleConfigurationZip {
             value.put("component", component.flattenToString());
             return value;
         }
-    }
-
-    private static String shellDetail(LocalAdbBridge.ShellResult result) {
-        return result.status + ": " + safe(result.error);
     }
 
     static JSONObject oemReadbackJson(LocalAdbBridge.ShellResult result) throws IOException {
@@ -1458,7 +1540,7 @@ final class VehicleConfigurationZip {
 
     static boolean isSafeApkMetadataPath(String path) {
         if (path == null || path.isEmpty() || path.length() > 512
-                || path.contains("..") || !path.matches("[A-Za-z0-9_./+@=:-]+")) {
+                || path.contains("..") || !path.matches("[A-Za-z0-9_./+@=:~-]+")) {
             return false;
         }
         return path.endsWith(".apk") && (path.startsWith("/data/app/")

@@ -159,8 +159,8 @@ public final class UserRuntimeSessionTest {
         String sender = source("NavHudLiveSender.java");
         assertTrue(body(main, "protected void onCreate(")
                 .contains("NavHudLiveSender.activateUserRuntime(this)"));
-        assertTrue(body(main, "protected void onResume()")
-                .contains("if (!exitRequested) NavHudLiveSender.get(this).resumeUserRuntime("));
+        assertTrue(body(body(main, "protected void onResume()"), "if (!exitRequested)")
+                .contains("NavHudLiveSender.get(this).resumeUserRuntime("));
         for (String signature : new String[]{"public void composeHudCheckToggleRunning()",
                 "public void composeSetTbtWithoutHudOutputEnabled(",
                 "private void setNavHudForPackage("}) {

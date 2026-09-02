@@ -181,15 +181,21 @@ public final class VehicleConfigurationReadbackEntryPoint {
         record.put("id", String.format(java.util.Locale.ROOT, "0x%08X", read.id));
         record.put("constant", read.constant);
         record.put("valueType", read.type.getName());
-        //JSON cannot encode NaN/infinity as numbers; keep their raw spelling rather than inventing zero.
-        record.put("rawValue", raw == null ? JSONObject.NULL
-                : Double.isNaN(raw.doubleValue()) || Double.isInfinite(raw.doubleValue()) ? raw.toString() : raw);
-        if (raw != null && !VehicleConfigurationReadback.interpretation(read, raw).isEmpty()) {
-            record.put("interpretation", VehicleConfigurationReadback.interpretation(read, raw));
-        }
+        putValue(record, read, raw);
         record.put("errorClass", error == null ? JSONObject.NULL : error.getClass().getName());
         record.put("error", detail.isEmpty() ? JSONObject.NULL : detail);
         return record;
+    }
+
+    static void putValue(JSONObject record, VehicleConfigurationReadback.Read read, Number raw) throws Exception {
+        //JSON cannot encode NaN/infinity as numbers; keep their raw spelling rather than inventing zero.
+        record.put("rawValue", raw == null ? JSONObject.NULL
+                : Double.isNaN(raw.doubleValue()) || Double.isInfinite(raw.doubleValue()) ? raw.toString() : raw);
+        String interpretation = VehicleConfigurationReadback.interpretation(read, raw);
+        if (!interpretation.isEmpty()) record.put("interpretation", interpretation);
+        String semantics = VehicleConfigurationReadback.semanticStatus(read, raw);
+        record.put("semanticStatus", semantics);
+        record.put("semanticReason", VehicleConfigurationReadback.semanticReason(semantics));
     }
 
     private void unsupported(String parameter, String api, String reason) throws Exception {
@@ -197,6 +203,8 @@ public final class VehicleConfigurationReadbackEntryPoint {
         record.put("id", api.startsWith("0x") ? api : JSONObject.NULL);
         record.put("rawValue", JSONObject.NULL);
         record.put("valueType", "unknown");
+        record.put("semanticStatus", "unknown");
+        record.put("semanticReason", VehicleConfigurationReadback.semanticReason("unknown"));
         record.put("error", reason);
         emit(record);
     }

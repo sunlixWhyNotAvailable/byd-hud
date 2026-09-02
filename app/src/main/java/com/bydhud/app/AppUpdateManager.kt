@@ -12,8 +12,19 @@ import android.net.Uri
 import android.os.Environment
 import android.os.SystemClock
 import androidx.core.content.FileProvider
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
@@ -28,9 +39,7 @@ object AppUpdateManager {
     private const val PREFS_NAME = "bydhud_update_prefs"
     private const val KEY_AUTO_CHECK = "auto_check_enabled"
     private const val KEY_BETA_CHANNEL = "beta_channel_enabled"
-    private const val KEY_LAST_CHECK_MS = "last_check_ms"
-    private const val KEY_AUTO_CHECK_READY_AT_MS = "auto_check_ready_at_ms"
-    private const val CHECK_THROTTLE_MS = 10 * 60 * 1000L
+    internal const val SESSION_REFRESH_AGE_MS = 60 * 60 * 1000L
     private const val DOWNLOAD_TIMEOUT_MS = 10 * 60 * 1000L
     private const val EXPECTED_PACKAGE_NAME = "com.bydhud.app"
     private const val RELEASE_API_HOST = "api.github.com"
@@ -105,118 +114,83 @@ object AppUpdateManager {
         data object UpToDate : CheckResult()
         //defines Available UI/state support so Compose code can keep rendering intent explicit.
         data class Available(val info: UpdateInfo) : CheckResult()
+        data class Error(val message: String) : CheckResult()
     }
+
+    data class Snapshot(
+        val result: CheckResult? = null,
+        val checking: Boolean = false,
+        val dialogRequested: Boolean = false
+    )
+
+    private val session = UpdateSession(
+        CoroutineScope(SupervisorJob() + Dispatchers.IO),
+        SystemClock::elapsedRealtime,
+        ::fetchUpdate
+    )
+
+    val snapshot: StateFlow<Snapshot> = session.snapshot
+
+    /** Called only by admitted runtime startup or a user-open entry, never by a heartbeat. */
+    @JvmStatic
+    fun onSessionEntry(context: Context) {
+        val app = context.applicationContext
+        session.enter(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
+    }
+
+    @JvmStatic
+    fun requestManualCheck(context: Context) {
+        session.requestManual(isBetaChannelEnabled(context.applicationContext))
+    }
+
+    @JvmStatic
+    fun dismissResult() = session.dismiss()
+
+    @JvmStatic
+    fun resetForShutdown() = session.reset()
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     fun isAutoCheckEnabled(context: Context): Boolean {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_AUTO_CHECK, true)
     }
 
     //keeps this Compose helper focused so UI state changes remain easy to audit.
     fun setAutoCheckEnabled(context: Context, enabled: Boolean) {
-        context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val app = context.applicationContext
+        app.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_AUTO_CHECK, enabled)
-            .also { editor ->
-                if (!enabled) {
-                    editor.remove(KEY_AUTO_CHECK_READY_AT_MS)
-                }
-            }
             .apply()
+        if (enabled) onSessionEntry(app) else session.disableAutomatic()
     }
 
     fun isBetaChannelEnabled(context: Context): Boolean {
-        return context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .getBoolean(KEY_BETA_CHANNEL, false)
     }
 
-    //changing channels invalidates only the throttle; the caller decides when to check again.
+    //Channel selection invalidates old work/results but never starts a request by itself.
     fun setBetaChannelEnabled(context: Context, enabled: Boolean) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val prefs = context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
         if (prefs.getBoolean(KEY_BETA_CHANNEL, false) == enabled) {
             return
         }
         prefs.edit()
             .putBoolean(KEY_BETA_CHANNEL, enabled)
-            .remove(KEY_LAST_CHECK_MS)
             .apply()
+        session.changeChannel(enabled)
     }
 
-    @JvmStatic
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    fun armAutoCheckTimer(context: Context, delayMs: Long) {
-        armAutoCheckTimer(context, delayMs, System.currentTimeMillis())
-    }
-
-    @JvmStatic
-    //starts or schedules work here so lifecycle recovery follows one controlled path.
-    fun armAutoCheckTimer(context: Context, delayMs: Long, nowMs: Long) {
-        if (!isAutoCheckEnabled(context)) {
-            return
-        }
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val readyAt = prefs.getLong(KEY_AUTO_CHECK_READY_AT_MS, 0L)
-        if (readyAt > 0L) {
-            return
-        }
-        prefs.edit()
-            .putLong(KEY_AUTO_CHECK_READY_AT_MS, nowMs + delayMs.coerceAtLeast(0L))
-            .apply()
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    fun autoCheckDelayRemainingMs(context: Context): Long? {
-        return autoCheckDelayRemainingMs(context, System.currentTimeMillis())
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    internal fun autoCheckDelayRemainingMs(context: Context, nowMs: Long): Long? {
-        if (!isAutoCheckEnabled(context)) {
-            return null
-        }
-        val readyAt = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .getLong(KEY_AUTO_CHECK_READY_AT_MS, 0L)
-        if (readyAt <= 0L) {
-            return null
-        }
-        return (readyAt - nowMs).coerceAtLeast(0L)
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    fun consumeAutoCheckReady(context: Context): Boolean {
-        return consumeAutoCheckReady(context, System.currentTimeMillis())
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    internal fun consumeAutoCheckReady(context: Context, nowMs: Long): Boolean {
-        if (!isAutoCheckEnabled(context)) {
-            return false
-        }
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val readyAt = prefs.getLong(KEY_AUTO_CHECK_READY_AT_MS, 0L)
-        if (readyAt <= 0L || nowMs < readyAt) {
-            return false
-        }
-        prefs.edit().remove(KEY_AUTO_CHECK_READY_AT_MS).apply()
-        return true
-    }
-
-    //keeps this Compose helper focused so UI state changes remain easy to audit.
-    suspend fun checkForUpdate(context: Context, forceCheck: Boolean): CheckResult = withContext(Dispatchers.IO) {
-        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-        val now = System.currentTimeMillis()
-        val lastCheck = prefs.getLong(KEY_LAST_CHECK_MS, 0L)
-        if (!forceCheck && now - lastCheck < CHECK_THROTTLE_MS) {
-            return@withContext CheckResult.UpToDate
-        }
-        prefs.edit().putLong(KEY_LAST_CHECK_MS, now).apply()
-
-        val release = if (isBetaChannelEnabled(context)) {
+    //No Context or UI is retained by the process-owned request.
+    private suspend fun fetchUpdate(betaChannel: Boolean): CheckResult = withContext(Dispatchers.IO) {
+        currentCoroutineContext().ensureActive()
+        val release = if (betaChannel) {
             selectLatestRelease(fetchReleaseListJson())
         } else {
             selectStableRelease(fetchLatestReleaseJson())
         }
+        currentCoroutineContext().ensureActive()
         val remoteVersion = parseGitTag(release.optString("tag_name", "")).androidName()
         if (!isNewerVersion(remoteVersion, BuildConfig.VERSION_NAME)) {
             return@withContext CheckResult.UpToDate
@@ -228,6 +202,151 @@ object AppUpdateManager {
                 releaseNotes = release.optString("body", "")
             )
         )
+    }
+
+    /** Small process-session controller; injected clock/delay/fetch make its lifecycle deterministic. */
+    internal class UpdateSession(
+        private val scope: CoroutineScope,
+        private val elapsedMs: () -> Long,
+        private val fetch: suspend (Boolean) -> CheckResult,
+        private val waitBeforeCheck: suspend (Long) -> Unit = { delay(it) }
+    ) {
+        private class Request(val generation: Long, var manual: Boolean) {
+            var dismissed = false
+            var job: Job? = null
+        }
+
+        private val lock = Any()
+        private val state = MutableStateFlow(Snapshot())
+        val snapshot: StateFlow<Snapshot> = state.asStateFlow()
+        private var channel: Boolean? = null
+        private var generation = 0L
+        private var scheduled: Job? = null
+        private var active: Request? = null
+        private var lastCompletedAt: Long? = null
+
+        fun enter(automaticEnabled: Boolean, betaChannel: Boolean) = synchronized(lock) {
+            changeChannelLocked(betaChannel)
+            if (!automaticEnabled) {
+                disableAutomaticLocked()
+                return@synchronized
+            }
+            if (scheduled != null || active != null || state.value.dialogRequested) return@synchronized
+            val completed = lastCompletedAt
+            if (completed != null && elapsedMs() - completed < SESSION_REFRESH_AGE_MS) return@synchronized
+            val ticket = ++generation
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                waitBeforeCheck(AUTO_CHECK_DELAY_MS)
+                currentCoroutineContext().ensureActive()
+                synchronized(lock) {
+                    if (generation == ticket) {
+                        scheduled = null
+                        startRequestLocked(manual = false)
+                    }
+                }
+            }
+            scheduled = job
+            job.start()
+        }
+
+        fun requestManual(betaChannel: Boolean) = synchronized(lock) {
+            changeChannelLocked(betaChannel)
+            cancelScheduledLocked()
+            val current = active
+            if (current != null) {
+                current.manual = true
+                current.dismissed = false
+                state.value = state.value.copy(dialogRequested = true)
+            } else {
+                startRequestLocked(manual = true)
+            }
+        }
+
+        fun dismiss() = synchronized(lock) {
+            active?.dismissed = true
+            state.value = state.value.copy(dialogRequested = false)
+        }
+
+        fun disableAutomatic() = synchronized(lock) { disableAutomaticLocked() }
+
+        fun changeChannel(betaChannel: Boolean) = synchronized(lock) { changeChannelLocked(betaChannel) }
+
+        fun reset() = synchronized(lock) {
+            clearLocked()
+            channel = null
+        }
+
+        private fun changeChannelLocked(betaChannel: Boolean) {
+            if (channel == betaChannel) return
+            clearLocked()
+            channel = betaChannel
+        }
+
+        private fun clearLocked() {
+            ++generation
+            scheduled?.cancel()
+            scheduled = null
+            val previous = active
+            active = null
+            previous?.job?.cancel()
+            lastCompletedAt = null
+            state.value = Snapshot()
+        }
+
+        private fun cancelScheduledLocked() {
+            if (scheduled == null) return
+            ++generation
+            scheduled?.cancel()
+            scheduled = null
+        }
+
+        private fun disableAutomaticLocked() {
+            cancelScheduledLocked()
+            val current = active
+            if (current != null && !current.manual) {
+                ++generation
+                active = null
+                current.job?.cancel()
+                state.value = state.value.copy(checking = false)
+            }
+        }
+
+        private fun startRequestLocked(manual: Boolean) {
+            val request = Request(++generation, manual)
+            val requestChannel = checkNotNull(channel)
+            active = request
+            state.value = state.value.copy(checking = true, dialogRequested = manual)
+            val job = scope.launch(start = CoroutineStart.LAZY) {
+                try {
+                    val result = try {
+                        fetch(requestChannel)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        CheckResult.Error(error.message ?: "Update check failed")
+                    }
+                    currentCoroutineContext().ensureActive()
+                    synchronized(lock) {
+                        if (active === request && generation == request.generation) {
+                            active = null
+                            lastCompletedAt = elapsedMs()
+                            state.value = Snapshot(result, checking = false,
+                                dialogRequested = !request.dismissed && (request.manual || result is CheckResult.Available))
+                        }
+                    }
+                } catch (cancelled: CancellationException) {
+                    synchronized(lock) {
+                        if (active === request) {
+                            active = null
+                            state.value = state.value.copy(checking = false, dialogRequested = false)
+                        }
+                    }
+                    throw cancelled
+                }
+            }
+            request.job = job
+            job.start()
+        }
     }
 
     //keeps update I/O here so network, file, and installer failures are handled in one path.

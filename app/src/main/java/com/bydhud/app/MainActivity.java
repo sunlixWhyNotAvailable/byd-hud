@@ -309,7 +309,10 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
-        if (!exitRequested) NavHudLiveSender.get(this).resumeUserRuntime("activity-resume");
+        if (!exitRequested) {
+            NavHudLiveSender.get(this).resumeUserRuntime("activity-resume");
+            AppUpdateManager.onSessionEntry(this);
+        }
         activityResumed = true;
         RESUMED_ACTIVITY.set(this);
         DashboardWidgetController.refresh(this);
@@ -356,7 +359,6 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("onStop after explicit exit");
             return;
         }
-        AppUpdateManager.armAutoCheckTimer(this, AppUpdateManager.AUTO_CHECK_DELAY_MS);
         appendStatus("onStop background keepalive sending=" + sending);
     }
 
@@ -3798,6 +3800,7 @@ public final class MainActivity extends ComponentActivity {
         RuntimeUiSession.PROCESS.clear();
         UserRuntimeSession.PROCESS.shutdown();
         HudPrefs.setUserShutdownActive(this, true);
+        AppUpdateManager.resetForShutdown();
         NavAppDisplayController.get(this).cancelWidgetModeForShutdown();
         DashboardWidgetController.shutdown(this);
         AppEventLogger.event(this, "shutdown requested reason=" + safeReason);

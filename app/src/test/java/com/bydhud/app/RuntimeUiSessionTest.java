@@ -105,7 +105,7 @@ public final class RuntimeUiSessionTest {
         assertTrue(runtime.contains("snapshot.appScanCacheAvailable || !snapshot.appScanInProgress"));
         assertTrue(runtime.contains("snapshot.storageCacheAvailable || !snapshot.storageCalculating"));
         assertFalse(runtime.contains("RuntimeUiSession.PROCESS"));
-        String lifecycle = between(runtime, "DisposableEffect(activity)", "LaunchedEffect(\n");
+        String lifecycle = between(runtime, "DisposableEffect(activity)", "LaunchedEffect(");
         assertTrue(lifecycle.contains("Lifecycle.Event.ON_PAUSE"));
         assertTrue(lifecycle.contains("Lifecycle.Event.ON_STOP"));
         assertTrue(lifecycle.contains("Lifecycle.Event.ON_DESTROY"));

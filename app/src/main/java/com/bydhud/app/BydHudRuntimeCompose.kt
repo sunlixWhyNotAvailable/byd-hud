@@ -62,6 +62,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
@@ -681,9 +682,19 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var betaChannelEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isBetaChannelEnabled(activity)) }
-    var showUpdateDialog by rememberSaveable { mutableStateOf(false) }
-    var pendingUpdateDialog by remember { mutableStateOf(false) }
-    var updateState by remember { mutableStateOf<UpdateCheckState>(UpdateCheckState.Checking) }
+    val updateSnapshot by AppUpdateManager.snapshot.collectAsState()
+    var showUpdateDialog by remember { mutableStateOf(false) }
+    var updateDownloadState by remember(updateSnapshot) { mutableStateOf<UpdateCheckState?>(null) }
+    val updateState = updateDownloadState ?: if (updateSnapshot.checking) {
+        UpdateCheckState.Checking
+    } else {
+        when (val result = updateSnapshot.result) {
+            AppUpdateManager.CheckResult.UpToDate -> UpdateCheckState.Latest
+            is AppUpdateManager.CheckResult.Available -> UpdateCheckState.Available(result.info)
+            is AppUpdateManager.CheckResult.Error -> UpdateCheckState.Error(result.message)
+            null -> UpdateCheckState.Checking
+        }
+    }
     var pendingPatchProfile by rememberSaveable { mutableStateOf("") }
     var pendingPatchDestructive by rememberSaveable { mutableStateOf(false) }
     var pendingPatchFileConfirmProfile by rememberSaveable { mutableStateOf("") }
@@ -694,10 +705,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var navigatorAssetActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
-    val latestAutoUpdateCheckEnabled by rememberUpdatedState(autoUpdateCheckEnabled)
-    val latestAppInForeground by rememberUpdatedState(appInForeground)
-    val latestShowSetupDialog by rememberUpdatedState(showSetupDialog)
-    val latestShowUpdateDialog by rememberUpdatedState(showUpdateDialog)
     val latestSelectedTab by rememberUpdatedState(selectedTab)
     val palette = remember(snapshot.darkTheme) {
         if (snapshot.darkTheme) darkPalette() else lightPalette()
@@ -840,40 +847,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         }
     }
 
-    //keeps this HUD step isolated so cluster payload behavior stays predictable.
-    fun beginUpdateCheck(force: Boolean, showLatestResult: Boolean) {
-        //guard update checks behind explicit UI state so repeated taps cannot leave stale results visible.
-        updateState = UpdateCheckState.Checking
-        if (showLatestResult) {
-            if (activity.composeTryStartBlockingUiFlow("update")) {
-                showUpdateDialog = true
-                pendingUpdateDialog = false
-            } else {
-                pendingUpdateDialog = true
-            }
-        }
-        updateScope.launch {
-            val nextState = try {
-                when (val result = AppUpdateManager.checkForUpdate(activity, forceCheck = force)) {
-                    AppUpdateManager.CheckResult.UpToDate -> UpdateCheckState.Latest
-                    is AppUpdateManager.CheckResult.Available -> UpdateCheckState.Available(result.info)
-                }
-            } catch (e: Exception) {
-                UpdateCheckState.Error(e.message ?: "Update check failed")
-            }
-            if (!showLatestResult && nextState !is UpdateCheckState.Available) {
-                return@launch
-            }
-            updateState = nextState
-            if (activity.composeTryStartBlockingUiFlow("update")) {
-                showUpdateDialog = true
-                pendingUpdateDialog = false
-            } else {
-                pendingUpdateDialog = true
-            }
-        }
-    }
-
     //runs storage deletion as folder steps so the UI can stay responsive without a pre-scan.
     fun beginStorageDelete(days: List<String>) {
         if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
@@ -970,15 +943,15 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         activity.composeReportMainUiState(blockingUiFlow)
     }
 
-    LaunchedEffect(pendingUpdateDialog) {
-        while (pendingUpdateDialog) {
-            delay(250L)
-            if (latestAppInForeground
-                && activity.composeTryStartBlockingUiFlow("update")) {
-                pendingUpdateDialog = false
-                showUpdateDialog = true
-            }
+    LaunchedEffect(activity, updateSnapshot.dialogRequested, appInForeground, showSetupDialog) {
+        if (!updateSnapshot.dialogRequested || !appInForeground || showSetupDialog) {
+            showUpdateDialog = false
+            return@LaunchedEffect
         }
+        while (!activity.composeTryStartBlockingUiFlow("update")) {
+            delay(250L)
+        }
+        showUpdateDialog = true
     }
 
     LaunchedEffect(uiSession) {
@@ -1044,34 +1017,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             latestCaptureUiSession()
             activity.lifecycle.removeObserver(observer)
             activity.composeSetSnapshotInvalidationListener(null)
-        }
-    }
-
-    LaunchedEffect(
-        latestAutoUpdateCheckEnabled,
-        latestAppInForeground,
-        latestShowSetupDialog,
-        latestShowUpdateDialog
-    ) {
-        //guard auto-check behind a background-armed timer so foreground opening can consume pending work immediately.
-        if (!latestAutoUpdateCheckEnabled ||
-            !latestAppInForeground ||
-            latestShowSetupDialog ||
-            latestShowUpdateDialog
-        ) {
-            return@LaunchedEffect
-        }
-        val remainingMs = AppUpdateManager.autoCheckDelayRemainingMs(activity) ?: return@LaunchedEffect
-        if (remainingMs > 0L) {
-            delay(remainingMs)
-        }
-        if (latestAutoUpdateCheckEnabled &&
-            latestAppInForeground &&
-            !latestShowSetupDialog &&
-            !latestShowUpdateDialog &&
-            AppUpdateManager.consumeAutoCheckReady(activity)
-        ) {
-            beginUpdateCheck(force = false, showLatestResult = false)
         }
     }
 
@@ -1307,7 +1252,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             betaChannelEnabled = enabled
                             AppUpdateManager.setBetaChannelEnabled(activity, enabled)
                         },
-                        onManualUpdateCheck = { beginUpdateCheck(force = true, showLatestResult = true) },
+                        onManualUpdateCheck = { AppUpdateManager.requestManualCheck(activity) },
                         onDisableBgApps = {
                             if (activity.composeTryStartBlockingUiFlow("setup")) {
                                 showSetupDialog = true
@@ -1517,19 +1462,22 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 onUpdate = {
                     val available = updateState
                     if (available is UpdateCheckState.Available) {
-                        updateState = UpdateCheckState.Downloading(available.info, "0%")
+                        updateDownloadState = UpdateCheckState.Downloading(available.info, "0%")
                         updateScope.launch {
                             try {
                                 AppUpdateManager.downloadAndInstall(activity, available.info) { progress ->
-                                    updateState = UpdateCheckState.Downloading(available.info, progress)
+                                    updateDownloadState = UpdateCheckState.Downloading(available.info, progress)
                                 }
                             } catch (e: Exception) {
-                                updateState = UpdateCheckState.Error(e.message ?: "Download failed")
+                                updateDownloadState = UpdateCheckState.Error(e.message ?: "Download failed")
                             }
                         }
                     }
                 },
-                onClose = { showUpdateDialog = false }
+                onClose = {
+                    AppUpdateManager.dismissResult()
+                    showUpdateDialog = false
+                }
             )
         }
 
