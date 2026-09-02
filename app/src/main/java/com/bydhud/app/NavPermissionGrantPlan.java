@@ -91,9 +91,9 @@ final class NavPermissionGrantPlan {
                 return invalidPlan("Installed navigation service component could not be resolved");
             }
             String canonicalNotificationListeners = canonicalizeServiceList(
-                    context, currentNotificationListeners);
+                    currentNotificationListeners);
             String canonicalAccessibilityServices = canonicalizeServiceList(
-                    context, currentAccessibilityServices);
+                    currentAccessibilityServices);
             return buildPlan(
                     normalizedPackage,
                     notificationService,
@@ -232,28 +232,43 @@ final class NavPermissionGrantPlan {
         }
     }
 
-    private static String canonicalizeServiceList(Context context, String currentValue) {
-        if (context == null) {
-            throw new IllegalArgumentException("Missing context for service validation");
-        }
+    //Preserve saved entries even when they are stale or not visible to PackageManager.
+    private static String canonicalizeServiceList(String currentValue) {
         List<String> canonical = new ArrayList<>();
         for (String value : splitSettingList(currentValue)) {
             ComponentName parsed = ComponentName.unflattenFromString(value);
             if (parsed == null) {
                 throw new IllegalArgumentException("Invalid enabled service component");
             }
-            try {
-                ServiceInfo info = context.getPackageManager().getServiceInfo(parsed, 0);
-                if (info == null || info.packageName == null || info.name == null
-                        || info.packageName.trim().isEmpty() || info.name.trim().isEmpty()) {
-                    throw new IllegalArgumentException("Invalid enabled service component");
-                }
-                canonical.add(new ComponentName(info.packageName, info.name).flattenToString());
-            } catch (PackageManager.NameNotFoundException error) {
-                throw new IllegalArgumentException("Unresolved enabled service component");
+            String packageName = parsed.getPackageName();
+            String normalized = normalizeComponentName(parsed.flattenToString());
+            if (!normalizePackageName(packageName).equals(packageName)
+                    || !isValidServiceClassName(normalized.substring(packageName.length() + 1))) {
+                throw new IllegalArgumentException("Invalid enabled service component");
+            }
+            if (!canonical.contains(normalized)) {
+                canonical.add(normalized);
             }
         }
         return joinSettingList(canonical, true);
+    }
+
+    private static boolean isValidServiceClassName(String className) {
+        boolean segmentStart = true;
+        for (int offset = 0; offset < className.length();) {
+            int codePoint = className.codePointAt(offset);
+            offset += Character.charCount(codePoint);
+            if (codePoint == '.' && !segmentStart) {
+                segmentStart = true;
+            } else if (!Character.isISOControl(codePoint) && (segmentStart
+                    ? Character.isJavaIdentifierStart(codePoint)
+                    : Character.isJavaIdentifierPart(codePoint))) {
+                segmentStart = false;
+            } else {
+                return false;
+            }
+        }
+        return !segmentStart;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
