@@ -49,7 +49,7 @@ public final class StorageAndLogsUiSourceContractTest {
         assertEquals(1, occurrences(storage,
                 "if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat"));
         assertTrue(runtimeState.contains(
-                "val storageDayScrollState = remember { LazyListState() }"));
+                "val storageDayScrollState = viewportStates.getValue(\"storage-days\").listState"));
         assertFalse(runtimeState.contains("storageDayScrollState = rememberSaveable"));
         assertTrue(runtimeStorage.contains("dayScrollState = storageDayScrollState"));
         assertTrue(storage.contains("scrollState: LazyListState"));
@@ -123,7 +123,17 @@ public final class StorageAndLogsUiSourceContractTest {
         String dayListSection = logsSection.substring(dayList, footer);
         assertTrue(dayListSection.contains(".heightIn(max = 260.dp)"));
         assertTrue(dayListSection.contains("contentType = { \"storage-day\" }"));
-        assertTrue(dayListSection.contains("closeSection = false"));
+        assertTrue(dayListSection.contains("key = { index -> \"storage-day-${days[index].name}\" }"));
+        assertTrue(dayListSection.contains(".padding(start = 14.dp, end = 14.dp, top = 10.dp)"));
+        assertTrue(dayListSection.contains(
+                ".appSectionSegmentFrame(palette, palette.panel, top = false, bottom = false)"));
+        assertFalse(dayListSection.contains("AppSectionRow("));
+        assertFalse(dayListSection.contains("segmented ="));
+        String dayRow = between(source, "private fun StorageDayRow(", "private fun storageLocationLabel(");
+        assertTrue(dayRow.contains(".clip(RoundedCornerShape(8.dp))"));
+        assertTrue(dayRow.contains(
+                ".border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))"));
+        assertFalse(dayRow.contains("segmented"));
         assertTrue(dayListSection.contains("selected = selectedDays.contains(day.name)"));
         assertTrue(dayListSection.contains("enabled = !storageSortBusy"));
         assertTrue(dayListSection.contains("onToggle = { onToggleDay(day.name) }"));
@@ -173,6 +183,29 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(source.contains(
                 "activity.composeTryStartBlockingUiFlow(\"configuration-share\")"));
         assertTrue(source.contains("configurationShareVisible = true"));
+    }
+
+    @Test
+    public void configurationExportCopyDisclosesNewReadOnlyGroupsWithoutChangingDestinations() throws IOException {
+        String source = source();
+        assertTrue(source.contains("shareConfiguration = \"Export configuration\""));
+        assertTrue(source.contains("shareConfiguration = \"Експортувати конфігурацію\""));
+        for (String copy : new String[]{
+                "available live HUD/cluster values", "permissions, components, runtime and BYD HUD options",
+                "device/firmware, package/process, display, audio and system metadata",
+                "Network addresses are masked", "Nothing is uploaded automatically",
+                "доступні поточні значення HUD/приборки", "дозволи, компоненти, стан виконання й налаштування BYD HUD",
+                "Мережеві адреси маскуються", "Автоматичного надсилання немає"}) {
+            assertTrue(copy, source.contains(copy));
+        }
+        String modal = between(source, "private fun ConfigurationShareDestinationOverlay(",
+                "private fun StorageDeleteConfirmOverlay(");
+        assertTrue(modal.contains("copy.shareLogsSentryNotice"));
+        assertTrue(modal.contains("onClick = onSentry"));
+        assertTrue(modal.contains("onClick = onAnotherApp"));
+        assertTrue(modal.contains("onClick = onCancel"));
+        assertTrue(source.contains("shareSelected = \"Share logs\""));
+        assertTrue(source.contains("shareSelected = \"Поділитись логами\""));
     }
 
     private static String source() throws IOException {

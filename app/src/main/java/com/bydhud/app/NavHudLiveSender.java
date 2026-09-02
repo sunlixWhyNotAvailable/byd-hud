@@ -7,13 +7,18 @@ import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+
+import org.json.JSONObject;
 
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.UnaryOperator;
 
 //defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
@@ -40,7 +45,7 @@ final class NavHudLiveSender {
     static final int SURFACE_HANDOFF_READY = 4;
     static final int SURFACE_HANDOFF_FAILED = 5;
 
-    private static NavHudLiveSender instance;
+    private static volatile NavHudLiveSender instance;
     private static boolean wazeBridgeMetadataSeen;
     private static long acceptedWazeBridgeGeneration;
     private static int acceptedWazeBridgeCapabilities;
@@ -51,6 +56,73 @@ final class NavHudLiveSender {
             instance = new NavHudLiveSender(context.getApplicationContext());
         }
         return instance;
+    }
+
+    /** Captures independent cached channels without starting or querying either producer. */
+    static JSONObject configurationSnapshot() throws Exception {
+        NavHudLiveSender current = instance;
+        if (current == null) {
+            return new JSONObject().put("status", "unavailable")
+                    .put("reason", "not_initialized");
+        }
+        if (Looper.myLooper() == current.handler.getLooper()) {
+            return current.configurationSnapshotOnOwner();
+        }
+        FutureTask<JSONObject> capture = new FutureTask<>(current::configurationSnapshotOnOwner);
+        if (!current.handler.post(capture)) {
+            return new JSONObject().put("status", "unavailable")
+                    .put("reason", "owner_thread_stopped");
+        }
+        try {
+            return capture.get(1_500L, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException timeout) {
+            return new JSONObject().put("status", "timeout").put("reason", "owner_thread_busy");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        } finally {
+            current.handler.removeCallbacks(capture);
+            capture.cancel(false);
+        }
+    }
+
+    private JSONObject configurationSnapshotOnOwner() throws Exception {
+        JSONObject waze = new JSONObject().put("handshakeAvailable", wazeDirectHandshakeAvailable)
+                .put("navigating", wazeDirectNavigating).put("frameReceived", wazeDirectFrameReceived)
+                .put("routeEnded", wazeDirectRouteEnded).put("terminalFence", wazeDirectRouteTerminalFence)
+                .put("routeGeneration", wazeRouteGeneration)
+                .put("terminalBridgeGeneration", wazeDirectTerminalBridgeGeneration)
+                .put("clusterFramePresent", latestWazeClusterFrame != null)
+                .put("clusterFrameSessionGeneration", latestWazeClusterFrameSessionGeneration)
+                .put("surfaceFramePresent", latestWazeSurfaceFrame != null)
+                .put("surfaceFrameSessionGeneration", latestWazeSurfaceFrameSessionGeneration)
+                .put("surfaceActive", wazeSurfaceActive).put("surfaceVisible", wazeSurfaceVisible)
+                .put("surfaceLaunchPending", wazeSurfaceLaunchPending)
+                .put("surfaceEnabledForRoute", wazeSurfaceEnabledForRoute)
+                .put("surfaceDismissedForRoute", wazeSurfaceDismissedForRoute)
+                .put("frameAgeMs", new JSONObject().put("status", "unsupported")
+                        .put("reason", "not_recorded"));
+        JSONObject gmaps = new JSONObject().put("handshakeAvailable", gmapsDirectHandshakeAvailable)
+                .put("state", gmapsDirectState.name()).put("stateSessionGeneration", gmapsDirectStateSessionGeneration)
+                .put("producerEpoch", gmapsDirectStateProducerEpoch)
+                .put("routeGeneration", gmapsDirectStateRouteGeneration)
+                .put("frameReceived", gmapsDirectFrameReceived).put("framePresent", latestGMapsDirectFrame != null)
+                .put("frameSessionGeneration", latestGMapsDirectFrameSessionGeneration)
+                .put("timedOut", gmapsDirectTimedOut).put("routeEnded", gmapsDirectRouteEnded)
+                .put("frameAgeMs", new JSONObject().put("status", "unsupported")
+                        .put("reason", "not_recorded"));
+        return new JSONObject().put("status", "ok").put("source", "process_memory")
+                .put("capturedElapsedMs", SystemClock.elapsedRealtime())
+                .put("coherence", "existing_owner_thread").put("active", active)
+                .put("activePackage", activePackage).put("stopInProgress", stopInProgress)
+                .put("runtimeReinitInProgress", runtimeReinitInProgress)
+                .put("sourceSwitchInProgress", sourceSwitchInProgress)
+                .put("pendingSourceSwitchPackage", pendingSourceSwitchPackage)
+                .put("lifecycleGeneration", tbtLifecycleToken).put("sourceSwitchGeneration", sourceSwitchToken)
+                .put("manualTbtActive", manualTbtActive).put("manualTbtGeneration", manualTbtGeneration)
+                .put("manualHudCheckRunning", hudCheckState.running)
+                .put("wazeObserver", tbtWazeObserver).put("gmapsObserver", tbtGMapsObserver)
+                .put("waze", waze).put("gmaps", gmaps);
     }
 
     // Only UI/user entrypoints arm this bit; get(), callbacks and saved selections do not.

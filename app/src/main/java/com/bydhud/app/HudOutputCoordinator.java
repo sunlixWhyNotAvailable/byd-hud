@@ -3,10 +3,16 @@ package com.bydhud.app;
 import android.content.Context;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.RemoteException;
 import android.os.SystemClock;
 import android.util.Log;
 
+import org.json.JSONObject;
+
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -40,13 +46,68 @@ final class HudOutputCoordinator {
     private static final long[] PROTOCOL_RETRY_DELAYS_MS = {1_000L, 2_000L, 5_000L};
     private static final long STATS_INTERVAL_MS = 30_000L;
 
-    private static HudOutputCoordinator instance;
+    private static volatile HudOutputCoordinator instance;
 
     static synchronized HudOutputCoordinator get(Context context) {
         if (instance == null) {
             instance = new HudOutputCoordinator(context.getApplicationContext());
         }
         return instance;
+    }
+
+    /** Reads the existing owner only; never initializes or recovers a transport. */
+    static JSONObject configurationSnapshot() throws Exception {
+        HudOutputCoordinator current = instance;
+        if (current == null) {
+            return new JSONObject().put("status", "unavailable")
+                    .put("reason", "not_initialized");
+        }
+        if (Looper.myLooper() == current.worker.getLooper()) {
+            return current.configurationSnapshotOnWorker();
+        }
+        FutureTask<JSONObject> capture = new FutureTask<>(current::configurationSnapshotOnWorker);
+        if (!current.worker.post(capture)) {
+            return new JSONObject().put("status", "unavailable")
+                    .put("reason", "owner_thread_stopped");
+        }
+        try {
+            return capture.get(1_500L, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException timeout) {
+            return new JSONObject().put("status", "timeout").put("reason", "owner_thread_busy");
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            throw interrupted;
+        } finally {
+            current.worker.removeCallbacks(capture);
+            capture.cancel(false);
+        }
+    }
+
+    private JSONObject configurationSnapshotOnWorker() throws Exception {
+        return new JSONObject().put("status", "ok").put("source", "process_memory")
+                .put("capturedElapsedMs", SystemClock.elapsedRealtime())
+                .put("coherence", "existing_owner_thread")
+                .put("activeOwner", activeSource.name()).put("pendingOwner", pendingSource.name())
+                .put("manualEnabled", manualEnabled).put("directEnabled", directEnabled)
+                .put("directOwnerPackage", directOwnerPackage)
+                .put("directOwnerSessionGeneration", directOwnerSessionGeneration)
+                .put("directFramePresent", directFrame != null)
+                .put("boundReferencePresent", client.isBound()).put("bindingPresent", client.hasBinding())
+                .put("serviceStarted", serviceStarted).put("generation", generation)
+                .put("bindGeneration", bindGeneration).put("bindCheckScheduled", bindCheckScheduled)
+                .put("sendScheduled", sendScheduled).put("protocolRetryScheduled", protocolRetryScheduled)
+                .put("protocolFailureCount", protocolFailureCount)
+                .put("completedNonClearSendCount", sendCount).put("sendFailureCount", sendFailures)
+                .put("sendCounterMeaning", "non_clear_calls_returned; failures_also_include_bind_protocol_and_exceptions")
+                .put("sendSuccessCount", new JSONObject().put("status", "unsupported")
+                        .put("reason", "not_recorded"))
+                .put("lastTransportOwner", lastTransportSource.name())
+                .put("lastTransportChannel", lastTransportChannel)
+                .put("deliverySummary", HudDeliveryStatus.uiStatus())
+                .put("lastTransportResult", new JSONObject().put("status", "unsupported")
+                        .put("reason", "not_recorded"))
+                .put("finalClearInProgress", finalClearInProgress)
+                .put("physicalRenderAcknowledgement", "not_available");
     }
 
     private final Context context;

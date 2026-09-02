@@ -8,6 +8,7 @@ import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.BooleanSupplier;
 
 //Read-only reflection catalog for the static BYD feature identifiers exposed by the car framework.
 final class FidCatalog {
@@ -23,7 +24,15 @@ final class FidCatalog {
         return collect(ROOTS);
     }
 
+    static Result collectBounded(BooleanSupplier cancelled) {
+        return collect(ROOTS, cancelled);
+    }
+
     static Result collect(String[] classNames) {
+        return collect(classNames, () -> false);
+    }
+
+    static Result collect(String[] classNames, BooleanSupplier cancelled) {
         List<Entry> entries = new ArrayList<>();
         List<String> errors = new ArrayList<>();
         Set<String> visited = new HashSet<>();
@@ -32,15 +41,17 @@ final class FidCatalog {
             classNames = new String[0];
         }
         for (String className : classNames) {
+            if (cancelled.getAsBoolean()) break;
             try {
                 Class<?> root = Class.forName(className, false, FidCatalog.class.getClassLoader());
                 loadedRoots++;
-                collectClass(root, visited, entries, errors);
+                collectClass(root, visited, entries, errors, cancelled);
             } catch (Throwable error) {
                 errors.add("class_load\t" + clean(className) + "\t"
                         + error.getClass().getName());
             }
         }
+        if (cancelled.getAsBoolean()) errors.add("collection_cancelled\tpartial catalog");
         entries.sort(Comparator.comparing(Entry::key));
         errors.sort(String::compareTo);
         return new Result(entries, errors, loadedRoots);
@@ -50,12 +61,14 @@ final class FidCatalog {
             Class<?> type,
             Set<String> visited,
             List<Entry> entries,
-            List<String> errors) {
-        if (!visited.add(type.getName())) {
+            List<String> errors,
+            BooleanSupplier cancelled) {
+        if (cancelled.getAsBoolean() || !visited.add(type.getName())) {
             return;
         }
         try {
             for (Field field : type.getDeclaredFields()) {
+                if (cancelled.getAsBoolean()) return;
                 Class<?> fieldType = field.getType();
                 int modifiers = field.getModifiers();
                 if (!Modifier.isStatic(modifiers) || !Modifier.isFinal(modifiers)
@@ -85,7 +98,8 @@ final class FidCatalog {
             Class<?>[] nested = type.getDeclaredClasses();
             Arrays.sort(nested, Comparator.comparing(Class::getName));
             for (Class<?> child : nested) {
-                collectClass(child, visited, entries, errors);
+                if (cancelled.getAsBoolean()) return;
+                collectClass(child, visited, entries, errors, cancelled);
             }
         } catch (Throwable error) {
             errors.add("nested_classes\t" + clean(type.getName()) + "\t"

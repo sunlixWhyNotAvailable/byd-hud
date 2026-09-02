@@ -4,6 +4,8 @@ package com.bydhud.app;
 
 import android.content.Context;
 
+import org.json.JSONObject;
+
 //defines the NavRuntimePermissionRepair module boundary so related behavior stays readable inside one unit.
 final class NavRuntimePermissionRepair {
     static final String RESULT_ALREADY_RUNNING = "Permission repair already running";
@@ -21,6 +23,21 @@ final class NavRuntimePermissionRepair {
     static boolean isRunning() {
         synchronized (LOCK) {
             return running;
+        }
+    }
+
+    /** Observes the repair state only; does not inspect permissions, authorize, or request repair. */
+    static JSONObject configurationSnapshot() throws Exception {
+        synchronized (LOCK) {
+            long now = android.os.SystemClock.elapsedRealtime();
+            return new JSONObject().put("status", "ok").put("source", "process_memory")
+                    .put("capturedElapsedMs", now).put("coherence", "existing_state_lock")
+                    .put("running", running)
+                    .put("lastStartedElapsedMs", lastStartedMs > 0L ? lastStartedMs : JSONObject.NULL)
+                    .put("lastStartedAgeMs", lastStartedMs > 0L
+                            ? Math.max(0L, now - lastStartedMs) : JSONObject.NULL)
+                    .put("lastResult", new JSONObject().put("status", "unsupported")
+                            .put("reason", "not_recorded"));
         }
     }
 

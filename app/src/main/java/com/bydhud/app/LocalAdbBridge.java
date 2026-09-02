@@ -32,7 +32,15 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
+
+import org.json.JSONObject;
 
 //contains the LocalAdbBridge transport boundary so external communication is isolated from app logic.
 final class LocalAdbBridge {
@@ -97,6 +105,7 @@ final class LocalAdbBridge {
     private static volatile String verifiedFingerprintThisProcess = "";
     private static volatile KeyPair cachedKeyPair;
     private static volatile String cachedKeyFingerprint = "";
+    private static volatile long authorizationObservedAtMs;
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private LocalAdbBridge() {
@@ -151,6 +160,231 @@ final class LocalAdbBridge {
 
     static boolean isPermissionGrantInProgress() {
         return permissionGrantInProgress;
+    }
+
+    //This snapshot never loads/generates a key or refreshes the runtime authorization cache.
+    static JSONObject configurationExportAdbState(Context context) {
+        JSONObject state = new JSONObject();
+        try {
+            File directory = new File(context.getFilesDir(), KEY_DIR);
+            state.put("privateKeyFilePresent", new File(directory, PRIVATE_KEY_FILE).isFile());
+            state.put("publicKeyFilePresent", new File(directory, PUBLIC_KEY_FILE).isFile());
+            state.put("keyLoadedInProcess", cachedKeyPair != null);
+            String cached = cachedKeyFingerprint;
+            state.put("cachedKeyAuthorization", cached.isEmpty() ? JSONObject.NULL
+                    : cached.equals(prefs(context).getString(KEY_AUTHORIZED_FINGERPRINT, "")));
+            state.put("verifiedThisProcess", !verifiedFingerprintThisProcess.isEmpty());
+            state.put("observedAtMs", authorizationObservedAtMs > 0
+                    ? authorizationObservedAtMs : JSONObject.NULL);
+            state.put("source", "passive app cache and file presence; not an ADB handshake");
+        } catch (Exception error) {
+            try { state.put("error", error.getClass().getName()); } catch (Exception ignored) { }
+        }
+        return state;
+    }
+
+    static ConfigurationExportSession openConfigurationExport(Context context) {
+        return openConfigurationExport(context, VehicleConfigurationReadback.SESSION_TIMEOUT_MS);
+    }
+
+    //The collector owns the overall deadline, including its pre-ADB local work.
+    static ConfigurationExportSession openConfigurationExport(Context context, long remainingBudgetMs) {
+        long budgetMs = Math.max(0L, Math.min(remainingBudgetMs, VehicleConfigurationReadback.SESSION_TIMEOUT_MS));
+        ConfigurationExportSession session = new ConfigurationExportSession(new Socket(), budgetMs);
+        if (budgetMs == 0L) {
+            session.unavailable = exportFailure("skipped", 125, "collection deadline exhausted", "");
+            session.stop("session deadline");
+            return session;
+        }
+        session.open(context.getApplicationContext());
+        return session;
+    }
+
+    //One foreground export owns one transport. No runtime locks, retries, consent or cache writes.
+    static final class ConfigurationExportSession implements AutoCloseable {
+        private final Socket socket;
+        private final ScheduledExecutorService deadlines = Executors.newSingleThreadScheduledExecutor(r -> {
+            Thread thread = new Thread(r, "bydhud-export-deadline");
+            thread.setDaemon(true);
+            return thread;
+        });
+        private final long deadlineNanos;
+        private final AtomicBoolean busy = new AtomicBoolean();
+        private final AtomicBoolean oemRead = new AtomicBoolean();
+        private final AtomicReference<String> stopped = new AtomicReference<>();
+        private volatile Connection connection;
+        private volatile ShellResult unavailable;
+        private String apkPath;
+
+        private ConfigurationExportSession(Socket socket, long budgetMs) {
+            this.socket = socket;
+            deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
+            deadlines.schedule(() -> stop("session deadline"),
+                    budgetMs, TimeUnit.MILLISECONDS);
+        }
+
+        private void open(Context context) {
+            ScheduledFuture<?> guard = null;
+            try {
+                guard = guard(CONNECT_TIMEOUT_MS, "connect/auth timeout");
+                apkPath = context.getApplicationInfo().sourceDir;
+                File directory = new File(context.getFilesDir(), KEY_DIR);
+                File privateFile = new File(directory, PRIVATE_KEY_FILE);
+                File publicFile = new File(directory, PUBLIC_KEY_FILE);
+                //Refuse partial, oversized or mismatched saved pairs; never repair/migrate them.
+                KeyPair pair = loadConfigurationExportKeyPair(privateFile, publicFile);
+                if (pair == null) {
+                    unavailable = exportFailure("denied", 126, "existing complete ADB key unavailable", "");
+                    stop("key unavailable");
+                    return;
+                }
+                if (stopped.get() != null || Thread.currentThread().isInterrupted()) {
+                    throw new IOException("export cancelled before connect");
+                }
+                socket.connect(new InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS);
+                socket.setSoTimeout(CONNECT_TIMEOUT_MS);
+                OpenResult opened = Connection.openConnectedSocket(context,
+                        AuthorizationPromptMode.NEVER, pair, "", socket, endpointLabel(PORT), 0L, false);
+                if (opened.authorizationRequired) {
+                    unavailable = exportFailure("denied", 126, "existing ADB key not authorized", "");
+                    stop("authorization denied");
+                } else {
+                    connection = opened.connection;
+                    socket.setSoTimeout(0); //Absolute watchdog also bounds streaming peers and writes.
+                }
+            } catch (Exception error) {
+                String reason = stopped.get();
+                boolean timeout = reason != null && (reason.contains("timeout") || reason.contains("deadline"));
+                unavailable = exportFailure(timeout ? "timeout" : "error", timeout ? 124 : -1,
+                        reason == null ? exportError(error) : reason, "");
+                stop("open failed");
+            } finally {
+                if (guard != null) guard.cancel(false);
+            }
+        }
+
+        ShellResult run(String command) {
+            String safe = command == null ? "" : command.trim();
+            if (!VehicleConfigurationReadback.isAllowedCommand(safe)
+                    && !isVehicleConfigurationCommand(safe)) {
+                throw new SecurityException("Configuration export command is not read-only allowlisted");
+            }
+            return execute(safe, VehicleConfigurationReadback.COMMAND_TIMEOUT_MS);
+        }
+
+        ShellResult readOem() {
+            long observedAtMs = System.currentTimeMillis();
+            long startedNanos = System.nanoTime();
+            return readOemUntimed().withTiming(observedAtMs,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
+        }
+
+        private ShellResult readOemUntimed() {
+            if (!oemRead.compareAndSet(false, true)) {
+                return exportFailure("skipped", 125, "OEM readback already requested", "");
+            }
+            if (unavailable != null) return unavailable;
+            try {
+                return execute(VehicleConfigurationReadback.launchCommand(apkPath),
+                        VehicleConfigurationReadback.OEM_TIMEOUT_MS);
+            } catch (SecurityException error) {
+                return exportFailure("unsupported", 127, error.getMessage(), "");
+            }
+        }
+
+        private ShellResult execute(String command, long timeoutMs) {
+            long observedAtMs = System.currentTimeMillis();
+            long startedNanos = System.nanoTime();
+            return executeUntimed(command, timeoutMs).withTiming(observedAtMs,
+                    TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
+        }
+
+        private ShellResult executeUntimed(String command, long timeoutMs) {
+            if (unavailable != null) return unavailable;
+            if (!busy.compareAndSet(false, true)) {
+                return exportFailure("skipped", 125, "export command already in progress", "");
+            }
+            ScheduledFuture<?> guard = null;
+            OutputAccumulator output = new OutputAccumulator(MAX_DIAGNOSTIC_OUTPUT_BYTES, true);
+            try {
+                if (System.nanoTime() >= deadlineNanos) stop("session deadline");
+                if (Thread.currentThread().isInterrupted()) stop("cancelled");
+                if (stopped.get() != null || connection == null) {
+                    return exportFailure("skipped", 125, String.valueOf(stopped.get()), "");
+                }
+                guard = guard(timeoutMs, "command timeout");
+                ShellCapture captured = connection.shell(command + "; echo " + EXIT_MARKER + "$?", output);
+                ShellResult result = ShellResult.parse(captured.raw, captured.truncated, captured.droppedBytes);
+                if (stopped.get() != null) return interruptedResult(output, null);
+                return result;
+            } catch (IOException | RuntimeException error) {
+                ShellResult result = interruptedResult(output, error);
+                stop("transport failed");
+                return result;
+            } finally {
+                if (guard != null) guard.cancel(false);
+                busy.set(false);
+            }
+        }
+
+        private ShellResult interruptedResult(OutputAccumulator output, Exception error) {
+            String reason = stopped.get();
+            boolean timeout = reason != null && (reason.contains("timeout") || reason.contains("deadline"));
+            try {
+                ShellCapture captured = output.capture();
+                return new ShellResult(captured.raw, timeout ? 124 : -1, captured.raw,
+                        captured.truncated, captured.droppedBytes, timeout ? "timeout" : "error",
+                        reason == null ? exportError(error) : reason);
+            } catch (IOException impossible) {
+                return exportFailure(timeout ? "timeout" : "error", timeout ? 124 : -1,
+                        reason == null ? exportError(error) : reason, "");
+            }
+        }
+
+        private ScheduledFuture<?> guard(long timeoutMs, String reason) {
+            long remaining = Math.max(0L, deadlineNanos - System.nanoTime());
+            long operationBudget = TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+            String expiry = remaining <= operationBudget ? "session deadline" : reason;
+            return deadlines.schedule(() -> stop(expiry), Math.min(remaining,
+                    operationBudget), TimeUnit.NANOSECONDS);
+        }
+
+        private void stop(String reason) {
+            if (stopped.compareAndSet(null, reason)) {
+                closeExportSocket(socket);
+                deadlines.shutdownNow();
+            }
+        }
+
+        @Override public void close() {
+            stop("closed/cancelled");
+            deadlines.shutdownNow();
+        }
+    }
+
+    static KeyPair loadConfigurationExportKeyPair(File privateFile, File publicFile) throws Exception {
+        if (!privateFile.isFile() || !publicFile.isFile()
+                || privateFile.length() <= 0 || privateFile.length() > 16384
+                || publicFile.length() <= 0 || publicFile.length() > 16384) return null;
+        KeyPair pair = loadPersistedKeyPair(privateFile, publicFile, true);
+        if (pair == null || !(pair.getPrivate() instanceof RSAPrivateCrtKey)
+                || !(pair.getPublic() instanceof RSAPublicKey)) return null;
+        RSAPrivateCrtKey privateKey = (RSAPrivateCrtKey) pair.getPrivate();
+        RSAPublicKey publicKey = (RSAPublicKey) pair.getPublic();
+        return privateKey.getModulus().equals(publicKey.getModulus())
+                && privateKey.getPublicExponent().equals(publicKey.getPublicExponent()) ? pair : null;
+    }
+
+    private static ShellResult exportFailure(String status, int code, String error, String output) {
+        return new ShellResult(output, code, output, false, 0L, status, error);
+    }
+
+    private static String exportError(Exception error) {
+        return error == null ? "export interrupted" : error.getClass().getName() + ": " + error.getMessage();
+    }
+
+    private static void closeExportSocket(Socket socket) {
+        try { socket.close(); } catch (IOException ignored) { }
     }
 
     //closes only the socket waiting for RSA approval so a manual retry can prompt immediately.
@@ -1214,14 +1448,20 @@ final class LocalAdbBridge {
         private final InputStream in;
         private final OutputStream out;
         private final KeyPair keyPair;
+        private final boolean publishAuthorization;
         private int nextLocalId = 1;
 
         //opens the external boundary here so connection setup remains observable and retryable.
         private Connection(Socket socket, KeyPair keyPair) throws IOException {
+            this(socket, keyPair, true);
+        }
+
+        private Connection(Socket socket, KeyPair keyPair, boolean publishAuthorization) throws IOException {
             this.socket = socket;
             this.in = socket.getInputStream();
             this.out = socket.getOutputStream();
             this.keyPair = keyPair;
+            this.publishAuthorization = publishAuthorization;
         }
 
         //opens the external boundary here so connection setup remains observable and retryable.
@@ -1265,7 +1505,15 @@ final class LocalAdbBridge {
                 Socket socket,
                 String endpoint,
                 long cancellationGeneration) throws Exception {
-            Connection connection = new Connection(socket, keyPair);
+            return openConnectedSocket(context, authorizationPromptMode, keyPair, keyFingerprint,
+                    socket, endpoint, cancellationGeneration, true);
+        }
+
+        private static OpenResult openConnectedSocket(
+                Context context, AuthorizationPromptMode authorizationPromptMode,
+                KeyPair keyPair, String keyFingerprint, Socket socket, String endpoint,
+                long cancellationGeneration, boolean publishAuthorization) throws Exception {
+            Connection connection = new Connection(socket, keyPair, publishAuthorization);
             byte[] banner = nulPayload("host::");
             AdbPacket.write(
                     connection.out,
@@ -1287,8 +1535,10 @@ final class LocalAdbBridge {
                     throw e;
                 }
                 if (packet.command == AdbPacket.A_CNXN) {
-                    markAuthorizedFingerprint(context, keyFingerprint);
-                    clearPendingAuthorization(socket);
+                    if (publishAuthorization) {
+                        markAuthorizedFingerprint(context, keyFingerprint);
+                        clearPendingAuthorization(socket);
+                    }
                     return new OpenResult(connection, false, publicKeySent, endpoint);
                 }
                 if (packet.command != AdbPacket.A_AUTH
@@ -1307,12 +1557,12 @@ final class LocalAdbBridge {
                     continue;
                 }
                 if (!publicKeySent) {
-                    boolean persistedAuthorizationRejected = keyFingerprint.equals(
+                    boolean persistedAuthorizationRejected = publishAuthorization && keyFingerprint.equals(
                             prefs(context).getString(KEY_AUTHORIZED_FINGERPRINT, ""));
                     if (persistedAuthorizationRejected) {
                         clearAuthorizedFingerprint(context, keyFingerprint);
                     }
-                    if (!shouldSendPublicKeyForMode(authorizationPromptMode)) {
+                    if (!publishAuthorization || !shouldSendPublicKeyForMode(authorizationPromptMode)) {
                         connection.close();
                         return new OpenResult(null, true, false, endpoint);
                     }
@@ -1353,9 +1603,12 @@ final class LocalAdbBridge {
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         private ShellCapture shell(String command, int maxOutputBytes) throws IOException {
+            return shell(command, new OutputAccumulator(maxOutputBytes));
+        }
+
+        private ShellCapture shell(String command, OutputAccumulator output) throws IOException {
             int localId = nextLocalId++;
             int remoteId = 0;
-            OutputAccumulator output = new OutputAccumulator(maxOutputBytes);
             AdbPacket.write(out, AdbPacket.A_OPEN, localId, 0, nulPayload("shell:" + command));
             while (true) {
                 AdbPacket packet = AdbPacket.read(in);
@@ -1392,7 +1645,8 @@ final class LocalAdbBridge {
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         void close() {
-            closeQuietly(socket);
+            if (publishAuthorization) closeQuietly(socket);
+            else closeExportSocket(socket);
         }
     }
 
@@ -1409,19 +1663,26 @@ final class LocalAdbBridge {
     }
 
     private static final class OutputAccumulator {
+        private static final byte[] GAP = "\n[output truncated]\n".getBytes(StandardCharsets.UTF_8);
         private final int maxBytes;
         private final int prefixLimit;
         private final int tailLimit;
         private final ByteArrayOutputStream prefix = new ByteArrayOutputStream();
         private final ByteArrayOutputStream tail = new ByteArrayOutputStream();
         private long totalBytes;
+        private final boolean separateTruncation;
 
         OutputAccumulator(int maxBytes) {
+            this(maxBytes, false);
+        }
+
+        OutputAccumulator(int maxBytes, boolean separateTruncation) {
             this.maxBytes = Math.max(0, maxBytes);
+            this.separateTruncation = separateTruncation;
             tailLimit = Math.min(DIAGNOSTIC_OUTPUT_TAIL_BYTES, this.maxBytes);
             prefixLimit = this.maxBytes == 0
                     ? 0
-                    : this.maxBytes - tailLimit;
+                    : Math.max(0, this.maxBytes - tailLimit - (separateTruncation ? GAP.length : 0));
         }
 
         void append(byte[] bytes) {
@@ -1459,11 +1720,12 @@ final class LocalAdbBridge {
             ByteArrayOutputStream raw = new ByteArrayOutputStream(
                     prefix.size() + tail.size());
             raw.write(prefix.toByteArray());
+            long dropped = Math.max(0L, totalBytes - prefix.size() - tail.size());
+            if (separateTruncation && dropped > 0) raw.write(GAP);
             raw.write(tail.toByteArray());
-            if (maxBytes == 0 || totalBytes <= maxBytes) {
+            if (maxBytes == 0 || dropped == 0) {
                 return new ShellCapture(raw.toString("UTF-8"), false, 0L);
             }
-            long dropped = Math.max(0L, totalBytes - prefix.size() - tail.size());
             return new ShellCapture(raw.toString("UTF-8"), true, dropped);
         }
     }
@@ -1475,6 +1737,10 @@ final class LocalAdbBridge {
         final String raw;
         final boolean truncated;
         final long droppedBytes;
+        final String status;
+        final String error;
+        final long observedAtMs;
+        final long durationMs;
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         private ShellResult(String output, int exitCode, String raw) {
@@ -1484,11 +1750,33 @@ final class LocalAdbBridge {
         private ShellResult(
                 String output, int exitCode, String raw,
                 boolean truncated, long droppedBytes) {
+            this(output, exitCode, raw, truncated, droppedBytes,
+                    exitCode == 0 ? "success" : exitCode == 124 || exitCode == 137 ? "timeout"
+                            : exitCode == 126 ? "denied" : exitCode == 127 ? "unsupported" : "error", "");
+        }
+
+        private ShellResult(String output, int exitCode, String raw,
+                boolean truncated, long droppedBytes, String status, String error) {
+            this(output, exitCode, raw, truncated, droppedBytes, status, error, -1L, -1L);
+        }
+
+        private ShellResult(String output, int exitCode, String raw,
+                boolean truncated, long droppedBytes, String status, String error,
+                long observedAtMs, long durationMs) {
             this.output = output == null ? "" : output;
             this.exitCode = exitCode;
             this.raw = raw == null ? "" : raw;
             this.truncated = truncated;
             this.droppedBytes = Math.max(0L, droppedBytes);
+            this.status = status;
+            this.error = error == null ? "" : error;
+            this.observedAtMs = observedAtMs;
+            this.durationMs = durationMs;
+        }
+
+        private ShellResult withTiming(long observedAtMs, long durationMs) {
+            return new ShellResult(output, exitCode, raw, truncated, droppedBytes, status, error,
+                    observedAtMs, Math.max(0L, durationMs));
         }
 
         //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1503,7 +1791,8 @@ final class LocalAdbBridge {
                 trimmed = trimmed.substring(0, 160) + "...";
             }
             return "exit=" + exitCode + " output=" + trimmed
-                    + (truncated ? " truncatedBytes=" + droppedBytes : "");
+                    + (truncated ? " truncatedBytes=" + droppedBytes : "")
+                    + (error.isEmpty() ? "" : " status=" + status + " error=" + error);
         }
 
         //parses source data here so downstream HUD code receives normalized navigation fields.
@@ -1601,18 +1890,22 @@ final class LocalAdbBridge {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static KeyPair loadPersistedKeyPair(File privateFile, File publicFile) throws Exception {
+        return loadPersistedKeyPair(privateFile, publicFile, false);
+    }
+
+    private static KeyPair loadPersistedKeyPair(File privateFile, File publicFile, boolean exportOnly) throws Exception {
         if (!privateFile.exists() || !publicFile.exists()) {
             return null;
         }
         try {
             KeyFactory keyFactory = KeyFactory.getInstance("RSA");
             PrivateKey privateKey = keyFactory.generatePrivate(
-                    new PKCS8EncodedKeySpec(readFile(privateFile)));
+                    new PKCS8EncodedKeySpec(readFile(privateFile, exportOnly ? 16384 : 0)));
             PublicKey publicKey = keyFactory.generatePublic(
-                    new X509EncodedKeySpec(readFile(publicFile)));
+                    new X509EncodedKeySpec(readFile(publicFile, exportOnly ? 16384 : 0)));
             return new KeyPair(publicKey, privateKey);
         } catch (Exception e) {
-            Log.w(TAG, "ADB persisted keypair load failed; trying private-key repair", e);
+            if (!exportOnly) Log.w(TAG, "ADB persisted keypair load failed; trying private-key repair", e);
             return null;
         }
     }
@@ -1652,12 +1945,17 @@ final class LocalAdbBridge {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static byte[] readFile(File file) throws IOException {
+        return readFile(file, 0);
+    }
+
+    private static byte[] readFile(File file, int maxBytes) throws IOException {
         FileInputStream in = new FileInputStream(file);
         try {
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             byte[] buffer = new byte[4096];
             int read;
             while ((read = in.read(buffer)) >= 0) {
+                if (maxBytes > 0 && bytes.size() + read > maxBytes) throw new IOException("Key file exceeds export limit");
                 bytes.write(buffer, 0, read);
             }
             return bytes.toByteArray();
@@ -1724,6 +2022,7 @@ final class LocalAdbBridge {
 
     //records only completed ADB handshakes, not merely displayed RSA prompts.
     private static void markAuthorizedFingerprint(Context context, String keyFingerprint) {
+        authorizationObservedAtMs = System.currentTimeMillis();
         verifiedFingerprintThisProcess = keyFingerprint == null ? "" : keyFingerprint.trim();
         prefs(context).edit()
                 .putString(KEY_AUTHORIZED_FINGERPRINT,
@@ -1734,6 +2033,7 @@ final class LocalAdbBridge {
     }
 
     private static void clearAuthorizedFingerprint(Context context, String keyFingerprint) {
+        authorizationObservedAtMs = System.currentTimeMillis();
         verifiedFingerprintThisProcess = "";
         prefs(context).edit().remove(KEY_AUTHORIZED_FINGERPRINT).apply();
         AppEventLogger.event(context, "adb_bridge authorization_revoked key=" + keyFingerprint);

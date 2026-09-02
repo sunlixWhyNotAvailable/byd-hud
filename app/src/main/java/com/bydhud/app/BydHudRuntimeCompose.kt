@@ -71,6 +71,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -131,6 +132,8 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
@@ -142,13 +145,15 @@ object BydHudRuntimeCompose {
     @JvmStatic
     //keeps update I/O here so network, file, and installer failures are handled in one path.
     fun install(activity: MainActivity) {
-        val initialTab = if (HudPrefs.takeOptionsIntroForCurrentVersion(activity)) {
-            RuntimeTab.Options
-        } else {
-            RuntimeTab.Apps
+        val uiSession = RuntimeUiSession.PROCESS.getOrCreate {
+            if (HudPrefs.takeOptionsIntroForCurrentVersion(activity)) {
+                RuntimeTab.Options.name
+            } else {
+                RuntimeTab.Apps.name
+            }
         }
         activity.setContent {
-            RuntimeApp(activity, initialTab)
+            RuntimeApp(activity, uiSession)
         }
     }
 }
@@ -578,35 +583,68 @@ private fun ModalInputBlocker() {
     )
 }
 
+private val runtimeViewportKeys = listOf(
+    "apps", "storage", "storage-days", "patch", "hud-check", "options-categories",
+    "options:runtime-permissions", "options:basic-navigation", "options:route-eta",
+    "options:speed-limit", "options:waze-features", "options:extra-navigation",
+    "options:dashboard-window-profile", "options:dashboard-widget", "options:dashboard-move"
+)
+
+// Compose-owned state is recreated from data; it is never kept in the process holder.
+private class SessionViewportState(val initial: RuntimeUiSession.Viewport) {
+    val listState = LazyListState(initial.index, initial.offset)
+    var restored by mutableStateOf(initial == RuntimeUiSession.Viewport.TOP)
+
+    fun position(): RuntimeUiSession.Viewport? =
+        if (restored && listState.layoutInfo.visibleItemsInfo.isNotEmpty()) {
+            RuntimeUiSession.Viewport(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
+        } else null
+}
+
+@Composable
+private fun rememberSessionViewport(
+    session: RuntimeUiSession.Session,
+    viewportKey: String,
+    contentReady: Boolean
+): SessionViewportState {
+    val viewport = remember(session, viewportKey) { SessionViewportState(session.viewport(viewportKey)) }
+    LaunchedEffect(viewport, contentReady) {
+        if (contentReady && !viewport.restored) {
+            // Cold placeholders must not clamp and overwrite a saved nonzero position.
+            snapshotFlow { viewport.listState.layoutInfo.totalItemsCount }.first { it > 0 }
+            viewport.listState.scrollToItem(viewport.initial.index, viewport.initial.offset)
+            viewport.restored = true
+        }
+    }
+    return viewport
+}
+
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
+private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Session) {
     var snapshot by remember { mutableStateOf(activity.composeSnapshot()) }
-    var selectedTab by remember(initialTab) { mutableStateOf(initialTab) }
-    val appsScrollState = remember { LazyListState() }
-    val storageScrollState = remember { LazyListState() }
-    val storageDayScrollState = remember { LazyListState() }
-    val patchScrollState = remember { LazyListState() }
-    val hudCheckScrollState = remember { LazyListState() }
-    var selectedOptionsSectionKey by remember { mutableStateOf("runtime-permissions") }
-    val optionsCategoryScrollState = remember { LazyListState() }
-    val optionsSectionScrollStates = remember {
-        mapOf(
-            "runtime-permissions" to LazyListState(),
-            "basic-navigation" to LazyListState(),
-            "route-eta" to LazyListState(),
-            "speed-limit" to LazyListState(),
-            "waze-features" to LazyListState(),
-            "extra-navigation" to LazyListState(),
-            "dashboard-window-profile" to LazyListState(),
-            "dashboard-widget" to LazyListState(),
-            "dashboard-move" to LazyListState()
-        )
+    var selectedTab by remember(uiSession) { mutableStateOf(RuntimeTab.valueOf(uiSession.selectedTab())) }
+    var selectedOptionsSectionKey by remember(uiSession) { mutableStateOf(uiSession.selectedOptionsSection()) }
+    fun viewportContentReady(viewportKey: String): Boolean = when (viewportKey) {
+        "apps" -> snapshot.appScanCacheAvailable || !snapshot.appScanInProgress
+        "storage", "storage-days" -> snapshot.storageCacheAvailable || !snapshot.storageCalculating
+        else -> true
     }
+    val viewportStates = runtimeViewportKeys.associateWith { viewportKey ->
+        key(viewportKey) { rememberSessionViewport(uiSession, viewportKey, viewportContentReady(viewportKey)) }
+    }
+    val appsScrollState = viewportStates.getValue("apps").listState
+    val storageScrollState = viewportStates.getValue("storage").listState
+    val storageDayScrollState = viewportStates.getValue("storage-days").listState
+    val patchScrollState = viewportStates.getValue("patch").listState
+    val hudCheckScrollState = viewportStates.getValue("hud-check").listState
+    val optionsCategoryScrollState = viewportStates.getValue("options-categories").listState
+    val optionsSectionScrollStates = viewportStates.filterKeys { it.startsWith("options:") }
+        .mapKeys { it.key.removePrefix("options:") }.mapValues { it.value.listState }
     var storageLimitDraft by remember(snapshot.storageLimitGb) {
         mutableIntStateOf(snapshot.storageLimitGb)
     }
-    var previousTab by remember { mutableStateOf(initialTab) }
+    var previousTab by remember(uiSession) { mutableStateOf(selectedTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
@@ -679,6 +717,14 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
             || pendingPatchProfile.isNotEmpty() -> "patch"
         else -> ""
     }
+
+    fun captureUiSession() {
+        uiSession.select(selectedTab.name, selectedOptionsSectionKey)
+        viewportStates.forEach { (viewportKey, viewport) ->
+            uiSession.recordViewport(viewportKey, viewport.position())
+        }
+    }
+    val latestCaptureUiSession by rememberUpdatedState(::captureUiSession)
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     fun refresh() {
@@ -935,6 +981,12 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
         }
     }
 
+    LaunchedEffect(uiSession) {
+        snapshotFlow {
+            (selectedTab to selectedOptionsSectionKey) to viewportStates.mapValues { it.value.position() }
+        }.collect { latestCaptureUiSession() }
+    }
+
     LaunchedEffect(selectedTab) {
         if (previousTab == RuntimeTab.HudCheck && selectedTab != RuntimeTab.HudCheck) {
             runAction { activity.composeHudCheckStop("tab-change") }
@@ -980,12 +1032,16 @@ private fun RuntimeApp(activity: MainActivity, initialTab: RuntimeTab) {
                 }
                 Lifecycle.Event.ON_PAUSE,
                 Lifecycle.Event.ON_STOP,
-                Lifecycle.Event.ON_DESTROY -> appInForeground = false
+                Lifecycle.Event.ON_DESTROY -> {
+                    latestCaptureUiSession()
+                    appInForeground = false
+                }
                 else -> Unit
             }
         }
         activity.lifecycle.addObserver(observer)
         onDispose {
+            latestCaptureUiSession()
             activity.lifecycle.removeObserver(observer)
             activity.composeSetSnapshotInvalidationListener(null)
         }
@@ -4492,15 +4548,18 @@ private fun StorageTab(
                             contentType = { "storage-day" }
                         ) { index ->
                             val day = days[index]
-                            AppSectionRow(index, days.lastIndex, palette, closeSection = false) {
+                            Box(
+                                Modifier.fillMaxWidth()
+                                    .appSectionSegmentFrame(palette, palette.panel, top = false, bottom = false)
+                                    .padding(start = 14.dp, end = 14.dp, top = 10.dp)
+                            ) {
                                 StorageDayRow(
                                     day = day,
                                     copy = copy,
                                     palette = palette,
                                     selected = selectedDays.contains(day.name),
                                     enabled = !storageSortBusy,
-                                    onToggle = { onToggleDay(day.name) },
-                                    segmented = true
+                                    onToggle = { onToggleDay(day.name) }
                                 )
                             }
                         }
@@ -5312,8 +5371,7 @@ private fun StorageDayRow(
     palette: Palette,
     selected: Boolean,
     enabled: Boolean,
-    onToggle: () -> Unit,
-    segmented: Boolean = false
+    onToggle: () -> Unit
 ) {
     val press = rememberPressFeedback(enabled)
     val visualClick = rememberVisualFirstClick(onToggle)
@@ -5321,9 +5379,8 @@ private fun StorageDayRow(
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .then(if (segmented) Modifier else Modifier
-                .clip(RoundedCornerShape(8.dp))
-                .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp)))
+            .clip(RoundedCornerShape(8.dp))
+            .border(1.dp, if (selected) palette.accent else palette.border, RoundedCornerShape(8.dp))
             .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
@@ -7366,7 +7423,7 @@ private fun enCopy() = Copy(
     noBackgroundApps = "Supported apps are not duplicated here. This list shows only current non-system background apps.",
     startLogcat = "Start Logcat",
     stopLogcat = "Stop Logcat",
-    shareConfiguration = "Share configuration",
+    shareConfiguration = "Export configuration",
     storage = "Storage and logs",
     storageHint = "Navigation log recording, sharing, retention, and cleanup controls.",
     storageSettings = "Storage settings",
@@ -7592,7 +7649,7 @@ private fun uaCopy() = enCopy().copy(
     noBackgroundApps = "Підтримувані застосунки тут не дублюються. Тут тільки поточні несистемні фонові застосунки.",
     startLogcat = "Почати Logcat",
     stopLogcat = "Зупинити Logcat",
-    shareConfiguration = "Поділитись конфігурацією",
+    shareConfiguration = "Експортувати конфігурацію",
     storage = "Сховище та логи",
     storageHint = "Запис, поширення, зберігання й очищення навігаційних логів.",
     storageSettings = "Налаштування сховища",
@@ -7713,7 +7770,7 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         reportId = "ID звіту",
         close = "Закрити",
         configurationTitle = "Поділитися конфігурацією авто",
-        configurationWarning = "Архів міститиме технічні відомості про пристрій, установлені пакети й процеси, мережеву конфігурацію та SOME/IP. Перевірте отримувача перед надсиланням.",
+        configurationWarning = "Архів міститиме доступні поточні значення HUD/приборки; дозволи, компоненти, стан виконання й налаштування BYD HUD; відомості про пристрій, прошивку, пакети/процеси, дисплеї, аудіо й систему; мережеву діагностику та SOME/IP. Мережеві адреси маскуються; облікові дані, VIN, акаунти, маршрути, координати, вміст сповіщень і аудіозаписи не включаються. Автоматичного надсилання немає. Перевірте отримувача перед надсиланням.",
         configurationUploadTitle = "Надсилання конфігурації розробнику",
         configurationSuccess = "Конфігурацію успішно надіслано.",
         configurationFailure = "Не вдалося надіслати конфігурацію."
@@ -7739,7 +7796,7 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         reportId = "Report ID",
         close = "Close",
         configurationTitle = "Share vehicle configuration",
-        configurationWarning = "The archive will include technical device, installed package and process details, network configuration, and SOME/IP data. Verify the recipient before sending.",
+        configurationWarning = "The archive includes available live HUD/cluster values; permissions, components, runtime and BYD HUD options; device/firmware, package/process, display, audio and system metadata; network and SOME/IP diagnostics. Network addresses are masked; credentials, VIN, account data, routes, coordinates, notification contents and recordings are excluded. Nothing is uploaded automatically. Verify the recipient before sending.",
         configurationUploadTitle = "Sending configuration to developer",
         configurationSuccess = "Configuration sent successfully.",
         configurationFailure = "The configuration could not be sent."

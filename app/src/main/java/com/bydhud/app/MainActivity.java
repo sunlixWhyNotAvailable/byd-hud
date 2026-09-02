@@ -3779,6 +3779,7 @@ public final class MainActivity extends ComponentActivity {
         }
         appendStatus("exit requested");
         exitRequested = true;
+        RuntimeUiSession.PROCESS.clear();
         cancelActiveAdbAuthorization("exit", false);
         stopRecorderAsync("exit", () -> {
             stopImmediately("exit", true, true);
@@ -3794,6 +3795,7 @@ public final class MainActivity extends ComponentActivity {
         String safeReason = reason == null ? "shutdown" : reason;
         appendStatus("shutdown requested reason=" + safeReason);
         exitRequested = true;
+        RuntimeUiSession.PROCESS.clear();
         UserRuntimeSession.PROCESS.shutdown();
         HudPrefs.setUserShutdownActive(this, true);
         NavAppDisplayController.get(this).cancelWidgetModeForShutdown();

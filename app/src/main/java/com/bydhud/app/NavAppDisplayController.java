@@ -6,13 +6,18 @@ import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.Log;
 import android.widget.Toast;
+
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 import java.io.IOException;
 import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
+import java.util.TreeMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -87,7 +92,7 @@ final class NavAppDisplayController {
         void onNavAppDisplayChanged(boolean moveInProgress);
     }
 
-    private static NavAppDisplayController instance;
+    private static volatile NavAppDisplayController instance;
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static synchronized NavAppDisplayController get(Context context) {
@@ -95,6 +100,42 @@ final class NavAppDisplayController {
             instance = new NavAppDisplayController(context.getApplicationContext());
         }
         return instance;
+    }
+
+    /** Cached observations only: no task/display probe, projection check, or AutoContainer call. */
+    static JSONObject configurationSnapshot() throws Exception {
+        NavAppDisplayController current = instance;
+        if (current == null) {
+            return new JSONObject().put("status", "unavailable")
+                    .put("reason", "not_initialized");
+        }
+        JSONObject result;
+        Map<String, NavAppDisplayState> observations;
+        synchronized (current.lock) {
+            result = new JSONObject().put("status", "ok").put("source", "process_memory")
+                    .put("capturedElapsedMs", SystemClock.elapsedRealtime())
+                    .put("coherence", "existing_state_lock")
+                    .put("moveInProgress", current.moveInProgress)
+                    .put("cachedDashboardOwnerPackage", current.activeDashboardPackage)
+                    .put("pendingShutdownReturnPackage", current.pendingShutdownReturnPackage)
+                    .put("widgetOperationGeneration", current.widgetOperationToken)
+                    .put("widgetOperationActive", current.widgetOperationActive)
+                    .put("widgetOperationCancelled", current.widgetOperationCancelled);
+            observations = new TreeMap<>(current.states);
+        }
+        JSONArray placements = new JSONArray();
+        for (NavAppDisplayState observation : observations.values()) {
+            placements.put(new JSONObject().put("packageName", observation.packageName)
+                    .put("taskId", observation.taskId).put("displayId", observation.displayId)
+                    .put("visible", observation.visible));
+        }
+        return result.put("cachedPlacements", placements)
+                .put("placementMeaning", "cached_app_observation_not_current_physical_confirmation")
+                .put("placementAgeMs", new JSONObject().put("status", "unsupported")
+                        .put("reason", "not_recorded"))
+                .put("lastAppIssuedAutoContainer", new JSONObject().put("status", "unsupported")
+                        .put("reason", "complete_command_history_not_recorded"))
+                .put("autoContainerReadback", "not_queried");
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.

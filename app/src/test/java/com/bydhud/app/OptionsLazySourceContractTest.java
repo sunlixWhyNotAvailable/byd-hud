@@ -38,21 +38,17 @@ public final class OptionsLazySourceContractTest {
         String options = between(source, "private fun OptionsTab(", "private fun WidgetNumberLine(");
 
         assertTrue(runtime.contains(
-                "var selectedOptionsSectionKey by remember { mutableStateOf(\"runtime-permissions\") }"));
-        assertTrue(runtime.contains("val optionsCategoryScrollState = remember { LazyListState() }"));
-        assertTrue(runtime.contains("val optionsSectionScrollStates = remember {"));
+                "var selectedOptionsSectionKey by remember(uiSession) { mutableStateOf(uiSession.selectedOptionsSection()) }"));
+        assertTrue(runtime.contains("val optionsCategoryScrollState = viewportStates.getValue(\"options-categories\").listState"));
+        assertTrue(runtime.contains("val optionsSectionScrollStates = viewportStates.filterKeys"));
         assertFalse(runtime.contains("selectedOptionsSectionKey by rememberSaveable"));
-        assertEquals(9, occurrences(runtime, " to LazyListState()"));
-        assertOrdered(runtime,
-                "\"runtime-permissions\" to LazyListState()",
-                "\"basic-navigation\" to LazyListState()",
-                "\"route-eta\" to LazyListState()",
-                "\"speed-limit\" to LazyListState()",
-                "\"waze-features\" to LazyListState()",
-                "\"extra-navigation\" to LazyListState()",
-                "\"dashboard-window-profile\" to LazyListState()",
-                "\"dashboard-widget\" to LazyListState()",
-                "\"dashboard-move\" to LazyListState()");
+        String viewportKeys = between(source, "private val runtimeViewportKeys", "private class SessionViewportState");
+        assertEquals(9, occurrences(viewportKeys, "\"options:"));
+        assertOrdered(viewportKeys,
+                "\"options:runtime-permissions\"", "\"options:basic-navigation\"",
+                "\"options:route-eta\"", "\"options:speed-limit\"", "\"options:waze-features\"",
+                "\"options:extra-navigation\"", "\"options:dashboard-window-profile\"",
+                "\"options:dashboard-widget\"", "\"options:dashboard-move\"");
         assertTrue(source.contains("selectedSectionKey = selectedOptionsSectionKey"));
         assertTrue(source.contains("categoryScrollState = optionsCategoryScrollState"));
         assertTrue(source.contains("sectionScrollStates = optionsSectionScrollStates"));

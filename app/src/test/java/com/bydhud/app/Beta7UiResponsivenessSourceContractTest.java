@@ -141,12 +141,12 @@ public final class Beta7UiResponsivenessSourceContractTest {
         String lifecycleObserver = between(lifecycle, "val observer =", "activity.lifecycle.addObserver");
 
         assertTrue(runtimeState.contains(
-                "var selectedTab by remember(initialTab) { mutableStateOf(initialTab) }"));
+                "var selectedTab by remember(uiSession) { mutableStateOf(RuntimeTab.valueOf(uiSession.selectedTab())) }"));
         assertFalse(runtimeState.contains("selectedTab by rememberSaveable"));
-        assertTrue(runtimeState.contains("val appsScrollState = remember { LazyListState() }"));
-        assertTrue(runtimeState.contains("val storageScrollState = remember { LazyListState() }"));
-        assertTrue(runtimeState.contains("val patchScrollState = remember { LazyListState() }"));
-        assertTrue(runtimeState.contains("val hudCheckScrollState = remember { LazyListState() }"));
+        assertTrue(runtimeState.contains("val appsScrollState = viewportStates.getValue(\"apps\").listState"));
+        assertTrue(runtimeState.contains("val storageScrollState = viewportStates.getValue(\"storage\").listState"));
+        assertTrue(runtimeState.contains("val patchScrollState = viewportStates.getValue(\"patch\").listState"));
+        assertTrue(runtimeState.contains("val hudCheckScrollState = viewportStates.getValue(\"hud-check\").listState"));
         assertTrue(source.contains("scrollState = appsScrollState"));
         assertTrue(source.contains("scrollState = storageScrollState"));
         assertTrue(source.contains("scrollState = patchScrollState"));

@@ -12,6 +12,8 @@ import android.util.Log;
 
 import androidx.core.content.ContextCompat;
 
+import org.json.JSONObject;
+
 import java.io.IOException;
 import java.security.SecureRandom;
 import java.util.ArrayList;
@@ -39,7 +41,7 @@ final class InstrumentProxyManager {
     private static final char[] HEX = "0123456789abcdef".toCharArray();
     private static final Object INSTANCE_LOCK = new Object();
     @SuppressLint("StaticFieldLeak")
-    private static InstrumentProxyManager instance;
+    private static volatile InstrumentProxyManager instance;
 
     private enum State {
         IDLE,
@@ -215,6 +217,36 @@ final class InstrumentProxyManager {
                     requestGeneration, requestNonce, requestLaunchToken));
             worker.schedule(() -> handleStartTimeout(requestGeneration),
                     START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
+    /** Reads existing references and lifecycle state without calling the helper or its Binder. */
+    static JSONObject configurationSnapshot() throws Exception {
+        InstrumentProxyManager current = instance;
+        if (current == null) {
+            return new JSONObject().put("status", "unavailable")
+                    .put("reason", "not_initialized");
+        }
+        synchronized (current.lock) {
+            long now = SystemClock.elapsedRealtime();
+            return new JSONObject().put("status", "ok").put("source", "process_memory")
+                    .put("capturedElapsedMs", now).put("coherence", "existing_state_lock")
+                    .put("state", current.state.name()).put("generation", current.generation)
+                    .put("runtimeActive", current.runtimeActive).put("startStage", current.startStage)
+                    .put("proxyReferencePresent", current.proxy != null)
+                    .put("binderReferencePresent", current.proxyBinder != null)
+                    .put("connectingProxyReferencePresent", current.connectingProxy != null)
+                    .put("connectingBinderReferencePresent", current.connectingBinder != null)
+                    .put("connectedAgeMs", current.connectedAtMs > 0L
+                            ? Math.max(0L, now - current.connectedAtMs) : JSONObject.NULL)
+                    .put("retryDelayMs", Math.max(0L, current.nextRetryAtMs - now))
+                    .put("rapidFailureCount", current.rapidFailureCount)
+                    .put("pingInFlight", current.pingInFlight)
+                    .put("capabilityMode", current.capabilityMode.name())
+                    .put("trafficLightCapable", current.trafficLightCapable)
+                    .put("lastResult", new JSONObject().put("status", "unsupported")
+                            .put("reason", "not_recorded"))
+                    .put("binderLiveness", "not_queried");
         }
     }
 

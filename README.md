@@ -46,6 +46,8 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Updates | Stable releases by default, with an optional beta channel |
 | HUD check | Test stock and bitmap navigation output, text, distances, traffic lights and additional vehicle display fields without a navigator |
 
+While BYD HUD is running, switching tabs or returning from another app restores the selected tab and its scroll position. Each Options category keeps its own position too. Exit, Shutdown, or a full app restart starts a fresh UI session.
+
 <p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
 ## Navigation channels
@@ -308,9 +310,11 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 - shares or deletes only the selected days;
 - shows file count, archive size, and a sensitive-data warning before creating a ZIP;
 - uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
-- provides `Share configuration` for a smaller diagnostic archive containing device, permission, network, patcher, and navigation-output details.
+- provides `Export configuration` for a diagnostic archive containing available HUD/dashboard settings, display placement, permission and service details, navigation-output state, firmware, audio and system-condition information.
 
-`Share logs` and sorting stay at the top of `Logs`; its bounded day list scrolls independently so the footer remains reachable. The footer contains `Start Logcat` / `Stop Logcat`, `Share configuration`, and `Delete selected`. Available folder paths are shown in `Navigation logs folder` below. Configuration sharing does not require selected days.
+`Share logs` and sorting stay at the top of `Logs`; its inset day cards scroll independently so the footer remains reachable. The footer contains `Start Logcat` / `Stop Logcat`, `Export configuration`, and `Delete selected`. Available folder paths are shown in `Navigation logs folder` below. Configuration export does not require selected days.
+
+Export reads available diagnostic information without changing vehicle modes or repairing permissions. An already authorized ADB connection enables additional readings; without it, the basic archive remains available. Unsupported or failed readings are identified rather than reported as disabled. The confirmation offers the normal Android share chooser or sending the archive to the developer through Sentry. Credentials are excluded and network addresses are masked.
 
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
 
@@ -422,7 +426,7 @@ For a navigation-output problem:
 3. Press `Share logs` and choose your messenger or `Send to developer`.
 4. Disable detailed diagnostics after the test to reduce storage use.
 
-For a permission, device, patcher, or startup problem, use `Storage and logs -> Logs -> Share configuration` instead.
+For a permission, device, patcher, or startup problem, use `Storage and logs -> Logs -> Export configuration` instead.
 
 > Navigation archives may contain coordinates, searched destinations, street names, notification text, screenshots, and device identifiers. Review the warning before sharing and use only the minimum required day.
 

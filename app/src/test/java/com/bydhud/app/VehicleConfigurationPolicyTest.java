@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -119,5 +120,20 @@ public final class VehicleConfigurationPolicyTest {
             assertFalse(value.contains("AA:BB:CC"));
             assertFalse(value.contains("11-22-33"));
         }
+    }
+
+    @Test
+    public void networkMaskingHandlesFilenameDotsWithoutMatchingLongNumericSequences() {
+        List<String> masked = VehicleConfigurationZip.maskNetworkAddressesForTest(Arrays.asList(
+                "adb/192.168.8.10.txt",
+                "adb/host.192.168.8.10.txt",
+                "peer 192.168.8.10:52001/24",
+                "sequence 1.2.3.4.5",
+                "invalid 1192.168.8.10"));
+        assertEquals("adb/<IP_1>.txt", masked.get(0));
+        assertEquals("adb/host.<IP_1>.txt", masked.get(1));
+        assertEquals("peer <IP_1>:52001/24", masked.get(2));
+        assertEquals("sequence 1.2.3.4.5", masked.get(3));
+        assertEquals("invalid 1192.168.8.10", masked.get(4));
     }
 }
