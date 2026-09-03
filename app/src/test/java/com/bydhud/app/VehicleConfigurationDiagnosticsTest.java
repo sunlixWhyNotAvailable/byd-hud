@@ -16,6 +16,15 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.*;
 
 public class VehicleConfigurationDiagnosticsTest {
+    @Test public void activityRecordPatternUsesIcuCompatibleLiteralBraces() throws Exception {
+        java.lang.reflect.Field field = VehicleConfigurationDiagnostics.class.getDeclaredField("ACTIVITY");
+        field.setAccessible(true);
+        String pattern = ((java.util.regex.Pattern) field.get(null)).pattern();
+        // The host JVM accepts a bare closing brace, but Android ICU rejects it at class initialization.
+        assertTrue(pattern.contains("ActivityRecord\\{"));
+        assertTrue("Android ICU requires the literal closing brace to be escaped", pattern.endsWith("\\}"));
+    }
+
     @Test public void diagnosticCommandsAreFixedAndAllowed() {
         assertEquals("dumpsys window displays", VehicleConfigurationDiagnostics.adbCommands().get("focus"));
         for (Map.Entry<String, String> entry : VehicleConfigurationDiagnostics.adbCommands().entrySet()) {

@@ -4005,7 +4005,7 @@ private fun AppsTab(
     LazyPageSurface(copy.apps, copy.appsHint, palette, scrollState, headerAction = {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
             Pill(scanStatusText, scanStatusColor.first, scanStatusColor.second, Modifier.width(230.dp))
-            HudButton(copy.refreshApps, palette, primary = true, width = 178.dp) {
+            HudButton(copy.refreshApps, palette, primary = true, width = 178.dp, modifier = Modifier.height(36.dp)) {
                 runAction { activity.composeRefreshApps() }
             }
         }
@@ -5407,7 +5407,8 @@ private fun HudCheckTab(
                     if (state.running) copy.hudCheckStop else copy.hudCheckStart,
                     palette,
                     primary = true,
-                    width = 180.dp
+                    width = 180.dp,
+                    modifier = Modifier.height(36.dp)
                 ) { runAction { activity.composeHudCheckToggleRunning() } }
             }
         }
@@ -5790,9 +5791,21 @@ private fun PageSurfaceHeader(
     headerAction: (@Composable () -> Unit)?
 ) {
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Column(Modifier.weight(1f)) {
-            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
-            Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        Row(
+            Modifier.weight(1f),
+            horizontalArrangement = Arrangement.spacedBy(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp, maxLines = 1)
+            Text(
+                hint,
+                color = palette.muted,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f)
+            )
         }
         headerAction?.invoke()
     }
@@ -5865,8 +5878,7 @@ private fun SidebarOptionsSurface(
             .background(palette.panel)
             .padding(14.dp)
     ) {
-        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 22.sp)
-        Text(hint, color = palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 13.sp)
+        PageSurfaceHeader(title, hint, palette, null)
         Spacer(Modifier.height(8.dp))
         Row(
             modifier = Modifier
@@ -6136,6 +6148,9 @@ private fun HudTransferAppDropdown(
     val fieldText = if (hasSelection) selected.label() else {
         if (ua) "Вибрати застосунок для перенесення" else "Select app to transfer"
     }
+    val selectedBackground = palette.accent.copy(alpha = if (palette.dark) 0.20f else 0.04f)
+    val fieldBackground = if (entries.isNotEmpty()) selectedBackground
+        else palette.accent.copy(alpha = if (palette.dark) 0.78f else 0.08f)
     Box(Modifier.width(width)) {
         Row(
             Modifier
@@ -6143,7 +6158,7 @@ private fun HudTransferAppDropdown(
                 .height(44.dp)
                 .clip(RoundedCornerShape(7.dp))
                 .border(1.dp, palette.accent, RoundedCornerShape(7.dp))
-                .background(palette.accent.copy(alpha = if (palette.dark) 0.78f else 0.08f))
+                .background(fieldBackground)
                 .clickable(enabled = entries.isNotEmpty()) { expanded = true }
                 .padding(horizontal = 10.dp),
             verticalAlignment = Alignment.CenterVertically
@@ -6185,7 +6200,7 @@ private fun HudTransferAppDropdown(
                                 .fillMaxWidth()
                                 .height(56.dp)
                                 .background(
-                                    if (selectedRow) palette.accent.copy(alpha = 0.18f)
+                                    if (selectedRow) selectedBackground
                                     else Color.Transparent
                                 )
                                 .clickable {
@@ -6306,7 +6321,7 @@ private fun HudDropdown(
     var expanded by remember { mutableStateOf(false) }
     val safeIndex = selectedIndex.coerceIn(options.indices)
     val rowHeight = 40.dp
-    val selectedBackground = palette.accent.copy(alpha = if (palette.dark) 0.78f else 0.08f)
+    val selectedBackground = palette.accent.copy(alpha = if (palette.dark) 0.20f else 0.04f)
     val selectedContent = if (palette.dark) Color.White else palette.text
     val fieldBackground = if (enabled) selectedBackground else palette.panelAlt
     val fieldBorder = if (enabled) palette.accent else palette.borderStrong

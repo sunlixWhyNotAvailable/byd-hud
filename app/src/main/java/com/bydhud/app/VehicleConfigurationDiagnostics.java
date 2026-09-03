@@ -52,7 +52,7 @@ final class VehicleConfigurationDiagnostics {
             "([A-Za-z][\\w]*(?:\\.[A-Za-z][\\w]*)+)/([.$\\w]+)");
     private static final Pattern TASK_DISPLAY = Pattern.compile("^(\\s*)Display\\s+#(\\d+)\\s+\\(activities[^)]*\\):?\\s*$");
     private static final Pattern ACTIVITY = Pattern.compile("^(\\s*)\\*\\s+Hist\\s+#\\d+:\\s+ActivityRecord\\{"
-            + "[^\\s{}]+\\s+u(\\d+)\\s+(" + COMPONENT.pattern() + ")\\s+t(\\d+)\\b[^}]*}");
+            + "[^\\s{}]+\\s+u(\\d+)\\s+(" + COMPONENT.pattern() + ")\\s+t(\\d+)\\b[^}]*\\}");
     private static final Pattern ACTIVITY_VISIBLE = Pattern.compile(
             "^(?:mVisibleRequested=(?:true|false)\\s+)?(mVisible|visible)=(true|false)\\b");
     private static final Pattern WINDOW_DISPLAY = Pattern.compile("^(\\s*)Display:\\s+mDisplayId=(\\d+)\\b");
