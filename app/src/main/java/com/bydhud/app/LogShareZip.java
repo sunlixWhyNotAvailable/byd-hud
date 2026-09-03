@@ -491,7 +491,7 @@ final class LogShareZip {
         return name != null
                 && (name.startsWith(ZIP_PREFIX) || name.startsWith(CONFIG_ZIP_PREFIX))
                 && (name.endsWith(".zip") || name.endsWith(".zip.part")
-                || name.endsWith(".zip.staging"));
+                || name.endsWith(".zip.staging") || name.endsWith(".zip.source.part"));
     }
 
     static void deleteArtifact(File file) {

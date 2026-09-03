@@ -75,7 +75,7 @@ public final class BackendPatchShareSourceContractTest {
                 < deliver.indexOf("SHARE_LAUNCH_EVENT.set(new ShareLaunchEvent"));
         assertTrue(deliver.contains("publishSharedUiStateChange();"));
         assertTrue(deliver.contains("share_chooser_failed"));
-        assertTrue(source.contains("queuePendingShare(result.file, Collections.emptyList())"));
+        assertTrue(source.contains("queuePendingShare(file, Collections.emptyList())"));
         assertTrue(snapshot.contains("shareLaunchId"));
         assertTrue(snapshot.contains("shareLaunchDays"));
         assertTrue(compose.contains(

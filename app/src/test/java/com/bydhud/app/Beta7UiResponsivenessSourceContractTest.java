@@ -219,7 +219,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
                 "public ComposeStorageShareSummary composeDescribeStorageShareDays");
         String sentryShare = between(activity,
                 "public ComposeSentryUploadResult composeUploadStorageDaysToSentry(",
-                "public String composeShareVehicleConfiguration()");
+                "public boolean composeBeginConfigurationExport(");
         String storage = source("NavigationLogStorage.java");
         String retention = between(storage, "private static void runScheduledRetention(",
                 "private static void runNavCaptureRetention(");

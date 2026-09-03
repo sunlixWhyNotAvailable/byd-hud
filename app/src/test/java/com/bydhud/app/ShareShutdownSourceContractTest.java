@@ -52,7 +52,7 @@ public final class ShareShutdownSourceContractTest {
                 "fun runLogcatAction(");
         String shareEffect = between(source,
                 "LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination)",
-                "LaunchedEffect(configurationShareBusy, configurationShareDestination)");
+                "    Box(\n        modifier = Modifier");
         assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
         assertFalse(shareEffect.contains("NonCancellable"));
         assertTrue(shareEffect.contains("runInterruptible(Dispatchers.IO)"));
@@ -155,7 +155,7 @@ public final class ShareShutdownSourceContractTest {
                     : relativePath;
             file = root.resolve(withoutApp);
         }
-        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8).replace("\r\n", "\n");
     }
 
     private static String between(String source, String start, String end) {

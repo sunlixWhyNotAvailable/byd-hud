@@ -4,6 +4,7 @@ package com.bydhud.app
 
 import android.os.SystemClock
 import android.view.MotionEvent
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -24,6 +25,7 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
@@ -671,12 +673,10 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var sentryUploadError by remember { mutableStateOf("") }
     var sentryUploadCooldownUntilMs by rememberSaveable { mutableStateOf(0L) }
     var sentryUploadCooldownRemaining by remember { mutableIntStateOf(0) }
-    var sentryUploadingConfiguration by remember { mutableStateOf(false) }
-    var configurationShareBusy by remember { mutableStateOf(false) }
+    val configurationExport by VehicleConfigurationExport.snapshot.collectAsState()
+    val configurationShareBusy = configurationExport?.let { configurationExportBusy(it.phase) } ?: false
     var configurationShareVisible by rememberSaveable { mutableStateOf(false) }
-    var configurationShareDestination by remember {
-        mutableStateOf<StorageShareDestination?>(null)
-    }
+    var configurationStartFailed by remember { mutableStateOf(false) }
     var logcatBusy by remember { mutableStateOf(false) }
     var liveHudStatus by remember { mutableStateOf(snapshot.hudStatus) }
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
@@ -717,8 +717,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         showSetupDialog -> "setup"
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
-        configurationShareVisible || configurationShareBusy
-            || (sentryUploadPhase != null && sentryUploadingConfiguration) -> "configuration-share"
+        configurationShareVisible || configurationExport != null -> "configuration-share"
         pendingNavigatorAssetId.isNotEmpty() || navigatorAssetActionPending -> "navigator-asset"
         pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty()
             || pendingPatchProfile.isNotEmpty() -> "patch"
@@ -910,14 +909,11 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
 
     fun beginConfigurationShare(destination: StorageShareDestination) {
         if (configurationShareBusy) return
-        configurationShareVisible = false
-        configurationShareDestination = destination
-        configurationShareBusy = true
-        sentryUploadingConfiguration = destination == StorageShareDestination.Sentry
-        if (destination == StorageShareDestination.Sentry) {
-            sentryUploadEventId = ""
-            sentryUploadError = ""
-            sentryUploadPhase = SentryUploadPhase.Preparing
+        if (activity.composeBeginConfigurationExport(destination == StorageShareDestination.Sentry)) {
+            configurationShareVisible = false
+            configurationStartFailed = false
+        } else {
+            configurationStartFailed = true
         }
     }
 
@@ -1166,46 +1162,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         }
     }
 
-    LaunchedEffect(configurationShareBusy, configurationShareDestination) {
-        val destination = configurationShareDestination
-        if (!configurationShareBusy || destination == null) {
-            return@LaunchedEffect
-        }
-        try {
-            if (destination == StorageShareDestination.Sentry) {
-                val result = withContext(Dispatchers.IO + NonCancellable) {
-                    activity.composeUploadVehicleConfigurationToSentry {
-                        activity.runOnUiThread { sentryUploadPhase = SentryUploadPhase.Uploading }
-                    }
-                }
-                sentryUploadEventId = result.eventId
-                sentryUploadError = result.detail
-                sentryUploadPhase = if (result.ok) {
-                    SentryUploadPhase.Success
-                } else {
-                    SentryUploadPhase.Failure
-                }
-                activity.composeAppendStatus("Sentry configuration upload: ${result.detail}")
-            } else {
-                val detail = withContext(Dispatchers.IO + NonCancellable) {
-                    activity.composeShareVehicleConfiguration()
-                }
-                activity.composeAppendStatus("Configuration share: $detail")
-            }
-        } catch (error: Exception) {
-            val detail = error.message ?: error.javaClass.simpleName
-            if (destination == StorageShareDestination.Sentry) {
-                sentryUploadError = detail
-                sentryUploadPhase = SentryUploadPhase.Failure
-            }
-            activity.composeAppendStatus("Configuration share failed: $detail")
-        } finally {
-            configurationShareBusy = false
-            configurationShareDestination = null
-            refresh()
-        }
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1290,8 +1246,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         onStartLogcat = { runLogcatAction(true) },
                         onStopLogcat = { runLogcatAction(false) },
                         onShareConfiguration = {
-                            if (!configurationShareBusy
+                            if (configurationExport == null
                                 && activity.composeTryStartBlockingUiFlow("configuration-share")) {
+                                configurationStartFailed = false
                                 configurationShareVisible = true
                             }
                         },
@@ -1604,7 +1561,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
                         sentryUploadCooldownRemaining = 30
                         storageShareSummary = null
-                        sentryUploadingConfiguration = false
                         sentryUploadEventId = ""
                         sentryUploadError = ""
                         sentryUploadPhase = SentryUploadPhase.Preparing
@@ -1639,28 +1595,44 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         }
 
         sentryUploadPhase?.let { phase ->
-            if (storageSharePhase != null && !sentryUploadingConfiguration) return@let
+            if (storageSharePhase != null) return@let
             SentryUploadOverlay(
                 copy = shareCopy,
                 palette = palette,
                 phase = phase,
                 eventId = sentryUploadEventId,
                 error = sentryUploadError,
-                configuration = sentryUploadingConfiguration,
+                configuration = false,
                 onClose = {
                     sentryUploadPhase = null
-                    sentryUploadingConfiguration = false
                 }
             )
         }
 
-        if (configurationShareVisible) {
+        if (configurationShareVisible && configurationExport == null) {
             ConfigurationShareDestinationOverlay(
                 copy = shareCopy,
                 palette = palette,
+                startError = if (!configurationStartFailed) "" else if (copy.language == Language.Ua) {
+                    "Інша операція ще триває. Зачекайте й повторіть спробу"
+                } else {
+                    "Another operation is still running. Wait and try again"
+                },
                 onSentry = { beginConfigurationShare(StorageShareDestination.Sentry) },
                 onAnotherApp = { beginConfigurationShare(StorageShareDestination.Android) },
                 onCancel = { configurationShareVisible = false }
+            )
+        }
+
+        configurationExport?.let { state ->
+            ConfigurationExportOverlay(
+                copy = copy,
+                shareCopy = shareCopy,
+                palette = palette,
+                state = state,
+                onCancel = { activity.composeCancelConfigurationExport() },
+                onClose = { activity.composeDismissConfigurationExport() },
+                onShare = { activity.composeShareConfigurationExport() }
             )
         }
 
@@ -3606,14 +3578,185 @@ private fun SentryUploadOverlay(
 }
 
 @Composable
+private fun ConfigurationExportOverlay(
+    copy: Copy,
+    shareCopy: ShareCopy,
+    palette: Palette,
+    state: ConfigurationExportSnapshot,
+    onCancel: () -> Unit,
+    onClose: () -> Unit,
+    onShare: () -> Unit
+) {
+    val ua = copy.language == Language.Ua
+    val busy = configurationExportBusy(state.phase)
+    val canCancel = busy && state.phase != ConfigurationExportPhase.UPLOADING
+        && state.phase != ConfigurationExportPhase.CANCELLING
+    val canShare = state.archiveAvailable && !busy && state.phase != ConfigurationExportPhase.CANCELLED
+    val partial = state.unavailableFiles > 0
+    val stageText = when (state.phase) {
+        ConfigurationExportPhase.INVENTORY -> if (ua) "Пошук системних компонентів" else "Finding system components"
+        ConfigurationExportPhase.DIAGNOSTICS -> if (ua) "Збирання конфігурації та діагностики" else "Collecting configuration and diagnostics"
+        ConfigurationExportPhase.COPYING -> if (ua) "Копіювання системних файлів" else "Copying system files"
+        ConfigurationExportPhase.ARCHIVING -> if (ua) "Пакування перевірених файлів у ZIP" else "Adding verified files to ZIP"
+        ConfigurationExportPhase.VERIFYING -> if (ua) "Перевірка завершеного ZIP-архіву" else "Verifying the completed ZIP archive"
+        ConfigurationExportPhase.READY -> if (partial) {
+            if (ua) "Архів готовий · є недоступні файли" else "Archive ready · some files unavailable"
+        } else if (ua) "Архів готовий" else "Archive ready"
+        ConfigurationExportPhase.UPLOADING -> shareCopy.uploading
+        ConfigurationExportPhase.SENT -> if (partial) {
+            if (ua) "Надіслано частковий архів · є недоступні файли" else "Partial archive sent · some files unavailable"
+        } else shareCopy.configurationSuccess
+        ConfigurationExportPhase.FAILED -> if (state.archiveAvailable && state.toDeveloper) {
+            shareCopy.configurationFailure
+        } else if (ua) "Не вдалося завершити експорт" else "Export could not be completed"
+        ConfigurationExportPhase.CANCELLING -> if (ua) "Зупинення експорту й очищення тимчасових файлів" else "Stopping export and cleaning temporary files"
+        ConfigurationExportPhase.CANCELLED -> if (ua) "Експорт скасовано" else "Export cancelled"
+    }
+    // The host dispatches Back here; never label a dispatched upload as cancelled.
+    BackHandler {
+        if (canCancel) onCancel() else if (!busy) onClose()
+    }
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier.width(minOf(640.dp, maxWidth - 36.dp))
+                .heightIn(max = maxHeight - 36.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(shareCopy.configurationTitle, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(
+                stageText,
+                color = when {
+                    state.phase == ConfigurationExportPhase.FAILED -> palette.red
+                    partial && !busy -> palette.yellow
+                    canShare -> palette.green
+                    else -> palette.text
+                },
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                if (ua) "Минуло: ${state.elapsedSeconds} с" else "Elapsed: ${state.elapsedSeconds} s",
+                color = palette.muted, fontSize = 13.sp
+            )
+            if (busy) {
+                val totalBytes = state.totalBytes
+                // Copy completion is not archive completion; finalization stays indeterminate.
+                if (state.phase == ConfigurationExportPhase.COPYING && totalBytes != null
+                    && totalBytes > 0L && state.copiedBytes < totalBytes) {
+                    val percent = (state.copiedBytes.toDouble() / totalBytes * 100).toInt().coerceIn(0, 99)
+                    UpdateProgressBar("$percent%", palette)
+                } else {
+                    LoadingSpinner(palette)
+                }
+            }
+            if (state.currentFile.isNotBlank()) {
+                CodeBlock(state.currentFile, palette, compact = true)
+            }
+            val byteTotal = state.totalBytes?.let { formatBytes(it, copy) } ?: "?"
+            val fileTotal = state.totalFiles?.toString() ?: "?"
+            Text(
+                if (ua) {
+                    "Скопійовано: ${formatBytes(state.copiedBytes, copy)} / $byteTotal · файлів: ${state.copiedFiles} / $fileTotal\nНедоступно: ${state.unavailableFiles}"
+                } else {
+                    "Copied: ${formatBytes(state.copiedBytes, copy)} / $byteTotal · files: ${state.copiedFiles} / $fileTotal\nUnavailable: ${state.unavailableFiles}"
+                },
+                color = palette.text, fontSize = 14.sp
+            )
+            if (busy && (state.totalBytes == null || state.totalFiles == null)) {
+                Text(
+                    if (ua) "Загальний обсяг і кількість стануть відомі після пошуку файлів"
+                    else "Total size and count will be known after inventory",
+                    color = palette.muted, fontSize = 14.sp
+                )
+            }
+            if (state.archiveAvailable) {
+                CodeBlock("${state.archiveName}\nZIP: ${formatBytes(state.archiveBytes, copy)}", palette, compact = true)
+            }
+            if (partial && state.archiveAvailable) {
+                Text(
+                    if (ua) "Частину файлів отримати не вдалося. Причини збережено в manifest.json; доступні файли залишаються в архіві"
+                    else "Some files could not be collected. Reasons are recorded in manifest.json; available files remain in the archive",
+                    color = palette.muted, fontSize = 14.sp
+                )
+            }
+            if (state.toDeveloper && state.archiveAvailable && state.archiveBytes > SentryLogUploader.MAX_ZIP_BYTES) {
+                val limitMiB = SentryLogUploader.MAX_ZIP_BYTES / (1024L * 1024L)
+                Text(
+                    if (ua) "Архів перевищує ліміт Sentry ($limitMiB МіБ) і не був надісланий. Повний архів збережено — передайте його через інший застосунок"
+                    else "The archive exceeds the Sentry limit ($limitMiB MiB) and was not sent. The complete archive is retained — share it through another app",
+                    color = palette.yellow, fontSize = 14.sp
+                )
+            }
+            if (state.phase == ConfigurationExportPhase.UPLOADING) {
+                Text(
+                    if (ua) "Надсилання через Sentry вже розпочалося; скасування не гарантується. Зачекайте на результат"
+                    else "Sentry dispatch has started; cancellation cannot be guaranteed. Wait for the result",
+                    color = palette.muted, fontSize = 14.sp
+                )
+            } else if (state.phase == ConfigurationExportPhase.CANCELLED) {
+                Text(
+                    if (ua) "Незавершений архів не передаватиметься. Експорт можна запустити знову"
+                    else "The unfinished archive will not be shared. You can start the export again",
+                    color = palette.muted, fontSize = 14.sp
+                )
+            } else if (busy) {
+                Text(
+                    if (ua) "Збирання повного пакета може тривати кілька хвилин. Завершення буде підтверджено лише після перевірки ZIP"
+                    else "Collecting the full package may take several minutes. Completion is confirmed only after ZIP verification",
+                    color = palette.muted, fontSize = 14.sp
+                )
+            }
+            if (state.detail.isNotBlank()) CodeBlock(state.detail, palette, compact = true)
+            if (state.eventId.isNotBlank()) CodeBlock("${shareCopy.reportId}: ${state.eventId}", palette, compact = true)
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                if (canShare) {
+                    HudButton(shareCopy.shareToAnotherApp, palette, primary = true, width = 220.dp, onClick = onShare)
+                }
+                HudButton(
+                    text = if (canCancel) shareCopy.cancel else if (busy) {
+                        if (ua) "Зачекайте" else "Please wait"
+                    } else shareCopy.close,
+                    palette = palette,
+                    primary = !canShare,
+                    enabled = canCancel || !busy,
+                    width = 138.dp,
+                    onClick = if (canCancel) onCancel else onClose
+                )
+            }
+        }
+    }
+}
+
+private fun configurationExportBusy(phase: ConfigurationExportPhase): Boolean = when (phase) {
+    ConfigurationExportPhase.INVENTORY, ConfigurationExportPhase.DIAGNOSTICS,
+    ConfigurationExportPhase.COPYING, ConfigurationExportPhase.ARCHIVING,
+    ConfigurationExportPhase.VERIFYING, ConfigurationExportPhase.UPLOADING,
+    ConfigurationExportPhase.CANCELLING -> true
+    ConfigurationExportPhase.READY, ConfigurationExportPhase.SENT,
+    ConfigurationExportPhase.FAILED, ConfigurationExportPhase.CANCELLED -> false
+}
+
+@Composable
 private fun ConfigurationShareDestinationOverlay(
     copy: ShareCopy,
     palette: Palette,
+    startError: String,
     onSentry: () -> Unit,
     onAnotherApp: () -> Unit,
     onCancel: () -> Unit
 ) {
-    Box(
+    BackHandler(onBack = onCancel)
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
@@ -3622,10 +3765,12 @@ private fun ConfigurationShareDestinationOverlay(
         ModalInputBlocker()
         Column(
             modifier = Modifier
-                .width(760.dp)
+                .width(minOf(760.dp, maxWidth - 36.dp))
+                .heightIn(max = maxHeight - 36.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(palette.surface)
                 .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState())
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
@@ -3676,6 +3821,7 @@ private fun ConfigurationShareDestinationOverlay(
                 )
                 HudButton(copy.cancel, palette, width = 138.dp, onClick = onCancel)
             }
+            if (startError.isNotEmpty()) Text(startError, color = palette.yellow, fontSize = 14.sp)
         }
     }
 }
@@ -7732,8 +7878,8 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         failure = "Не вдалося надіслати логи.",
         reportId = "ID звіту",
         close = "Закрити",
-        configurationTitle = "Поділитися конфігурацією авто",
-        configurationWarning = "Архів міститиме доступні поточні значення HUD/приборки; дозволи, компоненти, стан виконання й налаштування BYD HUD; відомості про пристрій, прошивку, пакети/процеси, дисплеї, аудіо й систему; мережеву діагностику та SOME/IP. Мережеві адреси маскуються; облікові дані, VIN, акаунти, маршрути, координати, вміст сповіщень і аудіозаписи не включаються. Автоматичного надсилання немає. Перевірте отримувача перед надсиланням.",
+        configurationTitle = "Експорт конфігурації авто",
+        configurationWarning = "Архів міститиме доступні значення HUD/приборки, FID, дозволи, стан BYD HUD, відомості про прошивку, дисплеї, аудіо, мережу та SOME/IP. Також додаються самі діагностично потрібні системні застосунки з split APK, бібліотеки, framework, ресурси приборки, конфіги й залежності — не лише їхні хеші. Пакет може бути великим, а збирання — тривалим. Не пов’язані з діагностикою застосунки й особисті дані застосунків (акаунти, маршрути та записи) не читаються. Бінарні файли прошивки копіюються без змін і можуть містити вбудовані виробником дані. Мережеві адреси й чутливі ідентифікатори у текстовій діагностиці та конфігурації маскуються. Автоматичного надсилання немає. Передавайте архів лише довіреному отримувачу.",
         configurationUploadTitle = "Надсилання конфігурації розробнику",
         configurationSuccess = "Конфігурацію успішно надіслано.",
         configurationFailure = "Не вдалося надіслати конфігурацію."
@@ -7758,8 +7904,8 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         failure = "The logs could not be sent.",
         reportId = "Report ID",
         close = "Close",
-        configurationTitle = "Share vehicle configuration",
-        configurationWarning = "The archive includes available live HUD/cluster values; permissions, components, runtime and BYD HUD options; device/firmware, package/process, display, audio and system metadata; network and SOME/IP diagnostics. Network addresses are masked; credentials, VIN, account data, routes, coordinates, notification contents and recordings are excluded. Nothing is uploaded automatically. Verify the recipient before sending.",
+        configurationTitle = "Export vehicle configuration",
+        configurationWarning = "The archive includes available HUD/cluster values, FIDs, permissions, BYD HUD state, firmware, display, audio, network and SOME/IP diagnostics. It also includes the relevant system apps with split APKs, libraries, framework, cluster resources, configs and dependencies themselves — not just their hashes. The package may be large and collection may take time. Unrelated apps and personal app data (accounts, routes and recordings) are not read. Binary firmware files are copied unchanged and may contain vendor-embedded data. Network addresses and sensitive identifiers in text diagnostics and configuration values are masked. Nothing is uploaded automatically. Share only with a trusted recipient.",
         configurationUploadTitle = "Sending configuration to developer",
         configurationSuccess = "Configuration sent successfully.",
         configurationFailure = "The configuration could not be sent."

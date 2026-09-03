@@ -141,6 +141,28 @@ public final class VehicleConfigurationPolicyTest {
     }
 
     @Test
+    public void commonCompoundCredentialsAreMaskedWithoutDestroyingXmlSiblings() throws Exception {
+        String json = "{\"accessToken\":\"t-secret\",\"clientSecret\":\"c-secret\","
+                + "\"passwordHash\":\"p-secret\",\"apiSecret\":\"a-secret\",\"tokenizer\":\"keep\"}";
+        assertTrue(VehicleConfigurationZip.containsSensitiveConfigContent(json));
+        org.json.JSONObject redacted = new org.json.JSONObject(VehicleConfigurationZip.redactConfigContent(json));
+        for (String key : new String[]{"accessToken", "clientSecret", "passwordHash", "apiSecret"}) {
+            assertEquals("[REDACTED]", redacted.getString(key));
+        }
+        assertEquals("keep", redacted.getString("tokenizer"));
+        String xml = "<config><accessToken>x-secret</accessToken><port>52001</port>"
+                + "<entry key='refreshToken' data='r-secret'/><endpoint apiSecret=\"a-secret\"/></config>";
+        String maskedXml = VehicleConfigurationZip.redactConfigContent(xml);
+        assertTrue(maskedXml.contains("<accessToken>[REDACTED]</accessToken>"));
+        assertTrue(maskedXml.contains("<port>52001</port>"));
+        assertFalse(maskedXml.contains("x-secret"));
+        assertFalse(maskedXml.contains("r-secret"));
+        assertFalse(maskedXml.contains("a-secret"));
+        javax.xml.parsers.DocumentBuilderFactory.newInstance().newDocumentBuilder().parse(
+                new java.io.ByteArrayInputStream(maskedXml.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+    }
+
+    @Test
     public void networkMaskingHandlesFilenameDotsWithoutMatchingLongNumericSequences() {
         List<String> masked = VehicleConfigurationZip.maskNetworkAddressesForTest(Arrays.asList(
                 "adb/192.168.8.10.txt",

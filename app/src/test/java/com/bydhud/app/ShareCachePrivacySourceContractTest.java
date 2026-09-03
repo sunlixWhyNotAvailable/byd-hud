@@ -41,4 +41,17 @@ public final class ShareCachePrivacySourceContractTest {
         assertTrue(method.contains("app.getExternalCacheDir()"));
         assertTrue(method.contains("app.getCacheDir()"));
     }
+
+    @Test
+    public void staleConfigurationSpoolsUseExistingScopedCleanup() throws Exception {
+        java.lang.reflect.Method matcher = LogShareZip.class.getDeclaredMethod("isShareArtifact", String.class);
+        matcher.setAccessible(true);
+        assertTrue((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-20260903.zip.source.part"));
+        assertTrue((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-elf-123.zip.source.part"));
+        assertFalse((Boolean) matcher.invoke(null, "unrelated.zip.source.part"));
+        assertFalse((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-keep.so"));
+        String inventory = source("src/main/java/com/bydhud/app/VehicleConfigurationFiles.java");
+        assertTrue(inventory.contains("File directory = LogShareZip.writableShareDir(context)"));
+        assertTrue(inventory.contains("File.createTempFile(\"BYD-HUD-vehicle-config-elf-\", \".zip.source.part\", directory)"));
+    }
 }

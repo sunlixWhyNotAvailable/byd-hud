@@ -39,6 +39,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
+import java.util.function.LongConsumer;
 
 import org.json.JSONObject;
 
@@ -63,6 +64,8 @@ final class LocalAdbBridge {
     private static final int MAX_DIAGNOSTIC_OUTPUT_BYTES = 4 * 1024 * 1024;
     private static final int DIAGNOSTIC_OUTPUT_TAIL_BYTES = 64;
     private static final int INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES = 4 * 1024;
+    private static final int FULL_EXPORT_IDLE_TIMEOUT_MS = 30_000;
+    private static final long FULL_INVENTORY_COMMAND_TIMEOUT_MS = 60_000L;
     private static final String KEY_DIR = "adb_keys";
     private static volatile boolean permissionGrantInProgress;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
@@ -190,12 +193,19 @@ final class LocalAdbBridge {
     //The collector owns the overall deadline, including its pre-ADB local work.
     static ConfigurationExportSession openConfigurationExport(Context context, long remainingBudgetMs) {
         long budgetMs = Math.max(0L, Math.min(remainingBudgetMs, VehicleConfigurationReadback.SESSION_TIMEOUT_MS));
-        ConfigurationExportSession session = new ConfigurationExportSession(new Socket(), budgetMs);
+        ConfigurationExportSession session = new ConfigurationExportSession(new Socket(), budgetMs, false);
         if (budgetMs == 0L) {
             session.unavailable = exportFailure("skipped", 125, "collection deadline exhausted", "");
             session.stop("session deadline");
             return session;
         }
+        session.open(context.getApplicationContext());
+        return session;
+    }
+
+    //Full raw-file export has no aggregate deadline; each command and idle read stays bounded.
+    static ConfigurationExportSession openFullConfigurationExport(Context context) {
+        ConfigurationExportSession session = new ConfigurationExportSession(new Socket(), 0L, true);
         session.open(context.getApplicationContext());
         return session;
     }
@@ -209,6 +219,7 @@ final class LocalAdbBridge {
             return thread;
         });
         private final long deadlineNanos;
+        private final boolean fullExport;
         private final AtomicBoolean busy = new AtomicBoolean();
         private final AtomicBoolean oemRead = new AtomicBoolean();
         private final AtomicReference<String> stopped = new AtomicReference<>();
@@ -217,10 +228,19 @@ final class LocalAdbBridge {
         private String apkPath;
 
         private ConfigurationExportSession(Socket socket, long budgetMs) {
+            this(socket, budgetMs, false);
+        }
+
+        private ConfigurationExportSession(Socket socket, long budgetMs, boolean fullExport) {
             this.socket = socket;
-            deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
-            deadlines.schedule(() -> stop("session deadline"),
-                    budgetMs, TimeUnit.MILLISECONDS);
+            this.fullExport = fullExport;
+            deadlineNanos = fullExport
+                    ? Long.MAX_VALUE
+                    : System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
+            if (!fullExport && budgetMs > 0L) {
+                deadlines.schedule(() -> stop("session deadline"),
+                        budgetMs, TimeUnit.MILLISECONDS);
+            }
         }
 
         private void open(Context context) {
@@ -250,7 +270,7 @@ final class LocalAdbBridge {
                     stop("authorization denied");
                 } else {
                     connection = opened.connection;
-                    socket.setSoTimeout(0); //Absolute watchdog also bounds streaming peers and writes.
+                    socket.setSoTimeout(fullExport ? FULL_EXPORT_IDLE_TIMEOUT_MS : 0);
                 }
             } catch (Exception error) {
                 String reason = stopped.get();
@@ -270,6 +290,50 @@ final class LocalAdbBridge {
                 throw new SecurityException("Configuration export command is not read-only allowlisted");
             }
             return execute(safe, VehicleConfigurationReadback.COMMAND_TIMEOUT_MS);
+        }
+
+        ShellResult runFileCommand(String command) {
+            String safe = command == null ? "" : command.trim();
+            if (!VehicleConfigurationFiles.isAllowedCommand(safe)) {
+                throw new SecurityException("Full configuration command is not allowlisted");
+            }
+            long timeout = fullExport && safe.startsWith("find ")
+                    ? FULL_INVENTORY_COMMAND_TIMEOUT_MS
+                    : VehicleConfigurationReadback.COMMAND_TIMEOUT_MS;
+            return execute(safe, timeout);
+        }
+
+        long readFile(String path, OutputStream output, long expectedBytes,
+                LongConsumer progress) throws IOException {
+            if (!VehicleConfigurationFiles.isAllowedPath(path)) {
+                throw new SecurityException("Full configuration path is not allowlisted");
+            }
+            String safePath = path;
+            if (!fullExport) throw new IOException("full export session required");
+            if (output == null) throw new IllegalArgumentException("output is required");
+            if (expectedBytes < 0L) throw new IllegalArgumentException("expectedBytes < 0");
+            if (unavailable != null) {
+                throw new IOException(unavailable.error.isEmpty()
+                        ? "configuration export transport unavailable" : unavailable.error);
+            }
+            if (!busy.compareAndSet(false, true)) {
+                throw new IOException("export command already in progress");
+            }
+            try {
+                if (Thread.currentThread().isInterrupted()) {
+                    stop("cancelled");
+                    throw new IOException("configuration file read cancelled");
+                }
+                if (stopped.get() != null || connection == null) {
+                    throw new IOException(String.valueOf(stopped.get()));
+                }
+                return connection.readFile(safePath, output, expectedBytes, progress);
+            } catch (IOException | RuntimeException error) {
+                if (stopped.get() == null) stop("transport failed");
+                throw error;
+            } finally {
+                busy.set(false);
+            }
         }
 
         ShellResult readOem() {
@@ -342,7 +406,9 @@ final class LocalAdbBridge {
         }
 
         private ScheduledFuture<?> guard(long timeoutMs, String reason) {
-            long remaining = Math.max(0L, deadlineNanos - System.nanoTime());
+            long remaining = fullExport
+                    ? Long.MAX_VALUE
+                    : Math.max(0L, deadlineNanos - System.nanoTime());
             long operationBudget = TimeUnit.MILLISECONDS.toNanos(timeoutMs);
             String expiry = remaining <= operationBudget ? "session deadline" : reason;
             return deadlines.schedule(() -> stop(expiry), Math.min(remaining,
@@ -1632,6 +1698,72 @@ final class LocalAdbBridge {
                     return output.capture();
                 }
             }
+        }
+
+        //Uses the ADB sync RECV protocol so arbitrary file bytes never pass through shell text.
+        long readFile(String path, OutputStream output, long expectedBytes,
+                LongConsumer progress) throws IOException {
+            byte[] pathBytes = path.getBytes(StandardCharsets.UTF_8);
+            if (pathBytes.length == 0 || pathBytes.length > 4096) {
+                throw new IOException("ADB sync path length out of range");
+            }
+            int localId = nextLocalId++;
+            int remoteId = 0;
+            AdbPacket.write(out, AdbPacket.A_OPEN, localId, 0, nulPayload("sync:"));
+            AdbSyncReader reader = new AdbSyncReader(output, expectedBytes, progress);
+            boolean requestSent = false;
+            while (true) {
+                AdbPacket packet = AdbPacket.read(in);
+                if (packet.arg1 != localId) {
+                    handleStalePacket(packet);
+                    continue;
+                }
+                if (packet.command == AdbPacket.A_OKAY) {
+                    if (remoteId != 0 && remoteId != packet.arg0) {
+                        throw new IOException("ADB sync remote id changed");
+                    }
+                    remoteId = packet.arg0;
+                    if (!requestSent) {
+                        AdbPacket.write(out, AdbPacket.A_WRTE, localId, remoteId,
+                                syncRecvRequest(pathBytes));
+                        requestSent = true;
+                    }
+                } else if (packet.command == AdbPacket.A_WRTE) {
+                    if (remoteId == 0) remoteId = packet.arg0;
+                    reader.accept(packet.payload);
+                    AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
+                    if (reader.isDone()) {
+                        //Sync services may hold CLSE until the client closes this stream.
+                        AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
+                        return reader.copiedBytes();
+                    }
+                } else if (packet.command == AdbPacket.A_CLSE) {
+                    if (remoteId == 0) remoteId = packet.arg0;
+                    reader.finish();
+                    AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
+                    return reader.copiedBytes();
+                } else {
+                    throw new IOException("Unexpected ADB sync packet");
+                }
+            }
+        }
+
+        private static byte[] syncRecvRequest(byte[] pathBytes) throws IOException {
+            ByteArrayOutputStream request = new ByteArrayOutputStream(pathBytes.length + 8);
+            request.write('R');
+            request.write('E');
+            request.write('C');
+            request.write('V');
+            writeIntLe(request, pathBytes.length);
+            request.write(pathBytes);
+            return request.toByteArray();
+        }
+
+        private static void writeIntLe(OutputStream output, int value) throws IOException {
+            output.write(value & 0xff);
+            output.write((value >>> 8) & 0xff);
+            output.write((value >>> 16) & 0xff);
+            output.write((value >>> 24) & 0xff);
         }
 
         //handles this branch here so source-specific edge cases stay out of the main flow.

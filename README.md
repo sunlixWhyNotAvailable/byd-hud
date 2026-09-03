@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
 
-- **Version:** v3.1.2
+- **Version:** v3.2.0
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
@@ -316,7 +316,11 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 
 `Share logs` and sorting stay at the top of `Logs`; its inset day cards scroll independently so the footer remains reachable. The footer contains `Start Logcat` / `Stop Logcat`, `Export configuration`, and `Delete selected`. Available folder paths are shown in `Navigation logs folder` below. Configuration export does not require selected days.
 
-Export reads available diagnostic information without changing vehicle modes or repairing permissions. An already authorized ADB connection enables additional readings; without it, the basic archive remains available. Unsupported or failed readings are identified rather than reported as disabled. The confirmation offers the normal Android share chooser or sending the archive to the developer through Sentry. Credentials are excluded and network addresses are masked.
+Export reads available diagnostic information without changing vehicle modes or repairing permissions. It also collects the relevant stock navigation and dashboard APKs (including splits), native libraries and their dependencies, framework files, and dashboard resources. An already authorized ADB connection provides wider access; without it, the readable local files and basic report remain available. Missing or inaccessible files are listed in the result.
+
+The export window shows the current stage and file, followed by the actual file count and copied volume once discovery finishes. Collection can take time and the archive may exceed 1 GB. You can cancel it, or leave and reopen BYD HUD while the same process continues working. The final archive size appears only after ZIP verification. Developer uploads are limited to 20 MiB; larger archives remain available through `Another app` without being split or truncated.
+
+Text diagnostics and configuration values are redacted and network addresses masked. Firmware binaries are copied unchanged and may contain vendor-embedded data. Unrelated apps and private app data are not collected. Review the warning and share only with a trusted recipient; nothing is uploaded without your choice.
 
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
 
@@ -331,7 +335,7 @@ Archive preparation uses a persistent progress card that remains visible across 
 
 After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears exactly the day checkboxes captured for that archive. Archive, chooser, upload, or cancellation failure keeps the selection. Days selected while an upload is running remain selected.
 
-With authorized ADB, starting Logcat records all system log buffers and captures the initial performance state; stopping it adds final frame and system metrics. Without ADB, the same stateful button records the buffers and diagnostics available to the app. There are no fixed-duration presets. Configuration sharing works without ADB; an already-authorized bridge only adds more read-only system diagnostics. Sharing does not request ADB access and does not enable telemetry.
+With authorized ADB, starting Logcat records all system log buffers and captures the initial performance state; stopping it adds final frame and system metrics. Without ADB, the same stateful button records the buffers and diagnostics available to the app. There are no fixed-duration presets. Configuration export does not request ADB access, repair permissions, or enable telemetry.
 
 Each Logcat recording writes one continuous file until stopped, without splitting, rotation, or a fixed per-recording size cap. Initial and final diagnostics remain separate files in the same recording folder. Long recordings use more storage; the normal log-folder retention settings still apply.
 

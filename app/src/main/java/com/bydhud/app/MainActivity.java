@@ -385,6 +385,10 @@ public final class MainActivity extends ComponentActivity {
     @SuppressLint("MissingSuperCall")
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void onBackPressed() {
+        if (getOnBackPressedDispatcher().hasEnabledCallbacks()) {
+            getOnBackPressedDispatcher().onBackPressed();
+            return;
+        }
         appendStatus("back pressed: moving task to background");
         moveTaskToBack(true);
     }
@@ -2212,50 +2216,21 @@ public final class MainActivity extends ComponentActivity {
         }
     }
 
-    //Creates one bounded diagnostic ZIP and enriches it through ADB only when already available.
-    public String composeShareVehicleConfiguration() {
-        if (!SHARE_OPERATION.compareAndSet(false, true)) {
-            return "failed: share already running";
-        }
-        try {
-            VehicleConfigurationZip.Result result = VehicleConfigurationZip.create(this);
-            if (!result.ok || result.file == null) {
-                return "failed: " + result.detail;
-            }
-            queuePendingShare(result.file, Collections.emptyList());
-            return "ready " + result.file.getName() + " " + result.detail;
-        } finally {
-            SHARE_OPERATION.set(false);
-        }
+    public boolean composeBeginConfigurationExport(boolean toDeveloper) {
+        return VehicleConfigurationExport.start(getApplicationContext(), toDeveloper);
     }
 
-    //Creates and uploads one vehicle-configuration ZIP only after explicit in-app consent.
-    public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(
-            Runnable uploadStarted) {
-        if (!SHARE_OPERATION.compareAndSet(false, true)) {
-            return new ComposeSentryUploadResult(false, "", "share already running");
-        }
-        try {
-            VehicleConfigurationZip.Result archive = VehicleConfigurationZip.create(this);
-            if (!archive.ok || archive.file == null) {
-                return new ComposeSentryUploadResult(false, "", archive.detail);
-            }
-            try {
-                if (uploadStarted != null) {
-                    uploadStarted.run();
-                }
-            } catch (RuntimeException error) {
-                LogShareZip.deleteArtifact(archive.file);
-                return new ComposeSentryUploadResult(false, "",
-                        error.getClass().getSimpleName() + ": " + error.getMessage());
-            }
-            SentryLogUploader.Result upload =
-                    SentryLogUploader.uploadConfiguration(this, archive.file);
-            return new ComposeSentryUploadResult(upload.ok, upload.eventId, upload.detail);
-        } finally {
-            SHARE_OPERATION.set(false);
-        }
-    }
+    public void composeCancelConfigurationExport() { VehicleConfigurationExport.cancel(); }
+
+    public void composeDismissConfigurationExport() { VehicleConfigurationExport.dismiss(); }
+
+    public void composeShareConfigurationExport() { VehicleConfigurationExport.shareReady(); }
+
+    static boolean claimShareOperation() { return SHARE_OPERATION.compareAndSet(false, true); }
+
+    static void releaseShareOperation() { SHARE_OPERATION.set(false); }
+
+    static void queueConfigurationShare(File file) { queuePendingShare(file, Collections.emptyList()); }
 
     private static List<String> immutableStorageDays(List<String> days) {
         if (days == null || days.isEmpty()) {
@@ -3801,6 +3776,7 @@ public final class MainActivity extends ComponentActivity {
         UserRuntimeSession.PROCESS.shutdown();
         HudPrefs.setUserShutdownActive(this, true);
         AppUpdateManager.resetForShutdown();
+        VehicleConfigurationExport.shutdown();
         NavAppDisplayController.get(this).cancelWidgetModeForShutdown();
         DashboardWidgetController.shutdown(this);
         AppEventLogger.event(this, "shutdown requested reason=" + safeReason);

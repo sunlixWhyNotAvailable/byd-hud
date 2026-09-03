@@ -16,7 +16,7 @@ public final class ShareCompletionSourceContractTest {
         String activity = source("MainActivity.java");
         String upload = between(activity,
                 "public ComposeSentryUploadResult composeUploadStorageDaysToSentry(",
-                "public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(");
+                "public boolean composeBeginConfigurationExport(");
 
         assertTrue(upload.contains("List<String> submittedDays = immutableStorageDays(days)"));
         assertTrue(upload.contains("LogShareZip.create(this, submittedDays, uploadId)"));
@@ -36,14 +36,12 @@ public final class ShareCompletionSourceContractTest {
         String activity = source("MainActivity.java");
         String deliver = between(activity, "private void deliverPendingShare()",
                 "private static void notifyPendingShare()");
-        String config = between(activity,
-                "public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(",
-                "private static List<String> immutableStorageDays");
+        String config = source("VehicleConfigurationExport.kt");
 
         assertTrue(deliver.contains("publishShareCompletion(pending.launchId, pending.storageDays)"));
         assertTrue(config.contains("SentryLogUploader.uploadConfiguration"));
         assertTrue(!config.contains("publishShareCompletion"));
-        assertTrue(activity.contains("queuePendingShare(result.file, Collections.emptyList())"));
+        assertTrue(activity.contains("queuePendingShare(file, Collections.emptyList())"));
     }
 
     @Test
@@ -51,7 +49,7 @@ public final class ShareCompletionSourceContractTest {
         String activity = source("MainActivity.java");
         String upload = between(activity,
                 "public ComposeSentryUploadResult composeUploadStorageDaysToSentry(",
-                "public ComposeSentryUploadResult composeUploadVehicleConfigurationToSentry(");
+                "public boolean composeBeginConfigurationExport(");
         assertTrue(upload.contains("String uploadId = SentryLogUploader.newUploadId()"));
         assertTrue(upload.contains("LogShareZip.create(this, submittedDays, uploadId)"));
         assertTrue(upload.contains("SentryLogUploader.upload(\n                    this, archive.file, submittedDays, uploadId)"));

@@ -191,11 +191,11 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(source.contains("shareConfiguration = \"Export configuration\""));
         assertTrue(source.contains("shareConfiguration = \"Експортувати конфігурацію\""));
         for (String copy : new String[]{
-                "available live HUD/cluster values", "permissions, components, runtime and BYD HUD options",
-                "device/firmware, package/process, display, audio and system metadata",
-                "Network addresses are masked", "Nothing is uploaded automatically",
-                "доступні поточні значення HUD/приборки", "дозволи, компоненти, стан виконання й налаштування BYD HUD",
-                "Мережеві адреси маскуються", "Автоматичного надсилання немає"}) {
+                "available HUD/cluster values", "FIDs, permissions, BYD HUD state",
+                "relevant system apps with split APKs", "framework, cluster resources",
+                "Nothing is uploaded automatically", "Share only with a trusted recipient",
+                "доступні значення HUD/приборки", "FID, дозволи, стан BYD HUD",
+                "системні застосунки з split APK", "Автоматичного надсилання немає"}) {
             assertTrue(copy, source.contains(copy));
         }
         String modal = between(source, "private fun ConfigurationShareDestinationOverlay(",
