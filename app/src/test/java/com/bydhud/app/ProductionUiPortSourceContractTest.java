@@ -108,13 +108,106 @@ public final class ProductionUiPortSourceContractTest {
         String feedback = between(compose, "private fun rememberPressFeedback(",
                 "private fun pressBackground(");
         assertTrue(feedback.contains("animateFloatAsState("));
-        assertTrue(feedback.contains("if (enabled && pressed) 0.97f else 1.0f"));
+        assertTrue(feedback.contains("val visiblePressed = visualPressed && (releaseHoldMillis > 0L || enabled)"));
+        assertTrue(feedback.contains("if (visiblePressed) 0.97f else 1.0f"));
+        assertTrue(feedback.contains("PressInteraction.Press"));
+        assertTrue(feedback.contains("PressInteraction.Release"));
+        assertTrue(feedback.contains("PressInteraction.Cancel"));
+        assertTrue(feedback.contains("clearIfCurrent(generation)"));
+        assertTrue(feedback.contains("LaunchedEffect(interactionSource, tracker)"));
+        assertTrue(compose.contains("private const val VISUAL_PRESS_HOLD_MS = 90L"));
         String hudSwitch = between(compose, "private fun HudSwitch(", "private fun Segmented(");
         assertTrue(hudSwitch.contains("if (enabled && pendingHolder.value == null)"));
         assertTrue(hudSwitch.contains("SWITCH_PENDING_TIMEOUT_MS"));
         assertTrue(hudSwitch.contains("delay(50L)"));
         assertTrue(hudSwitch.contains("animationSpec = tween(durationMillis = 140)"));
         assertTrue(compose.contains("delay(viewConfiguration.longPressTimeoutMillis)"));
+    }
+
+    @Test
+    public void toggleOnlySettingRowsUseSharedRowAndSwitchRouting() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String eta = between(compose, "optionsSection(\"route-eta\"",
+                "optionsSection(\"speed-limit\"");
+        String wait = between(eta, "row(\"eta-wait-full-text\")", "row(\"eta-output\")");
+        assertTrue(wait.contains("SwitchRow("));
+        assertTrue(wait.contains("hudPresentation.waitForFullText"));
+        assertTrue(wait.contains("composeSetEtaWaitForFullTextEnabled(enabled)"));
+        assertFalse(wait.contains("SettingRow("));
+
+        String widget = between(compose, "optionsSection(\n            \"dashboard-widget\"",
+                "optionsSection(\"dashboard-move\"");
+        for (String row : new String[] {"widget-auto-collapse", "widget-auto-collapse-inactivity",
+                "widget-apply-window-profile"}) {
+            assertTrue(row, between(widget, "row(\"" + row + "\")", "row(")
+                    .contains("SwitchRow("));
+        }
+        assertTrue(widget.contains("dashboardWidget.copy(autoCollapse = it)"));
+        assertTrue(widget.contains("dashboardWidget.copy(autoCollapseAfterInactivity = it)"));
+        assertTrue(widget.contains("dashboardWidget.copy(applyWindowProfile = it)"));
+
+        String localSwitch = between(compose,
+                "if (request.kind == HudHelpControlKind.Switch)", "} else {");
+        assertTrue(localSwitch.contains("localChecked"));
+        assertTrue(localSwitch.contains("toggleable("));
+        assertTrue(localSwitch.contains("role = Role.Switch"));
+        assertTrue(localSwitch.contains("externalControl = switchControl"));
+        assertTrue(localSwitch.contains("releaseHoldMillis = VISUAL_PRESS_HOLD_MS"));
+
+        String settingRow = between(compose, "private fun SettingRow(",
+                "private fun steeringButtonLabel(");
+        assertFalse(settingRow.contains("toggleable("));
+        assertFalse(settingRow.contains("clickable("));
+    }
+
+    @Test
+    public void holdIsOptInAndExcludedInteractionPathsKeepNoHoldFeedback() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        for (String control : new String[] {"SwitchRow", "UpdateCheckLine", "CompactSwitchBox",
+                "HudSwitch", "HudButton", "HudIconButton", "HudHelpButton",
+                "ShareIconLabelButton", "HudChevronButton", "TransferProfileIconButton",
+                "OutputImageChoiceItem", "NavigatorAssetAction"}) {
+            String body = between(compose, "private fun " + control + "(", "@Composable");
+            assertTrue(control, body.contains("releaseHoldMillis = VISUAL_PRESS_HOLD_MS"));
+        }
+        for (String control : new String[] {"StorageDayRow", "HudCheckModeTile", "SegmentedItem", "TabButton"}) {
+            String body = between(compose, "private fun " + control + "(", "@Composable");
+            if (control.equals("StorageDayRow")) {
+                assertTrue(control, body.contains("rememberPressFeedback(enabled)"));
+            } else {
+                assertTrue(control, body.contains("rememberPressFeedback()"));
+            }
+            assertFalse(control, body.contains("VISUAL_PRESS_HOLD_MS"));
+        }
+    }
+
+    @Test
+    public void navigatorAssetActionHasScopedFeedbackAndKeepsParentPassive() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String action = between(compose, "private fun NavigatorAssetAction(", "@Composable");
+        assertTrue(action.contains(
+                "rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)"));
+        assertTrue(action.contains("text = label"));
+        assertTrue(action.contains("asset.state == NavigatorAssetManager.RECOVERY_REQUIRED -> palette.red"));
+        assertTrue(action.contains("palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)"));
+        assertTrue(action.contains(".clip(RoundedCornerShape(4.dp))"));
+        assertTrue(action.contains(".background(renderedBackground)"));
+        assertTrue(action.contains(".then(press.modifier)"));
+        assertTrue(action.contains("enabled = enabled"));
+        assertTrue(action.contains("interactionSource = press.interactionSource"));
+        assertTrue(action.contains("indication = null"));
+        assertTrue(action.contains(".padding(horizontal = 8.dp, vertical = 6.dp)"));
+        assertTrue(action.contains("onInstall(asset.id)"));
+        assertTrue(action.contains("onRestore(asset.id)"));
+        assertTrue(action.contains("onDownload(asset.id)"));
+        assertFalse(action.contains("delay("));
+        assertFalse(action.contains("scope.launch"));
+
+        String parent = between(compose, "private fun NavigatorAssetColumn(",
+                "private fun NavigatorAssetAction(");
+        assertFalse(parent.contains("rememberPressFeedback"));
+        assertFalse(parent.contains(".clickable("));
+        assertFalse(parent.contains("VISUAL_PRESS_HOLD_MS"));
     }
 
     private static String source(String name) throws Exception {

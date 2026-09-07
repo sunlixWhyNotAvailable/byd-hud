@@ -22,6 +22,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.PressInteraction
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.aspectRatio
@@ -528,18 +529,106 @@ private data class SwitchExternalControl(
     val pending: Boolean
 )
 
+private const val VISUAL_PRESS_HOLD_MS = 90L
+
+/** Keeps a completed press visible without delaying the action callback. */
+internal class PressFeedbackTracker(
+    private val releaseHoldMillis: Long
+) {
+    private val activePresses = mutableSetOf<Any>()
+    private var releaseGeneration = 0L
+
+    var visualPressed: Boolean = false
+        private set
+
+    fun press(token: Any) {
+        if (!activePresses.add(token)) return
+        releaseGeneration++
+        visualPressed = true
+    }
+
+    fun release(token: Any): Long? = finish(token)
+
+    fun cancel(token: Any): Long? = finish(token)
+
+    fun clearIfCurrent(generation: Long): Boolean {
+        if (generation != releaseGeneration) return false
+        visualPressed = false
+        return true
+    }
+
+    fun reset() {
+        activePresses.clear()
+        releaseGeneration++
+        visualPressed = false
+    }
+
+    private fun finish(token: Any): Long? {
+        if (!activePresses.remove(token)) return null
+        if (activePresses.isNotEmpty()) return null
+        val generation = ++releaseGeneration
+        if (releaseHoldMillis <= 0L) {
+            visualPressed = false
+            return null
+        }
+        visualPressed = true
+        return generation
+    }
+}
+
 @Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
-private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
+private fun rememberPressFeedback(
+    enabled: Boolean = true,
+    releaseHoldMillis: Long = 0L
+): PressFeedback {
     val interactionSource = remember { MutableInteractionSource() }
-    val pressed by interactionSource.collectIsPressedAsState()
+    val tracker = remember(releaseHoldMillis) { PressFeedbackTracker(releaseHoldMillis) }
+    var visualPressed by remember(releaseHoldMillis) { mutableStateOf(false) }
+    LaunchedEffect(interactionSource, tracker) {
+        tracker.reset()
+        visualPressed = false
+        interactionSource.interactions.collect { interaction ->
+            when (interaction) {
+                is PressInteraction.Press -> {
+                    tracker.press(interaction)
+                    visualPressed = tracker.visualPressed
+                }
+                is PressInteraction.Release -> {
+                    val generation = tracker.release(interaction.press)
+                    visualPressed = tracker.visualPressed
+                    if (generation != null) {
+                        launch {
+                            delay(releaseHoldMillis)
+                            if (tracker.clearIfCurrent(generation)) {
+                                visualPressed = false
+                            }
+                        }
+                    }
+                }
+                is PressInteraction.Cancel -> {
+                    val generation = tracker.cancel(interaction.press)
+                    visualPressed = tracker.visualPressed
+                    if (generation != null) {
+                        launch {
+                            delay(releaseHoldMillis)
+                            if (tracker.clearIfCurrent(generation)) {
+                                visualPressed = false
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    val visiblePressed = visualPressed && (releaseHoldMillis > 0L || enabled)
     val scale by animateFloatAsState(
-        targetValue = if (enabled && pressed) 0.97f else 1.0f,
+        targetValue = if (visiblePressed) 0.97f else 1.0f,
         label = "pressScale"
     )
     return PressFeedback(
         interactionSource = interactionSource,
-        pressed = enabled && pressed,
+        pressed = visiblePressed,
         modifier = Modifier.graphicsLayer {
             scaleX = scale
             scaleY = scale
@@ -2128,20 +2217,16 @@ private fun OptionsTab(
                 }
             }
             row("eta-wait-full-text") {
-                SettingRow(
+                SwitchRow(
                     etaWaitTitle,
                     etaWaitHint,
+                    hudPresentation.waitForFullText,
                     palette,
                     enabled = hudPresentation.waitApplies(etaStreetEnabled)
-                ) {
-                    HudSwitch(
-                        hudPresentation.waitForFullText,
-                        { enabled -> runAction {
-                            activity.composeSetEtaWaitForFullTextEnabled(enabled)
-                        } },
-                        palette,
-                        enabled = hudPresentation.waitApplies(etaStreetEnabled)
-                    )
+                ) { enabled ->
+                    runAction {
+                        activity.composeSetEtaWaitForFullTextEnabled(enabled)
+                    }
                 }
             }
             row("eta-output") {
@@ -2449,48 +2534,36 @@ private fun OptionsTab(
                 }
             }
             row("widget-auto-collapse") {
-                SettingRow(
+                SwitchRow(
                     if (ua) "Автоматично згортати віджет після зміни режиму" else "Automatically collapse the widget after a mode change",
                     "",
+                    dashboardWidget.autoCollapse,
                     palette,
                     enabled = dashboardWidget.enabled
                 ) {
-                    HudSwitch(
-                        dashboardWidget.autoCollapse,
-                        { onDashboardWidgetChange(dashboardWidget.copy(autoCollapse = it)) },
-                        palette,
-                        enabled = dashboardWidget.enabled
-                    )
+                    onDashboardWidgetChange(dashboardWidget.copy(autoCollapse = it))
                 }
             }
             row("widget-auto-collapse-inactivity") {
-                SettingRow(
+                SwitchRow(
                     if (ua) "Автоматично згортати віджет через 5 секунд неактивності" else "Automatically collapse the widget after 5 seconds of inactivity",
                     "",
+                    dashboardWidget.autoCollapseAfterInactivity,
                     palette,
                     enabled = dashboardWidget.enabled
                 ) {
-                    HudSwitch(
-                        dashboardWidget.autoCollapseAfterInactivity,
-                        { onDashboardWidgetChange(dashboardWidget.copy(autoCollapseAfterInactivity = it)) },
-                        palette,
-                        enabled = dashboardWidget.enabled
-                    )
+                    onDashboardWidgetChange(dashboardWidget.copy(autoCollapseAfterInactivity = it))
                 }
             }
             row("widget-apply-window-profile") {
-                SettingRow(
+                SwitchRow(
                     if (ua) "Застосовувати профіль вікна приборки" else "Apply dashboard window profile",
                     "",
+                    dashboardWidget.applyWindowProfile,
                     palette,
                     enabled = dashboardWidget.enabled
                 ) {
-                    HudSwitch(
-                        dashboardWidget.applyWindowProfile,
-                        { onDashboardWidgetChange(dashboardWidget.copy(applyWindowProfile = it)) },
-                        palette,
-                        enabled = dashboardWidget.enabled
-                    )
+                    onDashboardWidgetChange(dashboardWidget.copy(applyWindowProfile = it))
                 }
             }
             if (dashboardWidget.enabled && !widgetOverlayPermission) {
@@ -4389,6 +4462,12 @@ private fun NavigatorAssetAction(
             && asset.state != NavigatorAssetManager.INSTALL_REQUESTED
             && asset.state != NavigatorAssetManager.UNINSTALL_REQUESTED
             && asset.state != NavigatorAssetManager.INSTALLED
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
+    val renderedBackground = if (asset.state == NavigatorAssetManager.RECOVERY_REQUIRED && press.pressed) {
+        palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)
+    } else {
+        pressBackground(Color.Transparent, palette, press.pressed)
+    }
     Text(
         text = label,
         color = when {
@@ -4400,7 +4479,13 @@ private fun NavigatorAssetAction(
         fontWeight = FontWeight.SemiBold,
         modifier = Modifier
             .clip(RoundedCornerShape(4.dp))
-            .clickable(enabled = enabled) {
+            .background(renderedBackground)
+            .then(press.modifier)
+            .clickable(
+                enabled = enabled,
+                interactionSource = press.interactionSource,
+                indication = null
+            ) {
                 when (asset.state) {
                     NavigatorAssetManager.READY -> onInstall(asset.id)
                     NavigatorAssetManager.RECOVERY_REQUIRED -> onRestore(asset.id)
@@ -6070,7 +6155,7 @@ private fun HudChevronButton(
     enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback(enabled)
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = Modifier
             .width(44.dp)
@@ -6179,7 +6264,7 @@ private fun OutputImageChoiceItem(
     modifier: Modifier,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback()
+    val press = rememberPressFeedback(releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = modifier
             .fillMaxHeight()
@@ -6650,49 +6735,83 @@ private fun HudHelpOverlay(
                     }
                 }
             }
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(request.title, color = palette.text, fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp, modifier = Modifier.weight(1f))
-                when (request.kind) {
-                    HudHelpControlKind.Switch -> HudSwitch(localChecked,
-                        { localChecked = it }, palette)
-                    HudHelpControlKind.Dropdown -> HudDropdown(
-                        selectedIndex = localIndex,
-                        options = request.options,
-                        palette = palette,
-                        width = 230.dp,
-                        onSelected = { localIndex = it }
-                    )
-                    HudHelpControlKind.Integer -> HudIntegerStepper(
-                        value = localValue,
-                        palette = palette,
-                        enabled = true,
-                        maxValue = when (request.topic) {
-                            HudHelpTopicId.SpeedLimitCompositeManeuverSize -> 103
-                            HudHelpTopicId.SpeedLimitCompositeLaneSize -> 36
-                            else -> 10
-                        },
-                        fallbackValue = if (request.topic == HudHelpTopicId.SpeedLimitCompositeLaneSize) 36
-                            else if (request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize) 64 else 5,
-                        onValueChange = { localValue = it }
-                    )
-                    HudHelpControlKind.Color -> {
-                        val slot = requireNotNull(request.colorSlot)
-                        Box(
-                            Modifier
-                                .size(28.dp)
-                                .background(Color(localPresentation.color(slot)), RoundedCornerShape(4.dp))
-                                .border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp))
+            if (request.kind == HudHelpControlKind.Switch) {
+                val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
+                val rowEnabled = switchControl.value?.pending != true
+                val press = rememberPressFeedback(
+                    rowEnabled,
+                    releaseHoldMillis = VISUAL_PRESS_HOLD_MS
+                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(7.dp))
+                        .background(pressBackground(Color.Transparent, palette, press.pressed))
+                        .then(press.modifier)
+                        .toggleable(
+                            value = localChecked,
+                            enabled = rowEnabled,
+                            role = Role.Switch,
+                            interactionSource = press.interactionSource,
+                            indication = null,
+                            onValueChange = { switchControl.value?.trigger?.invoke() }
                         )
-                        Spacer(Modifier.width(10.dp))
-                        HudIconButton(
-                            icon = R.drawable.ic_palette,
-                            contentDescription = request.title,
+                        .semantics(mergeDescendants = true) {},
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(request.title, color = palette.text, fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    HudSwitch(
+                        localChecked,
+                        { localChecked = it },
+                        palette,
+                        externalControl = switchControl
+                    )
+                }
+            } else {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(request.title, color = palette.text, fontWeight = FontWeight.SemiBold,
+                        fontSize = 15.sp, modifier = Modifier.weight(1f))
+                    when (request.kind) {
+                        HudHelpControlKind.Switch -> Unit
+                        HudHelpControlKind.Dropdown -> HudDropdown(
+                            selectedIndex = localIndex,
+                            options = request.options,
                             palette = palette,
-                            tint = palette.accent,
-                            modifier = Modifier.size(44.dp),
-                            onClick = { showLocalColorPicker = true }
+                            width = 230.dp,
+                            onSelected = { localIndex = it }
                         )
+                        HudHelpControlKind.Integer -> HudIntegerStepper(
+                            value = localValue,
+                            palette = palette,
+                            enabled = true,
+                            maxValue = when (request.topic) {
+                                HudHelpTopicId.SpeedLimitCompositeManeuverSize -> 103
+                                HudHelpTopicId.SpeedLimitCompositeLaneSize -> 36
+                                else -> 10
+                            },
+                            fallbackValue = if (request.topic == HudHelpTopicId.SpeedLimitCompositeLaneSize) 36
+                                else if (request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize) 64 else 5,
+                            onValueChange = { localValue = it }
+                        )
+                        HudHelpControlKind.Color -> {
+                            val slot = requireNotNull(request.colorSlot)
+                            Box(
+                                Modifier
+                                    .size(28.dp)
+                                    .background(Color(localPresentation.color(slot)), RoundedCornerShape(4.dp))
+                                    .border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp))
+                            )
+                            Spacer(Modifier.width(10.dp))
+                            HudIconButton(
+                                icon = R.drawable.ic_palette,
+                                contentDescription = request.title,
+                                palette = palette,
+                                tint = palette.accent,
+                                modifier = Modifier.size(44.dp),
+                                onClick = { showLocalColorPicker = true }
+                            )
+                        }
                     }
                 }
             }
@@ -6809,7 +6928,7 @@ private fun TransferProfileIconButton(
     onClick: () -> Unit
 ) {
     val tint = if (delete) palette.red else palette.accent
-    val press = rememberPressFeedback(true)
+    val press = rememberPressFeedback(true, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = Modifier
             .size(42.dp)
@@ -7481,7 +7600,7 @@ private fun SwitchRow(
 ) {
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
     val rowEnabled = enabled && switchControl.value?.pending != true
-    val press = rememberPressFeedback(rowEnabled)
+    val press = rememberPressFeedback(rowEnabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -7542,7 +7661,7 @@ private fun UpdateCheckLine(
 ) {
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
     val rowEnabled = switchControl.value?.pending != true
-    val press = rememberPressFeedback(rowEnabled)
+    val press = rememberPressFeedback(rowEnabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         Modifier
             .fillMaxWidth()
@@ -7656,12 +7775,17 @@ private fun HudButton(
     onClick: () -> Unit
 ) {
     val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)
-    val press = rememberPressFeedback(enabled)
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     val baseBackground = when {
         !enabled -> palette.disabled
         destructive -> palette.redSoft
         primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
         else -> palette.panelAlt
+    }
+    val renderedBackground = if (destructive && press.pressed) {
+        palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)
+    } else {
+        pressBackground(baseBackground, palette, press.pressed)
     }
     Box(
         modifier = base
@@ -7671,7 +7795,7 @@ private fun HudButton(
                 primary -> palette.accent
                 else -> palette.borderStrong
             }, RoundedCornerShape(7.dp))
-            .background(pressBackground(baseBackground, palette, press.pressed))
+            .background(renderedBackground)
             .then(press.modifier)
             .clickable(
                 enabled = enabled,
@@ -7710,7 +7834,7 @@ private fun HudIconButton(
     modifier: Modifier = Modifier,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback(enabled)
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     val baseBackground = tint.copy(alpha = if (palette.dark) 0.20f else 0.12f)
     val pressedBackground = tint.copy(alpha = if (palette.dark) 0.88f else 0.72f)
     Box(
@@ -7744,7 +7868,7 @@ private fun HudIconButton(
 
 @Composable
 private fun HudHelpButton(palette: Palette, onClick: () -> Unit) {
-    val press = rememberPressFeedback(true)
+    val press = rememberPressFeedback(true, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = Modifier
             .size(36.dp)
@@ -7772,7 +7896,7 @@ private fun ShareIconLabelButton(
     width: Dp,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback(enabled)
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Row(
         modifier = Modifier.width(width).height(44.dp)
             .clip(RoundedCornerShape(7.dp))
@@ -7813,7 +7937,7 @@ private fun CompactSwitchBox(
 ) {
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
     val rowEnabled = switchControl.value?.pending != true
-    val press = rememberPressFeedback(rowEnabled)
+    val press = rememberPressFeedback(rowEnabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Row(
         modifier = Modifier
             .width(width)
@@ -7857,7 +7981,7 @@ private fun HudSwitch(
     val pendingHolder = remember { mutableStateOf<SwitchPendingState?>(null) }
     val pendingState = pendingHolder.value
     val isPending = pendingState != null
-    val press = rememberPressFeedback(enabled && !isPending)
+    val press = rememberPressFeedback(enabled && !isPending, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     val scope = rememberCoroutineScope()
     val latestOnChecked by rememberUpdatedState(onChecked)
     val latestChecked by rememberUpdatedState(checked)
