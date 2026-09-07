@@ -257,7 +257,8 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(source.contains("val palette = remember(snapshot.darkTheme)"));
         assertTrue(source.contains("val copy = remember(snapshot.uaLanguage)"));
         assertTrue(source.contains("val shareCopy = remember(copy.language)"));
-        assertTrue(source.contains("VISUAL_PRESS_BEFORE_ACTION_MS = 90L"));
+        assertFalse(source.contains("VISUAL_PRESS_BEFORE_ACTION_MS"));
+        assertFalse(source.contains("rememberVisualFirstClick"));
         assertFalse(source.contains("SWITCH_CENTER_BEFORE_ACTION_MS"));
         String hudSwitch = between(source, "private fun HudSwitch(",
                 "private fun Segmented(");

@@ -508,9 +508,6 @@ private data class PressFeedback(
     val modifier: Modifier
 )
 
-//guards button callbacks so the visible press state renders before expensive actions start.
-private const val VISUAL_PRESS_BEFORE_ACTION_MS = 90L
-
 //guards stalled switch actions so controls never stay blocked indefinitely.
 private const val SWITCH_PENDING_TIMEOUT_MS = 2_000L
 
@@ -553,21 +550,6 @@ private fun rememberPressFeedback(enabled: Boolean = true): PressFeedback {
 //adds a short color response so a tap is visible even when the next action is slow.
 private fun pressBackground(base: Color, palette: Palette, pressed: Boolean): Color {
     return if (pressed) palette.accent.copy(alpha = if (palette.dark) 0.24f else 0.14f) else base
-}
-
-@Composable
-//delays action launch briefly so tap feedback is visible before synchronous work can block recomposition.
-private fun rememberVisualFirstClick(onClick: () -> Unit): () -> Unit {
-    val scope = rememberCoroutineScope()
-    val latestOnClick by rememberUpdatedState(onClick)
-    return remember {
-        {
-            scope.launch {
-                delay(VISUAL_PRESS_BEFORE_ACTION_MS)
-                latestOnClick()
-            }
-        }
-    }
 }
 
 @Composable
@@ -5628,7 +5610,6 @@ private fun StorageDayRow(
     onToggle: () -> Unit
 ) {
     val press = rememberPressFeedback(enabled)
-    val visualClick = rememberVisualFirstClick(onToggle)
     val baseBackground = if (selected) palette.active else palette.panelAlt
     Row(
         modifier = Modifier
@@ -5641,7 +5622,7 @@ private fun StorageDayRow(
                 enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onToggle
             )
             .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically
@@ -5944,7 +5925,6 @@ private fun HudChevronButton(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback(enabled)
-    val visualClick = rememberVisualFirstClick(onClick)
     Box(
         modifier = Modifier
             .width(44.dp)
@@ -5957,7 +5937,7 @@ private fun HudChevronButton(
                 enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .semantics { this.contentDescription = contentDescription },
         contentAlignment = Alignment.Center
@@ -5983,7 +5963,6 @@ private fun HudCheckModeTile(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback()
-    val visualClick = rememberVisualFirstClick(onClick)
     val background = if (selected) palette.active else palette.panelAlt
     Column(
         modifier = modifier
@@ -5997,7 +5976,7 @@ private fun HudCheckModeTile(
                 role = Role.RadioButton,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.Center
@@ -6630,7 +6609,6 @@ private fun TransferProfileIconButton(
 ) {
     val tint = if (delete) palette.red else palette.accent
     val press = rememberPressFeedback(true)
-    val visualClick = rememberVisualFirstClick(onClick)
     Box(
         modifier = Modifier
             .size(42.dp)
@@ -6641,7 +6619,7 @@ private fun TransferProfileIconButton(
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .semantics { contentDescription = description }
             .padding(9.dp),
@@ -7303,9 +7281,6 @@ private fun SwitchRow(
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
     val rowEnabled = enabled && switchControl.value?.pending != true
     val press = rememberPressFeedback(rowEnabled)
-    val visualClick = rememberVisualFirstClick {
-        switchControl.value?.trigger?.invoke()
-    }
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -7319,7 +7294,7 @@ private fun SwitchRow(
                 role = Role.Switch,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onValueChange = { visualClick() }
+                onValueChange = { switchControl.value?.trigger?.invoke() }
             )
             .semantics(mergeDescendants = true) {},
         verticalAlignment = Alignment.CenterVertically
@@ -7446,7 +7421,6 @@ private fun HudButton(
 ) {
     val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)
     val press = rememberPressFeedback(enabled)
-    val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = when {
         !enabled -> palette.disabled
         destructive -> palette.redSoft
@@ -7467,7 +7441,7 @@ private fun HudButton(
                 enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .padding(horizontal = 12.dp),
         contentAlignment = Alignment.Center
@@ -7501,7 +7475,6 @@ private fun HudIconButton(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback(enabled)
-    val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = tint.copy(alpha = if (palette.dark) 0.20f else 0.12f)
     val pressedBackground = tint.copy(alpha = if (palette.dark) 0.88f else 0.72f)
     Box(
@@ -7515,7 +7488,7 @@ private fun HudIconButton(
                 enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .padding(6.dp),
         contentAlignment = Alignment.Center
@@ -7536,7 +7509,6 @@ private fun HudIconButton(
 @Composable
 private fun HudHelpButton(palette: Palette, onClick: () -> Unit) {
     val press = rememberPressFeedback(true)
-    val visualClick = rememberVisualFirstClick(onClick)
     Box(
         modifier = Modifier
             .size(36.dp)
@@ -7547,7 +7519,7 @@ private fun HudHelpButton(palette: Palette, onClick: () -> Unit) {
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .semantics { contentDescription = "Help" },
         contentAlignment = Alignment.Center
@@ -7565,14 +7537,13 @@ private fun ShareIconLabelButton(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback(enabled)
-    val visualClick = rememberVisualFirstClick(onClick)
     Row(
         modifier = Modifier.width(width).height(44.dp)
             .clip(RoundedCornerShape(7.dp))
             .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
             .background(pressBackground(if (enabled) palette.panelAlt else palette.disabled, palette, press.pressed))
             .then(press.modifier)
-            .clickable(enabled = enabled, interactionSource = press.interactionSource, indication = null, onClick = visualClick)
+            .clickable(enabled = enabled, interactionSource = press.interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.Center

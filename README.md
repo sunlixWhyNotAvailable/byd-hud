@@ -50,6 +50,8 @@ While BYD HUD is running, switching tabs or returning from another app restores 
 
 The header language and theme selectors use a sliding highlight. Choices apply immediately without waiting for the 140 ms animation to finish; saved preferences and control sizes are unchanged.
 
+Buttons, switch rows, log-day selection and HUD-check controls also dispatch actions without an artificial pre-action pause. Tap feedback and movement animations remain independent of action dispatch; gesture timing and operation timeouts are unchanged.
+
 <p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
 ## Navigation channels

@@ -45,7 +45,7 @@ public final class ProductionUiPortSourceContractTest {
         String helpButton = between(compose, "private fun HudHelpButton(",
                 "private fun ShareIconLabelButton(");
         assertTrue(helpButton.contains("rememberPressFeedback"));
-        assertTrue(helpButton.contains("rememberVisualFirstClick"));
+        assertTrue(helpButton.contains("onClick = onClick"));
     }
 
     @Test
@@ -87,6 +87,37 @@ public final class ProductionUiPortSourceContractTest {
                 "private fun Segmented(");
         assertFalse(hudSwitch.substring(hudSwitch.indexOf("scope.launch"),
                 hudSwitch.indexOf("latestOnChecked(target)")).contains("delay("));
+    }
+
+    @Test
+    public void allFormerlyDelayedControlsDispatchDirectlyAndKeepPressFeedback() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        assertFalse(compose.contains("rememberVisualFirstClick"));
+        assertFalse(compose.contains("VISUAL_PRESS_BEFORE_ACTION_MS"));
+        for (String control : new String[] {"StorageDayRow", "HudChevronButton",
+                "HudCheckModeTile", "TransferProfileIconButton", "SwitchRow", "HudButton",
+                "HudIconButton", "HudHelpButton", "ShareIconLabelButton"}) {
+            String body = between(compose, "private fun " + control + "(", "@Composable");
+            assertTrue(control, body.contains("rememberPressFeedback("));
+            assertTrue(control, body.contains(".then(press.modifier)"));
+            assertTrue(control, body.contains("interactionSource = press.interactionSource"));
+            assertFalse(control, body.contains("delay("));
+            assertFalse(control, body.contains("scope.launch"));
+            String callback = control.equals("SwitchRow")
+                    ? "onValueChange = { switchControl.value?.trigger?.invoke() }"
+                    : control.equals("StorageDayRow") ? "onClick = onToggle" : "onClick = onClick";
+            assertTrue(control, body.contains(callback));
+        }
+        String feedback = between(compose, "private fun rememberPressFeedback(",
+                "private fun pressBackground(");
+        assertTrue(feedback.contains("animateFloatAsState("));
+        assertTrue(feedback.contains("if (enabled && pressed) 0.97f else 1.0f"));
+        String hudSwitch = between(compose, "private fun HudSwitch(", "private fun Segmented(");
+        assertTrue(hudSwitch.contains("if (enabled && pendingHolder.value == null)"));
+        assertTrue(hudSwitch.contains("SWITCH_PENDING_TIMEOUT_MS"));
+        assertTrue(hudSwitch.contains("delay(50L)"));
+        assertTrue(hudSwitch.contains("animationSpec = tween(durationMillis = 140)"));
+        assertTrue(compose.contains("delay(viewConfiguration.longPressTimeoutMillis)"));
     }
 
     private static String source(String name) throws Exception {

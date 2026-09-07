@@ -101,7 +101,7 @@ public final class CompactHeaderUiSourceContractTest {
         assertContains(button,
                 "val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)",
                 ".then(press.modifier)", ".clickable(", "enabled = enabled",
-                "interactionSource = press.interactionSource", "onClick = visualClick");
+                "interactionSource = press.interactionSource", "onClick = onClick");
     }
 
     @Test
