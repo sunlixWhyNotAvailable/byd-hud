@@ -6,7 +6,7 @@
 
 BYD HUD connects an active Google Maps or Waze route to the navigation fields already available in compatible Chinese-market BYD vehicles. The map stays in the navigator; maneuver, distance, street, lanes, alerts, and optional trip metrics are sent separately to the HUD.
 
-The app also controls navigator projection on the instrument cluster, keeps day-based diagnostic logs, can download fixed verified navigator builds, and can locally prepare compatible navigator packages for a structured direct channel.
+The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
 - **Version:** v3.2.0
 - **Supported navigators:** Google Maps and Waze
@@ -37,7 +37,7 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 | Area | What it provides |
 | --- | --- |
 | Navigation output | Maneuver image, native arrow, distance, street or cue, lanes, and optional route metrics |
-| Direct channels | Structured low-latency data from a compatible patched Google Maps or Waze build |
+| Direct channels | Navigation guidance received directly from a compatible patched Google Maps or Waze build |
 | Dashboard control | Move a running navigator between displays, choose its screen mode, and tune the projection window |
 | Dashboard widget | A movable shortcut for IPC OFF, TBT, MINI and FULL, with optional saved window profiles |
 | Navigator downloads | Download and validate the fixed navigator assets currently offered in the `Apps` tab |
@@ -48,22 +48,18 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 
 While BYD HUD is running, switching tabs or returning from another app restores the selected tab and its scroll position. Each Options category keeps its own position too. Exit, Shutdown, or a full app restart starts a fresh UI session.
 
-The header language and theme selectors use a sliding highlight. Choices apply immediately without waiting for the 140 ms animation to finish; saved preferences and control sizes are unchanged.
-
-Buttons, switch rows, log-day selection and HUD-check controls also dispatch actions without an artificial pre-action pause. Tap feedback and movement animations remain independent of action dispatch; gesture timing and operation timeouts are unchanged.
-
 <p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
 ## Navigation channels
 
-BYD HUD uses a compatible direct channel for the selected navigator. Accessibility and notification access may still be used for diagnostics, but never supplies or controls HUD guidance.
+BYD HUD receives navigation guidance directly from a compatible navigator. Accessibility and notification access do not substitute for a compatible navigator build.
 
 | Navigator | Direct-channel data | Main limitations |
 | --- | --- | --- |
-| Google Maps ReVanced | Structured maneuver, distance, road, lanes when supplied, rendered maneuver image, ETA, remaining time, and remaining distance | Requires a compatible patched ReVanced package |
-| Waze | Structured maneuver, distance, street, lanes, session alerts, and route metrics | Requires a compatible project-patched build for complete output |
+| Google Maps ReVanced | Maneuvers, distance, street, lanes when supplied, ETA, remaining time, and remaining distance | Requires a compatible patched ReVanced package |
+| Waze | Maneuvers, distance, street, lanes, alerts, and route metrics | Requires a compatible project-patched build for complete output |
 
-By default, the direct channel leaves the navigator screen unchanged while navigation data is sent to BYD HUD in the background. With `Start with custom surface` enabled, Waze still handles search and route selection on its normal screen, then supplies the active route map and controls to a separate route screen after navigation starts. Normal Waze direct guidance remains available while that screen starts; if it is not ready within five seconds, BYD HUD keeps the guidance without ending the route. Google Maps always keeps its normal screen.
+By default, the navigator screen stays unchanged while guidance is sent to BYD HUD in the background. With `Start with custom surface` enabled, Waze still handles search and route selection on its normal screen, then opens a separate route screen after navigation starts. If that screen cannot open, normal HUD guidance continues. Google Maps always keeps its normal screen.
 
 ### Current navigator compatibility
 
@@ -76,16 +72,15 @@ The patcher verifies that the selected package is intact and structurally compat
 
 ### Direct-channel switching
 
-- BYD HUD switches to a direct channel as soon as valid data arrives.
-- If direct updates stop, stale guidance is cleared while the navigator-specific channel performs its own recovery.
-- Accessibility, notifications, and screen content never replace or take ownership from the direct channel.
+- Guidance appears when the compatible navigator starts supplying route data.
+- If updates stop, outdated guidance is cleared until fresh data is available.
 - The `HUD` status is active only while navigation guidance is actually being sent. Selecting a navigator without starting navigation leaves it in the idle state.
 
 ## Using the Apps tab
 
 The `Apps` tab is the normal starting screen after initial setup.
 
-The notice at the top lists the supported navigator builds. Each `Download` action retrieves one fixed asset from the project release, shows inline progress, verifies its SHA-256, package, version, version code, and signer, then offers the Android installer. An already compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot replace the installed signer or version safely.
+The notice at the top lists the supported navigator builds. Each `Download` action retrieves the offered build from the project release, shows progress, checks the file's integrity and compatibility, then opens the Android installer. A compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot safely update the installed app.
 
 1. Find Google Maps or Waze under `Supported navigation apps`.
 2. Enable `HUD` before or after launching the navigator.
@@ -99,7 +94,7 @@ The same tab also lists other applications that can be moved between displays, b
 
 | Status | Meaning |
 | --- | --- |
-| `HUD: running` | A navigation payload is currently reaching the vehicle HUD |
+| `HUD: running` | Navigation guidance is currently reaching the vehicle HUD |
 | `HUD: idle` | No navigation guidance is currently being delivered to the vehicle HUD |
 | `HUD: failed` | An attempted required HUD delivery failed; ADB and permission states remain separate |
 | `ADB: OK` | Required app settings and permissions are present; this is not a live ADB connection indicator |
@@ -111,7 +106,7 @@ The same tab also lists other applications that can be moved between displays, b
 
 The `Options` tab controls what BYD HUD sends. Changing a switch affects the next outgoing HUD state; it does not change the map inside the navigator.
 
-Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its local controls change only the illustration, not your saved settings or the HUD. Samples follow the application's Ukrainian/English language and selected street format; color previews affect only the corresponding text. Experimental ETA/Waze locations use separate HUD regions. The full-text waiting setting is reserved and has no output effect yet. Existing screenshots below predate this UI port.
+Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its controls change only the illustration, not your saved settings or the HUD. Samples follow the application's language, street format and selected colors. Experimental ETA/Waze locations use separate HUD regions. The full-text waiting option has no effect yet. Some screenshots below show an earlier interface layout.
 
 ### Basic navigation output
 
@@ -126,7 +121,7 @@ Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a s
 | `Text transliteration` | Off | Optionally converts Ukrainian or other writing systems to Latin characters for vehicle displays that cannot show them correctly | Sends the navigator text unchanged |
 | `Text direction output` | On | Uses a cue such as `Continue straight` when no street text is available | Does not substitute a cue for a missing street name |
 
-Street text has priority over the text direction because both use the same vehicle field. If both are empty, BYD HUD sends a blank placeholder so text from the previous maneuver is not left on screen.
+The street name takes priority over a text direction. If neither is available, the previous text is cleared.
 
 Transliteration offers `Ukrainian` for Ukrainian road names and `Universal` for other writing systems. It changes only the text sent to the vehicle, not the text inside the navigator.
 
@@ -139,7 +134,7 @@ Transliteration offers `Ukrainian` for Ukrainian road names and `Universal` for 
 | `ETA output mode (time/distance)` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze uses the final destination for the entire route and falls back per field to an available next-stop value |
 | `ETA output field` | Street | Uses the street field or a separate Experimental block on the right of the HUD |
 | `ETA format in street field` | Prepend | Prepend adds a bracketed block before the street; Replace shows only the selected metrics |
-| `Wait for the full street text to display` | On | Reserved setting; currently saved only, without delaying text updates |
+| `Wait for the full street text to display` | On | Not active yet; enabling it does not change text updates |
 | `Show ETA` | Off | Shows the expected arrival time in the selected output field |
 | `Show remaining time` | Off | Shows remaining travel time in the selected output field |
 | `Show remaining distance` | Off | Shows remaining route distance in the selected output field |
@@ -179,7 +174,7 @@ An alert in shared-field mode occupies the maneuver field with the same priority
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Create a TBT card even for an active navigator session without HUD output` | On | Publishes direct guidance to the dashboard TBT card independently of windshield-HUD selection; the HUD-selected navigator has priority, otherwise the most recently started route is used |
-| `Switch to the TBT card when HUD output starts` | On | Best-effort selects the dashboard TBT layout when direct HUD output starts; a layout-switch failure does not block TBT or windshield-HUD data |
+| `Switch to the TBT card when HUD output starts` | On | Attempts to show the dashboard TBT card when HUD output starts; if the card cannot be shown, navigation output continues |
 
 <p align="center"><img src="docs/screenshots/en/settings-extra-navigation.png" alt="Extra navigation behavior settings" width="100%"></p>
 
@@ -190,13 +185,13 @@ An alert in shared-field mode occupies the maneuver field with the same priority
 | `Show Waze alerts` | On | Enables available Waze warnings on the HUD |
 | `Waze alert output field` | Maneuver | Maneuver shows the closer known maneuver or warning; a warning uses its own image, distance and text, keeps lanes and hides the native arrow. Experimental shows warning icon and distance separately, without replacing route guidance |
 | Warning distance color | Yellow | Sets the distance text color for enabled Experimental warnings; remains visible but disabled in other modes |
-| `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate route screen; Back returns to the normal Waze screen for the rest of that route |
+| `Start with custom surface` | Off | Opens a separate route screen when a Waze route starts; Back returns to the normal Waze screen for the rest of that route |
 
 <p align="center"><img src="docs/screenshots/en/settings-waze.png" alt="Waze alert and custom surface settings" width="100%"></p>
 
-The custom surface is route-scoped. Changing its switch during an active route does not replace the current route screen. A five-second readiness failure keeps standard Waze direct guidance active and waits for the next route before trying the surface again. Returning to Waze during the same route restores the surface; ending the route closes it. The Waze alert switch controls windshield-HUD alerts only; alerts supplied to the custom surface remain visible there.
+Set the custom-surface option before starting a route; changing it during navigation does not replace the current route screen. If the screen fails to open, normal HUD guidance continues and it can be tried again on the next route. Returning to Waze after switching to another app restores the route screen; ending the route closes it. The Waze alert switch controls windshield-HUD alerts only, not warnings on the route screen.
 
-Waze route recovery is independent from the `HUD` switch and dashboard placement. A route may start before BYD HUD opens or while windshield-HUD output is disabled, and a genuinely new route can start after the previous one ends. Delayed updates from the old route are ignored instead of reopening it.
+You can start a Waze route before opening BYD HUD and enable `HUD` before or after starting navigation, including while Waze is on the dashboard.
 
 ## Dashboard projection
 
@@ -212,7 +207,7 @@ Find the screen mode and geometry controls under `Options → Dashboard window p
 | `Horizontal offset` | Full 50%; Partial 99% | Positions the window in the remaining horizontal space: 0% left, 50% centered, 100% right |
 | `Scale` | Full 100%; Partial 50% | Changes the navigator content scale inside the window from 20% to 150% |
 
-The navigator must already be running and dashboard control requires authorized ADB access. BYD HUD moves the navigator window and verifies its placement first. `None` only moves the navigator and leaves the current cluster layout unchanged; its geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Changing the selector alone sends no vehicle command. A failed presentation request leaves the navigator on the dashboard and reports the failure. Use `Send to main` to return it. During an active Waze custom-surface route, the route surface follows Waze so the BYD HUD settings screen is not moved by mistake.
+The navigator must already be running and dashboard control requires authorized ADB access. `None` only moves the navigator and leaves the current cluster layout unchanged; its geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Choosing a mode alone does not switch the dashboard. If changing the presentation fails, the navigator stays on the dashboard and a message explains the failure. Use `Send to main` to return it. During a Waze custom-surface route, the route screen follows Waze between displays.
 
 <p align="center"><img src="docs/screenshots/en/settings-dashboard.png" alt="Dashboard window profile with screen mode, width and height controls" width="100%"></p>
 
@@ -243,7 +238,7 @@ Tap to expand the four mode pictures: IPC OFF, TBT, MINI and FULL. Tap the cross
 | Color | Blue `#2F86F6` | Presets or synchronized HEX/RGB entry |
 | Border size and color | 2 dp, black `#000000` | 0–16 dp; 0 removes the border; presets or synchronized HEX/RGB entry |
 
-Mode buttons require authorized ADB. They change the presentation without moving, launching or returning a navigator. With profile application off, or without an existing BYD HUD projection, only the mode is requested. Widget profile selection does not change the screen mode saved for the next `Send to dashboard` action. The widget does not mark a mode as currently active because firmware state cannot be determined reliably.
+Mode buttons require authorized ADB. They request a presentation change without moving, launching or returning a navigator. With profile application off, or without an existing BYD HUD projection, only a mode change is requested. Widget profile selection does not change the screen mode saved for the next `Send to dashboard` action. The buttons are shortcuts, not indicators of the currently active mode.
 
 Appearance and position survive restarts. Automatic startup follows `Boot runtime service`; a temporarily hidden widget stays hidden until BYD HUD is opened. `Shutdown` also removes the widget until the app is opened again. Hiding it removes its touch area rather than leaving an invisible overlay.
 
@@ -251,15 +246,15 @@ Appearance and position survive restarts. Automatic startup follows `Boot runtim
 
 ### Steering-wheel transfer shortcut
 
-Open `Options → Dashboard transfer settings` and press `+ Create profile`. Learn a button, choose `Single`, `Hold` or `Double`, select an installed application and choose `Current profile`, `Partial only` or `Full only`. Current resolves the saved dashboard mode when the gesture runs. Save is available only after selecting a button and app and when no other profile uses that physical button and press type. Known short/long aliases count as the same button.
+Open `Options → Dashboard transfer settings` and press `+ Create profile`. Learn a button, choose `Single`, `Hold` or `Double`, select an installed application and choose `Current profile`, `Partial only` or `Full only`. `Current profile` uses the dashboard mode saved at the time you use the shortcut. Save is available after choosing a button and app, provided another profile does not already use the same button and press type.
 
-Learning and edits remain a draft until Save. Cancel discards them. The pencil edits a saved profile; Delete from either the row or editor always asks for confirmation. No keeps the draft open; Yes deletes the original profile. Profiles survive restarts, and the old configured shortcut migrates automatically; an old native-long binding becomes Hold.
+Press Save to keep your changes or Cancel to discard them. The pencil edits a saved profile; Delete asks for confirmation. Profiles survive restarts, and existing shortcuts are preserved when updating the app.
 
 The selected application must already be running and dashboard transfer requires authorized ADB. Each new press checks its current window and display: an application on the main display moves to the dashboard with the selected profile; one already on the dashboard returns to the main display. If no running window can be confirmed, nothing is moved or launched. Repeated presses during a transfer are ignored, not queued. This also works after transfers started from the Apps tab. A failed transfer is reported with a message.
 
-Button learning and interception require the enabled Accessibility service. BYD HUD consumes the assigned physical button's complete delivered DOWN/repeat/UP stream, including when no gesture matches, the application is closed, a transfer is busy, or a check fails. Its stock action is never replayed. Delete all profiles for that button to release its assignment.
+Button learning and interception require the enabled Accessibility service. An assigned button no longer performs its stock action, even if its gesture has no matching profile, the selected app is closed, or a transfer cannot be performed. Delete all profiles for that button to restore its stock function.
 
-Single acts on release and waits for the platform double-press window only if Double is also assigned. Double completes after the second short release. Known native long-button aliases trigger Hold directly; buttons without such an alias, including Camera 294, use the platform hold timeout. Pending gestures are cancelled when profiles change or the runtime shuts down. Hardware and firmware determine which events reach Accessibility; physical-car validation of the new gesture modes is still pending.
+Single acts when you release the button. If Double is assigned to the same button, the single action waits briefly to distinguish the two gestures. Double acts after the second short press; Hold requires holding the button. Supported buttons and gestures depend on the vehicle firmware; the new gesture modes still need testing on a vehicle.
 
 <p align="center"><img src="docs/screenshots/en/settings-dashboard-transfer.png" alt="Earlier single-shortcut UI, before the transfer-profile list" width="100%"></p>
 
@@ -286,7 +281,7 @@ Official Google Maps package `com.google.android.apps.maps`, bundles with OBB ex
 4. Press `Patch` and confirm the warning.
 5. BYD HUD repeats all compatibility checks, changes only recognized app parts, signs the complete package set with a key generated on this tablet, and asks Android to install it.
 
-For Waze, the direct channel and lanes are mandatory; stability and alert support remain optional. Google Maps Direct, Google services dialog handling, Audio, and PiP are independent components, so one component does not determine whether another works. PiP disables navigation picture-in-picture without disabling dashboard resizing. The Google Maps 26.30 Direct component obtains Google-rendered maneuver images without requiring its turn card to remain visible. Waze alert support is currently limited to the compatible Waze 5.20.0.1 build.
+For Waze, the direct channel and lanes are mandatory; stability and alert support remain optional. Google Maps Direct, Google services dialog handling, Audio, and PiP can be selected separately. PiP disables navigation picture-in-picture without disabling dashboard resizing. Waze alert support is currently limited to the compatible Waze 5.20.0.1 build.
 
 `Check` and `Patch` use persistent progress cards that stay visible while you switch tabs. Waze and Google Maps can be checked or prepared at the same time, while Android installation remains one-at-a-time. Patch cards stack with archive/share progress instead of covering one another. `Stop` is available only while the current operation can still be cancelled safely; use `Close` to dismiss a finished, cancelled, or failed card.
 
@@ -305,16 +300,16 @@ Back up important navigator data and sign in to its account before patching. The
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `Boot runtime service` | On | Restarts the BYD HUD runtime after supported boot and update events |
+| `Boot runtime service` | On | Starts BYD HUD automatically after supported tablet restarts and app updates |
 | `Save diagnostic screenshots and extended logs` | Off | Records additional navigation evidence; use it only while diagnosing because it consumes more storage |
 | `Check for updates` | On | Checks the stable GitHub release channel |
 | `Take part in beta-testing` | Off | Includes prereleases, which may be unstable or broken |
 
-`ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and the runtime cleanly.
+`ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and background operation.
 
 Turning off `Boot runtime service` disables automatic startup, not navigation you have started yourself. You can open BYD HUD and use navigation output or HUD check with this option off.
 
-With automatic update checks enabled, the first check starts about 30 seconds after opening BYD HUD or an allowed background startup. An available update is shown when the app is in the foreground. Closing the window keeps it dismissed while the app process stays alive; after one hour, the next app opening or runtime startup can allow a fresh check. Manual checks remain available immediately, including after an error. `Shutdown` or a full process restart starts a new update-check session.
+With automatic update checks enabled, BYD HUD checks shortly after startup, including an allowed background startup. Available updates are shown when you open the app. A dismissed update may be offered again later. You can also check manually whenever needed, including after a failed check.
 
 <p align="center"><img src="docs/screenshots/en/settings-permissions-runtime.png" alt="Permissions, background runtime, diagnostics, and update settings" width="100%"></p>
 
@@ -326,7 +321,7 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 
 - shows the storage-limit draft immediately while the slider moves and applies it only after `OK`;
 - groups navigation logs, snapshots, screenshots, and optional logcat by day;
-- shows one available navigation-log folder as a compact label/path block and places a second location beside it;
+- shows the available navigation-log folder locations;
 - shares or deletes only the selected days;
 - shows file count, archive size, and a sensitive-data warning before creating a ZIP;
 - uses one stateful `Start Logcat` / `Stop Logcat` button for explicit system-log recording;
@@ -336,7 +331,7 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 
 Export reads available diagnostic information without changing vehicle modes or repairing permissions. It also collects the relevant stock navigation and dashboard APKs (including splits), native libraries and their dependencies, framework files, and dashboard resources. An already authorized ADB connection provides wider access; without it, the readable local files and basic report remain available. Missing or inaccessible files are listed in the result.
 
-The export window shows the current stage and file, followed by the actual file count and copied volume once discovery finishes. Collection can take time and the archive may exceed 1 GB. You can cancel it, or leave and reopen BYD HUD while the same process continues working. The final archive size appears only after ZIP verification. Developer uploads are limited to 20 MiB; larger archives remain available through `Another app` without being split or truncated.
+The export window shows the current stage and file, followed by the actual file count and copied volume once discovery finishes. Collection can take time and the archive may exceed 1 GB. You can cancel it or switch to another app and return while export continues in the background. The final archive size appears only after ZIP verification. Developer uploads are limited to 20 MiB; larger archives remain available through `Another app` without being split or truncated.
 
 Text diagnostics and configuration values are redacted and network addresses masked. Firmware binaries are copied unchanged and may contain vendor-embedded data. Unrelated apps and private app data are not collected. Review the warning and share only with a trusted recipient; nothing is uploaded without your choice.
 
@@ -353,9 +348,9 @@ Archive preparation uses a persistent progress card that remains visible across 
 
 After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears exactly the day checkboxes captured for that archive. Archive, chooser, upload, or cancellation failure keeps the selection. Days selected while an upload is running remain selected.
 
-With authorized ADB, starting Logcat records all system log buffers and captures the initial performance state; stopping it adds final frame and system metrics. Without ADB, the same stateful button records the buffers and diagnostics available to the app. There are no fixed-duration presets. Configuration export does not request ADB access, repair permissions, or enable telemetry.
+With authorized ADB, Logcat records the full system log and additional performance diagnostics. Without ADB, it records only the logs and diagnostics available to the app. Configuration export does not request ADB access, repair permissions, or enable automatic reporting.
 
-Each Logcat recording writes one continuous file until stopped, without splitting, rotation, or a fixed per-recording size cap. Initial and final diagnostics remain separate files in the same recording folder. Long recordings use more storage; the normal log-folder retention settings still apply.
+Logcat records continuously into one file until you stop it. There is no separate recording-size limit, so long recordings use more storage; the normal log-folder retention settings still apply.
 
 BYD HUD does not automatically send crash reports, performance traces, screenshots, screen recordings, or navigation logs to the Sentry service. Read the complete policy in [PRIVACY.md](PRIVACY.md).
 
@@ -396,7 +391,7 @@ The `HUD check` tab tests the vehicle's supported navigation displays without an
 6. Return to `Apps`, enable `HUD` for Google Maps or Waze, and start navigation.
 7. For a compatible navigator, the direct channel starts automatically when the navigator supplies an active route.
 
-When the existing ADB RSA key is authorized, dashboard-card integration starts automatically with the BYD HUD runtime; there is no additional setup or status indicator. Without authorized ADB, compatible direct navigation can still reach the windshield HUD, but the dashboard navigation card and dashboard movement controls are unavailable on the tested firmware.
+With authorized ADB access, the dashboard navigation card works with BYD HUD without additional setup. Without authorized ADB, compatible navigation can still reach the windshield HUD, but the dashboard navigation card and dashboard movement controls are unavailable on the tested firmware.
 
 When `Lane output` is enabled and the navigator supplies lanes, BYD HUD publishes the guidance through all supported vehicle navigation outputs. Authorized ADB enables the additional vehicle lane interface needed by some vehicles; it does not turn the TBT maneuver card into a copy of the HUD lane image. Empty or ended guidance clears the previous lanes instead of leaving stale information on screen.
 
@@ -411,7 +406,7 @@ When `Lane output` is enabled and the navigator supplies lanes, BYD HUD publishe
 | Public day-based log storage | Limited by Android permissions | Available |
 | Dashboard projection controls | Unavailable on tested firmware | Available |
 | Extended configuration diagnostics | Basic report | Enriched report |
-| Runtime recovery after the process is killed | May require reopening the app | Boot/runtime setup can restore it |
+| Background recovery if Android closes the app | May require reopening the app | Background and automatic-startup settings can restore operation |
 
 ## Troubleshooting
 
@@ -460,11 +455,11 @@ For a permission, device, patcher, or startup problem, use `Storage and logs -> 
 - The patcher supports Google Maps ReVanced package `app.revanced.android.apps.maps`, not official package `com.google.android.apps.maps`.
 - Waze route metrics depend on destination estimates supplied by the supported project-patched Waze `5.20.0.1` session; an unavailable whole-route field falls back to the corresponding next-stop value.
 - Waze alerts still depend on Waze supplying an alert and are available only with the compatible Waze `5.20.0.1` build.
-- Waze custom surface is an opt-in beta path. It requires a working Waze direct channel and is activated only after Waze reports active navigation; readiness failure keeps the normal direct guidance active after five seconds.
+- The optional Waze custom route screen is experimental and requires a compatible navigator build. It opens only after navigation starts; if it cannot open, normal HUD guidance continues.
 - Stock cluster firmware may add dark overlays to dashboard projection.
 - Unsupported multi-file packages and XAPK files with OBB data cannot be patched.
 - Native arrows require `Navigation fusion` in the vehicle HUD settings.
-- Some firmware may kill the process without ADB-assisted background and boot setup.
+- Some firmware may stop the app unless background operation and automatic startup are configured with ADB.
 
 ## Contributions and acknowledgements
 
