@@ -4,11 +4,14 @@ package com.bydhud.app;
 
 import android.accessibilityservice.AccessibilityService;
 import android.content.Context;
+import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
+import android.os.Looper;
 import android.os.Process;
 import android.os.SystemClock;
 import android.view.KeyEvent;
+import android.view.ViewConfiguration;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -46,7 +49,10 @@ public final class NavAccessibilityService extends AccessibilityService {
     private volatile boolean steeringSuspended;
     private volatile int capturedKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
     private volatile int suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
-    private volatile boolean mappedKeyActive;
+    private final Handler steeringHandler = new Handler(Looper.getMainLooper());
+    private final SteeringGestureRecognizer steeringGestures = new SteeringGestureRecognizer(
+            ViewConfiguration.getLongPressTimeout(), multiPressTimeoutMs(), STEERING_KEY_TAIL_TIMEOUT_MS);
+    private final Runnable steeringDeadline = this::onSteeringDeadline;
     private volatile long steeringRuntimeGeneration;
     private long steeringKeyTailGeneration;
 
@@ -123,7 +129,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         AppEventLogger.event(context, "accessibility_service suspended reason=" + safe(reason));
     }
 
-    /** Starts raw key learning; the first delivered non-repeat down is persisted. */
+    /** Starts raw key learning; the first delivered non-repeat down updates the editor draft. */
     static boolean beginKeyLearning(Context context) {
         NavAccessibilityService service = activeService;
         if (service == null) {
@@ -247,19 +253,21 @@ public final class NavAccessibilityService extends AccessibilityService {
             cancelKeyLearningTransient();
         }
         if (keyLearning) {
-            if (SteeringTransferPolicy.isFirstDown(
+            logSteeringKey(event, "learning");
+            if (!event.isCanceled() && SteeringTransferPolicy.isFirstDown(
                     event.getAction(), event.getRepeatCount())) {
                 int code = event.getKeyCode();
+                int canonical = SteeringTransferPolicy.canonicalKeyCode(code);
                 synchronized (steeringLock) {
-                    capturedKeyCode = code;
+                    capturedKeyCode = canonical;
                     keyLearning = false;
-                    suppressKeyCode = code;
-                    mappedKeyActive = false;
+                    suppressKeyCode = canonical;
+                    clearGestureLocked();
                 }
                 STEERING_LEARNING_REVISION.incrementAndGet();
                 armSteeringKeyTailTimeout();
-                SteeringTransferPreferences.setKeyCode(this, code);
-                AppEventLogger.event(this, "steering_learning captured keycode=" + code);
+                AppEventLogger.event(this, "steering_learning captured keycode=" + code
+                        + " canonical=" + canonical);
                 MainActivity.publishSharedUiStateChange();
             }
             //While the dialog is open, every delivered key event belongs to learning.
@@ -268,7 +276,8 @@ public final class NavAccessibilityService extends AccessibilityService {
 
         int keyCode = event.getKeyCode();
         int suppressed = suppressKeyCode;
-        if (suppressed >= 0 && keyCode == suppressed) {
+        if (suppressed >= 0 && SteeringTransferPolicy.isMappedKey(keyCode, suppressed)) {
+            logSteeringKey(event, "learning-tail");
             if (event.getAction() == KeyEvent.ACTION_UP) {
                 synchronized (steeringLock) {
                     suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
@@ -280,43 +289,74 @@ public final class NavAccessibilityService extends AccessibilityService {
             return true;
         }
 
+        final boolean consumed;
+        synchronized (steeringLock) {
+            refreshSteeringProfilesLocked();
+            boolean blocked = steeringSuspended || HudPrefs.isUserShutdownActive(this)
+                    || NavAppDisplayController.get(this).isMoveInProgress();
+            if (blocked) steeringGestures.cancel();
+            consumed = steeringGestures.onKey(keyCode, event.getAction(), event.getRepeatCount(),
+                    event.isCanceled(), event.getEventTime(), SystemClock.uptimeMillis(),
+                    blocked, this::dispatchSteeringMatch);
+            scheduleSteeringDeadlineLocked();
+        }
+        if (consumed) logSteeringKey(event, "assigned");
+        return consumed;
+    }
+
+    private void logSteeringKey(KeyEvent event, String mode) {
+        AppEventLogger.event(this, "steering_key mode=" + mode
+                + " raw=" + event.getKeyCode()
+                + " canonical=" + SteeringTransferPolicy.canonicalKeyCode(event.getKeyCode())
+                + " action=" + event.getAction() + " repeat=" + event.getRepeatCount()
+                + " flags=" + event.getFlags() + " cancelled=" + event.isCanceled()
+                + " downTime=" + event.getDownTime() + " eventTime=" + event.getEventTime()
+                + " callbackTime=" + SystemClock.uptimeMillis());
+    }
+
+    private void refreshSteeringProfilesLocked() {
+        synchronized (SteeringTransferPreferences.class) {
+            long revision = SteeringTransferPreferences.revision(this);
+            if (revision != steeringGestures.revision()) {
+                steeringGestures.configure(SteeringTransferPreferences.profiles(this), revision);
+            }
+        }
+    }
+
+    private void dispatchSteeringMatch(SteeringTransferProfile profile) {
         final long runtimeGeneration = steeringRuntimeGeneration;
-        final long bindingRevision = SteeringTransferPreferences.revision(this);
-        int configured = SteeringTransferPreferences.keyCode(this);
-        if (!SteeringTransferPolicy.isMappedKey(keyCode, configured)) {
-            return false;
+        final long bindingRevision = steeringGestures.revision();
+        AppEventLogger.event(this, "steering_gesture profile=" + profile.id
+                + " keycode=" + profile.keyCode + " press=" + profile.pressMode
+                + " revision=" + bindingRevision);
+        NavAppDisplayController.get(this).requestSteeringToggle(
+                profile.packageName, profile.windowProfile, "steering-" + profile.pressMode,
+                () -> isSteeringRequestCurrent(runtimeGeneration, bindingRevision));
+    }
+
+    private void onSteeringDeadline() {
+        synchronized (steeringLock) {
+            refreshSteeringProfilesLocked();
+            if (steeringSuspended || HudPrefs.isUserShutdownActive(this)
+                    || NavAppDisplayController.get(this).isMoveInProgress()) steeringGestures.cancel();
+            steeringGestures.advance(SystemClock.uptimeMillis(), this::dispatchSteeringMatch);
+            scheduleSteeringDeadlineLocked();
         }
-        if (event.getAction() == KeyEvent.ACTION_DOWN) {
-            boolean startTransfer;
-            synchronized (steeringLock) {
-                startTransfer = SteeringTransferPolicy.shouldStartTransfer(
-                        event.getAction(), event.getRepeatCount(), mappedKeyActive);
-                mappedKeyActive = true;
-            }
-            armSteeringKeyTailTimeout();
-            if (startTransfer) {
-                NavAppDisplayController.get(this).requestSteeringToggle(
-                        SteeringTransferPreferences.packageName(this),
-                        SteeringTransferPreferences.profile(this),
-                        "steering-key",
-                        () -> isSteeringRequestCurrent(runtimeGeneration, bindingRevision));
-            }
-        } else if (event.getAction() == KeyEvent.ACTION_UP) {
-            synchronized (steeringLock) {
-                mappedKeyActive = false;
-            }
-            cancelSteeringKeyTailTimeoutIfIdle();
-        }
-        //The assigned key never reaches stock handling, even when no transfer can run.
-        return true;
+    }
+
+    private void scheduleSteeringDeadlineLocked() {
+        steeringHandler.removeCallbacks(steeringDeadline);
+        long next = steeringGestures.nextDeadline();
+        if (next != Long.MAX_VALUE) steeringHandler.postAtTime(steeringDeadline, next);
     }
 
     private void beginKeyLearningInternal() {
         synchronized (steeringLock) {
+            steeringRuntimeGeneration++;
             keyLearning = true;
             capturedKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
             suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
-            mappedKeyActive = false;
+            clearGestureLocked();
             steeringKeyTailGeneration++;
         }
         STEERING_LEARNING_REVISION.incrementAndGet();
@@ -329,8 +369,8 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (steeringLock) {
             changed = keyLearning;
             keyLearning = false;
-            capturedKeyCode = SteeringTransferPreferences.keyCode(this);
-            mappedKeyActive = false;
+            capturedKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
+            clearGestureLocked();
             if (suppressKeyCode < 0) {
                 steeringKeyTailGeneration++;
             }
@@ -345,9 +385,9 @@ public final class NavAccessibilityService extends AccessibilityService {
             steeringRuntimeGeneration++;
             changed = keyLearning;
             keyLearning = false;
-            capturedKeyCode = SteeringTransferPreferences.keyCode(this);
+            capturedKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
             suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
-            mappedKeyActive = false;
+            clearGestureLocked();
             steeringKeyTailGeneration++;
         }
         if (changed) STEERING_LEARNING_REVISION.incrementAndGet();
@@ -368,7 +408,7 @@ public final class NavAccessibilityService extends AccessibilityService {
 
     private void cancelSteeringKeyTailTimeoutIfIdle() {
         synchronized (steeringLock) {
-            if (suppressKeyCode < 0 && !mappedKeyActive) {
+            if (suppressKeyCode < 0) {
                 steeringKeyTailGeneration++;
             }
         }
@@ -378,10 +418,21 @@ public final class NavAccessibilityService extends AccessibilityService {
         synchronized (steeringLock) {
             if (generation != steeringKeyTailGeneration) return;
             suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;
-            mappedKeyActive = false;
+            clearGestureLocked();
             steeringKeyTailGeneration++;
         }
         AppEventLogger.event(this, "steering_key_tail expired");
+    }
+
+    private static long multiPressTimeoutMs() {
+        return Build.VERSION.SDK_INT >= 31
+                ? ViewConfiguration.getMultiPressTimeout()
+                : ViewConfiguration.getDoubleTapTimeout();
+    }
+
+    private void clearGestureLocked() {
+        steeringGestures.cancel();
+        steeringHandler.removeCallbacks(steeringDeadline);
     }
 
     //guard active-window traversal so accessibility node trees are captured by one serialized path.

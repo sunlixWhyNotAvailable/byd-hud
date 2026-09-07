@@ -21,8 +21,22 @@ public final class SteeringTransferPolicyTest {
     public void anyDeliveredConfiguredRawCodeIsConsumed() {
         for (int code : new int[] {0, 294, 304, 305, 313, 1000}) {
             assertTrue(SteeringTransferPolicy.isMappedKey(code, code));
-            assertFalse(SteeringTransferPolicy.isMappedKey(code + 1, code));
         }
+        assertFalse(SteeringTransferPolicy.isMappedKey(295, 294));
+        assertFalse(SteeringTransferPolicy.isMappedKey(313, 304));
+        assertFalse(SteeringTransferPolicy.isMappedKey(1001, 1000));
+    }
+
+    @Test
+    public void nativeLongAliasesShareOneButtonFamily() {
+        assertTrue(SteeringTransferPolicy.isMappedKey(305, 306));
+        assertTrue(SteeringTransferPolicy.isMappedKey(306, 305));
+        assertTrue(SteeringTransferPolicy.isMappedKey(304, 312));
+        assertTrue(SteeringTransferPolicy.isMappedKey(312, 304));
+        assertTrue(SteeringTransferPolicy.isNativeLongAlias(306));
+        assertTrue(SteeringTransferPolicy.isNativeLongAlias(312));
+        assertTrue(SteeringTransferPolicy.hasNativeLongAlias(305));
+        assertTrue(SteeringTransferPolicy.hasNativeLongAlias(304));
     }
 
     @Test

@@ -183,6 +183,15 @@ final class VehicleConfigurationDiagnostics {
                 || HudPrefs.isRemainingDistanceOutputEnabled(context);
         int metrics = prefs.contains("route_metrics_mode") ? Math.max(0, Math.min(2, prefs.getInt("route_metrics_mode", 0)))
                 : !anyMetric ? 0 : prefs.getBoolean("whole_route_metrics", false) ? 2 : 1;
+        JSONArray steeringTransfers = new JSONArray();
+        for (SteeringTransferProfile transfer : SteeringTransferPreferences.diagnosticProfiles(context)) {
+            steeringTransfers.put(new JSONObject()
+                    .put("id", transfer.id)
+                    .put("keyCode", transfer.keyCode)
+                    .put("pressMode", transfer.pressMode)
+                    .put("packageName", transfer.packageName)
+                    .put("windowProfile", transfer.windowProfile));
+        }
         return new JSONObject().put("navigators", navigators)
                 .put("selectedHudPackage", ingress.hudPackage)
                 .put("autoStart", HudPrefs.isBootEnabled(context))
@@ -191,8 +200,12 @@ final class VehicleConfigurationDiagnostics {
                 .put("street", HudPrefs.isStreetOutputEnabled(context)).put("textDirection", HudPrefs.isTextDirectionOutputEnabled(context))
                 .put("transliteration", HudPrefs.transliterationMode(context))
                 .put("nearDistanceClamp", HudPrefs.isSmallDistanceClampEnabled(context))
-                .put("wazeAlerts", HudPrefs.isWazeAlertsEnabled(context)).put("wazeSurface", HudPrefs.isWazeCustomSurfaceEnabled(context))
-                .put("routeMetricsMode", metrics).put("eta", HudPrefs.isEtaOutputEnabled(context))
+                .put("wazeAlerts", HudPrefs.isWazeAlertsEnabled(context))
+                .put("wazeAlertField", HudPrefs.wazeAlertField(context))
+                .put("wazeSurface", HudPrefs.isWazeCustomSurfaceEnabled(context))
+                .put("routeMetricsMode", metrics)
+                .put("etaOutputField", HudPrefs.etaOutputField(context))
+                .put("eta", HudPrefs.isEtaOutputEnabled(context))
                 .put("remainingTime", HudPrefs.isRemainingTimeOutputEnabled(context))
                 .put("remainingDistance", HudPrefs.isRemainingDistanceOutputEnabled(context))
                 .put("speedLimitMode", HudPrefs.speedLimitMode(context)).put("speedLimitFallback", HudPrefs.speedLimitFreeFallback(context))
@@ -202,6 +215,7 @@ final class VehicleConfigurationDiagnostics {
                 .put("speedLimitLaneSize", HudPrefs.speedLimitLaneOverlaySize(context))
                 .put("tbtWithoutHud", HudPrefs.isTbtWithoutHudOutputEnabled(context))
                 .put("switchToTbtOnStart", HudPrefs.isSwitchToTbtOnHudStartEnabled(context))
+                .put("steeringTransferProfiles", steeringTransfers)
                 .put("dashboardMode", mode)
                 .put("miniProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_PARTIAL)))
                 .put("fullProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_FULL)));

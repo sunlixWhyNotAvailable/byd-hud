@@ -17,10 +17,11 @@ public final class SteeringTransferServiceSourceContractTest {
         String key = keyHandler();
         String learning = between(key, "if (keyLearning) {", "int keyCode = event.getKeyCode();");
         assertTrue(learning.contains("SteeringTransferPolicy.isFirstDown("));
-        assertTrue(learning.contains("suppressKeyCode = code;"));
-        assertTrue(learning.contains("SteeringTransferPreferences.setKeyCode(this, code);"));
+        assertTrue(learning.contains("capturedKeyCode = canonical;"));
+        assertTrue(learning.contains("suppressKeyCode = canonical;"));
         assertTrue(learning.contains("return true;"));
-        assertFalse(learning.contains("requestSteeringToggle("));
+        assertFalse(learning.contains("saveProfile("));
+        assertFalse(learning.contains("requestSteeringTransfer("));
         String xml = file("src/main/res/xml/nav_accessibility_service.xml");
         assertTrue(xml.contains("flagRequestFilterKeyEvents"));
         assertTrue(xml.contains("canRequestFilterKeyEvents=\"true\""));
@@ -30,15 +31,12 @@ public final class SteeringTransferServiceSourceContractTest {
     public void everyMappedEventIncludingOrphanTailsIsConsumedWithoutTaskAdmission() throws Exception {
         String key = keyHandler();
         assertTrue(key.contains("if (event == null) return false;"));
-        assertTrue(key.contains(
-                "if (!SteeringTransferPolicy.isMappedKey(keyCode, configured)) { return false; }"));
-        String mapped = key.substring(key.indexOf("if (event.getAction() == KeyEvent.ACTION_DOWN)",
-                key.indexOf("int configured =")));
-        assertFalse(mapped.contains("return false;"));
-        assertTrue(mapped.endsWith("return true; } "));
-        assertTrue(mapped.contains("SteeringTransferPolicy.shouldStartTransfer("));
-        assertTrue(mapped.contains("if (startTransfer) { NavAppDisplayController.get(this).requestSteeringToggle("));
-        assertTrue(mapped.contains("else if (event.getAction() == KeyEvent.ACTION_UP)"));
+        assertTrue(key.contains("consumed = steeringGestures.onKey(keyCode, event.getAction(), event.getRepeatCount(),"));
+        assertTrue(key.contains("event.isCanceled(), event.getEventTime(), SystemClock.uptimeMillis(),"));
+        assertTrue(key.contains("blocked, this::dispatchSteeringMatch)"));
+        assertTrue(key.contains("if (blocked) steeringGestures.cancel();"));
+        assertTrue(key.contains("scheduleSteeringDeadlineLocked();"));
+        assertTrue(key.contains("return consumed;"));
         assertFalse(key.contains("LocalAdbBridge"));
         assertFalse(key.contains("checkDisplay("));
         assertFalse(key.contains("Thread"));
@@ -63,8 +61,9 @@ public final class SteeringTransferServiceSourceContractTest {
     public void learningAndMappedTailsKeepBoundedLostUpRecovery() throws Exception {
         String service = source("NavAccessibilityService.java");
         String key = keyHandler();
-        String suppressed = between(key, "if (suppressed >= 0 && keyCode == suppressed)",
-                "final long runtimeGeneration");
+        String suppressed = between(key,
+                "if (suppressed >= 0 && SteeringTransferPolicy.isMappedKey(keyCode, suppressed))",
+                "final boolean consumed");
         assertTrue(suppressed.contains("suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;"));
         assertTrue(suppressed.contains("return true;"));
         assertFalse(suppressed.contains("requestSteeringToggle"));
@@ -73,9 +72,15 @@ public final class SteeringTransferServiceSourceContractTest {
                 "private void postCaptureActiveWindow(");
         assertTrue(expiry.contains("if (generation != steeringKeyTailGeneration) return;"));
         assertTrue(expiry.contains("suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;"));
-        assertTrue(expiry.contains("mappedKeyActive = false;"));
-        assertTrue(key.contains("mappedKeyActive = true; } armSteeringKeyTailTimeout();"));
-        assertTrue(key.contains("mappedKeyActive = false; } cancelSteeringKeyTailTimeoutIfIdle();"));
+        assertTrue(expiry.contains("clearGestureLocked();"));
+        assertTrue(key.contains("armSteeringKeyTailTimeout();"));
+        assertTrue(key.contains("cancelSteeringKeyTailTimeoutIfIdle();"));
+        assertTrue(service.contains("new Handler(Looper.getMainLooper())"));
+        assertTrue(service.contains("ViewConfiguration.getLongPressTimeout()"));
+        assertTrue(service.contains("ViewConfiguration.getMultiPressTimeout()"));
+        assertTrue(service.contains("ViewConfiguration.getDoubleTapTimeout()"));
+        assertTrue(service.contains("steeringHandler.removeCallbacks(steeringDeadline);"));
+        assertTrue(service.contains("steeringGestures.cancel();"));
     }
 
     @Test
@@ -106,9 +111,18 @@ public final class SteeringTransferServiceSourceContractTest {
     public void everyFreshPrecheckRevalidatesBindingAndLifecycleBeforeMutation() throws Exception {
         String service = source("NavAccessibilityService.java");
         String key = keyHandler();
-        assertTrue(key.indexOf("SteeringTransferPreferences.revision(this)")
-                < key.indexOf("SteeringTransferPreferences.keyCode(this)"));
-        assertTrue(key.contains("() -> isSteeringRequestCurrent(runtimeGeneration, bindingRevision)"));
+        assertTrue(key.contains("refreshSteeringProfilesLocked();"));
+        String refresh = between(service, "private void refreshSteeringProfilesLocked()",
+                "private void dispatchSteeringMatch(");
+        assertTrue(refresh.contains("synchronized (SteeringTransferPreferences.class)"));
+        assertTrue(refresh.contains("SteeringTransferPreferences.profiles(this)"));
+        assertTrue(refresh.contains("SteeringTransferPreferences.revision(this)"));
+        assertTrue(refresh.contains("steeringGestures.configure("));
+        String deadlines = between(service, "private void onSteeringDeadline()",
+                "private void scheduleSteeringDeadlineLocked()");
+        assertTrue(deadlines.indexOf("refreshSteeringProfilesLocked();")
+                < deadlines.indexOf("steeringGestures.advance("));
+        assertTrue(service.contains("() -> isSteeringRequestCurrent(runtimeGeneration, bindingRevision)"));
         assertTrue(service.contains("bindingRevision, SteeringTransferPreferences.revision(this)"));
         assertTrue(service.contains("runtimeGeneration, steeringRuntimeGeneration"));
         String steering = steeringWorker();
@@ -144,6 +158,8 @@ public final class SteeringTransferServiceSourceContractTest {
         assertTrue(between(service, "private void clearSteeringTransientState()", "private void armSteeringKeyTailTimeout()")
                 .contains("steeringRuntimeGeneration++;"));
         assertTrue(between(service, "protected void onServiceConnected()", "public void onAccessibilityEvent(")
+                .contains("steeringRuntimeGeneration++;"));
+        assertTrue(between(service, "private void beginKeyLearningInternal()", "private void cancelKeyLearningTransient()")
                 .contains("steeringRuntimeGeneration++;"));
         assertTrue(between(service, "static void resumeSteeringRuntime(", "protected void onServiceConnected()")
                 .contains("service.steeringSuspended = false;"));
@@ -187,17 +203,30 @@ public final class SteeringTransferServiceSourceContractTest {
                 "private long widgetProjectionGenerationForPackage(");
         assertTrue(end.contains("moveInProgress = false;"));
         assertTrue(end.contains("notifyStatusChanged();"));
-        assertTrue(preferences.contains("editor.putLong(KEY_REVISION, revision(context) + 1L).apply();"));
+        assertTrue(preferences.contains("putLong(KEY_REVISION, preferences.getLong(KEY_REVISION, 0L) + 1L)"));
         assertTrue(preferences.contains("MainActivity.publishSharedUiStateChange();"));
-        assertFalse(between(preferences, "static void setPackageName(", "static void setProfile(")
-                .contains("KEY_CODE"));
-        assertTrue(between(preferences, "static void reset(", "private static void put(")
-                .contains("putInt(KEY_CODE, NO_KEY_CODE)"));
+        assertTrue(preferences.contains("KEY_PROFILES = \"profiles_v2\""));
+        assertTrue(preferences.contains("static synchronized boolean saveProfile("));
+        assertTrue(preferences.contains("static synchronized boolean deleteProfile("));
+        assertFalse(preferences.contains("static void setKeyCode("));
+    }
+
+    @Test
+    public void diagnosticExportDoesNotCommitLegacyMigration() throws Exception {
+        String preferences = source("SteeringTransferPreferences.java");
+        String diagnostic = between(preferences,
+                "static synchronized List<SteeringTransferProfile> diagnosticProfiles(",
+                "static synchronized boolean saveProfile(");
+        assertTrue(diagnostic.contains("migrateLegacy("));
+        assertFalse(diagnostic.contains("ensureMigrated("));
+        assertFalse(diagnostic.contains(".edit()"));
+        assertTrue(source("VehicleConfigurationDiagnostics.java")
+                .contains("SteeringTransferPreferences.diagnosticProfiles(context)"));
     }
 
     private static String keyHandler() throws IOException {
         return between(source("NavAccessibilityService.java"),
-                "public boolean onKeyEvent(KeyEvent event)", "private void beginKeyLearningInternal()").trim() + " ";
+                "public boolean onKeyEvent(KeyEvent event)", "private void logSteeringKey(").trim() + " ";
     }
 
     private static String steeringWorker() throws IOException {

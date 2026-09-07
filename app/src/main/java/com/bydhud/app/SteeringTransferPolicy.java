@@ -13,7 +13,22 @@ final class SteeringTransferPolicy {
     }
 
     static boolean isMappedKey(int keyCode, int configuredKeyCode) {
-        return configuredKeyCode >= 0 && keyCode == configuredKeyCode;
+        return configuredKeyCode >= 0
+                && canonicalKeyCode(keyCode) == canonicalKeyCode(configuredKeyCode);
+    }
+
+    static int canonicalKeyCode(int keyCode) {
+        if (keyCode == 306) return 305;
+        if (keyCode == 312) return 304;
+        return keyCode < 0 ? SteeringTransferPreferences.NO_KEY_CODE : keyCode;
+    }
+
+    static boolean isNativeLongAlias(int keyCode) {
+        return keyCode == 306 || keyCode == 312;
+    }
+
+    static boolean hasNativeLongAlias(int canonicalKeyCode) {
+        return canonicalKeyCode == 305 || canonicalKeyCode == 304;
     }
 
     static boolean shouldStartTransfer(int action, int repeatCount, boolean keyActive) {

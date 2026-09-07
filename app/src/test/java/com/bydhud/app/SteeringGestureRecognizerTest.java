@@ -1,0 +1,161 @@
+package com.bydhud.app;
+
+import static com.bydhud.app.SteeringTransferPreferences.*;
+import static org.junit.Assert.*;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import org.junit.Test;
+
+public final class SteeringGestureRecognizerTest {
+    private final SteeringGestureRecognizer recognizer = new SteeringGestureRecognizer(400, 300, 3000);
+    private final List<SteeringTransferProfile> matches = new ArrayList<>();
+
+    private SteeringTransferProfile profile(int key, String mode) {
+        return new SteeringTransferProfile(key + mode, key, mode, "com.waze", PROFILE_SELECTED);
+    }
+
+    private void configure(int key, String... modes) {
+        List<SteeringTransferProfile> profiles = new ArrayList<>();
+        for (String mode : modes) profiles.add(profile(key, mode));
+        recognizer.configure(profiles, 1);
+    }
+
+    private boolean event(int key, int action, long time) {
+        return recognizer.onKey(key, action, 0, false, time, time, false, matches::add);
+    }
+
+    private void modes(String... expected) {
+        List<String> actual = new ArrayList<>();
+        for (SteeringTransferProfile match : matches) actual.add(match.pressMode);
+        assertEquals(Arrays.asList(expected), actual);
+    }
+
+    @Test public void singleWaitsForUpButNotForUnusedDoubleWindow() {
+        configure(294, PRESS_SINGLE);
+        assertTrue(event(294, 0, 0));
+        modes();
+        assertTrue(event(294, 1, 70));
+        modes(PRESS_SINGLE);
+        assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
+        assertFalse(event(320, 0, 90));
+    }
+
+    @Test public void doubleUsesFirstUpToSecondDownAndCompletesOnSecondUp() {
+        configure(294, PRESS_SINGLE, PRESS_DOUBLE);
+        event(294, 0, 0); event(294, 1, 50);
+        recognizer.advance(350, matches::add);
+        modes();
+        event(294, 0, 350);
+        recognizer.advance(351, matches::add);
+        modes();
+        event(294, 1, 380);
+        recognizer.advance(1000, matches::add);
+        modes(PRESS_DOUBLE);
+    }
+
+    @Test public void missedDoubleWindowEmitsTwoIndependentSingles() {
+        configure(294, PRESS_SINGLE, PRESS_DOUBLE);
+        event(294, 0, 0); event(294, 1, 50);
+        event(294, 0, 351); event(294, 1, 390);
+        modes(PRESS_SINGLE);
+        recognizer.advance(691, matches::add);
+        modes(PRESS_SINGLE, PRESS_SINGLE);
+    }
+
+    @Test public void holdHasOneActionAndNeverFallsBackToSingle() {
+        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(294, 0, 0);
+        recognizer.advance(400, matches::add);
+        assertTrue(recognizer.onKey(294, 0, 3, false, 600, 600, false, matches::add));
+        event(294, 1, 800);
+        recognizer.advance(2000, matches::add);
+        modes(PRESS_HOLD);
+    }
+
+    @Test public void unmatchedHoldAndSingleAreConsumedWithoutAction() {
+        configure(294, PRESS_SINGLE, PRESS_DOUBLE);
+        event(294, 0, 0); event(294, 1, 500); // UP handles a delayed timer too.
+        recognizer.advance(1000, matches::add);
+        modes();
+        recognizer.configure(Collections.singletonList(profile(294, PRESS_HOLD)), 2);
+        event(294, 0, 1100); event(294, 1, 1150);
+        modes();
+    }
+
+    @Test public void secondHeldPressIsNotADouble() {
+        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(294, 0, 0); event(294, 1, 50);
+        event(294, 0, 150); event(294, 1, 600);
+        recognizer.advance(1000, matches::add);
+        modes(PRESS_HOLD);
+    }
+
+    @Test public void nativeAliasNeedsNoTimerAndDoesNotRepeat() {
+        configure(305, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(306, 0, 0); event(306, 0, 20);
+        recognizer.onKey(306, 0, 1, false, 30, 30, false, matches::add);
+        modes(PRESS_HOLD);
+        event(306, 1, 56);
+        event(305, 0, 100);
+        recognizer.advance(700, matches::add); // short semantic code is not a timed hold.
+        event(305, 1, 710);
+        recognizer.advance(1011, matches::add);
+        modes(PRESS_HOLD, PRESS_SINGLE);
+    }
+
+    @Test public void revisionChangeCancelsPendingAndHeldActionsButConsumesTheirTails() {
+        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(294, 0, 0); event(294, 1, 50);
+        recognizer.configure(Collections.singletonList(profile(294, PRESS_SINGLE)), 2);
+        recognizer.advance(500, matches::add);
+        event(294, 0, 600);
+        recognizer.configure(Collections.emptyList(), 3);
+        assertTrue(event(294, 1, 650));
+        assertFalse(event(294, 0, 700));
+        modes();
+    }
+
+    @Test public void canceledUpAndLifecycleCancelCannotTriggerAnAction() {
+        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(294, 0, 0);
+        recognizer.onKey(294, 1, 0, true, 50, 50, false, matches::add);
+        event(294, 0, 100); event(294, 1, 150);
+        recognizer.cancel();
+        recognizer.advance(1000, matches::add);
+        modes();
+    }
+
+    @Test public void busyPressIsNotReplayedWhenWorkerBecomesFree() {
+        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        assertTrue(recognizer.onKey(294, 0, 0, false, 0, 0, true, matches::add));
+        event(294, 1, 50);
+        recognizer.advance(1000, matches::add);
+        modes();
+    }
+
+    @Test public void differentButtonsKeepIndependentDoubleWindows() {
+        recognizer.configure(Arrays.asList(profile(294, PRESS_SINGLE), profile(294, PRESS_DOUBLE),
+                profile(305, PRESS_SINGLE), profile(305, PRESS_DOUBLE)), 1);
+        event(294, 0, 0); event(294, 1, 50);
+        event(305, 0, 100); event(305, 1, 150);
+        event(294, 0, 200); event(294, 1, 250);
+        recognizer.advance(451, matches::add);
+        modes(PRESS_DOUBLE, PRESS_SINGLE);
+        assertEquals(294, matches.get(0).keyCode);
+        assertEquals(305, matches.get(1).keyCode);
+    }
+
+    @Test public void orphanRepeatsAndLostUpHaveBoundedRecovery() {
+        configure(294, PRESS_SINGLE);
+        assertTrue(recognizer.onKey(294, 0, 1, false, 0, 0, false, matches::add));
+        event(294, 1, 50);
+        event(294, 0, 100);
+        recognizer.advance(3100, matches::add);
+        event(294, 1, 3200);
+        event(294, 0, 3300); event(294, 1, 3350);
+        modes(PRESS_SINGLE);
+    }
+}

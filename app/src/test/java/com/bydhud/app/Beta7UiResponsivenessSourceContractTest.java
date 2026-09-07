@@ -250,7 +250,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
     }
 
     @Test
-    public void immutableUiCopyModelsAreRememberedWithoutChangingFeedbackTiming()
+    public void immutableUiCopyModelsAreRememberedAndSwitchActionsAreImmediate()
             throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
 
@@ -258,7 +258,12 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(source.contains("val copy = remember(snapshot.uaLanguage)"));
         assertTrue(source.contains("val shareCopy = remember(copy.language)"));
         assertTrue(source.contains("VISUAL_PRESS_BEFORE_ACTION_MS = 90L"));
-        assertTrue(source.contains("SWITCH_CENTER_BEFORE_ACTION_MS = 120L"));
+        assertFalse(source.contains("SWITCH_CENTER_BEFORE_ACTION_MS"));
+        String hudSwitch = between(source, "private fun HudSwitch(",
+                "private fun Segmented(");
+        assertTrue(hudSwitch.contains("latestOnChecked(target)"));
+        assertFalse(hudSwitch.substring(hudSwitch.indexOf("scope.launch"),
+                hudSwitch.indexOf("latestOnChecked(target)")).contains("delay("));
     }
 
     @Test

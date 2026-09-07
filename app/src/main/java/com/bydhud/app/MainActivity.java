@@ -849,10 +849,12 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.transliterationMode(this),
                 HudPrefs.isTextDirectionOutputEnabled(this),
                 HudPrefs.isWazeAlertsEnabled(this),
+                HudPrefs.wazeAlertField(this),
                 HudPrefs.isTbtWithoutHudOutputEnabled(this),
                 HudPrefs.isSwitchToTbtOnHudStartEnabled(this),
                 HudPrefs.isWholeRouteMetricsEnabled(this),
                 HudPrefs.routeMetricsMode(this),
+                HudPrefs.etaOutputField(this),
                 HudPrefs.isEtaOutputEnabled(this),
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
@@ -871,11 +873,10 @@ public final class MainActivity extends ComponentActivity {
                 DashboardWidgetController.snapshot(this),
                 DashboardWidgetController.hasOverlayPermission(),
                 installedTransferApps,
-                SteeringTransferPreferences.keyCode(this),
-                SteeringTransferPreferences.packageName(this),
-                SteeringTransferPreferences.profile(this),
+                SteeringTransferPreferences.profiles(this),
                 SteeringTransferPreferences.revision(this),
                 NavAccessibilityService.isKeyLearning(),
+                NavAccessibilityService.capturedKeyCode(),
                 HudPrefs.isSmallDistanceClampEnabled(this),
                 permissionStatus.settingsGranted(),
                 adbAuthorized(),
@@ -1399,6 +1400,12 @@ public final class MainActivity extends ComponentActivity {
         setWazeAlertsEnabled(enabled);
     }
 
+    public void composeSetWazeAlertField(int field) {
+        HudPrefs.setWazeAlertField(this, field);
+        AppEventLogger.event(this, "ui waze_alert_field=" + HudPrefs.wazeAlertField(this));
+        refreshControls();
+    }
+
     public void composeSetTbtWithoutHudOutputEnabled(boolean enabled) {
         if (enabled && !NavHudLiveSender.activateUserRuntime(this)) return;
         HudPrefs.setTbtWithoutHudOutputEnabled(this, enabled);
@@ -1419,6 +1426,12 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetRouteMetricsMode(int mode) {
         setRouteMetricsMode(mode);
+    }
+
+    public void composeSetEtaOutputField(int field) {
+        HudPrefs.setEtaOutputField(this, field);
+        AppEventLogger.event(this, "ui eta_output_field=" + HudPrefs.etaOutputField(this));
+        refreshControls();
     }
 
     public void composeSetEtaOutputEnabled(boolean enabled) {
@@ -1546,21 +1559,14 @@ public final class MainActivity extends ComponentActivity {
         invalidateComposeSnapshot();
     }
 
-    public void composeResetSteeringButton() {
-        SteeringTransferPreferences.setKeyCode(this, SteeringTransferPreferences.NO_KEY_CODE);
+    public boolean composeSaveSteeringTransferProfile(String id, int keyCode,
+            String pressMode, String packageName, String windowProfile) {
+        return SteeringTransferPreferences.saveProfile(this, new SteeringTransferProfile(
+                id, keyCode, pressMode, packageName, windowProfile));
     }
 
-    public void composeSetSteeringTransferPackage(String packageName) {
-        SteeringTransferPreferences.setPackageName(this, packageName);
-    }
-
-    public void composeResetSteeringTransferPackage() {
-        SteeringTransferPreferences.setPackageName(
-                this, SteeringTransferPreferences.EMPTY_PACKAGE);
-    }
-
-    public void composeSetSteeringTransferProfile(String profile) {
-        SteeringTransferPreferences.setProfile(this, profile);
+    public boolean composeDeleteSteeringTransferProfile(String id) {
+        return SteeringTransferPreferences.deleteProfile(this, id);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2458,10 +2464,12 @@ public final class MainActivity extends ComponentActivity {
         public final int transliterationMode;
         public final boolean textDirectionOutputEnabled;
         public final boolean wazeAlertsEnabled;
+        public final int wazeAlertField;
         public final boolean tbtWithoutHudOutputEnabled;
         public final boolean switchToTbtOnHudStartEnabled;
         public final boolean wholeRouteMetricsEnabled;
         public final int routeMetricsMode;
+        public final int etaOutputField;
         public final boolean etaOutputEnabled;
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
@@ -2480,11 +2488,10 @@ public final class MainActivity extends ComponentActivity {
         public final DashboardWidgetState dashboardWidgetState;
         public final boolean dashboardWidgetOverlayPermission;
         public final List<InstalledTransferAppCatalog.Entry> steeringTransferApps;
-        public final int steeringTransferKeyCode;
-        public final String steeringTransferPackage;
-        public final String steeringTransferProfile;
+        public final List<SteeringTransferProfile> steeringTransferProfiles;
         public final long steeringTransferRevision;
         public final boolean steeringButtonLearning;
+        public final int steeringCapturedKeyCode;
         public final boolean smallDistanceClampEnabled;
         public final boolean settingsPermissionsGranted;
         public final boolean adbAuthorized;
@@ -2531,9 +2538,10 @@ public final class MainActivity extends ComponentActivity {
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 int transliterationMode,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
+                int wazeAlertField,
                 boolean tbtWithoutHudOutputEnabled,
                 boolean switchToTbtOnHudStartEnabled,
-                boolean wholeRouteMetricsEnabled, int routeMetricsMode,
+                boolean wholeRouteMetricsEnabled, int routeMetricsMode, int etaOutputField,
                 boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
                 boolean remainingDistanceOutputEnabled, int speedLimitMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
@@ -2546,9 +2554,9 @@ public final class MainActivity extends ComponentActivity {
                 DashboardWidgetState dashboardWidgetState,
                 boolean dashboardWidgetOverlayPermission,
                 List<InstalledTransferAppCatalog.Entry> steeringTransferApps,
-                int steeringTransferKeyCode, String steeringTransferPackage,
-                String steeringTransferProfile, long steeringTransferRevision,
-                boolean steeringButtonLearning,
+                List<SteeringTransferProfile> steeringTransferProfiles,
+                long steeringTransferRevision, boolean steeringButtonLearning,
+                int steeringCapturedKeyCode,
                 boolean smallDistanceClampEnabled,
                 boolean settingsPermissionsGranted,
                 boolean adbAuthorized,
@@ -2579,10 +2587,14 @@ public final class MainActivity extends ComponentActivity {
             this.transliterationMode = HudPrefs.normalizeTransliterationMode(transliterationMode);
             this.textDirectionOutputEnabled = textDirectionOutputEnabled;
             this.wazeAlertsEnabled = wazeAlertsEnabled;
+            this.wazeAlertField = Math.max(HudPrefs.WAZE_ALERT_FIELD_MANEUVER,
+                    Math.min(HudPrefs.WAZE_ALERT_FIELD_EXPERIMENTAL, wazeAlertField));
             this.tbtWithoutHudOutputEnabled = tbtWithoutHudOutputEnabled;
             this.switchToTbtOnHudStartEnabled = switchToTbtOnHudStartEnabled;
             this.wholeRouteMetricsEnabled = wholeRouteMetricsEnabled;
             this.routeMetricsMode = routeMetricsMode;
+            this.etaOutputField = Math.max(HudPrefs.ETA_OUTPUT_FIELD_STREET,
+                    Math.min(HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL, etaOutputField));
             this.etaOutputEnabled = etaOutputEnabled;
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
@@ -2603,13 +2615,12 @@ public final class MainActivity extends ComponentActivity {
             this.steeringTransferApps = steeringTransferApps == null
                     ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(steeringTransferApps));
-            this.steeringTransferKeyCode = steeringTransferKeyCode;
-            this.steeringTransferPackage = steeringTransferPackage == null
-                    ? "" : steeringTransferPackage;
-            this.steeringTransferProfile = steeringTransferProfile == null
-                    ? SteeringTransferPreferences.PROFILE_SELECTED : steeringTransferProfile;
+            this.steeringTransferProfiles = steeringTransferProfiles == null
+                    ? Collections.emptyList()
+                    : Collections.unmodifiableList(new ArrayList<>(steeringTransferProfiles));
             this.steeringTransferRevision = Math.max(0L, steeringTransferRevision);
             this.steeringButtonLearning = steeringButtonLearning;
+            this.steeringCapturedKeyCode = steeringCapturedKeyCode;
             this.smallDistanceClampEnabled = smallDistanceClampEnabled;
             this.settingsPermissionsGranted = settingsPermissionsGranted;
             this.adbAuthorized = adbAuthorized;
@@ -2679,10 +2690,12 @@ public final class MainActivity extends ComponentActivity {
                     && transliterationMode == other.transliterationMode
                     && textDirectionOutputEnabled == other.textDirectionOutputEnabled
                     && wazeAlertsEnabled == other.wazeAlertsEnabled
+                    && wazeAlertField == other.wazeAlertField
                     && tbtWithoutHudOutputEnabled == other.tbtWithoutHudOutputEnabled
                     && switchToTbtOnHudStartEnabled == other.switchToTbtOnHudStartEnabled
                     && wholeRouteMetricsEnabled == other.wholeRouteMetricsEnabled
                     && routeMetricsMode == other.routeMetricsMode
+                    && etaOutputField == other.etaOutputField
                     && etaOutputEnabled == other.etaOutputEnabled
                     && remainingTimeOutputEnabled == other.remainingTimeOutputEnabled
                     && remainingDistanceOutputEnabled == other.remainingDistanceOutputEnabled
@@ -2701,11 +2714,10 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(dashboardWidgetState, other.dashboardWidgetState)
                     && dashboardWidgetOverlayPermission == other.dashboardWidgetOverlayPermission
                     && Objects.equals(steeringTransferApps, other.steeringTransferApps)
-                    && steeringTransferKeyCode == other.steeringTransferKeyCode
-                    && Objects.equals(steeringTransferPackage, other.steeringTransferPackage)
-                    && Objects.equals(steeringTransferProfile, other.steeringTransferProfile)
+                    && Objects.equals(steeringTransferProfiles, other.steeringTransferProfiles)
                     && steeringTransferRevision == other.steeringTransferRevision
                     && steeringButtonLearning == other.steeringButtonLearning
+                    && steeringCapturedKeyCode == other.steeringCapturedKeyCode
                     && smallDistanceClampEnabled == other.smallDistanceClampEnabled
                     && settingsPermissionsGranted == other.settingsPermissionsGranted
                     && adbAuthorized == other.adbAuthorized
@@ -2753,16 +2765,17 @@ public final class MainActivity extends ComponentActivity {
                     pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
                     distanceOutputEnabled, streetOutputEnabled, transliterationMode,
                     textDirectionOutputEnabled,
-                    wazeAlertsEnabled, tbtWithoutHudOutputEnabled,
+                    wazeAlertsEnabled, wazeAlertField, tbtWithoutHudOutputEnabled,
                     switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
+                    etaOutputField,
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
                     speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
                     dashboardScalePercent, dashboardWidgetState, dashboardWidgetOverlayPermission,
-                    steeringTransferApps, steeringTransferKeyCode, steeringTransferPackage,
-                    steeringTransferProfile, steeringTransferRevision, steeringButtonLearning,
+                    steeringTransferApps, steeringTransferProfiles,
+                    steeringTransferRevision, steeringButtonLearning, steeringCapturedKeyCode,
                     smallDistanceClampEnabled,
                     settingsPermissionsGranted, adbAuthorized, captureReady,
                     permissionSummary, adbKeyFingerprint, hudStatus, hudPackage,

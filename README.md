@@ -107,6 +107,8 @@ The same tab also lists other applications that can be moved between displays, b
 
 The `Options` tab controls what BYD HUD sends. Changing a switch affects the next outgoing HUD state; it does not change the map inside the navigator.
 
+Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its local control changes only the illustration, not your saved setting or the HUD. Samples follow the application's Ukrainian/English language. The experimental ETA/Waze locations are placeholders for a later patch: their choices are saved, but current output stays in the existing street/maneuver fields. Existing screenshots below predate this UI port.
+
 ### Basic navigation output
 
 | Setting | Default | When enabled | When disabled |
@@ -114,7 +116,8 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 | `PNG output` | On | Shows the rendered maneuver or alert image | Hides the rendered image field |
 | `Native output` | On | Shows the vehicle's native turn arrow | Hides the native arrow field |
 | `Lane output` | On | Shows recommended lanes when available | Hides lane guidance |
-| `Distance output` | On | Shows distance to the current maneuver | Hides maneuver distance |
+| `Distance output` | On | Shows distance to the current maneuver | Sends zero; affected native HUDs show `现在` instead of an empty field |
+| `Small distance clamp` | Off | Replaces positive distances below 11 m with 11 m | Keeps the original distance; this control is inactive while Distance output is off, without clearing its saved value |
 | `Street output` | On | Shows the current road or street text | Hides street text |
 | `Text transliteration` | Off | Optionally converts Ukrainian or other writing systems to Latin characters for vehicle displays that cannot show them correctly | Sends the navigator text unchanged |
 | `Text direction output` | On | Uses a cue such as `Continue straight` when no street text is available | Does not substitute a cue for a missing street name |
@@ -129,7 +132,8 @@ Transliteration offers `Ukrainian` for Ukrainian road names and `Universal` for 
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `ETA/time/distance output mode` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze uses the final destination for the entire route and falls back per field to an available next-stop value |
+| `ETA output mode (time/distance)` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze uses the final destination for the entire route and falls back per field to an available next-stop value |
+| `ETA output field` | Street | Street or Experimental; Experimental is saved for a later patch and currently leaves the normal output unchanged |
 | `Show ETA` | Off | Adds the expected arrival time to the street field |
 | `Show remaining time` | Off | Adds remaining travel time to the street field |
 | `Show remaining distance` | Off | Adds remaining route distance to the street field |
@@ -165,7 +169,6 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Small distance clamp` | Off | Replaces positive distances below 11 m with 11 m to avoid invalid characters on affected HUD firmware |
 | `Create a TBT card even for an active navigator session without HUD output` | On | Publishes direct guidance to the dashboard TBT card independently of windshield-HUD selection; the HUD-selected navigator has priority, otherwise the most recently started route is used |
 | `Switch to the TBT card when HUD output starts` | On | Best-effort selects the dashboard TBT layout when direct HUD output starts; a layout-switch failure does not block TBT or windshield-HUD data |
 
@@ -176,6 +179,7 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Show Waze alerts` | On | Shows the closer known item when a route maneuver and Waze alert compete; an active alert uses its own image, distance, and text, keeps lane guidance, and hides the native route arrow |
+| `Waze alert output field` | Maneuver | Maneuver or Experimental; Experimental is saved for a later patch and currently leaves the normal output unchanged |
 | `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate route screen; Back returns to the normal Waze screen for the rest of that route |
 
 <p align="center"><img src="docs/screenshots/en/settings-waze.png" alt="Waze alert and custom surface settings" width="100%"></p>
@@ -237,13 +241,17 @@ Appearance and position survive restarts. Automatic startup follows `Boot runtim
 
 ### Steering-wheel transfer shortcut
 
-Open `Options → Move to dashboard` to assign a steering-wheel button, choose an installed user application, and select `Selected profile`, `Partial`, or `Full`. The application list uses Android's installed-app names and icons and does not launch the selected application.
+Open `Options → Dashboard transfer settings` and press `+ Create profile`. Learn a button, choose `Single`, `Hold` or `Double`, select an installed application and choose `Current profile`, `Partial only` or `Full only`. Current resolves the saved dashboard mode when the gesture runs. Save is available only after selecting a button and app and when no other profile uses that physical button and press type. Known short/long aliases count as the same button.
+
+Learning and edits remain a draft until Save. Cancel discards them. The pencil edits a saved profile; Delete from either the row or editor always asks for confirmation. No keeps the draft open; Yes deletes the original profile. Profiles survive restarts, and the old configured shortcut migrates automatically; an old native-long binding becomes Hold.
 
 The selected application must already be running and dashboard transfer requires authorized ADB. Each new press checks its current window and display: an application on the main display moves to the dashboard with the selected profile; one already on the dashboard returns to the main display. If no running window can be confirmed, nothing is moved or launched. Repeated presses during a transfer are ignored, not queued. This also works after transfers started from the Apps tab. A failed transfer is reported with a message.
 
-Button learning and interception require the enabled Accessibility service. BYD HUD always consumes an assigned key that reaches the service, even when the selected application is closed, no application is selected, a transfer is busy, or a check fails. Its original action is not performed. Reset the button assignment to restore the original action; resetting only the application selection stops transfers but keeps the button assigned. Hardware and firmware decide which steering-wheel keys Android exposes, so some buttons may not be learnable on every vehicle.
+Button learning and interception require the enabled Accessibility service. BYD HUD consumes the assigned physical button's complete delivered DOWN/repeat/UP stream, including when no gesture matches, the application is closed, a transfer is busy, or a check fails. Its stock action is never replayed. Delete all profiles for that button to release its assignment.
 
-<p align="center"><img src="docs/screenshots/en/settings-dashboard-transfer.png" alt="Move to dashboard settings with a steering-wheel button, application and transfer profile" width="100%"></p>
+Single acts on release and waits for the platform double-press window only if Double is also assigned. Double completes after the second short release. Known native long-button aliases trigger Hold directly; buttons without such an alias, including Camera 294, use the platform hold timeout. Pending gestures are cancelled when profiles change or the runtime shuts down. Hardware and firmware determine which events reach Accessibility; physical-car validation of the new gesture modes is still pending.
+
+<p align="center"><img src="docs/screenshots/en/settings-dashboard-transfer.png" alt="Earlier single-shortcut UI, before the transfer-profile list" width="100%"></p>
 
 ## Navigator patcher
 

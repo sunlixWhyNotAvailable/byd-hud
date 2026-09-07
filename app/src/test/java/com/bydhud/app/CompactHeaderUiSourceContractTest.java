@@ -98,8 +98,9 @@ public final class CompactHeaderUiSourceContractTest {
                 "color = palette.text.copy(alpha = 0.78f)", "TransferAppIcon(selected, palette)",
                 "TransferAppIcon(entry, palette)", "items(entries.size, key = { entries[it].packageName() })",
                 "InstalledTransferAppCatalog.selectionOrFallback(entries, selectedPackage)");
-        String appPickerRow = between(source, "row(\"move-app\")", "row(\"move-window-profile\")");
-        assertContains(appPickerRow, "HudTransferAppDropdown(", "width = 400.dp");
+        String profileEditor = between(source, "private fun TransferProfileEditorDialog(",
+                "private fun TransferProfileDeleteConfirmDialog(");
+        assertContains(profileEditor, "HudTransferAppDropdown(", "width = 350.dp");
     }
 
     private static String runtimeSource() throws IOException {

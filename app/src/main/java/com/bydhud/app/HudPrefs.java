@@ -19,8 +19,10 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_TEXT_DIRECTION = "output_text_direction";
     static final String KEY_TEXT_TRANSLITERATION = "text_transliteration";
     private static final String KEY_WAZE_ALERTS = "waze_alerts";
+    private static final String KEY_WAZE_ALERT_FIELD = "waze_alert_field";
     private static final String KEY_WHOLE_ROUTE_METRICS = "whole_route_metrics";
     private static final String KEY_ROUTE_METRICS_MODE = "route_metrics_mode";
+    private static final String KEY_ETA_OUTPUT_FIELD = "eta_output_field";
     private static final String KEY_OUTPUT_ETA = "output_eta";
     private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
     private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
@@ -54,6 +56,10 @@ final class HudPrefs {
     static final int ROUTE_METRICS_OFF = 0;
     static final int ROUTE_METRICS_NEXT_STOP = 1;
     static final int ROUTE_METRICS_WHOLE_ROUTE = 2;
+    static final int WAZE_ALERT_FIELD_MANEUVER = 0;
+    static final int WAZE_ALERT_FIELD_EXPERIMENTAL = 1;
+    static final int ETA_OUTPUT_FIELD_STREET = 0;
+    static final int ETA_OUTPUT_FIELD_EXPERIMENTAL = 1;
     static final int SPEED_LIMIT_OFF = 0;
     static final int SPEED_LIMIT_MANEUVER = 1;
     static final int SPEED_LIMIT_LANES = 2;
@@ -193,6 +199,18 @@ final class HudPrefs {
         markOutputOptionChanged(KEY_WAZE_ALERTS);
     }
 
+    static int wazeAlertField(Context context) {
+        return clamp(prefs(context).getInt(KEY_WAZE_ALERT_FIELD,
+                WAZE_ALERT_FIELD_MANEUVER),
+                WAZE_ALERT_FIELD_MANEUVER, WAZE_ALERT_FIELD_EXPERIMENTAL);
+    }
+
+    static void setWazeAlertField(Context context, int field) {
+        prefs(context).edit().putInt(KEY_WAZE_ALERT_FIELD,
+                clamp(field, WAZE_ALERT_FIELD_MANEUVER,
+                        WAZE_ALERT_FIELD_EXPERIMENTAL)).apply();
+    }
+
     static boolean isWholeRouteMetricsEnabled(Context context) {
         return routeMetricsMode(context) == ROUTE_METRICS_WHOLE_ROUTE;
     }
@@ -224,6 +242,18 @@ final class HudPrefs {
         prefs(context).edit().putInt(KEY_ROUTE_METRICS_MODE,
                 clamp(mode, ROUTE_METRICS_OFF, ROUTE_METRICS_WHOLE_ROUTE)).apply();
         markOutputOptionChanged(KEY_ROUTE_METRICS_MODE);
+    }
+
+    static int etaOutputField(Context context) {
+        return clamp(prefs(context).getInt(KEY_ETA_OUTPUT_FIELD,
+                ETA_OUTPUT_FIELD_STREET),
+                ETA_OUTPUT_FIELD_STREET, ETA_OUTPUT_FIELD_EXPERIMENTAL);
+    }
+
+    static void setEtaOutputField(Context context, int field) {
+        prefs(context).edit().putInt(KEY_ETA_OUTPUT_FIELD,
+                clamp(field, ETA_OUTPUT_FIELD_STREET,
+                        ETA_OUTPUT_FIELD_EXPERIMENTAL)).apply();
     }
 
     static boolean isEtaOutputEnabled(Context context) {

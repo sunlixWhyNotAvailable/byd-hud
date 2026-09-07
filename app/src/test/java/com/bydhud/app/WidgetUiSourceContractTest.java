@@ -31,9 +31,11 @@ public final class WidgetUiSourceContractTest {
         assertTrue(options.contains("autoCollapseAfterInactivity"));
         assertTrue(options.contains("widget-corner-radius"));
         assertTrue(options.contains("dashboard-move"));
-        assertTrue(options.contains("move-steering-button"));
-        assertTrue(options.contains("HudTransferAppDropdown("));
-        assertTrue(options.contains("move-window-profile"));
+        assertTrue(options.contains("move-create-profile"));
+        assertTrue(options.contains("move-profile-${profile.id}"));
+        assertTrue(options.contains("TransferProfileEditorDialog("));
+        assertTrue(options.contains("TransferProfileDeleteConfirmDialog("));
+        assertTrue(source.contains("HudTransferAppDropdown("));
         assertTrue(options.contains("composeBeginSteeringButtonLearning"));
         assertFalse(options.contains("This section will be configured in the next step"));
         String colorLine = between(source, "private fun WidgetColorLine(", "private fun WidgetColorPicker(");
@@ -50,8 +52,9 @@ public final class WidgetUiSourceContractTest {
         assertTrue(effect.contains("val wasVisible = showSteeringButtonCapture"));
         assertTrue(effect.contains("if (wasVisible)"));
         assertFalse(effect.contains("if (showSteeringButtonCapture)"));
-        assertTrue(options.contains("snapshot.steeringTransferRevision > steeringCaptureRevision"));
         assertTrue(options.contains("steeringLearningRevision > steeringCaptureLearningRevision"));
+        assertTrue(options.contains("transferDraft = transferDraft?.copy(keyCode = snapshot.steeringCapturedKeyCode)"));
+        assertFalse(options.contains("composeSetSteeringTransferKeyCode"));
     }
 
     @Test

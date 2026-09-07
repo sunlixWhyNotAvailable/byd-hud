@@ -24,6 +24,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
@@ -84,6 +85,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -91,6 +93,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -508,9 +511,6 @@ private data class PressFeedback(
 //guards button callbacks so the visible press state renders before expensive actions start.
 private const val VISUAL_PRESS_BEFORE_ACTION_MS = 90L
 
-//guards switch actions so the knob reaches the pending center before backend work starts.
-private const val SWITCH_CENTER_BEFORE_ACTION_MS = 120L
-
 //guards stalled switch actions so controls never stay blocked indefinitely.
 private const val SWITCH_PENDING_TIMEOUT_MS = 2_000L
 
@@ -603,6 +603,31 @@ private class SessionViewportState(val initial: RuntimeUiSession.Viewport) {
             RuntimeUiSession.Viewport(listState.firstVisibleItemIndex, listState.firstVisibleItemScrollOffset)
         } else null
 }
+
+private enum class HudHelpControlKind { Switch, Dropdown, Integer }
+
+private data class HudHelpRequest(
+    val topic: HudHelpTopicId,
+    val title: String,
+    val kind: HudHelpControlKind,
+    val checked: Boolean = false,
+    val selectedIndex: Int = 0,
+    val options: List<String> = emptyList(),
+    val value: Int = 0,
+    val etaMask: Int = 0,
+    val etaStreet: Boolean = true,
+    val warningFieldIndex: Int = 0,
+    val compositeFieldIndex: Int = 0,
+    val freeFieldOverlapIndex: Int = 0
+)
+
+private data class SteeringTransferDraft(
+    val id: String? = null,
+    val keyCode: Int = SteeringTransferPreferences.NO_KEY_CODE,
+    val pressMode: String = SteeringTransferPreferences.PRESS_SINGLE,
+    val packageName: String = SteeringTransferPreferences.EMPTY_PACKAGE,
+    val windowProfile: String = SteeringTransferPreferences.PROFILE_SELECTED
+)
 
 @Composable
 private fun rememberSessionViewport(
@@ -1732,30 +1757,85 @@ private fun OptionsTab(
     val ua = copy.language == Language.Ua
     var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
     var showSteeringButtonCapture by remember { mutableStateOf(false) }
-    var steeringCaptureRevision by remember { mutableStateOf(0L) }
     var steeringCaptureLearningRevision by remember { mutableStateOf(0L) }
+    var transferDraft by remember { mutableStateOf<SteeringTransferDraft?>(null) }
+    var transferDeleteTarget by remember { mutableStateOf<SteeringTransferProfile?>(null) }
+    var hudHelpRequest by remember { mutableStateOf<HudHelpRequest?>(null) }
     val steeringLearningRevision = NavAccessibilityService.keyLearningRevision()
-    val steeringProfiles = if (ua) {
-        listOf("Обраний профіль", "Частковий", "Повний")
+    val steeringPressModes = if (ua) {
+        listOf("Одиночне", "Утримання", "Подвійне")
     } else {
-        listOf("Selected profile", "Partial", "Full")
+        listOf("Single", "Hold", "Double")
     }
-    val steeringProfileIndex = when (snapshot.steeringTransferProfile) {
+    val steeringWindowProfiles = if (ua) {
+        listOf("Поточний профіль", "Тільки частковий", "Тільки повний")
+    } else {
+        listOf("Current profile", "Partial only", "Full only")
+    }
+    val etaOutputFields = if (ua) listOf("Вулиці", "Експериментальне")
+        else listOf("Street", "Experimental")
+    val wazeAlertFields = if (ua) listOf("Маневру", "Експериментальне")
+        else listOf("Maneuver", "Experimental")
+    fun pressModeIndex(mode: String): Int = when (mode) {
+        SteeringTransferPreferences.PRESS_HOLD -> 1
+        SteeringTransferPreferences.PRESS_DOUBLE -> 2
+        else -> 0
+    }
+    fun windowProfileIndex(profile: String): Int = when (profile) {
         SteeringTransferPreferences.PROFILE_PARTIAL -> 1
         SteeringTransferPreferences.PROFILE_FULL -> 2
         else -> 0
     }
+    fun profileSummary(profile: SteeringTransferProfile): String {
+        val app = InstalledTransferAppCatalog.selectionOrFallback(
+            snapshot.steeringTransferApps, profile.packageName).label()
+        return listOf(
+            steeringButtonLabel(profile.keyCode, ua),
+            steeringPressModes[pressModeIndex(profile.pressMode)],
+            app,
+            steeringWindowProfiles[windowProfileIndex(profile.windowProfile)]
+        ).joinToString(" · ")
+    }
+    val etaMask = (if (snapshot.etaOutputEnabled) 1 else 0) or
+        (if (snapshot.remainingTimeOutputEnabled) 2 else 0) or
+        (if (snapshot.remainingDistanceOutputEnabled) 4 else 0)
+    fun switchHelp(topic: HudHelpTopicId, title: String, checked: Boolean) = HudHelpRequest(
+        topic, title, HudHelpControlKind.Switch, checked = checked,
+        etaMask = etaMask, etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+        warningFieldIndex = snapshot.wazeAlertField,
+        compositeFieldIndex = snapshot.speedLimitCompositePlacement,
+        freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
+    )
+    fun dropdownHelp(topic: HudHelpTopicId, title: String, selected: Int,
+        options: List<String>) = HudHelpRequest(
+        topic, title, HudHelpControlKind.Dropdown, selectedIndex = selected,
+        options = options, etaMask = etaMask,
+        etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+        warningFieldIndex = snapshot.wazeAlertField,
+        compositeFieldIndex = snapshot.speedLimitCompositePlacement,
+        freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
+    )
+    fun integerHelp(topic: HudHelpTopicId, title: String, value: Int) = HudHelpRequest(
+        topic, title, HudHelpControlKind.Integer, value = value,
+        etaMask = etaMask,
+        etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+        warningFieldIndex = snapshot.wazeAlertField,
+        compositeFieldIndex = snapshot.speedLimitCompositePlacement,
+        freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
+    )
     LaunchedEffect(
         showSteeringButtonCapture,
-        snapshot.steeringTransferRevision,
         snapshot.steeringButtonLearning,
-        steeringLearningRevision
+        steeringLearningRevision,
+        snapshot.steeringCapturedKeyCode
     ) {
         if (showSteeringButtonCapture
             && !snapshot.steeringButtonLearning
-            && (snapshot.steeringTransferRevision > steeringCaptureRevision
-                || steeringLearningRevision > steeringCaptureLearningRevision)
+            && steeringLearningRevision > steeringCaptureLearningRevision
         ) {
+            if (snapshot.steeringCapturedKeyCode >= 0) {
+                transferDraft = transferDraft?.copy(keyCode = snapshot.steeringCapturedKeyCode)
+            }
             showSteeringButtonCapture = false
         }
     }
@@ -1798,9 +1878,9 @@ private fun OptionsTab(
         listOf("None", "Partial", "Full")
     }
     val routeMetricsTitle = if (ua) {
-        "Режим виводу ЕТА/часу/дистанції"
+        "Режим виводу ЕТА (час/дистанція)"
     } else {
-        "ETA/time/distance output mode"
+        "ETA output mode (time/distance)"
     }
     val routeMetricsHint = if (ua) {
         "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze підтримує весь маршрут і використовує доступне значення до зупинки, якщо окремий показник маршруту відсутній."
@@ -1841,6 +1921,16 @@ private fun OptionsTab(
     val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE
     val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
             || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
+    val transferConflict = transferDraft?.let { draft ->
+        SteeringTransferPreferences.findConflict(
+            snapshot.steeringTransferProfiles,
+            SteeringTransferProfile(
+                draft.id ?: "draft", draft.keyCode, draft.pressMode,
+                draft.packageName, draft.windowProfile
+            ),
+            draft.id ?: ""
+        )
+    }
 
     val sections = buildOptionsSections {
         optionsSection("runtime-permissions", copy.permissionsRuntime, R.drawable.ic_options_build) {
@@ -1899,27 +1989,32 @@ private fun OptionsTab(
         }
         optionsSection("basic-navigation", copy.basicNavigationOutput, R.drawable.ic_options_navigation) {
             row("png-output") {
-                SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette) {
+                SwitchRow(copy.pngOutput, copy.pngHint, snapshot.pngOutputEnabled, palette,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicPng, copy.pngOutput, snapshot.pngOutputEnabled) }) {
                     runAction { activity.composeSetPngOutputEnabled(it) }
                 }
             }
             row("native-output") {
-                SwitchRow(copy.nativeOutput, copy.nativeHint, snapshot.nativeOutputEnabled, palette) {
+                SwitchRow(copy.nativeOutput, copy.nativeHint, snapshot.nativeOutputEnabled, palette,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicNative, copy.nativeOutput, snapshot.nativeOutputEnabled) }) {
                     runAction { activity.composeSetNativeOutputEnabled(it) }
                 }
             }
             row("lane-output") {
-                SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette) {
+                SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicLanes, copy.laneOutput, snapshot.laneOutputEnabled) }) {
                     runAction { activity.composeSetLaneOutputEnabled(it) }
                 }
             }
             row("street-output") {
-                SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette) {
+                SwitchRow(copy.streetOutput, copy.streetHint, snapshot.streetOutputEnabled, palette,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicStreet, copy.streetOutput, snapshot.streetOutputEnabled) }) {
                     runAction { activity.composeSetStreetOutputEnabled(it) }
                 }
             }
             row("text-transliteration") {
-                SettingRow(copy.textTransliteration, copy.textTransliterationHint, palette) {
+                SettingRow(copy.textTransliteration, copy.textTransliterationHint, palette,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.BasicTransliteration, copy.textTransliteration, snapshot.transliterationMode, textTransliterationModes) }) {
                     HudDropdown(
                         selectedIndex = snapshot.transliterationMode,
                         options = textTransliterationModes,
@@ -1930,14 +2025,26 @@ private fun OptionsTab(
                 }
             }
             row("distance-output") {
-                SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette) {
+                SwitchRow(copy.distanceOutput, copy.distanceHint, snapshot.distanceOutputEnabled, palette,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicDistance, copy.distanceOutput, snapshot.distanceOutputEnabled) }) {
                     runAction { activity.composeSetDistanceOutputEnabled(it) }
                 }
+            }
+            row("small-distance-clamp") {
+                SwitchRow(
+                    copy.smallDistanceClamp,
+                    copy.smallDistanceHint,
+                    snapshot.smallDistanceClampEnabled,
+                    palette,
+                    enabled = snapshot.distanceOutputEnabled,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.SmallDistanceClamp, copy.smallDistanceClamp, snapshot.smallDistanceClampEnabled) }
+                ) { runAction { activity.composeSetSmallDistanceClamp(it) } }
             }
         }
         optionsSection("route-eta", if (ua) "ЕТА маршруту" else "Route ETA", R.drawable.ic_options_schedule) {
             row("route-metrics-mode") {
-                SettingRow(routeMetricsTitle, routeMetricsHint, palette) {
+                SettingRow(routeMetricsTitle, routeMetricsHint, palette,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaMode, routeMetricsTitle, snapshot.routeMetricsMode, routeMetricModes) }) {
                     HudDropdown(
                         selectedIndex = snapshot.routeMetricsMode,
                         options = routeMetricModes,
@@ -1947,25 +2054,53 @@ private fun OptionsTab(
                     )
                 }
             }
+            row("eta-output-field") {
+                val title = if (ua) "Поле виводу ЕТА" else "ETA output field"
+                SettingRow(
+                    title,
+                    if (ua) "Експериментальний режим буде активовано в наступному патчі."
+                    else "Experimental output will be activated in the next patch.",
+                    palette,
+                    enabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaOutputField, title, snapshot.etaOutputField, etaOutputFields) }
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.etaOutputField,
+                        options = etaOutputFields,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF,
+                        onSelected = { field -> runAction { activity.composeSetEtaOutputField(field) } }
+                    )
+                }
+            }
             row("eta-output") {
-                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
+                SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette,
+                    enabled = snapshot.routeMetricsMode != 0,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.EtaOutput, copy.showEta, snapshot.etaOutputEnabled) }) {
                     runAction { activity.composeSetEtaOutputEnabled(it) }
                 }
             }
             row("remaining-time-output") {
-                SwitchRow(copy.showRemainingTime, copy.showRemainingTimeHint, snapshot.remainingTimeOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
+                SwitchRow(copy.showRemainingTime, copy.showRemainingTimeHint, snapshot.remainingTimeOutputEnabled, palette,
+                    enabled = snapshot.routeMetricsMode != 0,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.RemainingTime, copy.showRemainingTime, snapshot.remainingTimeOutputEnabled) }) {
                     runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
                 }
             }
             row("remaining-distance-output") {
-                SwitchRow(copy.showRemainingDistance, copy.showRemainingDistanceHint, snapshot.remainingDistanceOutputEnabled, palette, enabled = snapshot.routeMetricsMode != 0) {
+                SwitchRow(copy.showRemainingDistance, copy.showRemainingDistanceHint, snapshot.remainingDistanceOutputEnabled, palette,
+                    enabled = snapshot.routeMetricsMode != 0,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.RemainingDistance, copy.showRemainingDistance, snapshot.remainingDistanceOutputEnabled) }) {
                     runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
                 }
             }
         }
         optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", R.drawable.ic_options_speed) {
             row("speed-limit-mode") {
-                SettingRow(if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode", speedLimitModeHint, palette) {
+                val title = if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode"
+                SettingRow(title, speedLimitModeHint, palette,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitMode, title, snapshot.speedLimitMode, speedLimitModes) }) {
                     HudDropdown(
                         selectedIndex = snapshot.speedLimitMode,
                         options = speedLimitModes,
@@ -1980,7 +2115,10 @@ private fun OptionsTab(
                     if (ua) "Накладання у режимі «У вільному полі»" else "Overlay in \"In a free field\" mode",
                     freeFallbackHint,
                     palette,
-                    enabled = freeFallbackEnabled
+                    enabled = freeFallbackEnabled,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitFallback,
+                        if (ua) "Накладання у режимі «У вільному полі»" else "Overlay in \"In a free field\" mode",
+                        snapshot.speedLimitFreeFallback, speedLimitFallbackModes) }
                 ) {
                     HudDropdown(
                         selectedIndex = snapshot.speedLimitFreeFallback,
@@ -2012,7 +2150,10 @@ private fun OptionsTab(
                     if (ua) "Поле для виводу у композитному режимі" else "Composite output field",
                     compositePlacementHint,
                     palette,
-                    enabled = compositeEnabled
+                    enabled = compositeEnabled,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitCompositeField,
+                        if (ua) "Поле для виводу у композитному режимі" else "Composite output field",
+                        snapshot.speedLimitCompositePlacement, speedLimitCompositePlacementModes) }
                 ) {
                     HudDropdown(
                         selectedIndex = snapshot.speedLimitCompositePlacement,
@@ -2029,7 +2170,10 @@ private fun OptionsTab(
                     if (ua) "Розмір знаку у полі маневру" else "Sign size in maneuver field",
                     compositeManeuverSizeHint,
                     palette,
-                    enabled = compositeEnabled
+                    enabled = compositeEnabled,
+                    onHelp = { hudHelpRequest = integerHelp(HudHelpTopicId.SpeedLimitCompositeManeuverSize,
+                        if (ua) "Розмір знаку у полі маневру" else "Sign size in maneuver field",
+                        snapshot.speedLimitManeuverOverlaySize) }
                 ) {
                     HudIntegerStepper(
                         value = snapshot.speedLimitManeuverOverlaySize,
@@ -2046,7 +2190,10 @@ private fun OptionsTab(
                     if (ua) "Розмір знаку у полі для смуг" else "Sign size in lane field",
                     compositeLaneSizeHint,
                     palette,
-                    enabled = compositeEnabled
+                    enabled = compositeEnabled,
+                    onHelp = { hudHelpRequest = integerHelp(HudHelpTopicId.SpeedLimitCompositeLaneSize,
+                        if (ua) "Розмір знаку у полі для смуг" else "Sign size in lane field",
+                        snapshot.speedLimitLaneOverlaySize) }
                 ) {
                     HudIntegerStepper(
                         value = snapshot.speedLimitLaneOverlaySize,
@@ -2061,8 +2208,29 @@ private fun OptionsTab(
         }
         optionsSection("waze-features", copy.wazeFeatures, R.drawable.waze_app_icon) {
             row("waze-alerts") {
-                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette) {
+                SwitchRow(copy.showWazeAlerts, copy.showWazeAlertsHint, snapshot.wazeAlertsEnabled, palette,
+                    onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.WazeAlerts, copy.showWazeAlerts, snapshot.wazeAlertsEnabled) }) {
                     runAction { activity.composeSetWazeAlertsEnabled(it) }
+                }
+            }
+            row("waze-alert-field") {
+                val title = if (ua) "Поле виводу попередження Waze" else "Waze alert output field"
+                SettingRow(
+                    title,
+                    if (ua) "Експериментальний режим буде активовано в наступному патчі."
+                    else "Experimental output will be activated in the next patch.",
+                    palette,
+                    enabled = snapshot.wazeAlertsEnabled,
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.WazeAlertField, title, snapshot.wazeAlertField, wazeAlertFields) }
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.wazeAlertField,
+                        options = wazeAlertFields,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = snapshot.wazeAlertsEnabled,
+                        onSelected = { field -> runAction { activity.composeSetWazeAlertField(field) } }
+                    )
                 }
             }
             row("waze-custom-surface") {
@@ -2085,11 +2253,6 @@ private fun OptionsTab(
             row("text-direction") {
                 SwitchRow(copy.textDirectionOutput, copy.textDirectionOutputHint, snapshot.textDirectionOutputEnabled, palette) {
                     runAction { activity.composeSetTextDirectionOutputEnabled(it) }
-                }
-            }
-            row("small-distance-clamp") {
-                SwitchRow(copy.smallDistanceClamp, copy.smallDistanceHint, snapshot.smallDistanceClampEnabled, palette) {
-                    runAction { activity.composeSetSmallDistanceClamp(it) }
                 }
             }
         }
@@ -2313,83 +2476,33 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("dashboard-move", if (ua) "Перенесення на приборку" else "Move to dashboard", R.drawable.ic_options_open_in_new) {
-            row("move-steering-button") {
+        optionsSection("dashboard-move", if (ua) "Налаштування перенесення на приборку" else "Dashboard transfer settings", R.drawable.ic_options_open_in_new) {
+            row("move-create-profile") {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HudButton(
-                        if (ua) "Вибрати кнопку для перенесення" else "Select steering-wheel button",
+                        if (ua) "+ Створити профіль" else "+ Create profile",
                         palette,
                         primary = true,
-                        width = 250.dp
-                    ) {
-                        if (activity.composeBeginSteeringButtonLearning()) {
-                            steeringCaptureRevision = snapshot.steeringTransferRevision
-                            steeringCaptureLearningRevision =
-                                NavAccessibilityService.keyLearningRevision()
-                            showSteeringButtonCapture = true
-                        }
-                    }
-                    HudReadOnlyField(
-                        steeringButtonLabel(snapshot.steeringTransferKeyCode, ua),
-                        palette,
-                        Modifier.weight(1f)
-                    )
-                    HudButton(
-                        if (ua) "Скинути кнопку" else "Reset button",
-                        palette,
-                        enabled = snapshot.steeringTransferKeyCode >= 0,
-                        width = 145.dp
-                    ) { runAction { activity.composeResetSteeringButton() } }
+                        width = 210.dp
+                    ) { transferDraft = SteeringTransferDraft() }
                 }
             }
-            row("move-app") {
-                Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
-                    horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    HudTransferAppDropdown(
-                        entries = snapshot.steeringTransferApps,
-                        selectedPackage = snapshot.steeringTransferPackage,
+            snapshot.steeringTransferProfiles.forEach { profile ->
+                row("move-profile-${profile.id}") {
+                    TransferProfileRow(
+                        summary = profileSummary(profile),
                         ua = ua,
                         palette = palette,
-                        width = 400.dp,
-                        onSelected = { packageName ->
-                            runAction { activity.composeSetSteeringTransferPackage(packageName) }
-                        }
-                    )
-                    Spacer(Modifier.weight(1f))
-                    HudButton(
-                        if (ua) "Скинути застосунок" else "Reset app",
-                        palette,
-                        enabled = snapshot.steeringTransferPackage.isNotEmpty(),
-                        width = 170.dp
-                    ) { runAction { activity.composeResetSteeringTransferPackage() } }
-                }
-            }
-            row("move-window-profile") {
-                SettingRow(
-                    if (ua) "Профіль вікна для перенесення на приборку" else "Dashboard window profile for transfer",
-                    "",
-                    palette
-                ) {
-                    HudDropdown(
-                        selectedIndex = steeringProfileIndex,
-                        options = steeringProfiles,
-                        palette = palette,
-                        width = 190.dp,
-                        onSelected = { index ->
-                            val profile = when (index) {
-                                1 -> SteeringTransferPreferences.PROFILE_PARTIAL
-                                2 -> SteeringTransferPreferences.PROFILE_FULL
-                                else -> SteeringTransferPreferences.PROFILE_SELECTED
-                            }
-                            runAction { activity.composeSetSteeringTransferProfile(profile) }
-                        }
+                        onEdit = {
+                            transferDraft = SteeringTransferDraft(
+                                profile.id, profile.keyCode, profile.pressMode,
+                                profile.packageName, profile.windowProfile
+                            )
+                        },
+                        onDelete = { transferDeleteTarget = profile }
                     )
                 }
             }
@@ -2426,14 +2539,61 @@ private fun OptionsTab(
             }
         )
     }
+    transferDraft?.let { draft ->
+        TransferProfileEditorDialog(
+            draft = draft,
+            apps = snapshot.steeringTransferApps,
+            pressModes = steeringPressModes,
+            windowProfiles = steeringWindowProfiles,
+            conflictSummary = transferConflict?.let(::profileSummary),
+            ua = ua,
+            palette = palette,
+            onDraftChange = { transferDraft = it },
+            onSelectButton = {
+                if (activity.composeBeginSteeringButtonLearning()) {
+                    steeringCaptureLearningRevision = NavAccessibilityService.keyLearningRevision()
+                    showSteeringButtonCapture = true
+                }
+            },
+            onDismiss = {
+                activity.composeCancelSteeringButtonLearning()
+                showSteeringButtonCapture = false
+                transferDraft = null
+            },
+            onSave = {
+                if (activity.composeSaveSteeringTransferProfile(
+                        draft.id ?: "", draft.keyCode, draft.pressMode,
+                        draft.packageName, draft.windowProfile)) {
+                    transferDraft = null
+                }
+            },
+            onDelete = draft.id?.let {
+                { transferDeleteTarget = snapshot.steeringTransferProfiles.firstOrNull { profile -> profile.id == it } }
+            }
+        )
+    }
     if (showSteeringButtonCapture) {
         SteeringButtonCaptureDialog(
             ua = ua,
             palette = palette,
-            onDismiss = {
-                showSteeringButtonCapture = false
+            onDismiss = { showSteeringButtonCapture = false }
+        )
+    }
+    transferDeleteTarget?.let { profile ->
+        TransferProfileDeleteConfirmDialog(
+            summary = profileSummary(profile),
+            ua = ua,
+            palette = palette,
+            onNo = { transferDeleteTarget = null },
+            onYes = {
+                activity.composeDeleteSteeringTransferProfile(profile.id)
+                if (transferDraft?.id == profile.id) transferDraft = null
+                transferDeleteTarget = null
             }
         )
+    }
+    hudHelpRequest?.let { request ->
+        HudHelpOverlay(request, copy.language, palette) { hudHelpRequest = null }
     }
 }
 
@@ -5855,18 +6015,34 @@ private fun OutputImageChoice(
     palette: Palette,
     onChange: (Boolean) -> Unit
 ) {
-    Row(
+    val selectedOffset by animateDpAsState(
+        targetValue = if (bitmap) 117.dp else 5.dp,
+        animationSpec = tween(durationMillis = 140),
+        label = "outputImageChoiceOffset"
+    )
+    Box(
         modifier = Modifier
             .width(230.dp)
             .height(42.dp)
             .clip(RoundedCornerShape(22.dp))
             .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
             .background(palette.panelAlt)
-            .padding(5.dp),
-        horizontalArrangement = Arrangement.spacedBy(4.dp)
     ) {
-        OutputImageChoiceItem(stockText, !bitmap, palette, Modifier.weight(1f)) { onChange(false) }
-        OutputImageChoiceItem(bitmapText, bitmap, palette, Modifier.weight(1f)) { onChange(true) }
+        Box(
+            Modifier
+                .offset(x = selectedOffset, y = 5.dp)
+                .width(108.dp)
+                .height(32.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(palette.accent)
+        )
+        Row(
+            modifier = Modifier.fillMaxSize().padding(5.dp),
+            horizontalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            OutputImageChoiceItem(stockText, !bitmap, palette, Modifier.weight(1f)) { onChange(false) }
+            OutputImageChoiceItem(bitmapText, bitmap, palette, Modifier.weight(1f)) { onChange(true) }
+        }
     }
 }
 
@@ -5879,17 +6055,16 @@ private fun OutputImageChoiceItem(
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback()
-    val visualClick = rememberVisualFirstClick(onClick)
     Box(
         modifier = modifier
             .fillMaxHeight()
             .clip(RoundedCornerShape(18.dp))
-            .background(pressBackground(if (active) palette.accent else Color.Transparent, palette, press.pressed))
+            .background(pressBackground(Color.Transparent, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             )
             .semantics {
                 selected = active
@@ -6203,12 +6378,172 @@ private fun Section(
 private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(".")
 
 @Composable
+private fun HudHelpOverlay(
+    request: HudHelpRequest,
+    language: Language,
+    palette: Palette,
+    onDismiss: () -> Unit
+) {
+    val ua = language == Language.Ua
+    val topic = HudHelpCatalog.topic(request.topic)
+    var localChecked by remember(request) { mutableStateOf(request.checked) }
+    var localIndex by remember(request) { mutableIntStateOf(request.selectedIndex) }
+    var localValue by remember(request) { mutableIntStateOf(request.value) }
+    val previewEtaMask = if (request.etaMask == 0) 7 else request.etaMask
+    val imageRes = when (request.topic) {
+        HudHelpTopicId.BasicPng,
+        HudHelpTopicId.BasicNative,
+        HudHelpTopicId.BasicLanes,
+        HudHelpTopicId.BasicStreet,
+        HudHelpTopicId.BasicDistance,
+        HudHelpTopicId.SmallDistanceClamp,
+        HudHelpTopicId.EtaOutput,
+        HudHelpTopicId.RemainingTime,
+        HudHelpTopicId.RemainingDistance,
+        HudHelpTopicId.WazeAlerts -> topic.frames
+            .getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }.imageRes
+        HudHelpTopicId.BasicTransliteration,
+        HudHelpTopicId.SpeedLimitFallback,
+        HudHelpTopicId.SpeedLimitCompositeField,
+        HudHelpTopicId.WazeAlertField -> topic.frames
+            .getOrElse(localIndex) { topic.frames.first() }.imageRes
+        HudHelpTopicId.EtaOutputField -> HudHelpCatalog.etaImage(
+            localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET, previewEtaMask)
+        HudHelpTopicId.EtaMode -> if (localIndex == HudPrefs.ROUTE_METRICS_OFF) {
+            R.drawable.hud_help_baseline
+        } else {
+            HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask)
+        }
+        HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 4)) {
+            0 -> R.drawable.hud_help_baseline
+            1 -> R.drawable.hud_help_speed_maneuver
+            2 -> R.drawable.hud_help_speed_lanes
+            3 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
+                1 -> R.drawable.hud_help_speed_maneuver
+                2 -> R.drawable.hud_help_speed_lanes
+                else -> R.drawable.hud_help_baseline
+            }
+            else -> if (request.compositeFieldIndex % 2 == 1) {
+                R.drawable.hud_help_speed_composite_lanes
+            } else {
+                R.drawable.hud_help_speed_composite_maneuver
+            }
+        }
+        HudHelpTopicId.SpeedLimitCompositeManeuverSize,
+        HudHelpTopicId.SpeedLimitCompositeLaneSize -> R.drawable.hud_help_baseline
+    }
+    val sizeTopic = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
+        || request.topic == HudHelpTopicId.SpeedLimitCompositeLaneSize
+    val signBitmap = if (sizeTopic) ImageBitmap.imageResource(R.drawable.hud_help_baseline) else null
+    val warningImage = if (request.warningFieldIndex == HudPrefs.WAZE_ALERT_FIELD_EXPERIMENTAL) {
+        R.drawable.hud_help_warning_separate
+    } else {
+        R.drawable.hud_help_warning_maneuver
+    }
+    val localizedImage = HudHelpCatalog.localizedImage(
+        if (request.topic == HudHelpTopicId.WazeAlerts && localChecked) warningImage else imageRes,
+        ua
+    )
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .width(820.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Text(if (ua) "Передпоказ" else "Preview", color = palette.text,
+                fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .aspectRatio(3f)
+                    .clip(RoundedCornerShape(6.dp))
+                    .background(Color.Black)
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Image(
+                    painter = painterResource(localizedImage),
+                    contentDescription = request.title,
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.fillMaxSize()
+                )
+                if (signBitmap != null) {
+                    Canvas(Modifier.fillMaxSize()) {
+                        val maneuver = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
+                        val nominal = if (maneuver) 64 else 36
+                        val maximum = if (maneuver) 103 else 36
+                        val value = localValue.coerceIn(1, maximum)
+                        val signSize = value * 68f / nominal
+                        val scaleX = size.width / 2172f
+                        val scaleY = size.height / 724f
+                        val left = if (maneuver) 410f else 1360f
+                        val bottom = if (maneuver) 512f else 515f
+                        drawImage(
+                            image = signBitmap,
+                            srcOffset = IntOffset(1546, 347),
+                            srcSize = IntSize(110, 111),
+                            dstOffset = IntOffset((left * scaleX).roundToInt(),
+                                ((bottom - signSize) * scaleY).roundToInt()),
+                            dstSize = IntSize((signSize * scaleX).roundToInt().coerceAtLeast(1),
+                                (signSize * scaleY).roundToInt().coerceAtLeast(1))
+                        )
+                    }
+                }
+            }
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(request.title, color = palette.text, fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp, modifier = Modifier.weight(1f))
+                when (request.kind) {
+                    HudHelpControlKind.Switch -> HudSwitch(localChecked,
+                        { localChecked = it }, palette)
+                    HudHelpControlKind.Dropdown -> HudDropdown(
+                        selectedIndex = localIndex,
+                        options = request.options,
+                        palette = palette,
+                        width = 230.dp,
+                        onSelected = { localIndex = it }
+                    )
+                    HudHelpControlKind.Integer -> HudIntegerStepper(
+                        value = localValue,
+                        palette = palette,
+                        enabled = true,
+                        maxValue = when (request.topic) {
+                            HudHelpTopicId.SpeedLimitCompositeManeuverSize -> 103
+                            HudHelpTopicId.SpeedLimitCompositeLaneSize -> 36
+                            else -> 10
+                        },
+                        fallbackValue = if (request.topic == HudHelpTopicId.SpeedLimitCompositeLaneSize) 36
+                            else if (request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize) 64 else 5,
+                        onValueChange = { localValue = it }
+                    )
+                }
+            }
+            HudButton(if (ua) "Закрити" else "Close", palette, width = 0.dp,
+                modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
+        }
+    }
+}
+
+@Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun SettingRow(
     title: String,
     hint: String,
     palette: Palette,
     enabled: Boolean = true,
+    onHelp: (() -> Unit)? = null,
     action: @Composable () -> Unit
 ) {
     Row(
@@ -6232,6 +6567,10 @@ private fun SettingRow(
                 )
             }
         }
+        if (onHelp != null) {
+            HudHelpButton(palette, onHelp)
+            Spacer(Modifier.width(10.dp))
+        }
         action()
     }
 }
@@ -6239,6 +6578,8 @@ private fun SettingRow(
 private fun steeringButtonLabel(keyCode: Int, ua: Boolean): String {
     if (keyCode < 0) return ""
     val name = when (keyCode) {
+        294 -> if (ua) "Камери 360°" else "360° cameras"
+        304 -> if (ua) "Голосове керування" else "Voice control"
         305 -> if (ua) "Ліва зірочка" else "Left star"
         309 -> if (ua) "Режими приборки / завершення виклику" else "Dashboard modes / end call"
         310 -> if (ua) "Круговий огляд" else "Surround view"
@@ -6249,6 +6590,266 @@ private fun steeringButtonLabel(keyCode: Int, ua: Boolean): String {
         else -> return if (ua) "Кнопка (код $keyCode)" else "Button (code $keyCode)"
     }
     return "$name ($keyCode)"
+}
+
+@Composable
+private fun TransferProfileRow(
+    summary: String,
+    ua: Boolean,
+    palette: Palette,
+    onEdit: () -> Unit,
+    onDelete: () -> Unit
+) {
+    Row(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Text(
+            summary,
+            color = palette.text,
+            fontSize = 14.sp,
+            fontFamily = FontFamily.Monospace,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.weight(1f)
+        )
+        TransferProfileIconButton(false, if (ua) "Редагувати профіль" else "Edit profile",
+            palette, onEdit)
+        TransferProfileIconButton(true, if (ua) "Видалити профіль" else "Delete profile",
+            palette, onDelete)
+    }
+}
+
+@Composable
+private fun TransferProfileIconButton(
+    delete: Boolean,
+    description: String,
+    palette: Palette,
+    onClick: () -> Unit
+) {
+    val tint = if (delete) palette.red else palette.accent
+    val press = rememberPressFeedback(true)
+    val visualClick = rememberVisualFirstClick(onClick)
+    Box(
+        modifier = Modifier
+            .size(42.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, tint.copy(alpha = 0.85f), RoundedCornerShape(7.dp))
+            .background(tint.copy(alpha = if (press.pressed) 0.55f else 0.16f))
+            .then(press.modifier)
+            .clickable(
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
+            .semantics { contentDescription = description }
+            .padding(9.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Canvas(Modifier.fillMaxSize()) {
+            val stroke = 2.dp.toPx()
+            if (delete) {
+                drawRect(tint, topLeft = Offset(size.width * .25f, size.height * .28f),
+                    size = Size(size.width * .5f, size.height * .58f), style = Stroke(stroke))
+                drawLine(tint, Offset(size.width * .18f, size.height * .22f),
+                    Offset(size.width * .82f, size.height * .22f), stroke)
+                drawLine(tint, Offset(size.width * .4f, size.height * .12f),
+                    Offset(size.width * .6f, size.height * .12f), stroke)
+            } else {
+                drawLine(tint, Offset(size.width * .22f, size.height * .76f),
+                    Offset(size.width * .72f, size.height * .26f), stroke, StrokeCap.Round)
+                drawLine(tint, Offset(size.width * .65f, size.height * .2f),
+                    Offset(size.width * .8f, size.height * .35f), stroke, StrokeCap.Round)
+                drawLine(tint, Offset(size.width * .18f, size.height * .82f),
+                    Offset(size.width * .38f, size.height * .76f), stroke, StrokeCap.Round)
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferProfileEditorDialog(
+    draft: SteeringTransferDraft,
+    apps: List<InstalledTransferAppCatalog.Entry>,
+    pressModes: List<String>,
+    windowProfiles: List<String>,
+    conflictSummary: String?,
+    ua: Boolean,
+    palette: Palette,
+    onDraftChange: (SteeringTransferDraft) -> Unit,
+    onSelectButton: () -> Unit,
+    onDismiss: () -> Unit,
+    onSave: () -> Unit,
+    onDelete: (() -> Unit)?
+) {
+    val pressIndex = when (draft.pressMode) {
+        SteeringTransferPreferences.PRESS_HOLD -> 1
+        SteeringTransferPreferences.PRESS_DOUBLE -> 2
+        else -> 0
+    }
+    val windowIndex = when (draft.windowProfile) {
+        SteeringTransferPreferences.PROFILE_PARTIAL -> 1
+        SteeringTransferPreferences.PROFILE_FULL -> 2
+        else -> 0
+    }
+    val canSave = draft.keyCode >= 0 && draft.packageName.isNotBlank()
+        && conflictSummary == null
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            modifier = Modifier
+                .width(860.dp)
+                .heightIn(max = 650.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                if (ua) {
+                    if (draft.id == null) "Створення профілю перенесення"
+                    else "Редагування профілю перенесення"
+                } else {
+                    if (draft.id == null) "Create transfer profile" else "Edit transfer profile"
+                },
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.SemiBold
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(14.dp)
+            ) {
+                Text(if (ua) "Кнопка та тип натискання" else "Button and press type",
+                    color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    HudButton(if (ua) "Вибрати кнопку" else "Select button", palette,
+                        primary = true, width = 190.dp, onClick = onSelectButton)
+                    HudReadOnlyField(
+                        if (draft.keyCode < 0) {
+                            if (ua) "Кнопку не вибрано" else "No button selected"
+                        } else steeringButtonLabel(draft.keyCode, ua),
+                        palette,
+                        Modifier.weight(1f)
+                    )
+                    HudDropdown(
+                        selectedIndex = pressIndex,
+                        options = pressModes,
+                        palette = palette,
+                        width = 170.dp,
+                        onSelected = { index ->
+                            onDraftChange(draft.copy(pressMode = when (index) {
+                                1 -> SteeringTransferPreferences.PRESS_HOLD
+                                2 -> SteeringTransferPreferences.PRESS_DOUBLE
+                                else -> SteeringTransferPreferences.PRESS_SINGLE
+                            }))
+                        }
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (ua) "Застосунок" else "Application", color = palette.text,
+                        fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    HudTransferAppDropdown(
+                        entries = apps,
+                        selectedPackage = draft.packageName,
+                        ua = ua,
+                        palette = palette,
+                        width = 350.dp,
+                        onSelected = { onDraftChange(draft.copy(packageName = it)) }
+                    )
+                }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(if (ua) "Профіль перенесення на приборку" else "Dashboard transfer profile",
+                        color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
+                        modifier = Modifier.weight(1f))
+                    HudDropdown(
+                        selectedIndex = windowIndex,
+                        options = windowProfiles,
+                        palette = palette,
+                        width = 240.dp,
+                        onSelected = { index ->
+                            onDraftChange(draft.copy(windowProfile = when (index) {
+                                1 -> SteeringTransferPreferences.PROFILE_PARTIAL
+                                2 -> SteeringTransferPreferences.PROFILE_FULL
+                                else -> SteeringTransferPreferences.PROFILE_SELECTED
+                            }))
+                        }
+                    )
+                }
+            }
+            if (conflictSummary != null) {
+                Text(
+                    if (ua) "Такий профіль уже створено: $conflictSummary"
+                    else "This profile already exists: $conflictSummary",
+                    color = palette.yellow,
+                    fontSize = 15.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    lineHeight = 21.sp
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                HudButton(if (ua) "Зберегти" else "Save", palette, primary = true,
+                    enabled = canSave, width = 150.dp, onClick = onSave)
+                HudButton(if (ua) "Скасувати" else "Cancel", palette,
+                    width = 150.dp, onClick = onDismiss)
+                Spacer(Modifier.weight(1f))
+                if (onDelete != null) {
+                    HudButton(if (ua) "Видалити" else "Delete", palette,
+                        destructive = true, width = 150.dp, onClick = onDelete)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TransferProfileDeleteConfirmDialog(
+    summary: String,
+    ua: Boolean,
+    palette: Palette,
+    onNo: () -> Unit,
+    onYes: () -> Unit
+) {
+    Dialog(onDismissRequest = onNo, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(
+            modifier = Modifier
+                .width(700.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(if (ua) "Видалення профілю" else "Delete profile", color = palette.text,
+                fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                if (ua) "Ви впевнені, що хочете видалити профіль:\n$summary?"
+                else "Are you sure you want to delete this profile:\n$summary?",
+                color = palette.text, fontSize = 16.sp, lineHeight = 23.sp
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                HudButton(if (ua) "Так" else "Yes", palette, destructive = true,
+                    width = 138.dp, onClick = onYes)
+                HudButton(if (ua) "Ні" else "No", palette, width = 138.dp, onClick = onNo)
+            }
+        }
+    }
 }
 
 @Composable
@@ -6696,6 +7297,7 @@ private fun SwitchRow(
     checked: Boolean,
     palette: Palette,
     enabled: Boolean = true,
+    onHelp: (() -> Unit)? = null,
     onChecked: (Boolean) -> Unit
 ) {
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
@@ -6736,6 +7338,10 @@ private fun SwitchRow(
                     fontSize = 13.sp
                 )
             }
+        }
+        if (onHelp != null) {
+            HudHelpButton(palette, onHelp)
+            Spacer(Modifier.width(10.dp))
         }
         HudSwitch(
             checked,
@@ -6833,6 +7439,7 @@ private fun HudButton(
     palette: Palette,
     primary: Boolean = false,
     enabled: Boolean = true,
+    destructive: Boolean = false,
     width: Dp = 150.dp,
     modifier: Modifier = Modifier,
     onClick: () -> Unit
@@ -6842,13 +7449,18 @@ private fun HudButton(
     val visualClick = rememberVisualFirstClick(onClick)
     val baseBackground = when {
         !enabled -> palette.disabled
+        destructive -> palette.redSoft
         primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
         else -> palette.panelAlt
     }
     Box(
         modifier = base
             .clip(RoundedCornerShape(7.dp))
-            .border(1.dp, if (primary) palette.accent else palette.borderStrong, RoundedCornerShape(7.dp))
+            .border(1.dp, when {
+                destructive -> palette.red
+                primary -> palette.accent
+                else -> palette.borderStrong
+            }, RoundedCornerShape(7.dp))
             .background(pressBackground(baseBackground, palette, press.pressed))
             .then(press.modifier)
             .clickable(
@@ -6864,6 +7476,7 @@ private fun HudButton(
             text,
             color = when {
                 !enabled -> palette.muted.copy(alpha = 0.55f)
+                destructive -> palette.red
                 primary && palette.dark -> Color.White
                 else -> palette.text
             },
@@ -6921,6 +7534,29 @@ private fun HudIconButton(
 }
 
 @Composable
+private fun HudHelpButton(palette: Palette, onClick: () -> Unit) {
+    val press = rememberPressFeedback(true)
+    val visualClick = rememberVisualFirstClick(onClick)
+    Box(
+        modifier = Modifier
+            .size(36.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(pressBackground(palette.panelAlt, palette, press.pressed))
+            .then(press.modifier)
+            .clickable(
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = visualClick
+            )
+            .semantics { contentDescription = "Help" },
+        contentAlignment = Alignment.Center
+    ) {
+        Text("?", color = if (press.pressed) Color.White else palette.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+    }
+}
+
+@Composable
 private fun ShareIconLabelButton(
     label: String,
     palette: Palette,
@@ -6971,9 +7607,6 @@ private fun CompactSwitchBox(
     val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
     val rowEnabled = switchControl.value?.pending != true
     val press = rememberPressFeedback(rowEnabled)
-    val visualClick = rememberVisualFirstClick {
-        switchControl.value?.trigger?.invoke()
-    }
     Row(
         modifier = Modifier
             .width(width)
@@ -6988,7 +7621,7 @@ private fun CompactSwitchBox(
                 role = Role.Switch,
                 interactionSource = press.interactionSource,
                 indication = null,
-                onValueChange = { visualClick() }
+                onValueChange = { switchControl.value?.trigger?.invoke() }
             )
             .semantics(mergeDescendants = true) {}
             .padding(horizontal = 12.dp),
@@ -7032,7 +7665,6 @@ private fun HudSwitch(
                     startedAtMs = SystemClock.elapsedRealtime()
                 )
                 scope.launch {
-                    delay(SWITCH_CENTER_BEFORE_ACTION_MS)
                     latestOnChecked(target)
                     val deadline = SystemClock.elapsedRealtime() + SWITCH_PENDING_TIMEOUT_MS
                     while (SystemClock.elapsedRealtime() < deadline) {
