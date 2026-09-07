@@ -57,28 +57,53 @@ public final class HudRuntimeService extends Service {
     static void startPersistent(Context context, String reason) {
         Context appContext = context.getApplicationContext();
         String safeReason = reason == null ? "" : reason.trim();
-        if (HudPrefs.isUserShutdownActive(appContext)) {
+        boolean shutdownActive = HudPrefs.isUserShutdownActive(appContext);
+        if (shutdownActive) {
             HudRuntimeWatchdog.cancel(appContext);
+            HudRuntimeState.clearServicePresent(appContext,
+                    "start-rejected:shutdown-active:" + safeReason);
             AppEventLogger.event(appContext,
                     "runtime startPersistent skipped shutdown_active reason=" + safeReason);
             return;
         }
-        if (!HudPrefs.isBootEnabled(appContext)) {
+        boolean bootEnabled = HudPrefs.isBootEnabled(appContext);
+        if (!bootEnabled) {
             HudRuntimeWatchdog.cancel(appContext);
+            HudRuntimeState.clearServicePresent(appContext,
+                    "start-rejected:boot-disabled:" + safeReason);
             AppEventLogger.event(appContext,
                     "runtime startPersistent skipped boot_disabled reason=" + safeReason);
             return;
         }
         boolean hardResetPending = HudRuntimeUpgradeGuard.hasPendingHardReset(appContext);
-        if (!hardResetPending
-                && HudRuntimeState.isAlive(appContext, android.os.SystemClock.elapsedRealtime())) {
+        StartDecision decision = startDecision(
+                false,
+                true,
+                HudRuntimeState.isServicePresent(),
+                START_IN_FLIGHT.get(),
+                hardResetPending);
+        if (decision == StartDecision.ALREADY_ALIVE) {
             AppEventLogger.event(appContext,
-                    "runtime startPersistent skipped already_alive reason=" + safeReason);
+                    "runtime startPersistent skipped already_present reason=" + safeReason);
             return;
         }
-        if (!START_IN_FLIGHT.compareAndSet(false, true)) {
+        if (decision == StartDecision.IN_FLIGHT) {
             AppEventLogger.event(appContext,
                     "runtime startPersistent skipped start_in_flight reason=" + safeReason);
+            return;
+        }
+        if (!tryAcquireStartRequest()) {
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent skipped start_in_flight reason=" + safeReason);
+            return;
+        }
+        //The service may have published while this request crossed the first
+        //presence check. Do not issue a duplicate start after acquiring the gate.
+        if (shouldSkipStartAfterGate(hardResetPending)) {
+            clearStartRequestGate();
+            AppEventLogger.event(appContext,
+                    "runtime startPersistent skipped already_present_after_gate reason="
+                            + safeReason);
             return;
         }
         startGateHandler().removeCallbacks(START_REQUEST_TIMEOUT);
@@ -112,12 +137,28 @@ public final class HudRuntimeService extends Service {
         REQUEST
     }
 
-    static StartDecision startDecisionForTest(boolean shutdown, boolean bootEnabled,
-            boolean alive, boolean inFlight, boolean hardResetPending) {
+    //Keeps the executable admission policy shared by production and focused JVM tests.
+    static StartDecision startDecision(boolean shutdown, boolean bootEnabled,
+            boolean servicePresent, boolean inFlight, boolean hardResetPending) {
         if (shutdown) return StartDecision.SHUTDOWN;
         if (!bootEnabled) return StartDecision.BOOT_DISABLED;
-        if (alive && !hardResetPending) return StartDecision.ALREADY_ALIVE;
+        if (servicePresent && !hardResetPending) return StartDecision.ALREADY_ALIVE;
         return inFlight ? StartDecision.IN_FLIGHT : StartDecision.REQUEST;
+    }
+
+    static StartDecision startDecisionForTest(boolean shutdown, boolean bootEnabled,
+            boolean servicePresent, boolean inFlight, boolean hardResetPending) {
+        return startDecision(shutdown, bootEnabled, servicePresent, inFlight, hardResetPending);
+    }
+
+    //Acquires the one startup gate used by all production start callers.
+    static boolean tryAcquireStartRequest() {
+        return START_IN_FLIGHT.compareAndSet(false, true);
+    }
+
+    //Rechecks the production marker after the gate closes the check/start race.
+    static boolean shouldSkipStartAfterGate(boolean hardResetPending) {
+        return !hardResetPending && HudRuntimeState.isServicePresent();
     }
 
     static void clearStartRequestForTest() {
@@ -142,18 +183,18 @@ public final class HudRuntimeService extends Service {
     static void stopPersistent(Context context, String reason) {
         Context appContext = context.getApplicationContext();
         clearStartRequestGate();
+        HudRuntimeState.clearServicePresent(appContext, "stop:" + reason);
         HudRuntimeWatchdog.cancel(appContext);
         releaseInstrumentRuntime(appContext, "runtime-stop:" + reason);
+        HudRuntimeState.markStopped(appContext, "stop:" + reason);
         appContext.stopService(new Intent(appContext, HudRuntimeService.class));
         HudPrefs.setRuntimeServiceRunning(appContext, false);
-        HudRuntimeState.markStopped(appContext, "stop:" + reason);
     }
 
     @Override
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     public void onCreate() {
         super.onCreate();
-        clearStartRequestGate();
         runtimeStartInitialized = false;
         runtimeActiveWork = false;
         HudRuntimeUpgradeGuard.recordVersionStart(this, "service-create");
@@ -161,6 +202,10 @@ public final class HudRuntimeService extends Service {
         startForeground(NOTIFICATION_ID, buildNotification("Runtime active"));
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markStarted(this, "onCreate");
+        HudRuntimeState.publishServicePresent(this, "onCreate");
+        //Publish service presence before releasing the request gate. A second
+        //start must observe the live service, not a persisted heartbeat.
+        clearStartRequestGate();
         scheduleHeartbeat();
         requestInitialUiRefresh("runtime-create");
         log("runtime foreground active version=" + BuildConfig.VERSION_NAME
@@ -196,6 +241,7 @@ public final class HudRuntimeService extends Service {
             return START_NOT_STICKY;
         }
         AppUpdateManager.onSessionEntry(this);
+        HudRuntimeState.publishServicePresent(this, "onStartCommand");
         clearStartRequestGate();
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
@@ -256,6 +302,7 @@ public final class HudRuntimeService extends Service {
     public void onDestroy() {
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         clearStartRequestGate();
+        HudRuntimeState.clearServicePresent(this, "destroyed");
         runtimeStartInitialized = false;
         runtimeActiveWork = false;
         releaseInstrumentRuntime(this, "runtime-destroyed");

@@ -1,10 +1,12 @@
 package com.bydhud.app;
 
-//records runtime heartbeat state so supervisor decisions can distinguish alive and stale services.
+//records process-local service presence plus persisted heartbeat diagnostics.
 
 import android.content.Context;
 import android.content.SharedPreferences;
 import android.os.SystemClock;
+
+import java.util.concurrent.atomic.AtomicBoolean;
 
 //models HudRuntimeState data here so transport and parser layers share a stable contract.
 final class HudRuntimeState {
@@ -14,7 +16,9 @@ final class HudRuntimeState {
     private static final String KEY_LAST_HEARTBEAT = "last_heartbeat";
     private static final String KEY_REASON = "reason";
     private static final String KEY_STOP_REASON = "stop_reason";
-    private static final long LIVE_TTL_MS = 90_000L;
+    //Process-local presence is the only admission signal. Persisted heartbeat
+    //state remains diagnostic because it cannot prove that this process exists.
+    private static final AtomicBoolean SERVICE_PRESENT = new AtomicBoolean(false);
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private HudRuntimeState() {
@@ -45,6 +49,7 @@ final class HudRuntimeState {
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void markStopped(Context context, String reason) {
+        clearServicePresent(context, reason);
         prefs(context).edit()
                 .putBoolean(KEY_RUNNING, false)
                 .putString(KEY_STOP_REASON, safe(reason))
@@ -54,6 +59,7 @@ final class HudRuntimeState {
 
     //guards package-replace restart from losing the stopped flag when the process is killed immediately.
     static boolean markPackageReplaceReset(Context context, String reason) {
+        clearServicePresent(context, "package-replace-hard-reset:" + safe(reason));
         boolean persisted = prefs(context).edit()
                 .putBoolean(KEY_RUNNING, false)
                 .putString(KEY_STOP_REASON, safe(reason))
@@ -62,15 +68,27 @@ final class HudRuntimeState {
         return persisted;
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean isAlive(Context context, long nowElapsedMs) {
-        SharedPreferences prefs = prefs(context);
-        if (!prefs.getBoolean(KEY_RUNNING, false)) {
-            return false;
+    //publishes the real Android service lifecycle to every thread in this process.
+    static boolean publishServicePresent(Context context, String reason) {
+        boolean changed = SERVICE_PRESENT.compareAndSet(false, true);
+        if (changed) {
+            recordLifecycleHook(context, "service-present", reason);
         }
-        long lastHeartbeat = prefs.getLong(KEY_LAST_HEARTBEAT, 0L);
-        long ageMs = nowElapsedMs - lastHeartbeat;
-        return lastHeartbeat > 0L && ageMs >= 0L && ageMs <= LIVE_TTL_MS;
+        return changed;
+    }
+
+    //clears process-local service presence before teardown or a rejected start can race in.
+    static boolean clearServicePresent(Context context, String reason) {
+        boolean wasPresent = SERVICE_PRESENT.getAndSet(false);
+        if (wasPresent) {
+            recordLifecycleHook(context, "service-absent", reason);
+        }
+        return wasPresent;
+    }
+
+    //keeps admission independent from persisted heartbeat state across process recreation.
+    static boolean isServicePresent() {
+        return SERVICE_PRESENT.get();
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -79,17 +97,20 @@ final class HudRuntimeState {
         long lastHeartbeat = prefs.getLong(KEY_LAST_HEARTBEAT, 0L);
         long ageMs = lastHeartbeat <= 0L ? -1L : nowElapsedMs - lastHeartbeat;
         String ageText = ageMs < 0L ? "clock-reset" : Long.toString(ageMs);
-        if (isAlive(context, nowElapsedMs)) {
-            return "alive ageMs=" + ageText + " reason=" + prefs.getString(KEY_REASON, "");
-        }
-        if (prefs.getBoolean(KEY_RUNNING, false)) {
-            return "stale ageMs=" + ageText + " reason=" + prefs.getString(KEY_REASON, "");
-        }
-        return "stopped reason=" + prefs.getString(KEY_STOP_REASON, "");
+        boolean persistedRunning = prefs.getBoolean(KEY_RUNNING, false);
+        return "servicePresent=" + isServicePresent()
+                + " persistedRunning=" + persistedRunning
+                + " heartbeatAgeMs=" + ageText
+                + " ageMs=" + ageText
+                + " reason=" + prefs.getString(KEY_REASON, "")
+                + " stopReason=" + prefs.getString(KEY_STOP_REASON, "");
     }
 
     //updates shared state here so freshness and lifecycle checks use the same evidence.
     static void recordLifecycleHook(Context context, String lifecycle, String reason) {
+        if (context == null) {
+            return;
+        }
         recordLifecycleHook(context, lifecycle, reason, SystemClock.elapsedRealtime());
     }
 

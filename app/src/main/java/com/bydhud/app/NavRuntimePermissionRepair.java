@@ -16,6 +16,12 @@ final class NavRuntimePermissionRepair {
     private static boolean running;
     private static long lastStartedMs;
 
+    enum AsyncRepairAdmission {
+        START,
+        RUNNING,
+        COOLDOWN
+    }
+
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavRuntimePermissionRepair() {
     }
@@ -39,6 +45,19 @@ final class NavRuntimePermissionRepair {
                     .put("lastResult", new JSONObject().put("status", "unsupported")
                             .put("reason", "not_recorded"));
         }
+    }
+
+    //Applies cooldown only to a recorded prior attempt; an active repair always wins over FORCE.
+    static AsyncRepairAdmission asyncRepairAdmission(
+            boolean repairRunning, long nowMs, long previousStartedMs, boolean force) {
+        if (repairRunning) {
+            return AsyncRepairAdmission.RUNNING;
+        }
+        if (!force && previousStartedMs > 0L
+                && nowMs - previousStartedMs < MIN_REPAIR_INTERVAL_MS) {
+            return AsyncRepairAdmission.COOLDOWN;
+        }
+        return AsyncRepairAdmission.START;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -67,9 +86,19 @@ final class NavRuntimePermissionRepair {
         synchronized (LOCK) {
             long now = android.os.SystemClock.elapsedRealtime();
             boolean force = safeMode == LocalAdbBridge.AuthorizationPromptMode.FORCE;
-            if (running || (!force && now - lastStartedMs < MIN_REPAIR_INTERVAL_MS)) {
-                AppEventLogger.event(appContext, "nav_permission_repair skipped reason="
-                        + safe(reason) + " running=" + running);
+            AsyncRepairAdmission admission = asyncRepairAdmission(running, now, lastStartedMs, force);
+            if (admission == AsyncRepairAdmission.RUNNING) {
+                AppEventLogger.event(appContext, "nav_permission_repair skipped running=true reason="
+                        + safe(reason) + " nowElapsedMs=" + now
+                        + " lastStartedElapsedMs=" + lastStartedMs);
+                return;
+            }
+            if (admission == AsyncRepairAdmission.COOLDOWN) {
+                long ageMs = Math.max(0L, now - lastStartedMs);
+                AppEventLogger.event(appContext, "nav_permission_repair skipped cooldown=true reason="
+                        + safe(reason) + " nowElapsedMs=" + now
+                        + " lastStartedElapsedMs=" + lastStartedMs
+                        + " ageMs=" + ageMs + " intervalMs=" + MIN_REPAIR_INTERVAL_MS);
                 return;
             }
             running = true;

@@ -23,6 +23,8 @@ final class HudRuntimeSupervisor {
         String safeReason = safe(reason);
         if (HudPrefs.isUserShutdownActive(appContext)) {
             HudRuntimeWatchdog.cancel(appContext);
+            HudRuntimeState.clearServicePresent(appContext,
+                    "supervisor-rejected:shutdown-active:" + safeReason);
             HudRuntimeState.recordLifecycleHook(appContext, "supervisor-shutdown-active", safeReason);
             AppEventLogger.event(appContext,
                     "runtime_supervisor shutdown_active reason=" + safeReason);
@@ -30,6 +32,8 @@ final class HudRuntimeSupervisor {
         }
         if (!HudPrefs.isBootEnabled(appContext)) {
             HudRuntimeWatchdog.cancel(appContext);
+            HudRuntimeState.clearServicePresent(appContext,
+                    "supervisor-rejected:boot-disabled:" + safeReason);
             HudRuntimeState.recordLifecycleHook(appContext, "supervisor-disabled", safeReason);
             AppEventLogger.event(appContext,
                     "runtime_supervisor disabled reason=" + safeReason);
@@ -38,7 +42,7 @@ final class HudRuntimeSupervisor {
 
         long now = SystemClock.elapsedRealtime();
         boolean hardResetPending = HudRuntimeUpgradeGuard.hasPendingHardReset(appContext);
-        if (hardResetPending || !HudRuntimeState.isAlive(appContext, now)) {
+        if (hardResetPending || !HudRuntimeState.isServicePresent()) {
             try {
                 HudRuntimeState.recordLifecycleHook(appContext, "supervisor-start", safeReason);
                 HudRuntimeService.startPersistent(appContext, "supervisor:" + safeReason);
@@ -111,6 +115,8 @@ final class HudRuntimeSupervisor {
     static void hardResetAfterPackageReplace(Context context, String reason) {
         Context appContext = context.getApplicationContext();
         String safeReason = safe(reason);
+        HudRuntimeState.clearServicePresent(appContext,
+                "package-replace-hard-reset:" + safeReason);
         if (HudPrefs.isUserShutdownActive(appContext)) {
             HudRuntimeWatchdog.cancel(appContext);
             AppEventLogger.event(appContext, "runtime_supervisor package_replace_hard_reset_skipped shutdown_active reason="
