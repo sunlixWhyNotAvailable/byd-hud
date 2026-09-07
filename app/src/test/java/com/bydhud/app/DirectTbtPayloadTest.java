@@ -231,8 +231,8 @@ public final class DirectTbtPayloadTest {
         DirectTbtPayload.Prepared wholeRoute = DirectTbtPayload.prepare(
                 frame, metricOptions(true, true, true, true, true, true));
 
-        assertEquals("[ETA: 12:20 | 11 min | 5.1 km] Road", nextStop.displayText());
-        assertEquals("[ETA: 13:40 | 18 min | 10.3 km] Road", wholeRoute.displayText());
+        assertEquals("[12:20 | 11 min | 5.1 km] Road", nextStop.displayText());
+        assertEquals("[13:40 | 18 min | 10.3 km] Road", wholeRoute.displayText());
     }
 
     @Test
@@ -259,7 +259,7 @@ public final class DirectTbtPayloadTest {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame, metricOptions(true, true, true, true, true, true));
 
-        assertEquals("[ETA: 12:20 | 18 min | 5.1 km] Road", prepared.displayText());
+        assertEquals("[12:20 | 18 min | 5.1 km] Road", prepared.displayText());
     }
 
     @Test
@@ -274,7 +274,7 @@ public final class DirectTbtPayloadTest {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame, metricOptions(false, true, true, true, true, true));
 
-        assertEquals("[ETA: 13:40 | 18 min | 10.3 km] Road", prepared.displayText());
+        assertEquals("[13:40 | 18 min | 10.3 km] Road", prepared.displayText());
     }
 
     @Test
@@ -301,7 +301,7 @@ public final class DirectTbtPayloadTest {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
                 frame, metricOptions(false, true, false, false, true, true));
 
-        assertEquals("[ETA: 03:00] Road", prepared.displayText());
+        assertEquals("[03:00] Road", prepared.displayText());
     }
 
     @Test

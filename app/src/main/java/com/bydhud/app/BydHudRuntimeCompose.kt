@@ -586,7 +586,7 @@ private class SessionViewportState(val initial: RuntimeUiSession.Viewport) {
         } else null
 }
 
-private enum class HudHelpControlKind { Switch, Dropdown, Integer }
+private enum class HudHelpControlKind { Switch, Dropdown, Integer, Color }
 
 private data class HudHelpRequest(
     val topic: HudHelpTopicId,
@@ -598,6 +598,8 @@ private data class HudHelpRequest(
     val value: Int = 0,
     val etaMask: Int = 0,
     val etaStreet: Boolean = true,
+    val presentation: HudPresentationPreview = HudPresentationPreview(),
+    val colorSlot: HudTextColorSlot? = null,
     val warningFieldIndex: Int = 0,
     val compositeFieldIndex: Int = 0,
     val freeFieldOverlapIndex: Int = 0
@@ -1743,6 +1745,7 @@ private fun OptionsTab(
     var transferDraft by remember { mutableStateOf<SteeringTransferDraft?>(null) }
     var transferDeleteTarget by remember { mutableStateOf<SteeringTransferProfile?>(null) }
     var hudHelpRequest by remember { mutableStateOf<HudHelpRequest?>(null) }
+    var hudColorTarget by remember { mutableStateOf<HudTextColorSlot?>(null) }
     val steeringLearningRevision = NavAccessibilityService.keyLearningRevision()
     val steeringPressModes = if (ua) {
         listOf("Одиночне", "Утримання", "Подвійне")
@@ -1781,8 +1784,28 @@ private fun OptionsTab(
     val etaMask = (if (snapshot.etaOutputEnabled) 1 else 0) or
         (if (snapshot.remainingTimeOutputEnabled) 2 else 0) or
         (if (snapshot.remainingDistanceOutputEnabled) 4 else 0)
+    val hudPresentation = remember(
+        snapshot.etaStreetFormat,
+        snapshot.etaWaitForFullTextEnabled,
+        snapshot.etaArrivalColor,
+        snapshot.etaDurationColor,
+        snapshot.etaRemainingDistanceColor,
+        snapshot.wazeWarningDistanceColor
+    ) {
+        HudPresentationPreview(
+            streetFormat = EtaStreetFormat.entries[
+                snapshot.etaStreetFormat.coerceIn(0, EtaStreetFormat.entries.lastIndex)
+            ],
+            waitForFullText = snapshot.etaWaitForFullTextEnabled,
+            arrivalColor = snapshot.etaArrivalColor,
+            durationColor = snapshot.etaDurationColor,
+            remainingColor = snapshot.etaRemainingDistanceColor,
+            warningColor = snapshot.wazeWarningDistanceColor
+        )
+    }
     fun switchHelp(topic: HudHelpTopicId, title: String, checked: Boolean) = HudHelpRequest(
         topic, title, HudHelpControlKind.Switch, checked = checked,
+        presentation = hudPresentation,
         etaMask = etaMask, etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
@@ -1791,7 +1814,7 @@ private fun OptionsTab(
     fun dropdownHelp(topic: HudHelpTopicId, title: String, selected: Int,
         options: List<String>) = HudHelpRequest(
         topic, title, HudHelpControlKind.Dropdown, selectedIndex = selected,
-        options = options, etaMask = etaMask,
+        options = options, presentation = hudPresentation, etaMask = etaMask,
         etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
@@ -1799,11 +1822,16 @@ private fun OptionsTab(
     )
     fun integerHelp(topic: HudHelpTopicId, title: String, value: Int) = HudHelpRequest(
         topic, title, HudHelpControlKind.Integer, value = value,
-        etaMask = etaMask,
+        presentation = hudPresentation, etaMask = etaMask,
         etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
         freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
+    )
+    fun colorHelp(slot: HudTextColorSlot) = HudHelpRequest(
+        HudHelpTopicId.TextColor, slot.title(ua), HudHelpControlKind.Color,
+        presentation = hudPresentation, colorSlot = slot, etaMask = etaMask,
+        etaStreet = false
     )
     LaunchedEffect(
         showSteeringButtonCapture,
@@ -2040,8 +2068,8 @@ private fun OptionsTab(
                 val title = if (ua) "Поле виводу ЕТА" else "ETA output field"
                 SettingRow(
                     title,
-                    if (ua) "Експериментальний режим буде активовано в наступному патчі."
-                    else "Experimental output will be activated in the next patch.",
+                    if (ua) "У вулиці або в окремому блоці праворуч."
+                    else "In the street text or a separate block on the right.",
                     palette,
                     enabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaOutputField, title, snapshot.etaOutputField, etaOutputFields) }
@@ -2056,12 +2084,81 @@ private fun OptionsTab(
                     )
                 }
             }
+            val etaStreetEnabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
+                    && snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET
+            val etaColorsEnabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
+                    && snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL
+            val etaStreetFormats = if (ua) listOf("Приставити", "Замінити")
+                else listOf("Prepend", "Replace")
+            val etaStreetFormatTitle = if (ua) "Формат ЕТА у полі вулиці"
+                else "ETA format in street field"
+            val etaWaitTitle = if (ua) "Дочікуватись повного показу тексту вулиці"
+                else "Wait for the full street text to display"
+            val etaWaitHint = if (ua) {
+                "Оновлювати ЕТА після повного проходження тексту або зміни вулиці"
+            } else {
+                "Update ETA after the text finishes scrolling or the street changes"
+            }
+            row("eta-street-format") {
+                SettingRow(
+                    etaStreetFormatTitle,
+                    if (ua) "Додати ЕТА перед вулицею або показувати лише вибрані складові ЕТА"
+                    else "Prepend ETA to the street or show only the selected ETA values",
+                    palette,
+                    enabled = etaStreetEnabled,
+                    onHelp = {
+                        hudHelpRequest = dropdownHelp(
+                            HudHelpTopicId.EtaStreetFormat,
+                            etaStreetFormatTitle,
+                            hudPresentation.streetFormat.ordinal,
+                            etaStreetFormats
+                        )
+                    }
+                ) {
+                    HudDropdown(
+                        selectedIndex = hudPresentation.streetFormat.ordinal,
+                        options = etaStreetFormats,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = etaStreetEnabled,
+                        onSelected = { format ->
+                            runAction { activity.composeSetEtaStreetFormat(format) }
+                        }
+                    )
+                }
+            }
+            row("eta-wait-full-text") {
+                SettingRow(
+                    etaWaitTitle,
+                    etaWaitHint,
+                    palette,
+                    enabled = hudPresentation.waitApplies(etaStreetEnabled)
+                ) {
+                    HudSwitch(
+                        hudPresentation.waitForFullText,
+                        { enabled -> runAction {
+                            activity.composeSetEtaWaitForFullTextEnabled(enabled)
+                        } },
+                        palette,
+                        enabled = hudPresentation.waitApplies(etaStreetEnabled)
+                    )
+                }
+            }
             row("eta-output") {
                 SwitchRow(copy.showEta, copy.showEtaHint, snapshot.etaOutputEnabled, palette,
                     enabled = snapshot.routeMetricsMode != 0,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.EtaOutput, copy.showEta, snapshot.etaOutputEnabled) }) {
                     runAction { activity.composeSetEtaOutputEnabled(it) }
                 }
+            }
+            row("eta-arrival-color") {
+                WidgetColorLine(
+                    HudTextColorSlot.Arrival.title(ua),
+                    hudPresentation.arrivalColor,
+                    palette,
+                    etaColorsEnabled && snapshot.etaOutputEnabled,
+                    onHelp = { hudHelpRequest = colorHelp(HudTextColorSlot.Arrival) }
+                ) { hudColorTarget = HudTextColorSlot.Arrival }
             }
             row("remaining-time-output") {
                 SwitchRow(copy.showRemainingTime, copy.showRemainingTimeHint, snapshot.remainingTimeOutputEnabled, palette,
@@ -2070,12 +2167,30 @@ private fun OptionsTab(
                     runAction { activity.composeSetRemainingTimeOutputEnabled(it) }
                 }
             }
+            row("eta-duration-color") {
+                WidgetColorLine(
+                    HudTextColorSlot.Duration.title(ua),
+                    hudPresentation.durationColor,
+                    palette,
+                    etaColorsEnabled && snapshot.remainingTimeOutputEnabled,
+                    onHelp = { hudHelpRequest = colorHelp(HudTextColorSlot.Duration) }
+                ) { hudColorTarget = HudTextColorSlot.Duration }
+            }
             row("remaining-distance-output") {
                 SwitchRow(copy.showRemainingDistance, copy.showRemainingDistanceHint, snapshot.remainingDistanceOutputEnabled, palette,
                     enabled = snapshot.routeMetricsMode != 0,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.RemainingDistance, copy.showRemainingDistance, snapshot.remainingDistanceOutputEnabled) }) {
                     runAction { activity.composeSetRemainingDistanceOutputEnabled(it) }
                 }
+            }
+            row("eta-remaining-color") {
+                WidgetColorLine(
+                    HudTextColorSlot.Remaining.title(ua),
+                    hudPresentation.remainingColor,
+                    palette,
+                    etaColorsEnabled && snapshot.remainingDistanceOutputEnabled,
+                    onHelp = { hudHelpRequest = colorHelp(HudTextColorSlot.Remaining) }
+                ) { hudColorTarget = HudTextColorSlot.Remaining }
             }
         }
         optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", R.drawable.ic_options_speed) {
@@ -2199,8 +2314,8 @@ private fun OptionsTab(
                 val title = if (ua) "Поле виводу попередження Waze" else "Waze alert output field"
                 SettingRow(
                     title,
-                    if (ua) "Експериментальний режим буде активовано в наступному патчі."
-                    else "Experimental output will be activated in the next patch.",
+                    if (ua) "У полі маневру або окремо ліворуч від смуг."
+                    else "In the maneuver field or separately to the left of the lanes.",
                     palette,
                     enabled = snapshot.wazeAlertsEnabled,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.WazeAlertField, title, snapshot.wazeAlertField, wazeAlertFields) }
@@ -2214,6 +2329,16 @@ private fun OptionsTab(
                         onSelected = { field -> runAction { activity.composeSetWazeAlertField(field) } }
                     )
                 }
+            }
+            row("waze-warning-distance-color") {
+                WidgetColorLine(
+                    HudTextColorSlot.Warning.title(ua),
+                    hudPresentation.warningColor,
+                    palette,
+                    snapshot.wazeAlertsEnabled
+                            && snapshot.wazeAlertField == HudPrefs.WAZE_ALERT_FIELD_EXPERIMENTAL,
+                    onHelp = { hudHelpRequest = colorHelp(HudTextColorSlot.Warning) }
+                ) { hudColorTarget = HudTextColorSlot.Warning }
             }
             row("waze-custom-surface") {
                 SwitchRow(copy.customSurface, copy.customSurfaceHint, snapshot.wazeCustomSurfaceEnabled, palette) {
@@ -2521,6 +2646,26 @@ private fun OptionsTab(
             }
         )
     }
+    hudColorTarget?.let { slot ->
+        WidgetColorPicker(
+            initialArgb = hudPresentation.color(slot),
+            title = slot.title(ua),
+            copy = copy,
+            palette = palette,
+            onDismiss = { hudColorTarget = null },
+            onSelect = { color ->
+                runAction {
+                    when (slot) {
+                        HudTextColorSlot.Arrival -> activity.composeSetEtaArrivalColor(color)
+                        HudTextColorSlot.Duration -> activity.composeSetEtaDurationColor(color)
+                        HudTextColorSlot.Remaining -> activity.composeSetEtaRemainingDistanceColor(color)
+                        HudTextColorSlot.Warning -> activity.composeSetWazeWarningDistanceColor(color)
+                    }
+                }
+                hudColorTarget = null
+            }
+        )
+    }
     transferDraft?.let { draft ->
         TransferProfileEditorDialog(
             draft = draft,
@@ -2654,9 +2799,10 @@ private fun WidgetColorLine(
     argb: Int,
     palette: Palette,
     enabled: Boolean,
+    onHelp: (() -> Unit)? = null,
     onPick: () -> Unit
 ) {
-    ActionRow(title, "", palette, enabled = enabled) {
+    ActionRow(title, "", palette, enabled = enabled, onHelp = onHelp) {
         Row(Modifier.width(106.dp), horizontalArrangement = Arrangement.spacedBy(10.dp), verticalAlignment = Alignment.CenterVertically) {
             Box(
                 Modifier.width(52.dp).height(44.dp).clip(RoundedCornerShape(7.dp))
@@ -6368,6 +6514,8 @@ private fun HudHelpOverlay(
     var localChecked by remember(request) { mutableStateOf(request.checked) }
     var localIndex by remember(request) { mutableIntStateOf(request.selectedIndex) }
     var localValue by remember(request) { mutableIntStateOf(request.value) }
+    var localPresentation by remember(request) { mutableStateOf(request.presentation) }
+    var showLocalColorPicker by remember(request) { mutableStateOf(false) }
     val previewEtaMask = if (request.etaMask == 0) 7 else request.etaMask
     val imageRes = when (request.topic) {
         HudHelpTopicId.BasicPng,
@@ -6386,12 +6534,21 @@ private fun HudHelpOverlay(
         HudHelpTopicId.SpeedLimitCompositeField,
         HudHelpTopicId.WazeAlertField -> topic.frames
             .getOrElse(localIndex) { topic.frames.first() }.imageRes
+        HudHelpTopicId.EtaStreetFormat -> HudHelpCatalog.etaImage(
+            true, 1, EtaStreetFormat.entries[localIndex.coerceIn(0, EtaStreetFormat.entries.lastIndex)])
+        HudHelpTopicId.TextColor -> if (request.colorSlot == HudTextColorSlot.Warning) {
+            R.drawable.hud_help_warning_separate
+        } else {
+            R.drawable.hud_help_eta_all
+        }
         HudHelpTopicId.EtaOutputField -> HudHelpCatalog.etaImage(
-            localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET, previewEtaMask)
+            localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET,
+            previewEtaMask,
+            localPresentation.streetFormat)
         HudHelpTopicId.EtaMode -> if (localIndex == HudPrefs.ROUTE_METRICS_OFF) {
             R.drawable.hud_help_baseline
         } else {
-            HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask)
+            HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask, localPresentation.streetFormat)
         }
         HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 4)) {
             0 -> R.drawable.hud_help_baseline
@@ -6419,10 +6576,22 @@ private fun HudHelpOverlay(
     } else {
         R.drawable.hud_help_warning_maneuver
     }
-    val localizedImage = HudHelpCatalog.localizedImage(
-        if (request.topic == HudHelpTopicId.WazeAlerts && localChecked) warningImage else imageRes,
-        ua
-    )
+    val selectedImage = if (request.topic == HudHelpTopicId.WazeAlerts && localChecked) {
+        warningImage
+    } else {
+        imageRes
+    }
+    val formattedImage = if (request.topic == HudHelpTopicId.EtaStreetFormat) {
+        // etaImage above already follows the modal's local dropdown choice.
+        selectedImage
+    } else {
+        HudHelpCatalog.streetFormatImage(selectedImage, localPresentation.streetFormat)
+    }
+    val localizedImage = HudHelpCatalog.localizedImage(formattedImage, ua)
+    val resources = androidx.compose.ui.platform.LocalContext.current.resources
+    val coloredImage = remember(localizedImage, localPresentation) {
+        tintedHudHelp(resources, localizedImage, localPresentation)
+    }
     Dialog(
         onDismissRequest = onDismiss,
         properties = DialogProperties(
@@ -6453,7 +6622,7 @@ private fun HudHelpOverlay(
                 contentAlignment = Alignment.Center
             ) {
                 Image(
-                    painter = painterResource(localizedImage),
+                    bitmap = coloredImage,
                     contentDescription = request.title,
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
@@ -6507,11 +6676,43 @@ private fun HudHelpOverlay(
                             else if (request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize) 64 else 5,
                         onValueChange = { localValue = it }
                     )
+                    HudHelpControlKind.Color -> {
+                        val slot = requireNotNull(request.colorSlot)
+                        Box(
+                            Modifier
+                                .size(28.dp)
+                                .background(Color(localPresentation.color(slot)), RoundedCornerShape(4.dp))
+                                .border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp))
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        HudIconButton(
+                            icon = R.drawable.ic_palette,
+                            contentDescription = request.title,
+                            palette = palette,
+                            tint = palette.accent,
+                            modifier = Modifier.size(44.dp),
+                            onClick = { showLocalColorPicker = true }
+                        )
+                    }
                 }
             }
             HudButton(if (ua) "Закрити" else "Close", palette, width = 0.dp,
                 modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
         }
+    }
+    if (showLocalColorPicker) {
+        val slot = requireNotNull(request.colorSlot)
+        WidgetColorPicker(
+            initialArgb = localPresentation.color(slot),
+            title = request.title,
+            copy = if (ua) uaCopy() else enCopy(),
+            palette = palette,
+            onDismiss = { showLocalColorPicker = false },
+            onSelect = { color ->
+                localPresentation = localPresentation.withColor(slot, color)
+                showLocalColorPicker = false
+            }
+        )
     }
 }
 
@@ -7339,10 +7540,38 @@ private fun UpdateCheckLine(
     onCheckClick: () -> Unit,
     palette: Palette
 ) {
-    SettingRow(title, hint, palette) {
-        Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            HudButton(buttonText, palette, width = 190.dp, onClick = onCheckClick)
-            HudSwitch(checked, onCheckedChange, palette)
+    val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }
+    val rowEnabled = switchControl.value?.pending != true
+    val press = rememberPressFeedback(rowEnabled)
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(7.dp))
+            .background(pressBackground(Color.Transparent, palette, press.pressed))
+            .then(press.modifier)
+            .toggleable(
+                value = checked,
+                enabled = rowEnabled,
+                role = Role.Switch,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onValueChange = { switchControl.value?.trigger?.invoke() }
+            )
+            .semantics(mergeDescendants = true) {}
+    ) {
+        SettingRow(title, hint, palette) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                HudButton(buttonText, palette, width = 190.dp, onClick = onCheckClick)
+                HudSwitch(
+                    checked,
+                    onCheckedChange,
+                    palette,
+                    externalControl = switchControl
+                )
+            }
         }
     }
 }
@@ -7355,6 +7584,7 @@ private fun ActionRow(
     palette: Palette,
     verticalPadding: Dp = 12.dp,
     enabled: Boolean = true,
+    onHelp: (() -> Unit)? = null,
     action: @Composable () -> Unit
 ) {
     Row(
@@ -7377,7 +7607,13 @@ private fun ActionRow(
             )
         }
         Spacer(Modifier.width(10.dp))
-        action()
+        if (onHelp != null) {
+            HudHelpButton(palette, onHelp)
+            Spacer(Modifier.width(6.dp))
+            action()
+        } else {
+            action()
+        }
     }
 }
 
@@ -8096,11 +8332,11 @@ private fun enCopy() = Copy(
     showWholeRouteMetrics = "Show ETA/time/distance for entire route",
     showWholeRouteMetricsHint = "Prefer whole-route values. Waze falls back to an available next-stop value when an individual whole-route metric is missing.",
     showEta = "Show ETA",
-    showEtaHint = "Prepend the estimated arrival time to the street text.",
+    showEtaHint = "Show the estimated arrival time in the selected ETA output field.",
     showRemainingTime = "Show remaining time",
-    showRemainingTimeHint = "Prepend the remaining trip time to the street text.",
+    showRemainingTimeHint = "Show the remaining trip time in the selected ETA output field.",
     showRemainingDistance = "Show remaining distance",
-    showRemainingDistanceHint = "Prepend the remaining trip distance to the street text.",
+    showRemainingDistanceHint = "Show the remaining trip distance in the selected ETA output field.",
     dashboardScreenMode = "Dashboard screen mode",
     dashboardScreenModeHint = "Choose the dashboard screen mode",
     dashboardWidth = "Width",
@@ -8323,11 +8559,11 @@ private fun uaCopy() = enCopy().copy(
     showWholeRouteMetrics = "Показувати ETA/час/дистанцію всього маршруту",
     showWholeRouteMetricsHint = "Надавати перевагу значенням усього маршруту. Waze використовує доступне значення до зупинки, якщо окремий показник усього маршруту відсутній.",
     showEta = "Показувати час прибуття",
-    showEtaHint = "Додавати очікуваний час прибуття перед назвою вулиці.",
+    showEtaHint = "Показувати очікуваний час прибуття у вибраному полі виводу ЕТА.",
     showRemainingTime = "Показувати залишок часу",
-    showRemainingTimeHint = "Додавати залишок часу поїздки перед назвою вулиці.",
+    showRemainingTimeHint = "Показувати залишок часу поїздки у вибраному полі виводу ЕТА.",
     showRemainingDistance = "Показувати залишок дистанції",
-    showRemainingDistanceHint = "Додавати залишок дистанції поїздки перед назвою вулиці.",
+    showRemainingDistanceHint = "Показувати залишок дистанції поїздки у вибраному полі виводу ЕТА.",
     dashboardScreenMode = "Режим екрану на приборці",
     dashboardScreenModeHint = "Оберіть режим екрану на приборці",
     dashboardWidth = "Ширина",

@@ -372,7 +372,8 @@ final class HudOutputCoordinator {
             lastBitmapTxDiagnosticKey = "";
             pendingDirectReceivedAtMs = receivedAtMs;
             pendingDirectReason = safe(reason);
-            directAlertClearPending = true;
+            directAlertClearPending = requiresAlertClear(
+                    DirectTbtPayload.Options.from(context).presentation.separateWarning());
             renewDirectLeaseOnWorker(ownerPackage, ownerSessionGeneration, reason);
             if (activeSource == Source.DIRECT) {
                 worker.removeCallbacks(sendLoop);
@@ -380,6 +381,12 @@ final class HudOutputCoordinator {
                 scheduleImmediate(reason);
             }
         });
+    }
+
+    static boolean requiresAlertClear(boolean separateWarning) {
+        // An empty auxiliary region replaces its previous pixels in the next full
+        // plane; a global clear would unnecessarily blank live route guidance.
+        return !separateWarning;
     }
 
     void selectNavigationSource(Source source, String reason) {
@@ -882,7 +889,8 @@ final class HudOutputCoordinator {
                 directLossClearSent = true;
             }
             if (source == Source.DIRECT && directAlertClearPending) {
-                if (!sendRequiredClear(
+                if (requiresAlertClear(DirectTbtPayload.Options.from(context)
+                        .presentation.separateWarning()) && !sendRequiredClear(
                         "direct alert preference disabled", source, "alert_clear")) {
                     return;
                 }

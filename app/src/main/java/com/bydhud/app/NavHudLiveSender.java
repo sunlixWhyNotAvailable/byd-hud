@@ -2399,7 +2399,7 @@ final class NavHudLiveSender {
         byte[] maneuver = frame.getManeuverPng();
         byte[] lanes = frame.getLanePng();
         DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
-        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(frame, options);
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.describe(frame, options);
         DirectSessionLog session = wazeDirectSession;
         String maneuverArtifact = "";
         String laneArtifact = "";
@@ -2436,12 +2436,11 @@ final class NavHudLiveSender {
                 + " alertId=" + (alert.isActive() ? alert.getId() : -1)
                 + " alertArtifact=\"" + alertArtifact + "\""
                 + " hudManeuver=" + prepared.maneuverMode()
-                + " hudManeuverBytes=" + prepared.maneuverPngBytes()
                 + " hudNative=" + prepared.nativeManeuver()
                 + " hudDistanceM=" + prepared.distanceMeters()
                 + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
                 + " hudLaneCount=" + prepared.laneCount()
-                + " hudLaneBytes=" + prepared.lanePngBytes();
+                + " hudDiagnostics=semantic-plan";
         if (session != null) session.raw(raw);
         WazeCaptureDebugWriter.get().rawEvent(
                 context, "waze_direct", WAZE_PACKAGE, raw);
@@ -2736,7 +2735,7 @@ final class NavHudLiveSender {
 
     private void logGMapsDirectFrame(DirectTbtFrame rawFrame, DirectTbtFrame frame,
             int sourceDistanceMeters, String reason, long receivedAtMs) {
-        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.describe(
                 frame, DirectTbtPayload.Options.from(context));
         String raw = "reason=" + safeReason(reason)
                 + " receivedAtElapsedMs=" + receivedAtMs
@@ -2757,12 +2756,11 @@ final class NavHudLiveSender {
                 + " speedLimitKph=" + frame.getSpeedLimit().getKph()
                 + " speedUnit=\"" + frame.getSpeedLimit().getUnit() + "\""
                 + " hudManeuver=" + prepared.maneuverMode()
-                + " hudManeuverBytes=" + prepared.maneuverPngBytes()
                 + " hudNative=" + prepared.nativeManeuver()
                 + " hudDistanceM=" + prepared.distanceMeters()
                 + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
                 + " hudLaneCount=" + prepared.laneCount()
-                + " hudLaneBytes=" + prepared.lanePngBytes();
+                + " hudDiagnostics=semantic-plan";
         DirectSessionLog session = gmapsDirectSession;
         if (session != null) session.raw(raw);
         WazeCaptureDebugWriter.get().rawEvent(

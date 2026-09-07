@@ -8,14 +8,11 @@ import java.io.ByteArrayOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Collections;
-import java.util.Date;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
-import java.util.SimpleTimeZone;
 import java.util.function.IntSupplier;
 import java.util.function.Supplier;
-import java.text.SimpleDateFormat;
 
 /** Builds complete 0x8001 road-info payloads without owning a transport. */
 public final class DirectTbtPayload {
@@ -27,6 +24,7 @@ public final class DirectTbtPayload {
     private static Options cachedOptions;
     private static int cachedOptionsRevision = Integer.MIN_VALUE;
     private static byte[] cachedBlankS72Png;
+    private static final HudExperimentalCompositor EXPERIMENTAL = new HudExperimentalCompositor();
 
     private DirectTbtPayload() {
     }
@@ -57,13 +55,26 @@ public final class DirectTbtPayload {
     }
 
     public static Prepared prepare(DirectTbtFrame frame, Options options) {
+        return prepare(frame, options, true, EXPERIMENTAL);
+    }
+
+    static Prepared prepare(DirectTbtFrame frame, Options options, HudExperimentalCompositor compositor) {
+        return prepare(frame, options, true, compositor);
+    }
+
+    /** Source-side diagnostics must never allocate/rasterize output PNGs. */
+    static Prepared describe(DirectTbtFrame frame, Options options) {
+        return prepare(frame, options, false, null);
+    }
+
+    private static Prepared prepare(DirectTbtFrame frame, Options options, boolean render,
+            HudExperimentalCompositor compositor) {
         DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
         Options safeOptions = options == null ? Options.ALL : options;
-        DirectTbtFrame.AlertOverlay alert = safeFrame.getAlertOverlay();
-        if (alert.isActive() && alert.useRouteFrame()) {
-            safeFrame = safeFrame.withAlertOverlay(DirectTbtFrame.AlertOverlay.inactive());
-            alert = safeFrame.getAlertOverlay();
-        }
+        DirectTbtFrame.AlertOverlay separateWarning = safeOptions.presentation.separateWarning()
+                ? safeFrame.getAlertOverlay() : DirectTbtFrame.AlertOverlay.inactive();
+        DirectTbtFrame.AlertOverlay alert = sharedAlert(safeFrame, safeOptions)
+                ? safeFrame.getAlertOverlay() : DirectTbtFrame.AlertOverlay.inactive();
 
         List<DirectTbtFrame.Lane> lanes = safeOptions.lanes
                 ? safeFrame.getLanes() : Collections.emptyList();
@@ -99,12 +110,10 @@ public final class DirectTbtPayload {
         } else {
             displayText = "";
         }
-        if (!alert.isActive()) {
-            String metricPrefix = metricPrefix(safeFrame, safeOptions);
-            if (!metricPrefix.isEmpty()) {
-                displayText = displayText.isEmpty()
-                        ? metricPrefix : metricPrefix + " " + displayText;
-            }
+        HudEtaText metrics = HudEtaText.from(safeFrame, safeOptions);
+        if (!alert.isActive() && !safeOptions.presentation.separateEta()
+                && safeOptions.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF) {
+            displayText = metrics.street(displayText, safeOptions.presentation.streetFormat == 1);
         }
 
         if (!safeOptions.png) maneuverPng = new byte[0];
@@ -112,7 +121,7 @@ public final class DirectTbtPayload {
         if (!safeOptions.distance) distanceMeters = 0;
         int speedPlacement = speedPlacement(safeFrame, safeOptions);
         boolean maneuverSpeedApplied = false;
-        if (speedPlacement != SPEED_PLACEMENT_NONE) {
+        if (render && speedPlacement != SPEED_PLACEMENT_NONE) {
             int speedLimit = safeFrame.getSpeedLimit().getDisplayValue();
             if (safeOptions.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE) {
                 boolean occupied = speedPlacement == SPEED_PLACEMENT_MANEUVER
@@ -164,6 +173,28 @@ public final class DirectTbtPayload {
                 : alert.isActive() ? "alert"
                 : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
                 : navManeuverPng.length > 0 ? "current" : "empty";
+
+        if (!render) {
+            return new Prepared(new byte[0], maneuverMode, nativeManeuver,
+                    distanceMeters, displayText, lanes.size(), 0, null);
+        }
+
+        // Only the compositor consumes these independent regions. Instrument/AMap
+        // still receive the immutable semantic frame, never this combined artwork.
+        if (safeOptions.presentation.separateEta() || safeOptions.presentation.separateWarning()) {
+            HudEtaText separateEta = safeOptions.presentation.separateEta() ? metrics : HudEtaText.EMPTY;
+            Presentation style = safeOptions.presentation;
+            HudExperimentalCompositor.Result composed = compositor.compose(new HudExperimentalCompositor.Inputs(
+                    separateEta.arrival, separateEta.duration, separateEta.remainingDistance,
+                    maneuverPng, lanePng, separateWarning.getManeuverPng(),
+                    separateWarning.isActive() && separateWarning.isDistanceKnown()
+                            ? HudEtaText.distance(separateWarning.getDistanceMeters(), style.ukrainian) : "",
+                    style.arrivalColor, style.durationColor, style.remainingColor, style.warningColor));
+            byte[] upper = composed.f8Png();
+            byte[] lower = composed.f7Png();
+            maneuverPng = upper == null ? maneuverPng : upper;
+            lanePng = lower == null ? lanePng : lower;
+        }
 
         ByteArrayOutputStream fields = new ByteArrayOutputStream();
         if (!lanes.isEmpty()) writeVarintField(fields, 5, lanes.size());
@@ -221,78 +252,10 @@ public final class DirectTbtPayload {
         return value != null && !value.trim().isEmpty();
     }
 
-    private static String metricPrefix(DirectTbtFrame frame, Options options) {
-        if (options.routeMetricsMode == HudPrefs.ROUTE_METRICS_OFF
-                || !options.showEta && !options.showRemainingTime
-                && !options.showRemainingDistance) {
-            return "";
-        }
-        DirectTbtFrame.TripMetrics metrics = frame.getTripMetrics();
-        DirectTbtFrame.TravelMetrics nextStop = metrics.getNextStop();
-        DirectTbtFrame.TravelMetrics wholeRoute = metrics.getWholeRoute();
-        boolean preferWholeRoute = options.routeMetricsMode
-                == HudPrefs.ROUTE_METRICS_WHOLE_ROUTE;
-        StringBuilder values = new StringBuilder();
-        DirectTbtFrame.TravelMetrics eta = selectMetric(
-                preferWholeRoute,
-                wholeRoute.getArrivalTimeEpochMs() > 0L,
-                nextStop.getArrivalTimeEpochMs() > 0L,
-                wholeRoute, nextStop);
-        if (options.showEta && eta.getArrivalTimeEpochMs() > 0L) {
-            SimpleDateFormat formatter = new SimpleDateFormat("HH:mm", Locale.US);
-            if (eta.getArrivalZoneOffsetSeconds()
-                    != DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS) {
-                formatter.setTimeZone(new SimpleTimeZone(
-                        eta.getArrivalZoneOffsetSeconds() * 1000, "ETA"));
-            }
-            appendMetric(values, "ETA: "
-                    + formatter.format(new Date(eta.getArrivalTimeEpochMs())));
-        }
-        DirectTbtFrame.TravelMetrics time = selectMetric(
-                preferWholeRoute,
-                wholeRoute.getRemainingTimeSeconds() >= 0L,
-                nextStop.getRemainingTimeSeconds() >= 0L,
-                wholeRoute, nextStop);
-        if (options.showRemainingTime && time.getRemainingTimeSeconds() >= 0L) {
-            long minutes = (time.getRemainingTimeSeconds() + 59L) / 60L;
-            appendMetric(values, minutes + " min");
-        }
-        DirectTbtFrame.TravelMetrics distance = selectMetric(
-                preferWholeRoute,
-                wholeRoute.getRemainingDistanceMeters() >= 0L,
-                nextStop.getRemainingDistanceMeters() >= 0L,
-                wholeRoute, nextStop);
-        if (options.showRemainingDistance && distance.getRemainingDistanceMeters() >= 0L) {
-            appendMetric(values, formatDistance(distance.getRemainingDistanceMeters()));
-        }
-        return values.length() == 0 ? "" : "[" + values + "]";
-    }
-
-    private static DirectTbtFrame.TravelMetrics selectMetric(
-            boolean preferWholeRoute,
-            boolean wholeRouteFieldAvailable,
-            boolean nextStopFieldAvailable,
-            DirectTbtFrame.TravelMetrics wholeRoute,
-            DirectTbtFrame.TravelMetrics nextStop) {
-        if (preferWholeRoute) {
-            return wholeRouteFieldAvailable || !nextStopFieldAvailable
-                    ? wholeRoute : nextStop;
-        }
-        return nextStopFieldAvailable || !wholeRouteFieldAvailable
-                ? nextStop : wholeRoute;
-    }
-
-    private static void appendMetric(StringBuilder values, String value) {
-        if (values.length() > 0) values.append(" | ");
-        values.append(value);
-    }
-
-    private static String formatDistance(long meters) {
-        if (meters < 1000L) return meters + " m";
-        double kilometers = meters / 1000d;
-        String value = String.format(Locale.US, "%.1f", kilometers);
-        if (value.endsWith(".0")) value = value.substring(0, value.length() - 2);
-        return value + " km";
+    static boolean sharedAlert(DirectTbtFrame frame, Options options) {
+        return frame.getAlertOverlay().isActive()
+                && !frame.getAlertOverlay().useRouteFrame()
+                && !options.presentation.separateWarning();
     }
 
     static int speedPlacement(DirectTbtFrame frame, Options options) {
@@ -301,7 +264,7 @@ public final class DirectTbtPayload {
             return SPEED_PLACEMENT_NONE;
         }
         if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER) {
-            return frame.getAlertOverlay().isActive()
+            return sharedAlert(frame, options)
                     ? SPEED_PLACEMENT_NONE : SPEED_PLACEMENT_MANEUVER;
         }
         if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES) {
@@ -348,9 +311,8 @@ public final class DirectTbtPayload {
 
     private static boolean maneuverFieldOccupied(DirectTbtFrame frame, Options options) {
         if (!options.png) return false;
-        DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
-        return alert.isActive() && alert.getManeuverPng().length > 0
-                || !alert.isActive() && frame.getManeuverPng().length > 0;
+        return sharedAlert(frame, options) ? frame.getAlertOverlay().getManeuverPng().length > 0
+                : frame.getManeuverPng().length > 0;
     }
 
     private static boolean laneFieldOccupied(DirectTbtFrame frame, Options options) {
@@ -537,6 +499,42 @@ public final class DirectTbtPayload {
     }
 
     /** Independent switches for each optional cluster output. */
+    static final class Presentation {
+        static final Presentation DEFAULT = new Presentation(0, 0, 0, false,
+                0xffffffff, 0xffffffff, 0xffffffff, 0xffffff00);
+        final int etaField;
+        final int warningField;
+        final int streetFormat;
+        final boolean ukrainian;
+        final int arrivalColor;
+        final int durationColor;
+        final int remainingColor;
+        final int warningColor;
+
+        // Deliberately no wait preference: it is a persisted UI placeholder in this patch.
+        Presentation(int etaField, int warningField, int streetFormat, boolean ukrainian,
+                int arrivalColor, int durationColor, int remainingColor, int warningColor) {
+            this.etaField = etaField;
+            this.warningField = warningField;
+            this.streetFormat = streetFormat;
+            this.ukrainian = ukrainian;
+            this.arrivalColor = arrivalColor | 0xff000000;
+            this.durationColor = durationColor | 0xff000000;
+            this.remainingColor = remainingColor | 0xff000000;
+            this.warningColor = warningColor | 0xff000000;
+        }
+
+        boolean separateEta() { return etaField == HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL; }
+        boolean separateWarning() { return warningField == HudPrefs.WAZE_ALERT_FIELD_EXPERIMENTAL; }
+
+        String diagnostics() {
+            return "etaField=" + etaField + " warningField=" + warningField
+                    + " etaStreetFormat=" + streetFormat + " etaLanguage=" + (ukrainian ? "uk" : "en")
+                    + String.format(Locale.US, " etaColors=%08X/%08X/%08X warningColor=%08X",
+                    arrivalColor, durationColor, remainingColor, warningColor);
+        }
+    }
+
     public static final class Options {
         public static final Options ALL = new Options(
                 true, true, true, true, true, true, false,
@@ -560,6 +558,7 @@ public final class DirectTbtPayload {
         public final int speedLimitCompositePlacement;
         public final int speedLimitManeuverOverlaySize;
         public final int speedLimitLaneOverlaySize;
+        final Presentation presentation;
         private final byte[] blankS72Png;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
@@ -625,6 +624,22 @@ public final class DirectTbtPayload {
                 int speedLimitManeuverOverlaySize,
                 int speedLimitLaneOverlaySize,
                 byte[] blankS72Png) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize,
+                    blankS72Png, Presentation.DEFAULT);
+        }
+
+        private Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, int routeMetricsMode,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -644,6 +659,15 @@ public final class DirectTbtPayload {
             this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
             this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
+            this.presentation = presentation;
+        }
+
+        Options withPresentation(Presentation value) {
+            return new Options(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, value);
         }
 
         public static Options from(Context context) {
@@ -679,7 +703,15 @@ public final class DirectTbtPayload {
                                 HudPrefs.speedLimitCompositePlacement(safeContext),
                                 HudPrefs.speedLimitManeuverOverlaySize(safeContext),
                                 HudPrefs.speedLimitLaneOverlaySize(safeContext),
-                                blankS72Png));
+                                blankS72Png).withPresentation(new Presentation(
+                                HudPrefs.etaOutputField(safeContext),
+                                HudPrefs.wazeAlertField(safeContext),
+                                HudPrefs.getEtaStreetFormat(safeContext),
+                                HudPrefs.isUaLanguage(safeContext),
+                                HudPrefs.getEtaArrivalColor(safeContext),
+                                HudPrefs.getEtaDurationColor(safeContext),
+                                HudPrefs.getEtaRemainingDistanceColor(safeContext),
+                                HudPrefs.getWazeWarningDistanceColor(safeContext))));
                 synchronized (OPTIONS_LOCK) {
                     if (snapshot.revision != HudPrefs.outputOptionsRevision()) continue;
                     if (cachedOptions != null

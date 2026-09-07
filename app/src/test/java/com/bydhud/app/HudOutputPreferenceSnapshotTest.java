@@ -20,7 +20,9 @@ public final class HudOutputPreferenceSnapshotTest {
                         + " clampSmallDistance=1 wazeAlerts=1 routeMetrics=2 eta=1"
                         + " remainingTime=0 remainingDistance=1 speedLimitMode=4"
                         + " speedFreeFallback=2 speedOverlaySeconds=7 speedPlacement=3"
-                        + " speedManeuverSize=80 speedLaneSize=30",
+                        + " speedManeuverSize=80 speedLaneSize=30"
+                        + " etaField=0 warningField=0 etaStreetFormat=0 etaLanguage=en"
+                        + " etaColors=FFFFFFFF/FFFFFFFF/FFFFFFFF warningColor=FFFFFF00",
                 snapshot.compact());
     }
 

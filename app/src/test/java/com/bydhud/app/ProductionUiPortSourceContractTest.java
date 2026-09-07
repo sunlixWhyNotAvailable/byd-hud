@@ -17,12 +17,12 @@ public final class ProductionUiPortSourceContractTest {
     public void helpCatalogAndFixedAssetsCoverAllApprovedControls() throws Exception {
         String catalog = source("HudHelpCatalog.kt");
         String ids = between(catalog, "internal enum class HudHelpTopicId {", "}");
-        assertEquals(19, ids.substring(ids.indexOf('{') + 1).lines()
+        assertEquals(21, ids.substring(ids.indexOf('{') + 1).lines()
                 .filter(line -> !line.trim().isEmpty()).count());
 
         Path assets = projectRoot().resolve("app/src/main/res/drawable-nodpi");
         try (java.util.stream.Stream<Path> files = Files.list(assets)) {
-            assertEquals(50, files.filter(path -> path.getFileName().toString()
+            assertEquals(68, files.filter(path -> path.getFileName().toString()
                     .startsWith("hud_help_") && path.toString().endsWith(".png")).count());
         }
         assertTrue(catalog.contains("fun localizedImage(imageRes: Int, ua: Boolean)"));
@@ -49,7 +49,7 @@ public final class ProductionUiPortSourceContractTest {
     }
 
     @Test
-    public void controlsKeepApprovedGatingAndNonFunctionalExperimentalSelectors() throws Exception {
+    public void controlsKeepApprovedGatingAndPersistentExperimentalSelectors() throws Exception {
         String compose = source("BydHudRuntimeCompose.kt");
         String basic = between(compose, "optionsSection(\"basic-navigation\"",
                 "optionsSection(\"route-eta\"");
@@ -58,13 +58,10 @@ public final class ProductionUiPortSourceContractTest {
         assertTrue(basic.contains("enabled = snapshot.distanceOutputEnabled"));
         assertTrue(compose.contains("row(\"eta-output-field\")"));
         assertTrue(compose.contains("row(\"waze-alert-field\")"));
-
-        for (String runtime : new String[] {"NavHudLiveSender.java",
-                "SomeIpHudClient.java", "WazeDirectChannel.java"}) {
-            String text = source(runtime);
-            assertFalse(runtime, text.contains("wazeAlertField("));
-            assertFalse(runtime, text.contains("etaOutputField("));
-        }
+        assertTrue(source("HudPrefs.java").contains("setEtaOutputField(Context context, int field)"));
+        assertTrue(source("HudPrefs.java").contains("setWazeAlertField(Context context, int field)"));
+        assertTrue(source("MainActivity.java").contains("composeSetEtaOutputField(int field)"));
+        assertTrue(source("MainActivity.java").contains("composeSetWazeAlertField(int field)"));
     }
 
     @Test

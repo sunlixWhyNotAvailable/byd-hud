@@ -111,7 +111,7 @@ The same tab also lists other applications that can be moved between displays, b
 
 The `Options` tab controls what BYD HUD sends. Changing a switch affects the next outgoing HUD state; it does not change the map inside the navigator.
 
-Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its local control changes only the illustration, not your saved setting or the HUD. Samples follow the application's Ukrainian/English language. The experimental ETA/Waze locations are placeholders for a later patch: their choices are saved, but current output stays in the existing street/maneuver fields. Existing screenshots below predate this UI port.
+Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its local controls change only the illustration, not your saved settings or the HUD. Samples follow the application's Ukrainian/English language and selected street format; color previews affect only the corresponding text. Experimental ETA/Waze locations use separate HUD regions. The full-text waiting setting is reserved and has no output effect yet. Existing screenshots below predate this UI port.
 
 ### Basic navigation output
 
@@ -137,18 +137,23 @@ Transliteration offers `Ukrainian` for Ukrainian road names and `Universal` for 
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `ETA output mode (time/distance)` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze uses the final destination for the entire route and falls back per field to an available next-stop value |
-| `ETA output field` | Street | Street or Experimental; Experimental is saved for a later patch and currently leaves the normal output unchanged |
-| `Show ETA` | Off | Adds the expected arrival time to the street field |
-| `Show remaining time` | Off | Adds remaining travel time to the street field |
-| `Show remaining distance` | Off | Adds remaining route distance to the street field |
+| `ETA output field` | Street | Uses the street field or a separate Experimental block on the right of the HUD |
+| `ETA format in street field` | Prepend | Prepend adds a bracketed block before the street; Replace shows only the selected metrics |
+| `Wait for the full street text to display` | On | Reserved setting; currently saved only, without delaying text updates |
+| `Show ETA` | Off | Shows the expected arrival time in the selected output field |
+| `Show remaining time` | Off | Shows remaining travel time in the selected output field |
+| `Show remaining distance` | Off | Shows remaining route distance in the selected output field |
+| Metric text colors | White | Independent arrival, remaining-time and remaining-distance colors for Experimental output |
 
-The three value switches are disabled while the mode is `Off`, but their saved values are preserved.
+The three value switches are disabled while the mode is `Off`, but their saved values are preserved. Format, wait and color settings remain visible when unavailable: format requires Street output, wait additionally requires Prepend, and each color requires Experimental output and its enabled metric.
 
-Enabled metrics are added before the street or cue, for example:
+Prepend adds enabled, available metrics before the street or cue:
 
 ```text
-[ETA: 12:20 | 11 min | 5.1 km] Main Street
+[18:45 | 25 min | 8.4 km] Main Street
 ```
+
+Replace shows `18:45 | 25 min | 8.4 km` without the street or brackets. Unavailable values are omitted, not replaced with zeroes. Experimental output leaves the street unchanged and shows the metrics separately. Its layout has been calibrated on Sea Lion 07 EV; live output on other vehicles still needs validation, with no automatic fallback to the street field.
 
 Google Maps direct supplies all three metrics. Project-patched Waze `5.20.0.1` supplies ETA, remaining time, and remaining distance for the next stop and the entire route. On a multi-stop route, `Entire route` uses the final destination; if an individual whole-route value is unavailable, BYD HUD uses the corresponding available next-stop value.
 
@@ -165,7 +170,7 @@ Google Maps direct supplies all three metrics. Project-patched Waze `5.20.0.1` s
 | `Sign size in maneuver field` | 64 px | Sets the composite sign size in the maneuver image from 1 to 103 px |
 | `Sign size in lane field` | 36 px | Sets the composite sign size in the lane image from 1 to 36 px |
 
-An alert occupies the maneuver field with the same priority as a route maneuver. A standalone sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when non-composite output replaces an occupied maneuver, alert, or lane field. Composite mode draws the sign into the selected maneuver or lane image without discarding its existing guidance and does not use the replacement timer. This feature requires a current compatible project-patched Google Maps or Waze build.
+An alert in shared-field mode occupies the maneuver field with the same priority as a route maneuver. A standalone sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when non-composite output replaces an occupied maneuver, alert, or lane field. Composite mode draws the sign into the selected maneuver or lane image without discarding its existing guidance and does not use the replacement timer. This feature requires a current compatible project-patched Google Maps or Waze build.
 
 <p align="center"><img src="docs/screenshots/en/settings-speed-limit.png" alt="Speed limit output settings" width="100%"></p>
 
@@ -182,8 +187,9 @@ An alert occupies the maneuver field with the same priority as a route maneuver.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Show Waze alerts` | On | Shows the closer known item when a route maneuver and Waze alert compete; an active alert uses its own image, distance, and text, keeps lane guidance, and hides the native route arrow |
-| `Waze alert output field` | Maneuver | Maneuver or Experimental; Experimental is saved for a later patch and currently leaves the normal output unchanged |
+| `Show Waze alerts` | On | Enables available Waze warnings on the HUD |
+| `Waze alert output field` | Maneuver | Maneuver shows the closer known maneuver or warning; a warning uses its own image, distance and text, keeps lanes and hides the native arrow. Experimental shows warning icon and distance separately, without replacing route guidance |
+| Warning distance color | Yellow | Sets the distance text color for enabled Experimental warnings; remains visible but disabled in other modes |
 | `Start with custom surface` | Off | Samples the setting when a Waze route starts, then opens Waze-rendered route content in a separate route screen; Back returns to the normal Waze screen for the rest of that route |
 
 <p align="center"><img src="docs/screenshots/en/settings-waze.png" alt="Waze alert and custom surface settings" width="100%"></p>

@@ -23,6 +23,12 @@ final class HudPrefs {
     private static final String KEY_WHOLE_ROUTE_METRICS = "whole_route_metrics";
     private static final String KEY_ROUTE_METRICS_MODE = "route_metrics_mode";
     private static final String KEY_ETA_OUTPUT_FIELD = "eta_output_field";
+    private static final String KEY_ETA_STREET_FORMAT = "eta_street_format";
+    private static final String KEY_ETA_WAIT_FOR_FULL_TEXT = "eta_wait_for_full_text";
+    private static final String KEY_ETA_ARRIVAL_COLOR = "eta_arrival_color";
+    private static final String KEY_ETA_DURATION_COLOR = "eta_duration_color";
+    private static final String KEY_ETA_REMAINING_DISTANCE_COLOR = "eta_remaining_distance_color";
+    private static final String KEY_WAZE_WARNING_DISTANCE_COLOR = "waze_warning_distance_color";
     private static final String KEY_OUTPUT_ETA = "output_eta";
     private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
     private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
@@ -60,6 +66,8 @@ final class HudPrefs {
     static final int WAZE_ALERT_FIELD_EXPERIMENTAL = 1;
     static final int ETA_OUTPUT_FIELD_STREET = 0;
     static final int ETA_OUTPUT_FIELD_EXPERIMENTAL = 1;
+    static final int ETA_STREET_FORMAT_PREPEND = 0;
+    static final int ETA_STREET_FORMAT_REPLACE = 1;
     static final int SPEED_LIMIT_OFF = 0;
     static final int SPEED_LIMIT_MANEUVER = 1;
     static final int SPEED_LIMIT_LANES = 2;
@@ -209,6 +217,7 @@ final class HudPrefs {
         prefs(context).edit().putInt(KEY_WAZE_ALERT_FIELD,
                 clamp(field, WAZE_ALERT_FIELD_MANEUVER,
                         WAZE_ALERT_FIELD_EXPERIMENTAL)).apply();
+        markOutputOptionChanged(KEY_WAZE_ALERT_FIELD);
     }
 
     static boolean isWholeRouteMetricsEnabled(Context context) {
@@ -254,6 +263,66 @@ final class HudPrefs {
         prefs(context).edit().putInt(KEY_ETA_OUTPUT_FIELD,
                 clamp(field, ETA_OUTPUT_FIELD_STREET,
                         ETA_OUTPUT_FIELD_EXPERIMENTAL)).apply();
+        markOutputOptionChanged(KEY_ETA_OUTPUT_FIELD);
+    }
+
+    static int getEtaStreetFormat(Context context) {
+        return clamp(prefs(context).getInt(KEY_ETA_STREET_FORMAT,
+                ETA_STREET_FORMAT_PREPEND),
+                ETA_STREET_FORMAT_PREPEND, ETA_STREET_FORMAT_REPLACE);
+    }
+
+    static void setEtaStreetFormat(Context context, int format) {
+        prefs(context).edit().putInt(KEY_ETA_STREET_FORMAT,
+                clamp(format, ETA_STREET_FORMAT_PREPEND, ETA_STREET_FORMAT_REPLACE)).apply();
+        markOutputOptionChanged(KEY_ETA_STREET_FORMAT);
+    }
+
+    static boolean isEtaWaitForFullTextEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_ETA_WAIT_FOR_FULL_TEXT, true);
+    }
+
+    static void setEtaWaitForFullTextEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_ETA_WAIT_FOR_FULL_TEXT, enabled).apply();
+    }
+
+    static int getEtaArrivalColor(Context context) {
+        return opaqueColor(prefs(context).getInt(KEY_ETA_ARRIVAL_COLOR, 0xFFFFFFFF));
+    }
+
+    static void setEtaArrivalColor(Context context, int color) {
+        prefs(context).edit().putInt(KEY_ETA_ARRIVAL_COLOR, opaqueColor(color)).apply();
+        markOutputOptionChanged(KEY_ETA_ARRIVAL_COLOR);
+    }
+
+    static int getEtaDurationColor(Context context) {
+        return opaqueColor(prefs(context).getInt(KEY_ETA_DURATION_COLOR, 0xFFFFFFFF));
+    }
+
+    static void setEtaDurationColor(Context context, int color) {
+        prefs(context).edit().putInt(KEY_ETA_DURATION_COLOR, opaqueColor(color)).apply();
+        markOutputOptionChanged(KEY_ETA_DURATION_COLOR);
+    }
+
+    static int getEtaRemainingDistanceColor(Context context) {
+        return opaqueColor(prefs(context).getInt(KEY_ETA_REMAINING_DISTANCE_COLOR, 0xFFFFFFFF));
+    }
+
+    static void setEtaRemainingDistanceColor(Context context, int color) {
+        prefs(context).edit().putInt(KEY_ETA_REMAINING_DISTANCE_COLOR,
+                opaqueColor(color)).apply();
+        markOutputOptionChanged(KEY_ETA_REMAINING_DISTANCE_COLOR);
+    }
+
+    static int getWazeWarningDistanceColor(Context context) {
+        return opaqueColor(prefs(context).getInt(KEY_WAZE_WARNING_DISTANCE_COLOR,
+                0xFFFFFF00));
+    }
+
+    static void setWazeWarningDistanceColor(Context context, int color) {
+        prefs(context).edit().putInt(KEY_WAZE_WARNING_DISTANCE_COLOR,
+                opaqueColor(color)).apply();
+        markOutputOptionChanged(KEY_WAZE_WARNING_DISTANCE_COLOR);
     }
 
     static boolean isEtaOutputEnabled(Context context) {
@@ -505,6 +574,7 @@ final class HudPrefs {
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setUaLanguage(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_UA_LANGUAGE, enabled).apply();
+        markOutputOptionChanged(KEY_UA_LANGUAGE);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
@@ -589,5 +659,9 @@ final class HudPrefs {
 
     private static int clamp(int value, int minimum, int maximum) {
         return Math.max(minimum, Math.min(maximum, value));
+    }
+
+    private static int opaqueColor(int color) {
+        return color | 0xFF000000;
     }
 }

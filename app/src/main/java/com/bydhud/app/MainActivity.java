@@ -855,6 +855,12 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isWholeRouteMetricsEnabled(this),
                 HudPrefs.routeMetricsMode(this),
                 HudPrefs.etaOutputField(this),
+                HudPrefs.getEtaStreetFormat(this),
+                HudPrefs.isEtaWaitForFullTextEnabled(this),
+                HudPrefs.getEtaArrivalColor(this),
+                HudPrefs.getEtaDurationColor(this),
+                HudPrefs.getEtaRemainingDistanceColor(this),
+                HudPrefs.getWazeWarningDistanceColor(this),
                 HudPrefs.isEtaOutputEnabled(this),
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
@@ -1431,6 +1437,44 @@ public final class MainActivity extends ComponentActivity {
     public void composeSetEtaOutputField(int field) {
         HudPrefs.setEtaOutputField(this, field);
         AppEventLogger.event(this, "ui eta_output_field=" + HudPrefs.etaOutputField(this));
+        refreshControls();
+    }
+
+    public void composeSetEtaStreetFormat(int format) {
+        HudPrefs.setEtaStreetFormat(this, format);
+        AppEventLogger.event(this, "ui eta_street_format=" + HudPrefs.getEtaStreetFormat(this));
+        refreshControls();
+    }
+
+    public void composeSetEtaWaitForFullTextEnabled(boolean enabled) {
+        HudPrefs.setEtaWaitForFullTextEnabled(this, enabled);
+        AppEventLogger.event(this, "ui eta_wait_for_full_text=" + enabled);
+        refreshControls();
+    }
+
+    public void composeSetEtaArrivalColor(int color) {
+        HudPrefs.setEtaArrivalColor(this, color);
+        AppEventLogger.event(this, "ui eta_arrival_color=" + HudPrefs.getEtaArrivalColor(this));
+        refreshControls();
+    }
+
+    public void composeSetEtaDurationColor(int color) {
+        HudPrefs.setEtaDurationColor(this, color);
+        AppEventLogger.event(this, "ui eta_duration_color=" + HudPrefs.getEtaDurationColor(this));
+        refreshControls();
+    }
+
+    public void composeSetEtaRemainingDistanceColor(int color) {
+        HudPrefs.setEtaRemainingDistanceColor(this, color);
+        AppEventLogger.event(this, "ui eta_remaining_distance_color="
+                + HudPrefs.getEtaRemainingDistanceColor(this));
+        refreshControls();
+    }
+
+    public void composeSetWazeWarningDistanceColor(int color) {
+        HudPrefs.setWazeWarningDistanceColor(this, color);
+        AppEventLogger.event(this, "ui waze_warning_distance_color="
+                + HudPrefs.getWazeWarningDistanceColor(this));
         refreshControls();
     }
 
@@ -2470,6 +2514,12 @@ public final class MainActivity extends ComponentActivity {
         public final boolean wholeRouteMetricsEnabled;
         public final int routeMetricsMode;
         public final int etaOutputField;
+        public final int etaStreetFormat;
+        public final boolean etaWaitForFullTextEnabled;
+        public final int etaArrivalColor;
+        public final int etaDurationColor;
+        public final int etaRemainingDistanceColor;
+        public final int wazeWarningDistanceColor;
         public final boolean etaOutputEnabled;
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
@@ -2542,6 +2592,9 @@ public final class MainActivity extends ComponentActivity {
                 boolean tbtWithoutHudOutputEnabled,
                 boolean switchToTbtOnHudStartEnabled,
                 boolean wholeRouteMetricsEnabled, int routeMetricsMode, int etaOutputField,
+                int etaStreetFormat, boolean etaWaitForFullTextEnabled,
+                int etaArrivalColor, int etaDurationColor, int etaRemainingDistanceColor,
+                int wazeWarningDistanceColor,
                 boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
                 boolean remainingDistanceOutputEnabled, int speedLimitMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
@@ -2595,6 +2648,13 @@ public final class MainActivity extends ComponentActivity {
             this.routeMetricsMode = routeMetricsMode;
             this.etaOutputField = Math.max(HudPrefs.ETA_OUTPUT_FIELD_STREET,
                     Math.min(HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL, etaOutputField));
+            this.etaStreetFormat = Math.max(HudPrefs.ETA_STREET_FORMAT_PREPEND,
+                    Math.min(HudPrefs.ETA_STREET_FORMAT_REPLACE, etaStreetFormat));
+            this.etaWaitForFullTextEnabled = etaWaitForFullTextEnabled;
+            this.etaArrivalColor = etaArrivalColor | 0xFF000000;
+            this.etaDurationColor = etaDurationColor | 0xFF000000;
+            this.etaRemainingDistanceColor = etaRemainingDistanceColor | 0xFF000000;
+            this.wazeWarningDistanceColor = wazeWarningDistanceColor | 0xFF000000;
             this.etaOutputEnabled = etaOutputEnabled;
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
@@ -2696,6 +2756,12 @@ public final class MainActivity extends ComponentActivity {
                     && wholeRouteMetricsEnabled == other.wholeRouteMetricsEnabled
                     && routeMetricsMode == other.routeMetricsMode
                     && etaOutputField == other.etaOutputField
+                    && etaStreetFormat == other.etaStreetFormat
+                    && etaWaitForFullTextEnabled == other.etaWaitForFullTextEnabled
+                    && etaArrivalColor == other.etaArrivalColor
+                    && etaDurationColor == other.etaDurationColor
+                    && etaRemainingDistanceColor == other.etaRemainingDistanceColor
+                    && wazeWarningDistanceColor == other.wazeWarningDistanceColor
                     && etaOutputEnabled == other.etaOutputEnabled
                     && remainingTimeOutputEnabled == other.remainingTimeOutputEnabled
                     && remainingDistanceOutputEnabled == other.remainingDistanceOutputEnabled
@@ -2767,7 +2833,9 @@ public final class MainActivity extends ComponentActivity {
                     textDirectionOutputEnabled,
                     wazeAlertsEnabled, wazeAlertField, tbtWithoutHudOutputEnabled,
                     switchToTbtOnHudStartEnabled, wholeRouteMetricsEnabled, routeMetricsMode,
-                    etaOutputField,
+                    etaOutputField, etaStreetFormat, etaWaitForFullTextEnabled,
+                    etaArrivalColor, etaDurationColor, etaRemainingDistanceColor,
+                    wazeWarningDistanceColor,
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
                     speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
