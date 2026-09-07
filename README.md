@@ -48,6 +48,8 @@ Google Maps and Waze remain responsible for the map and route. BYD HUD only coor
 
 While BYD HUD is running, switching tabs or returning from another app restores the selected tab and its scroll position. Each Options category keeps its own position too. Exit, Shutdown, or a full app restart starts a fresh UI session.
 
+The header language and theme selectors use a sliding highlight. Choices apply immediately without waiting for the 140 ms animation to finish; saved preferences and control sizes are unchanged.
+
 <p align="center"><img src="docs/screenshots/en/apps.png" alt="Apps tab with supported navigators and HUD controls" width="100%"></p>
 
 ## Navigation channels

@@ -7751,7 +7751,12 @@ private fun Segmented(
     onLeft: () -> Unit,
     onRight: () -> Unit
 ) {
-    Row(
+    val selectionOffset by animateDpAsState(
+        targetValue = if (leftActive) 0.dp else 64.dp,
+        animationSpec = tween(durationMillis = 140),
+        label = "segmentedSelectionOffset"
+    )
+    Box(
         modifier = Modifier
             .height(42.dp)
             .clip(RoundedCornerShape(22.dp))
@@ -7759,8 +7764,18 @@ private fun Segmented(
             .background(palette.panelAlt)
             .padding(5.dp)
     ) {
-        SegmentedItem(left, leftActive, palette, onLeft)
-        SegmentedItem(right, !leftActive, palette, onRight)
+        Box(
+            Modifier
+                .offset(x = selectionOffset)
+                .width(64.dp)
+                .height(32.dp)
+                .clip(RoundedCornerShape(18.dp))
+                .background(palette.accent)
+        )
+        Row {
+            SegmentedItem(left, leftActive, palette, onLeft)
+            SegmentedItem(right, !leftActive, palette, onRight)
+        }
     }
 }
 
@@ -7768,19 +7783,17 @@ private fun Segmented(
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onClick: () -> Unit) {
     val press = rememberPressFeedback()
-    val visualClick = rememberVisualFirstClick(onClick)
-    val baseBackground = if (active) palette.accent else Color.Transparent
     Box(
         modifier = Modifier
             .height(32.dp)
             .width(64.dp)
             .clip(RoundedCornerShape(18.dp))
-            .background(pressBackground(baseBackground, palette, press.pressed))
+            .background(pressBackground(Color.Transparent, palette, press.pressed))
             .then(press.modifier)
             .clickable(
                 interactionSource = press.interactionSource,
                 indication = null,
-                onClick = visualClick
+                onClick = onClick
             ),
         contentAlignment = Alignment.Center
     ) {

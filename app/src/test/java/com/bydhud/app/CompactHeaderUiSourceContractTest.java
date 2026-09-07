@@ -14,6 +14,42 @@ import org.junit.Test;
 
 public final class CompactHeaderUiSourceContractTest {
     @Test
+    public void languageAndThemeSelectorsSlideWithoutDelayingTheirActions() throws IOException {
+        String source = runtimeSource();
+        String header = between(source, "private fun Header(", "private fun OptionsTab(");
+        assertContains(header,
+                "Segmented(copy.ukr, copy.eng, snapshot.uaLanguage, palette,",
+                "onLeft = { onLanguage(true) }", "onRight = { onLanguage(false) }",
+                "Segmented(copy.dark, copy.light, snapshot.darkTheme, palette,",
+                "onLeft = { onTheme(true) }", "onRight = { onTheme(false) }");
+        assertEquals(3, occurrences(source, "Segmented("));
+        String segmented = between(source, "private fun Segmented(", "private fun SegmentedItem(");
+        assertContains(segmented,
+                "val selectionOffset by animateDpAsState(",
+                "targetValue = if (leftActive) 0.dp else 64.dp",
+                "animationSpec = tween(durationMillis = 140)",
+                "label = \"segmentedSelectionOffset\"", ".offset(x = selectionOffset)",
+                ".height(42.dp)", "RoundedCornerShape(22.dp)", ".padding(5.dp)",
+                ".width(64.dp)", ".height(32.dp)", "RoundedCornerShape(18.dp)",
+                ".background(palette.accent)", "Row {",
+                "SegmentedItem(left, leftActive, palette, onLeft)",
+                "SegmentedItem(right, !leftActive, palette, onRight)");
+        String item = between(source, "private fun SegmentedItem(", "private fun Pill(");
+        assertContains(item,
+                "rememberPressFeedback()", ".height(32.dp)", ".width(64.dp)",
+                ".background(pressBackground(Color.Transparent, palette, press.pressed))",
+                ".then(press.modifier)", "interactionSource = press.interactionSource",
+                "onClick = onClick", "color = if (active) Color.White else palette.muted");
+        assertFalse(item.contains("rememberVisualFirstClick"));
+        assertFalse(item.contains("if (active) palette.accent"));
+        assertFalse((header + segmented + item).contains("delay("));
+        assertContains(source,
+                "onLanguage = { ua -> runAction { activity.composeSetUaLanguage(ua) } }",
+                "onTheme = { dark -> runAction { activity.composeSetDarkTheme(dark) } }",
+                "fun runAction(action: () -> Unit) {\n        action()\n        refresh()");
+    }
+
+    @Test
     public void allFiveMainTabsShareTheInlineHeaderWithoutChangingViewports() throws IOException {
         String source = runtimeSource();
         String header = between(source, "private fun PageSurfaceHeader(", "private data class OptionsRowSpec");
