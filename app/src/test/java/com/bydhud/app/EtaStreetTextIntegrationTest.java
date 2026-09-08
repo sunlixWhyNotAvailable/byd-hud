@@ -245,6 +245,53 @@ public final class EtaStreetTextIntegrationTest {
         }
     }
 
+    @Test
+    public void derivedMinuteChangeUsesTheExistingF10GateAndStreetBypass() {
+        long minute = 60_000L;
+        long now = 100L * minute + 45_000L;
+        DirectTbtFrame.TripMetrics arrivalOnly = DirectTbtFrame.TripMetrics.nextStopOnly(
+                new DirectTbtFrame.TravelMetrics(
+                        103L * minute + 15_000L, 0, -1L, -1L, now));
+        DirectTbtPayload.Options options = streetOptions(
+                HudPrefs.ROUTE_METRICS_NEXT_STOP, 0, false, true);
+        String context = HudOutputCoordinator.etaStreetContext(options, 0);
+        EtaStreetTextGate gate = new EtaStreetTextGate();
+
+        DirectTbtPayload.Prepared initial = DirectTbtPayload.describe(
+                frame(ROAD, arrivalOnly, 13, 120, 1), options, now);
+        assertTrue(initial.displayText().contains("3 min"));
+        DirectTbtPayload.Options replace = streetOptions(
+                HudPrefs.ROUTE_METRICS_NEXT_STOP, 1, false, true);
+        assertEquals("01:43 | 3 min", DirectTbtPayload.describe(
+                frame(ROAD, arrivalOnly, 13, 120, 1), replace, now).displayText());
+        gate.select(initial.displayText(), ROAD, context, true, 0L);
+        gate.onSent(initial.displayText(), 0L);
+
+        DirectTbtPayload.Prepared minuteLater = DirectTbtPayload.describe(
+                frame(ROAD, arrivalOnly, 13, 120, 1), options, now + minute);
+        assertTrue(minuteLater.displayText().contains("2 min"));
+        assertEquals(initial.displayText(), gate.select(
+                minuteLater.displayText(), ROAD, context, true, 100L));
+        assertEquals(minuteLater.displayText(), gate.select(
+                minuteLater.displayText(), "Changed road", context, true, 101L));
+    }
+
+    @Test
+    public void coordinatorRechecksOnlyOnWallMinuteAndOnlyRebuildsChangedEta() throws Exception {
+        String coordinator = source("HudOutputCoordinator.java");
+        assertTrue(coordinator.contains(
+                "long wallMinute = HudEtaResolver.epochMinute(nowWallTimeMs);"));
+        assertTrue(coordinator.contains(
+                "if (sourceChanged || preparedEtaWallMinute != wallMinute)"));
+        assertTrue(coordinator.contains(
+                "if (sourceChanged || !etaCacheKey.equals(preparedEtaCacheKey))"));
+        assertTrue(coordinator.contains(
+                "candidateDirectPayload = DirectTbtPayload.prepare("));
+        assertFalse(coordinator.contains("postDelayed(eta"));
+        assertTrue(coordinator.contains(
+                "if (source == Source.NONE || source != desiredSource() || !hasFrame(source))"));
+    }
+
     private static void assertBypasses(DirectTbtPayload.Prepared initial,
             DirectTbtPayload.Options initialOptions, DirectTbtPayload.Prepared candidate,
             DirectTbtPayload.Options candidateOptions, boolean wait) {

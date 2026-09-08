@@ -83,8 +83,6 @@ public final class MainActivity extends ComponentActivity {
     private static final String THEME_WARNING_TAG = "theme_warning";
     private static final AtomicBoolean STORAGE_DELETE_OPERATION = new AtomicBoolean(false);
     private static final AtomicBoolean SHARE_OPERATION = new AtomicBoolean(false);
-    private static final AtomicLong STORAGE_SHARE_OPERATION_SEQUENCE = new AtomicLong();
-    private static final Object STORAGE_SHARE_COMPLETION_LOCK = new Object();
     private static final AtomicReference<PendingShare> PENDING_SHARE = new AtomicReference<>();
     private static final AtomicReference<ShareLaunchEvent> SHARE_LAUNCH_EVENT =
             new AtomicReference<>(ShareLaunchEvent.empty());
@@ -2203,68 +2201,21 @@ public final class MainActivity extends ComponentActivity {
         moveIndependentDashboardDisplay(packageName, toDashboard);
     }
 
-    //Creates one bounded ZIP off the UI thread, then posts a read-only Android share chooser.
-    public String composeShareStorageDays(List<String> days, long operationToken) {
-        if (!SHARE_OPERATION.compareAndSet(false, true)) {
-            return "failed: share already running";
-        }
-        List<String> selectedDays = immutableStorageDays(days);
-        try {
-            LogShareZip.Result result = LogShareZip.create(this, selectedDays);
-            if (!result.ok || result.file == null) {
-                return "failed: " + result.detail;
-            }
-            if (!queuePendingShareIfCurrent(operationToken, result.file, selectedDays)) {
-                LogShareZip.deleteArtifact(result.file);
-                return "cancelled";
-            }
-            return "ready " + result.file.getName() + " " + result.detail;
-        } finally {
-            SHARE_OPERATION.set(false);
-            requestStorageRefreshAfterMutation(this, "share");
-        }
-    }
-
     public ComposeStorageShareSummary composeDescribeStorageShareDays(List<String> days) {
         LogShareZip.SelectionSummary summary = LogShareZip.summarize(this, days);
         return new ComposeStorageShareSummary(summary.ok, summary.dayCount,
                 summary.fileCount, summary.sourceBytes, summary.detail);
     }
 
-    //Creates and uploads the same complete-day ZIP only after explicit in-app consent.
-    public ComposeSentryUploadResult composeUploadStorageDaysToSentry(
-            List<String> days, long operationToken, Runnable uploadStarted) {
-        if (!SHARE_OPERATION.compareAndSet(false, true)) {
-            return new ComposeSentryUploadResult(false, "", "share already running");
-        }
-        List<String> submittedDays = immutableStorageDays(days);
-        String uploadId = SentryLogUploader.newUploadId();
-        try {
-            LogShareZip.Result archive = LogShareZip.create(this, submittedDays, uploadId);
-            if (!archive.ok || archive.file == null) {
-                return new ComposeSentryUploadResult(false, "", archive.detail);
-            }
-            try {
-                if (uploadStarted != null) {
-                    uploadStarted.run();
-                }
-            } catch (RuntimeException error) {
-                LogShareZip.deleteArtifact(archive.file);
-                return new ComposeSentryUploadResult(false, "",
-                        error.getClass().getSimpleName() + ": " + error.getMessage());
-            }
-            SentryLogUploader.Result upload = SentryLogUploader.upload(
-                    this, archive.file, submittedDays, uploadId);
-            if (upload.ok && !publishShareCompletionIfCurrent(
-                    operationToken, submittedDays)) {
-                return new ComposeSentryUploadResult(false, "", "cancelled");
-            }
-            return new ComposeSentryUploadResult(upload.ok, upload.eventId, upload.detail);
-        } finally {
-            SHARE_OPERATION.set(false);
-            requestStorageRefreshAfterMutation(this, "sentry-share");
-        }
+    public boolean composeBeginStorageShare(List<String> days, boolean toDeveloper,
+            int selectedFileCount, long selectedBytes) {
+        return StorageLogShareWorkflow.start(getApplicationContext(),
+                immutableStorageDays(days), toDeveloper, selectedFileCount, selectedBytes);
     }
+
+    public void composeCancelStorageShare() { StorageLogShareWorkflow.cancel(); }
+
+    public void composeDismissStorageShare() { StorageLogShareWorkflow.dismiss(); }
 
     public boolean composeBeginConfigurationExport(boolean toDeveloper) {
         return VehicleConfigurationExport.start(getApplicationContext(), toDeveloper);
@@ -2280,7 +2231,22 @@ public final class MainActivity extends ComponentActivity {
 
     static void releaseShareOperation() { SHARE_OPERATION.set(false); }
 
-    static void queueConfigurationShare(File file) { queuePendingShare(file, Collections.emptyList()); }
+    static void queueConfigurationShare(File file, String operationId) {
+        queuePendingShare(file, Collections.emptyList(), ShareOwner.CONFIGURATION, operationId);
+    }
+
+    static void queueStorageShare(File file, List<String> storageDays, String operationId) {
+        queuePendingShare(file, immutableStorageDays(storageDays), ShareOwner.STORAGE_LOGS,
+                operationId);
+    }
+
+    static void publishStorageShareCompletion(List<String> storageDays) {
+        publishShareCompletion(immutableStorageDays(storageDays));
+    }
+
+    static void refreshAfterStorageShare(Context context, String reason) {
+        requestStorageRefreshAfterMutation(context, reason);
+    }
 
     private static List<String> immutableStorageDays(List<String> days) {
         if (days == null || days.isEmpty()) {
@@ -2289,53 +2255,17 @@ public final class MainActivity extends ComponentActivity {
         return Collections.unmodifiableList(new ArrayList<>(days));
     }
 
-    public long composeBeginStorageShareOperation() {
-        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
-            return STORAGE_SHARE_OPERATION_SEQUENCE.incrementAndGet();
-        }
-    }
-
-    public void composeCancelStorageShareOperation(long operationToken) {
-        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
-            if (operationToken != 0L
-                    && STORAGE_SHARE_OPERATION_SEQUENCE.get() == operationToken) {
-                STORAGE_SHARE_OPERATION_SEQUENCE.incrementAndGet();
-            }
-        }
-    }
-
-    private static boolean queuePendingShareIfCurrent(
-            long operationToken, File file, List<String> storageDays) {
-        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
-            if (operationToken == 0L
-                    || STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken) {
-                return false;
-            }
-            queuePendingShare(file, storageDays);
-            return true;
-        }
-    }
-
-    private static boolean publishShareCompletionIfCurrent(
-            long operationToken, List<String> storageDays) {
-        synchronized (STORAGE_SHARE_COMPLETION_LOCK) {
-            if (operationToken == 0L
-                    || STORAGE_SHARE_OPERATION_SEQUENCE.get() != operationToken) {
-                return false;
-            }
-            publishShareCompletion(storageDays);
-            return true;
-        }
-    }
-
-    private static void queuePendingShare(File file, List<String> storageDays) {
+    private static void queuePendingShare(File file, List<String> storageDays,
+            ShareOwner owner, String operationId) {
         if (file == null) {
             return;
         }
         PENDING_SHARE.set(new PendingShare(
                 file,
                 SHARE_LAUNCH_SEQUENCE.incrementAndGet(),
-                immutableStorageDays(storageDays)));
+                immutableStorageDays(storageDays),
+                owner,
+                operationId));
         notifyPendingShare();
     }
 
@@ -2354,6 +2284,7 @@ public final class MainActivity extends ComponentActivity {
         }
         if (!pending.file.isFile()) {
             PENDING_SHARE.compareAndSet(pending, null);
+            notifyShareFailed(pending, "Archive is missing", true);
             return;
         }
         try {
@@ -2368,12 +2299,36 @@ public final class MainActivity extends ComponentActivity {
             send.setClipData(ClipData.newRawUri(pending.file.getName(), uri));
             startActivity(Intent.createChooser(send, null));
             PENDING_SHARE.compareAndSet(pending, null);
-            publishShareCompletion(pending.launchId, pending.storageDays);
+            boolean accepted = notifyShareLaunched(pending);
+            if (accepted && pending.owner == ShareOwner.STORAGE_LOGS) {
+                publishShareCompletion(pending.launchId, pending.storageDays);
+            }
         } catch (RuntimeException e) {
             PENDING_SHARE.compareAndSet(pending, null);
-            AppEventLogger.event(this, "share_chooser_failed error="
-                    + e.getClass().getSimpleName() + " "
-                    + String.valueOf(e.getMessage()).replace('\n', ' ').replace('\r', ' '));
+            String detail = e.getClass().getSimpleName() + ": " + String.valueOf(e.getMessage());
+            notifyShareFailed(pending, detail, false);
+            AppEventLogger.event(this, "share_chooser_failed error=" +
+                    detail.replace('\n', ' ').replace('\r', ' '));
+        }
+    }
+
+    private static boolean notifyShareLaunched(PendingShare pending) {
+        if (pending.owner == ShareOwner.STORAGE_LOGS) {
+            return StorageLogShareWorkflow.androidShareLaunched(pending.operationId);
+        }
+        if (pending.owner == ShareOwner.CONFIGURATION) {
+            return VehicleConfigurationExport.androidShareLaunched(pending.operationId);
+        }
+        return false;
+    }
+
+    private static void notifyShareFailed(
+            PendingShare pending, String detail, boolean archiveMissing) {
+        if (pending.owner == ShareOwner.STORAGE_LOGS) {
+            StorageLogShareWorkflow.androidShareFailed(pending.operationId, detail);
+        } else if (pending.owner == ShareOwner.CONFIGURATION) {
+            VehicleConfigurationExport.androidShareFailed(
+                    pending.operationId, detail, archiveMissing);
         }
     }
 
@@ -2468,15 +2423,22 @@ public final class MainActivity extends ComponentActivity {
         return Math.max(min, Math.min(max, value));
     }
 
+    private enum ShareOwner { STORAGE_LOGS, CONFIGURATION }
+
     private static final class PendingShare {
         final File file;
         final long launchId;
         final List<String> storageDays;
+        final ShareOwner owner;
+        final String operationId;
 
-        PendingShare(File file, long launchId, List<String> storageDays) {
+        PendingShare(File file, long launchId, List<String> storageDays,
+                ShareOwner owner, String operationId) {
             this.file = file;
             this.launchId = launchId;
             this.storageDays = immutableStorageDays(storageDays);
+            this.owner = owner;
+            this.operationId = operationId == null ? "" : operationId;
         }
     }
 
@@ -3074,18 +3036,6 @@ public final class MainActivity extends ComponentActivity {
             this.dayCount = Math.max(0, dayCount);
             this.fileCount = Math.max(0, fileCount);
             this.sourceBytes = Math.max(0L, sourceBytes);
-            this.detail = detail == null ? "" : detail;
-        }
-    }
-
-    public static final class ComposeSentryUploadResult {
-        public final boolean ok;
-        public final String eventId;
-        public final String detail;
-
-        ComposeSentryUploadResult(boolean ok, String eventId, String detail) {
-            this.ok = ok;
-            this.eventId = eventId == null ? "" : eventId;
             this.detail = detail == null ? "" : detail;
         }
     }
@@ -3858,6 +3808,7 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setUserShutdownActive(this, true);
         AppUpdateManager.resetForShutdown();
         VehicleConfigurationExport.shutdown();
+        StorageLogShareWorkflow.shutdown();
         NavAppDisplayController.get(this).cancelWidgetModeForShutdown();
         DashboardWidgetController.shutdown(this);
         AppEventLogger.event(this, "shutdown requested reason=" + safeReason);

@@ -4,6 +4,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import org.junit.Test;
 
 /** Pure policy and metadata checks for the raw-file inventory. */
@@ -105,6 +108,22 @@ public final class VehicleConfigurationFilesTest {
         assertEquals(20L, inventory.totalBytes);
         assertTrue(inventory.entries.get(0).aliases.contains("libsomeipimpl.so"));
         assertTrue(inventory.entries.get(0).aliases.contains("vendor-alias"));
+    }
+
+    @Test public void inventoryProgressGrowsFromInspectionThroughUnavailableFiles() {
+        List<String> progress = new ArrayList<>();
+        VehicleConfigurationFiles.Inventory inventory = new VehicleConfigurationFiles.Inventory(
+                (file, found, bytes, unavailable) -> progress.add(
+                        file + "|" + found + "|" + bytes + "|" + unavailable));
+        inventory.inspect("package-manager");
+        inventory.add(new VehicleConfigurationFiles.Entry("/system/framework/services.jar",
+                "files/system/framework/services.jar", 40L, 30L, 1L, 2L,
+                "regular", "framework"), null);
+        inventory.unavailable("/vendor/lib64/missing.so", "not readable");
+
+        assertEquals("package-manager|0|0|0", progress.get(0));
+        assertEquals("/system/framework/services.jar|1|40|0", progress.get(1));
+        assertEquals("/vendor/lib64/missing.so|1|40|1", progress.get(2));
     }
 
     @Test public void candidateSelectionCoversClusterFrameworkAndDependencyFamilies() {

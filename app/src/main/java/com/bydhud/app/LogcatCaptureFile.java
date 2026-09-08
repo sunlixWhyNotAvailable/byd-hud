@@ -10,39 +10,64 @@ final class LogcatCaptureFile {
     private final File saved;
     private boolean started;
     private boolean finished;
+    private FileOutputStream output;
 
     LogcatCaptureFile(File directory) {
         part = new File(directory, "logcat.log.part");
         saved = new File(directory, "logcat.log");
     }
 
-    void append(byte[] bytes) throws IOException {
+    synchronized void append(byte[] bytes) throws IOException {
+        append(bytes, 0, bytes == null ? 0 : bytes.length);
+    }
+
+    synchronized void append(byte[] bytes, int offset, int length) throws IOException {
         if (finished) throw new IOException("Capture log already finalized");
+        if (bytes == null) throw new IllegalArgumentException("bytes are required");
+        if (offset < 0 || length < 0 || offset + length > bytes.length) {
+            throw new IndexOutOfBoundsException();
+        }
+        if (length == 0) return;
         if (!started) {
             if (saved.exists() || !part.createNewFile()) {
                 throw new IOException("Capture log already exists: " + part);
             }
             started = true;
+            output = new FileOutputStream(part, true);
         }
-        // Close each bounded poll so even a failed write leaves no open capture handle.
-        try (FileOutputStream output = new FileOutputStream(part, true)) {
-            output.write(bytes);
-        }
+        output.write(bytes, offset, length);
     }
 
-    void finish() throws IOException {
+    synchronized void finish() throws IOException {
         if (finished) return;
+        if (output != null) {
+            FileOutputStream current = output;
+            output = null;
+            IOException failure = null;
+            try {
+                current.flush();
+            } catch (IOException error) {
+                failure = error;
+            }
+            try {
+                current.close();
+            } catch (IOException error) {
+                if (failure == null) failure = error;
+                else failure.addSuppressed(error);
+            }
+            if (failure != null) throw failure;
+        }
         if (started && (saved.exists() || !part.renameTo(saved))) {
             throw new IOException("Unable to finalize " + part);
         }
         finished = true;
     }
 
-    File file() {
+    synchronized File file() {
         return finished ? saved : part;
     }
 
-    long bytes() {
+    synchronized long bytes() {
         return file().isFile() ? file().length() : 0L;
     }
 }

@@ -20,12 +20,15 @@ public final class WazeTravelEstimateTest {
         TravelEstimate estimate = estimate(arrivalTimeMs, 660, 5.1);
 
         DirectTbtFrame.TripMetrics metrics =
-                WazeDirectChannel.destinationMetrics(Collections.singletonList(estimate));
+                WazeDirectChannel.destinationMetrics(
+                        Collections.singletonList(estimate), 1_700_000_012_345L);
 
         assertEquals(arrivalTimeMs, metrics.getNextStop().getArrivalTimeEpochMs());
         assertEquals(0, metrics.getNextStop().getArrivalZoneOffsetSeconds());
         assertEquals(660, metrics.getNextStop().getRemainingTimeSeconds());
         assertEquals(5100, metrics.getNextStop().getRemainingDistanceMeters());
+        assertEquals(1_700_000_012_345L,
+                metrics.getNextStop().getSampleWallTimeEpochMs());
         assertFalse(metrics.getWholeRoute().hasAnyValue());
     }
 

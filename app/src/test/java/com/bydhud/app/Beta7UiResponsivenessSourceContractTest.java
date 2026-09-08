@@ -215,19 +215,15 @@ public final class Beta7UiResponsivenessSourceContractTest {
     public void storageMutationsRefreshSharedCacheWithoutAnActivityTabDependency()
             throws IOException {
         String activity = source("MainActivity.java");
-        String share = between(activity, "public String composeShareStorageDays(",
-                "public ComposeStorageShareSummary composeDescribeStorageShareDays");
-        String sentryShare = between(activity,
-                "public ComposeSentryUploadResult composeUploadStorageDaysToSentry(",
-                "public boolean composeBeginConfigurationExport(");
+        String workflow = source("StorageLogShareWorkflow.kt");
         String storage = source("NavigationLogStorage.java");
         String retention = between(storage, "private static void runScheduledRetention(",
                 "private static void runNavCaptureRetention(");
 
         assertTrue(activity.contains("requestStorageRefreshAfterMutation(this, \"delete\")"));
-        assertTrue(share.contains("requestStorageRefreshAfterMutation(this, \"share\")"));
-        assertTrue(sentryShare.contains(
-                "requestStorageRefreshAfterMutation(this, \"sentry-share\")"));
+        assertTrue(activity.contains("static void refreshAfterStorageShare(Context context, String reason)"));
+        assertTrue(activity.contains("requestStorageRefreshAfterMutation(context, reason)"));
+        assertTrue(workflow.contains("if (toDeveloper) \"sentry-share\" else \"share\""));
         assertTrue(storage.contains("app, \"retired-day-cleanup\")"));
         assertTrue(retention.contains("request.onComplete == null"));
         assertTrue(retention.contains("requestStorageRefreshAfterMutation("));

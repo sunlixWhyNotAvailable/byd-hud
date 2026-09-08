@@ -70,6 +70,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -135,14 +136,12 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -196,13 +195,6 @@ private sealed class UpdateCheckState {
 private enum class StorageShareDestination {
     Sentry,
     Android
-}
-
-private enum class SentryUploadPhase {
-    Preparing,
-    Uploading,
-    Success,
-    Failure
 }
 
 private const val SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L
@@ -493,12 +485,17 @@ private data class OperationCardSpec(
     val phase: String,
     val detail: String,
     val startedAt: Long,
+    val startedAtElapsedMs: Long = 0L,
+    val endedAtElapsedMs: Long = 0L,
     val busy: Boolean,
     val stopEnabled: Boolean,
     val closeEnabled: Boolean,
+    val details: String = "",
+    val primaryActionText: String = "",
     val failed: Boolean,
     val success: Boolean,
     val onStop: () -> Unit,
+    val onPrimary: () -> Unit = {},
     val onClose: () -> Unit
 )
 
@@ -760,18 +757,11 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var storageShareSummary by remember {
         mutableStateOf<MainActivity.ComposeStorageShareSummary?>(null)
     }
-    var storageShareDestination by remember { mutableStateOf<StorageShareDestination?>(null) }
-    var storageSharePhase by remember { mutableStateOf<LogShareZip.Phase?>(null) }
-    var storageShareStartedAt by rememberSaveable { mutableStateOf(0L) }
-    var storageShareOperationToken by rememberSaveable { mutableStateOf(0L) }
-    var storageShareTerminalPhase by rememberSaveable { mutableStateOf("") }
-    var storageShareTerminalDetail by rememberSaveable { mutableStateOf("") }
-    var sentryUploadPhase by remember { mutableStateOf<SentryUploadPhase?>(null) }
-    var sentryUploadEventId by remember { mutableStateOf("") }
-    var sentryUploadError by remember { mutableStateOf("") }
     var sentryUploadCooldownUntilMs by rememberSaveable { mutableStateOf(0L) }
     var sentryUploadCooldownRemaining by remember { mutableIntStateOf(0) }
+    val storageLogShare by StorageLogShareWorkflow.snapshot.collectAsState()
     val configurationExport by VehicleConfigurationExport.snapshot.collectAsState()
+    val storageLogShareBusy = storageLogShare?.let { storageLogShareBusy(it.phase) } ?: false
     val configurationShareBusy = configurationExport?.let { configurationExportBusy(it.phase) } ?: false
     var configurationShareVisible by rememberSaveable { mutableStateOf(false) }
     var configurationStartFailed by remember { mutableStateOf(false) }
@@ -815,7 +805,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         showSetupDialog -> "setup"
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
-        configurationShareVisible || configurationExport != null -> "configuration-share"
+        configurationShareVisible -> "configuration-share"
         pendingNavigatorAssetId.isNotEmpty() || navigatorAssetActionPending -> "navigator-asset"
         pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty()
             || pendingPatchProfile.isNotEmpty() -> "patch"
@@ -946,7 +936,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
 
     //runs storage deletion as folder steps so the UI can stay responsive without a pre-scan.
     fun beginStorageDelete(days: List<String>) {
-        if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
+        if (days.isEmpty() || storageDeleteBusy || storageShareBusy || storageLogShareBusy) {
             return
         }
         if (!activity.composeTryStartBlockingUiFlow("storage-delete")) {
@@ -961,14 +951,12 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     }
 
     fun beginStorageShare(days: List<String>) {
-        if (days.isEmpty() || storageDeleteBusy || storageShareBusy) {
+        if (days.isEmpty() || storageDeleteBusy || storageShareBusy || storageLogShareBusy ||
+            configurationShareBusy) {
             return
         }
-        storageShareTerminalPhase = ""
-        storageShareTerminalDetail = ""
         storageShareDays = days
         storageShareBusy = true
-        storageShareDestination = null
         updateScope.launch {
             try {
                 val summary = withContext(Dispatchers.IO) {
@@ -982,7 +970,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 }
             } catch (error: Exception) {
                 storageShareDays = emptyList()
-                storageShareDestination = null
                 storageShareSummary = null
                 activity.composeAppendStatus(
                     "Storage share failed: ${error.message ?: error.javaClass.simpleName}"
@@ -1185,81 +1172,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         refresh()
     }
 
-    LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination) {
-        val destination = storageShareDestination
-        val operationToken = storageShareOperationToken
-        if (!storageShareBusy || destination == null) {
-            return@LaunchedEffect
-        }
-        try {
-            if (destination == StorageShareDestination.Sentry) {
-                val result = runInterruptible(Dispatchers.IO) {
-                    LogShareZip.attachProgressListener { phase ->
-                        activity.runOnUiThread { storageSharePhase = phase }
-                    }
-                    try {
-                        activity.composeUploadStorageDaysToSentry(
-                            storageShareDays,
-                            operationToken
-                        ) {
-                            activity.runOnUiThread {
-                                storageSharePhase = null
-                                sentryUploadPhase = SentryUploadPhase.Uploading
-                            }
-                        }
-                    } finally {
-                        LogShareZip.clearProgressListener()
-                    }
-                }
-                sentryUploadEventId = result.eventId
-                sentryUploadError = result.detail
-                sentryUploadPhase = if (result.ok) {
-                    SentryUploadPhase.Success
-                } else {
-                    SentryUploadPhase.Failure
-                }
-                activity.composeAppendStatus("Sentry log upload: ${result.detail}")
-            } else {
-                val detail = runInterruptible(Dispatchers.IO) {
-                    LogShareZip.attachProgressListener { phase ->
-                        activity.runOnUiThread { storageSharePhase = phase }
-                    }
-                    try {
-                        activity.composeShareStorageDays(storageShareDays, operationToken)
-                    } finally {
-                        LogShareZip.clearProgressListener()
-                    }
-                }
-                activity.composeAppendStatus("Storage share: $detail")
-            }
-        } catch (cancelled: CancellationException) {
-            storageShareTerminalPhase = "CANCELLED"
-            storageShareTerminalDetail = if (copy.language == Language.Ua) {
-                "Операцію скасовано"
-            } else {
-                "Operation cancelled"
-            }
-            activity.composeAppendStatus("Storage share cancelled")
-            throw cancelled
-        } catch (error: Exception) {
-            val detail = error.message ?: error.javaClass.simpleName
-            storageShareTerminalPhase = "FAILED"
-            storageShareTerminalDetail = detail
-            if (destination == StorageShareDestination.Sentry) {
-                sentryUploadError = detail
-                sentryUploadPhase = SentryUploadPhase.Failure
-            }
-            activity.composeAppendStatus("Storage share failed: $detail")
-        } finally {
-            storageSharePhase = null
-            storageShareBusy = false
-            storageShareDays = emptyList()
-            storageShareDestination = null
-            storageShareOperationToken = 0L
-            refresh()
-        }
-    }
-
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -1339,12 +1251,12 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         scrollState = storageScrollState,
                         dayScrollState = storageDayScrollState,
                         snapshot = snapshot,
-                        configurationShareBusy = configurationShareBusy,
+                        configurationShareBusy = configurationShareBusy || storageLogShareBusy,
                         logcatBusy = logcatBusy,
                         onStartLogcat = { runLogcatAction(true) },
                         onStopLogcat = { runLogcatAction(false) },
                         onShareConfiguration = {
-                            if (configurationExport == null
+                            if (!configurationShareBusy && !storageLogShareBusy
                                 && activity.composeTryStartBlockingUiFlow("configuration-share")) {
                                 configurationStartFailed = false
                                 configurationShareVisible = true
@@ -1352,7 +1264,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         },
                         sortOldestFirst = storageSortOldestFirst,
                         selectedDays = selectedStorageDays,
-                        storageActionBusy = storageDeleteBusy || storageShareBusy,
+                        storageActionBusy = storageDeleteBusy || storageShareBusy || storageLogShareBusy,
                         storageSortBusy = storageDeleteBusy,
                         storageLimitDraft = storageLimitDraft,
                         onStorageLimitDraftChange = { storageLimitDraft = it },
@@ -1453,28 +1365,13 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             shareCopy = shareCopy,
             palette = palette,
             patchOperations = snapshot.patchOperations,
-            storageSharePhase = storageSharePhase,
-            storageShareTerminalPhase = storageShareTerminalPhase,
-            storageShareTerminalDetail = storageShareTerminalDetail,
-            storageShareStartedAt = storageShareStartedAt,
-            onCancelShare = {
-                activity.composeCancelStorageShareOperation(storageShareOperationToken)
-                storageShareTerminalPhase = "CANCELLED"
-                storageShareTerminalDetail = if (copy.language == Language.Ua) {
-                    "Операцію скасовано"
-                } else {
-                    "Operation cancelled"
-                }
-                storageShareBusy = false
-                if (sentryUploadPhase == SentryUploadPhase.Preparing) {
-                    sentryUploadPhase = null
-                }
-            },
-            onCloseShare = {
-                storageShareTerminalPhase = ""
-                storageShareTerminalDetail = ""
-                storageShareStartedAt = 0L
-            },
+            storageLogShare = storageLogShare,
+            configurationExport = configurationExport,
+            onCancelShare = { activity.composeCancelStorageShare() },
+            onCloseShare = { activity.composeDismissStorageShare() },
+            onCancelConfiguration = { activity.composeCancelConfigurationExport() },
+            onCloseConfiguration = { activity.composeDismissConfigurationExport() },
+            onShareConfiguration = { activity.composeShareConfigurationExport() },
             onCancelPatch = { profileId ->
                 updateScope.launch {
                     withContext(Dispatchers.IO) {
@@ -1656,18 +1553,19 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 onSentry = {
                     val now = SystemClock.elapsedRealtime()
                     if (sentryUploadCooldownUntilMs <= now) {
-                        sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
-                        sentryUploadCooldownRemaining = 30
-                        storageShareSummary = null
-                        sentryUploadEventId = ""
-                        sentryUploadError = ""
-                        sentryUploadPhase = SentryUploadPhase.Preparing
-                        storageShareDestination = StorageShareDestination.Sentry
-                        storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
-                        storageShareStartedAt = System.currentTimeMillis()
-                        storageShareOperationToken = activity.composeBeginStorageShareOperation()
-                        storageShareTerminalPhase = ""
-                        storageShareBusy = true
+                        if (activity.composeBeginStorageShare(
+                                storageShareDays,
+                                true,
+                                summary.fileCount,
+                                summary.sourceBytes
+                            )) {
+                            sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
+                            sentryUploadCooldownRemaining = 30
+                            storageShareSummary = null
+                            storageShareDays = emptyList()
+                        } else {
+                            activity.composeAppendStatus("Storage share already running")
+                        }
                     }
                 },
                 sentryButtonText = if (sentryButtonRemaining > 0) {
@@ -1677,13 +1575,17 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 },
                 sentryButtonEnabled = sentryButtonRemaining == 0,
                 onAnotherApp = {
-                    storageShareSummary = null
-                    storageShareDestination = StorageShareDestination.Android
-                    storageSharePhase = LogShareZip.Phase.WAITING_FOR_WRITES
-                    storageShareStartedAt = System.currentTimeMillis()
-                    storageShareOperationToken = activity.composeBeginStorageShareOperation()
-                    storageShareTerminalPhase = ""
-                    storageShareBusy = true
+                    if (activity.composeBeginStorageShare(
+                            storageShareDays,
+                            false,
+                            summary.fileCount,
+                            summary.sourceBytes
+                        )) {
+                        storageShareSummary = null
+                        storageShareDays = emptyList()
+                    } else {
+                        activity.composeAppendStatus("Storage share already running")
+                    }
                 },
                 onCancel = {
                     storageShareSummary = null
@@ -1692,22 +1594,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             )
         }
 
-        sentryUploadPhase?.let { phase ->
-            if (storageSharePhase != null) return@let
-            SentryUploadOverlay(
-                copy = shareCopy,
-                palette = palette,
-                phase = phase,
-                eventId = sentryUploadEventId,
-                error = sentryUploadError,
-                configuration = false,
-                onClose = {
-                    sentryUploadPhase = null
-                }
-            )
-        }
-
-        if (configurationShareVisible && configurationExport == null) {
+        if (configurationShareVisible) {
             ConfigurationShareDestinationOverlay(
                 copy = shareCopy,
                 palette = palette,
@@ -1719,18 +1606,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 onSentry = { beginConfigurationShare(StorageShareDestination.Sentry) },
                 onAnotherApp = { beginConfigurationShare(StorageShareDestination.Android) },
                 onCancel = { configurationShareVisible = false }
-            )
-        }
-
-        configurationExport?.let { state ->
-            ConfigurationExportOverlay(
-                copy = copy,
-                shareCopy = shareCopy,
-                palette = palette,
-                state = state,
-                onCancel = { activity.composeCancelConfigurationExport() },
-                onClose = { activity.composeDismissConfigurationExport() },
-                onShare = { activity.composeShareConfigurationExport() }
             )
         }
 
@@ -3709,54 +3584,134 @@ private fun OperationProgressStack(
     shareCopy: ShareCopy,
     palette: Palette,
     patchOperations: List<MainActivity.ComposePatchOperation>,
-    storageSharePhase: LogShareZip.Phase?,
-    storageShareTerminalPhase: String,
-    storageShareTerminalDetail: String,
-    storageShareStartedAt: Long,
+    storageLogShare: StorageLogShareSnapshot?,
+    configurationExport: ConfigurationExportSnapshot?,
     onCancelShare: () -> Unit,
     onCloseShare: () -> Unit,
+    onCancelConfiguration: () -> Unit,
+    onCloseConfiguration: () -> Unit,
+    onShareConfiguration: () -> Unit,
     onCancelPatch: (String) -> Unit,
     onDismissPatch: (String) -> Unit
 ) {
+    var detailsKey by remember { mutableStateOf("") }
+    val ua = copy.language == Language.Ua
+    val visibleStorageShare = storageLogShare?.takeUnless { it.dismissed }
+    val visibleConfigurationExport = configurationExport?.takeUnless { it.dismissed }
+    val showStorageShare = visibleStorageShare != null &&
+        (visibleConfigurationExport == null ||
+            visibleStorageShare.startedAtEpochMs >= visibleConfigurationExport.startedAtEpochMs)
     val cards = buildList {
-        if (storageShareTerminalPhase.isNotEmpty()) {
-            add(OperationCardSpec(
-                key = "share",
-                title = shareCopy.shareLogsTitle,
-                phase = if (storageShareTerminalPhase == "CANCELLED") {
-                    if (copy.language == Language.Ua) "Скасовано" else "Cancelled"
-                } else {
-                    shareCopy.failure
-                },
-                detail = storageShareTerminalDetail,
-                startedAt = storageShareStartedAt,
-                busy = false,
-                stopEnabled = false,
-                closeEnabled = true,
-                failed = storageShareTerminalPhase == "FAILED",
-                success = false,
-                onStop = {},
-                onClose = onCloseShare
-            ))
-        } else if (storageSharePhase != null) {
-            val phaseText = when (storageSharePhase) {
-                LogShareZip.Phase.WAITING_FOR_WRITES -> shareCopy.waitingForWrites
-                LogShareZip.Phase.COPYING -> shareCopy.copying
-                LogShareZip.Phase.ARCHIVING -> shareCopy.archiving
+        visibleStorageShare?.takeIf { showStorageShare }?.let { state ->
+            val busy = storageLogShareBusy(state.phase)
+            val sending = state.phase == StorageLogSharePhase.UPLOADING
+            val terminal = !busy
+            val phase = when (state.phase) {
+                StorageLogSharePhase.WAITING_FOR_WRITES -> shareCopy.waitingForWrites
+                StorageLogSharePhase.COPYING -> shareCopy.copying
+                StorageLogSharePhase.ARCHIVING -> shareCopy.archiving
+                StorageLogSharePhase.WAITING_FOR_SHARE -> if (ua) "Очікування Android Share" else "Waiting for Android share"
+                StorageLogSharePhase.READY -> if (ua) "Готово до надсилання" else "Ready to share"
+                StorageLogSharePhase.UPLOADING -> shareCopy.uploading
+                StorageLogSharePhase.SENT -> shareCopy.success
+                StorageLogSharePhase.FAILED -> shareCopy.failure
+                StorageLogSharePhase.CANCELLING -> if (ua) "Зупинення" else "Stopping"
+                StorageLogSharePhase.CANCELLED -> if (ua) "Скасовано" else "Cancelled"
+            }
+            val summary = buildString {
+                if (state.foundFiles > 0) append("${state.foundFiles} ${if (ua) "файлів" else "files"}")
+                if (state.knownBytes > 0) {
+                    if (isNotEmpty()) append(" · ")
+                    append(formatBytes(state.knownBytes, copy))
+                }
+                if (state.eventId.isNotEmpty()) {
+                    if (isNotEmpty()) append(" · ")
+                    append("${shareCopy.reportId}: ${state.eventId}")
+                }
             }
             add(OperationCardSpec(
                 key = "share",
                 title = shareCopy.shareLogsTitle,
-                phase = phaseText,
-                detail = "",
-                startedAt = storageShareStartedAt,
-                busy = true,
-                stopEnabled = true,
-                closeEnabled = false,
-                failed = false,
-                success = false,
+                phase = phase,
+                detail = summary,
+                startedAt = state.startedAtEpochMs,
+                startedAtElapsedMs = state.startedAtElapsedMs,
+                endedAtElapsedMs = state.endedAtElapsedMs,
+                busy = busy,
+                stopEnabled = busy && !sending && state.phase != StorageLogSharePhase.CANCELLING,
+                closeEnabled = sending || terminal,
+                details = operationDetails(
+                    operationId = state.operationId,
+                    currentFile = state.currentFile,
+                    detail = state.detail,
+                    eventId = state.eventId,
+                    unavailable = 0,
+                    ua = ua
+                ),
+                failed = state.phase == StorageLogSharePhase.FAILED,
+                success = state.phase == StorageLogSharePhase.SENT || state.phase == StorageLogSharePhase.READY,
                 onStop = onCancelShare,
-                onClose = {}
+                onClose = onCloseShare
+            ))
+        }
+        visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->
+            val busy = configurationExportBusy(state.phase)
+            val sending = state.phase == ConfigurationExportPhase.UPLOADING
+            val partial = state.unavailableFiles > 0
+            val phase = when (state.phase) {
+                ConfigurationExportPhase.INVENTORY -> if (ua) "Пошук системних компонентів" else "Finding system components"
+                ConfigurationExportPhase.DIAGNOSTICS -> if (ua) "Збирання діагностики" else "Collecting diagnostics"
+                ConfigurationExportPhase.COPYING -> if (ua) "Копіювання системних файлів" else "Copying system files"
+                ConfigurationExportPhase.ARCHIVING -> if (ua) "Пакування ZIP" else "Adding files to ZIP"
+                ConfigurationExportPhase.VERIFYING -> if (ua) "Перевірка ZIP" else "Verifying ZIP"
+                ConfigurationExportPhase.WAITING_FOR_SHARE -> if (ua) "Очікування Android Share" else "Waiting for Android share"
+                ConfigurationExportPhase.READY -> if (partial) {
+                    if (ua) "Архів готовий · частково" else "Archive ready · partial"
+                } else if (ua) "Архів готовий" else "Archive ready"
+                ConfigurationExportPhase.UPLOADING -> shareCopy.uploading
+                ConfigurationExportPhase.SENT -> if (partial) {
+                    if (ua) "Частковий архів надіслано" else "Partial archive sent"
+                } else shareCopy.configurationSuccess
+                ConfigurationExportPhase.FAILED -> shareCopy.configurationFailure
+                ConfigurationExportPhase.CANCELLING -> if (ua) "Зупинення" else "Stopping"
+                ConfigurationExportPhase.CANCELLED -> if (ua) "Скасовано" else "Cancelled"
+            }
+            val summary = if (!state.inventoryComplete) {
+                if (ua) "${state.foundFiles} знайдено · ${formatBytes(state.knownBytes, copy)} відомо наразі"
+                else "${state.foundFiles} found · ${formatBytes(state.knownBytes, copy)} known so far"
+            } else {
+                val totalFiles = state.totalFiles ?: state.foundFiles
+                val totalBytes = state.totalBytes ?: state.knownBytes
+                if (ua) "${state.copiedFiles}/$totalFiles файлів · ${formatBytes(state.copiedBytes, copy)}/${formatBytes(totalBytes, copy)}"
+                else "${state.copiedFiles}/$totalFiles files · ${formatBytes(state.copiedBytes, copy)}/${formatBytes(totalBytes, copy)}"
+            }
+            add(OperationCardSpec(
+                key = "configuration-export",
+                title = shareCopy.configurationTitle,
+                phase = phase,
+                detail = summary,
+                startedAt = state.startedAtEpochMs,
+                startedAtElapsedMs = state.startedAtElapsedMs,
+                endedAtElapsedMs = state.endedAtElapsedMs,
+                busy = busy,
+                stopEnabled = busy && !sending && state.phase != ConfigurationExportPhase.CANCELLING,
+                closeEnabled = sending || !busy,
+                details = operationDetails(
+                    operationId = state.operationId,
+                    currentFile = state.currentFile,
+                    detail = configurationExportDetails(state, copy, shareCopy),
+                    eventId = state.eventId,
+                    unavailable = state.unavailableFiles,
+                    ua = ua
+                ),
+                primaryActionText = if (state.archiveAvailable && !busy &&
+                    state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE
+                ) shareCopy.shareToAnotherApp else "",
+                failed = state.phase == ConfigurationExportPhase.FAILED,
+                success = state.phase == ConfigurationExportPhase.READY || state.phase == ConfigurationExportPhase.SENT,
+                onStop = onCancelConfiguration,
+                onPrimary = onShareConfiguration,
+                onClose = onCloseConfiguration
             ))
         }
         patchOperations.filter {
@@ -3783,7 +3738,7 @@ private fun OperationProgressStack(
                 onClose = { onDismissPatch(operation.profileId) }
             ))
         }
-    }.sortedByDescending { it.startedAt }.take(3)
+    }.sortedByDescending { it.startedAt }
 
     if (cards.isEmpty()) return
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
@@ -3792,8 +3747,19 @@ private fun OperationProgressStack(
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             cards.forEach { card ->
-                OperationProgressCard(card, shareCopy, palette, copy.language)
+                OperationProgressCard(
+                    card = card,
+                    copy = shareCopy,
+                    palette = palette,
+                    language = copy.language,
+                    onDetails = { detailsKey = card.key }
+                )
             }
+        }
+    }
+    cards.firstOrNull { it.key == detailsKey }?.let { card ->
+        OperationDetailsOverlay(card.title, card.details, shareCopy.close, palette) {
+            detailsKey = ""
         }
     }
 }
@@ -3803,8 +3769,29 @@ private fun OperationProgressCard(
     card: OperationCardSpec,
     copy: ShareCopy,
     palette: Palette,
-    language: Language
+    language: Language,
+    onDetails: () -> Unit
 ) {
+    var nowElapsedMs by remember(card.key, card.startedAtElapsedMs, card.endedAtElapsedMs) {
+        mutableLongStateOf(SystemClock.elapsedRealtime())
+    }
+    LaunchedEffect(card.key, card.startedAtElapsedMs, card.endedAtElapsedMs) {
+        while (card.startedAtElapsedMs > 0L && card.endedAtElapsedMs == 0L) {
+            nowElapsedMs = SystemClock.elapsedRealtime()
+            delay(1_000L)
+        }
+    }
+    val elapsed = if (card.startedAtElapsedMs > 0L) {
+        ((if (card.endedAtElapsedMs > 0L) card.endedAtElapsedMs else nowElapsedMs) -
+            card.startedAtElapsedMs).coerceAtLeast(0L) / 1_000L
+    } else null
+    val summary = buildString {
+        append(card.detail)
+        elapsed?.let {
+            if (isNotEmpty()) append(" · ")
+            append(if (language == Language.Ua) "${it} с" else "${it} s")
+        }
+    }
     Column(
         modifier = Modifier
             .width(460.dp)
@@ -3842,9 +3829,9 @@ private fun OperationProgressCard(
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis
                 )
-                if (card.detail.isNotEmpty()) {
+                if (summary.isNotEmpty()) {
                     Text(
-                        card.detail,
+                        summary,
                         color = palette.muted,
                         fontSize = 12.sp,
                         maxLines = 2,
@@ -3853,34 +3840,132 @@ private fun OperationProgressCard(
                 }
             }
         }
-        Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-            if (card.busy) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+        ) {
+            if (card.details.isNotEmpty()) {
+                HudButton(
+                    if (language == Language.Ua) "Деталі" else "Details",
+                    palette,
+                    width = 105.dp,
+                    onClick = onDetails
+                )
+            }
+            if (card.primaryActionText.isNotEmpty()) {
+                HudButton(
+                    card.primaryActionText,
+                    palette,
+                    primary = true,
+                    width = 160.dp,
+                    onClick = card.onPrimary
+                )
+            }
+            if (card.busy && card.stopEnabled) {
                 HudButton(
                     if (language == Language.Ua) "Зупинити" else "Stop",
                     palette,
-                    enabled = card.stopEnabled,
-                    width = 138.dp,
+                    width = 105.dp,
                     onClick = card.onStop
                 )
-            } else if (card.closeEnabled) {
-                HudButton(copy.close, palette, width = 138.dp, onClick = card.onClose)
+            }
+            if (card.closeEnabled) {
+                HudButton(copy.close, palette, width = 105.dp, onClick = card.onClose)
             }
         }
     }
 }
 
-@Composable
-private fun SentryUploadOverlay(
-    copy: ShareCopy,
-    palette: Palette,
-    phase: SentryUploadPhase,
+private fun storageLogShareBusy(phase: StorageLogSharePhase): Boolean = when (phase) {
+    StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
+    StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.UPLOADING,
+    StorageLogSharePhase.CANCELLING -> true
+    StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY, StorageLogSharePhase.SENT,
+    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED -> false
+}
+
+private fun configurationExportBusy(phase: ConfigurationExportPhase): Boolean = when (phase) {
+    ConfigurationExportPhase.INVENTORY, ConfigurationExportPhase.DIAGNOSTICS,
+    ConfigurationExportPhase.COPYING, ConfigurationExportPhase.ARCHIVING,
+    ConfigurationExportPhase.VERIFYING, ConfigurationExportPhase.UPLOADING,
+    ConfigurationExportPhase.CANCELLING -> true
+    ConfigurationExportPhase.WAITING_FOR_SHARE, ConfigurationExportPhase.READY, ConfigurationExportPhase.SENT,
+    ConfigurationExportPhase.FAILED, ConfigurationExportPhase.CANCELLED -> false
+}
+
+private fun configurationExportDetails(
+    state: ConfigurationExportSnapshot,
+    copy: Copy,
+    shareCopy: ShareCopy
+): String = buildString {
+    val ua = copy.language == Language.Ua
+    if (state.archiveAvailable) {
+        append(state.archiveName)
+        append("\nZIP: ${formatBytes(state.archiveBytes, copy)}")
+    }
+    if (state.unavailableFiles > 0) {
+        if (isNotEmpty()) append("\n\n")
+        append(if (ua) {
+            "Недоступно файлів: ${state.unavailableFiles}. Повні причини збережено в manifest.json"
+        } else {
+            "Unavailable files: ${state.unavailableFiles}. Full reasons are recorded in manifest.json"
+        })
+    }
+    if (state.toDeveloper && state.archiveAvailable &&
+        state.archiveBytes > SentryLogUploader.MAX_ZIP_BYTES) {
+        if (isNotEmpty()) append("\n\n")
+        val limit = SentryLogUploader.MAX_ZIP_BYTES / (1024L * 1024L)
+        append(if (ua) {
+            "Архів перевищує ліміт Sentry ($limit МіБ) і не був надісланий. Повний архів збережено для іншого застосунку"
+        } else {
+            "The archive exceeds the Sentry limit ($limit MiB) and was not sent. The complete archive is retained for another app"
+        })
+    }
+    if (state.phase == ConfigurationExportPhase.UPLOADING) {
+        if (isNotEmpty()) append("\n\n")
+        append(if (ua) {
+            "Надсилання через Sentry вже розпочалося. Close приховує картку, але не скасовує надсилання"
+        } else {
+            "Sentry sending has started. Close hides the card but does not cancel the upload"
+        })
+    }
+    if (state.detail.isNotBlank()) {
+        if (isNotEmpty()) append("\n\n")
+        append(state.detail)
+    }
+    if (state.eventId.isNotBlank()) {
+        if (isNotEmpty()) append("\n\n")
+        append("${shareCopy.reportId}: ${state.eventId}")
+    }
+}
+
+private fun operationDetails(
+    operationId: String,
+    currentFile: String,
+    detail: String,
     eventId: String,
-    error: String,
-    configuration: Boolean,
+    unavailable: Int,
+    ua: Boolean
+): String = buildString {
+    append("Operation ID: $operationId")
+    if (currentFile.isNotBlank()) append("\n\n${if (ua) "Поточний файл" else "Current file"}:\n$currentFile")
+    if (unavailable > 0 && !detail.contains("manifest.json")) {
+        append("\n\n${if (ua) "Недоступно" else "Unavailable"}: $unavailable")
+    }
+    if (detail.isNotBlank()) append("\n\n$detail")
+    if (eventId.isNotBlank() && !detail.contains(eventId)) append("\n\nEvent ID: $eventId")
+}
+
+@Composable
+private fun OperationDetailsOverlay(
+    title: String,
+    details: String,
+    closeText: String,
+    palette: Palette,
     onClose: () -> Unit
 ) {
-    val complete = phase == SentryUploadPhase.Success || phase == SentryUploadPhase.Failure
-    Box(
+    BackHandler(onBack = onClose)
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
@@ -3889,222 +3974,23 @@ private fun SentryUploadOverlay(
         ModalInputBlocker()
         Column(
             modifier = Modifier
-                .width(560.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .background(palette.surface)
-                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
-                .padding(18.dp),
-            verticalArrangement = Arrangement.spacedBy(14.dp)
-        ) {
-            Text(
-                if (configuration) copy.configurationUploadTitle else copy.uploadTitle,
-                color = palette.text,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            if (!complete) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    LoadingSpinner(palette)
-                    Spacer(Modifier.width(14.dp))
-                    Text(
-                        if (phase == SentryUploadPhase.Preparing) copy.preparing else copy.uploading,
-                        color = palette.text,
-                        fontSize = 16.sp,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                }
-            } else {
-                Text(
-                    if (phase == SentryUploadPhase.Success) {
-                        if (configuration) copy.configurationSuccess else copy.success
-                    } else {
-                        if (configuration) copy.configurationFailure else copy.failure
-                    },
-                    color = if (phase == SentryUploadPhase.Success) palette.green else palette.red,
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
-                val detail = if (phase == SentryUploadPhase.Success) {
-                    "${copy.reportId}: $eventId"
-                } else {
-                    error
-                }
-                CodeBlock(detail, palette, compact = true)
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                    HudButton(copy.close, palette, width = 138.dp, onClick = onClose)
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ConfigurationExportOverlay(
-    copy: Copy,
-    shareCopy: ShareCopy,
-    palette: Palette,
-    state: ConfigurationExportSnapshot,
-    onCancel: () -> Unit,
-    onClose: () -> Unit,
-    onShare: () -> Unit
-) {
-    val ua = copy.language == Language.Ua
-    val busy = configurationExportBusy(state.phase)
-    val canCancel = busy && state.phase != ConfigurationExportPhase.UPLOADING
-        && state.phase != ConfigurationExportPhase.CANCELLING
-    val canShare = state.archiveAvailable && !busy && state.phase != ConfigurationExportPhase.CANCELLED
-    val partial = state.unavailableFiles > 0
-    val stageText = when (state.phase) {
-        ConfigurationExportPhase.INVENTORY -> if (ua) "Пошук системних компонентів" else "Finding system components"
-        ConfigurationExportPhase.DIAGNOSTICS -> if (ua) "Збирання конфігурації та діагностики" else "Collecting configuration and diagnostics"
-        ConfigurationExportPhase.COPYING -> if (ua) "Копіювання системних файлів" else "Copying system files"
-        ConfigurationExportPhase.ARCHIVING -> if (ua) "Пакування перевірених файлів у ZIP" else "Adding verified files to ZIP"
-        ConfigurationExportPhase.VERIFYING -> if (ua) "Перевірка завершеного ZIP-архіву" else "Verifying the completed ZIP archive"
-        ConfigurationExportPhase.READY -> if (partial) {
-            if (ua) "Архів готовий · є недоступні файли" else "Archive ready · some files unavailable"
-        } else if (ua) "Архів готовий" else "Archive ready"
-        ConfigurationExportPhase.UPLOADING -> shareCopy.uploading
-        ConfigurationExportPhase.SENT -> if (partial) {
-            if (ua) "Надіслано частковий архів · є недоступні файли" else "Partial archive sent · some files unavailable"
-        } else shareCopy.configurationSuccess
-        ConfigurationExportPhase.FAILED -> if (state.archiveAvailable && state.toDeveloper) {
-            shareCopy.configurationFailure
-        } else if (ua) "Не вдалося завершити експорт" else "Export could not be completed"
-        ConfigurationExportPhase.CANCELLING -> if (ua) "Зупинення експорту й очищення тимчасових файлів" else "Stopping export and cleaning temporary files"
-        ConfigurationExportPhase.CANCELLED -> if (ua) "Експорт скасовано" else "Export cancelled"
-    }
-    // The host dispatches Back here; never label a dispatched upload as cancelled.
-    BackHandler {
-        if (canCancel) onCancel() else if (!busy) onClose()
-    }
-    BoxWithConstraints(
-        modifier = Modifier.fillMaxSize()
-            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
-        contentAlignment = Alignment.Center
-    ) {
-        ModalInputBlocker()
-        Column(
-            modifier = Modifier.width(minOf(640.dp, maxWidth - 36.dp))
+                .width(minOf(560.dp, maxWidth - 36.dp))
                 .heightIn(max = maxHeight - 36.dp)
                 .clip(RoundedCornerShape(8.dp))
                 .background(palette.surface)
                 .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
-                .verticalScroll(rememberScrollState())
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(shareCopy.configurationTitle, color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text(
-                stageText,
-                color = when {
-                    state.phase == ConfigurationExportPhase.FAILED -> palette.red
-                    partial && !busy -> palette.yellow
-                    canShare -> palette.green
-                    else -> palette.text
-                },
-                fontSize = 16.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-            Text(
-                if (ua) "Минуло: ${state.elapsedSeconds} с" else "Elapsed: ${state.elapsedSeconds} s",
-                color = palette.muted, fontSize = 13.sp
-            )
-            if (busy) {
-                val totalBytes = state.totalBytes
-                // Copy completion is not archive completion; finalization stays indeterminate.
-                if (state.phase == ConfigurationExportPhase.COPYING && totalBytes != null
-                    && totalBytes > 0L && state.copiedBytes < totalBytes) {
-                    val percent = (state.copiedBytes.toDouble() / totalBytes * 100).toInt().coerceIn(0, 99)
-                    UpdateProgressBar("$percent%", palette)
-                } else {
-                    LoadingSpinner(palette)
-                }
+            Text(title, color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            Box(modifier = Modifier.weight(1f, fill = false).verticalScroll(rememberScrollState())) {
+                CodeBlock(details, palette, compact = true)
             }
-            if (state.currentFile.isNotBlank()) {
-                CodeBlock(state.currentFile, palette, compact = true)
-            }
-            val byteTotal = state.totalBytes?.let { formatBytes(it, copy) } ?: "?"
-            val fileTotal = state.totalFiles?.toString() ?: "?"
-            Text(
-                if (ua) {
-                    "Скопійовано: ${formatBytes(state.copiedBytes, copy)} / $byteTotal · файлів: ${state.copiedFiles} / $fileTotal\nНедоступно: ${state.unavailableFiles}"
-                } else {
-                    "Copied: ${formatBytes(state.copiedBytes, copy)} / $byteTotal · files: ${state.copiedFiles} / $fileTotal\nUnavailable: ${state.unavailableFiles}"
-                },
-                color = palette.text, fontSize = 14.sp
-            )
-            if (busy && (state.totalBytes == null || state.totalFiles == null)) {
-                Text(
-                    if (ua) "Загальний обсяг і кількість стануть відомі після пошуку файлів"
-                    else "Total size and count will be known after inventory",
-                    color = palette.muted, fontSize = 14.sp
-                )
-            }
-            if (state.archiveAvailable) {
-                CodeBlock("${state.archiveName}\nZIP: ${formatBytes(state.archiveBytes, copy)}", palette, compact = true)
-            }
-            if (partial && state.archiveAvailable) {
-                Text(
-                    if (ua) "Частину файлів отримати не вдалося. Причини збережено в manifest.json; доступні файли залишаються в архіві"
-                    else "Some files could not be collected. Reasons are recorded in manifest.json; available files remain in the archive",
-                    color = palette.muted, fontSize = 14.sp
-                )
-            }
-            if (state.toDeveloper && state.archiveAvailable && state.archiveBytes > SentryLogUploader.MAX_ZIP_BYTES) {
-                val limitMiB = SentryLogUploader.MAX_ZIP_BYTES / (1024L * 1024L)
-                Text(
-                    if (ua) "Архів перевищує ліміт Sentry ($limitMiB МіБ) і не був надісланий. Повний архів збережено — передайте його через інший застосунок"
-                    else "The archive exceeds the Sentry limit ($limitMiB MiB) and was not sent. The complete archive is retained — share it through another app",
-                    color = palette.yellow, fontSize = 14.sp
-                )
-            }
-            if (state.phase == ConfigurationExportPhase.UPLOADING) {
-                Text(
-                    if (ua) "Надсилання через Sentry вже розпочалося; скасування не гарантується. Зачекайте на результат"
-                    else "Sentry dispatch has started; cancellation cannot be guaranteed. Wait for the result",
-                    color = palette.muted, fontSize = 14.sp
-                )
-            } else if (state.phase == ConfigurationExportPhase.CANCELLED) {
-                Text(
-                    if (ua) "Незавершений архів не передаватиметься. Експорт можна запустити знову"
-                    else "The unfinished archive will not be shared. You can start the export again",
-                    color = palette.muted, fontSize = 14.sp
-                )
-            } else if (busy) {
-                Text(
-                    if (ua) "Збирання повного пакета може тривати кілька хвилин. Завершення буде підтверджено лише після перевірки ZIP"
-                    else "Collecting the full package may take several minutes. Completion is confirmed only after ZIP verification",
-                    color = palette.muted, fontSize = 14.sp
-                )
-            }
-            if (state.detail.isNotBlank()) CodeBlock(state.detail, palette, compact = true)
-            if (state.eventId.isNotBlank()) CodeBlock("${shareCopy.reportId}: ${state.eventId}", palette, compact = true)
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
-                if (canShare) {
-                    HudButton(shareCopy.shareToAnotherApp, palette, primary = true, width = 220.dp, onClick = onShare)
-                }
-                HudButton(
-                    text = if (canCancel) shareCopy.cancel else if (busy) {
-                        if (ua) "Зачекайте" else "Please wait"
-                    } else shareCopy.close,
-                    palette = palette,
-                    primary = !canShare,
-                    enabled = canCancel || !busy,
-                    width = 138.dp,
-                    onClick = if (canCancel) onCancel else onClose
-                )
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                HudButton(closeText, palette, width = 138.dp, onClick = onClose)
             }
         }
     }
-}
-
-private fun configurationExportBusy(phase: ConfigurationExportPhase): Boolean = when (phase) {
-    ConfigurationExportPhase.INVENTORY, ConfigurationExportPhase.DIAGNOSTICS,
-    ConfigurationExportPhase.COPYING, ConfigurationExportPhase.ARCHIVING,
-    ConfigurationExportPhase.VERIFYING, ConfigurationExportPhase.UPLOADING,
-    ConfigurationExportPhase.CANCELLING -> true
-    ConfigurationExportPhase.READY, ConfigurationExportPhase.SENT,
-    ConfigurationExportPhase.FAILED, ConfigurationExportPhase.CANCELLED -> false
 }
 
 @Composable
@@ -4982,7 +4868,8 @@ private fun StorageTab(
                         ShareIconLabelButton(
                             label = copy.shareSelected,
                             palette = palette,
-                            enabled = selectedDayNames.isNotEmpty() && !storageActionBusy,
+                            enabled = selectedDayNames.isNotEmpty() && !storageActionBusy &&
+                                !configurationShareBusy,
                             width = 190.dp,
                             onClick = { onShareSelected(selectedDayNames) }
                         )

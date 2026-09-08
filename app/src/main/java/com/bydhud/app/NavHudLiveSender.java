@@ -2295,6 +2295,9 @@ final class NavHudLiveSender {
                 ownerPackage, frame, now);
         int sourceDistanceMeters = outputFrame.getDistanceMeters();
         outputFrame = effectiveDirectFrame(outputFrame);
+        long receivedWallClockMs = System.currentTimeMillis();
+        DirectTbtFrame semanticFrame = effectiveMetricFrame(
+                outputFrame, receivedWallClockMs);
         long tbtDispatchElapsedMs = WazeRouteTiming.UNSET;
         long hudDispatchElapsedMs = WazeRouteTiming.UNSET;
         boolean tbtDispatched = false;
@@ -2318,7 +2321,7 @@ final class NavHudLiveSender {
                         ownerPackage, sessionGeneration,
                         shouldRequestDashboardForDirectRouteForTest(hudOwner,
                                 HudPrefs.isSwitchToTbtOnHudStartEnabled(context)),
-                        hudOwner, frameReason, outputFrame, null)) {
+                        hudOwner, frameReason, semanticFrame, null)) {
                     tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
                             shouldRequestDashboardForDirectRouteForTest(hudOwner,
                                     HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
@@ -2329,7 +2332,7 @@ final class NavHudLiveSender {
                 tbtPublisher.updateOwnerHudPriority(
                         ownerPackage, sessionGeneration, hudOwner);
                 tbtPublisher.publishFrame(
-                        ownerPackage, sessionGeneration, outputFrame,
+                        ownerPackage, sessionGeneration, semanticFrame,
                         "waze-frame:" + safeReason(reason));
                 tbtDispatched = true;
                 tbtDispatchElapsedMs = SystemClock.elapsedRealtime();
@@ -2339,13 +2342,12 @@ final class NavHudLiveSender {
                 }
             } else {
                 tbtPublisher.recordDeferredFrame(
-                        ownerPackage, sessionGeneration, outputFrame,
+                        ownerPackage, sessionGeneration, semanticFrame,
                         "waze-frame:" + safeReason(reason));
             }
         } else {
             log("waze visual-only frame reason=" + safeReason(reason));
         }
-        long receivedWallClockMs = System.currentTimeMillis();
         logWazeDirectFrame(frame, outputFrame, sourceDistanceMeters,
                 reason, now, receivedWallClockMs,
                 DirectTbtPayload.Options.from(context));
@@ -2399,7 +2401,8 @@ final class NavHudLiveSender {
         byte[] maneuver = frame.getManeuverPng();
         byte[] lanes = frame.getLanePng();
         DirectTbtFrame.AlertOverlay alert = frame.getAlertOverlay();
-        DirectTbtPayload.Prepared prepared = DirectTbtPayload.describe(frame, options);
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.describe(
+                frame, options, receivedWallClockMs);
         DirectSessionLog session = wazeDirectSession;
         String maneuverArtifact = "";
         String laneArtifact = "";
@@ -2439,6 +2442,7 @@ final class NavHudLiveSender {
                 + " hudNative=" + prepared.nativeManeuver()
                 + " hudDistanceM=" + prepared.distanceMeters()
                 + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
+                + " hudEtaMetrics=\"" + normalizeString(prepared.etaDiagnostics()) + "\""
                 + " hudLaneCount=" + prepared.laneCount()
                 + " hudDiagnostics=semantic-plan";
         if (session != null) session.raw(raw);
@@ -2654,6 +2658,9 @@ final class NavHudLiveSender {
                 ownerPackage, frame, now);
         int sourceDistanceMeters = outputFrame.getDistanceMeters();
         outputFrame = effectiveDirectFrame(outputFrame);
+        long receivedWallClockMs = System.currentTimeMillis();
+        DirectTbtFrame semanticFrame = effectiveMetricFrame(
+                outputFrame, receivedWallClockMs);
         boolean firstRouteEvidence = gmapsTbtRouteStartedAtMs <= 0L;
         if (firstRouteEvidence) gmapsTbtRouteStartedAtMs = now;
         advanceTbtLifecycleForFirstFrame();
@@ -2671,7 +2678,7 @@ final class NavHudLiveSender {
                         ownerPackage, sessionGeneration,
                         shouldRequestDashboardForDirectRouteForTest(hudOwner,
                                 HudPrefs.isSwitchToTbtOnHudStartEnabled(context)),
-                        hudOwner, frameReason, outputFrame, null)) {
+                        hudOwner, frameReason, semanticFrame, null)) {
                     tbtPublisher.beginRoute(ownerPackage, sessionGeneration,
                             shouldRequestDashboardForDirectRouteForTest(hudOwner,
                                     HudPrefs.isSwitchToTbtOnHudStartEnabled(context)), hudOwner,
@@ -2682,19 +2689,20 @@ final class NavHudLiveSender {
                 tbtPublisher.updateOwnerHudPriority(
                         ownerPackage, sessionGeneration, hudOwner);
                 tbtPublisher.publishFrame(
-                        ownerPackage, sessionGeneration, outputFrame,
+                        ownerPackage, sessionGeneration, semanticFrame,
                         "gmaps-frame:" + safeReason(reason));
                 tbtDispatched = true;
                 tbtDispatchElapsedMs = SystemClock.elapsedRealtime();
             } else {
                 tbtPublisher.recordDeferredFrame(
-                        ownerPackage, sessionGeneration, outputFrame,
+                        ownerPackage, sessionGeneration, semanticFrame,
                         "gmaps-frame:" + safeReason(reason));
             }
         } else {
             log("gmaps visual-only frame reason=" + safeReason(reason));
         }
-        logGMapsDirectFrame(frame, outputFrame, sourceDistanceMeters, reason, now);
+        logGMapsDirectFrame(frame, outputFrame, sourceDistanceMeters,
+                reason, now, receivedWallClockMs);
         if (!isHudOutputOwner(ownerPackage)) {
             logGMapsDirectTiming(timing, callbackEntryElapsedMs,
                     tbtDispatchElapsedMs, hudDispatchElapsedMs,
@@ -2734,11 +2742,13 @@ final class NavHudLiveSender {
     }
 
     private void logGMapsDirectFrame(DirectTbtFrame rawFrame, DirectTbtFrame frame,
-            int sourceDistanceMeters, String reason, long receivedAtMs) {
+            int sourceDistanceMeters, String reason, long receivedAtMs,
+            long receivedWallClockMs) {
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.describe(
-                frame, DirectTbtPayload.Options.from(context));
+                frame, DirectTbtPayload.Options.from(context), receivedWallClockMs);
         String raw = "reason=" + safeReason(reason)
                 + " receivedAtElapsedMs=" + receivedAtMs
+                + " receivedAtWallMs=" + receivedWallClockMs
                 + " rawType=" + frame.getRawManeuverType()
                 + " amap=" + frame.getAmapManeuver()
                 + " byd=" + frame.getBydManeuver()
@@ -2759,6 +2769,7 @@ final class NavHudLiveSender {
                 + " hudNative=" + prepared.nativeManeuver()
                 + " hudDistanceM=" + prepared.distanceMeters()
                 + " hudText=\"" + normalizeString(prepared.displayText()) + "\""
+                + " hudEtaMetrics=\"" + normalizeString(prepared.etaDiagnostics()) + "\""
                 + " hudLaneCount=" + prepared.laneCount()
                 + " hudDiagnostics=semantic-plan";
         DirectSessionLog session = gmapsDirectSession;
@@ -2949,6 +2960,13 @@ final class NavHudLiveSender {
                 effective, HudPrefs.transliterationMode(context));
     }
 
+    static DirectTbtFrame effectiveMetricFrame(
+            DirectTbtFrame frame, long nowWallTimeMs) {
+        if (frame == null) return null;
+        return frame.withTripMetrics(HudEtaResolver.resolve(
+                frame.getTripMetrics(), nowWallTimeMs).effectiveMetrics());
+    }
+
     private boolean selectRemainingTbtRoute(String endedPackage, String reason) {
         if (!isRuntimeEnabled()) return false;
         String ended = normalizePackage(endedPackage);
@@ -2979,6 +2997,7 @@ final class NavHudLiveSender {
             DirectTbtFrame outputFrame = wazeFrame == null ? null
                     : effectiveDirectFrame(applySpeedLimitOverlay(
                             next, wazeFrame, SystemClock.elapsedRealtime()));
+            outputFrame = effectiveMetricFrame(outputFrame, System.currentTimeMillis());
             if (handoff && tbtPublisher.replaceDirectRoute(
                     tbtPublisher.ownerPackage(), tbtPublisher.ownerGeneration(),
                     next, generation, false, hudOwner, restoreReason, outputFrame, null)) {
@@ -2999,6 +3018,7 @@ final class NavHudLiveSender {
                     ? effectiveDirectFrame(applySpeedLimitOverlay(
                             next, latestGMapsDirectFrame,
                             SystemClock.elapsedRealtime())) : null;
+            outputFrame = effectiveMetricFrame(outputFrame, System.currentTimeMillis());
             if (handoff && tbtPublisher.replaceDirectRoute(
                     tbtPublisher.ownerPackage(), tbtPublisher.ownerGeneration(),
                     next, generation, false, hudOwner, restoreReason, outputFrame, null)) {

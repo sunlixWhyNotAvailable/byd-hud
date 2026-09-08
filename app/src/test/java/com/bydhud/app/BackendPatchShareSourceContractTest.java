@@ -62,6 +62,7 @@ public final class BackendPatchShareSourceContractTest {
     public void shareLaunchCarriesImmutableDaySnapshotAndOnlyCommitsAfterChooser() throws IOException {
         String source = source("MainActivity.java");
         String compose = source("BydHudRuntimeCompose.kt");
+        String workflow = source("StorageLogShareWorkflow.kt");
         String deliver = between(source, "private void deliverPendingShare()",
                 "private static void notifyPendingShare()");
         String snapshot = between(source, "public static final class ComposeSnapshot",
@@ -75,7 +76,11 @@ public final class BackendPatchShareSourceContractTest {
                 < deliver.indexOf("SHARE_LAUNCH_EVENT.set(new ShareLaunchEvent"));
         assertTrue(deliver.contains("publishSharedUiStateChange();"));
         assertTrue(deliver.contains("share_chooser_failed"));
-        assertTrue(source.contains("queuePendingShare(file, Collections.emptyList())"));
+        assertTrue(source.contains("queuePendingShare(file, Collections.emptyList(), ShareOwner.CONFIGURATION"));
+        assertTrue(source.contains("queueStorageShare(File file, List<String> storageDays, String operationId)"));
+        assertTrue(source.contains("ShareOwner.STORAGE_LOGS"));
+        assertTrue(workflow.contains("queueStorageShareIfOwned(control, archive.file, submittedDays)"));
+        assertTrue(workflow.contains("MainActivity.queueStorageShare(file, submittedDays, state.value!!.operationId)"));
         assertTrue(snapshot.contains("shareLaunchId"));
         assertTrue(snapshot.contains("shareLaunchDays"));
         assertTrue(compose.contains(

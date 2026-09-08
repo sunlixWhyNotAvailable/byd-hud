@@ -59,6 +59,27 @@ public class HudExperimentalIntegrationTest {
         assertEquals(0, out.laneCount());
     }
 
+    @Test public void derivedMetricsMatchStreetAndExperimentalOutputs() {
+        long minute = 60_000L;
+        long now = 100L * minute + 45_000L;
+        DirectTbtFrame arrivalOnly = frame().withTripMetrics(
+                DirectTbtFrame.TripMetrics.nextStopOnly(
+                        new DirectTbtFrame.TravelMetrics(
+                                102L * minute + 15_000L, 0, -1L, 8400L, now)));
+        DirectTbtPayload.Options sharedOptions = options(true, true, 1)
+                .withPresentation(style(0, 0));
+        assertEquals("[01:42 | 2 min | 8.4 km] Road",
+                DirectTbtPayload.prepare(
+                        arrivalOnly, sharedOptions, compositor(new ArrayList<>()), now)
+                        .displayText());
+
+        List<HudExperimentalCompositor.Inputs> calls = new ArrayList<>();
+        DirectTbtPayload.prepare(arrivalOnly, options(true, true, 1), compositor(calls), now);
+        assertEquals("01:42", calls.get(0).arrival);
+        assertEquals("2 min", calls.get(0).duration);
+        assertEquals("8.4 km", calls.get(1).remaining);
+    }
+
     @Test public void warningDoesNotReservePrimarySpeedSlotInSeparateMode() {
         DirectTbtFrame frame = frame().withAlertOverlay(DirectTbtFrame.AlertOverlay
                 .active(7, 10, "Camera", new byte[]{9})).withSpeedLimit(

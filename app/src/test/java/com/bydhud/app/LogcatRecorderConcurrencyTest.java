@@ -10,6 +10,10 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
 
 public final class LogcatRecorderConcurrencyTest {
     @Test
@@ -38,12 +42,21 @@ public final class LogcatRecorderConcurrencyTest {
     }
 
     @Test
-    public void StopPollsBeforeFinalizingAndFailureStillWritesManifest() throws IOException {
+    public void StopClosesTheReaderBeforeFinalizingAndFailureStillWritesManifest() throws IOException {
         String source = source();
+        String stop = section(source, "static Result stop(", "static void stopAsync(");
+        String stopAsync = section(source, "static void stopAsync(",
+                "static String fullLogcatCommandForTest(");
+        assertTrue(stop.indexOf("session.streamControl.stop()")
+                < stop.indexOf("ensureFinishLocked(session)"));
+        String activeStop = stopAsync.substring(stopAsync.indexOf("activeSession = null;"));
+        assertTrue(activeStop.indexOf("session.streamControl.stop()") >= 0);
+        assertTrue(activeStop.indexOf("session.streamControl.stop()")
+                < activeStop.indexOf("ensureFinishLocked(session)"));
         String finish = section(source, "private static void finish(",
-                "private static void pollSafely(");
-        assertTrue(finish.indexOf("poll(session)") >= 0);
-        assertTrue(finish.indexOf("poll(session)")
+                "private static void runStream(");
+        assertTrue(finish.indexOf("await(session.readerFuture") >= 0);
+        assertTrue(finish.indexOf("await(session.readerFuture")
                 < finish.indexOf("captureSnapshot(session, \"after\""));
         assertTrue(finish.indexOf("captureSnapshot(session, \"after\"")
                 < finish.indexOf("finalizeLog(session)"));
@@ -53,6 +66,64 @@ public final class LogcatRecorderConcurrencyTest {
         assertTrue(failure.indexOf("catch (Exception error)")
                 < failure.indexOf("session.manifest.put(\"status\", \"failed\")"));
         assertTrue(failure.contains("writeManifest(session)"));
+    }
+
+    @Test
+    public void BlockingReaderRunsOutsideTheStopAndFinalizationWorker() throws IOException {
+        String source = source();
+        assertTrue(source.contains("new Thread(runnable, \"BydHudSystemRecorder\")"));
+        assertTrue(source.contains("new Thread(runnable, \"BydHudLogcatStream\")"));
+        assertTrue(source.contains("startReaderBeforeSnapshot(STREAM_READER"));
+        assertTrue(source.contains("STREAM_STOP_TIMEOUT_MS = 10_000L"));
+        assertTrue(source.contains("Logcat reader did not stop after its stream was closed"));
+        assertFalse(source.contains("future.cancel(true)"));
+    }
+
+    @Test
+    public void OpenedSourceIsStopOwnedBeforeBeforeSnapshotCanFailOrBlock() throws IOException {
+        String source = source();
+        String begin = section(source, "private static void begin(",
+                "private static void finish(");
+        assertTrue(begin.indexOf("session.streamControl.install(source)")
+                < begin.indexOf("captureSnapshot(session, \"before\""));
+        assertTrue(begin.contains("session.streamControl.stop()"));
+        assertTrue(begin.contains("closeSource(source)"));
+    }
+
+    @Test
+    public void ReaderBeginsWhileBeforeSnapshotIsStillBlocked() throws Exception {
+        var readerExecutor = Executors.newSingleThreadExecutor();
+        var callerExecutor = Executors.newSingleThreadExecutor();
+        CountDownLatch readerStarted = new CountDownLatch(1);
+        CountDownLatch snapshotEntered = new CountDownLatch(1);
+        CountDownLatch releaseSnapshot = new CountDownLatch(1);
+        FutureTask<Void> reader = new FutureTask<>(() -> readerStarted.countDown(), null);
+        try {
+            var starting = callerExecutor.submit(() -> {
+                LogcatRecorder.startReaderBeforeSnapshot(readerExecutor, reader, () -> {
+                    snapshotEntered.countDown();
+                    try {
+                        if (!releaseSnapshot.await(2, TimeUnit.SECONDS)) {
+                            throw new IOException("snapshot release timed out");
+                        }
+                    } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("snapshot interrupted", error);
+                    }
+                });
+                return null;
+            });
+            assertTrue(snapshotEntered.await(1, TimeUnit.SECONDS));
+            assertTrue(readerStarted.await(1, TimeUnit.SECONDS));
+            assertFalse(starting.isDone());
+            releaseSnapshot.countDown();
+            starting.get(1, TimeUnit.SECONDS);
+            reader.get(1, TimeUnit.SECONDS);
+        } finally {
+            releaseSnapshot.countDown();
+            callerExecutor.shutdownNow();
+            readerExecutor.shutdownNow();
+        }
     }
 
     private static String source() throws IOException {

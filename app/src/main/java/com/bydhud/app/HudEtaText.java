@@ -7,22 +7,36 @@ import java.util.SimpleTimeZone;
 
 /** Pure metric selection/formatting shared by the street field and separate HUD rows. */
 final class HudEtaText {
-    static final HudEtaText EMPTY = new HudEtaText("", "", "");
+    static final HudEtaText EMPTY = new HudEtaText("", "", "", "");
     final String arrival;
     final String duration;
     final String remainingDistance;
+    final String diagnostics;
 
     HudEtaText(String arrival, String duration, String remainingDistance) {
+        this(arrival, duration, remainingDistance, "");
+    }
+
+    HudEtaText(String arrival, String duration, String remainingDistance, String diagnostics) {
         this.arrival = arrival;
         this.duration = duration;
         this.remainingDistance = remainingDistance;
+        this.diagnostics = diagnostics;
     }
 
     static HudEtaText from(DirectTbtFrame frame, DirectTbtPayload.Options options) {
-        if (options.routeMetricsMode == HudPrefs.ROUTE_METRICS_OFF) return EMPTY;
-        DirectTbtFrame.TripMetrics trip = frame.getTripMetrics();
-        DirectTbtFrame.TravelMetrics next = trip.getNextStop();
-        DirectTbtFrame.TravelMetrics whole = trip.getWholeRoute();
+        return from(frame, options, System.currentTimeMillis());
+    }
+
+    static HudEtaText from(DirectTbtFrame frame, DirectTbtPayload.Options options,
+            long nowWallTimeMs) {
+        HudEtaResolver.Result resolved = HudEtaResolver.resolve(
+                frame.getTripMetrics(), nowWallTimeMs);
+        if (options.routeMetricsMode == HudPrefs.ROUTE_METRICS_OFF) {
+            return new HudEtaText("", "", "", resolved.diagnostics());
+        }
+        DirectTbtFrame.TravelMetrics next = resolved.nextStop.effective;
+        DirectTbtFrame.TravelMetrics whole = resolved.wholeRoute.effective;
         boolean preferWhole = options.wholeRouteMetrics;
         DirectTbtFrame.TravelMetrics eta = select(preferWhole,
                 whole.getArrivalTimeEpochMs() > 0, next.getArrivalTimeEpochMs() > 0, whole, next);
@@ -42,7 +56,8 @@ final class HudEtaText {
         boolean ua = options.presentation.ukrainian;
         return new HudEtaText(arrival,
                 options.showRemainingTime ? duration(time.getRemainingTimeSeconds(), ua) : "",
-                options.showRemainingDistance ? distance(distance.getRemainingDistanceMeters(), ua) : "");
+                options.showRemainingDistance ? distance(distance.getRemainingDistanceMeters(), ua) : "",
+                resolved.diagnostics());
     }
 
     private static DirectTbtFrame.TravelMetrics select(boolean wholePreferred,
@@ -75,6 +90,10 @@ final class HudEtaText {
         append(result, duration);
         append(result, remainingDistance);
         return result.toString();
+    }
+
+    String cacheKey() {
+        return arrival + '\u0000' + duration + '\u0000' + remainingDistance;
     }
 
     private static void append(StringBuilder result, String value) {

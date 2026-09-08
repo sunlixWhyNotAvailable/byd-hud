@@ -156,6 +156,8 @@ final class HudOutputCoordinator {
     private DirectTbtPayload.Prepared candidateDirectPayload;
     private DirectTbtPayload.Options preparedDirectOptions;
     private String preparedEtaContext = "";
+    private long preparedEtaWallMinute = Long.MIN_VALUE;
+    private String preparedEtaCacheKey = "";
     private final EtaStreetTextGate etaStreetTextGate = new EtaStreetTextGate();
     private byte[] preparedDirectSemanticPayload;
     private GMapsDirectChannel.BitmapSelection directBitmapSelection;
@@ -982,18 +984,30 @@ final class HudOutputCoordinator {
     private byte[] buildPayload(Source source) {
         if (source == Source.DIRECT) {
             int optionsRevision = HudPrefs.outputOptionsRevision();
-            if (preparedDirectPayload == null
+            long nowWallTimeMs = System.currentTimeMillis();
+            long wallMinute = HudEtaResolver.epochMinute(nowWallTimeMs);
+            boolean sourceChanged = candidateDirectPayload == null
                     || preparedDirectFrame != directFrame
-                    || preparedDirectOptionsRevision != optionsRevision) {
+                    || preparedDirectOptionsRevision != optionsRevision;
+            if (sourceChanged) {
                 preparedDirectFrame = directFrame;
                 preparedDirectOptionsRevision = optionsRevision;
                 preparedDirectOptions = DirectTbtPayload.Options.from(context);
                 preparedEtaContext = etaStreetContext(preparedDirectOptions,
                         HudPrefs.transliterationMode(context));
-                candidateDirectPayload = DirectTbtPayload.prepare(directFrame, preparedDirectOptions);
-                preparedDirectPayload = null;
-                preparedDirectBitmapSelection = directBitmapSelection;
-                preparedDirectBitmapTxLogger = directBitmapTxLogger;
+            }
+            if (sourceChanged || preparedEtaWallMinute != wallMinute) {
+                String etaCacheKey = DirectTbtPayload.etaCacheKey(
+                        directFrame, preparedDirectOptions, nowWallTimeMs);
+                if (sourceChanged || !etaCacheKey.equals(preparedEtaCacheKey)) {
+                    candidateDirectPayload = DirectTbtPayload.prepare(
+                            directFrame, preparedDirectOptions, nowWallTimeMs);
+                    preparedDirectPayload = null;
+                    preparedDirectBitmapSelection = directBitmapSelection;
+                    preparedDirectBitmapTxLogger = directBitmapTxLogger;
+                }
+                preparedEtaWallMinute = wallMinute;
+                preparedEtaCacheKey = etaCacheKey;
             }
             String displayText = etaStreetTextGate.select(candidateDirectPayload.displayText(),
                     directSourceRoad, preparedEtaContext,

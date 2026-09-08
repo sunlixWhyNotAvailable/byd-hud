@@ -30,9 +30,13 @@ public final class PatchOperationUiSourceContractTest {
                 "private fun OperationProgressCard(");
         String card = between(source,
                 "private fun OperationProgressCard(",
-                "private fun SentryUploadOverlay(");
+                "private fun storageLogShareBusy(");
 
-        assertTrue(stack.contains("sortedByDescending { it.startedAt }.take(3)"));
+        assertTrue(stack.contains("sortedByDescending { it.startedAt }"));
+        assertFalse(stack.contains(".take(3)"));
+        assertTrue(stack.contains("visibleStorageShare"));
+        assertTrue(stack.contains("visibleConfigurationExport"));
+        assertTrue(stack.contains("showStorageShare"));
         assertTrue(stack.contains("padding(end = 24.dp, bottom = 24.dp)"));
         assertTrue(stack.contains("Arrangement.spacedBy(12.dp)"));
         assertTrue(card.contains(".width(460.dp)"));

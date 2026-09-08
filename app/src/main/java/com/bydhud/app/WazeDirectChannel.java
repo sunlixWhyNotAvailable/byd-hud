@@ -1284,17 +1284,24 @@ public final class WazeDirectChannel {
 
     static DirectTbtFrame.TripMetrics destinationMetrics(
             List<TravelEstimate> estimates) {
+        return destinationMetrics(estimates, System.currentTimeMillis());
+    }
+
+    static DirectTbtFrame.TripMetrics destinationMetrics(
+            List<TravelEstimate> estimates, long sampleWallTimeMs) {
         if (estimates == null || estimates.isEmpty()) {
             return DirectTbtFrame.TripMetrics.empty();
         }
-        DirectTbtFrame.TravelMetrics nextStop = travelMetrics(estimates.get(0));
+        DirectTbtFrame.TravelMetrics nextStop = travelMetrics(
+                estimates.get(0), sampleWallTimeMs);
         DirectTbtFrame.TravelMetrics wholeRoute = estimates.size() > 1
-                ? travelMetrics(estimates.get(estimates.size() - 1))
+                ? travelMetrics(estimates.get(estimates.size() - 1), sampleWallTimeMs)
                 : DirectTbtFrame.TravelMetrics.unavailable();
         return new DirectTbtFrame.TripMetrics(nextStop, wholeRoute);
     }
 
-    private static DirectTbtFrame.TravelMetrics travelMetrics(TravelEstimate estimate) {
+    private static DirectTbtFrame.TravelMetrics travelMetrics(
+            TravelEstimate estimate, long sampleWallTimeMs) {
         if (estimate == null) return DirectTbtFrame.TravelMetrics.unavailable();
         DateTimeWithZone arrival = estimate.getArrivalTimeAtDestination();
         long arrivalTimeMs = arrival == null ? -1L : arrival.getTimeSinceEpochMillis();
@@ -1306,7 +1313,7 @@ public final class WazeDirectChannel {
         long remainingMeters = remainingDistance == null ? -1L : meters(remainingDistance);
         return new DirectTbtFrame.TravelMetrics(
                 arrivalTimeMs, arrivalZoneOffsetSeconds,
-                remainingSeconds, remainingMeters);
+                remainingSeconds, remainingMeters, sampleWallTimeMs);
     }
 
     private static final int LANE_STRAIGHT = 1;
@@ -1880,7 +1887,7 @@ public final class WazeDirectChannel {
                     List<TravelEstimate> destinationEstimates =
                             trip.getDestinationTravelEstimates();
                     DirectTbtFrame.TripMetrics tripMetrics =
-                            destinationMetrics(destinationEstimates);
+                            destinationMetrics(destinationEstimates, System.currentTimeMillis());
                     List<Step> steps = trip.getSteps();
                     if (steps == null || steps.isEmpty()) {
                         navigationFrame = navigationFrame.withTripMetrics(tripMetrics);

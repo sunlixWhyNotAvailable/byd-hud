@@ -1,6 +1,6 @@
 package com.bydhud.app;
 
-// Captures full-system diagnostics with bounded polls through the authorized local ADB bridge.
+// Captures full-system diagnostics through one bounded-memory continuous Logcat stream.
 
 import android.content.Context;
 import android.content.pm.ApplicationInfo;
@@ -16,27 +16,27 @@ import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
+import java.io.Closeable;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Date;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
-import java.util.Set;
 import java.util.TimeZone;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
@@ -47,18 +47,23 @@ final class LogcatRecorder {
     static final String STATUS_SAVED = "Лог збережено";
 
     private static final String TAG = "BydHudLogcat";
-    private static final long POLL_INTERVAL_MS = 2_000L;
-    private static final int MAX_UID_POLL_BYTES = 4 * 1024 * 1024;
-    private static final int MAX_BOUNDARY_LINES = 4_096;
+    private static final int STREAM_CHUNK_BYTES = 32 * 1024;
+    private static final long STREAM_STOP_TIMEOUT_MS = 10_000L;
     private static final SimpleDateFormat FILE_FORMAT =
             new SimpleDateFormat("yyyyMMdd_HHmmss_SSS", Locale.US);
     private static final SimpleDateFormat LINE_FORMAT =
             new SimpleDateFormat("yyyy-MM-dd'T'HH:mm:ss.SSSXXX", Locale.US);
     private static final SimpleDateFormat LOGCAT_CURSOR_FORMAT =
             new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US);
-    private static final ScheduledExecutorService WORKER =
-            Executors.newSingleThreadScheduledExecutor(runnable -> {
+    private static final ExecutorService WORKER =
+            Executors.newSingleThreadExecutor(runnable -> {
                 Thread thread = new Thread(runnable, "BydHudSystemRecorder");
+                thread.setDaemon(true);
+                return thread;
+            });
+    private static final ExecutorService STREAM_READER =
+            Executors.newSingleThreadExecutor(runnable -> {
+                Thread thread = new Thread(runnable, "BydHudLogcatStream");
                 thread.setDaemon(true);
                 return thread;
             });
@@ -172,7 +177,7 @@ final class LogcatRecorder {
             session.stopRequested = true;
             lastStatus = STATUS_SAVING;
             lastDetail = "finalizing system capture";
-            if (session.pollFuture != null) session.pollFuture.cancel(false);
+            session.streamControl.stop();
             future = ensureFinishLocked(session);
         }
         Throwable failure = await(future, 90_000L);
@@ -211,14 +216,14 @@ final class LogcatRecorder {
             session.stopRequested = true;
             lastStatus = STATUS_SAVING;
             lastDetail = "finalizing system capture";
-            if (session.pollFuture != null) session.pollFuture.cancel(false);
+            session.streamControl.stop();
             addCompletionLocked(session, completion);
             ensureFinishLocked(session);
         }
     }
 
     static String fullLogcatCommandForTest(long cursorMs) {
-        return fullLogcatCommand(cursorMs);
+        return "logcat -b all -v threadtime -T '" + cursor(cursorMs) + "'";
     }
 
     private static void runBegin(Session session) {
@@ -299,13 +304,13 @@ final class LogcatRecorder {
     }
 
     private static void begin(Session session) {
+        CaptureSource source = null;
         try {
             if (!session.directory.exists() && !session.directory.mkdirs()) {
                 throw new IOException("Unable to create " + session.directory);
             }
             session.startedWallMs = System.currentTimeMillis();
             session.startedElapsedMs = SystemClock.elapsedRealtime();
-            session.lastPollWallMs = session.startedWallMs - 1_000L;
             session.manifest.put("captureId", session.captureId);
             session.manifest.put("status", "recording");
             session.manifest.put("startedAt", timestampForLine(session.startedWallMs));
@@ -314,48 +319,72 @@ final class LogcatRecorder {
             session.manifest.put("versionName", BuildConfig.VERSION_NAME);
             session.manifest.put("versionCode", BuildConfig.VERSION_CODE);
             session.manifest.put("bufferClear", false);
-            session.manifest.put("pollIntervalMs", POLL_INTERVAL_MS);
+            session.manifest.put("intakeMethod", "continuous_stream");
             session.manifest.put("logcatCommand",
-                    "logcat -b all -v threadtime -T <cursor> -d");
+                    "logcat -b all -v threadtime -T <start-cursor>");
             session.manifest.put("fallbackCommand",
-                    "logcat -v threadtime -T <cursor> -d (app-visible buffers)");
+                    "logcat -v threadtime -T <cursor> (continuous app-visible buffers)");
             session.manifest.put("app", appIdentity(session.context));
             session.manifest.put("runtime", runtimeIdentity(session.context));
-            String adbProbe;
             try {
-                LocalAdbBridge.ShellResult access = LocalAdbBridge.runDiagnosticShellCommand(
-                        session.context, "logcat -g -b all");
-                session.mode = access.success() ? "full_system_adb" : "app_uid_fallback";
-                session.fallbackReason = access.success() ? "" : access.shortDetail();
-                adbProbe = access.shortDetail();
+                source = new AdbLogcatSource(LocalAdbBridge.openLogcatStream(
+                        session.context, cursor(session.startedWallMs - 1_000L)));
+                session.mode = "full_system_adb";
             } catch (Exception error) {
                 session.mode = "app_uid_fallback";
-                session.fallbackReason = "ADB unavailable: "
-                        + error.getClass().getSimpleName() + ": " + safe(error.getMessage());
-                adbProbe = session.fallbackReason;
+                session.fallbackReason = "ADB unavailable: " + errorDetail(error);
+                session.reducedCoverage = true;
+                source = null;
             }
             session.manifest.put("mode", session.mode);
             session.manifest.put("buffers",
                     "full_system_adb".equals(session.mode) ? "all" : "app-visible");
-            session.manifest.put("adbProbe", adbProbe);
+            if (source != null && !session.streamControl.install(source)) {
+                throw new IOException("capture stopped before Logcat stream start");
+            }
             writeLog(session, "=== BYD HUD system capture " + session.captureId + " ===\n"
                     + "mode=" + session.mode + " bufferClear=false\n");
-            captureSnapshot(session, "before", fullSnapshotCommands(true));
-            poll(session);
-            writeManifest(session);
-            session.pollFuture = WORKER.scheduleWithFixedDelay(
-                    () -> pollSafely(session), POLL_INTERVAL_MS, POLL_INTERVAL_MS,
-                    TimeUnit.MILLISECONDS);
-            if (session.stopRequested) {
-                session.pollFuture.cancel(false);
+            if (source == null) {
+                source = openAppUidLogcat(session, session.startedWallMs - 1_000L);
+                if (!session.streamControl.install(source)) {
+                    throw new IOException("capture stopped before Logcat stream start");
+                }
             }
+            writeManifest(session);
+            CaptureSource initialSource = source;
+            FutureTask<Void> reader = new FutureTask<>(
+                    () -> runStream(session, initialSource), null);
+            session.readerFuture = reader;
+            startReaderBeforeSnapshot(STREAM_READER, reader,
+                    () -> captureSnapshot(session, "before", fullSnapshotCommands(true)));
             updateDetail(session, "mode=" + session.mode + " capture=" + session.captureId);
-            AppEventLogger.event(session.context,
-                    "system_recorder_start id=" + session.captureId + " mode=" + session.mode);
+            if (!session.stopRequested) {
+                AppEventLogger.event(session.context,
+                        "system_recorder_start id=" + session.captureId
+                                + " mode=" + session.mode);
+            }
             publishUiState();
         } catch (Exception error) {
+            session.streamControl.stop();
+            closeSource(source);
             throw new IllegalStateException(error);
         }
+    }
+
+    interface IoAction {
+        void run() throws IOException;
+    }
+
+    static void startReaderBeforeSnapshot(
+            ExecutorService executor, FutureTask<?> reader, IoAction snapshot)
+            throws IOException {
+        try {
+            executor.execute(reader);
+        } catch (RuntimeException error) {
+            reader.cancel(false);
+            throw error;
+        }
+        snapshot.run();
     }
 
     private static void finish(Session session) {
@@ -363,7 +392,16 @@ final class LogcatRecorder {
             synchronized (LogcatRecorder.class) {
                 if (session.finalized || session.failed) return;
             }
-            poll(session);
+            Throwable readerFailure = await(session.readerFuture, STREAM_STOP_TIMEOUT_MS);
+            if (readerFailure != null) {
+                throw new IOException(readerFailure instanceof TimeoutException
+                        ? "Logcat reader did not stop after its stream was closed"
+                        : "Logcat reader failed: " + safe(readerFailure.getMessage()), readerFailure);
+            }
+            if (session.readerFailure != null) {
+                throw new IOException("Logcat reader failed: " + session.readerError,
+                        session.readerFailure);
+            }
             captureSnapshot(session, "after", fullSnapshotCommands(false));
             finalizeLog(session);
             long endedWallMs = System.currentTimeMillis();
@@ -373,6 +411,7 @@ final class LogcatRecorder {
             session.manifest.put("durationMs", Math.max(0L,
                     SystemClock.elapsedRealtime() - session.startedElapsedMs));
             session.manifest.put("runtimeEnd", runtimeIdentity(session.context));
+            session.manifest.put("streamComplete", !session.knownLoss);
             writeManifest(session);
             long savedBytes = session.logFile.bytes();
             List<Runnable> completions;
@@ -384,7 +423,7 @@ final class LogcatRecorder {
                 lastSavedFile = session.manifestFile;
                 lastStatus = STATUS_SAVED;
                 lastDetail = "mode=" + session.mode + " bytes=" + savedBytes
-                        + (session.truncated ? " truncated" : "");
+                        + (session.reducedCoverage ? " reduced-coverage" : "");
                 completions = takeCompletionsLocked(session);
             }
             publishUiState();
@@ -393,123 +432,186 @@ final class LogcatRecorder {
                     "system_recorder_saved id=" + session.captureId
                             + " bytes=" + savedBytes
                             + " mode=" + session.mode
-                            + " truncated=" + session.truncated);
+                            + " reducedCoverage=" + session.reducedCoverage
+                            + " knownLoss=" + session.knownLoss);
         } catch (Exception error) {
+            session.streamControl.stop();
             throw new IllegalStateException(error);
         }
     }
 
-    private static void pollSafely(Session session) {
-        if (!isCurrent(session)) return;
+    private static void runStream(Session session, CaptureSource initialSource) {
+        CaptureOutput capture = new CaptureOutput(session);
+        CaptureSource source = initialSource;
         try {
-            poll(session);
-            writeManifest(session);
-        } catch (Exception error) {
-            session.pollErrors++;
-            session.lastPollError = error.getClass().getSimpleName() + ": "
-                    + safe(error.getMessage());
             try {
-                session.manifest.put("pollErrors", session.pollErrors);
-                session.manifest.put("lastPollError", session.lastPollError);
-                writeManifest(session);
-            } catch (Exception ignored) {
-                Log.w(TAG, "manifest update failed", ignored);
-            }
-        }
-    }
-
-    private static void poll(Session session) throws IOException {
-        long requestedAtMs = System.currentTimeMillis();
-        long cursorMs = Math.max(0L, session.lastPollWallMs - 1_000L);
-        String output;
-        if ("full_system_adb".equals(session.mode)) {
-            try {
-                LocalAdbBridge.ShellResult result = LocalAdbBridge.runDiagnosticShellCommand(
-                        session.context, fullLogcatCommand(cursorMs));
-                if (result.success()) {
-                    output = result.output;
-                    if (result.truncated) {
-                        session.truncated = true;
-                        session.droppedBytes += result.droppedBytes;
-                    }
-                } else {
-                    session.mode = "app_uid_fallback";
-                    session.fallbackReason = "ADB lost: " + result.shortDetail();
-                    output = appUidLogcat(session, cursorMs);
+                source.readTo(capture);
+                if (session.stopRequested) {
+                    recordPartial(session, capture.persistPartial(), "stop");
+                    return;
                 }
+                if (!(source instanceof AdbLogcatSource)) {
+                    throw new IOException("app-visible Logcat stream ended");
+                }
+                transitionToFallback(session, source, capture, "ADB stream ended");
+            } catch (CaptureWriteException error) {
+                throw error;
+            } catch (FallbackStreamException error) {
+                throw error;
             } catch (IOException error) {
-                session.mode = "app_uid_fallback";
-                session.fallbackReason = "ADB lost: " + safe(error.getMessage());
-                output = appUidLogcat(session, cursorMs);
+                if (session.stopRequested) {
+                    recordPartial(session, capture.persistPartial(), "stop");
+                    return;
+                }
+                if (!(source instanceof AdbLogcatSource)) throw error;
+                transitionToFallback(session, source, capture,
+                        "ADB stream failed: " + errorDetail(error));
             }
-        } else {
-            output = appUidLogcat(session, cursorMs);
-        }
-        writeDeduplicated(session, boundedPollOutput(session, output));
-        session.lastPollWallMs = requestedAtMs;
-        session.pollCount++;
-        try {
-            session.manifest.put("mode", session.mode);
-            session.manifest.put("fallbackReason", session.fallbackReason);
-            session.manifest.put("pollCount", session.pollCount);
-        } catch (Exception ignored) {
-            Log.w(TAG, "poll manifest update failed", ignored);
-        }
-    }
-
-    private static String appUidLogcat(Session session, long cursorMs) throws IOException {
-        File output = new File(session.context.getCacheDir(),
-                "bydhud-logcat-" + session.captureId + ".tmp");
-        Process process = new ProcessBuilder(
-                "logcat", "-v", "threadtime", "-T", cursor(cursorMs), "-d")
-                .redirectErrorStream(true)
-                .redirectOutput(output)
-                .start();
-        try {
-            if (!process.waitFor(8L, TimeUnit.SECONDS)) {
-                process.destroyForcibly();
-                throw new IOException("app logcat poll timeout");
+        } catch (Exception error) {
+            try {
+                recordPartial(session, capture.persistPartial(), "stream_failure");
+            } catch (IOException partialError) {
+                error.addSuppressed(partialError);
             }
-            long available = output.length();
-            if (available > MAX_UID_POLL_BYTES) {
-                session.truncated = true;
-                session.droppedBytes += available - MAX_UID_POLL_BYTES;
-            }
-            return readBounded(output, MAX_UID_POLL_BYTES);
-        } catch (InterruptedException error) {
-            Thread.currentThread().interrupt();
-            throw new IOException("app logcat poll interrupted", error);
+            requestReaderFailure(session, error);
         } finally {
-            if (output.exists() && !output.delete()) output.deleteOnExit();
+            session.streamControl.clearAndClose(source);
         }
     }
 
-    private static void writeDeduplicated(Session session, String output) throws IOException {
-        if (output == null || output.isEmpty()) {
+    private static void transitionToFallback(Session session, CaptureSource adbSource,
+            CaptureOutput capture, String reason) throws IOException {
+        session.streamControl.clearAndClose(adbSource);
+        if (session.stopRequested) return;
+        byte[] pendingPrefix = capture.takePartial();
+        LogcatStreamBoundary.Boundary boundary = session.boundary.snapshot();
+        session.mode = "app_uid_fallback";
+        session.fallbackReason = reason;
+        session.reducedCoverage = true;
+        session.knownLoss = true;
+        recordInterruption(session, reason,
+                boundary.reliable ? "timestamp_occurrence_reconcile" : "reconcile_unavailable");
+        CaptureSource fallback;
+        try {
+            fallback = openAppUidLogcat(session,
+                    boundary.timestamp.isEmpty() ? System.currentTimeMillis() : -1L,
+                    boundary.timestamp);
+        } catch (IOException error) {
+            capture.restorePartial(pendingPrefix);
+            throw error;
+        }
+        if (!session.streamControl.install(fallback)) {
+            capture.restorePartial(pendingPrefix);
+            recordPartial(session, capture.persistPartial(), "stop_during_fallback_open");
             return;
         }
-        String[] lines = output.split("\\r?\\n");
-        StringBuilder accepted = new StringBuilder(output.length());
-        for (String line : lines) {
-            if (line.isEmpty() || session.previousPollLines.contains(line)) continue;
-            accepted.append(line).append('\n');
+        LogcatStreamBoundary.Reconciler reconciler = null;
+        try {
+            OutputStream output = capture;
+            if (boundary.reliable) {
+                output = reconciler = new LogcatStreamBoundary.Reconciler(
+                        boundary, capture, pendingPrefix);
+            } else if (pendingPrefix.length > 0) {
+                output = reconciler = new LogcatStreamBoundary.Reconciler(
+                        boundary, capture, pendingPrefix);
+            }
+            writeManifest(session);
+            AppEventLogger.event(session.context,
+                    "system_recorder_fallback id=" + session.captureId
+                            + " reason=" + safe(reason)
+                            + " reconcile=" + (boundary.reliable ? "occurrence" : "unavailable"));
+            try {
+                fallback.readTo(output);
+            } catch (CaptureWriteException error) {
+                throw error;
+            } catch (IOException error) {
+                if (session.stopRequested) return;
+                throw new FallbackStreamException(
+                        "app-visible Logcat stream failed: " + errorDetail(error), error);
+            }
+            if (session.stopRequested) return;
+            if (reconciler != null && reconciler.overflowed()) {
+                recordInterruption(session, "fallback boundary line exceeded limit",
+                        "reconcile_overflow");
+            }
+            throw new FallbackStreamException("app-visible Logcat stream ended", null);
+        } finally {
+            if (reconciler != null) {
+                LogcatStreamBoundary.Finish result = reconciler.finish();
+                recordPartial(session, capture.persistPartial(),
+                        result.pendingMismatch ? "transition_prefix_mismatch" : "transition_stop");
+                if (result.pendingMismatch) {
+                    recordInterruption(session,
+                            "ADB partial record did not match fallback boundary",
+                            "both_valid_prefixes_persisted");
+                }
+                if (result.discardedBytes > 0) {
+                    session.knownLoss = true;
+                    recordInterruption(session,
+                            "discarded incomplete UTF-8 suffix bytes=" + result.discardedBytes,
+                            "valid_prefix_persisted");
+                }
+            }
+            session.streamControl.clearAndClose(fallback);
         }
-        LinkedHashSet<String> boundary = new LinkedHashSet<>();
-        int start = Math.max(0, lines.length - MAX_BOUNDARY_LINES);
-        for (int i = start; i < lines.length; i++) {
-            if (!lines[i].isEmpty()) boundary.add(lines[i]);
-        }
-        session.previousPollLines = boundary;
-        if (accepted.length() > 0) writeLog(session, accepted.toString());
     }
 
-    private static String boundedPollOutput(Session session, String output) {
-        if (output == null || output.isEmpty()) return "";
-        byte[] bytes = output.getBytes(StandardCharsets.UTF_8);
-        if (bytes.length <= MAX_UID_POLL_BYTES) return output;
-        session.truncated = true;
-        session.droppedBytes += bytes.length - MAX_UID_POLL_BYTES;
-        return new String(bytes, 0, MAX_UID_POLL_BYTES, StandardCharsets.UTF_8);
+    private static CaptureSource openAppUidLogcat(Session session, long cursorMs)
+            throws IOException {
+        return openAppUidLogcat(session, cursorMs, "");
+    }
+
+    private static CaptureSource openAppUidLogcat(
+            Session session, long cursorMs, String exactCursor) throws IOException {
+        String value = exactCursor == null || exactCursor.isEmpty()
+                ? cursor(Math.max(0L, cursorMs)) : exactCursor;
+        Process process = new ProcessBuilder(
+                "logcat", "-v", "threadtime", "-T", value)
+                .redirectErrorStream(true)
+                .start();
+        return new ProcessLogcatSource(process);
+    }
+
+    private static void requestReaderFailure(Session session, Exception error) {
+        session.readerFailure = error;
+        session.readerError = errorDetail(error);
+        recordInterruption(session, session.readerError, "stream_failed");
+        session.streamControl.stop();
+        synchronized (LogcatRecorder.class) {
+            if (session.finalized || session.failed) return;
+            if (activeSession == session) activeSession = null;
+            finalizingSession = session;
+            session.stopRequested = true;
+            lastStatus = STATUS_SAVING;
+            lastDetail = "Logcat stream failed; finalizing evidence";
+            ensureFinishLocked(session);
+        }
+        publishUiState();
+    }
+
+    private static void recordInterruption(Session session, String reason, String recovery) {
+        synchronized (session.interruptions) {
+            JSONObject item = new JSONObject();
+            try {
+                item.put("at", timestampForLine(System.currentTimeMillis()));
+                item.put("reason", safe(reason));
+                item.put("recovery", recovery);
+                item.put("knownLoss", session.knownLoss);
+            } catch (Exception ignored) {
+                Log.w(TAG, "interruption metadata failed", ignored);
+            }
+            session.interruptions.add(item);
+        }
+    }
+
+    private static void recordPartial(Session session, PartialWrite result, String reason) {
+        if (result == null || result.inputBytes <= 0) return;
+        if (result.discardedBytes > 0) session.knownLoss = true;
+        recordInterruption(session,
+                "partial Logcat record bytes=" + result.inputBytes
+                        + " persisted=" + result.persistedBytes
+                        + " discardedUtf8Tail=" + result.discardedBytes,
+                reason);
     }
 
     private static void captureSnapshot(Session session, String label, List<String> commands)
@@ -533,8 +635,7 @@ final class LogcatRecorder {
                     output.append("exit=").append(result.exitCode).append('\n')
                             .append(result.output).append('\n');
                     if (result.truncated) {
-                        session.truncated = true;
-                        session.droppedBytes += result.droppedBytes;
+                        session.diagnosticDroppedBytes += result.droppedBytes;
                         output.append("truncated=true droppedBytes=")
                                 .append(result.droppedBytes).append('\n');
                     }
@@ -637,9 +738,15 @@ final class LogcatRecorder {
     }
 
     private static void writeLog(Session session, String text) throws IOException {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        appendLog(session, bytes, 0, bytes.length);
+    }
+
+    private static void appendLog(Session session, byte[] bytes, int offset, int length)
+            throws IOException {
         NavigationLogStorage.lockTopologyRead();
         try {
-            session.logFile.append(text.getBytes(StandardCharsets.UTF_8));
+            session.logFile.append(bytes, offset, length);
         } finally {
             NavigationLogStorage.unlockTopologyRead();
         }
@@ -657,15 +764,25 @@ final class LogcatRecorder {
     private static void writeManifest(Session session) throws IOException {
         try {
             session.manifest.put("mode", session.mode);
+            session.manifest.put("buffers",
+                    "full_system_adb".equals(session.mode) ? "all" : "app-visible");
             session.manifest.put("fallbackReason", session.fallbackReason);
+            session.manifest.put("reducedCoverage", session.reducedCoverage);
+            session.manifest.put("knownLoss", session.knownLoss);
+            session.manifest.put("readerError",
+                    session.readerError.isEmpty() ? JSONObject.NULL : session.readerError);
+            JSONArray interruptions = new JSONArray();
+            synchronized (session.interruptions) {
+                for (JSONObject item : session.interruptions) interruptions.put(item);
+            }
+            session.manifest.put("interruptions", interruptions);
             JSONArray segments = new JSONArray();
             if (session.logFile.file().isFile()) {
                 segments.put(session.logFile.file().getName());
             }
             session.manifest.put("segments", segments);
             session.manifest.put("bytes", session.logFile.bytes());
-            session.manifest.put("droppedBytes", session.droppedBytes);
-            session.manifest.put("truncated", session.truncated);
+            session.manifest.put("diagnosticDroppedBytes", session.diagnosticDroppedBytes);
             File temporary = new File(session.directory, "manifest.json.tmp");
             writeFile(temporary,
                     session.manifest.toString(2).getBytes(StandardCharsets.UTF_8));
@@ -696,23 +813,6 @@ final class LogcatRecorder {
         }
     }
 
-    private static String readBounded(File file, int maxBytes) throws IOException {
-        ByteArrayOutputStream output = new ByteArrayOutputStream();
-        byte[] buffer = new byte[32 * 1024];
-        try (FileInputStream input = new FileInputStream(file)) {
-            int read;
-            while ((read = input.read(buffer)) >= 0 && output.size() < maxBytes) {
-                if (read <= 0) continue;
-                output.write(buffer, 0, Math.min(read, maxBytes - output.size()));
-            }
-        }
-        return output.toString("UTF-8");
-    }
-
-    private static boolean isCurrent(Session session) {
-        return activeSession == session;
-    }
-
     private static void updateDetail(Session session, String detail) {
         synchronized (LogcatRecorder.class) {
             if (activeSession == session) lastDetail = detail;
@@ -723,6 +823,12 @@ final class LogcatRecorder {
         synchronized (LogcatRecorder.class) {
             if (session.finalized) return;
             session.finalized = true;
+            session.stopRequested = true;
+        }
+        session.streamControl.stop();
+        Throwable readerStop = await(session.readerFuture, STREAM_STOP_TIMEOUT_MS);
+        if (readerStop instanceof TimeoutException) {
+            detail += "; Logcat reader did not stop after stream close";
         }
         Log.e(TAG, detail);
         try {
@@ -735,6 +841,7 @@ final class LogcatRecorder {
         try {
             session.manifest.put("status", "failed");
             session.manifest.put("failure", detail);
+            session.manifest.put("streamComplete", false);
             writeManifest(session);
         } catch (Exception ignored) {
             Log.e(TAG, "Unable to finalize failed capture", ignored);
@@ -758,6 +865,7 @@ final class LogcatRecorder {
     }
 
     private static Throwable await(Future<?> future, long timeoutMs) {
+        if (future == null) return null;
         try {
             future.get(timeoutMs, TimeUnit.MILLISECONDS);
             return null;
@@ -769,10 +877,6 @@ final class LogcatRecorder {
         } catch (TimeoutException error) {
             return error;
         }
-    }
-
-    private static String fullLogcatCommand(long cursorMs) {
-        return "logcat -b all -v threadtime -T '" + cursor(cursorMs) + "' -d";
     }
 
     private static String cursor(long millis) {
@@ -796,6 +900,19 @@ final class LogcatRecorder {
 
     private static String safe(String value) {
         return value == null ? "" : value.replace('\n', ' ').replace('\r', ' ').trim();
+    }
+
+    private static String errorDetail(Throwable error) {
+        StringBuilder detail = new StringBuilder();
+        Throwable current = error;
+        for (int depth = 0; current != null && depth < 4; depth++) {
+            if (depth > 0) detail.append(" <- ");
+            detail.append(current.getClass().getSimpleName());
+            String message = safe(current.getMessage());
+            if (!message.isEmpty()) detail.append(": ").append(message);
+            current = current.getCause();
+        }
+        return detail.toString();
     }
 
     static final class Result {
@@ -836,24 +953,25 @@ final class LogcatRecorder {
         final File manifestFile;
         final JSONObject manifest = new JSONObject();
         final LogcatCaptureFile logFile;
-        volatile ScheduledFuture<?> pollFuture;
+        final LogcatStreamBoundary boundary = new LogcatStreamBoundary();
+        final StreamControl streamControl = new StreamControl();
+        final List<JSONObject> interruptions = new ArrayList<>();
+        volatile Future<?> readerFuture;
         volatile Future<?> finishFuture;
         volatile boolean stopRequested;
         volatile boolean finalized;
         volatile boolean failed;
+        volatile Throwable readerFailure;
         String failureDetail = "";
         final List<Runnable> completions = new ArrayList<>();
-        Set<String> previousPollLines = new LinkedHashSet<>();
-        long droppedBytes;
-        boolean truncated;
+        volatile long diagnosticDroppedBytes;
         long startedWallMs;
         long startedElapsedMs;
-        long lastPollWallMs;
-        int pollCount;
-        int pollErrors;
-        String lastPollError = "";
-        String mode = "initializing";
-        String fallbackReason = "";
+        volatile boolean reducedCoverage;
+        volatile boolean knownLoss;
+        volatile String readerError = "";
+        volatile String mode = "initializing";
+        volatile String fallbackReason = "";
 
         Session(Context context, String day, String captureId, File directory) {
             this.context = context;
@@ -862,6 +980,197 @@ final class LogcatRecorder {
             this.directory = directory;
             this.manifestFile = new File(directory, "manifest.json");
             this.logFile = new LogcatCaptureFile(directory);
+        }
+    }
+
+    private interface CaptureSource extends Closeable {
+        void readTo(OutputStream output) throws IOException;
+    }
+
+    private static final class AdbLogcatSource implements CaptureSource {
+        private final LocalAdbBridge.LogcatStreamSession session;
+
+        AdbLogcatSource(LocalAdbBridge.LogcatStreamSession session) {
+            this.session = session;
+        }
+
+        @Override public void readTo(OutputStream output) throws IOException {
+            session.readTo(output);
+        }
+
+        @Override public void close() {
+            session.close();
+        }
+    }
+
+    private static final class ProcessLogcatSource implements CaptureSource {
+        private final Process process;
+        private final InputStream input;
+
+        ProcessLogcatSource(Process process) {
+            this.process = process;
+            input = process.getInputStream();
+        }
+
+        @Override public void readTo(OutputStream output) throws IOException {
+            byte[] buffer = new byte[STREAM_CHUNK_BYTES];
+            int read;
+            while ((read = input.read(buffer)) >= 0) {
+                if (read > 0) output.write(buffer, 0, read);
+            }
+            int exitCode;
+            try {
+                exitCode = process.exitValue();
+            } catch (IllegalThreadStateException error) {
+                throw new IOException("app-visible Logcat stream closed without process exit", error);
+            }
+            if (exitCode != 0) {
+                throw new IOException("app-visible Logcat exited with " + exitCode);
+            }
+        }
+
+        @Override public void close() {
+            try {
+                input.close();
+            } catch (IOException ignored) {
+                // Closing the process is the Stop signal; a reader-side error owns reporting.
+            }
+            process.destroy();
+            if (process.isAlive()) process.destroyForcibly();
+        }
+    }
+
+    private static final class CaptureOutput extends OutputStream {
+        private static final int MAX_RECORD_BYTES = 64 * 1024;
+        private final Session session;
+        private final byte[] record = new byte[MAX_RECORD_BYTES + 1];
+        private int recordBytes;
+
+        CaptureOutput(Session session) {
+            this.session = session;
+        }
+
+        @Override public void write(int value) throws IOException {
+            appendByte((byte) value);
+        }
+
+        @Override public void write(byte[] bytes, int offset, int length) throws IOException {
+            int end = offset + length;
+            for (int index = offset; index < end; index++) {
+                appendByte(bytes[index]);
+            }
+        }
+
+        private void appendByte(byte value) throws IOException {
+            if (recordBytes >= MAX_RECORD_BYTES) {
+                throw new CaptureWriteException("Logcat record exceeds bounded intake", null);
+            }
+            record[recordBytes++] = value;
+            if (value != '\n') return;
+            try {
+                appendLog(session, record, 0, recordBytes);
+                session.boundary.observe(record, 0, recordBytes);
+                recordBytes = 0;
+            } catch (IOException error) {
+                throw new CaptureWriteException("capture file write failed", error);
+            }
+        }
+
+        byte[] takePartial() {
+            byte[] partial = Arrays.copyOf(record, recordBytes);
+            recordBytes = 0;
+            return partial;
+        }
+
+        void restorePartial(byte[] partial) throws IOException {
+            if (partial == null || partial.length == 0) return;
+            if (recordBytes != 0 || partial.length > MAX_RECORD_BYTES) {
+                throw new IOException("Unable to restore bounded Logcat partial record");
+            }
+            System.arraycopy(partial, 0, record, 0, partial.length);
+            recordBytes = partial.length;
+        }
+
+        PartialWrite persistPartial() throws IOException {
+            byte[] partial = takePartial();
+            int complete = LogcatStreamBoundary.completeUtf8PrefixLength(
+                    partial, partial.length);
+            if (complete > 0) {
+                try {
+                    appendLog(session, partial, 0, complete);
+                } catch (IOException error) {
+                    throw new CaptureWriteException("capture partial write failed", error);
+                }
+            }
+            return new PartialWrite(partial.length, complete, partial.length - complete);
+        }
+    }
+
+    private static final class PartialWrite {
+        final int inputBytes;
+        final int persistedBytes;
+        final int discardedBytes;
+
+        PartialWrite(int inputBytes, int persistedBytes, int discardedBytes) {
+            this.inputBytes = inputBytes;
+            this.persistedBytes = persistedBytes;
+            this.discardedBytes = discardedBytes;
+        }
+    }
+
+    static final class StreamControl {
+        private CaptureSource source;
+        private boolean stopped;
+
+        synchronized boolean install(CaptureSource next) {
+            if (stopped) {
+                close(next);
+                return false;
+            }
+            source = next;
+            return true;
+        }
+
+        synchronized void clearAndClose(CaptureSource expected) {
+            if (source == expected) source = null;
+            close(expected);
+        }
+
+        synchronized void stop() {
+            stopped = true;
+            CaptureSource current = source;
+            source = null;
+            close(current);
+        }
+
+        private static void close(Closeable value) {
+            if (value == null) return;
+            try {
+                value.close();
+            } catch (IOException ignored) {
+                // Reader/finalizer reports the meaningful terminal result.
+            }
+        }
+    }
+
+    private static void closeSource(Closeable source) {
+        if (source == null) return;
+        try {
+            source.close();
+        } catch (IOException ignored) {
+            // The owning start/finalize error is reported with the capture result.
+        }
+    }
+
+    private static final class CaptureWriteException extends IOException {
+        CaptureWriteException(String message, IOException cause) {
+            super(message, cause);
+        }
+    }
+
+    private static final class FallbackStreamException extends IOException {
+        FallbackStreamException(String message, IOException cause) {
+            super(message, cause);
         }
     }
 

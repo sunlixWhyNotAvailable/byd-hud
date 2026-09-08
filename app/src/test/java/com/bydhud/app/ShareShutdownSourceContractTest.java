@@ -47,17 +47,21 @@ public final class ShareShutdownSourceContractTest {
     @Test
     public void shareUiIsCancellableAndCopyIsCompact() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String workflow = source("StorageLogShareWorkflow.kt");
         String begin = between(source,
                 "fun beginStorageShare(days: List<String>)",
                 "fun runLogcatAction(");
-        String shareEffect = between(source,
-                "LaunchedEffect(storageShareBusy, storageShareDays, storageShareDestination)",
-                "    Box(\n        modifier = Modifier");
         assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
-        assertFalse(shareEffect.contains("NonCancellable"));
-        assertTrue(shareEffect.contains("runInterruptible(Dispatchers.IO)"));
+        assertFalse(source.contains("LaunchedEffect(storageShareBusy, storageShareDays"));
+        assertTrue(workflow.contains("Executors.newSingleThreadExecutor"));
+        assertTrue(workflow.contains("val app = context.applicationContext"));
+        assertTrue(workflow.contains("if (control.cancelled) return@execute"));
+        assertTrue(workflow.contains("LogShareZip.attachProgressListener"));
+        assertTrue(workflow.contains("StorageLogSharePhase.CANCELLING"));
+        assertTrue(workflow.contains("active?.cancel()"));
         assertTrue(source.contains("OperationProgressStack("));
-        assertTrue(source.contains("storageShareTerminalPhase = \"CANCELLED\""));
+        assertTrue(source.contains("onCancelShare = { activity.composeCancelStorageShare() }"));
+        assertTrue(source.contains("onCloseShare = { activity.composeDismissStorageShare() }"));
         assertTrue(source.contains("waitingForWrites = \"Очікування записів\""));
         assertTrue(source.contains("archiving = \"Archiving\""));
         assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));

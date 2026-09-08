@@ -81,6 +81,8 @@ final class LocalAdbBridge {
     private static final Pattern DIAGNOSTIC_LOGCAT_COMMAND = Pattern.compile(
             "logcat -b all -v threadtime -T '[0-9]{2}-[0-9]{2} "
                     + "[0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}' -d");
+    private static final Pattern LOGCAT_STREAM_CURSOR = Pattern.compile(
+            "[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\\.[0-9]{3}");
     private static final Pattern DIAGNOSTIC_PROC_STAT_COMMAND = Pattern.compile(
             "cat /proc/[0-9]{1,10}/stat");
     private static final Pattern VEHICLE_CONFIG_PROPERTY_COMMAND = Pattern.compile(
@@ -188,6 +190,71 @@ final class LocalAdbBridge {
 
     static ConfigurationExportSession openConfigurationExport(Context context) {
         return openConfigurationExport(context, VehicleConfigurationReadback.SESSION_TIMEOUT_MS);
+    }
+
+    /** Opens one isolated, prompt-free transport for a continuous all-buffer Logcat stream. */
+    static LogcatStreamSession openLogcatStream(Context context, String cursor) throws IOException {
+        String safeCursor = cursor == null ? "" : cursor.trim();
+        if (!LOGCAT_STREAM_CURSOR.matcher(safeCursor).matches()) {
+            throw new SecurityException("Invalid Logcat stream cursor");
+        }
+        Context app = context.getApplicationContext();
+        Socket socket = new Socket();
+        try {
+            File directory = new File(app.getFilesDir(), KEY_DIR);
+            KeyPair pair = loadConfigurationExportKeyPair(
+                    new File(directory, PRIVATE_KEY_FILE),
+                    new File(directory, PUBLIC_KEY_FILE));
+            if (pair == null) throw new IOException("existing complete ADB key unavailable");
+            socket.connect(new InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS);
+            socket.setSoTimeout(CONNECT_TIMEOUT_MS);
+            OpenResult opened = Connection.openConnectedSocket(app,
+                    AuthorizationPromptMode.NEVER, pair, "", socket,
+                    endpointLabel(PORT), 0L, false);
+            if (opened.authorizationRequired || opened.connection == null) {
+                throw new IOException("existing ADB key not authorized");
+            }
+            socket.setSoTimeout(0);
+            return new LogcatStreamSession(socket, opened.connection, safeCursor);
+        } catch (Exception error) {
+            closeExportSocket(socket);
+            if (error instanceof IOException) throw (IOException) error;
+            throw new IOException("Unable to open Logcat stream", error);
+        }
+    }
+
+    /** A single-use stream whose close affects neither runtime ADB nor authorization state. */
+    static final class LogcatStreamSession implements AutoCloseable {
+        private final Socket socket;
+        private final Connection connection;
+        private final String cursor;
+        private final AtomicBoolean reading = new AtomicBoolean();
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private LogcatStreamSession(Socket socket, Connection connection, String cursor) {
+            this.socket = socket;
+            this.connection = connection;
+            this.cursor = cursor;
+        }
+
+        void readTo(OutputStream output) throws IOException {
+            if (output == null) throw new IllegalArgumentException("output is required");
+            if (closed.get()) throw new IOException("Logcat stream closed");
+            if (!reading.compareAndSet(false, true)) {
+                throw new IOException("Logcat stream already consumed");
+            }
+            connection.streamShell(
+                    "logcat -b all -v threadtime -T '" + cursor + "'", output);
+        }
+
+        @Override public void close() {
+            if (closed.compareAndSet(false, true)) closeExportSocket(socket);
+        }
+    }
+
+    static LogcatStreamSession logcatStreamForTest(Socket socket) throws IOException {
+        return new LogcatStreamSession(socket, new Connection(socket, null, false),
+                "09-08 15:45:20.226");
     }
 
     //The collector owns the overall deadline, including its pre-ADB local work.
@@ -1696,6 +1763,34 @@ final class LocalAdbBridge {
                     }
                     AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
                     return output.capture();
+                }
+            }
+        }
+
+        /** Forwards one shell stream packet-by-packet without an aggregate output buffer. */
+        private void streamShell(String command, OutputStream output) throws IOException {
+            int localId = nextLocalId++;
+            int remoteId = 0;
+            AdbPacket.write(out, AdbPacket.A_OPEN, localId, 0, nulPayload("shell:" + command));
+            while (true) {
+                AdbPacket packet = AdbPacket.read(in);
+                if (packet.arg1 != localId) {
+                    handleStalePacket(packet);
+                    continue;
+                }
+                if (packet.command == AdbPacket.A_OKAY) {
+                    remoteId = packet.arg0;
+                } else if (packet.command == AdbPacket.A_WRTE) {
+                    if (remoteId == 0) remoteId = packet.arg0;
+                    output.write(packet.payload);
+                    AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
+                } else if (packet.command == AdbPacket.A_CLSE) {
+                    if (remoteId == 0) remoteId = packet.arg0;
+                    AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
+                    output.flush();
+                    return;
+                } else {
+                    throw new IOException("Unexpected ADB Logcat packet");
                 }
             }
         }

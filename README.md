@@ -154,7 +154,9 @@ Prepend adds enabled, available metrics before the street or cue:
 
 Replace shows `18:45 | 25 min | 8.4 km` without the street or brackets. Unavailable values are omitted, not replaced with zeroes. Experimental output leaves the street unchanged and shows the metrics separately. Its layout has been calibrated on Sea Lion 07 EV; live output on other vehicles still needs validation, with no automatic fallback to the street field.
 
-Google Maps direct supplies all three metrics. Project-patched Waze `5.20.0.1` supplies ETA, remaining time, and remaining distance for the next stop and the entire route. On a multi-stop route, `Entire route` uses the final destination; if an individual whole-route value is unavailable, BYD HUD uses the corresponding available next-stop value.
+Available metrics depend on the navigator's current estimate. For both Google Maps and Waze, BYD HUD keeps supplied arrival and remaining time unchanged. If only one is available, it calculates the other at minute precision; if neither is available, both stay hidden. A hidden arrival-time setting can still provide the input for visible remaining time. This applies to both street formats and Experimental output, without changing the navigator's own data.
+
+Missing values are completed separately for each destination. On a multi-stop route, `Entire route` uses the final destination; if an individual whole-route value is unavailable, BYD HUD uses the corresponding available next-stop value. The existing first-pass text waiting still applies to ETA-only changes in the street field.
 
 <p align="center"><img src="docs/screenshots/en/settings-route-eta.png" alt="Route ETA, time, and distance settings" width="100%"></p>
 
@@ -335,13 +337,13 @@ BYD HUD stores navigation evidence in day folders so one trip can be shared with
 
 Export reads available diagnostic information without changing vehicle modes or repairing permissions. It also collects the relevant stock navigation and dashboard APKs (including splits), native libraries and their dependencies, framework files, and dashboard resources. An already authorized ADB connection provides wider access; without it, the readable local files and basic report remain available. Missing or inaccessible files are listed in the result.
 
-The export window shows the current stage and file, followed by the actual file count and copied volume once discovery finishes. Collection can take time and the archive may exceed 1 GB. You can cancel it or switch to another app and return while export continues in the background. The final archive size appears only after ZIP verification. Developer uploads are limited to 20 MiB; larger archives remain available through `Another app` without being split or truncated.
+Export uses a compact corner card without blocking other tabs. It shows the phase, growing discovered file/byte counts, then actual copy progress after discovery; elapsed seconds update independently of file progress. Full paths and explanations remain available through `Details`. Collection can take time and the archive may exceed 1 GB. You can stop preparation or switch tabs/apps while it continues. The final archive size appears only after ZIP verification. Developer uploads are limited to 20 MiB; larger archives remain available through `Another app` without being split or truncated.
 
 Text diagnostics and configuration values are redacted and network addresses masked. Firmware binaries are copied unchanged and may contain vendor-embedded data. Unrelated apps and private app data are not collected. Review the warning and share only with a trusted recipient; nothing is uploaded without your choice.
 
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
 
-Archive preparation uses a persistent progress card that remains visible across tabs and can be stopped safely. It stacks with Waze and Google Maps patch cards instead of overlapping them.
+Configuration export and selected-day log sharing keep the same progress card through preparation, sending and the result. Cards stack with Waze and Google Maps patch cards instead of overlapping them. During sending, `Close` hides the card but does not cancel the upload or allow another conflicting export. Progress does not reopen a dismissed card; the outcome is retained in diagnostics. Preparation still supports real cancellation, and consent is requested before creating or sending an archive.
 
 `Share logs` offers two explicit destinations:
 
@@ -354,7 +356,7 @@ After the Android share chooser opens successfully or `Send to developer` finish
 
 With authorized ADB, Logcat records the full system log and additional performance diagnostics. Without ADB, it records only the logs and diagnostics available to the app. Configuration export does not request ADB access, repair permissions, or enable automatic reporting.
 
-Logcat records continuously into one file until you stop it. There is no separate recording-size limit, so long recordings use more storage; the normal log-folder retention settings still apply.
+Logcat reads a continuous stream into one file until you stop it, rather than repeatedly reading overlapping snapshots. Full-system capture keeps all log buffers and before/after system metrics. If ADB disconnects, the result identifies the reduced app-visible fallback and any known interruption or loss. There is no separate recording-size limit, so long recordings use more storage; the normal log-folder retention settings still apply.
 
 BYD HUD does not automatically send crash reports, performance traces, screenshots, screen recordings, or navigation logs to the Sentry service. Read the complete policy in [PRIVACY.md](PRIVACY.md).
 

@@ -305,19 +305,20 @@ public final class DirectTbtFrame {
     public static final class TravelMetrics {
         public static final int UNKNOWN_ZONE_OFFSET_SECONDS = Integer.MIN_VALUE;
         private static final TravelMetrics UNAVAILABLE = new TravelMetrics(
-                -1L, UNKNOWN_ZONE_OFFSET_SECONDS, -1L, -1L);
+                -1L, UNKNOWN_ZONE_OFFSET_SECONDS, -1L, -1L, -1L);
 
         private final long arrivalTimeEpochMs;
         private final int arrivalZoneOffsetSeconds;
         private final long remainingTimeSeconds;
         private final long remainingDistanceMeters;
+        private final long sampleWallTimeEpochMs;
 
         public TravelMetrics(
                 long arrivalTimeEpochMs,
                 long remainingTimeSeconds,
                 long remainingDistanceMeters) {
             this(arrivalTimeEpochMs, UNKNOWN_ZONE_OFFSET_SECONDS,
-                    remainingTimeSeconds, remainingDistanceMeters);
+                    remainingTimeSeconds, remainingDistanceMeters, -1L);
         }
 
         public TravelMetrics(
@@ -325,6 +326,16 @@ public final class DirectTbtFrame {
                 int arrivalZoneOffsetSeconds,
                 long remainingTimeSeconds,
                 long remainingDistanceMeters) {
+            this(arrivalTimeEpochMs, arrivalZoneOffsetSeconds,
+                    remainingTimeSeconds, remainingDistanceMeters, -1L);
+        }
+
+        public TravelMetrics(
+                long arrivalTimeEpochMs,
+                int arrivalZoneOffsetSeconds,
+                long remainingTimeSeconds,
+                long remainingDistanceMeters,
+                long sampleWallTimeEpochMs) {
             this.arrivalTimeEpochMs = arrivalTimeEpochMs > 0L ? arrivalTimeEpochMs : -1L;
             this.arrivalZoneOffsetSeconds = arrivalTimeEpochMs > 0L
                     ? arrivalZoneOffsetSeconds : UNKNOWN_ZONE_OFFSET_SECONDS;
@@ -332,6 +343,8 @@ public final class DirectTbtFrame {
                     ? remainingTimeSeconds : -1L;
             this.remainingDistanceMeters = remainingDistanceMeters >= 0L
                     ? remainingDistanceMeters : -1L;
+            this.sampleWallTimeEpochMs = sampleWallTimeEpochMs > 0L
+                    ? sampleWallTimeEpochMs : -1L;
         }
 
         public static TravelMetrics unavailable() {
@@ -352,6 +365,11 @@ public final class DirectTbtFrame {
 
         public long getRemainingDistanceMeters() {
             return remainingDistanceMeters;
+        }
+
+        /** Wall clock captured when these producer metrics were freshly ingested. */
+        public long getSampleWallTimeEpochMs() {
+            return sampleWallTimeEpochMs;
         }
 
         public boolean hasAnyValue() {

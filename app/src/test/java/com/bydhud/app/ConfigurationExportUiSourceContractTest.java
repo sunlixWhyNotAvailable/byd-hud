@@ -13,110 +13,144 @@ import org.junit.Test;
 
 public final class ConfigurationExportUiSourceContractTest {
     @Test
-    public void exportObservesProcessStateAndNeverOwnsTheWorkerInCompose() throws IOException {
+    public void composeObservesBothProcessOwnedExportsWithoutOwningWorkers() throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
         String runtime = between(source, "private fun RuntimeApp(", "private fun Header(");
         assertContains(runtime,
+                "val storageLogShare by StorageLogShareWorkflow.snapshot.collectAsState()",
                 "val configurationExport by VehicleConfigurationExport.snapshot.collectAsState()",
-                "val configurationShareBusy = configurationExport?.let { configurationExportBusy(it.phase) } ?: false",
-                "configurationShareVisible || configurationExport != null -> \"configuration-share\"",
-                "configurationExport?.let { state ->", "state = state",
-                "onCancel = { activity.composeCancelConfigurationExport() }",
-                "onClose = { activity.composeDismissConfigurationExport() }",
-                "onShare = { activity.composeShareConfigurationExport() }");
-        assertTrue(runtime.indexOf("configurationExport?.let { state ->") > runtime.indexOf("BottomTabs(copy"));
-        assertFalse(source.contains("LaunchedEffect(configurationShare"));
-        assertFalse(source.contains("composeShareVehicleConfiguration"));
-        assertFalse(source.contains("composeUploadVehicleConfigurationToSentry"));
-        assertFalse(source.contains("var configurationShareBusy"));
-        String begin = between(runtime, "fun beginConfigurationShare(", "LaunchedEffect(sentryUploadCooldownUntilMs)");
-        assertContains(begin,
+                "storageLogShare = storageLogShare", "configurationExport = configurationExport",
+                "onCancelShare = { activity.composeCancelStorageShare() }",
+                "onCloseShare = { activity.composeDismissStorageShare() }",
+                "onCancelConfiguration = { activity.composeCancelConfigurationExport() }",
+                "onCloseConfiguration = { activity.composeDismissConfigurationExport() }",
+                "onShareConfiguration = { activity.composeShareConfigurationExport() }");
+        assertTrue(runtime.indexOf("OperationProgressStack(") > runtime.indexOf("BottomTabs(copy"));
+        assertContains(runtime,
+                "activity.composeBeginStorageShare(",
                 "if (activity.composeBeginConfigurationExport(destination == StorageShareDestination.Sentry))",
-                "configurationShareVisible = false", "configurationStartFailed = true");
-        assertTrue(begin.indexOf("composeBeginConfigurationExport") < begin.indexOf("configurationShareVisible = false"));
-        assertFalse(begin.contains("launch"));
-        assertFalse(begin.contains("withContext"));
-        // Navigation-log collection and its distinct Sentry result window remain wired as before.
-        assertContains(runtime, "activity.composeUploadStorageDaysToSentry(", "activity.composeShareStorageDays(",
-                "runInterruptible(Dispatchers.IO)", "configuration = false",
                 "sentryButtonEnabled = sentryButtonRemaining == 0");
+        assertFalse(source.contains("LaunchedEffect(storageShareBusy, storageShareDays"));
+        assertFalse(source.contains("ConfigurationExportOverlay("));
+        assertFalse(source.contains("SentryUploadOverlay("));
+        assertFalse(source.contains("composeShareStorageDays("));
+        assertFalse(source.contains("composeUploadStorageDaysToSentry("));
     }
 
     @Test
-    public void progressUsesOnlyRealSnapshotCountersAndKeepsPartialArchivesHonest() throws IOException {
-        String overlay = overlay();
-        assertContains(overlay,
-                "state: ConfigurationExportSnapshot", "state.elapsedSeconds", "state.currentFile",
-                "state.totalBytes", "state.copiedBytes", "state.totalFiles", "state.copiedFiles",
-                "state.unavailableFiles", "state.archiveName", "state.archiveBytes", "state.eventId",
-                "state.phase == ConfigurationExportPhase.COPYING && totalBytes != null",
-                "totalBytes > 0L && state.copiedBytes < totalBytes",
-                "state.copiedBytes.toDouble() / totalBytes * 100", ".coerceIn(0, 99)",
-                "UpdateProgressBar(\"$percent%\", palette)", "LoadingSpinner(palette)",
-                "state.totalFiles?.toString() ?: \"?\"", "Total size and count will be known after inventory",
-                "val partial = state.unavailableFiles > 0", "ConfigurationExportPhase.READY -> if (partial)",
-                "if (partial && state.archiveAvailable)", "manifest.json");
-        assertFalse(overlay.contains("100%"));
-        assertFalse(overlay.contains("delay("));
-        assertFalse(overlay.contains("ConfigurationExportPreview"));
-        assertFalse(overlay.contains("Simulation"));
-        for (String phase : new String[] { "INVENTORY", "DIAGNOSTICS", "COPYING", "ARCHIVING", "VERIFYING",
-                "READY", "UPLOADING", "SENT", "FAILED", "CANCELLING", "CANCELLED" }) {
-            assertTrue("missing phase " + phase, overlay.contains("ConfigurationExportPhase." + phase));
-        }
-    }
-
-    @Test
-    public void backAndButtonsCancelCollectionButNeverClaimToCancelDispatchedUploads() throws IOException {
+    public void progressUsesGrowingInventoryThenRealCopyTotalsAndIndependentElapsed()
+            throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
-        String overlay = overlay();
-        assertContains(overlay,
-                "val canCancel = busy && state.phase != ConfigurationExportPhase.UPLOADING",
-                "&& state.phase != ConfigurationExportPhase.CANCELLING",
-                "BackHandler {\n        if (canCancel) onCancel() else if (!busy) onClose()",
-                "ModalInputBlocker()", ".heightIn(max = maxHeight - 36.dp)",
-                ".verticalScroll(rememberScrollState())", "enabled = canCancel || !busy",
-                "onClick = if (canCancel) onCancel else onClose",
-                "cancellation cannot be guaranteed. Wait for the result");
-        String busy = between(source, "private fun configurationExportBusy(", "private fun ConfigurationShareDestinationOverlay(");
-        assertContains(busy, "ConfigurationExportPhase.CANCELLING -> true",
-                "ConfigurationExportPhase.FAILED, ConfigurationExportPhase.CANCELLED -> false");
-        String hostBack = between(source("MainActivity.java"), "public void onBackPressed()", "//builds this artifact here");
+        String stack = stack(source);
+        String config = between(stack,
+                "visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->",
+                "patchOperations.filter {");
+        String card = between(source, "private fun OperationProgressCard(",
+                "private fun storageLogShareBusy(");
+        assertContains(config,
+                "state.inventoryComplete", "state.foundFiles", "state.knownBytes",
+                "known so far", "відомо наразі", "state.totalFiles ?: state.foundFiles",
+                "state.totalBytes ?: state.knownBytes", "state.copiedFiles", "state.copiedBytes",
+                "state.unavailableFiles", "state.archiveAvailable", "state.eventId");
+        assertFalse(config.contains("%"));
+        for (String phase : new String[] { "INVENTORY", "DIAGNOSTICS", "COPYING", "ARCHIVING",
+                "VERIFYING", "WAITING_FOR_SHARE", "READY", "UPLOADING", "SENT", "FAILED",
+                "CANCELLING", "CANCELLED" }) {
+            assertTrue("missing phase " + phase, config.contains("ConfigurationExportPhase." + phase));
+        }
+        assertContains(card,
+                ".width(460.dp)", ".height(170.dp)",
+                "SystemClock.elapsedRealtime()", "delay(1_000L)",
+                "card.endedAtElapsedMs", "coerceAtLeast(0L) / 1_000L");
+    }
+
+    @Test
+    public void compactCardsOnlyOpenAModalForExplicitDetails() throws IOException {
+        String source = source("BydHudRuntimeCompose.kt");
+        String stack = stack(source);
+        String card = between(source, "private fun OperationProgressCard(",
+                "private fun storageLogShareBusy(");
+        String details = between(source, "private fun OperationDetailsOverlay(",
+                "private fun ConfigurationShareDestinationOverlay(");
+        assertFalse(stack.contains(".take(3)"));
+        assertContains(stack,
+                "visibleStorageShare", "visibleConfigurationExport", "showStorageShare",
+                "padding(end = 24.dp, bottom = 24.dp)", "Arrangement.spacedBy(12.dp)",
+                "onDetails = { detailsKey = card.key }",
+                "cards.firstOrNull { it.key == detailsKey }");
+        assertFalse(stack.contains("ModalInputBlocker()"));
+        assertContains(card,
+                "if (card.details.isNotEmpty())", "\"Деталі\" else \"Details\"",
+                "if (card.busy && card.stopEnabled)", "if (card.closeEnabled)");
+        assertContains(details, "BackHandler(onBack = onClose)", "ModalInputBlocker()",
+                ".verticalScroll(rememberScrollState())", "onClick = onClose");
+    }
+
+    @Test
+    public void sendingHasCloseWhileOnlyPreparationCanStop() throws IOException {
+        String source = source("BydHudRuntimeCompose.kt");
+        String stack = stack(source);
+        assertContains(stack,
+                "val sending = state.phase == StorageLogSharePhase.UPLOADING",
+                "stopEnabled = busy && !sending && state.phase != StorageLogSharePhase.CANCELLING",
+                "closeEnabled = sending || terminal",
+                "val sending = state.phase == ConfigurationExportPhase.UPLOADING",
+                "stopEnabled = busy && !sending && state.phase != ConfigurationExportPhase.CANCELLING",
+                "closeEnabled = sending || !busy");
+        String hostBack = between(source("MainActivity.java"), "public void onBackPressed()",
+                "//builds this artifact here");
         assertContains(hostBack, "getOnBackPressedDispatcher().hasEnabledCallbacks()",
                 "getOnBackPressedDispatcher().onBackPressed()", "moveTaskToBack(true)");
+
+        String workflow = source("VehicleConfigurationExport.kt");
+        String admission = between(workflow, "val uploadFile = synchronized(this) {",
+                "if (uploadFile != null) {");
+        assertContains(admission,
+                "active === control && !control.isCancelled && toDeveloper",
+                "state.value = state.value!!.copy(phase = ConfigurationExportPhase.UPLOADING)");
+        assertTrue(workflow.indexOf("val uploadFile = synchronized(this) {")
+                < workflow.indexOf("SentryLogUploader.uploadConfiguration"));
+        String cancel = between(workflow, "fun cancel()", "fun dismiss()");
+        assertFalse(cancel.contains("ConfigurationExportPhase.UPLOADING"));
     }
 
     @Test
-    public void consentDisclosesRawFilesAndRetainsAnotherAppForOversizeOrUploadFailure() throws IOException {
+    public void consentDisclosesRawFilesAndRetainsOversizeArchiveForAnotherApp()
+            throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
-        String consent = between(source, "private fun ConfigurationShareDestinationOverlay(", "private fun StorageDeleteConfirmOverlay(");
+        String consent = between(source, "private fun ConfigurationShareDestinationOverlay(",
+                "private fun StorageDeleteConfirmOverlay(");
+        String details = between(source, "private fun configurationExportDetails(",
+                "private fun operationDetails(");
         assertContains(consent, "BackHandler(onBack = onCancel)", "ModalInputBlocker()",
                 "copy.configurationWarning", "copy.shareLogsSentryNotice",
                 "onClick = onSentry", "onClick = onAnotherApp", "onClick = onCancel", "startError");
         assertContains(source,
-                "split APK", "libraries, framework, cluster resources", "бібліотеки, framework, ресурси приборки",
-                "The package may be large and collection may take time", "Пакет може бути великим",
-                "text diagnostics and configuration values are masked", "у текстовій діагностиці та конфігурації маскуються",
-                "Binary firmware files are copied unchanged", "Бінарні файли прошивки копіюються без змін",
-                "may contain vendor-embedded data", "можуть містити вбудовані виробником дані",
-                "trusted recipient", "довіреному отримувачу");
-        assertContains(overlay(),
-                "val canShare = state.archiveAvailable && !busy && state.phase != ConfigurationExportPhase.CANCELLED",
+                "split APK", "libraries, framework, cluster resources",
+                "бібліотеки, framework, ресурси приборки",
+                "Binary firmware files are copied unchanged",
+                "Бінарні файли прошивки копіюються без змін", "trusted recipient", "довіреному отримувачу");
+        assertContains(details,
+                "Full reasons are recorded in manifest.json",
                 "state.archiveBytes > SentryLogUploader.MAX_ZIP_BYTES",
-                "The complete archive is retained", "if (canShare)", "onClick = onShare",
-                "ConfigurationExportPhase.FAILED -> if (state.archiveAvailable && state.toDeveloper)");
+                "The complete archive is retained for another app",
+                "Повний архів збережено для іншого застосунку");
+        assertContains(stack(source),
+                "state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE",
+                "onPrimary = onShareConfiguration");
     }
 
-    private static String overlay() throws IOException {
-        return between(source("BydHudRuntimeCompose.kt"), "private fun ConfigurationExportOverlay(",
-                "private fun configurationExportBusy(");
+    private static String stack(String source) {
+        return between(source, "private fun OperationProgressStack(",
+                "private fun OperationProgressCard(");
     }
 
     private static String source(String fileName) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/" + fileName);
         if (!Files.isRegularFile(file)) file = root.resolve("src/main/java/com/bydhud/app/" + fileName);
-        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8).replace("\r\n", "\n");
+        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n").replace('\r', '\n');
     }
 
     private static String between(String source, String start, String end) {

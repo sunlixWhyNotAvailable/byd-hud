@@ -15,7 +15,9 @@ public final class SystemDiagnosticRecorderPolicyTest {
     @Test
     public void FullSystemCommandsAreTypedAndShellInjectionIsRejected() {
         String logcat = LogcatRecorder.fullLogcatCommandForTest(1_786_793_345_678L);
-        assertTrue(LocalAdbBridge.isAllowedDiagnosticShellCommandForTest(logcat));
+        assertTrue(logcat.startsWith("logcat -b all -v threadtime -T '"));
+        assertFalse(logcat.endsWith(" -d"));
+        assertFalse(LocalAdbBridge.isAllowedDiagnosticShellCommandForTest(logcat));
         assertTrue(LocalAdbBridge.isAllowedDiagnosticShellCommandForTest(
                 "dumpsys gfxinfo com.bydhud.app reset"));
         assertTrue(LocalAdbBridge.isAllowedDiagnosticShellCommandForTest(
@@ -52,23 +54,29 @@ public final class SystemDiagnosticRecorderPolicyTest {
     }
 
     @Test
-    public void RecorderNeverClearsGlobalBuffersAndHasBoundedFallbackEvidence()
+    public void RecorderUsesContinuousBoundedMemoryIntakeAndKeepsOneFile()
             throws IOException {
         String source = source("LogcatRecorder.java");
         assertFalse(source.contains("logcat\", \"-c"));
         assertFalse(source.contains("logcat -c"));
+        assertFalse(source.contains(" -d"));
         assertTrue(source.contains("full_system_adb"));
         assertTrue(source.contains("app_uid_fallback"));
         assertFalse(source.contains("SEGMENT_BYTES"));
         assertFalse(source.contains("MAX_SEGMENTS"));
         assertFalse(source.contains("\"segmentBytes\""));
         assertFalse(source.contains("\"maxSegments\""));
-        assertTrue(source.contains("MAX_UID_POLL_BYTES = 4 * 1024 * 1024"));
-        assertTrue(source.contains("session.logFile.append(text.getBytes(StandardCharsets.UTF_8))"));
+        assertFalse(source.contains("MAX_UID_POLL_BYTES"));
+        assertFalse(source.contains("pollIntervalMs"));
+        assertTrue(source.contains("intakeMethod\", \"continuous_stream"));
+        assertTrue(source.contains("STREAM_CHUNK_BYTES = 32 * 1024"));
+        assertTrue(source.contains("session.logFile.append(bytes, offset, length)"));
         assertTrue(source.contains("segments.put(session.logFile.file().getName())"));
         assertTrue(source.contains("session.manifest.put(\"bytes\", session.logFile.bytes())"));
+        assertTrue(source.contains("session.manifest.put(\"knownLoss\", session.knownLoss)"));
+        assertTrue(source.contains("session.manifest.put(\"interruptions\", interruptions)"));
+        assertTrue(source.contains("session.readerError = errorDetail(error)"));
         assertTrue(source.contains("lockTopologyRead()"));
-        assertTrue(source.contains("session.context.getCacheDir()"));
         assertTrue(source.contains("yyyyMMdd_HHmmss_SSS"));
         assertTrue(source.contains("manifest.json"));
         assertTrue(source.contains("dumpsys gfxinfo com.bydhud.app framestats"));

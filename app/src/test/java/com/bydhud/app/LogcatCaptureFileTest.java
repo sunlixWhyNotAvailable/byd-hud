@@ -16,6 +16,9 @@ import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.Arrays;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public final class LogcatCaptureFileTest {
     @Rule
@@ -116,6 +119,37 @@ public final class LogcatCaptureFileTest {
         capture.finish();
         assertFalse(capture.file().exists());
         assertThrows(IOException.class, () -> capture.append(utf8("after Stop")));
+    }
+
+    @Test
+    public void finalizationSerializesAgainstTheLastChunkWriter() throws Exception {
+        File directory = temporaryFolder.newFolder("writer-finish-race");
+        LogcatCaptureFile capture = new LogcatCaptureFile(directory);
+        byte[] record = utf8("09-08 15:45:20.226 line\n");
+        AtomicInteger appended = new AtomicInteger();
+        CountDownLatch started = new CountDownLatch(1);
+        var executor = Executors.newSingleThreadExecutor();
+        try {
+            var writer = executor.submit(() -> {
+                started.countDown();
+                for (int index = 0; index < 100_000; index++) {
+                    try {
+                        capture.append(record, 0, record.length);
+                        appended.incrementAndGet();
+                    } catch (IOException stopped) {
+                        return;
+                    }
+                }
+            });
+            started.await();
+            while (appended.get() == 0) Thread.yield();
+            capture.finish();
+            writer.get();
+        } finally {
+            executor.shutdownNow();
+        }
+        assertEquals((long) appended.get() * record.length, capture.bytes());
+        assertArrayEquals(new String[]{"logcat.log"}, directory.list());
     }
 
     private static byte[] utf8(String value) {

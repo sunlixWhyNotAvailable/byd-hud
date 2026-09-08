@@ -127,6 +127,10 @@ final class VehicleConfigurationFiles {
 
     private VehicleConfigurationFiles() { }
 
+    interface ProgressListener {
+        void changed(String currentFile, int foundFiles, long knownBytes, int unavailableFiles);
+    }
+
     static final class FileStat {
         final long mode;
         final long size;
@@ -226,12 +230,29 @@ final class VehicleConfigurationFiles {
     static final class Inventory {
         final List<Entry> entries = new ArrayList<>();
         final List<Unavailable> unavailable = new ArrayList<>();
+        private final ProgressListener progress;
         long totalBytes;
         boolean partial;
+
+        Inventory() {
+            this(null);
+        }
+
+        Inventory(ProgressListener progress) {
+            this.progress = progress;
+        }
+
+        void inspect(String path) {
+            if (progress != null) {
+                progress.changed(path == null ? "" : path, entries.size(), totalBytes,
+                        unavailable.size());
+            }
+        }
 
         void unavailable(String path, String reason) {
             unavailable.add(new Unavailable(path, reason));
             partial = true;
+            inspect(path);
         }
 
         void add(Entry entry, String alias) {
@@ -254,6 +275,7 @@ final class VehicleConfigurationFiles {
                 totalBytes = Long.MAX_VALUE;
                 unavailable(entry.sourcePath, "inventory size overflow");
             }
+            inspect(entry.sourcePath);
         }
 
         private static String entryIdentity(Entry entry) {
@@ -265,12 +287,19 @@ final class VehicleConfigurationFiles {
     /** Collects all selected metadata; no file body is read into memory. */
     static Inventory collect(Context context, LocalAdbBridge.ConfigurationExportSession session,
             BooleanSupplier cancelled) throws IOException {
-        Inventory inventory = new Inventory();
+        return collect(context, session, cancelled, null);
+    }
+
+    static Inventory collect(Context context, LocalAdbBridge.ConfigurationExportSession session,
+            BooleanSupplier cancelled, ProgressListener progress) throws IOException {
+        Inventory inventory = new Inventory(progress);
         BooleanSupplier stop = cancelled == null ? () -> false : cancelled;
         Set<String> packagePaths = new LinkedHashSet<>();
         Map<String, Set<String>> pathAliases = new LinkedHashMap<>();
+        inventory.inspect("package-manager");
         discoverPackages(context, session, stop, packagePaths, pathAliases, inventory);
         for (String path : packagePaths) {
+            inventory.inspect(path);
             String canonical = canonicalPath(path, session, stop, inventory);
             if (canonical != null) {
                 addCandidate(canonical, "apk", pathAliases.get(path), session, stop, inventory);
@@ -294,6 +323,7 @@ final class VehicleConfigurationFiles {
         Map<String, List<String>> libraryIndex = new LinkedHashMap<>();
         for (String command : FIND_COMMANDS) {
             checkCancelled(stop);
+            inventory.inspect(command);
             LocalAdbBridge.ShellResult result = run(session, command);
             if (result == null) {
                 inventory.unavailable(command, "inventory command unavailable");
@@ -309,6 +339,7 @@ final class VehicleConfigurationFiles {
                     libraryIndex.computeIfAbsent(baseName(rawPath), ignored -> new ArrayList<>()).add(rawPath);
                 }
                 if (!isRelevantCandidate(rawPath)) continue;
+                inventory.inspect(rawPath);
                 String path = canonicalPath(rawPath, session, stop, inventory);
                 if (path == null || !isRelevantCandidate(path)) continue;
                 addCandidate(path, category(path), null, session, stop, inventory);
@@ -343,6 +374,7 @@ final class VehicleConfigurationFiles {
         for (String packageName : packages) {
             checkCancelled(cancelled);
             if (session == null) continue;
+            inventory.inspect("package:" + packageName);
             LocalAdbBridge.ShellResult result;
             try {
                 result = run(session, "pm path " + packageName);
@@ -402,6 +434,7 @@ final class VehicleConfigurationFiles {
     private static void discoverProcesses(LocalAdbBridge.ConfigurationExportSession session,
             BooleanSupplier cancelled, Inventory inventory, Map<String, List<String>> libraryIndex)
             throws IOException {
+        inventory.inspect("processes");
         LocalAdbBridge.ShellResult processes = run(session, "ps -A -o pid,args");
         if (processes == null) {
             inventory.unavailable("processes", "process identity unavailable");
@@ -417,6 +450,7 @@ final class VehicleConfigurationFiles {
             Matcher matcher = Pattern.compile("^([0-9]{1,10})\\s+(.+)$").matcher(trimmed);
             if (!matcher.matches() || !relevantProcess(matcher.group(2))) continue;
             String pid = matcher.group(1);
+            inventory.inspect("/proc/" + pid);
             LocalAdbBridge.ShellResult exe = run(session, "readlink -f /proc/" + pid + "/exe");
             if (exe == null || !exe.success()) {
                 inventory.unavailable("/proc/" + pid + "/exe",
@@ -485,6 +519,7 @@ final class VehicleConfigurationFiles {
     private static void discoverLocalFiles(BooleanSupplier cancelled, Inventory inventory,
             Map<String, List<String>> libraryIndex) throws IOException {
         for (String root : APPROVED_ROOTS) {
+            inventory.inspect(root);
             try {
                 Path rootPath = new File(root).toPath();
                 if (!Files.isDirectory(rootPath, LinkOption.NOFOLLOW_LINKS)) continue;
@@ -521,6 +556,7 @@ final class VehicleConfigurationFiles {
     private static void discoverLocalApexLibraries(BooleanSupplier cancelled, Inventory inventory,
             Map<String, List<String>> libraryIndex) throws IOException {
         Path apexRoot = new File("/apex").toPath();
+        inventory.inspect("/apex");
         try {
             if (!Files.isDirectory(apexRoot, LinkOption.NOFOLLOW_LINKS)) return;
             Files.walkFileTree(apexRoot, new SimpleFileVisitor<Path>() {
@@ -574,6 +610,7 @@ final class VehicleConfigurationFiles {
             checkCancelled(cancelled);
             Entry entry = inventory.entries.get(index);
             if (!entry.category.startsWith("native") || !inspected.add(entry.sourcePath)) continue;
+            inventory.inspect(entry.sourcePath);
             if (session == null) {
                 try {
                     addDependencies(VehicleConfigurationElf.needed(new File(entry.sourcePath)), entry,
@@ -656,6 +693,7 @@ final class VehicleConfigurationFiles {
             Inventory inventory, Map<String, List<String>> libraryIndex) throws IOException {
         for (String dependency : new LinkedHashSet<>(dependencies)) {
             checkCancelled(cancelled);
+            inventory.inspect(entry.sourcePath + " -> " + dependency);
             List<String> candidates = libraryIndex.get(dependency);
             if (candidates == null || candidates.isEmpty()) {
                 inventory.unavailable(entry.sourcePath, "dependency path not found: " + dependency);
@@ -690,6 +728,7 @@ final class VehicleConfigurationFiles {
         }
         try {
             checkCancelled(cancelled);
+            inventory.inspect(entry.sourcePath);
             FileStat before = stat(entry.sourcePath, session, cancelled);
             long copied;
             try (FileOutputStream output = new FileOutputStream(temporary)) {

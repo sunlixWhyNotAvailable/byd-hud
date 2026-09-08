@@ -1083,7 +1083,7 @@ final class GMapsDirectChannel {
         return value instanceof Number ? ((Number) value).longValue() : fallback;
     }
 
-    private static DirectTbtFrame.TripMetrics tripMetrics(
+    static DirectTbtFrame.TripMetrics tripMetrics(
             Map<String, Object> summary, long frameWallTimeMs) {
         DirectTbtFrame.TravelMetrics nextStop = travelMetrics(
                 longValue(summary.get("nextStopRemainingSeconds"), -1L),
@@ -1096,13 +1096,11 @@ final class GMapsDirectChannel {
         return new DirectTbtFrame.TripMetrics(nextStop, wholeRoute);
     }
 
-    private static DirectTbtFrame.TravelMetrics travelMetrics(
+    static DirectTbtFrame.TravelMetrics travelMetrics(
             long seconds, long meters, long frameWallTimeMs) {
-        long arrivalTimeMs = -1L;
-        if (seconds >= 0L && seconds <= (Long.MAX_VALUE - frameWallTimeMs) / 1000L) {
-            arrivalTimeMs = frameWallTimeMs + seconds * 1000L;
-        }
-        return new DirectTbtFrame.TravelMetrics(arrivalTimeMs, seconds, meters);
+        return new DirectTbtFrame.TravelMetrics(
+                -1L, DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS,
+                seconds, meters, frameWallTimeMs);
     }
 
     private static String stringValue(Object value) {

@@ -55,20 +55,40 @@ public final class DirectTbtPayload {
     }
 
     public static Prepared prepare(DirectTbtFrame frame, Options options) {
-        return prepare(frame, options, true, EXPERIMENTAL);
+        return prepare(frame, options, System.currentTimeMillis());
+    }
+
+    static Prepared prepare(DirectTbtFrame frame, Options options, long nowWallTimeMs) {
+        return prepare(frame, options, true, EXPERIMENTAL, nowWallTimeMs);
     }
 
     static Prepared prepare(DirectTbtFrame frame, Options options, HudExperimentalCompositor compositor) {
-        return prepare(frame, options, true, compositor);
+        return prepare(frame, options, compositor, System.currentTimeMillis());
+    }
+
+    static Prepared prepare(DirectTbtFrame frame, Options options,
+            HudExperimentalCompositor compositor, long nowWallTimeMs) {
+        return prepare(frame, options, true, compositor, nowWallTimeMs);
     }
 
     /** Source-side diagnostics must never allocate/rasterize output PNGs. */
     static Prepared describe(DirectTbtFrame frame, Options options) {
-        return prepare(frame, options, false, null);
+        return describe(frame, options, System.currentTimeMillis());
+    }
+
+    static Prepared describe(DirectTbtFrame frame, Options options, long nowWallTimeMs) {
+        return prepare(frame, options, false, null, nowWallTimeMs);
+    }
+
+    static String etaCacheKey(DirectTbtFrame frame, Options options, long nowWallTimeMs) {
+        DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
+        Options safeOptions = options == null ? Options.ALL : options;
+        HudEtaText metrics = HudEtaText.from(safeFrame, safeOptions, nowWallTimeMs);
+        return etaVisible(safeFrame, safeOptions) ? metrics.cacheKey() : "";
     }
 
     private static Prepared prepare(DirectTbtFrame frame, Options options, boolean render,
-            HudExperimentalCompositor compositor) {
+            HudExperimentalCompositor compositor, long nowWallTimeMs) {
         DirectTbtFrame safeFrame = frame == null ? DirectTbtFrame.empty() : frame;
         Options safeOptions = options == null ? Options.ALL : options;
         DirectTbtFrame.AlertOverlay separateWarning = safeOptions.presentation.separateWarning()
@@ -110,7 +130,7 @@ public final class DirectTbtPayload {
         } else {
             displayText = "";
         }
-        HudEtaText metrics = HudEtaText.from(safeFrame, safeOptions);
+        HudEtaText metrics = HudEtaText.from(safeFrame, safeOptions, nowWallTimeMs);
         boolean hasStreetEta = !metrics.joined().isEmpty()
                 && !sharedAlert(safeFrame, safeOptions)
                 && !safeOptions.presentation.separateEta();
@@ -180,7 +200,7 @@ public final class DirectTbtPayload {
         if (!render) {
             return new Prepared(new byte[0], maneuverMode, nativeManeuver,
                     distanceMeters, displayText, lanes.size(), 0, null,
-                    -1, -1, hasStreetEta);
+                    -1, -1, hasStreetEta, metrics.diagnostics);
         }
 
         // Only the compositor consumes these independent regions. Instrument/AMap
@@ -215,7 +235,13 @@ public final class DirectTbtPayload {
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
         return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
-                maneuverPng, displayTextStart, displayTextEnd, hasStreetEta);
+                maneuverPng, displayTextStart, displayTextEnd, hasStreetEta,
+                metrics.diagnostics);
+    }
+
+    private static boolean etaVisible(DirectTbtFrame frame, Options options) {
+        return options.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
+                && (options.presentation.separateEta() || !sharedAlert(frame, options));
     }
 
     public static byte[] buildClear() {
@@ -435,22 +461,26 @@ public final class DirectTbtPayload {
         private final int displayTextStart;
         private final int displayTextEnd;
         private final boolean hasStreetEta;
+        private final String etaDiagnostics;
 
         private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
                          int distanceMeters, String displayText, int laneCount,
                          int lanePngBytes, byte[] maneuverPng,
-                         int displayTextStart, int displayTextEnd, boolean hasStreetEta) {
+                         int displayTextStart, int displayTextEnd, boolean hasStreetEta,
+                         String etaDiagnostics) {
             this(fields, maneuverMode, nativeManeuver, distanceMeters, displayText,
                     laneCount, lanePngBytes, maneuverPng == null ? 0 : maneuverPng.length,
                     shortSha256(maneuverPng), pngWidth(maneuverPng), pngHeight(maneuverPng),
-                    displayTextStart, displayTextEnd, hasStreetEta);
+                    displayTextStart, displayTextEnd, hasStreetEta,
+                    etaDiagnostics);
         }
 
         private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
                          int distanceMeters, String displayText, int laneCount,
                          int lanePngBytes, int maneuverPngBytes, String maneuverPngSha,
                          int maneuverPngWidth, int maneuverPngHeight,
-                         int displayTextStart, int displayTextEnd, boolean hasStreetEta) {
+                         int displayTextStart, int displayTextEnd, boolean hasStreetEta,
+                         String etaDiagnostics) {
             this.fields = fields == null ? new byte[0] : fields;
             this.maneuverMode = maneuverMode == null ? "empty" : maneuverMode;
             this.nativeManeuver = nativeManeuver;
@@ -465,6 +495,7 @@ public final class DirectTbtPayload {
             this.displayTextStart = displayTextStart;
             this.displayTextEnd = displayTextEnd;
             this.hasStreetEta = hasStreetEta;
+            this.etaDiagnostics = etaDiagnostics == null ? "" : etaDiagnostics;
         }
 
         public String maneuverMode() {
@@ -511,6 +542,10 @@ public final class DirectTbtPayload {
             return hasStreetEta;
         }
 
+        String etaDiagnostics() {
+            return etaDiagnostics;
+        }
+
         /** Replaces only serialized F10 while retaining all prepared PNG work and metadata. */
         public Prepared withDisplayText(String value) {
             String safeValue = value == null ? "" : value;
@@ -530,7 +565,8 @@ public final class DirectTbtPayload {
             return new Prepared(updated, maneuverMode, nativeManeuver, distanceMeters,
                     safeValue, laneCount, lanePngBytes, maneuverPngBytes, maneuverPngSha,
                     maneuverPngWidth, maneuverPngHeight, displayTextStart,
-                    displayTextStart + textField.length, hasStreetEta);
+                    displayTextStart + textField.length, hasStreetEta,
+                    etaDiagnostics);
         }
 
         public byte[] build(int counter) {

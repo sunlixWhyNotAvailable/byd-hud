@@ -216,14 +216,20 @@ final class VehicleConfigurationZip {
                 });
         private boolean nativeWorkerUnavailable;
         private final Control control;
+        private final ProgressListener progress;
 
         Collector(Context context) {
-            this(context, null);
+            this(context, null, null);
         }
 
         Collector(Context context, Control control) {
+            this(context, control, null);
+        }
+
+        Collector(Context context, Control control, ProgressListener progress) {
             this.context = context;
             this.control = control;
+            this.progress = progress;
         }
 
         void collect() throws IOException {
@@ -267,6 +273,7 @@ final class VehicleConfigurationZip {
         void collectBaseline(
                 String path, String source, Callable<JSONObject> collector)
                 throws InterruptedIOException {
+            notice(path);
             if (!hasAcquisitionBudget(path)) return;
             try {
                 addJson(path, source, nativeValue(collector));
@@ -300,6 +307,7 @@ final class VehicleConfigurationZip {
 
         private void collectDiagnostics() throws InterruptedIOException {
             String path = "app/diagnostics.json";
+            notice(path);
             if (!hasAcquisitionBudget(path)) return;
             try {
                 addJson(path, "application-passive",
@@ -311,6 +319,7 @@ final class VehicleConfigurationZip {
         }
 
         private void collectAdb() throws IOException {
+            notice("adb");
             if (!hasAcquisitionBudget("adb")) return;
             try (LocalAdbBridge.ConfigurationExportSession session =
                          LocalAdbBridge.openConfigurationExport(context, remainingBudgetMs())) {
@@ -339,6 +348,7 @@ final class VehicleConfigurationZip {
 
             checkCancelled();
             try {
+                notice("adb/oem-readback.json");
                 JSONObject readback = oemReadbackJson(exportSession.readOem());
                 addJson("adb/oem-readback.json", "fixed-read-only-helper", readback);
                 if (!"success".equals(readback.optString("recordParsingStatus"))) {
@@ -409,6 +419,7 @@ final class VehicleConfigurationZip {
         }
 
         private void collectFidCatalog() throws InterruptedIOException {
+            notice("fid-catalog");
             if (!hasAcquisitionBudget("fid-catalog")) return;
             try {
                 FidCatalog.Result result = nativeValue(() -> FidCatalog.collectBounded(() ->
@@ -646,6 +657,7 @@ final class VehicleConfigurationZip {
         }
 
         private LocalAdbBridge.ShellResult adb(String command) throws InterruptedIOException {
+            notice("adb:" + command);
             if (!hasAcquisitionBudget("adb:" + command)) return null;
             LocalAdbBridge.ShellResult result = exportSession == null
                     ? null : exportSession.run(command);
@@ -797,15 +809,28 @@ final class VehicleConfigurationZip {
             }
             files.add(new ArchiveFile(maskedPath, maskString(source), bytes, maskString(note)));
             totalBytes += bytes.length;
+            notice(path);
         }
 
         private void unavailable(String path, String reason) {
+            recordUnavailable(path, reason);
+            notice(path);
+        }
+
+        private void recordUnavailable(String path, String reason) {
             JSONObject item = new JSONObject();
             try {
                 item.put("path", path == null ? "" : path);
                 item.put("reason", reason == null ? "" : reason);
                 unavailable.put(item);
             } catch (Exception ignored) {
+            }
+        }
+
+        private void notice(String path) {
+            if (progress != null) {
+                progress.changed("DIAGNOSTICS", path == null ? "" : path, totalBytes, -1,
+                        files.size(), -1, unavailable.length());
             }
         }
 
@@ -1107,12 +1132,13 @@ final class VehicleConfigurationZip {
                 + new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date())
                 + ".zip";
         File output = new File(shareDir, fileName);
-        try (Collector collector = new Collector(context.getApplicationContext(), control)) {
+        try (Collector collector = new Collector(context.getApplicationContext(), control, progress)) {
             control.check();
             progress.changed("DIAGNOSTICS", "", 0, -1, 0, -1, 0);
             collector.collect();
             control.check();
-            progress.changed("INVENTORY", "", 0, -1, 0, -1, collector.unavailable.length());
+            progress.changed("INVENTORY", "", collector.totalBytes, -1,
+                    collector.files.size(), -1, collector.unavailable.length());
             LocalAdbBridge.ConfigurationExportSession session =
                     LocalAdbBridge.openFullConfigurationExport(context.getApplicationContext());
             control.attach(session);
@@ -1123,11 +1149,20 @@ final class VehicleConfigurationZip {
             }
             collector.adbAuthorized |= session != null;
             VehicleConfigurationFiles.Inventory inventory = VehicleConfigurationFiles.collect(
-                    context.getApplicationContext(), session, control::isCancelled);
+                    context.getApplicationContext(), session, control::isCancelled,
+                    (file, foundFiles, knownBytes, unavailable) -> progress.changed(
+                            "INVENTORY", file,
+                            collector.totalBytes + knownBytes, -1,
+                            collector.files.size() + foundFiles, -1,
+                            collector.unavailable.length() + unavailable));
             control.check();
             for (VehicleConfigurationFiles.Unavailable unavailable : inventory.unavailable) {
-                collector.unavailable(unavailable.sourcePath, unavailable.reason);
+                collector.recordUnavailable(unavailable.sourcePath, unavailable.reason);
             }
+            progress.changed("INVENTORY", "", 0,
+                    collector.totalBytes + inventory.totalBytes, 0,
+                    collector.files.size() + inventory.entries.size(),
+                    collector.unavailable.length());
             return writeFullArchive(output, collector, inventory, session, control, progress);
         } catch (Exception e) {
             return failure(e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
@@ -1160,9 +1195,11 @@ final class VehicleConfigurationZip {
             Set<String> storedPaths = new TreeSet<>();
             progress.changed("COPYING", "", 0, total, 0, count, collector.unavailable.length());
             try (FileOutputStream fileOut = new FileOutputStream(part);
-                 ZipOutputStream zip = new ZipOutputStream(fileOut)) {
+                ZipOutputStream zip = new ZipOutputStream(fileOut)) {
                 for (ArchiveFile file : collector.files) {
                     control.check();
+                    progress.changed("ARCHIVING", file.path, copied, total, copiedFiles,
+                            count, collector.unavailable.length());
                     writeEntry(zip, file.path, file.bytes);
                     storedPaths.add(file.path);
                     copied += file.bytes.length;
@@ -1170,6 +1207,8 @@ final class VehicleConfigurationZip {
                 }
                 for (VehicleConfigurationFiles.Entry entry : inventory.entries) {
                     control.check();
+                    progress.changed("COPYING", entry.sourcePath, copied, total, copiedFiles,
+                            count, collector.unavailable.length());
                     final long before = copied;
                     final int beforeFiles = copiedFiles;
                     final long[] lastNotice = {0};
@@ -1218,7 +1257,7 @@ final class VehicleConfigurationZip {
                         control.check();
                         // ZIP writes happen outside the recoverable acquisition scope below.
                         if (error instanceof ArchiveWriteException) throw error;
-                        collector.unavailable(entry.sourcePath,
+                        collector.recordUnavailable(entry.sourcePath,
                                 error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
                     } finally {
                         LogShareZip.deleteArtifact(sourcePart);
@@ -1266,7 +1305,8 @@ final class VehicleConfigurationZip {
             }
             control.check();
             progress.changed("VERIFYING", "", copied, total, copiedFiles, count, collector.unavailable.length());
-            verifyFullZip(part, entries, control);
+            verifyFullZip(part, entries, control, progress, copied, total, copiedFiles, count,
+                    collector.unavailable.length());
             control.check();
             if (!part.renameTo(output)) throw new IOException("final rename failed");
             control.check();
@@ -1388,11 +1428,21 @@ final class VehicleConfigurationZip {
     }
 
     static void verifyFullZip(File archive, JSONArray expected, Control control) throws Exception {
+        verifyFullZip(archive, expected, control, null, 0, -1, 0, -1, 0);
+    }
+
+    private static void verifyFullZip(File archive, JSONArray expected, Control control,
+            ProgressListener progress, long copied, long total, int copiedFiles, int totalFiles,
+            int unavailable) throws Exception {
         try (ZipFile zip = new ZipFile(archive)) {
             if (zip.size() != expected.length()) throw new IOException("ZIP entry count mismatch");
             for (int i = 0; i < expected.length(); i++) {
                 control.check();
                 JSONObject item = expected.getJSONObject(i);
+                if (progress != null) {
+                    progress.changed("VERIFYING", item.getString("path"), copied, total,
+                            copiedFiles, totalFiles, unavailable);
+                }
                 ZipEntry entry = zip.getEntry(item.getString("path"));
                 if (entry == null || entry.getSize() != item.getLong("size")) throw new IOException("ZIP size mismatch");
                 CRC32 crc = new CRC32();

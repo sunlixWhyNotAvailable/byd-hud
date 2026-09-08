@@ -68,12 +68,20 @@ public class VehicleConfigurationFullArchiveTest {
                 "/system/lib64/libBydCluster-192.168.1.10-not-installed.so", "files/system/lib64/missing.so",
                 500, 0, 0, 0, "regular", "native"), null);
         List<Long> totals = new ArrayList<>();
+        List<String> progress = new ArrayList<>();
         VehicleConfigurationZip.Result result = VehicleConfigurationZip.writeFullArchive(
                 output, collector, inventory, null, new VehicleConfigurationZip.Control(),
-                (phase, file, bytes, total, files, count, unavailable) -> totals.add(total));
+                (phase, file, bytes, total, files, count, unavailable) -> {
+                    totals.add(total);
+                    progress.add(phase + "|" + file);
+                });
         assertTrue(result.detail, result.ok);
         assertEquals(1, result.unavailableFiles);
         assertEquals(1, totals.stream().distinct().count());
+        assertTrue(progress.contains("COPYING|/system/lib64/libBydCluster-192.168.1.10-not-installed.so"));
+        assertTrue(progress.contains("ARCHIVING|manifest.json"));
+        assertTrue(progress.contains("VERIFYING|app/test.json"));
+        assertTrue(progress.contains("VERIFYING|manifest.json"));
         try (ZipFile zip = new ZipFile(output)) {
             assertNull(zip.getEntry("files/system/lib64/missing.so"));
             JSONObject manifest = new JSONObject(new String(zip.getInputStream(
