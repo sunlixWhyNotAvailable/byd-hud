@@ -108,6 +108,8 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 
 Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its controls change only the illustration, not your saved settings or the HUD. Samples follow the application's language, street format and selected colors. Experimental ETA/Waze locations use separate HUD regions. Some screenshots below show an earlier interface layout.
 
+The 68 help illustrations use compressed WebP (quality 60) at their original 2172×724 resolution to reduce the APK size. Their positions and language variants are preserved; this compression does not affect navigation images sent to the HUD.
+
 ### Basic navigation output
 
 | Setting | Default | When enabled | When disabled |

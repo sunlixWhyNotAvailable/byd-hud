@@ -22,8 +22,15 @@ public final class ProductionUiPortSourceContractTest {
 
         Path assets = projectRoot().resolve("app/src/main/res/drawable-nodpi");
         try (java.util.stream.Stream<Path> files = Files.list(assets)) {
-            assertEquals(68, files.filter(path -> path.getFileName().toString()
-                    .startsWith("hud_help_") && path.toString().endsWith(".png")).count());
+            Path[] help = files.filter(path -> path.getFileName().toString()
+                    .startsWith("hud_help_")).toArray(Path[]::new);
+            assertEquals(68, help.length);
+            for (Path image : help) {
+                assertTrue(image.toString(), image.toString().endsWith(".webp"));
+                byte[] bytes = Files.readAllBytes(image);
+                assertEquals("RIFF", new String(bytes, 0, 4, StandardCharsets.US_ASCII));
+                assertEquals("WEBP", new String(bytes, 8, 4, StandardCharsets.US_ASCII));
+            }
         }
         assertTrue(catalog.contains("fun localizedImage(imageRes: Int, ua: Boolean)"));
         assertTrue(catalog.contains("hud_help_warning_maneuver_en"));
