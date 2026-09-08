@@ -3,12 +3,15 @@ package com.bydhud.app;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
 import java.util.Collections;
 import java.util.Calendar;
+import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class DirectTbtPayloadTest {
@@ -24,6 +27,83 @@ public final class DirectTbtPayloadTest {
                 DirectTbtPayload.build(
                         frame(11, 9, DirectTbtFrame.AlertOverlay.inactive()),
                         7, DirectTbtPayload.Options.ALL));
+    }
+
+    @Test
+    public void displayTextOverrideChangesOnlyF10AcrossUtf8SizesAndEmptyText() {
+        byte[] maneuverPng = pngHeader(37, 19);
+        DirectTbtFrame source = frame(11, 9, DirectTbtFrame.AlertOverlay.inactive())
+                .withManeuverPng(maneuverPng)
+                .withTripMetrics(DirectTbtFrame.TripMetrics.nextStopOnly(
+                        new DirectTbtFrame.TravelMetrics(-1, 601, -1)));
+        DirectTbtPayload.Prepared original = DirectTbtPayload.prepare(
+                source, metricOptions(false, false, true, false, true, true));
+        byte[] originalPayload = original.build(255);
+
+        assertTrue(original.hasStreetEta());
+        assertSame(original, original.withDisplayText(original.displayText()));
+        assertEquals(37, original.maneuverPngWidth());
+        assertEquals(19, original.maneuverPngHeight());
+        assertFalse(original.maneuverPngSha().isEmpty());
+
+        DirectTbtPayload.Prepared current = original;
+        for (String replacement : new String[]{repeat("Ї", 80), ""}) {
+            current = current.withDisplayText(replacement);
+            byte[] payload = current.build(255);
+            assertFraming(payload);
+            assertEquals(replacement, lengthDelimitedText(payload, 10));
+            for (int field : new int[]{7, 8, 9, 28, 29}) {
+                assertArrayEquals("field " + field,
+                        fieldEncoding(originalPayload, field), fieldEncoding(payload, field));
+            }
+            assertEquals(original.maneuverPngBytes(), current.maneuverPngBytes());
+            assertEquals(original.maneuverPngSha(), current.maneuverPngSha());
+            assertEquals(original.maneuverPngWidth(), current.maneuverPngWidth());
+            assertEquals(original.maneuverPngHeight(), current.maneuverPngHeight());
+            assertEquals(original.hasStreetEta(), current.hasStreetEta());
+            assertEquals(replacement, current.displayText());
+        }
+    }
+
+    @Test
+    public void streetEtaMarkerRequiresSelectedMetricsWithoutSharedAlertOrSeparateEta() {
+        DirectTbtFrame metrics = frame(11, 9, DirectTbtFrame.AlertOverlay.inactive())
+                .withTripMetrics(DirectTbtFrame.TripMetrics.nextStopOnly(
+                        new DirectTbtFrame.TravelMetrics(-1, 601, -1)));
+        DirectTbtPayload.Options streetEta = metricOptions(
+                false, false, true, false, true, true);
+
+        assertTrue(DirectTbtPayload.describe(metrics, streetEta).hasStreetEta());
+        assertFalse(DirectTbtPayload.describe(
+                metrics.withAlertOverlay(DirectTbtFrame.AlertOverlay.active(
+                        7, 25, "Camera", new byte[]{8, 9})), streetEta).hasStreetEta());
+        assertFalse(DirectTbtPayload.describe(metrics, streetEta.withPresentation(
+                new DirectTbtPayload.Presentation(1, 0, 0, false,
+                        -1, -1, -1, 0xffffff00))).hasStreetEta());
+        assertFalse(DirectTbtPayload.describe(metrics, metricOptions(
+                false, false, false, false, true, true)).hasStreetEta());
+    }
+
+    @Test
+    public void displayTextOverrideDoesNotInvokeExperimentalRendererAgain() {
+        AtomicInteger renders = new AtomicInteger();
+        HudExperimentalCompositor compositor = new HudExperimentalCompositor(input -> {
+            renders.incrementAndGet();
+            return new HudExperimentalCompositor.Result(new byte[]{8}, new byte[]{7});
+        });
+        DirectTbtPayload.Options options = DirectTbtPayload.Options.ALL.withPresentation(
+                new DirectTbtPayload.Presentation(0, 1, 0, false,
+                        -1, -1, -1, 0xffffff00));
+        DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(
+                frame(11, 9, DirectTbtFrame.AlertOverlay.inactive()), options, compositor);
+        int renderCount = renders.get();
+
+        DirectTbtPayload.Prepared updated = prepared.withDisplayText("Updated street");
+
+        assertEquals(renderCount, renders.get());
+        assertEquals(prepared.maneuverPngSha(), updated.maneuverPngSha());
+        assertEquals(prepared.maneuverPngBytes(), updated.maneuverPngBytes());
+        assertEquals(prepared.lanePngBytes(), updated.lanePngBytes());
     }
 
     @Test
@@ -556,6 +636,86 @@ public final class DirectTbtPayloadTest {
         calendar.set(2026, Calendar.JANUARY, 1, hour, minute, 0);
         calendar.set(Calendar.MILLISECOND, 0);
         return calendar.getTimeInMillis();
+    }
+
+    private static void assertFraming(byte[] payload) {
+        assertEquals(0x0a, payload[0] & 0xff);
+        int[] offset = {1};
+        int innerLength = (int) readVarint(payload, offset);
+        assertEquals(payload.length, offset[0] + innerLength);
+        assertArrayEquals(new byte[]{0x10, (byte) 0xff, 0x01},
+                fieldEncoding(payload, 2));
+    }
+
+    private static String lengthDelimitedText(byte[] payload, int wantedField) {
+        byte[] encoded = fieldEncoding(payload, wantedField);
+        assertNotNull(encoded);
+        int[] offset = {0};
+        readVarint(encoded, offset);
+        int length = (int) readVarint(encoded, offset);
+        return new String(encoded, offset[0], length, java.nio.charset.StandardCharsets.UTF_8);
+    }
+
+    private static byte[] fieldEncoding(byte[] payload, int wantedField) {
+        int[] offset = {1};
+        int innerLength = (int) readVarint(payload, offset);
+        int end = offset[0] + innerLength;
+        while (offset[0] < end) {
+            int start = offset[0];
+            long tag = readVarint(payload, offset);
+            int wireType = (int) (tag & 7);
+            if (wireType == 0) {
+                readVarint(payload, offset);
+            } else if (wireType == 2) {
+                int length = (int) readVarint(payload, offset);
+                offset[0] += length;
+            } else {
+                throw new AssertionError("unsupported wire type " + wireType);
+            }
+            if ((tag >>> 3) == wantedField) {
+                return Arrays.copyOfRange(payload, start, offset[0]);
+            }
+        }
+        return null;
+    }
+
+    private static long readVarint(byte[] bytes, int[] offset) {
+        long value = 0;
+        int shift = 0;
+        while (offset[0] < bytes.length && shift < 64) {
+            int next = bytes[offset[0]++] & 0xff;
+            value |= (long) (next & 0x7f) << shift;
+            if ((next & 0x80) == 0) return value;
+            shift += 7;
+        }
+        throw new AssertionError("invalid varint");
+    }
+
+    private static String repeat(String value, int count) {
+        StringBuilder result = new StringBuilder(value.length() * count);
+        for (int index = 0; index < count; index++) result.append(value);
+        return result.toString();
+    }
+
+    private static byte[] pngHeader(int width, int height) {
+        byte[] png = new byte[24];
+        png[0] = (byte) 0x89;
+        png[1] = 0x50;
+        png[2] = 0x4e;
+        png[3] = 0x47;
+        png[12] = 0x49;
+        png[13] = 0x48;
+        png[14] = 0x44;
+        png[15] = 0x52;
+        png[16] = (byte) (width >>> 24);
+        png[17] = (byte) (width >>> 16);
+        png[18] = (byte) (width >>> 8);
+        png[19] = (byte) width;
+        png[20] = (byte) (height >>> 24);
+        png[21] = (byte) (height >>> 16);
+        png[22] = (byte) (height >>> 8);
+        png[23] = (byte) height;
+        return png;
     }
 
     private static DirectTbtFrame frame(

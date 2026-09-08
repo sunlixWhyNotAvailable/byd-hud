@@ -29,7 +29,7 @@ public final class EtaUiSourceContractTest {
         String waitSetter = between(prefs, "static void setEtaWaitForFullTextEnabled(",
                 "static int getEtaArrivalColor(");
         assertTrue(waitSetter.contains("putBoolean(KEY_ETA_WAIT_FOR_FULL_TEXT, enabled)"));
-        assertFalse(waitSetter.contains("markOutputOptionChanged"));
+        assertTrue(waitSetter.contains("markOutputOptionChanged(KEY_ETA_WAIT_FOR_FULL_TEXT)"));
         for (String key : new String[] {"KEY_ETA_ARRIVAL_COLOR", "KEY_ETA_DURATION_COLOR",
                 "KEY_ETA_REMAINING_DISTANCE_COLOR", "KEY_WAZE_WARNING_DISTANCE_COLOR"}) {
             assertTrue(key, prefs.contains("markOutputOptionChanged(" + key + ")"));
@@ -57,6 +57,11 @@ public final class EtaUiSourceContractTest {
         }
         assertTrue(activity.contains("etaWaitForFullTextEnabled == other.etaWaitForFullTextEnabled"));
         assertTrue(activity.contains("etaRemainingDistanceColor == other.etaRemainingDistanceColor"));
+
+        String payload = source("DirectTbtPayload.java");
+        assertTrue(payload.contains("final boolean waitForFullText"));
+        assertTrue(payload.contains("HudPrefs.isEtaWaitForFullTextEnabled(safeContext)"));
+        assertTrue(payload.contains("etaWaitForFullText="));
     }
 
     @Test
@@ -104,6 +109,8 @@ public final class EtaUiSourceContractTest {
         assertFalse(catalog.contains("зберігається для наступного патчу"));
         assertTrue(presentation.contains("val streetFormat: EtaStreetFormat = EtaStreetFormat.Prefix"));
         assertTrue(presentation.contains("val waitForFullText: Boolean = true"));
+        assertTrue(presentation.contains("fun waitApplies(etaStreetEnabled: Boolean) = etaStreetEnabled"));
+        assertFalse(presentation.contains("waitApplies(etaStreetEnabled: Boolean) = etaStreetEnabled &&"));
         assertTrue(presentation.contains("if (ua) \"25 хв\" else \"25 min\""));
         assertTrue(presentation.contains("else \"[$fields] \" + if (short) \"Dn\" else \"Dniprovske\""));
         assertTrue(tint.contains("Fixed text-only masks"));

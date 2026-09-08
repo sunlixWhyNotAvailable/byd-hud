@@ -132,6 +132,7 @@ final class HudOutputCoordinator {
     private volatile int hudCheckAuxiliaryResult;
     private volatile boolean hudCheckHasAuxiliary;
     private DirectTbtFrame directFrame;
+    private String directSourceRoad = "";
     private volatile Source activeSource = Source.NONE;
     private Source pendingSource = Source.NONE;
     private String pendingReason = "";
@@ -152,6 +153,10 @@ final class HudOutputCoordinator {
     private long lastStatsLogMs;
     private DirectTbtFrame preparedDirectFrame;
     private DirectTbtPayload.Prepared preparedDirectPayload;
+    private DirectTbtPayload.Prepared candidateDirectPayload;
+    private DirectTbtPayload.Options preparedDirectOptions;
+    private String preparedEtaContext = "";
+    private final EtaStreetTextGate etaStreetTextGate = new EtaStreetTextGate();
     private byte[] preparedDirectSemanticPayload;
     private GMapsDirectChannel.BitmapSelection directBitmapSelection;
     private GMapsDirectChannel.BitmapSelection preparedDirectBitmapSelection;
@@ -308,12 +313,27 @@ final class HudOutputCoordinator {
     }
 
     void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
+            String ownerPackage, long ownerSessionGeneration, String sourceRoad) {
+        publishDirect(frame, reason, receivedAtMs, null, null,
+                ownerPackage, ownerSessionGeneration, sourceRoad);
+    }
+
+    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
             GMapsDirectChannel.BitmapSelection bitmapSelection,
             Consumer<String> bitmapTxLogger,
             String ownerPackage, long ownerSessionGeneration) {
+        publishDirect(frame, reason, receivedAtMs, bitmapSelection, bitmapTxLogger,
+                ownerPackage, ownerSessionGeneration, frame == null ? "" : frame.getRoadText());
+    }
+
+    void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
+            GMapsDirectChannel.BitmapSelection bitmapSelection,
+            Consumer<String> bitmapTxLogger,
+            String ownerPackage, long ownerSessionGeneration, String sourceRoad) {
         worker.post(() -> {
             if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) return;
             directFrame = frame;
+            directSourceRoad = sourceRoad == null ? "" : sourceRoad;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
             preparedDirectSemanticPayload = null;
@@ -355,7 +375,7 @@ final class HudOutputCoordinator {
     }
 
     void clearDirectAlertAndRepublish(String ownerPackage, long ownerSessionGeneration,
-            DirectTbtFrame frame, String reason, long receivedAtMs) {
+            DirectTbtFrame frame, String reason, long receivedAtMs, String sourceRoad) {
         worker.post(() -> {
             if (!matchesDirectOwner(ownerPackage, ownerSessionGeneration)
                     || frame == null || (!directEnabled
@@ -364,6 +384,7 @@ final class HudOutputCoordinator {
                 return;
             }
             directFrame = frame;
+            directSourceRoad = sourceRoad == null ? "" : sourceRoad;
             preparedDirectFrame = null;
             preparedDirectPayload = null;
             preparedDirectSemanticPayload = null;
@@ -622,6 +643,7 @@ final class HudOutputCoordinator {
         finalClearStartedAtMs = 0L;
         Runnable clearCompletion = chainCompletions(carriedCompletion, firstClearCompletion);
         Source previous = activeSource;
+        resetEtaStreetText("source-transition");
         boolean stillNeedsClear = pendingNeedsClear || unfinishedFinalClear;
         long existingBarrierDeadline = pendingActivationNotBeforeMs;
         activeSource = Source.NONE;
@@ -920,6 +942,9 @@ final class HudOutputCoordinator {
                 releaseHudCheckAuxiliary("hud-check-late-clear");
             }
             if (source == Source.DIRECT) {
+                etaStreetTextGate.onSent(preparedDirectPayload.displayText(),
+                        SystemClock.elapsedRealtime());
+                logEtaStreetTextTransition();
                 emitBitmapTxAfterSuccess(SystemClock.elapsedRealtime());
             }
             maybeLogStats(source, payload.length, duration);
@@ -962,11 +987,24 @@ final class HudOutputCoordinator {
                     || preparedDirectOptionsRevision != optionsRevision) {
                 preparedDirectFrame = directFrame;
                 preparedDirectOptionsRevision = optionsRevision;
-                preparedDirectPayload = DirectTbtPayload.prepare(
-                        directFrame, DirectTbtPayload.Options.from(context));
-                preparedDirectSemanticPayload = preparedDirectPayload.build(0);
+                preparedDirectOptions = DirectTbtPayload.Options.from(context);
+                preparedEtaContext = etaStreetContext(preparedDirectOptions,
+                        HudPrefs.transliterationMode(context));
+                candidateDirectPayload = DirectTbtPayload.prepare(directFrame, preparedDirectOptions);
+                preparedDirectPayload = null;
                 preparedDirectBitmapSelection = directBitmapSelection;
                 preparedDirectBitmapTxLogger = directBitmapTxLogger;
+            }
+            String displayText = etaStreetTextGate.select(candidateDirectPayload.displayText(),
+                    directSourceRoad, preparedEtaContext,
+                    preparedDirectOptions.presentation.waitForFullText
+                            && candidateDirectPayload.hasStreetEta(),
+                    SystemClock.elapsedRealtime());
+            logEtaStreetTextTransition();
+            if (preparedDirectPayload == null
+                    || !displayText.equals(preparedDirectPayload.displayText())) {
+                preparedDirectPayload = candidateDirectPayload.withDisplayText(displayText);
+                preparedDirectSemanticPayload = preparedDirectPayload.build(0);
             }
             return preparedDirectPayload.build(directCounter);
         }
@@ -1389,8 +1427,33 @@ final class HudOutputCoordinator {
         return completion;
     }
 
+    // Only text-affecting options belong here: distance/lanes/colors must not
+    // restart a street's first pass when their independent output changes.
+    static String etaStreetContext(DirectTbtPayload.Options options, int transliterationMode) {
+        return options.presentation.etaField + ":" + options.presentation.streetFormat
+                + ":" + options.presentation.ukrainian + ":" + options.routeMetricsMode
+                + ":" + options.showEta + ":" + options.showRemainingTime
+                + ":" + options.showRemainingDistance + ":" + options.street
+                + ":" + options.textDirection + ":" + transliterationMode;
+    }
+
+    private void logEtaStreetTextTransition() {
+        String event = etaStreetTextGate.drainEvent();
+        if (!event.isEmpty()) log("eta_street " + event);
+    }
+
+    private void resetEtaStreetText(String reason) {
+        etaStreetTextGate.reset();
+        candidateDirectPayload = null;
+        preparedDirectPayload = null;
+        preparedDirectSemanticPayload = null;
+        String event = etaStreetTextGate.drainEvent();
+        if (!event.isEmpty()) log("eta_street " + event + " trigger=" + safe(reason));
+    }
+
     private boolean sendRequiredClear(String reason, Source source, String kind)
             throws RemoteException {
+        resetEtaStreetText("clear:" + kind);
         if (!manualEnabled) releaseHudCheckAuxiliary(reason);
         byte[] payload = DirectTbtPayload.buildClear();
         int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
@@ -1421,6 +1484,7 @@ final class HudOutputCoordinator {
     }
 
     private void stopServiceAndUnbind(String reason) {
+        resetEtaStreetText("transport-stop:" + reason);
         releaseHudCheckAuxiliary(reason);
         ++bindGeneration;
         finishBindAttempt();
@@ -1508,6 +1572,7 @@ final class HudOutputCoordinator {
     }
 
     private void handleTransportFailure(String reason, Throwable error) {
+        resetEtaStreetText("transport-failure:" + reason);
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
             setHudCheckRoadResult(-1, "transport-unavailable");
@@ -1544,6 +1609,7 @@ final class HudOutputCoordinator {
         sendFailures++;
         if (resultMarksServiceUnstarted(result)) {
             serviceStarted = false;
+            resetEtaStreetText("service-unstarted");
         }
         handleProtocolFailure(reason + " result=" + result);
     }
@@ -1756,6 +1822,7 @@ final class HudOutputCoordinator {
         }
         if (!shouldQueueDirectLossClear(
                 true, true, directLossClearSent, directLossClearPending)) return;
+        resetEtaStreetText("producer-loss:" + reason);
         directFrame = null;
         preparedDirectFrame = null;
         preparedDirectPayload = null;
@@ -1847,6 +1914,7 @@ final class HudOutputCoordinator {
     }
 
     private void resetDirectTransportTiming() {
+        resetEtaStreetText("owner-session");
         directFirstFrameAtMs = 0L;
         directServiceReadyAtMs = 0L;
         directFirstPhysicalSendLogged = false;

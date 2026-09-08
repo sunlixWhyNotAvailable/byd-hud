@@ -106,7 +106,7 @@ The same tab also lists other applications that can be moved between displays, b
 
 The `Options` tab controls what BYD HUD sends. Changing a switch affects the next outgoing HUD state; it does not change the map inside the navigator.
 
-Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its controls change only the illustration, not your saved settings or the HUD. Samples follow the application's language, street format and selected colors. Experimental ETA/Waze locations use separate HUD regions. The full-text waiting option has no effect yet. Some screenshots below show an earlier interface layout.
+Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its controls change only the illustration, not your saved settings or the HUD. Samples follow the application's language, street format and selected colors. Experimental ETA/Waze locations use separate HUD regions. Some screenshots below show an earlier interface layout.
 
 ### Basic navigation output
 
@@ -134,13 +134,15 @@ Transliteration offers `Ukrainian` for Ukrainian road names and `Universal` for 
 | `ETA output mode (time/distance)` | Off | Selects `Off`, `Next stop`, or `Entire route`; Waze uses the final destination for the entire route and falls back per field to an available next-stop value |
 | `ETA output field` | Street | Uses the street field or a separate Experimental block on the right of the HUD |
 | `ETA format in street field` | Prepend | Prepend adds a bracketed block before the street; Replace shows only the selected metrics |
-| `Wait for the full street text to display` | On | Not active yet; enabling it does not change text updates |
+| `Wait for the full street text to display` | On | Keeps overflowing street-field ETA text unchanged for its estimated first pass; applies only the latest pending ETA update, while a street change takes effect immediately |
 | `Show ETA` | Off | Shows the expected arrival time in the selected output field |
 | `Show remaining time` | Off | Shows remaining travel time in the selected output field |
 | `Show remaining distance` | Off | Shows remaining route distance in the selected output field |
 | Metric text colors | White | Independent arrival, remaining-time and remaining-distance colors for Experimental output |
 
-The three value switches are disabled while the mode is `Off`, but their saved values are preserved. Format, wait and color settings remain visible when unavailable: format requires Street output, wait additionally requires Prepend, and each color requires Experimental output and its enabled metric.
+The three value switches are disabled while the mode is `Off`, but their saved values are preserved. Format, wait and color settings remain visible when unavailable: format and wait require Street output and an active ETA mode; wait supports both Prepend and Replace. Each color requires Experimental output and its enabled metric.
+
+Full-text waiting affects only the native SOME/IP street field. Short text updates immediately; maneuver, distance, lanes and separate bitmap regions remain live while long ETA text finishes its first pass. Changing the underlying street bypasses waiting even in Replace mode, where the street is hidden. Turning waiting off releases the latest text. The interval is an approximate Sea Lion 07 calibration, not feedback from the display or a timing guarantee on other firmware. Instrument/AMap and Experimental ETA output are unchanged. See the [implementation and verification record](docs/eta-first-pass-wait.md).
 
 Prepend adds enabled, available metrics before the street or cue:
 

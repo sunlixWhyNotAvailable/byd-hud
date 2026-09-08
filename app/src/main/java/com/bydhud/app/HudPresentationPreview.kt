@@ -37,7 +37,7 @@ internal data class HudPresentationPreview(
         }
     }
 
-    fun waitApplies(etaStreetEnabled: Boolean) = etaStreetEnabled && streetFormat == EtaStreetFormat.Prefix
+    fun waitApplies(etaStreetEnabled: Boolean) = etaStreetEnabled
 
     fun streetSample(mask: Int, ua: Boolean, short: Boolean = false): String {
         val fields = buildList {

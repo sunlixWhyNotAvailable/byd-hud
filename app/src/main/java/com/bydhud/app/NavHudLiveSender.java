@@ -893,7 +893,7 @@ final class NavHudLiveSender {
                             if (isHudOutputOwner(ownerPackage)) {
                                 hudOutput.clearDirectAlertAndRepublish(
                                         ownerPackage, sessionGeneration, outputFrame, reason,
-                                        SystemClock.elapsedRealtime());
+                                        SystemClock.elapsedRealtime(), frame.getRoadText());
                             }
                         });
                     }
@@ -1183,7 +1183,7 @@ final class NavHudLiveSender {
                         hudOutput.clearDirectAlertAndRepublish(
                                 ownerPackage, wazeDirectChannel.sessionGeneration(), outputFrame,
                                 "surface:" + safeReason(reason),
-                                SystemClock.elapsedRealtime());
+                                SystemClock.elapsedRealtime(), frame.getRoadText());
                     }
                 });
             }
@@ -2359,7 +2359,7 @@ final class NavHudLiveSender {
             return;
         }
         hudOutput.publishDirect(
-                outputFrame, reason, now, ownerPackage, sessionGeneration);
+                outputFrame, reason, now, ownerPackage, sessionGeneration, frame.getRoadText());
         hudDispatched = true;
         hudDispatchElapsedMs = SystemClock.elapsedRealtime();
         if (timing != null) {
@@ -2704,7 +2704,7 @@ final class NavHudLiveSender {
         }
         hudOutput.publishDirect(
                 outputFrame, reason, now, bitmapSelection, this::logGMapsDirectChannelEvent,
-                ownerPackage, sessionGeneration);
+                ownerPackage, sessionGeneration, frame.getRoadText());
         hudDispatched = true;
         hudDispatchElapsedMs = SystemClock.elapsedRealtime();
         hudOutput.selectNavigationSource(

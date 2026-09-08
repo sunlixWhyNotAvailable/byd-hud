@@ -22,6 +22,7 @@ public final class HudOutputPreferenceSnapshotTest {
                         + " speedFreeFallback=2 speedOverlaySeconds=7 speedPlacement=3"
                         + " speedManeuverSize=80 speedLaneSize=30"
                         + " etaField=0 warningField=0 etaStreetFormat=0 etaLanguage=en"
+                        + " etaWaitForFullText=1"
                         + " etaColors=FFFFFFFF/FFFFFFFF/FFFFFFFF warningColor=FFFFFF00",
                 snapshot.compact());
     }
@@ -42,6 +43,19 @@ public final class HudOutputPreferenceSnapshotTest {
         assertEquals(enabled.hashCode(), enabledAgain.hashCode());
         assertNotEquals(enabled, disabled);
         assertNotEquals(enabled, ukrainian);
+    }
+
+    @Test
+    public void equalityChangesWithWaitForFullTextRuntimeOption() {
+        DirectTbtPayload.Options enabled = options().withPresentation(
+                new DirectTbtPayload.Presentation(0, 0, 0, false,
+                        -1, -1, -1, 0xffffff00, true));
+        DirectTbtPayload.Options disabled = options().withPresentation(
+                new DirectTbtPayload.Presentation(0, 0, 0, false,
+                        -1, -1, -1, 0xffffff00, false));
+
+        assertNotEquals(HudOutputPreferenceSnapshot.from(enabled, true),
+                HudOutputPreferenceSnapshot.from(disabled, true));
     }
 
     private static DirectTbtPayload.Options options() {

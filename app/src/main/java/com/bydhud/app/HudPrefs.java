@@ -284,6 +284,7 @@ final class HudPrefs {
 
     static void setEtaWaitForFullTextEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_ETA_WAIT_FOR_FULL_TEXT, enabled).apply();
+        markOutputOptionChanged(KEY_ETA_WAIT_FOR_FULL_TEXT);
     }
 
     static int getEtaArrivalColor(Context context) {

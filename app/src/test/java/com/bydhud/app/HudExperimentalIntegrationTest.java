@@ -100,7 +100,7 @@ public class HudExperimentalIntegrationTest {
         assertFalse(sender.contains("DirectTbtPayload.prepare("));
         assertTrue(sender.contains("DirectTbtPayload.describe("));
         String payload = source("DirectTbtPayload.java");
-        assertFalse(payload.contains("isEtaWaitForFullTextEnabled("));
+        assertTrue(payload.contains("HudPrefs.isEtaWaitForFullTextEnabled(safeContext)"));
         assertFalse(payload.contains("postDelayed("));
         String tbt = source("VehicleTbtPublisher.java");
         assertFalse(tbt.contains("HudExperimentalCompositor"));

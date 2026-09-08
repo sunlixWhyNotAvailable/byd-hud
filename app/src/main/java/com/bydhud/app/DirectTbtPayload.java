@@ -111,6 +111,9 @@ public final class DirectTbtPayload {
             displayText = "";
         }
         HudEtaText metrics = HudEtaText.from(safeFrame, safeOptions);
+        boolean hasStreetEta = !metrics.joined().isEmpty()
+                && !sharedAlert(safeFrame, safeOptions)
+                && !safeOptions.presentation.separateEta();
         if (!alert.isActive() && !safeOptions.presentation.separateEta()
                 && safeOptions.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF) {
             displayText = metrics.street(displayText, safeOptions.presentation.streetFormat == 1);
@@ -176,7 +179,8 @@ public final class DirectTbtPayload {
 
         if (!render) {
             return new Prepared(new byte[0], maneuverMode, nativeManeuver,
-                    distanceMeters, displayText, lanes.size(), 0, null);
+                    distanceMeters, displayText, lanes.size(), 0, null,
+                    -1, -1, hasStreetEta);
         }
 
         // Only the compositor consumes these independent regions. Instrument/AMap
@@ -202,14 +206,16 @@ public final class DirectTbtPayload {
         writeBytesField(fields, 7, lanePng);
         writeBytesField(fields, 8, maneuverPng);
         writeVarintField(fields, 9, Math.max(0, distanceMeters));
+        int displayTextStart = fields.size();
         writeStringField(fields, 10, displayText);
+        int displayTextEnd = fields.size();
         writeVarintField(fields, 16, 2);
         writeStringField(fields, 26, "");
         writeVarintField(fields, 28, Math.max(0, nativeManeuver));
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
         return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
-                maneuverPng);
+                maneuverPng, displayTextStart, displayTextEnd, hasStreetEta);
     }
 
     public static byte[] buildClear() {
@@ -426,10 +432,25 @@ public final class DirectTbtPayload {
         private final String maneuverPngSha;
         private final int maneuverPngWidth;
         private final int maneuverPngHeight;
+        private final int displayTextStart;
+        private final int displayTextEnd;
+        private final boolean hasStreetEta;
 
         private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
                          int distanceMeters, String displayText, int laneCount,
-                         int lanePngBytes, byte[] maneuverPng) {
+                         int lanePngBytes, byte[] maneuverPng,
+                         int displayTextStart, int displayTextEnd, boolean hasStreetEta) {
+            this(fields, maneuverMode, nativeManeuver, distanceMeters, displayText,
+                    laneCount, lanePngBytes, maneuverPng == null ? 0 : maneuverPng.length,
+                    shortSha256(maneuverPng), pngWidth(maneuverPng), pngHeight(maneuverPng),
+                    displayTextStart, displayTextEnd, hasStreetEta);
+        }
+
+        private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
+                         int distanceMeters, String displayText, int laneCount,
+                         int lanePngBytes, int maneuverPngBytes, String maneuverPngSha,
+                         int maneuverPngWidth, int maneuverPngHeight,
+                         int displayTextStart, int displayTextEnd, boolean hasStreetEta) {
             this.fields = fields == null ? new byte[0] : fields;
             this.maneuverMode = maneuverMode == null ? "empty" : maneuverMode;
             this.nativeManeuver = nativeManeuver;
@@ -437,10 +458,13 @@ public final class DirectTbtPayload {
             this.displayText = displayText == null ? "" : displayText;
             this.laneCount = laneCount;
             this.lanePngBytes = lanePngBytes;
-            this.maneuverPngBytes = maneuverPng == null ? 0 : maneuverPng.length;
-            this.maneuverPngSha = shortSha256(maneuverPng);
-            this.maneuverPngWidth = pngWidth(maneuverPng);
-            this.maneuverPngHeight = pngHeight(maneuverPng);
+            this.maneuverPngBytes = maneuverPngBytes;
+            this.maneuverPngSha = maneuverPngSha;
+            this.maneuverPngWidth = maneuverPngWidth;
+            this.maneuverPngHeight = maneuverPngHeight;
+            this.displayTextStart = displayTextStart;
+            this.displayTextEnd = displayTextEnd;
+            this.hasStreetEta = hasStreetEta;
         }
 
         public String maneuverMode() {
@@ -483,6 +507,32 @@ public final class DirectTbtPayload {
             return maneuverPngHeight;
         }
 
+        public boolean hasStreetEta() {
+            return hasStreetEta;
+        }
+
+        /** Replaces only serialized F10 while retaining all prepared PNG work and metadata. */
+        public Prepared withDisplayText(String value) {
+            String safeValue = value == null ? "" : value;
+            if (displayText.equals(safeValue)) return this;
+            if (displayTextStart < 0 || displayTextEnd < displayTextStart) {
+                throw new IllegalStateException("Prepared payload has no serialized F10 field");
+            }
+            ByteArrayOutputStream replacement = new ByteArrayOutputStream();
+            writeStringField(replacement, 10, safeValue);
+            byte[] textField = replacement.toByteArray();
+            byte[] updated = new byte[fields.length - (displayTextEnd - displayTextStart)
+                    + textField.length];
+            System.arraycopy(fields, 0, updated, 0, displayTextStart);
+            System.arraycopy(textField, 0, updated, displayTextStart, textField.length);
+            System.arraycopy(fields, displayTextEnd, updated, displayTextStart + textField.length,
+                    fields.length - displayTextEnd);
+            return new Prepared(updated, maneuverMode, nativeManeuver, distanceMeters,
+                    safeValue, laneCount, lanePngBytes, maneuverPngBytes, maneuverPngSha,
+                    maneuverPngWidth, maneuverPngHeight, displayTextStart,
+                    displayTextStart + textField.length, hasStreetEta);
+        }
+
         public byte[] build(int counter) {
             long safeCounter = counter & 0xffL;
             int counterBytes = 1 + varintSize(safeCounter);
@@ -510,10 +560,17 @@ public final class DirectTbtPayload {
         final int durationColor;
         final int remainingColor;
         final int warningColor;
+        final boolean waitForFullText;
 
-        // Deliberately no wait preference: it is a persisted UI placeholder in this patch.
         Presentation(int etaField, int warningField, int streetFormat, boolean ukrainian,
                 int arrivalColor, int durationColor, int remainingColor, int warningColor) {
+            this(etaField, warningField, streetFormat, ukrainian, arrivalColor,
+                    durationColor, remainingColor, warningColor, true);
+        }
+
+        Presentation(int etaField, int warningField, int streetFormat, boolean ukrainian,
+                int arrivalColor, int durationColor, int remainingColor, int warningColor,
+                boolean waitForFullText) {
             this.etaField = etaField;
             this.warningField = warningField;
             this.streetFormat = streetFormat;
@@ -522,6 +579,7 @@ public final class DirectTbtPayload {
             this.durationColor = durationColor | 0xff000000;
             this.remainingColor = remainingColor | 0xff000000;
             this.warningColor = warningColor | 0xff000000;
+            this.waitForFullText = waitForFullText;
         }
 
         boolean separateEta() { return etaField == HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL; }
@@ -530,6 +588,7 @@ public final class DirectTbtPayload {
         String diagnostics() {
             return "etaField=" + etaField + " warningField=" + warningField
                     + " etaStreetFormat=" + streetFormat + " etaLanguage=" + (ukrainian ? "uk" : "en")
+                    + " etaWaitForFullText=" + (waitForFullText ? 1 : 0)
                     + String.format(Locale.US, " etaColors=%08X/%08X/%08X warningColor=%08X",
                     arrivalColor, durationColor, remainingColor, warningColor);
         }
@@ -711,7 +770,8 @@ public final class DirectTbtPayload {
                                 HudPrefs.getEtaArrivalColor(safeContext),
                                 HudPrefs.getEtaDurationColor(safeContext),
                                 HudPrefs.getEtaRemainingDistanceColor(safeContext),
-                                HudPrefs.getWazeWarningDistanceColor(safeContext))));
+                                HudPrefs.getWazeWarningDistanceColor(safeContext),
+                                HudPrefs.isEtaWaitForFullTextEnabled(safeContext))));
                 synchronized (OPTIONS_LOCK) {
                     if (snapshot.revision != HudPrefs.outputOptionsRevision()) continue;
                     if (cachedOptions != null
