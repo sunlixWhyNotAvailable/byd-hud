@@ -5,13 +5,24 @@ final class UserRuntimeSession {
     static final UserRuntimeSession PROCESS = new UserRuntimeSession();
 
     private volatile boolean active;
+    private long generation;
 
-    void activate() {
+    synchronized void activate() {
+        if (!active) generation++;
         active = true;
     }
 
-    void shutdown() {
+    synchronized void shutdown() {
+        generation++;
         active = false;
+    }
+
+    synchronized long shutdownToken() {
+        return active ? -1L : generation;
+    }
+
+    synchronized boolean isCurrentShutdown(long token) {
+        return token > 0L && !active && generation == token;
     }
 
     boolean allowsRuntime(boolean bootEnabled, boolean userShutdown) {

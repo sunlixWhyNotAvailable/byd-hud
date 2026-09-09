@@ -24,7 +24,7 @@ public final class SteeringGestureRecognizerTest {
     }
 
     private boolean event(int key, int action, long time) {
-        return recognizer.onKey(key, action, 0, false, time, time, false, matches::add);
+        return recognizer.onKey(key, action, 0, false, time, time, false, profile -> matches.add(profile));
     }
 
     private void modes(String... expected) {
@@ -40,9 +40,9 @@ public final class SteeringGestureRecognizerTest {
         assertTrue(event(294, 1, 70));
         modes();
         assertEquals(371, recognizer.nextDeadline());
-        recognizer.advance(370, matches::add);
+        recognizer.advance(370, profile -> matches.add(profile));
         modes();
-        recognizer.advance(371, matches::add);
+        recognizer.advance(371, profile -> matches.add(profile));
         modes(PRESS_SINGLE);
         assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
         assertFalse(event(320, 0, 400));
@@ -51,36 +51,36 @@ public final class SteeringGestureRecognizerTest {
     @Test public void doubleAcceptsExactFirstUpToSecondDownBoundary() {
         configure(294, PRESS_SINGLE, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
-        recognizer.advance(350, matches::add);
+        recognizer.advance(350, profile -> matches.add(profile));
         modes();
         event(294, 0, 350);
-        recognizer.advance(351, matches::add);
+        recognizer.advance(351, profile -> matches.add(profile));
         modes();
         event(294, 1, 380);
-        recognizer.advance(1000, matches::add);
+        recognizer.advance(1000, profile -> matches.add(profile));
         modes(PRESS_DOUBLE);
     }
 
     @Test public void oneMillisecondOutsideDoubleWindowEmitsTwoSingles() {
         configure(294, PRESS_SINGLE, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
-        recognizer.advance(350, matches::add);
+        recognizer.advance(350, profile -> matches.add(profile));
         modes();
         event(294, 0, 351); event(294, 1, 390);
         modes(PRESS_SINGLE);
-        recognizer.advance(690, matches::add);
+        recognizer.advance(690, profile -> matches.add(profile));
         modes(PRESS_SINGLE);
-        recognizer.advance(691, matches::add);
+        recognizer.advance(691, profile -> matches.add(profile));
         modes(PRESS_SINGLE, PRESS_SINGLE);
     }
 
     @Test public void holdHasOneActionAndNeverFallsBackToSingle() {
         configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
         event(294, 0, 0);
-        recognizer.advance(400, matches::add);
-        assertTrue(recognizer.onKey(294, 0, 3, false, 600, 600, false, matches::add));
+        recognizer.advance(400, profile -> matches.add(profile));
+        assertTrue(recognizer.onKey(294, 0, 3, false, 600, 600, false, profile -> matches.add(profile)));
         event(294, 1, 800);
-        recognizer.advance(2000, matches::add);
+        recognizer.advance(2000, profile -> matches.add(profile));
         modes(PRESS_HOLD);
     }
 
@@ -92,14 +92,14 @@ public final class SteeringGestureRecognizerTest {
 
         configure(294, PRESS_HOLD);
         assertTrue(event(294, 0, 300)); assertTrue(event(294, 1, 350));
-        recognizer.advance(651, matches::add);
+        recognizer.advance(651, profile -> matches.add(profile));
         modes(); // Single on a Hold-only button has no action.
 
         configure(294, PRESS_DOUBLE);
         assertTrue(event(294, 0, 700));
-        recognizer.advance(1100, matches::add);
+        recognizer.advance(1100, profile -> matches.add(profile));
         assertTrue(event(294, 1, 1150));
-        recognizer.advance(2000, matches::add);
+        recognizer.advance(2000, profile -> matches.add(profile));
         modes();
     }
 
@@ -107,7 +107,7 @@ public final class SteeringGestureRecognizerTest {
         assertFalse(event(294, 0, 0));
         assertFalse(event(294, 1, 50));
         assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
-        recognizer.advance(1000, matches::add);
+        recognizer.advance(1000, profile -> matches.add(profile));
         modes();
     }
 
@@ -115,7 +115,7 @@ public final class SteeringGestureRecognizerTest {
         configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
         event(294, 0, 150); event(294, 1, 600);
-        recognizer.advance(1000, matches::add);
+        recognizer.advance(1000, profile -> matches.add(profile));
         modes(PRESS_HOLD);
     }
 
@@ -125,9 +125,9 @@ public final class SteeringGestureRecognizerTest {
         event(294, 0, 150); event(294, 1, 180);
         event(294, 0, 250); event(294, 1, 280);
         modes(PRESS_DOUBLE);
-        recognizer.advance(580, matches::add);
+        recognizer.advance(580, profile -> matches.add(profile));
         modes(PRESS_DOUBLE);
-        recognizer.advance(581, matches::add);
+        recognizer.advance(581, profile -> matches.add(profile));
         modes(PRESS_DOUBLE, PRESS_SINGLE);
     }
 
@@ -137,90 +137,222 @@ public final class SteeringGestureRecognizerTest {
             configure(key, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
             event(key, 0, 1000);
             assertEquals(1400, recognizer.nextDeadline());
-            recognizer.advance(1399, matches::add);
+            recognizer.advance(1399, profile -> matches.add(profile));
             modes();
-            recognizer.advance(1400, matches::add);
+            recognizer.advance(1400, profile -> matches.add(profile));
             modes(PRESS_HOLD);
             event(key, 0, 1450); // Duplicate DOWN cannot restart or emit again.
-            recognizer.onKey(key, 0, 1, false, 1500, 1500, false, matches::add);
+            recognizer.onKey(key, 0, 1, false, 1500, 1500, false, profile -> matches.add(profile));
             event(key, 1, 1600);
-            recognizer.advance(2000, matches::add);
+            recognizer.advance(2000, profile -> matches.add(profile));
             modes(PRESS_HOLD);
             assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
         }
     }
 
     @Test public void knownFamiliesAlsoRecognizeHoldOnUpWhenTheTimerIsDelayed() {
-        for (int key : new int[] {304, 305}) {
+        for (int key : new int[] {304, 305, 87, 88}) {
             matches.clear();
             configure(key, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
             event(key, 0, 0); event(key, 1, 400);
-            recognizer.advance(1000, matches::add);
+            recognizer.advance(1000, profile -> matches.add(profile));
             modes(PRESS_HOLD);
         }
     }
 
-    @Test public void nativeAliasAloneNeverBecomesAnyGestureOrArmsATimer() {
-        for (int alias : new int[] {306, 312}) {
+    @Test public void nativeAliasDownEmitsImmediateHoldAndCompleteCyclesRepeat() {
+        for (int[] pair : new int[][] {{305, 306}, {304, 312}, {88, 303}, {87, 302}}) {
             matches.clear();
-            configure(alias, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
-            assertTrue(event(alias, 0, 0));
-            assertTrue(event(alias, 1, 56));
-            assertTrue(event(alias, 0, 100));
-            recognizer.advance(500, matches::add);
-            assertTrue(event(alias, 1, 600));
-            recognizer.advance(1000, matches::add);
-            modes();
+            configure(pair[0], PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            assertTrue(event(pair[1], 0, 8_074_946));
+            modes(PRESS_HOLD);
+            assertTrue(recognizer.onKey(pair[1], 0, 3, false,
+                    8_074_946, 8_074_946, false, profile -> matches.add(profile)));
+            assertTrue(event(pair[1], 1, 8_074_947));
+            assertTrue(event(pair[1], 0, 8_075_000));
+            assertTrue(event(pair[1], 1, 8_075_001));
+            modes(PRESS_HOLD, PRESS_HOLD);
             assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
         }
     }
 
-    @Test public void nativeAliasesCannotReleaseCancelOrDuplicateAnOrdinaryHold() {
-        for (int[] pair : new int[][] {{305, 306}, {304, 312}}) {
+    @Test public void nativeBeforeTimerSharesTheOrdinaryPressAndEmitsOnce() {
+        for (int[] pair : new int[][] {{305, 306}, {304, 312}, {88, 303}, {87, 302}}) {
             matches.clear();
             configure(pair[0], PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
             event(pair[0], 0, 0);
             assertTrue(event(pair[1], 0, 100));
-            assertTrue(recognizer.onKey(pair[1], 1, 0, true, 150, 150, false, matches::add));
-            assertEquals(400, recognizer.nextDeadline());
-            recognizer.advance(400, matches::add);
+            modes(PRESS_HOLD);
+            assertTrue(event(pair[1], 1, 101));
+            recognizer.advance(400, profile -> matches.add(profile));
             modes(PRESS_HOLD);
             event(pair[0], 1, 500);
-            event(pair[1], 0, 510); event(pair[1], 1, 520); // Late semantic tail.
-            event(pair[0], 0, 600);
-            event(pair[1], 1, 650); // Old alias UP cannot end the new press.
-            recognizer.advance(1000, matches::add);
-            event(pair[0], 1, 1100);
-            recognizer.advance(2000, matches::add);
-            modes(PRESS_HOLD, PRESS_HOLD);
+            recognizer.advance(2000, profile -> matches.add(profile));
+            modes(PRESS_HOLD);
         }
     }
 
-    @Test public void doubleStillUsesTwoOrdinaryClicksWhenNativeFeedbackAppearsOrDisappears() {
-        for (int[] pair : new int[][] {{305, 306}, {304, 312}}) {
-            for (boolean nativeFeedback : new boolean[] {false, true}) {
-                matches.clear();
-                configure(pair[0], PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
-                event(pair[0], 0, 0); event(pair[0], 1, 50);
-                if (nativeFeedback) {
-                    event(pair[1], 0, 100); event(pair[1], 1, 120);
-                }
-                recognizer.advance(350, matches::add);
-                modes();
-                event(pair[0], 0, 350);
-                if (nativeFeedback) event(pair[1], 1, 360);
-                event(pair[0], 1, 390);
-                recognizer.advance(1000, matches::add);
-                modes(PRESS_DOUBLE);
-            }
+    @Test public void timerBeforeNativeKeepsOneHoldAndTheNextOrdinaryPressStartsNormally() {
+        for (int[] pair : new int[][] {{305, 306}, {304, 312}, {88, 303}, {87, 302}}) {
+            matches.clear();
+            configure(pair[0], PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            event(pair[0], 0, 0);
+            recognizer.advance(400, profile -> matches.add(profile));
+            modes(PRESS_HOLD);
+            event(pair[0], 1, 500);
+            event(pair[1], 0, 550); event(pair[1], 1, 551); // One late native packet.
+            event(pair[0], 0, 600);
+            event(pair[1], 0, 650); event(pair[1], 1, 651); // Belongs to the new press.
+            recognizer.advance(1000, profile -> matches.add(profile));
+            modes(PRESS_HOLD, PRESS_HOLD);
+            event(pair[0], 1, 1100);
         }
+    }
+
+    @Test public void nativeAfterTimerBeforeReleaseCannotDuplicateAndDoesNotArmACooldown() {
+        configure(305, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(305, 0, 0);
+        recognizer.advance(400, profile -> matches.add(profile));
+        event(306, 0, 450); event(306, 1, 451);
+        event(305, 1, 500);
+        event(306, 0, 600); event(306, 1, 601);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void lateNativeGuardExpiresAfterTheExistingDoubleWindow() {
+        configure(305, PRESS_HOLD);
+        event(305, 0, 0);
+        recognizer.advance(400, profile -> matches.add(profile));
+        event(305, 1, 500); // Guard is inclusive through 800.
+        event(306, 0, 801); event(306, 1, 802);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void expiredTimerHoldSuppressesOneNativeTailThenNativeCyclesResume() {
+        configure(305, PRESS_HOLD);
+        event(305, 0, 0);
+        recognizer.advance(400, profile -> matches.add(profile));
+        recognizer.advance(3000, profile -> matches.add(profile));
+        assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
+
+        event(306, 0, 3100); event(306, 1, 3101);
+        modes(PRESS_HOLD);
+        event(306, 0, 3200); event(306, 1, 3201);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void ordinaryUpAfterExpiredTimerHoldUsesOnlyTheDoubleWindowTailGuard() {
+        configure(305, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(305, 0, 0);
+        recognizer.advance(400, profile -> matches.add(profile));
+        recognizer.advance(3000, profile -> matches.add(profile));
+        event(305, 1, 3100);
+        event(306, 0, 3200); event(306, 1, 3201);
+        modes(PRESS_HOLD);
+        event(306, 0, 3401); event(306, 1, 3402);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void freshOrdinaryDownReplacesAnExpiredTimerHoldMarker() {
+        configure(305, PRESS_HOLD);
+        event(305, 0, 0);
+        recognizer.advance(400, profile -> matches.add(profile));
+        recognizer.advance(3000, profile -> matches.add(profile));
+        event(305, 0, 3100);
+        event(306, 1, 3150); // Late UP from the previous physical cycle.
+        recognizer.advance(3500, profile -> matches.add(profile));
+        event(305, 1, 3600);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void lateNativeUpCannotCancelANewerOrdinaryPress() {
+        configure(305, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(305, 0, 0);
+        recognizer.advance(400, profile -> matches.add(profile));
+        event(305, 1, 500);
+        event(305, 0, 600);
+        event(306, 1, 650);
+        recognizer.advance(1000, profile -> matches.add(profile));
+        event(305, 1, 1100);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void ordinaryDoublesRemainUniversalForAllNativeFamilies() {
+        for (int key : new int[] {305, 304, 88, 87}) {
+            matches.clear();
+            configure(key, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            event(key, 0, 0); event(key, 1, 50);
+            event(key, 0, 350); event(key, 1, 390);
+            recognizer.advance(1000, profile -> matches.add(profile));
+            modes(PRESS_DOUBLE);
+        }
+    }
+
+    @Test public void nativeClassificationNeverDegradesToAnUnmatchedSingleOrDouble() {
+        configure(305, PRESS_SINGLE, PRESS_DOUBLE);
+        event(305, 0, 0);
+        event(306, 0, 100); event(306, 1, 101);
+        event(305, 1, 200);
+        recognizer.advance(1000, profile -> matches.add(profile));
+        modes();
+    }
+
+    @Test public void nativeHoldLogsItsRecognitionOrigin() {
+        configure(305, PRESS_HOLD);
+        List<String> origins = new ArrayList<>();
+        recognizer.onKey(306, 0, 0, false, 8_074_946, 8_074_946, false,
+                (profile, origin) -> { matches.add(profile); origins.add(origin); });
+        event(306, 1, 8_074_947);
+        recognizer.onKey(305, 0, 0, false, 8_075_000, 8_075_000, false,
+                (profile, origin) -> { matches.add(profile); origins.add(origin); });
+        recognizer.advance(8_075_400,
+                (profile, origin) -> { matches.add(profile); origins.add(origin); });
+        assertEquals(Arrays.asList(SteeringGestureRecognizer.ORIGIN_NATIVE,
+                SteeringGestureRecognizer.ORIGIN_TIMER), origins);
+        modes(PRESS_HOLD, PRESS_HOLD);
+    }
+
+    @Test public void cancelledRepeatedBusyAndRevisionChangedNativeInputCannotAct() {
+        configure(305, PRESS_HOLD);
+        assertTrue(recognizer.onKey(306, 0, 1, false, 0, 0, false, profile -> matches.add(profile)));
+        assertTrue(recognizer.onKey(306, 0, 0, true, 10, 10, false, profile -> matches.add(profile)));
+        assertTrue(recognizer.onKey(306, 1, 0, true, 11, 11, false, profile -> matches.add(profile)));
+        assertTrue(recognizer.onKey(306, 0, 0, false, 20, 20, true, profile -> matches.add(profile)));
+        assertTrue(event(306, 1, 21));
+        event(305, 0, 30);
+        recognizer.configure(Collections.singletonList(profile(305, PRESS_HOLD)), 2);
+        assertTrue(event(306, 0, 40));
+        assertTrue(event(306, 1, 41));
+        assertTrue(event(305, 1, 42));
+        recognizer.advance(1000, profile -> matches.add(profile));
+        modes();
+    }
+
+    @Test public void cancelledNativeDownCancelsTheActiveOrdinaryTimer() {
+        configure(305, PRESS_HOLD);
+        event(305, 0, 0);
+        assertTrue(recognizer.onKey(306, 0, 0, true, 100, 100, false, profile -> matches.add(profile)));
+        recognizer.advance(400, profile -> matches.add(profile));
+        event(305, 1, 500);
+        modes();
+    }
+
+    @Test public void nativeFamiliesKeepIndependentPressState() {
+        recognizer.configure(Arrays.asList(profile(305, PRESS_HOLD), profile(304, PRESS_HOLD),
+                profile(88, PRESS_HOLD), profile(87, PRESS_HOLD)), 1);
+        for (int alias : new int[] {306, 312, 303, 302}) event(alias, 0, 100 + alias);
+        assertEquals(Arrays.asList(305, 304, 88, 87), Arrays.asList(
+                matches.get(0).keyCode, matches.get(1).keyCode,
+                matches.get(2).keyCode, matches.get(3).keyCode));
+        for (int alias : new int[] {306, 312, 303, 302}) event(alias, 1, 200 + alias);
+        modes(PRESS_HOLD, PRESS_HOLD, PRESS_HOLD, PRESS_HOLD);
     }
 
     @Test public void revisionChangeCancelsPendingAndHeldActionsButConsumesTheirTails() {
         configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
         recognizer.configure(Collections.singletonList(profile(294, PRESS_SINGLE)), 2);
-        recognizer.advance(500, matches::add);
+        recognizer.advance(500, profile -> matches.add(profile));
         event(294, 0, 600);
         recognizer.configure(Collections.emptyList(), 3);
         assertTrue(event(294, 1, 650));
@@ -231,18 +363,18 @@ public final class SteeringGestureRecognizerTest {
     @Test public void canceledUpAndLifecycleCancelPendingSingleCannotTriggerAnAction() {
         configure(294, PRESS_SINGLE);
         event(294, 0, 0);
-        recognizer.onKey(294, 1, 0, true, 50, 50, false, matches::add);
+        recognizer.onKey(294, 1, 0, true, 50, 50, false, profile -> matches.add(profile));
         event(294, 0, 100); event(294, 1, 150);
         recognizer.cancel();
-        recognizer.advance(1000, matches::add);
+        recognizer.advance(1000, profile -> matches.add(profile));
         modes();
     }
 
     @Test public void busyPressIsNotReplayedWhenWorkerBecomesFree() {
         configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
-        assertTrue(recognizer.onKey(294, 0, 0, false, 0, 0, true, matches::add));
+        assertTrue(recognizer.onKey(294, 0, 0, false, 0, 0, true, profile -> matches.add(profile)));
         event(294, 1, 50);
-        recognizer.advance(1000, matches::add);
+        recognizer.advance(1000, profile -> matches.add(profile));
         modes();
     }
 
@@ -252,7 +384,7 @@ public final class SteeringGestureRecognizerTest {
         event(294, 0, 0); event(294, 1, 50);
         event(305, 0, 100); event(305, 1, 150);
         event(294, 0, 200); event(294, 1, 250);
-        recognizer.advance(451, matches::add);
+        recognizer.advance(451, profile -> matches.add(profile));
         modes(PRESS_DOUBLE, PRESS_SINGLE);
         assertEquals(294, matches.get(0).keyCode);
         assertEquals(305, matches.get(1).keyCode);
@@ -260,16 +392,16 @@ public final class SteeringGestureRecognizerTest {
 
     @Test public void orphanRepeatsAndLostUpHaveBoundedRecovery() {
         configure(294, PRESS_SINGLE);
-        assertTrue(recognizer.onKey(294, 0, 1, false, 0, 0, false, matches::add));
+        assertTrue(recognizer.onKey(294, 0, 1, false, 0, 0, false, profile -> matches.add(profile)));
         event(294, 1, 50);
         event(294, 0, 100);
-        recognizer.advance(3100, matches::add);
+        recognizer.advance(3100, profile -> matches.add(profile));
         event(294, 1, 3200);
         event(294, 0, 3300); event(294, 1, 3350);
         modes();
-        recognizer.advance(3650, matches::add);
+        recognizer.advance(3650, profile -> matches.add(profile));
         modes();
-        recognizer.advance(3651, matches::add);
+        recognizer.advance(3651, profile -> matches.add(profile));
         modes(PRESS_SINGLE);
     }
 }

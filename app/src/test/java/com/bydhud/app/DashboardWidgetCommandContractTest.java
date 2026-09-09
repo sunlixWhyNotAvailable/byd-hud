@@ -94,16 +94,27 @@ public final class DashboardWidgetCommandContractTest {
     }
 
     @Test
-    public void profilePathIsOwnerBoundAndDoesNotUseResizeRecoveryMove() throws Exception {
+    public void profilePathIsOwnerBoundAndRecoversOnlyAfterRollbackFailure() throws Exception {
         String service = source("ClusterProjectionService.java");
         assertTrue(service.contains("applyDashboardProfileForWidget"));
         assertTrue(service.contains("expectedProjectionGeneration"));
         assertTrue(service.contains("BooleanSupplier stillCurrent"));
         assertTrue(service.contains("resizeActiveProjectionForWidget"));
         assertTrue(service.contains("identity_updated=true"));
-        String resize = between(service, "private void resizeActiveProjection(",
+        String resize = between(service, "private boolean resizeActiveProjection(",
                 "private void recoverProjectionAfterResizeFailure(");
         assertFalse(resize.contains("widgetProfile"));
+        String widgetResize = between(service, "private String resizeActiveProjectionForWidget(",
+                "private boolean isCurrentWidgetRequestLocked(");
+        int unpublished = widgetResize.indexOf("projectionPlacementReady = false;");
+        int resized = widgetResize.indexOf("view.getHolder().setFixedSize(");
+        int restored = widgetResize.indexOf(
+                "projectionPlacementReady = oldPlacementReady;", resized);
+        int rollbackFailure = widgetResize.indexOf("profile_resize_rollback_failed widget=true");
+        int recovery = widgetResize.indexOf(
+                "recoverProjectionAfterResizeFailure(", rollbackFailure);
+        assertTrue(unpublished >= 0 && resized > unpublished && restored > resized);
+        assertTrue(rollbackFailure >= 0 && recovery > rollbackFailure);
     }
 
     @Test
@@ -113,7 +124,7 @@ public final class DashboardWidgetCommandContractTest {
         assertTrue(source.contains("widgetOperationCancelled = true"));
         assertTrue(source.contains("pendingShutdownReturnPackage"));
         assertTrue(source.contains("dashboard_return_main_queued"));
-        assertTrue(source.contains("moveIndependentDashboardApp(\n                    deferredReturnPackage"));
+        assertTrue(source.contains("returnActiveDashboardToMain(deferredReturnReason);"));
         String shutdownReturn = between(source, "void returnActiveDashboardToMain(",
                 "private static boolean isShutdownReturnReason(");
         assertFalse(shutdownReturn.contains("isMoveInProgress()"));

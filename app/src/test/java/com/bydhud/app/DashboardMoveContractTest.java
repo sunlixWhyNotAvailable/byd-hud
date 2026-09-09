@@ -58,7 +58,7 @@ public final class DashboardMoveContractTest {
                 "requestProjection(packageName, dashboardMode, reason)"));
         assertTrue(serviceSource.contains(
                 "requestProjection(packageName, dashboardMode, \"restore:\""));
-        int resizeStart = serviceSource.indexOf("private void resizeActiveProjection(");
+        int resizeStart = serviceSource.indexOf("private boolean resizeActiveProjection(");
         int resizeEnd = serviceSource.indexOf(
                 "private void recoverProjectionAfterResizeFailure(", resizeStart);
         String resize = serviceSource.substring(resizeStart, resizeEnd);
@@ -73,10 +73,20 @@ public final class DashboardMoveContractTest {
         int requestStart = serviceSource.indexOf("private void requestProjection(");
         int requestEnd = serviceSource.indexOf("private void returnPackageToMain(", requestStart);
         String request = serviceSource.substring(requestStart, requestEnd);
-        int invalidMoveGuard = request.indexOf(
-                "virtualDisplay != existing || !projectionGeometryValid");
-        assertTrue(invalidMoveGuard >= 0);
-        assertTrue(request.indexOf("movePackageToDisplay(", invalidMoveGuard) > invalidMoveGuard);
+        int resizeResult = request.indexOf(
+                "boolean resizeSucceeded = resizeActiveProjection(");
+        int initiallyHidden = request.indexOf(
+                "projectionPlacementReady = preserveVisibleOwner;");
+        int geometryGate = request.indexOf(
+                "ProjectionLifecyclePolicy.requestedGeometrySucceeded(", resizeResult);
+        int published = request.indexOf("projectionPlacementReady = true;", geometryGate);
+        int failureTransition = request.indexOf(
+                "handleProjectionRequestResizeFailure(", geometryGate);
+        int moveAfterGate = request.indexOf("movePackageToDisplay(", failureTransition);
+        assertTrue(initiallyHidden >= 0 && initiallyHidden < resizeResult);
+        assertTrue(geometryGate > resizeResult);
+        assertTrue(published > geometryGate && failureTransition > published);
+        assertTrue(moveAfterGate > failureTransition);
     }
 
     @Test
@@ -275,7 +285,7 @@ public final class DashboardMoveContractTest {
         assertTrue(sender.contains("existing AutoContainer lease retained"));
 
         int failedBranch = source.indexOf(
-                "if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed))");
+                "if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)");
         int failedReturn = source.indexOf("ClusterProjectionService.returnToMain(", failedBranch);
         int failedRelease = source.indexOf(
                 "releaseAutoContainerLeaseAfterFailedSuccessor(", failedReturn);
@@ -347,6 +357,25 @@ public final class DashboardMoveContractTest {
         assertTrue(controller.contains("void onNavAppDisplayChanged(boolean moveInProgress)"));
         assertTrue(controller.contains("moving = moveInProgress;"));
         assertTrue(controller.contains("callback.onNavAppDisplayChanged(moving);"));
+    }
+
+    @Test
+    public void retainedProjectionRevealsOnlyAVisibleTaskWithTheObservedOwnerToken() throws Exception {
+        String controller = source("NavAppDisplayController.java");
+        String outbound = between(controller,
+                "NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(",
+                "} catch (SecurityException e)");
+        int validated = outbound.indexOf("|| confirmed.taskId < 0 || !confirmed.visible");
+        int captured = outbound.indexOf("projectedGenerationTokenForWidget(packageName)");
+        int revealed = outbound.indexOf("ClusterProjectionService.confirmProjectionVisible(");
+        assertTrue(validated >= 0 && captured > validated && revealed > captured);
+        assertTrue(outbound.contains("packageName, confirmed.displayId, confirmedOwnerToken"));
+        String waiting = between(controller,
+                "private NavAppDisplayState waitForProjectedDashboardDisplay(",
+                "private boolean isConfirmedProjectedDashboardDisplay(");
+        assertTrue(waiting.contains("last.displayId == projectedDisplayId && last.taskId >= 0 && last.visible"));
+        assertTrue(waiting.indexOf("if (last.displayId != projectedDisplayId)")
+                < waiting.indexOf("moveTaskToDisplayBlocking("));
     }
 
     private static String source(String fileName) throws Exception {

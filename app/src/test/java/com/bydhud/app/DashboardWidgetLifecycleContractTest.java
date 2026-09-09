@@ -80,7 +80,7 @@ public final class DashboardWidgetLifecycleContractTest {
         int shutdown = activity.indexOf("HudPrefs.setUserShutdownActive(this, true)");
         int invalidate = activity.indexOf("cancelWidgetModeForShutdown()", shutdown);
         int overlayStop = activity.indexOf("DashboardWidgetController.shutdown(this)", invalidate);
-        int returnRequest = activity.indexOf("returnActiveDashboardToMain(safeReason)", overlayStop);
+        int returnRequest = activity.indexOf("shutdownDashboardProjection(safeReason)", overlayStop);
         assertTrue(shutdown >= 0 && invalidate > shutdown && overlayStop > invalidate && returnRequest > overlayStop);
         assertTrue(activity.contains("DashboardWidgetController.onAppOpened(this)"));
         assertTrue(source("HudRuntimeService.java").contains("DashboardWidgetController.onRuntimeStart(this)"));

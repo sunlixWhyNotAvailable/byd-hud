@@ -42,6 +42,10 @@ public final class SteeringTransferServiceSourceContractTest {
         assertFalse(key.contains("Thread"));
         assertFalse(key.contains("sleep("));
         assertFalse(key.contains("steering_key passed"));
+        String dispatch = between(source("NavAccessibilityService.java"),
+                "private void dispatchSteeringMatch(", "private void onSteeringDeadline()");
+        assertTrue(dispatch.contains("String origin"));
+        assertTrue(dispatch.contains("+ \" origin=\" + origin"));
     }
 
     @Test
@@ -100,11 +104,11 @@ public final class SteeringTransferServiceSourceContractTest {
         String ui = between(controller, "private void moveIndependentDashboardApp(",
                 "void requestWidgetMode(");
         assertTrue(ui.indexOf("if (!beginMove(normalized,") < ui.indexOf("Thread worker ="));
-        assertTrue(ui.contains("reason, completion, null)"));
+        assertTrue(ui.contains("reason, completion, null, shutdownToken)"));
         String widget = between(controller, "void requestWidgetMode(", "void cancelWidgetModeForShutdown()");
         assertTrue(widget.indexOf("if (!beginMove(\"\",") < widget.indexOf("Thread worker ="));
         String begin = between(controller, "private boolean beginMove(", "boolean reserveMove(");
-        assertTrue(begin.contains("if (!reserveMove()) return false;"));
+        assertTrue(begin.contains("if (!reserveMove(shutdownReason)) return false;"));
     }
 
     @Test
@@ -130,7 +134,7 @@ public final class SteeringTransferServiceSourceContractTest {
                 + "if (!requestCurrent.getAsBoolean()) return;"));
         assertTrue(steering.contains("observedDisplay(normalized, current)"));
         assertTrue(steering.contains("SteeringTransferPolicy.canToggleTask(current, observed)"));
-        assertTrue(steering.contains("}, requestCurrent);"));
+        assertTrue(steering.contains("}, requestCurrent, 0L);"));
         String controller = source("NavAppDisplayController.java");
         String move = between(controller, "private void moveIndependentDashboardAppBlocking(",
                 "private String completionErrorForState(");
@@ -140,7 +144,7 @@ public final class SteeringTransferServiceSourceContractTest {
         assertTrue(query >= 0 && guard > query && dispatch > guard);
         assertTrue(move.contains("current, observedDisplay(packageName, current))"));
         assertTrue(move.contains("returnPreviousDashboardApp(packageName, reason, requestCurrent)"));
-        String replacement = between(controller, "private synchronized NavAppDisplayState moveTaskToDisplayBlocking(",
+        String replacement = between(controller, "synchronized NavAppDisplayState moveTaskToDisplayBlocking(",
                 "LocalAdbBridge.ShellResult move = runCommand(");
         assertTrue(replacement.contains("checkDisplay(normalized, reason); "
                 + "if (requestCurrent != null && !requestCurrent.getAsBoolean())"));

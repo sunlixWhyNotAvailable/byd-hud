@@ -29,12 +29,16 @@ public final class SteeringTransferPolicyTest {
 
     @Test
     public void nativeLongAliasesShareOneButtonFamily() {
-        assertTrue(SteeringTransferPolicy.isMappedKey(305, 306));
-        assertTrue(SteeringTransferPolicy.isMappedKey(306, 305));
-        assertTrue(SteeringTransferPolicy.isMappedKey(304, 312));
-        assertTrue(SteeringTransferPolicy.isMappedKey(312, 304));
-        assertTrue(SteeringTransferPolicy.isNativeLongAlias(306));
-        assertTrue(SteeringTransferPolicy.isNativeLongAlias(312));
+        for (int[] pair : new int[][] {{305, 306}, {304, 312}, {88, 303}, {87, 302}}) {
+            assertTrue(SteeringTransferPolicy.isMappedKey(pair[0], pair[1]));
+            assertTrue(SteeringTransferPolicy.isMappedKey(pair[1], pair[0]));
+            assertTrue(SteeringTransferPolicy.isNativeLongAlias(pair[1]));
+            assertTrue(SteeringTransferPolicy.hasNativeLongAlias(pair[0]));
+        }
+        assertFalse(SteeringTransferPolicy.isNativeLongAlias(294));
+        assertFalse(SteeringTransferPolicy.isNativeLongAlias(353));
+        assertFalse(SteeringTransferPolicy.hasNativeLongAlias(294));
+        assertFalse(SteeringTransferPolicy.hasNativeLongAlias(353));
     }
 
     @Test

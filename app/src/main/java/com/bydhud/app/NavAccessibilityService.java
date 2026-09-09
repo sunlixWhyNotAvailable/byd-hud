@@ -324,11 +324,12 @@ public final class NavAccessibilityService extends AccessibilityService {
         }
     }
 
-    private void dispatchSteeringMatch(SteeringTransferProfile profile) {
+    private void dispatchSteeringMatch(SteeringTransferProfile profile, String origin) {
         final long runtimeGeneration = steeringRuntimeGeneration;
         final long bindingRevision = steeringGestures.revision();
         AppEventLogger.event(this, "steering_gesture profile=" + profile.id
                 + " keycode=" + profile.keyCode + " press=" + profile.pressMode
+                + " origin=" + origin
                 + " revision=" + bindingRevision);
         NavAppDisplayController.get(this).requestSteeringToggle(
                 profile.packageName, profile.windowProfile, "steering-" + profile.pressMode,

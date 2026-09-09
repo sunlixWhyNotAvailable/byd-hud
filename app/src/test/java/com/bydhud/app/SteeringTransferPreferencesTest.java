@@ -17,6 +17,10 @@ public final class SteeringTransferPreferencesTest {
                 SteeringTransferPreferences.migrateLegacy(306, "com.waze", "full").get(0).pressMode);
         assertEquals(304,
                 SteeringTransferPreferences.migrateLegacy(312, "com.waze", "partial").get(0).keyCode);
+        assertEquals(88,
+                SteeringTransferPreferences.migrateLegacy(303, "com.waze", "partial").get(0).keyCode);
+        assertEquals(SteeringTransferPreferences.PRESS_HOLD,
+                SteeringTransferPreferences.migrateLegacy(302, "com.waze", "full").get(0).pressMode);
         assertEquals(SteeringTransferPreferences.PROFILE_FULL,
                 SteeringTransferPreferences.migrateLegacy(305, "com.waze", "full").get(0).windowProfile);
         assertEquals(0, SteeringTransferPreferences.migrateLegacy(-1, "com.waze", "full").size());
@@ -56,6 +60,30 @@ public final class SteeringTransferPreferencesTest {
                 Arrays.asList(single), hold, ""));
         assertNull(SteeringTransferPreferences.findConflict(
                 Arrays.asList(single), aliasSingle, "single"));
+
+        SteeringTransferProfile previous = new SteeringTransferProfile(
+                "previous", 88, "hold", "com.waze", "selected");
+        SteeringTransferProfile previousAlias = new SteeringTransferProfile(
+                "previous-alias", 303, "hold", "com.example", "full");
+        assertSame(previous, SteeringTransferPreferences.findConflict(
+                Arrays.asList(previous), previousAlias, ""));
+    }
+
+    @Test
+    public void mediaAliasJsonKeepsIdsAndPressModesWhileCanonicalizingKeys() {
+        List<SteeringTransferProfile> parsed = SteeringTransferPreferences.parseProfiles(
+                "[{\"id\":\"previous-single\",\"keyCode\":303,\"pressMode\":\"single\","
+                        + "\"packageName\":\"com.waze\"},"
+                        + "{\"id\":\"next-double\",\"keyCode\":302,\"pressMode\":\"double\","
+                        + "\"packageName\":\"com.example\"}]");
+
+        assertEquals(2, parsed.size());
+        assertEquals("previous-single", parsed.get(0).id);
+        assertEquals(88, parsed.get(0).keyCode);
+        assertEquals(SteeringTransferPreferences.PRESS_SINGLE, parsed.get(0).pressMode);
+        assertEquals("next-double", parsed.get(1).id);
+        assertEquals(87, parsed.get(1).keyCode);
+        assertEquals(SteeringTransferPreferences.PRESS_DOUBLE, parsed.get(1).pressMode);
     }
 
     @Test

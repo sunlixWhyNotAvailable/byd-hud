@@ -203,6 +203,8 @@ You can start a Waze route before opening BYD HUD and enable `HUD` before or aft
 
 `Send to dashboard` moves a running application to the instrument cluster. `Send to main` returns it to the center display.
 
+After returning an application, BYD HUD keeps the projection ready for reuse and covers its area with black. The next transfer reuses it when valid and removes the cover once the application is confirmed visible on the target display. A brief earlier frame may appear before the application redraws. Full BYD HUD shutdown releases the retained projection.
+
 Find the screen mode and geometry controls under `Options → Dashboard window profile`.
 
 | Setting | Default | Behavior |
@@ -260,7 +262,7 @@ The selected application must already be running and dashboard transfer requires
 
 Button learning and interception require the enabled Accessibility service. BYD HUD consumes an assigned button's delivered press/release events even if the gesture has no matching profile, the selected app is closed, or a transfer cannot be performed. Unmatched clicks are not forwarded to ordinary applications. This cannot cancel an action already handled by vehicle firmware or another Accessibility service. Delete all profiles for that button to stop BYD HUD consuming it. Splitting gestures of one button across independent key-mapping apps is not coordinated: a Double action here can also cause two Single actions in another app.
 
-Single acts after you release the button and the double-press interval expires, even when only Single is assigned. Double acts after the second short press; Hold acts when the press reaches the system's long-press interval. The app recognizes the gesture before checking which action is assigned: a Double without a Double profile does not trigger two Single actions, and a Hold does not trigger Single on release. The app measures these gestures from ordinary button presses and releases, regardless of whether the car has a stock Hold or Double action. Known stock long-press signals do not trigger a gesture by themselves. Hold requires the firmware to deliver the press and release timing; a button that delivers only a stock long-press signal cannot trigger Hold. Supported buttons and gestures still need testing on a vehicle.
+Single acts after you release the button and the double-press interval expires, even when only Single is assigned. Double acts after the second short press. For the star, microphone and previous/next track buttons, a delivered known stock long-press signal triggers Hold immediately. Otherwise Hold uses the system's long-press interval measured from the initial ordinary press; panorama and wheel buttons use this timer too. When both forms arrive for one press, only one Hold action runs. Recognition happens before profile selection: an unmatched Double does not become two Singles, and Hold does not trigger Single on release. Firmware must deliver a usable signal to Accessibility; this change does not bypass firmware suppression of track-button signals. Supported buttons and gestures still need testing on a vehicle.
 
 <p align="center"><img src="docs/screenshots/en/settings-dashboard-transfer.png" alt="Earlier single-shortcut UI, before the transfer-profile list" width="100%"></p>
 

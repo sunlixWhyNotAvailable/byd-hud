@@ -15,6 +15,22 @@ import java.nio.file.Paths;
 /** Local lifecycle policy plus source wiring; does not claim Android/vehicle execution. */
 public final class UserRuntimeSessionTest {
     @Test
+    public void shutdownTokensCannotSurviveResumeOrAnotherShutdown() {
+        UserRuntimeSession session = new UserRuntimeSession();
+        assertFalse(session.isCurrentShutdown(session.shutdownToken()));
+        session.activate();
+        session.shutdown();
+        long firstShutdown = session.shutdownToken();
+        assertTrue(session.isCurrentShutdown(firstShutdown));
+        session.activate();
+        assertFalse(session.isCurrentShutdown(firstShutdown));
+        assertFalse(session.isCurrentShutdown(session.shutdownToken()));
+        session.shutdown();
+        assertFalse(session.isCurrentShutdown(firstShutdown));
+        assertTrue(session.isCurrentShutdown(session.shutdownToken()));
+    }
+
+    @Test
     public void coldProcessNeedsAutoStartEvenWithSavedHudAndTbtSelections() {
         UserRuntimeSession session = new UserRuntimeSession();
         assertFalse(session.allowsRuntime(false, false));

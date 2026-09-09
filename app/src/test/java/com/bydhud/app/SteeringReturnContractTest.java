@@ -49,6 +49,43 @@ public final class SteeringReturnContractTest {
     }
 
     @Test
+    public void shutdownWaitsForAnUnconfirmedMoveAndThenResolvesItsNewOwner() throws Exception {
+        String controller = source();
+        String shutdown = between(controller, "void shutdownDashboardProjection(",
+                "void returnActiveDashboardToMain(");
+        int busy = shutdown.indexOf("if (moveInProgress)");
+        int queued = shutdown.indexOf("pendingShutdownReturnReason = shutdownReason;");
+        int returned = shutdown.indexOf("returnActiveDashboardToMain(shutdownReason);");
+        assertTrue(busy >= 0 && queued > busy && returned > queued);
+        assertFalse(shutdown.contains("active.isEmpty()"));
+        String finished = between(controller, "void endMove(",
+                "private long widgetProjectionGenerationForPackage(");
+        assertTrue(finished.contains("if (!deferredReturnReason.isEmpty())"));
+        assertTrue(finished.contains("returnActiveDashboardToMain(deferredReturnReason);"));
+        assertFalse(finished.contains("moveIndependentDashboardApp( deferredReturnPackage"));
+    }
+
+    @Test
+    public void idleShutdownReleasesResourcesButResumedRuntimeCancelsOldShutdown() throws Exception {
+        String controller = source();
+        String returning = between(controller, "void returnActiveDashboardToMain(",
+                "private static boolean isShutdownReturnReason(");
+        assertTrue(returning.indexOf("!HudPrefs.isUserShutdownActive(context)")
+                < returning.indexOf("String active = activeDashboardPackage();"));
+        assertTrue(returning.contains("releaseRetainedProjectionAfterShutdown(reason);"));
+        String release = between(controller, "private void releaseRetainedProjectionAfterShutdown(",
+                "private void moveIndependentDashboardAppBlocking(");
+        assertTrue(release.contains("if (!projectionShutdownRequested || moveInProgress) return;"));
+        assertTrue(release.indexOf("if (HudPrefs.isUserShutdownActive(context))")
+                < release.indexOf("ClusterProjectionService.releaseIdleProjectionForShutdown(context, reason);"));
+        assertFalse(release.contains(".release()"));
+        Path activity = Path.of("src/main/java/com/bydhud/app/MainActivity.java");
+        if (!Files.exists(activity)) activity = Path.of("app").resolve(activity);
+        String ui = new String(Files.readAllBytes(activity), StandardCharsets.UTF_8);
+        assertTrue(ui.contains("NavAppDisplayController.get(this).shutdownDashboardProjection(safeReason);"));
+    }
+
+    @Test
     public void steeringDispatchUsesSharedDirectionalReasonForAnySelectedApp() throws Exception {
         String steering = between(source(),
                 "void requestSteeringToggle(",
@@ -78,6 +115,7 @@ public final class SteeringReturnContractTest {
                 "projectionReleased = waitForProjectionRelease( packageName, \"independent-return-release\");"));
         assertTrue(returning.contains(
                 "releaseAutoContainerLeaseIfRequested( packageName, returnGeneration, projectionReleased, reason); "
+                        + "if (!isShutdownReturnCurrent(shutdownToken)) return; "
                         + "requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason);"));
 
         String requestedRelease = between(controller,
@@ -177,10 +215,111 @@ public final class SteeringReturnContractTest {
         assertTrue(cleanup.contains("previousPackage, pendingGeneration, \"failed-successor-release\", reason"));
     }
 
+    @Test
+    public void shutdownReservationQueuesAtomicallyAndWorkerKeepsItsRuntimeToken() throws Exception {
+        String controller = source();
+        String reserve = between(controller, "private boolean reserveMove(String shutdownReason)",
+                "private void persistDashboardProjection(");
+        int locked = reserve.indexOf("synchronized (lock)");
+        int busy = reserve.indexOf("if (moveInProgress)");
+        int queue = reserve.indexOf("pendingShutdownReturnReason = shutdownReason;");
+        int decline = reserve.indexOf("return false;");
+        assertTrue(locked >= 0 && busy > locked && queue > busy && decline > queue);
+        String worker = between(controller, "private void moveIndependentDashboardApp(",
+                "void requestWidgetMode(");
+        assertTrue(worker.indexOf("UserRuntimeSession.PROCESS.shutdownToken()")
+                < worker.indexOf("Thread worker ="));
+        assertTrue(worker.contains("reason, completion, null, shutdownToken)"));
+        String returning = between(controller, "if (!toDashboard)",
+                "boolean alreadyProjected =");
+        assertTrue(returning.contains("\"independent-dashboard return-main \" + safe(reason), shutdownToken"));
+        assertTrue(returning.contains("() -> isShutdownReturnCurrent(shutdownToken)"));
+        assertTrue(returning.contains("if (!isShutdownReturnCurrent(shutdownToken)) return; releaseAutoContainerLeaseIfRequested("));
+    }
+
+    @Test
+    public void returnIntentAndCommandKeepExactProjectionAndShutdownIdentity() throws Exception {
+        String service = source("ClusterProjectionService.java");
+        String intent = between(service,
+                "static void returnToMain( Context context, String packageName, String reason, long shutdownToken)",
+                "static void applyDashboardProfile(");
+        assertTrue(intent.contains("EXTRA_RETURN_GENERATION, service.projectionGeneration"));
+        assertTrue(intent.contains("EXTRA_RETURN_OWNER_TOKEN, service.projectionOwnerToken"));
+        assertTrue(intent.contains("EXTRA_SHUTDOWN_TOKEN, shutdownToken"));
+        String returning = between(service, "private void returnPackageToMain(",
+                "private boolean isReturnMoveCurrent(");
+        assertTrue(returning.contains("BooleanSupplier requestCurrent = () -> isReturnMoveCurrent("));
+        assertTrue(returning.contains("\"cluster-projection return-main \" + reason, requestCurrent"));
+        assertTrue(returning.contains("if (!isReturnOwnerCurrent(targetPackage, returnGeneration, returnOwnerToken) || !shouldRetainAfterReturn("));
+        String command = between(source(),
+                "synchronized NavAppDisplayState moveTaskToDisplayBlocking( String packageName, int targetDisplay, String reason, BooleanSupplier requestCurrent)",
+                "private boolean ensureWazeSurfaceOnDisplay(");
+        int issue = command.indexOf("LocalAdbBridge.ShellResult move = runCommand(");
+        assertTrue(command.lastIndexOf("!requestCurrent.getAsBoolean()", issue)
+                > command.indexOf("if (current.displayId == targetDisplay)"));
+    }
+
+    @Test
+    public void deferredShutdownReleaseSurvivesActiveReturnAndDrainsAtIdle() throws Exception {
+        String service = source("ClusterProjectionService.java");
+        String release = between(service, "private void releaseIdleProjectionForShutdownOnMain(",
+                "private void releaseProjection(");
+        assertTrue(release.indexOf("pendingShutdownReleaseToken = shutdownToken;")
+                < release.indexOf("if (!ProjectionLifecyclePolicy.canReleaseIdleForShutdown("));
+        assertTrue(release.contains("isShutdownReturnCurrent(shutdownToken)"));
+        assertTrue(release.contains("shutdown_release_deferred"));
+        String idle = between(service, "private void retainProjectionIdle(",
+                "private void releaseIdleProjectionForShutdownOnMain(");
+        assertTrue(idle.contains("drainPendingShutdownRelease(reason);"));
+        assertTrue(idle.contains("releaseIdleProjectionForShutdownOnMain(pendingShutdownReleaseToken, reason)"));
+    }
+
+    @Test
+    public void admittedReturnReconcilesExactOwnerAfterResumeWithoutShutdownEffects() throws Exception {
+        String service = source("ClusterProjectionService.java");
+        String returning = between(service, "private void returnPackageToMain(",
+                "private boolean isReturnMoveCurrent(");
+        String completion = returning.substring(returning.indexOf("mainHandler.post(() ->"));
+        assertTrue(completion.contains("isReturnOwnerCurrent(targetPackage, returnGeneration, returnOwnerToken)"));
+        assertFalse(completion.contains("requestCurrent.getAsBoolean()"));
+        assertFalse(completion.contains("isShutdownReturnCurrent"));
+        assertTrue(completion.contains("controller.clearReturnedProjectionIntent(targetPackage, intentGeneration, reason);"));
+        assertTrue(completion.contains("retainProjectionIdle("));
+        assertFalse(completion.contains("releaseProjection("));
+        String identity = between(service, "private boolean isReturnOwnerCurrent(",
+                "private void ensureOverlay(");
+        assertTrue(identity.contains("projectionGeneration == expectedGeneration"));
+        assertTrue(identity.contains("projectionOwnerToken == expectedOwnerToken"));
+        String cleanup = between(source(), "void clearReturnedProjectionIntent(",
+                "private void clearDashboardProjection(");
+        assertTrue(cleanup.contains("projectionGenerationForPackage(packageName) != expectedGeneration"));
+        assertTrue(cleanup.contains("!packageName.equals(persistedDashboardPackage())"));
+        assertFalse(cleanup.contains("releaseAutoContainer"));
+        assertFalse(cleanup.contains("requestTbt"));
+    }
+
+    @Test
+    public void coldShutdownCanStopOnlyAServiceWithoutAllocationOrOwnership() throws Exception {
+        String service = source("ClusterProjectionService.java");
+        String cold = between(service, "private boolean stopColdIdleServiceAfterShutdown()",
+                "private void releaseProjection(");
+        assertTrue(service.contains("if (stopColdIdleServiceAfterShutdown()) return START_NOT_STICKY;"));
+        assertTrue(cold.contains("!HudPrefs.isUserShutdownActive(this)"));
+        assertTrue(cold.contains("UserRuntimeSession.PROCESS.shutdownToken() != 0L"));
+        assertTrue(cold.contains("hasAllocatedResourcesLocked()"));
+        assertTrue(cold.contains("ProjectionLifecyclePolicy.canReleaseIdleForShutdown("));
+        assertTrue(cold.contains("stopForegroundCompat(); stopSelf();"));
+        assertFalse(cold.contains("releaseProjection("));
+    }
+
     private static String source() throws Exception {
-        Path path = Path.of("src/main/java/com/bydhud/app/NavAppDisplayController.java");
+        return source("NavAppDisplayController.java");
+    }
+
+    private static String source(String fileName) throws Exception {
+        Path path = Path.of("src/main/java/com/bydhud/app/" + fileName);
         if (!Files.exists(path)) {
-            path = Path.of("app/src/main/java/com/bydhud/app/NavAppDisplayController.java");
+            path = Path.of("app/src/main/java/com/bydhud/app/" + fileName);
         }
         return new String(Files.readAllBytes(path), StandardCharsets.UTF_8).replaceAll("\\s+", " ");
     }

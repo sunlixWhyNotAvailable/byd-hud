@@ -20,11 +20,18 @@ final class SteeringTransferPolicy {
     static int canonicalKeyCode(int keyCode) {
         if (keyCode == 306) return 305;
         if (keyCode == 312) return 304;
+        if (keyCode == 303) return 88;
+        if (keyCode == 302) return 87;
         return keyCode < 0 ? SteeringTransferPreferences.NO_KEY_CODE : keyCode;
     }
 
     static boolean isNativeLongAlias(int keyCode) {
-        return keyCode == 306 || keyCode == 312;
+        return keyCode == 306 || keyCode == 312 || keyCode == 303 || keyCode == 302;
+    }
+
+    static boolean hasNativeLongAlias(int keyCode) {
+        int canonical = canonicalKeyCode(keyCode);
+        return canonical == 305 || canonical == 304 || canonical == 88 || canonical == 87;
     }
 
     static boolean shouldStartTransfer(int action, int repeatCount, boolean keyActive) {

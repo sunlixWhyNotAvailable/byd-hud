@@ -233,6 +233,7 @@ final class NavAppDisplayController {
     private long pendingAutoContainerLeaseTransferGeneration;
     private String pendingShutdownReturnPackage = "";
     private String pendingShutdownReturnReason = "";
+    private boolean projectionShutdownRequested;
     private long widgetOperationToken;
     private boolean widgetOperationActive;
     private boolean widgetOperationCancelled;
@@ -477,7 +478,8 @@ final class NavAppDisplayController {
                                 reportSteeringFailure(normalized, error);
                             }
                         },
-                        requestCurrent);
+                        requestCurrent,
+                        0L);
             } catch (RuntimeException error) {
                 reportSteeringFailure(
                         normalized, "runtime " + error.getClass().getSimpleName());
@@ -503,7 +505,11 @@ final class NavAppDisplayController {
         int normalizedDashboardMode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
         String normalized = normalizePackage(packageName);
         String label = toDashboard ? "independent_dashboard_on" : "independent_dashboard_off";
-        if (!beginMove(normalized, label + " reason=" + safe(reason))) {
+        long shutdownToken = isShutdownReturnReason(reason)
+                ? UserRuntimeSession.PROCESS.shutdownToken() : 0L;
+        if (isShutdownReturnReason(reason) && shutdownToken <= 0L) return;
+        if (!beginMove(normalized, label + " reason=" + safe(reason),
+                isShutdownReturnReason(reason) ? reason : "")) {
             log(normalized, label + " skipped already_running reason=" + safe(reason));
             notifyMoveCompletion(completion, "display move busy");
             return;
@@ -515,7 +521,8 @@ final class NavAppDisplayController {
                         normalizedDashboardMode,
                         reason,
                         completion,
-                        null),
+                        null,
+                        shutdownToken),
                 "BydHudIndependentDashboardDisplay");
         try {
             worker.start();
@@ -764,8 +771,28 @@ final class NavAppDisplayController {
         return true;
     }
 
+    //Shutdown also releases an idle retained projection, after any in-flight move settles.
+    void shutdownDashboardProjection(String reason) {
+        String shutdownReason = "shutdown " + safe(reason);
+        synchronized (lock) {
+            projectionShutdownRequested = true;
+            if (moveInProgress) {
+                pendingShutdownReturnPackage = activeDashboardPackage;
+                pendingShutdownReturnReason = shutdownReason;
+                log(activeDashboardPackage, "dashboard_shutdown_queued reason=" + shutdownReason);
+                return;
+            }
+        }
+        returnActiveDashboardToMain(shutdownReason);
+    }
+
     //returns the current dashboard-owned app to main before replacing or shutting down projection.
     void returnActiveDashboardToMain(String reason) {
+        if (isShutdownReturnReason(reason) && !HudPrefs.isUserShutdownActive(context)) {
+            synchronized (lock) { projectionShutdownRequested = false; }
+            log("", "dashboard_shutdown_cancelled reason=runtime-resumed");
+            return;
+        }
         String active = activeDashboardPackage();
         if (active.isEmpty()) {
             active = persistedDashboardPackage();
@@ -774,6 +801,10 @@ final class NavAppDisplayController {
             active = persistedAutoContainerLeasePackage();
         }
         if (active.isEmpty()) {
+            if (isShutdownReturnReason(reason)) {
+                releaseRetainedProjectionAfterShutdown(reason);
+                return;
+            }
             log("", "dashboard_return_main_failed package=missing reason=" + safe(reason));
             return;
         }
@@ -794,6 +825,21 @@ final class NavAppDisplayController {
         return safe(reason).toLowerCase(Locale.ROOT).contains("shutdown");
     }
 
+    boolean isShutdownReturnCurrent(long shutdownToken) {
+        return shutdownToken == 0L || (HudPrefs.isUserShutdownActive(context)
+                && UserRuntimeSession.PROCESS.isCurrentShutdown(shutdownToken));
+    }
+
+    private void releaseRetainedProjectionAfterShutdown(String reason) {
+        synchronized (lock) {
+            if (!projectionShutdownRequested || moveInProgress) return;
+            projectionShutdownRequested = false;
+        }
+        if (HudPrefs.isUserShutdownActive(context)) {
+            ClusterProjectionService.releaseIdleProjectionForShutdown(context, reason);
+        }
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void moveIndependentDashboardAppBlocking(
             String packageName,
@@ -801,8 +847,10 @@ final class NavAppDisplayController {
             int dashboardMode,
             String reason,
             Consumer<String> completion,
-            BooleanSupplier requestCurrent) {
+            BooleanSupplier requestCurrent,
+            long shutdownToken) {
         try {
+            if (!isShutdownReturnCurrent(shutdownToken)) return;
             if (packageName.isEmpty()) {
                 remember(new NavAppDisplayState(
                         packageName,
@@ -843,12 +891,14 @@ final class NavAppDisplayController {
                 return;
             }
             if (!toDashboard) {
+                if (!isShutdownReturnCurrent(shutdownToken)) return;
                 long returnGeneration = projectionGenerationForPackage(packageName);
                 if (current.displayId == MAIN_DISPLAY_ID
                         && !ClusterProjectionService.isProjectedPackageCurrent(packageName)) {
                     boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                             packageName, MAIN_DISPLAY_ID,
                             "dashboard-already-main:" + safe(reason));
+                    if (!isShutdownReturnCurrent(shutdownToken)) return;
                     synchronized (lock) {
                         if (packageName.equals(activeDashboardPackage)) {
                             activeDashboardPackage = "";
@@ -857,6 +907,7 @@ final class NavAppDisplayController {
                     clearDashboardProjection("independent-dashboard-already-main:" + safe(reason));
                     releaseAutoContainerLeaseIfRequested(
                             packageName, returnGeneration, true, reason);
+                    if (!isShutdownReturnCurrent(shutdownToken)) return;
                     requestTbtAfterReturnIfRequested(packageName, true, reason);
                     remember(new NavAppDisplayState(
                             packageName,
@@ -871,16 +922,20 @@ final class NavAppDisplayController {
                 ClusterProjectionService.returnToMain(
                         context,
                         packageName,
-                        "independent-dashboard return-main " + safe(reason));
+                        "independent-dashboard return-main " + safe(reason),
+                        shutdownToken);
                 log(packageName, "dashboard_return_main_requested package=" + packageName
                         + " reason=" + safe(reason));
                 NavAppDisplayState confirmed = waitForMainDisplay(
                         packageName,
-                        "independent-return-confirm");
+                        "independent-return-confirm",
+                        () -> isShutdownReturnCurrent(shutdownToken));
+                if (!isShutdownReturnCurrent(shutdownToken)) return;
                 boolean onMain = confirmed.taskId >= 0
                         && confirmed.displayId == MAIN_DISPLAY_ID;
                 boolean surfaceReady = !onMain || ensureWazeSurfaceOnDisplay(
                         packageName, MAIN_DISPLAY_ID, "dashboard-return:" + safe(reason));
+                if (!isShutdownReturnCurrent(shutdownToken)) return;
                 synchronized (lock) {
                     if (onMain
                             && packageName.equals(activeDashboardPackage)) {
@@ -899,8 +954,10 @@ final class NavAppDisplayController {
                             + " display=" + confirmed.displayId
                             + " reason=" + safe(reason));
                 }
+                if (!isShutdownReturnCurrent(shutdownToken)) return;
                 releaseAutoContainerLeaseIfRequested(
                         packageName, returnGeneration, projectionReleased, reason);
+                if (!isShutdownReturnCurrent(shutdownToken)) return;
                 requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason);
                 String returnStatus = onMain
                         ? surfaceReady
@@ -978,7 +1035,8 @@ final class NavAppDisplayController {
             NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(
                     packageName,
                     "independent-dashboard-start");
-            if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)) {
+            if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)
+                    || confirmed.taskId < 0 || !confirmed.visible) {
                 ClusterProjectionService.returnToMain(
                         context,
                         packageName,
@@ -995,6 +1053,10 @@ final class NavAppDisplayController {
                         "independent dashboard projection not confirmed"));
                 return;
             }
+            long confirmedOwnerToken =
+                    ClusterProjectionService.projectedGenerationTokenForWidget(packageName);
+            ClusterProjectionService.confirmProjectionVisible(
+                    packageName, confirmed.displayId, confirmedOwnerToken);
             reconcileConfirmedDashboardOwnership(
                     packageName,
                     confirmed,
@@ -1331,7 +1393,7 @@ final class NavAppDisplayController {
         return moveTaskToDisplayBlocking(packageName, targetDisplay, reason, null);
     }
 
-    private synchronized NavAppDisplayState moveTaskToDisplayBlocking(
+    synchronized NavAppDisplayState moveTaskToDisplayBlocking(
             String packageName,
             int targetDisplay,
             String reason,
@@ -1358,7 +1420,7 @@ final class NavAppDisplayController {
             NavAppDisplayState current = checkDisplay(normalized, reason);
             if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
                 return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
-                        current.visible, label + " blocked: steering request changed"));
+                        current.visible, label + " blocked: request changed"));
             }
             if (current.taskId < 0) {
                 return remember(new NavAppDisplayState(
@@ -1375,6 +1437,10 @@ final class NavAppDisplayController {
                         current.displayId,
                         current.visible,
                         label + " skipped: already on display " + targetDisplay));
+            }
+            if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
+                return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
+                        current.visible, label + " blocked: request changed before command"));
             }
             LocalAdbBridge.ShellResult move = runCommand(
                     normalized,
@@ -1492,21 +1558,22 @@ final class NavAppDisplayController {
                     + " actualDisplay=" + last.displayId
                     + " reason=" + safe(reason));
             if (projectedDisplayId > MAIN_DISPLAY_ID) {
-                if (last.displayId == projectedDisplayId) {
+                if (last.displayId == projectedDisplayId && last.taskId >= 0 && last.visible) {
                     log(packageName, "dashboard_confirmed_late package=" + packageName
                             + " display=" + last.displayId);
                     return last;
                 }
-                NavAppDisplayState moved = moveTaskToDisplayBlocking(
-                        packageName,
-                        projectedDisplayId,
-                        reason + "-late-projected-display");
-                if (moved.displayId == projectedDisplayId) {
-                    log(packageName, "dashboard_confirmed_late package=" + packageName
-                            + " display=" + moved.displayId);
-                    return moved;
+                if (last.displayId != projectedDisplayId) {
+                    last = moveTaskToDisplayBlocking(
+                            packageName,
+                            projectedDisplayId,
+                            reason + "-late-projected-display");
+                    if (last.displayId == projectedDisplayId && last.taskId >= 0 && last.visible) {
+                        log(packageName, "dashboard_confirmed_late package=" + packageName
+                                + " display=" + last.displayId);
+                        return last;
+                    }
                 }
-                last = moved;
             }
             sleepDisplayConfirmInterval();
             last = checkDisplay(packageName, reason);
@@ -1565,7 +1632,7 @@ final class NavAppDisplayController {
         return next;
     }
 
-    private long projectionGenerationForPackage(String packageName) {
+    long projectionGenerationForPackage(String packageName) {
         String normalized = normalizePackage(packageName);
         String persisted = persistedDashboardPackage();
         if (normalized.isEmpty()) return 0L;
@@ -1654,9 +1721,14 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private NavAppDisplayState waitForMainDisplay(String packageName, String reason) {
+        return waitForMainDisplay(packageName, reason, () -> true);
+    }
+
+    private NavAppDisplayState waitForMainDisplay(
+            String packageName, String reason, BooleanSupplier requestCurrent) {
         NavAppDisplayState last = checkDisplay(packageName, reason + "-initial");
         long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
-        while (last.taskId >= 0
+        while (requestCurrent.getAsBoolean() && last.taskId >= 0
                 && last.displayId != MAIN_DISPLAY_ID
                 && android.os.SystemClock.elapsedRealtime() < deadline) {
             sleepDisplayConfirmInterval();
@@ -1714,7 +1786,11 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private boolean beginMove(String packageName, String status) {
-        if (!reserveMove()) return false;
+        return beginMove(packageName, status, "");
+    }
+
+    private boolean beginMove(String packageName, String status, String shutdownReason) {
+        if (!reserveMove(shutdownReason)) return false;
         remember(new NavAppDisplayState(
                 packageName,
                 -1,
@@ -1726,8 +1802,16 @@ final class NavAppDisplayController {
 
     //The same atomic reservation is used before either UI or steering starts background work.
     boolean reserveMove() {
+        return reserveMove("");
+    }
+
+    private boolean reserveMove(String shutdownReason) {
         synchronized (lock) {
             if (moveInProgress) {
+                if (!shutdownReason.isEmpty()) {
+                    pendingShutdownReturnPackage = activeDashboardPackage;
+                    pendingShutdownReturnReason = shutdownReason;
+                }
                 return false;
             }
             moveInProgress = true;
@@ -1752,6 +1836,17 @@ final class NavAppDisplayController {
                 + " reason=" + safe(reason));
     }
 
+    //An admitted Return can finish after resume; reconcile only its unchanged owner intent.
+    void clearReturnedProjectionIntent(String packageName, long expectedGeneration, String reason) {
+        synchronized (lock) {
+            if (expectedGeneration <= 0L
+                    || !packageName.equals(persistedDashboardPackage())
+                    || projectionGenerationForPackage(packageName) != expectedGeneration) return;
+            if (packageName.equals(activeDashboardPackage)) activeDashboardPackage = "";
+            clearDashboardProjection("confirmed-service-return:" + safe(reason));
+        }
+    }
+
     //clears dashboard projection intent when the app is intentionally returned to main.
     private void clearDashboardProjection(String reason) {
         String previous = persistedDashboardPackage();
@@ -1774,24 +1869,22 @@ final class NavAppDisplayController {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void endMove(String packageName) {
-        String deferredReturnPackage;
         String deferredReturnReason;
         pendingAutoContainerLeaseTransferFrom = "";
         pendingAutoContainerLeaseTransferGeneration = 0L;
         synchronized (lock) {
             moveInProgress = false;
-            deferredReturnPackage = pendingShutdownReturnPackage;
             deferredReturnReason = pendingShutdownReturnReason;
             pendingShutdownReturnPackage = "";
             pendingShutdownReturnReason = "";
         }
         log(packageName, "move idle");
         notifyStatusChanged();
-        if (!deferredReturnPackage.isEmpty()) {
-            moveIndependentDashboardApp(
-                    deferredReturnPackage,
-                    false,
-                    deferredReturnReason);
+        if (!deferredReturnReason.isEmpty()) {
+            //The completed move may have changed the owner since shutdown was requested.
+            returnActiveDashboardToMain(deferredReturnReason);
+        } else {
+            releaseRetainedProjectionAfterShutdown("move-complete");
         }
     }
 

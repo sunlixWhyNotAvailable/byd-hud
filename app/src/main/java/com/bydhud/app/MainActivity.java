@@ -3832,7 +3832,7 @@ public final class MainActivity extends ComponentActivity {
         NavHudLiveSender sender = NavHudLiveSender.get(this);
         sender.stop(hudPackage, safeReason, true, sender::refreshTbtObservers);
 
-        NavAppDisplayController.get(this).returnActiveDashboardToMain(safeReason);
+        NavAppDisplayController.get(this).shutdownDashboardProjection(safeReason);
 
         stopRecorderAsync("shutdown", () -> {
             manualModeEnabled = false;
