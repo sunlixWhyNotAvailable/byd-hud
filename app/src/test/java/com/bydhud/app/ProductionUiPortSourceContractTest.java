@@ -128,7 +128,9 @@ public final class ProductionUiPortSourceContractTest {
         assertTrue(hudSwitch.contains("SWITCH_PENDING_TIMEOUT_MS"));
         assertTrue(hudSwitch.contains("delay(50L)"));
         assertTrue(hudSwitch.contains("animationSpec = tween(durationMillis = 140)"));
-        assertTrue(compose.contains("delay(viewConfiguration.longPressTimeoutMillis)"));
+        String widgetAnchor = between(compose, "internal fun DashboardWidgetAnchorContent(",
+                "internal fun DashboardWidgetMenuContent(");
+        assertTrue(widgetAnchor.contains("delay(1_000L)"));
     }
 
     @Test

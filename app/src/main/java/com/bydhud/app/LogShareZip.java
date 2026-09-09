@@ -489,7 +489,7 @@ final class LogShareZip {
 
     private static boolean isShareArtifact(String name) {
         return name != null
-                && (name.startsWith(ZIP_PREFIX) || name.startsWith(CONFIG_ZIP_PREFIX))
+                && name.startsWith(ZIP_PREFIX)
                 && (name.endsWith(".zip") || name.endsWith(".zip.part")
                 || name.endsWith(".zip.staging") || name.endsWith(".zip.source.part"));
     }

@@ -62,7 +62,7 @@ public final class PatchOperationUiSourceContractTest {
         assertTrue(source.contains("previewOperations.containsKey(\"waze\")"));
         assertTrue(source.contains("previewOperations.containsKey(\"gmaps\")"));
         assertTrue(source.contains("startPreviewOperation(\"share\""));
-        assertTrue(stack.contains("sortedByDescending { it.startedAt }.take(3)"));
+        assertTrue(stack.contains("sortedByDescending { it.first }.take(3)"));
         assertTrue(stack.contains(".padding(24.dp)"));
         assertTrue(stack.contains("Arrangement.spacedBy(12.dp)"));
         assertTrue(stack.contains(".size(width = 460.dp, height = 170.dp)"));

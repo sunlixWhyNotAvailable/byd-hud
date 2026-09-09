@@ -14,6 +14,7 @@ public final class BootReceiver extends BroadcastReceiver {
     @Override
     //handles broadcast recovery here so the app can restart required services without user interaction.
     public void onReceive(Context context, Intent intent) {
+        ConfigurationExportArtifacts.checkAsync(context);
         String action = intent == null ? "" : intent.getAction();
         if (isColdBootAction(action)) {
             NavAppDisplayController.get(context).clearStaleProjectionIntentForBoot(action);

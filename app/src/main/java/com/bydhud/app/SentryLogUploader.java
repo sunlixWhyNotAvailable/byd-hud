@@ -75,13 +75,6 @@ final class SentryLogUploader {
                 days == null ? "" : String.join(",", days), uploadId);
     }
 
-    static Result uploadConfiguration(Context context, File archive) {
-        return upload(context, archive,
-                "BYD HUD manual vehicle configuration upload",
-                "vehicle_configuration",
-                "", "");
-    }
-
     private static Result upload(Context context, File archive, String messageText,
             String uploadType, String selectedDays, String uploadId) {
         String validation = validate(BuildConfig.SENTRY_DSN, archive);

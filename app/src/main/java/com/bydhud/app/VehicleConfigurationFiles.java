@@ -75,39 +75,37 @@ final class VehicleConfigurationFiles {
                     "/storage/", "/mnt/", "/acct/", "/proc/", "/sys/")));
     private static final Set<String> RELEVANT_PACKAGE_TOKENS = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
-                    "naviauto", "someip", "amapservice", "containerservice",
-                    "clusterdebug", "cluster_hmi", "cluster", "launchermap", "carsetting",
-                    "car.settings", "mapaccount", "adas", "kanzi", "fission", "vehicle")));
+                    "naviauto", "someip", "amapservice", "containerservice", "launchermap", "cluster",
+                    "carsettingsplugins", "carsettings.plugins")));
     private static final Set<String> KNOWN_PACKAGES = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
                     "com.byd.naviauto", "com.ts.car.someip.service", "com.byd.someipsystemservice",
                     "com.example.amapservice", "com.byd.amapservice", "com.byd.containerservice",
-                    "com.byd.clusterdebug", "com.byd.launchermap", "com.byd.carsetting",
-                    "com.byd.car.settings", "com.byd.carsettings", "com.byd.carsettings.plugins",
-                    "com.byd.providers.carsettings", "com.byd.mapaccount", "com.byd.map.account",
-                    "com.byd.adas", "com.byd.adasservice", "com.byd.auto_camera",
-                    "com.byd.server.adasagent",
-                    "com.byd.avc", "com.byd.bydcamera", "com.byd.camera.remotectrl",
-                    "com.byd.cameramanager", "com.byd.cdr", "com.byd.diagnosticinfo",
-                    "com.byd.dipilot.dms", "com.byd.eventcenter", "com.byd.sr",
-                    "com.android.car.settings", "com.xdja.clusterdemo")));
+                    "com.byd.launchermap", "com.byd.carsettings.plugins")));
+    private static final Set<String> METADATA_PACKAGES = Collections.unmodifiableSet(
+            new LinkedHashSet<>(Arrays.asList(
+                    "com.byd.carsetting", "com.byd.car.settings", "com.byd.carsettings",
+                    "com.byd.providers.carsettings", "com.android.car.settings",
+                    "com.byd.mapaccount", "com.byd.map.account",
+                    "com.byd.adas", "com.byd.adasservice", "com.byd.server.adasagent",
+                    "com.byd.dipilot.dms", "com.byd.sr", "com.byd.auto_camera", "com.byd.avc",
+                    "com.byd.bydcamera", "com.byd.camera.remotectrl", "com.byd.cameramanager",
+                    "com.byd.cdr", "com.byd.diagnosticinfo", "com.byd.eventcenter",
+                    "com.byd.clusterdebug", "com.xdja.clusterdemo")));
     private static final Set<String> LIBRARY_FAMILIES = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
                     "libbydcluster", "libbyddatasource", "libsomeip", "libcommonapi-someip",
                     "libvsomeipjni", "libsomeipnative", "libvsomeip3", "vendor.ts.someip@",
-                    "libdi5lijie", "libvehicle", "libcan", "libprotobuf", "libbinder",
-                    "libandroid_runtime", "libutils", "libbase", "liblog", "libc++",
-                    "libdl.so", "libm.so", "libz.so")));
+                    "libdi5lijie", "libvehicle", "libcan")));
     private static final Set<String> FRAMEWORK_FAMILIES = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
-                    "framework.jar", "services.jar", "framework-res.apk", "android.policy.jar",
-                    "framework.odex", "framework.vdex", "services.odex", "services.vdex",
-                    "framework.art", "services.art", "framework-res.odex", "framework-res.vdex",
-                    "framework-res.art", "framework.oat", "services.oat",
-                    "boot-framework.oat", "boot-framework.vdex", "boot-framework.art",
-                    "boot-services.oat", "boot-services.vdex", "boot-services.art",
-                    "dilink", "bmmcamera",
-                    "car-framework", "bydcluster", "kanzi")));
+                    "framework.jar", "services.jar", "dilink", "car-framework",
+                    "android.car", "bydcluster")));
+    private static final Set<String> PLATFORM_LIBRARIES = Collections.unmodifiableSet(
+            new LinkedHashSet<>(Arrays.asList(
+                    "libbinder.so", "libbinder_ndk.so", "libutils.so", "libbase.so",
+                    "liblog.so", "libc++.so", "libc++_shared.so", "libc.so", "libdl.so",
+                    "libm.so", "libz.so", "libandroid.so", "libandroid_runtime.so")));
     private static final Set<String> SENSITIVE_NAMES = Collections.unmodifiableSet(
             new LinkedHashSet<>(Arrays.asList(
                     "account", "accounts", "credential", "credentials", "password", "passwords",
@@ -230,6 +228,8 @@ final class VehicleConfigurationFiles {
     static final class Inventory {
         final List<Entry> entries = new ArrayList<>();
         final List<Unavailable> unavailable = new ArrayList<>();
+        final Map<String, Set<String>> metadata = new LinkedHashMap<>();
+        final Set<String> mappedLibraries = new LinkedHashSet<>();
         private final ProgressListener progress;
         long totalBytes;
         boolean partial;
@@ -245,11 +245,32 @@ final class VehicleConfigurationFiles {
         void inspect(String path) {
             if (progress != null) {
                 progress.changed(path == null ? "" : path, entries.size(), totalBytes,
-                        unavailable.size());
+                        unavailableFileCount());
             }
         }
 
+        void metadata(String kind, String value) {
+            Set<String> values = metadata.computeIfAbsent(kind, ignored -> new LinkedHashSet<>());
+            if (values.size() < 8192) values.add(value);
+            else values.add("[metadata inventory truncated at 8192 entries]");
+        }
+
+        int unavailableFileCount() {
+            Set<String> paths = new LinkedHashSet<>();
+            for (Unavailable item : unavailable) {
+                if (item.sourcePath.startsWith("/") && !item.sourcePath.startsWith("/proc/"))
+                    paths.add(item.sourcePath);
+            }
+            return paths.size();
+        }
+
         void unavailable(String path, String reason) {
+            if (reason != null && (reason.contains("dependency") || reason.startsWith("ELF "))) {
+                metadata("dependencyOutcomes", path + ": " + reason);
+                return;
+            }
+            for (Unavailable item : unavailable) if (item.sourcePath.equals(path)
+                    && item.reason.equals(reason)) return;
             unavailable.add(new Unavailable(path, reason));
             partial = true;
             inspect(path);
@@ -338,6 +359,7 @@ final class VehicleConfigurationFiles {
                 if (rawPath.toLowerCase(Locale.ROOT).endsWith(".so")) {
                     libraryIndex.computeIfAbsent(baseName(rawPath), ignored -> new ArrayList<>()).add(rawPath);
                 }
+                if (isInventoryPath(rawPath)) inventory.metadata("firmwarePaths", rawPath);
                 if (!isRelevantCandidate(rawPath)) continue;
                 inventory.inspect(rawPath);
                 String path = canonicalPath(rawPath, session, stop, inventory);
@@ -349,9 +371,22 @@ final class VehicleConfigurationFiles {
             }
         }
         discoverProcesses(session, stop, inventory, libraryIndex);
+        retainMappedAbi(inventory);
         expandDependencies(context, session, stop, inventory, libraryIndex);
         inventory.entries.sort(Comparator.comparing(entry -> entry.archivePath));
         return inventory;
+    }
+
+    private static void retainMappedAbi(Inventory inventory) {
+        boolean mapped64 = inventory.mappedLibraries.stream().anyMatch(VehicleConfigurationFiles::is64BitPath);
+        boolean mapped32 = inventory.mappedLibraries.stream().anyMatch(path -> !is64BitPath(path));
+        if (mapped64 == mapped32) return; // No maps or both active ABIs: retain bounded vendor-family fallback.
+        inventory.entries.removeIf(entry -> {
+            if (!entry.category.startsWith("native") || is64BitPath(entry.sourcePath) == mapped64) return false;
+            inventory.totalBytes -= entry.size;
+            inventory.metadata("omittedBodies", entry.sourcePath + ": inactive ABI");
+            return true;
+        });
     }
 
     private static void discoverPackages(Context context, LocalAdbBridge.ConfigurationExportSession session,
@@ -363,6 +398,9 @@ final class VehicleConfigurationFiles {
                 PackageManager manager = context.getPackageManager();
                 for (PackageInfo info : manager.getInstalledPackages(0)) {
                     checkCancelled(cancelled);
+                    if (info != null && (inventoryPackageName(info.packageName) || relevantPackageInfo(info))) {
+                        inventory.metadata("installedPackages", info.packageName + " version=" + info.versionName);
+                    }
                     if (info != null && relevantPackageInfo(info)) packages.add(info.packageName);
                     if (info == null || !relevantPackageInfo(info)) continue;
                     addPackagePaths(info, paths, aliases);
@@ -389,7 +427,7 @@ final class VehicleConfigurationFiles {
             if (result.truncated) inventory.unavailable("package:" + packageName,
                     "partial pm path output; retained paths may be incomplete");
             if (!result.success() && result.output.trim().isEmpty()) {
-                inventory.unavailable("package:" + packageName, "pm path failed");
+                inventory.metadata("packageOutcomes", packageName + ": not installed or pm path unavailable");
                 continue;
             }
             int discoveredPaths = 0;
@@ -408,7 +446,7 @@ final class VehicleConfigurationFiles {
                 discovered.add(packageName);
             }
             if (result.success() && discoveredPaths == 0) {
-                inventory.unavailable("package:" + packageName, "package not installed or no APK path");
+                inventory.metadata("packageOutcomes", packageName + ": not installed or no APK path");
             }
         }
     }
@@ -450,6 +488,20 @@ final class VehicleConfigurationFiles {
             Matcher matcher = Pattern.compile("^([0-9]{1,10})\\s+(.+)$").matcher(trimmed);
             if (!matcher.matches() || !relevantProcess(matcher.group(2))) continue;
             String pid = matcher.group(1);
+            Matcher provider = PROCESS_PACKAGE.matcher(matcher.group(2).toLowerCase(Locale.ROOT));
+            while (provider.find()) {
+                String packageName = provider.group(1);
+                if (!packageName.contains("cluster")) continue;
+                LocalAdbBridge.ShellResult paths = run(session, "pm path " + packageName);
+                if (paths == null || !paths.success()) continue;
+                for (String value : lines(paths.output)) {
+                    String path = value.startsWith("package:") ? value.substring(8) : value;
+                    if (isAllowedPath(path) && isApkPath(path)) {
+                        addCandidate(path, "apk", Collections.singleton(packageName),
+                                session, cancelled, inventory);
+                    }
+                }
+            }
             inventory.inspect("/proc/" + pid);
             LocalAdbBridge.ShellResult exe = run(session, "readlink -f /proc/" + pid + "/exe");
             if (exe == null || !exe.success()) {
@@ -473,7 +525,10 @@ final class VehicleConfigurationFiles {
                 if (space >= 0) path = path.substring(0, space);
                 if (!isAllowedPath(path) || !path.toLowerCase(Locale.ROOT).endsWith(".so")
                         || isSensitiveName(path)) continue;
+                inventory.metadata("mappedLibraries", path);
+                inventory.mappedLibraries.add(path);
                 libraryIndex.computeIfAbsent(baseName(path), ignored -> new ArrayList<>()).add(path);
+                if (!isRelevantLibraryPath(path)) continue;
                 String canonical = canonicalPath(path, session, cancelled, inventory);
                 if (canonical != null) addCandidate(canonical, "native", null,
                         session, cancelled, inventory);
@@ -531,6 +586,7 @@ final class VehicleConfigurationFiles {
                         if (attrs.isRegularFile() && path.toLowerCase(Locale.ROOT).endsWith(".so")) {
                             libraryIndex.computeIfAbsent(baseName(path), ignored -> new ArrayList<>()).add(path);
                         }
+                        if (attrs.isRegularFile() && isInventoryPath(path)) inventory.metadata("firmwarePaths", path);
                         if (attrs.isRegularFile() && isRelevantCandidate(path)) {
                             addCandidate(path, category(path), null, null, cancelled, inventory);
                         }
@@ -538,7 +594,8 @@ final class VehicleConfigurationFiles {
                     }
 
                     @Override public FileVisitResult visitFileFailed(Path file, IOException error) {
-                        inventory.unavailable(file.toString(), "local read failed: " + safe(error.getMessage()));
+                        if (isRelevantCandidate(file.toString()))
+                            inventory.unavailable(file.toString(), "local read failed: " + safe(error.getMessage()));
                         return FileVisitResult.CONTINUE;
                     }
                 });
@@ -693,18 +750,34 @@ final class VehicleConfigurationFiles {
             Inventory inventory, Map<String, List<String>> libraryIndex) throws IOException {
         for (String dependency : new LinkedHashSet<>(dependencies)) {
             checkCancelled(cancelled);
-            inventory.inspect(entry.sourcePath + " -> " + dependency);
+            inventory.metadata("dependencies", entry.sourcePath + " -> " + dependency);
+            if (PLATFORM_LIBRARIES.contains(dependency.toLowerCase(Locale.ROOT))) continue;
             List<String> candidates = libraryIndex.get(dependency);
             if (candidates == null || candidates.isEmpty()) {
-                inventory.unavailable(entry.sourcePath, "dependency path not found: " + dependency);
+                inventory.metadata("dependencyOutcomes", entry.sourcePath + " -> " + dependency + ": not found");
                 continue;
             }
-            for (String path : candidates) {
+            List<String> compatible = new ArrayList<>();
+            for (String path : new LinkedHashSet<>(candidates)) {
+                if (path.startsWith("/apex/")) continue;
+                if (is64BitPath(path) == is64BitPath(entry.sourcePath)) compatible.add(path);
+            }
+            compatible.sort(Comparator.comparingInt(path ->
+                    inventory.mappedLibraries.contains(path) ? 0
+                            : path.substring(0, path.lastIndexOf('/')).equals(
+                                    entry.sourcePath.substring(0, entry.sourcePath.lastIndexOf('/'))) ? 1 : 2));
+            for (String path : compatible) {
                 String canonical = canonicalPath(path, session, cancelled, inventory);
-                if (canonical != null) addCandidate(canonical, "native-dependency", null,
-                        session, cancelled, inventory);
+                if (canonical != null) {
+                    addCandidate(canonical, "native-dependency", null, session, cancelled, inventory);
+                    break;
+                }
             }
         }
+    }
+
+    private static boolean is64BitPath(String path) {
+        return path.contains("/lib64/") || path.contains("/arm64/") || path.contains("/x86_64/");
     }
 
     private static List<String> streamedElfNeeded(Context context, Entry entry,
@@ -860,7 +933,8 @@ final class VehicleConfigurationFiles {
             return isAllowedPath(path);
         }
         Matcher pm = PM_PATH_COMMAND.matcher(safe);
-        return pm.matches() && relevantPackage(pm.group(1));
+        return pm.matches() && (relevantPackage(pm.group(1))
+                || pm.group(1).startsWith("com.byd.") || pm.group(1).equals("com.android.car.settings"));
     }
 
     static String quotePath(String path) {
@@ -873,41 +947,53 @@ final class VehicleConfigurationFiles {
         return "files/" + path.substring(1);
     }
 
+    static boolean inventoryPackageName(String name) {
+        return KNOWN_PACKAGES.contains(name) || METADATA_PACKAGES.contains(name)
+                || Arrays.asList(VehicleConfigurationDiagnostics.packageNames()).contains(name);
+    }
+
+    static boolean isInventoryPath(String path) {
+        if (!isAllowedPath(path)) return false;
+        if (isApkPath(path) || path.contains("/app/") || path.contains("/priv-app/")
+                || path.startsWith("/data/app/")) return isRelevantCandidate(path);
+        return true;
+    }
+
     static boolean isRelevantCandidate(String path) {
         if (!isAllowedPath(path) || isSensitiveName(path)) return false;
         String lower = path.toLowerCase(Locale.ROOT);
-        if (isApkPath(path) && !isFrameworkArtifact(lower)) {
-            return false; // Other APKs enter only through resolved package inventory.
-        }
-        if (lower.startsWith("/cluster/")) return true;
-        if (isRelevantLibraryPath(path)) return true;
+        // The mandatory full plugin may use an unexpected package name on another firmware.
+        if (isApkPath(path)) return lower.contains("/carsettingsplugins/");
+        if (lower.endsWith(".so")) return isRelevantLibraryPath(path);
         if (isFrameworkArtifact(lower)) return true;
-        return lower.contains("/vintf/") || lower.contains("/etc/init/") || lower.contains("/init.")
-                || lower.contains("/someip") || lower.contains("/cluster")
-                || lower.contains("/bydcluster") || lower.contains("/byd_cluster")
-                || lower.contains("/kanzi") || lower.contains("/fission")
-                || lower.contains("/container") || lower.contains("/dios")
-                || lower.contains("/instrument") || lower.contains("/hud")
-                || lower.contains("/navi") || lower.contains("/adas")
-                || lower.contains("/sflijie") || lower.contains("/kanzihw")
-                || lower.contains("/qt")
-                || lower.endsWith("/bydclustermanager")
-                || lower.endsWith("/bydclusterkanzi")
-                || lower.endsWith("/bydclusterlijie")
-                || lower.endsWith("cluster.dios_host.rc") || lower.endsWith("startbydcluster.sh");
+        if (isRequiredFrameworkCompanion(path)) return true;
+        String name = baseName(lower);
+        boolean text = name.endsWith(".xml") || name.endsWith(".json") || name.endsWith(".cfg")
+                || name.endsWith(".conf") || name.endsWith(".ini") || name.endsWith(".rc")
+                || name.endsWith(".sh");
+        boolean component = lower.contains("cluster") || lower.contains("someip")
+                || lower.contains("container") || lower.contains("instrument") || lower.contains("hud");
+        if (text) return lower.contains("/vintf/") || lower.contains("/etc/init/")
+                || component && (lower.contains("/etc/") || lower.contains("/config/")
+                        || lower.contains("/configs/") || name.endsWith(".rc") || name.endsWith(".sh")
+                        || name.contains("someip"));
+        return component && (lower.contains("/bin/") || name.equals("cluster_hmi")
+                || name.equals("bydclustermanager") || name.equals("bydclusterkanzi")
+                || name.equals("bydclusterlijie"));
     }
 
     static boolean isRelevantLibraryPath(String path) {
         if (!isAllowedPath(path)) return false;
         String lower = path.toLowerCase(Locale.ROOT);
         if (!lower.endsWith(".so") || isSensitiveName(path)) return false;
-        for (String family : LIBRARY_FAMILIES) if (lower.contains(family)) return true;
-        return lower.contains("/cluster/") || lower.contains("/someip/");
+        if (PLATFORM_LIBRARIES.contains(baseName(lower))) return false;
+        for (String family : LIBRARY_FAMILIES) if (baseName(lower).startsWith(family)) return true;
+        return false;
     }
 
     static String category(String path) {
         String lower = path == null ? "" : path.toLowerCase(Locale.ROOT);
-        if (isFrameworkArtifact(lower)) return "framework";
+        if (isFrameworkArtifact(lower) || isRequiredFrameworkCompanion(path)) return "framework";
         if (isApkPath(path)) return "apk";
         if (lower.endsWith(".so")) return "native";
         if (lower.contains("/framework/") || lower.endsWith("framework.jar")
@@ -918,13 +1004,36 @@ final class VehicleConfigurationFiles {
     }
 
     private static boolean isFrameworkArtifact(String lower) {
-        if (lower == null || !lower.contains("/framework/")) return false;
+        if (lower == null || !lower.contains("/framework/") || !lower.endsWith(".jar")) return false;
         String name = baseName(lower);
         for (String family : FRAMEWORK_FAMILIES) {
             if (name.equals(family) || name.startsWith(family + ".")
                     || name.startsWith(family + "-") || name.startsWith(family + "_")) return true;
         }
         return false;
+    }
+
+    static boolean isRequiredFrameworkCompanion(String path) {
+        String lower = path.toLowerCase(Locale.ROOT);
+        int framework = lower.indexOf("/framework/");
+        if (framework < 0 || !(lower.endsWith(".odex") || lower.endsWith(".vdex") || lower.endsWith(".oat"))) return false;
+        String name = baseName(lower).replaceFirst("^boot-", "");
+        name = name.substring(0, name.lastIndexOf('.'));
+        String jarPath = path.substring(0, framework + "/framework/".length()) + name + ".jar";
+        if (!isFrameworkArtifact(jarPath.toLowerCase(Locale.ROOT))) return false;
+        File jar = new File(jarPath);
+        if (jar.canRead()) {
+            try (java.util.zip.ZipFile zip = new java.util.zip.ZipFile(jar)) {
+                if (zip.getEntry("classes.dex") != null) return false;
+            } catch (IOException ignored) { /* A damaged/stripped JAR still needs code evidence. */ }
+        }
+        // Unknown or stripped JAR: keep code companions for the device's primary ABI only.
+        String[] abis = android.os.Build.SUPPORTED_ABIS;
+        if (abis != null && abis.length > 0) {
+            boolean primary64 = abis[0].contains("64");
+            if (is64BitPath(path) != primary64) return false;
+        }
+        return true;
     }
 
     private static String baseName(String path) {
@@ -985,6 +1094,7 @@ final class VehicleConfigurationFiles {
     private static boolean relevantPackage(String packageName) {
         if (packageName == null || packageName.length() > 128) return false;
         if (KNOWN_PACKAGES.contains(packageName)) return true;
+        if ("com.byd.clusterdebug".equals(packageName) || "com.xdja.clusterdemo".equals(packageName)) return true;
         if ("com.bydhud.app".equals(packageName)) return false;
         String lower = packageName.toLowerCase(Locale.ROOT);
         for (String token : RELEVANT_PACKAGE_TOKENS) if (lower.contains(token)) return true;
@@ -994,6 +1104,9 @@ final class VehicleConfigurationFiles {
     private static boolean relevantPackageInfo(PackageInfo info) {
         if (info == null || info.packageName == null) return false;
         if (KNOWN_PACKAGES.contains(info.packageName)) return true;
+        if (info.applicationInfo != null && info.applicationInfo.sourceDir != null
+                && info.applicationInfo.sourceDir.toLowerCase(Locale.ROOT).contains("/carsettingsplugins/")) return true;
+        if (info.packageName.contains("cluster")) return false;
         if (!relevantPackage(info.packageName) || info.applicationInfo == null) return false;
         int systemFlags = ApplicationInfo.FLAG_SYSTEM | ApplicationInfo.FLAG_UPDATED_SYSTEM_APP;
         return (info.applicationInfo.flags & systemFlags) != 0;
@@ -1011,7 +1124,7 @@ final class VehicleConfigurationFiles {
         while (packageMatcher.find()) {
             packageMentioned = true;
             String packageName = packageMatcher.group(1);
-            if (KNOWN_PACKAGES.contains(packageName)
+            if (KNOWN_PACKAGES.contains(packageName) || packageName.equals("com.xdja.clusterdemo")
                     || (packageName.startsWith("com.byd.") && relevantPackage(packageName))
                     || (packageName.startsWith("com.ts.") && relevantPackage(packageName))
                     || (packageName.startsWith("com.android.car.") && relevantPackage(packageName))) {

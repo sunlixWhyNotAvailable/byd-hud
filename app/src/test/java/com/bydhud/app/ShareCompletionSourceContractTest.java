@@ -37,10 +37,10 @@ public final class ShareCompletionSourceContractTest {
         String config = source("VehicleConfigurationExport.kt");
 
         assertTrue(deliver.contains("publishShareCompletion(pending.launchId, pending.storageDays)"));
-        assertTrue(config.contains("SentryLogUploader.uploadConfiguration"));
+        assertTrue(!config.contains("SentryLogUploader"));
         assertTrue(!config.contains("publishShareCompletion"));
         assertTrue(activity.contains(
-                "queuePendingShare(file, Collections.emptyList(), ShareOwner.CONFIGURATION"));
+                "queuePendingShare(files, Collections.emptyList(), ShareOwner.CONFIGURATION"));
     }
 
     @Test
@@ -124,9 +124,9 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(logs.contains("result=android_share_failed"));
         assertTrue(config.contains("if (current.operationId != operationId) return false"));
         assertTrue(config.contains("phase = ConfigurationExportPhase.WAITING_FOR_SHARE"));
-        assertTrue(config.contains("archiveAvailable = if (archiveMissing) false else current.archiveAvailable"));
+        assertTrue(config.contains("archiveAvailable = !archiveMissing && current.archiveAvailable"));
         assertTrue(logs.contains("endedAtElapsedMs = SystemClock.elapsedRealtime()"));
-        assertTrue(config.contains("endedAtElapsedMs = 0L"));
+        assertTrue(!config.contains("endedAtElapsedMs = 0L"));
         assertTrue(!logs.contains("dismissed = false"));
         assertTrue(!config.contains("dismissed = false"));
     }

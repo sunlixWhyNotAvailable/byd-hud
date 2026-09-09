@@ -492,6 +492,7 @@ private data class OperationCardSpec(
     val closeEnabled: Boolean,
     val details: String = "",
     val primaryActionText: String = "",
+    val configuration: ConfigurationExportSnapshot? = null,
     val failed: Boolean,
     val success: Boolean,
     val onStop: () -> Unit,
@@ -992,9 +993,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         }
     }
 
-    fun beginConfigurationShare(destination: StorageShareDestination) {
+    fun beginConfigurationShare() {
         if (configurationShareBusy) return
-        if (activity.composeBeginConfigurationExport(destination == StorageShareDestination.Sentry)) {
+        if (activity.composeBeginConfigurationExport()) {
             configurationShareVisible = false
             configurationStartFailed = false
         } else {
@@ -1603,8 +1604,8 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 } else {
                     "Another operation is still running. Wait and try again"
                 },
-                onSentry = { beginConfigurationShare(StorageShareDestination.Sentry) },
-                onAnotherApp = { beginConfigurationShare(StorageShareDestination.Android) },
+                language = copy.language,
+                onCreate = { beginConfigurationShare() },
                 onCancel = { configurationShareVisible = false }
             )
         }
@@ -2976,7 +2977,7 @@ internal fun DashboardWidgetAnchorContent(
                     gesture.previous = raw
                     pressed = true
                     gesture.longPressJob = gestureScope.launch {
-                        delay(viewConfiguration.longPressTimeoutMillis)
+                        delay(1_000L)
                         if (!gesture.dragging && !gesture.longPressTriggered) {
                             gesture.longPressTriggered = true
                             pressed = false
@@ -3656,59 +3657,44 @@ private fun OperationProgressStack(
         }
         visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->
             val busy = configurationExportBusy(state.phase)
-            val sending = state.phase == ConfigurationExportPhase.UPLOADING
-            val partial = state.unavailableFiles > 0
             val phase = when (state.phase) {
-                ConfigurationExportPhase.INVENTORY -> if (ua) "Пошук системних компонентів" else "Finding system components"
+                ConfigurationExportPhase.INVENTORY -> if (ua) "Пошук доступних файлів" else "Finding available files"
                 ConfigurationExportPhase.DIAGNOSTICS -> if (ua) "Збирання діагностики" else "Collecting diagnostics"
-                ConfigurationExportPhase.COPYING -> if (ua) "Копіювання системних файлів" else "Copying system files"
-                ConfigurationExportPhase.ARCHIVING -> if (ua) "Пакування ZIP" else "Adding files to ZIP"
-                ConfigurationExportPhase.VERIFYING -> if (ua) "Перевірка ZIP" else "Verifying ZIP"
-                ConfigurationExportPhase.WAITING_FOR_SHARE -> if (ua) "Очікування Android Share" else "Waiting for Android share"
-                ConfigurationExportPhase.READY -> if (partial) {
-                    if (ua) "Архів готовий · частково" else "Archive ready · partial"
-                } else if (ua) "Архів готовий" else "Archive ready"
-                ConfigurationExportPhase.UPLOADING -> shareCopy.uploading
-                ConfigurationExportPhase.SENT -> if (partial) {
-                    if (ua) "Частковий архів надіслано" else "Partial archive sent"
-                } else shareCopy.configurationSuccess
-                ConfigurationExportPhase.FAILED -> shareCopy.configurationFailure
-                ConfigurationExportPhase.CANCELLING -> if (ua) "Зупинення" else "Stopping"
-                ConfigurationExportPhase.CANCELLED -> if (ua) "Скасовано" else "Cancelled"
+                ConfigurationExportPhase.COPYING -> if (ua) "Копіювання файлів" else "Copying files"
+                ConfigurationExportPhase.ARCHIVING -> if (ua) "Архівування · томи до 1 ГБ" else "Archiving · volumes up to 1 GB"
+                ConfigurationExportPhase.READY, ConfigurationExportPhase.WAITING_FOR_SHARE ->
+                    if (state.volumeSizes.size > 1) {
+                        if (ua) "Готово · томів: ${state.volumeSizes.size} · ${state.archiveBytes / 1_000_000} МБ"
+                        else "Ready · ${state.volumeSizes.size} volumes · ${state.archiveBytes / 1_000_000} MB"
+                    } else if (ua) "Готово · 1 архів · ${state.archiveBytes / 1_000_000} МБ"
+                        else "Ready · 1 archive · ${state.archiveBytes / 1_000_000} MB"
+                ConfigurationExportPhase.EXPIRED -> if (ua) "Строк минув · архів недоступний" else "Expired · archive unavailable"
+                ConfigurationExportPhase.FAILED -> if (ua) "Помилка експорту" else "Export failed"
+                ConfigurationExportPhase.CANCELLING -> if (ua) "Скасування" else "Cancelling"
+                ConfigurationExportPhase.CANCELLED -> if (ua) "Експорт скасовано" else "Export cancelled"
             }
-            val summary = if (!state.inventoryComplete) {
-                if (ua) "${state.foundFiles} знайдено · ${formatBytes(state.knownBytes, copy)} відомо наразі"
-                else "${state.foundFiles} found · ${formatBytes(state.knownBytes, copy)} known so far"
-            } else {
-                val totalFiles = state.totalFiles ?: state.foundFiles
-                val totalBytes = state.totalBytes ?: state.knownBytes
-                if (ua) "${state.copiedFiles}/$totalFiles файлів · ${formatBytes(state.copiedBytes, copy)}/${formatBytes(totalBytes, copy)}"
-                else "${state.copiedFiles}/$totalFiles files · ${formatBytes(state.copiedBytes, copy)}/${formatBytes(totalBytes, copy)}"
-            }
+            val summary = if (busy) state.currentFile else if (state.expiresAtEpochMs > 0) {
+                val deadline = configurationExportDateTime(state.expiresAtEpochMs)
+                if (ua) "Видалення: $deadline" else "Deletion: $deadline"
+            } else if (ua) "Щоб поділитися, сформуйте новий архів." else "Create a new archive to share it."
             add(OperationCardSpec(
                 key = "configuration-export",
-                title = shareCopy.configurationTitle,
+                title = if (ua) "Експорт конфігурації" else "Configuration export",
                 phase = phase,
                 detail = summary,
                 startedAt = state.startedAtEpochMs,
                 startedAtElapsedMs = state.startedAtElapsedMs,
                 endedAtElapsedMs = state.endedAtElapsedMs,
                 busy = busy,
-                stopEnabled = busy && !sending && state.phase != ConfigurationExportPhase.CANCELLING,
-                closeEnabled = sending || !busy,
-                details = operationDetails(
-                    operationId = state.operationId,
-                    currentFile = state.currentFile,
-                    detail = configurationExportDetails(state, copy, shareCopy),
-                    eventId = state.eventId,
-                    unavailable = state.unavailableFiles,
-                    ua = ua
-                ),
+                stopEnabled = busy && state.phase != ConfigurationExportPhase.CANCELLING,
+                closeEnabled = !busy,
+                configuration = state,
+                details = "configuration",
                 primaryActionText = if (state.archiveAvailable && !busy &&
                     state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE
-                ) shareCopy.shareToAnotherApp else "",
-                failed = state.phase == ConfigurationExportPhase.FAILED,
-                success = state.phase == ConfigurationExportPhase.READY || state.phase == ConfigurationExportPhase.SENT,
+                ) if (ua) "Поділитися" else "Share" else "",
+                failed = state.phase == ConfigurationExportPhase.FAILED || state.phase == ConfigurationExportPhase.EXPIRED,
+                success = state.phase == ConfigurationExportPhase.READY,
                 onStop = onCancelConfiguration,
                 onPrimary = onShareConfiguration,
                 onClose = onCloseConfiguration
@@ -3758,8 +3744,10 @@ private fun OperationProgressStack(
         }
     }
     cards.firstOrNull { it.key == detailsKey }?.let { card ->
-        OperationDetailsOverlay(card.title, card.details, shareCopy.close, palette) {
-            detailsKey = ""
+        if (card.configuration != null) {
+            ConfigurationExportDetailsOverlay(copy.language, palette, card.configuration) { detailsKey = "" }
+        } else {
+            OperationDetailsOverlay(card.title, card.details, shareCopy.close, palette) { detailsKey = "" }
         }
     }
 }
@@ -3785,6 +3773,10 @@ private fun OperationProgressCard(
         ((if (card.endedAtElapsedMs > 0L) card.endedAtElapsedMs else nowElapsedMs) -
             card.startedAtElapsedMs).coerceAtLeast(0L) / 1_000L
     } else null
+    if (card.configuration != null) {
+        ConfigurationExportProgressCard(card, palette, language, elapsed ?: 0, onDetails)
+        return
+    }
     val summary = buildString {
         append(card.detail)
         elapsed?.let {
@@ -3797,7 +3789,7 @@ private fun OperationProgressCard(
             .width(460.dp)
             .height(170.dp)
             .clip(RoundedCornerShape(8.dp))
-            .background(palette.surface)
+            .background(palette.surface.copy(alpha = 0.70f))
             .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -3887,55 +3879,94 @@ private fun storageLogShareBusy(phase: StorageLogSharePhase): Boolean = when (ph
 private fun configurationExportBusy(phase: ConfigurationExportPhase): Boolean = when (phase) {
     ConfigurationExportPhase.INVENTORY, ConfigurationExportPhase.DIAGNOSTICS,
     ConfigurationExportPhase.COPYING, ConfigurationExportPhase.ARCHIVING,
-    ConfigurationExportPhase.VERIFYING, ConfigurationExportPhase.UPLOADING,
     ConfigurationExportPhase.CANCELLING -> true
-    ConfigurationExportPhase.WAITING_FOR_SHARE, ConfigurationExportPhase.READY, ConfigurationExportPhase.SENT,
-    ConfigurationExportPhase.FAILED, ConfigurationExportPhase.CANCELLED -> false
+    else -> false
 }
 
-private fun configurationExportDetails(
-    state: ConfigurationExportSnapshot,
-    copy: Copy,
-    shareCopy: ShareCopy
-): String = buildString {
-    val ua = copy.language == Language.Ua
-    if (state.archiveAvailable) {
-        append(state.archiveName)
-        append("\nZIP: ${formatBytes(state.archiveBytes, copy)}")
+private fun configurationExportDateTime(value: Long): String =
+    java.text.SimpleDateFormat("dd.MM.yyyy HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(value))
+
+@Composable
+private fun ConfigurationExportProgressCard(
+    card: OperationCardSpec, palette: Palette, language: Language, elapsed: Long, onDetails: () -> Unit
+) {
+    val ua = language == Language.Ua
+    val state = requireNotNull(card.configuration)
+    Column(Modifier.size(width = 460.dp, height = 170.dp).clip(RoundedCornerShape(8.dp))
+        .background(palette.surface.copy(alpha = 0.70f))
+        .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically) {
+            Text(card.title, color = palette.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text(if (ua) "$elapsed с" else "$elapsed s", color = palette.muted, fontSize = 12.sp)
+        }
+        Text(card.phase, color = if (card.failed) palette.red else palette.text,
+            fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
+        Text(card.detail, color = palette.muted, fontSize = 12.sp,
+            maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Spacer(Modifier.weight(1f))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End),
+            verticalAlignment = Alignment.CenterVertically) {
+            if (card.busy) {
+                Box(Modifier.weight(1f)) {
+                    val total = state.totalBytes ?: 0L
+                    UpdateProgressBar(if (total > 0) "${(state.copiedBytes * 100 / total).coerceIn(0, 100)}%" else "", palette)
+                }
+            }
+            HudButton(if (ua) "Деталі" else "Details", palette, width = 100.dp, onClick = onDetails)
+            if (card.primaryActionText.isNotEmpty()) {
+                HudButton(card.primaryActionText, palette, primary = true, width = 138.dp, onClick = card.onPrimary)
+            }
+            HudButton(if (card.busy) { if (ua) "Скасувати" else "Cancel" } else if (ua) "Закрити" else "Close",
+                palette, width = 108.dp, enabled = if (card.busy) card.stopEnabled else card.closeEnabled,
+                onClick = if (card.busy) card.onStop else card.onClose)
+        }
     }
-    if (state.unavailableFiles > 0) {
-        if (isNotEmpty()) append("\n\n")
-        append(if (ua) {
-            "Недоступно файлів: ${state.unavailableFiles}. Повні причини збережено в manifest.json"
-        } else {
-            "Unavailable files: ${state.unavailableFiles}. Full reasons are recorded in manifest.json"
-        })
-    }
-    if (state.toDeveloper && state.archiveAvailable &&
-        state.archiveBytes > SentryLogUploader.MAX_ZIP_BYTES) {
-        if (isNotEmpty()) append("\n\n")
-        val limit = SentryLogUploader.MAX_ZIP_BYTES / (1024L * 1024L)
-        append(if (ua) {
-            "Архів перевищує ліміт Sentry ($limit МіБ) і не був надісланий. Повний архів збережено для іншого застосунку"
-        } else {
-            "The archive exceeds the Sentry limit ($limit MiB) and was not sent. The complete archive is retained for another app"
-        })
-    }
-    if (state.phase == ConfigurationExportPhase.UPLOADING) {
-        if (isNotEmpty()) append("\n\n")
-        append(if (ua) {
-            "Надсилання через Sentry вже розпочалося. Close приховує картку, але не скасовує надсилання"
-        } else {
-            "Sentry sending has started. Close hides the card but does not cancel the upload"
-        })
-    }
-    if (state.detail.isNotBlank()) {
-        if (isNotEmpty()) append("\n\n")
-        append(state.detail)
-    }
-    if (state.eventId.isNotBlank()) {
-        if (isNotEmpty()) append("\n\n")
-        append("${shareCopy.reportId}: ${state.eventId}")
+}
+
+@Composable
+private fun ConfigurationExportDetailsOverlay(
+    language: Language, palette: Palette, state: ConfigurationExportSnapshot, onClose: () -> Unit
+) {
+    val ua = language == Language.Ua
+    BackHandler(onBack = onClose)
+    BoxWithConstraints(Modifier.fillMaxSize()
+        .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center) {
+        ModalInputBlocker()
+        Column(Modifier.width(minOf(720.dp, maxWidth - 36.dp)).heightIn(max = maxHeight - 36.dp)
+            .clip(RoundedCornerShape(8.dp)).background(palette.surface)
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+            .verticalScroll(rememberScrollState()).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            Text(if (ua) "Деталі експорту конфігурації" else "Configuration export details",
+                color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(if (ua) "Доступно: ${state.foundFiles} · зібрано: ${state.copiedFiles} · недоступно: ${state.unavailableFiles}"
+                else "Available: ${state.foundFiles} · collected: ${state.copiedFiles} · unavailable: ${state.unavailableFiles}",
+                color = palette.text, fontSize = 15.sp)
+            val total = state.totalBytes ?: state.knownBytes
+            Text(if (ua) "Скопійовано: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} МБ"
+                else "Copied: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} MB",
+                color = palette.muted, fontSize = 14.sp)
+            if (state.currentFile.isNotEmpty()) CodeBlock(state.currentFile, palette, compact = true)
+            if (state.completedAtEpochMs > 0) {
+                val created = configurationExportDateTime(state.completedAtEpochMs)
+                val expires = configurationExportDateTime(state.expiresAtEpochMs)
+                Text(if (ua) "Створено: $created\nВидалення: $expires" else "Created: $created\nDeletion: $expires",
+                    color = palette.text, fontSize = 14.sp, lineHeight = 21.sp)
+                Text(state.volumeSizes.mapIndexed { index, bytes ->
+                    if (ua) "Том ${index + 1}: ${bytes / 1_000_000} МБ" else "Volume ${index + 1}: ${bytes / 1_000_000} MB"
+                }.joinToString(" · "), color = palette.muted, fontSize = 14.sp)
+            }
+            if (state.detail.isNotBlank()) Text(state.detail, color = palette.text, fontSize = 14.sp)
+            if (state.phase == ConfigurationExportPhase.EXPIRED) Text(
+                if (ua) "Строк зберігання минув. Сформуйте новий архів."
+                else "The retention period has expired. Create a new archive.", color = palette.text, fontSize = 14.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                HudButton(if (ua) "Закрити" else "Close", palette, width = 138.dp, onClick = onClose)
+            }
+        }
     }
 }
 
@@ -3998,8 +4029,8 @@ private fun ConfigurationShareDestinationOverlay(
     copy: ShareCopy,
     palette: Palette,
     startError: String,
-    onSentry: () -> Unit,
-    onAnotherApp: () -> Unit,
+    language: Language,
+    onCreate: () -> Unit,
     onCancel: () -> Unit
 ) {
     BackHandler(onBack = onCancel)
@@ -4042,30 +4073,17 @@ private fun ConfigurationShareDestinationOverlay(
                     fontSize = 15.sp,
                     lineHeight = 21.sp
                 )
-                Text(
-                    copy.shareLogsSentryNotice,
-                    color = palette.text,
-                    fontSize = 15.sp,
-                    lineHeight = 21.sp
-                )
+                Text(if (language == Language.Ua)
+                    "Великий архів буде поділено на томи до 1 ГБ. Архів автоматично видалиться через 15 хвилин після завершення формування. Поділіться ним одразу. Закриття картки та повторне надсилання не подовжують строк; після закриття доведеться сформувати новий архів."
+                    else "Large archives will be split into volumes of up to 1 GB. The archive is automatically deleted 15 minutes after creation finishes. Share it promptly. Closing the card or sharing again does not extend the deadline; after closing, you will need to create a new archive.",
+                    color = palette.yellow, fontSize = 15.sp, lineHeight = 21.sp)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
             ) {
-                HudButton(
-                    copy.shareToSentry,
-                    palette,
-                    primary = true,
-                    width = 210.dp,
-                    onClick = onSentry
-                )
-                HudButton(
-                    copy.shareToAnotherApp,
-                    palette,
-                    width = 220.dp,
-                    onClick = onAnotherApp
-                )
+                HudButton(if (language == Language.Ua) "Сформувати архів" else "Create archive",
+                    palette, primary = true, width = 220.dp, onClick = onCreate)
                 HudButton(copy.cancel, palette, width = 138.dp, onClick = onCancel)
             }
             if (startError.isNotEmpty()) Text(startError, color = palette.yellow, fontSize = 14.sp)
@@ -8730,7 +8748,7 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         reportId = "ID звіту",
         close = "Закрити",
         configurationTitle = "Експорт конфігурації авто",
-        configurationWarning = "Архів міститиме доступні значення HUD/приборки, FID, дозволи, стан BYD HUD, відомості про прошивку, дисплеї, аудіо, мережу та SOME/IP. Також додаються самі діагностично потрібні системні застосунки з split APK, бібліотеки, framework, ресурси приборки, конфіги й залежності — не лише їхні хеші. Пакет може бути великим, а збирання — тривалим. Не пов’язані з діагностикою застосунки й особисті дані застосунків (акаунти, маршрути та записи) не читаються. Бінарні файли прошивки копіюються без змін і можуть містити вбудовані виробником дані. Мережеві адреси й чутливі ідентифікатори у текстовій діагностиці та конфігурації маскуються. Автоматичного надсилання немає. Передавайте архів лише довіреному отримувачу.",
+        configurationWarning = "Архів міститиме доступні значення HUD/приборки, FID, дозволи, стан BYD HUD, відомості про прошивку, дисплеї, аудіо, мережу та SOME/IP. Також додаються самі діагностично потрібні системні застосунки з split APK, бібліотеки, framework та конфіги, включно з повним CarSettingsPlugins. Пакет може бути великим, а збирання — тривалим. Не пов’язані з діагностикою застосунки й особисті дані застосунків (акаунти, маршрути та записи) не читаються. Бінарні файли прошивки копіюються без змін і можуть містити вбудовані виробником дані. Мережеві адреси й чутливі ідентифікатори у текстовій діагностиці та конфігурації маскуються. Автоматичного надсилання немає. Передавайте архів лише довіреному отримувачу.",
         configurationUploadTitle = "Надсилання конфігурації розробнику",
         configurationSuccess = "Конфігурацію успішно надіслано.",
         configurationFailure = "Не вдалося надіслати конфігурацію."
@@ -8756,7 +8774,7 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         reportId = "Report ID",
         close = "Close",
         configurationTitle = "Export vehicle configuration",
-        configurationWarning = "The archive includes available HUD/cluster values, FIDs, permissions, BYD HUD state, firmware, display, audio, network and SOME/IP diagnostics. It also includes the relevant system apps with split APKs, libraries, framework, cluster resources, configs and dependencies themselves — not just their hashes. The package may be large and collection may take time. Unrelated apps and personal app data (accounts, routes and recordings) are not read. Binary firmware files are copied unchanged and may contain vendor-embedded data. Network addresses and sensitive identifiers in text diagnostics and configuration values are masked. Nothing is uploaded automatically. Share only with a trusted recipient.",
+        configurationWarning = "The archive includes available HUD/cluster values, FIDs, permissions, BYD HUD state, firmware, display, audio, network and SOME/IP diagnostics. It also includes the relevant system apps with split APKs, libraries, framework and configs, including complete CarSettingsPlugins. The package may be large and collection may take time. Unrelated apps and personal app data (accounts, routes and recordings) are not read. Binary firmware files are copied unchanged and may contain vendor-embedded data. Network addresses and sensitive identifiers in text diagnostics and configuration values are masked. Nothing is uploaded automatically. Share only with a trusted recipient.",
         configurationUploadTitle = "Sending configuration to developer",
         configurationSuccess = "Configuration sent successfully.",
         configurationFailure = "The configuration could not be sent."

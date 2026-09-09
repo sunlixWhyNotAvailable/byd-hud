@@ -23,7 +23,6 @@ import java.net.Inet6Address;
 import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
-import java.security.DigestOutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -39,7 +38,6 @@ import java.util.concurrent.Callable;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.LongConsumer;
 import java.util.regex.Pattern;
-import java.util.zip.CRC32;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 import java.util.zip.ZipOutputStream;
@@ -135,6 +133,8 @@ final class VehicleConfigurationZip {
         final File file;
         final String detail;
         final int unavailableFiles;
+        List<File> volumes = Collections.emptyList();
+        long completedAtMs;
 
         Result(boolean ok, File file, String detail) {
             this(ok, file, detail, 0);
@@ -155,14 +155,15 @@ final class VehicleConfigurationZip {
 
     static final class Control implements AutoCloseable {
         private final AtomicBoolean cancelled = new AtomicBoolean();
-        private LocalAdbBridge.ConfigurationExportSession session;
+        private final Set<LocalAdbBridge.ConfigurationExportSession> sessions = new java.util.LinkedHashSet<>();
         volatile Thread worker;
 
         boolean isCancelled() { return cancelled.get() || Thread.currentThread().isInterrupted(); }
 
         synchronized void attach(LocalAdbBridge.ConfigurationExportSession value) {
-            session = value;
-            if (cancelled.get() && value != null) value.close();
+            if (value == null) return;
+            if (cancelled.get()) value.close();
+            else sessions.add(value);
         }
 
         void check() throws InterruptedIOException {
@@ -177,8 +178,9 @@ final class VehicleConfigurationZip {
         }
 
         @Override public synchronized void close() {
-            if (session != null) session.close();
-            session = null;
+            List<LocalAdbBridge.ConfigurationExportSession> closing = new ArrayList<>(sessions);
+            sessions.clear();
+            for (LocalAdbBridge.ConfigurationExportSession session : closing) session.close();
         }
     }
 
@@ -615,8 +617,6 @@ final class VehicleConfigurationZip {
             try {
                 item.put("path", path);
                 item.put("size", size);
-                String hash = remoteSha256(path);
-                item.put("sha256", hash.isEmpty() ? JSONObject.NULL : hash);
                 item.put("reason", reason);
                 excluded.put(item);
             } catch (Exception e) {
@@ -638,22 +638,6 @@ final class VehicleConfigurationZip {
                 unavailable(path, "invalid size");
                 return -1L;
             }
-        }
-
-        private String remoteSha256(String path) throws InterruptedIOException {
-            LocalAdbBridge.ShellResult result = adb("sha256sum " + path);
-            if (result == null || !result.success() || result.truncated) {
-                unavailable("sha256:" + path,
-                        result == null ? "hash unavailable" : shellDetail(result)
-                                + (result.truncated ? "; truncated hash output" : ""));
-                return "";
-            }
-            String output = result.output.trim();
-            int space = output.indexOf(' ');
-            String hash = space < 0 ? output : output.substring(0, space);
-            if (hash.matches("[A-Fa-f0-9]{64}")) return hash.toUpperCase(Locale.ROOT);
-            unavailable("sha256:" + path, "invalid hash output");
-            return "";
         }
 
         private LocalAdbBridge.ShellResult adb(String command) throws InterruptedIOException {
@@ -818,19 +802,53 @@ final class VehicleConfigurationZip {
         }
 
         private void recordUnavailable(String path, String reason) {
+            String source = path == null ? "" : path;
+            for (int index = 0; index < unavailable.length(); index++) {
+                JSONObject previous = unavailable.optJSONObject(index);
+                if (source.equals(previous.optString("path"))) {
+                    try {
+                        JSONArray reasons = previous.optJSONArray("reasons");
+                        if (reasons == null) {
+                            reasons = new JSONArray().put(previous.optString("reason"));
+                            previous.put("reasons", reasons);
+                        }
+                        boolean recorded = false;
+                        for (int i = 0; i < reasons.length(); i++) if (safe(reason).equals(reasons.optString(i))) recorded = true;
+                        if (!recorded) reasons.put(safe(reason));
+                    } catch (org.json.JSONException ignored) { }
+                    return;
+                }
+            }
             JSONObject item = new JSONObject();
             try {
-                item.put("path", path == null ? "" : path);
+                item.put("path", source);
                 item.put("reason", reason == null ? "" : reason);
+                item.put("kind", source.startsWith("/") && !source.startsWith("/proc/")
+                        && source.indexOf('/', 1) > 0 ? "file" : "diagnostic");
                 unavailable.put(item);
-            } catch (Exception ignored) {
+            } catch (Exception ignored) { }
+        }
+
+        int unavailableFileCount() {
+            int count = 0;
+            for (int index = 0; index < unavailable.length(); index++) {
+                JSONObject item = unavailable.optJSONObject(index);
+                if ("file".equals(item.optString("kind")) && !item.optBoolean("resolved")) count++;
+            }
+            return count;
+        }
+
+        void copiedSource(String path) throws org.json.JSONException {
+            for (int index = 0; index < unavailable.length(); index++) {
+                JSONObject item = unavailable.optJSONObject(index);
+                if (path.equals(item.optString("path"))) item.put("resolved", true);
             }
         }
 
         private void notice(String path) {
             if (progress != null) {
                 progress.changed("DIAGNOSTICS", path == null ? "" : path, totalBytes, -1,
-                        files.size(), -1, unavailable.length());
+                        files.size(), -1, unavailableFileCount());
             }
         }
 
@@ -856,7 +874,6 @@ final class VehicleConfigurationZip {
                 item.put("path", file.path);
                 item.put("source", file.source);
                 item.put("size", file.bytes.length);
-                item.put("sha256", sha256(file.bytes));
                 if (!file.note.isEmpty()) item.put("note", file.note);
                 entries.put(item);
             }
@@ -1132,13 +1149,17 @@ final class VehicleConfigurationZip {
                 + new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date())
                 + ".zip";
         File output = new File(shareDir, fileName);
-        try (Collector collector = new Collector(context.getApplicationContext(), control, progress)) {
+        ConfigurationExportArtifacts.protect(output);
+        final VehicleConfigurationFiles.Inventory[] discovered = {null};
+        ProgressListener diagnosticsProgress = (phase, file, bytes, total, files, count, unavailable) -> {
+            VehicleConfigurationFiles.Inventory found = discovered[0];
+            progress.changed(phase, file, bytes + (found == null ? 0 : found.totalBytes), total,
+                    files + (found == null ? 0 : found.entries.size()), count,
+                    unavailable + (found == null ? 0 : found.unavailableFileCount()));
+        };
+        try (Collector collector = new Collector(context.getApplicationContext(), control, diagnosticsProgress)) {
             control.check();
-            progress.changed("DIAGNOSTICS", "", 0, -1, 0, -1, 0);
-            collector.collect();
-            control.check();
-            progress.changed("INVENTORY", "", collector.totalBytes, -1,
-                    collector.files.size(), -1, collector.unavailable.length());
+            progress.changed("INVENTORY", "", 0, -1, 0, -1, 0);
             LocalAdbBridge.ConfigurationExportSession session =
                     LocalAdbBridge.openFullConfigurationExport(context.getApplicationContext());
             control.attach(session);
@@ -1154,7 +1175,9 @@ final class VehicleConfigurationZip {
                             "INVENTORY", file,
                             collector.totalBytes + knownBytes, -1,
                             collector.files.size() + foundFiles, -1,
-                            collector.unavailable.length() + unavailable));
+                            collector.unavailableFileCount() + unavailable));
+            discovered[0] = inventory;
+            collector.collect();
             control.check();
             for (VehicleConfigurationFiles.Unavailable unavailable : inventory.unavailable) {
                 collector.recordUnavailable(unavailable.sourcePath, unavailable.reason);
@@ -1162,12 +1185,23 @@ final class VehicleConfigurationZip {
             progress.changed("INVENTORY", "", 0,
                     collector.totalBytes + inventory.totalBytes, 0,
                     collector.files.size() + inventory.entries.size(),
-                    collector.unavailable.length());
-            return writeFullArchive(output, collector, inventory, session, control, progress);
+                    collector.unavailableFileCount());
+            Result result = writeFullArchive(output, collector, inventory, session, control, progress);
+            if (result.ok) {
+                try {
+                    ConfigurationExportArtifacts.completed(output, result.completedAtMs);
+                } catch (IOException failure) {
+                    for (File volume : result.volumes) LogShareZip.deleteArtifact(volume);
+                    return failure("expiry_record_failed");
+                }
+            }
+            return result;
         } catch (Exception e) {
             return failure(e.getClass().getSimpleName() + ": " + safe(e.getMessage()));
         } finally {
             control.close();
+            ConfigurationExportArtifacts.unprotect(output);
+            ConfigurationExportArtifacts.checkAsync(context);
         }
     }
 
@@ -1176,6 +1210,7 @@ final class VehicleConfigurationZip {
             VehicleConfigurationFiles.Inventory inventory,
             LocalAdbBridge.ConfigurationExportSession session, Control control,
             ProgressListener progress) {
+        ConfigurationArchiveOutput archiveOutput = new ConfigurationArchiveOutput(output, ConfigurationArchiveOutput.VOLUME_BYTES);
         File part = new File(output.getParentFile(), output.getName() + ".part");
         File sourcePart = new File(output.getParentFile(), output.getName() + ".source.part");
         if (output.exists() || part.exists() || sourcePart.exists()) return failure("archive path already exists");
@@ -1190,16 +1225,21 @@ final class VehicleConfigurationZip {
             for (VehicleConfigurationFiles.Entry entry : inventory.entries) largest = Math.max(largest, entry.size);
             requireFreeSpace(output.getParentFile().getUsableSpace(), total, largest);
             JSONObject manifest = collector.manifest();
+            JSONObject selection = new JSONObject();
+            for (Map.Entry<String, Set<String>> evidence : inventory.metadata.entrySet()) {
+                selection.put(evidence.getKey(), new JSONArray(evidence.getValue()));
+            }
+            manifest.put("selectionMetadata", selection);
             JSONArray entries = manifest.getJSONArray("files");
             JSONArray rawEntries = new JSONArray();
             Set<String> storedPaths = new TreeSet<>();
-            progress.changed("COPYING", "", 0, total, 0, count, collector.unavailable.length());
-            try (FileOutputStream fileOut = new FileOutputStream(part);
-                ZipOutputStream zip = new ZipOutputStream(fileOut)) {
+            progress.changed("COPYING", "", 0, total, 0, count, collector.unavailableFileCount());
+            try (ZipOutputStream zip = new ZipOutputStream(archiveOutput)) {
+                zip.setLevel(java.util.zip.Deflater.BEST_SPEED);
                 for (ArchiveFile file : collector.files) {
                     control.check();
                     progress.changed("ARCHIVING", file.path, copied, total, copiedFiles,
-                            count, collector.unavailable.length());
+                            count, collector.unavailableFileCount());
                     writeEntry(zip, file.path, file.bytes);
                     storedPaths.add(file.path);
                     copied += file.bytes.length;
@@ -1208,7 +1248,7 @@ final class VehicleConfigurationZip {
                 for (VehicleConfigurationFiles.Entry entry : inventory.entries) {
                     control.check();
                     progress.changed("COPYING", entry.sourcePath, copied, total, copiedFiles,
-                            count, collector.unavailable.length());
+                            count, collector.unavailableFileCount());
                     final long before = copied;
                     final int beforeFiles = copiedFiles;
                     final long[] lastNotice = {0};
@@ -1217,14 +1257,13 @@ final class VehicleConfigurationZip {
                         if (bytes == entry.size || now - lastNotice[0] >= 100_000_000L) {
                             lastNotice[0] = now;
                             progress.changed("COPYING", entry.sourcePath, before + bytes, total,
-                                    beforeFiles, count, collector.unavailable.length());
+                                    beforeFiles, count, collector.unavailableFileCount());
                         }
                     };
                     try {
                         ensureUnchanged(entry, VehicleConfigurationFiles.stat(
                                 entry.sourcePath, session, control::isCancelled));
-                        MessageDigest sourceDigest = MessageDigest.getInstance("SHA-256");
-                        try (OutputStream spool = new DigestOutputStream(new FileOutputStream(sourcePart), sourceDigest)) {
+                        try (OutputStream spool = openSpool(sourcePart)) {
                             File local = new File(entry.sourcePath);
                             if (local.canRead()) {
                                 try (InputStream input = new FileInputStream(local)) {
@@ -1242,15 +1281,16 @@ final class VehicleConfigurationZip {
                         if (sourcePart.length() != entry.size) throw new IOException("source_size_changed");
                         boolean redacted = redactFirmwareText(sourcePart, entry, collector);
                         progress.changed("ARCHIVING", entry.sourcePath, before + entry.size, total,
-                                beforeFiles, count, collector.unavailable.length());
+                                beforeFiles, count, collector.unavailableFileCount());
                         JSONObject metadata = fileMetadata(entry, sourcePart, redacted,
-                                hex(sourceDigest.digest()), control, collector);
+                                control, collector);
                         String storedPath = metadata.getString("path");
                         if (!storedPaths.add(storedPath)) throw new IOException("duplicate_archive_path_after_masking");
                         // From this point onward a ZIP/disk failure is fatal, not an unavailable source.
                         appendFile(zip, storedPath, sourcePart, control);
                         entries.put(metadata);
                         rawEntries.put(metadata);
+                        collector.copiedSource(entry.sourcePath);
                         copied += entry.size;
                         copiedFiles++;
                     } catch (IOException error) {
@@ -1263,20 +1303,21 @@ final class VehicleConfigurationZip {
                         LogShareZip.deleteArtifact(sourcePart);
                     }
                     progress.changed("COPYING", "", copied, total, copiedFiles, count,
-                            collector.unavailable.length());
+                            collector.unavailableFileCount());
                 }
-                manifest.put("schemaVersion", 2);
+                manifest.put("schemaVersion", 3);
                 JSONObject policy = manifest.getJSONObject("policy");
                 policy.put("apksIncluded", containsCategory(rawEntries, "apk"));
                 policy.put("nativeLibrariesIncluded", containsCategory(rawEntries, "native"));
                 policy.put("frameworkJarsIncluded", containsCategory(rawEntries, "framework"));
                 policy.put("binaryFirmwareFilesUnmodified", true);
                 policy.put("rawFirmwareMayContainVendorEmbeddedData", true);
-                policy.put("textConfigurationRedaction", "selected text files redacted; source hash retained");
+                policy.put("textConfigurationRedaction", "selected text files redacted; source size and modification time retained");
                 manifest.put("rawFiles", rawEntries);
                 manifest.put("unavailable", collector.unavailable);
                 manifest.put("status", collector.unavailable.length() == 0 ? "complete" : "partial");
                 manifest.put("inventoryFiles", count);
+                manifest.put("unavailableFiles", collector.unavailableFileCount());
                 manifest.put("inventorySourceBytes", total);
                 manifest.put("copiedFiles", copiedFiles);
                 manifest.put("copiedSourceBytes", copied);
@@ -1289,33 +1330,29 @@ final class VehicleConfigurationZip {
                 manifest.put("diagnosticsBudgetMs", VehicleConfigurationReadback.SESSION_TIMEOUT_MS);
                 manifest.put("rawFileBudgetMs", JSONObject.NULL);
                 manifest.put("finishedAtMs", System.currentTimeMillis());
-                manifest.put("finalizationPolicy", "streamed files; exact source size and metadata; verified ZIP SHA-256 and CRC");
+                manifest.put("finalizationPolicy", "streamed ZIP; exact source size and metadata; no archive reread");
                 // Include late acquisition failures in the same archive-local privacy pass.
                 manifest = (JSONObject) collector.sanitizeJson(manifest, "manifest.json", "");
                 entries = manifest.getJSONArray("files");
                 progress.changed("ARCHIVING", "manifest.json", copied, total, copiedFiles, count,
-                        collector.unavailable.length());
+                        collector.unavailableFileCount());
                 byte[] manifestBytes = jsonBytes(manifest);
                 writeEntry(zip, "manifest.json", manifestBytes);
-                entries = new JSONArray(entries.toString());
-                entries.put(new JSONObject().put("path", "manifest.json").put("size", manifestBytes.length)
-                        .put("sha256", sha256(manifestBytes)));
                 zip.finish();
-                fileOut.getFD().sync();
             }
             control.check();
-            progress.changed("VERIFYING", "", copied, total, copiedFiles, count, collector.unavailable.length());
-            verifyFullZip(part, entries, control, progress, copied, total, copiedFiles, count,
-                    collector.unavailable.length());
+            List<File> volumes = archiveOutput.publish();
             control.check();
-            if (!part.renameTo(output)) throw new IOException("final rename failed");
-            control.check();
-            return new Result(true, output, "", collector.unavailable.length());
+            Result result = new Result(true, volumes.get(0), "", collector.unavailableFileCount());
+            result.volumes = volumes;
+            result.completedAtMs = System.currentTimeMillis();
+            return result;
         } catch (Exception error) {
+            archiveOutput.abort();
             LogShareZip.deleteArtifact(part);
             LogShareZip.deleteArtifact(output);
             return new Result(false, null, error.getClass().getSimpleName() + ": "
-                    + safe(error.getMessage()), collector.unavailable.length());
+                    + safe(error.getMessage()), collector.unavailableFileCount());
         } finally {
             LogShareZip.deleteArtifact(sourcePart);
         }
@@ -1379,7 +1416,7 @@ final class VehicleConfigurationZip {
     }
 
     static JSONObject fileMetadata(VehicleConfigurationFiles.Entry entry, File spool,
-            boolean redacted, String sourceHash, Control control, Collector collector) throws Exception {
+            boolean redacted, Control control, Collector collector) throws Exception {
         JSONObject item = new JSONObject();
         item.put("path", collector.maskString(entry.archivePath).replace('<', '[').replace('>', ']'));
         item.put("source", entry.sourcePath);
@@ -1392,14 +1429,6 @@ final class VehicleConfigurationZip {
         item.put("device", entry.device);
         item.put("inode", entry.inode);
         item.put("redacted", redacted);
-        item.put("sourceSha256", sourceHash);
-        if (redacted) {
-            try (InputStream input = new FileInputStream(spool)) {
-                item.put("sha256", digest(input, control, null));
-            }
-        } else {
-            item.put("sha256", sourceHash);
-        }
         return (JSONObject) collector.sanitizeJson(item, "manifest.json", "");
     }
 
@@ -1409,6 +1438,22 @@ final class VehicleConfigurationZip {
             if (actual.startsWith(category)) return true;
         }
         return false;
+    }
+
+    private static OutputStream openSpool(File path) throws IOException {
+        try {
+            return new java.io.FilterOutputStream(new FileOutputStream(path)) {
+                @Override public void write(byte[] bytes, int offset, int length) throws IOException {
+                    try { out.write(bytes, offset, length); } catch (IOException error) { throw new ArchiveWriteException(error); }
+                }
+                @Override public void write(int value) throws IOException {
+                    try { out.write(value); } catch (IOException error) { throw new ArchiveWriteException(error); }
+                }
+                @Override public void close() throws IOException {
+                    try { super.close(); } catch (IOException error) { throw new ArchiveWriteException(error); }
+                }
+            };
+        } catch (IOException error) { throw new ArchiveWriteException(error); }
     }
 
     private static final class ArchiveWriteException extends IOException {
@@ -1425,51 +1470,6 @@ final class VehicleConfigurationZip {
         } catch (IOException error) {
             throw new ArchiveWriteException(error);
         }
-    }
-
-    static void verifyFullZip(File archive, JSONArray expected, Control control) throws Exception {
-        verifyFullZip(archive, expected, control, null, 0, -1, 0, -1, 0);
-    }
-
-    private static void verifyFullZip(File archive, JSONArray expected, Control control,
-            ProgressListener progress, long copied, long total, int copiedFiles, int totalFiles,
-            int unavailable) throws Exception {
-        try (ZipFile zip = new ZipFile(archive)) {
-            if (zip.size() != expected.length()) throw new IOException("ZIP entry count mismatch");
-            for (int i = 0; i < expected.length(); i++) {
-                control.check();
-                JSONObject item = expected.getJSONObject(i);
-                if (progress != null) {
-                    progress.changed("VERIFYING", item.getString("path"), copied, total,
-                            copiedFiles, totalFiles, unavailable);
-                }
-                ZipEntry entry = zip.getEntry(item.getString("path"));
-                if (entry == null || entry.getSize() != item.getLong("size")) throw new IOException("ZIP size mismatch");
-                CRC32 crc = new CRC32();
-                try (InputStream input = zip.getInputStream(entry)) {
-                    if (!item.getString("sha256").equalsIgnoreCase(digest(input, control, crc))
-                            || entry.getCrc() != crc.getValue()) throw new IOException("ZIP checksum mismatch");
-                }
-            }
-        }
-    }
-
-    private static String digest(InputStream input, Control control, CRC32 crc) throws Exception {
-        MessageDigest digest = MessageDigest.getInstance("SHA-256");
-        byte[] buffer = new byte[64 * 1024];
-        int count;
-        while ((count = input.read(buffer)) != -1) {
-            control.check();
-            digest.update(buffer, 0, count);
-            if (crc != null) crc.update(buffer, 0, count);
-        }
-        return hex(digest.digest());
-    }
-
-    private static String hex(byte[] bytes) {
-        StringBuilder text = new StringBuilder(bytes.length * 2);
-        for (byte value : bytes) text.append(String.format(Locale.US, "%02x", value & 0xff));
-        return text.toString();
     }
 
     static Result writeArchive(File output, Collector collector) {
@@ -1492,7 +1492,7 @@ final class VehicleConfigurationZip {
                     "files=" + (collector.files.size() + 1)
                             + " bytes=" + output.length()
                             + " adb=" + collector.adbAuthorized
-                            + " unavailable=" + collector.unavailable.length());
+                            + " unavailable=" + collector.unavailableFileCount());
         } catch (Exception error) {
             LogShareZip.deleteArtifact(part);
             LogShareZip.deleteArtifact(output);

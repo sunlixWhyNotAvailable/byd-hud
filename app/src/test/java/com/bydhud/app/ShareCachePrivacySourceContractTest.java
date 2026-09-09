@@ -43,11 +43,11 @@ public final class ShareCachePrivacySourceContractTest {
     }
 
     @Test
-    public void staleConfigurationSpoolsUseExistingScopedCleanup() throws Exception {
+    public void configurationSpoolsAreExcludedFromOrdinaryLogCleanup() throws Exception {
         java.lang.reflect.Method matcher = LogShareZip.class.getDeclaredMethod("isShareArtifact", String.class);
         matcher.setAccessible(true);
-        assertTrue((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-20260903.zip.source.part"));
-        assertTrue((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-elf-123.zip.source.part"));
+        assertFalse((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-20260903.zip.source.part"));
+        assertFalse((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-elf-123.zip.source.part"));
         assertFalse((Boolean) matcher.invoke(null, "unrelated.zip.source.part"));
         assertFalse((Boolean) matcher.invoke(null, "BYD-HUD-vehicle-config-keep.so"));
         String inventory = source("src/main/java/com/bydhud/app/VehicleConfigurationFiles.java");

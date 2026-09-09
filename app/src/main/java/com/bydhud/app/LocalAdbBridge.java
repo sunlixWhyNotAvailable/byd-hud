@@ -395,6 +395,9 @@ final class LocalAdbBridge {
                     throw new IOException(String.valueOf(stopped.get()));
                 }
                 return connection.readFile(safePath, output, expectedBytes, progress);
+            } catch (AdbSyncReader.FileUnavailableException error) {
+                // A completed sync FAIL or source-size mismatch affects this stream only.
+                throw error;
             } catch (IOException | RuntimeException error) {
                 if (stopped.get() == null) stop("transport failed");
                 throw error;
@@ -1825,7 +1828,13 @@ final class LocalAdbBridge {
                     }
                 } else if (packet.command == AdbPacket.A_WRTE) {
                     if (remoteId == 0) remoteId = packet.arg0;
-                    reader.accept(packet.payload);
+                    try {
+                        reader.accept(packet.payload);
+                    } catch (AdbSyncReader.FileUnavailableException sourceFailure) {
+                        AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
+                        AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
+                        throw sourceFailure;
+                    }
                     AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
                     if (reader.isDone()) {
                         //Sync services may hold CLSE until the client closes this stream.

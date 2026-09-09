@@ -11,6 +11,19 @@ import org.junit.Test;
 
 /** Pure policy and metadata checks for the raw-file inventory. */
 public final class VehicleConfigurationFilesTest {
+    @Test public void metadataIncludesAcceptedCandidatesWithoutUnrelatedApps() {
+        assertTrue(VehicleConfigurationFiles.inventoryPackageName("com.byd.carsettings.plugins"));
+        assertTrue(VehicleConfigurationFiles.inventoryPackageName("com.byd.avc"));
+        assertTrue(VehicleConfigurationFiles.inventoryPackageName("com.byd.diagnosticinfo"));
+        assertFalse(VehicleConfigurationFiles.inventoryPackageName("com.thirdparty.player"));
+        assertFalse(VehicleConfigurationFiles.isInventoryPath("/system/app/UnrelatedPlayer/base.apk"));
+        assertFalse(VehicleConfigurationFiles.isInventoryPath("/system/app/UnrelatedPlayer/lib/arm64/libplayer.so"));
+        assertTrue(VehicleConfigurationFiles.isInventoryPath("/system/priv-app/CarSettingsPlugins/CarSettingsPlugins.apk"));
+        assertTrue(VehicleConfigurationFiles.isInventoryPath("/system/lib64/libbinder.so"));
+        assertFalse(VehicleConfigurationFiles.isRelevantCandidate("/system/lib64/libbinder.so"));
+        assertFalse(VehicleConfigurationFiles.isRelevantCandidate("/cluster/scenes/scene.json"));
+    }
+
     @Test public void pathPolicyKeepsFirmwareAndResolvedApkShapesOnly() {
         assertTrue(VehicleConfigurationFiles.isAllowedPath("/system/framework/services.jar"));
         assertTrue(VehicleConfigurationFiles.isAllowedPath("/vendor/etc/vintf/manifest.xml"));

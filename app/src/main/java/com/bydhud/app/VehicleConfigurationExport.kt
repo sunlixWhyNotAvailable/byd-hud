@@ -10,8 +10,8 @@ import java.util.UUID
 import java.util.concurrent.Executors
 
 enum class ConfigurationExportPhase {
-    INVENTORY, DIAGNOSTICS, COPYING, ARCHIVING, VERIFYING, WAITING_FOR_SHARE, READY, UPLOADING,
-    SENT, FAILED, CANCELLING, CANCELLED
+    INVENTORY, DIAGNOSTICS, COPYING, ARCHIVING, WAITING_FOR_SHARE, READY,
+    FAILED, CANCELLING, CANCELLED, EXPIRED
 }
 
 data class ConfigurationExportSnapshot(
@@ -33,9 +33,10 @@ data class ConfigurationExportSnapshot(
     val archiveBytes: Long = 0,
     val archiveName: String = "",
     val archiveAvailable: Boolean = false,
-    val toDeveloper: Boolean = false,
+    val completedAtEpochMs: Long = 0,
+    val expiresAtEpochMs: Long = 0,
+    val volumeSizes: List<Long> = emptyList(),
     val detail: String = "",
-    val eventId: String = "",
     val dismissed: Boolean = false
 )
 
@@ -53,16 +54,13 @@ object VehicleConfigurationExport {
         Thread(task, "vehicle-configuration-export").apply { isDaemon = true }
     }
     private var active: VehicleConfigurationZip.Control? = null
-    private var archive: File? = null
+    private var archives: List<File> = emptyList()
     private var eventContext: Context? = null
-    private var lastLoggedPhase = ""
-    private var lastLoggedFile = ""
-    private var lastLoggedBytes = 0L
-    private var lastLoggedAtElapsedMs = 0L
+    private val loggedPhases = mutableSetOf<String>()
 
     @JvmStatic
     @Synchronized
-    fun start(context: Context, toDeveloper: Boolean): Boolean {
+    fun start(context: Context): Boolean {
         if (active != null || !MainActivity.claimShareOperation()) return false
         val control = VehicleConfigurationZip.Control()
         val app = context.applicationContext
@@ -71,24 +69,22 @@ object VehicleConfigurationExport {
         val startedEpochMs = System.currentTimeMillis()
         StorageLogShareWorkflow.replaceCompletedForNewOperation()
         active = control
-        archive = null
+        archives = emptyList()
         eventContext = app
-        lastLoggedPhase = ""
-        lastLoggedFile = ""
-        lastLoggedBytes = 0L
-        lastLoggedAtElapsedMs = 0L
+        loggedPhases.clear()
         state.value = ConfigurationExportSnapshot(
             operationId = operationId,
             phase = ConfigurationExportPhase.INVENTORY,
             startedAtEpochMs = startedEpochMs,
-            startedAtElapsedMs = startedElapsedMs,
-            toDeveloper = toDeveloper
+            startedAtElapsedMs = startedElapsedMs
         )
-        logEvent("started destination=${if (toDeveloper) "sentry" else "android"}")
+        logEvent("started")
         try {
             worker.execute {
                 control.worker = Thread.currentThread()
                 try {
+                    ConfigurationExportArtifacts.checkBeforeExport(app)
+                    control.check()
                     val result = VehicleConfigurationZip.createFull(app, control) {
                             phase, file, bytes, total, files, count, unavailable ->
                         synchronized(this) {
@@ -97,8 +93,8 @@ object VehicleConfigurationExport {
                                 val discovering = total < 0L || count < 0
                                 val updated = state.value!!.copy(
                                     phase = nextPhase,
-                                    foundFiles = if (discovering) files else maxOf(state.value!!.foundFiles, count),
-                                    knownBytes = if (discovering) bytes else maxOf(state.value!!.knownBytes, total),
+                                    foundFiles = if (discovering) files else count,
+                                    knownBytes = if (discovering) bytes else total,
                                     inventoryComplete = !discovering,
                                     copiedBytes = if (discovering) state.value!!.copiedBytes else bytes,
                                     totalBytes = total.takeIf { it >= 0 },
@@ -115,55 +111,30 @@ object VehicleConfigurationExport {
                     }
                     synchronized(this) {
                         if (active !== control || control.isCancelled) {
-                            LogShareZip.deleteArtifact(result.file)
+                            result.volumes.forEach(LogShareZip::deleteArtifact)
                             return@synchronized
                         }
-                        archive = result.file.takeIf { result.ok }
+                        archives = if (result.ok) result.volumes else emptyList()
                         state.value = state.value!!.copy(
                             phase = if (result.ok) ConfigurationExportPhase.READY else ConfigurationExportPhase.FAILED,
                             unavailableFiles = result.unavailableFiles,
-                            archiveBytes = archive?.length() ?: 0,
-                            archiveName = archive?.name.orEmpty(),
-                            archiveAvailable = archive != null,
+                            archiveBytes = archives.sumOf { it.length() },
+                            archiveName = archives.firstOrNull()?.name.orEmpty(),
+                            archiveAvailable = archives.isNotEmpty(),
+                            completedAtEpochMs = result.completedAtMs,
+                            expiresAtEpochMs = if (result.ok) result.completedAtMs + ConfigurationExportArtifacts.RETENTION_MS else 0,
+                            volumeSizes = archives.map { it.length() },
                             currentFile = "",
                             detail = if (result.ok) "" else result.detail
                         )
-                        logProgress(state.value!!, force = true)
-                    }
-                    val uploadFile = synchronized(this) {
-                        archive?.takeIf {
-                            active === control && !control.isCancelled && toDeveloper &&
-                                it.length() <= SentryLogUploader.MAX_ZIP_BYTES
-                        }?.also {
-                            state.value = state.value!!.copy(phase = ConfigurationExportPhase.UPLOADING)
-                            logProgress(state.value!!, force = true)
-                        }
-                    }
-                    if (uploadFile != null) {
-                        control.check()
-                        // Validate before the uploader: its legacy rejection path deletes its input.
-                        val invalid = SentryLogUploader.validate(BuildConfig.SENTRY_DSN, uploadFile)
-                        val sent = if (invalid.isEmpty()) SentryLogUploader.uploadConfiguration(app, uploadFile)
-                            else SentryLogUploader.Result(false, "", invalid)
-                        synchronized(this) {
-                            if (active === control && !control.isCancelled) {
-                                if (sent.ok) archive = null
-                                state.value = state.value!!.copy(
-                                    phase = if (sent.ok) ConfigurationExportPhase.SENT else ConfigurationExportPhase.FAILED,
-                                    archiveAvailable = archive?.isFile == true,
-                                    detail = sent.detail,
-                                    eventId = sent.eventId
-                                )
-                                logProgress(state.value!!, force = true)
-                            }
-                        }
+                        logProgress(state.value!!)
                     }
                 } catch (error: Exception) {
                     synchronized(this) {
                         if (active === control && !control.isCancelled) {
                             state.value = state.value?.copy(phase = ConfigurationExportPhase.FAILED,
                                 detail = error.javaClass.simpleName)
-                            state.value?.let { logProgress(it, force = true) }
+                            state.value?.let { logProgress(it) }
                         }
                     }
                 } finally {
@@ -182,7 +153,10 @@ object VehicleConfigurationExport {
                                     elapsedSeconds = configurationExportElapsedSeconds(
                                         state.value!!.copy(endedAtElapsedMs = ended)))
                             }
-                            state.value?.let { logProgress(it, force = true) }
+                            state.value?.let {
+                                logProgress(it)
+                                logEvent("finished phase=${it.phase} duration_s=${it.elapsedSeconds}")
+                            }
                             active = null
                         }
                         MainActivity.releaseShareOperation()
@@ -197,7 +171,7 @@ object VehicleConfigurationExport {
             state.value = state.value!!.copy(phase = ConfigurationExportPhase.FAILED,
                 detail = error.javaClass.simpleName,
                 endedAtElapsedMs = SystemClock.elapsedRealtime())
-            state.value?.let { logProgress(it, force = true) }
+            state.value?.let { logProgress(it) }
             return false
         }
         return true
@@ -211,12 +185,11 @@ object VehicleConfigurationExport {
                 ConfigurationExportPhase.INVENTORY,
                 ConfigurationExportPhase.DIAGNOSTICS,
                 ConfigurationExportPhase.COPYING,
-                ConfigurationExportPhase.ARCHIVING,
-                ConfigurationExportPhase.VERIFYING
+                ConfigurationExportPhase.ARCHIVING
             )) return
         active?.let {
             state.value = state.value?.copy(phase = ConfigurationExportPhase.CANCELLING)
-            state.value?.let { snapshot -> logProgress(snapshot, force = true) }
+            state.value?.let { snapshot -> logProgress(snapshot) }
             it.cancel()
         }
     }
@@ -225,48 +198,48 @@ object VehicleConfigurationExport {
     @Synchronized
     fun dismiss() {
         val current = state.value ?: return
-        if (active != null && current.phase != ConfigurationExportPhase.UPLOADING) return
+        if (active != null) return
         state.value = current.copy(dismissed = true)
         logEvent("dismissed phase=${current.phase}")
     }
 
     @JvmStatic
     @Synchronized
+    fun artifactsChecked(nowEpochMs: Long) {
+        val current = state.value ?: return
+        if (current.expiresAtEpochMs <= 0 || nowEpochMs < current.expiresAtEpochMs) return
+        if (current.phase == ConfigurationExportPhase.EXPIRED) return
+        archives = emptyList()
+        state.value = current.copy(phase = ConfigurationExportPhase.EXPIRED, archiveAvailable = false)
+        logEvent("expired expiresAtMs=${current.expiresAtEpochMs}")
+    }
+
+    @JvmStatic
+    @Synchronized
+    fun canShare(operationId: String): Boolean {
+        artifactsChecked(System.currentTimeMillis())
+        return state.value?.let { it.operationId == operationId && it.archiveAvailable } == true
+    }
+
+    @JvmStatic
+    @Synchronized
     fun shareReady() {
         if (active != null) return
-        val file = archive ?: return
+        artifactsChecked(System.currentTimeMillis())
         val current = state.value ?: return
-        if (current.phase == ConfigurationExportPhase.WAITING_FOR_SHARE) return
-        if (!file.isFile) {
-            archive = null
-            state.value = current.copy(phase = ConfigurationExportPhase.FAILED,
-                archiveAvailable = false, detail = "Archive is missing")
-            logEvent("android_share_failed detail=Archive is missing")
-            return
-        }
-        state.value = current.copy(
-            phase = ConfigurationExportPhase.WAITING_FOR_SHARE,
-            detail = "Waiting for Android share chooser",
-            endedAtElapsedMs = 0L,
-            elapsedSeconds = configurationExportElapsedSeconds(current.copy(endedAtElapsedMs = 0L))
-        )
-        MainActivity.queueConfigurationShare(file, current.operationId)
-        logProgress(state.value!!, force = true)
+        if (!current.archiveAvailable || current.phase == ConfigurationExportPhase.WAITING_FOR_SHARE) return
+        state.value = current.copy(phase = ConfigurationExportPhase.WAITING_FOR_SHARE, detail = "")
+        // No expiry renewal and no inferred delivery acknowledgement.
+        MainActivity.queueConfigurationShare(archives, current.operationId)
+        logEvent("share_attempt volumes=${archives.size} expiresAtMs=${current.expiresAtEpochMs}")
     }
 
     @JvmStatic
     @Synchronized
     fun androidShareLaunched(operationId: String): Boolean {
-        val current = state.value ?: return false
-        if (current.operationId != operationId) return false
-        val ended = SystemClock.elapsedRealtime()
-        state.value = current.copy(
-            phase = ConfigurationExportPhase.READY,
-            detail = "Android share chooser opened",
-            endedAtElapsedMs = ended,
-            elapsedSeconds = configurationExportElapsedSeconds(current.copy(endedAtElapsedMs = ended))
-        )
-        logProgress(state.value!!, force = true)
+        if (!canShare(operationId)) return false
+        state.value = state.value!!.copy(phase = ConfigurationExportPhase.READY, detail = "")
+        logEvent("share_chooser_opened")
         return true
     }
 
@@ -275,16 +248,14 @@ object VehicleConfigurationExport {
     fun androidShareFailed(operationId: String, detail: String, archiveMissing: Boolean): Boolean {
         val current = state.value ?: return false
         if (current.operationId != operationId) return false
-        if (archiveMissing) archive = null
-        val ended = SystemClock.elapsedRealtime()
+        if (current.phase == ConfigurationExportPhase.EXPIRED) return false
+        if (archiveMissing) archives = emptyList()
         state.value = current.copy(
             phase = ConfigurationExportPhase.FAILED,
-            archiveAvailable = if (archiveMissing) false else current.archiveAvailable,
-            detail = detail,
-            endedAtElapsedMs = ended,
-            elapsedSeconds = configurationExportElapsedSeconds(current.copy(endedAtElapsedMs = ended))
+            archiveAvailable = !archiveMissing && current.archiveAvailable,
+            detail = detail
         )
-        logProgress(state.value!!, force = true)
+        logEvent("share_failed missing=$archiveMissing")
         return true
     }
 
@@ -293,7 +264,7 @@ object VehicleConfigurationExport {
     fun replaceCompletedForNewOperation() {
         if (active != null) return
         state.value = null
-        archive = null
+        archives = emptyList()
         eventContext = null
     }
 
@@ -302,31 +273,16 @@ object VehicleConfigurationExport {
     fun shutdown() {
         active?.cancel()
         state.value = null
-        archive = null
+        archives = emptyList()
         eventContext = null
     }
 
-    private fun logProgress(snapshot: ConfigurationExportSnapshot, force: Boolean = false) {
-        val now = SystemClock.elapsedRealtime()
-        val phaseChanged = snapshot.phase.name != lastLoggedPhase
-        val fileChanged = snapshot.currentFile.isNotEmpty() && snapshot.currentFile != lastLoggedFile
-        val countersDue = snapshot.copiedBytes - lastLoggedBytes >= 4L * 1024L * 1024L ||
-            now - lastLoggedAtElapsedMs >= 1_000L
-        if (!force && !phaseChanged && !fileChanged && !countersDue) return
-        lastLoggedPhase = snapshot.phase.name
-        if (snapshot.currentFile.isNotEmpty()) lastLoggedFile = snapshot.currentFile
-        lastLoggedBytes = snapshot.copiedBytes
-        lastLoggedAtElapsedMs = now
-        logEvent(
-            "phase=${snapshot.phase} file=${safeEvent(snapshot.currentFile)} " +
-                "found=${snapshot.foundFiles} known_bytes=${snapshot.knownBytes} " +
-                "copied_files=${snapshot.copiedFiles} total_files=${snapshot.totalFiles ?: -1} " +
-                "copied_bytes=${snapshot.copiedBytes} total_bytes=${snapshot.totalBytes ?: -1} " +
-                "unavailable=${snapshot.unavailableFiles} duration_ms=" +
-                ((if (snapshot.endedAtElapsedMs > 0L) snapshot.endedAtElapsedMs else now) -
-                    snapshot.startedAtElapsedMs).coerceAtLeast(0L) +
-                " detail=${safeEvent(snapshot.detail)} event_id=${safeEvent(snapshot.eventId)}"
-        )
+    private fun logProgress(snapshot: ConfigurationExportSnapshot) {
+        // COPYING/ARCHIVING alternate per file: log each phase once, never per file or chunk.
+        if (!loggedPhases.add(snapshot.phase.name)) return
+        logEvent("phase=${snapshot.phase} inventory=${snapshot.foundFiles} collected=${snapshot.copiedFiles} " +
+            "unavailable=${snapshot.unavailableFiles} volumes=${snapshot.volumeSizes.size} bytes=${snapshot.archiveBytes} " +
+            "createdAtMs=${snapshot.completedAtEpochMs} expiresAtMs=${snapshot.expiresAtEpochMs}")
     }
 
     private fun logEvent(detail: String) {
@@ -336,5 +292,4 @@ object VehicleConfigurationExport {
         }
     }
 
-    private fun safeEvent(value: String): String = value.replace('\n', ' ').replace('\r', ' ')
 }

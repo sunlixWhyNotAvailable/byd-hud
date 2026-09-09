@@ -50,13 +50,13 @@ public class VehicleConfigurationFullArchiveTest {
             VehicleConfigurationZip.appendFile(zip, "files/system/app/large.apk", source,
                     new VehicleConfigurationZip.Control());
         }
-        JSONArray expected = new JSONArray().put(new JSONObject()
-                .put("path", "files/system/app/large.apk").put("size", source.length())
-                .put("sha256", sha(source)));
-        VehicleConfigurationZip.verifyFullZip(archive, expected, new VehicleConfigurationZip.Control());
-        expected.getJSONObject(0).put("sha256", "corrupt");
-        assertThrows(IOException.class, () -> VehicleConfigurationZip.verifyFullZip(
-                archive, expected, new VehicleConfigurationZip.Control()));
+        try (ZipFile zip = new ZipFile(archive)) {
+            ZipEntry entry = zip.getEntry("files/system/app/large.apk");
+            assertEquals(source.length(), entry.getSize());
+            try (InputStream input = zip.getInputStream(entry)) {
+                assertEquals(source.length(), input.transferTo(OutputStream.nullOutputStream()));
+            }
+        }
     }
 
     @Test public void missingFileKeepsUsablePartialArchiveAndStableInventory() throws Exception {
@@ -80,8 +80,7 @@ public class VehicleConfigurationFullArchiveTest {
         assertEquals(1, totals.stream().distinct().count());
         assertTrue(progress.contains("COPYING|/system/lib64/libBydCluster-192.168.1.10-not-installed.so"));
         assertTrue(progress.contains("ARCHIVING|manifest.json"));
-        assertTrue(progress.contains("VERIFYING|app/test.json"));
-        assertTrue(progress.contains("VERIFYING|manifest.json"));
+        assertTrue(progress.stream().noneMatch(value -> value.startsWith("VERIFYING")));
         try (ZipFile zip = new ZipFile(output)) {
             assertNull(zip.getEntry("files/system/lib64/missing.so"));
             JSONObject manifest = new JSONObject(new String(zip.getInputStream(
@@ -108,22 +107,24 @@ public class VehicleConfigurationFullArchiveTest {
         entry.aliases.add("/vendor/cluster/aa:bb:cc:dd:ee:ff.so");
         entry.aliases.add(entry.sourcePath);
         String sourceHash = sha(source);
-        JSONObject metadata = VehicleConfigurationZip.fileMetadata(entry, source, false, sourceHash,
+        JSONObject metadata = VehicleConfigurationZip.fileMetadata(entry, source, false,
                 new VehicleConfigurationZip.Control(), collector);
         assertEquals("files/vendor/cluster/[IP_1].so", metadata.getString("path"));
         assertEquals("/vendor/cluster/<IP_1>.so", metadata.getString("source"));
         assertFalse(metadata.toString().contains("192.168.1.10"));
         assertFalse(metadata.toString().contains("aa:bb:cc:dd:ee:ff"));
         assertTrue(metadata.getJSONArray("aliases").toString().contains("<MAC_1>"));
-        assertEquals(sourceHash, metadata.getString("sourceSha256"));
-        assertEquals(sourceHash, metadata.getString("sha256"));
+        assertFalse(metadata.has("sourceSha256"));
+        assertFalse(metadata.has("sha256"));
         File output = temp.newFile("masked.zip");
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(output))) {
             VehicleConfigurationZip.appendFile(zip, metadata.getString("path"), source,
                     new VehicleConfigurationZip.Control());
         }
-        VehicleConfigurationZip.verifyFullZip(output, new JSONArray().put(metadata),
-                new VehicleConfigurationZip.Control());
+        try (ZipFile zip = new ZipFile(output)) {
+            assertArrayEquals(Files.readAllBytes(source.toPath()),
+                    zip.getInputStream(zip.getEntry(metadata.getString("path"))).readAllBytes());
+        }
         assertEquals(sourceHash, sha(source));
     }
 

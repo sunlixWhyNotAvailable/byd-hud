@@ -28,7 +28,7 @@ public final class ConfigurationExportUiSourceContractTest {
         assertTrue(runtime.indexOf("OperationProgressStack(") > runtime.indexOf("BottomTabs(copy"));
         assertContains(runtime,
                 "activity.composeBeginStorageShare(",
-                "if (activity.composeBeginConfigurationExport(destination == StorageShareDestination.Sentry))",
+                "if (activity.composeBeginConfigurationExport())",
                 "sentryButtonEnabled = sentryButtonRemaining == 0");
         assertFalse(source.contains("LaunchedEffect(storageShareBusy, storageShareDays"));
         assertFalse(source.contains("ConfigurationExportOverlay("));
@@ -47,14 +47,13 @@ public final class ConfigurationExportUiSourceContractTest {
                 "patchOperations.filter {");
         String card = between(source, "private fun OperationProgressCard(",
                 "private fun storageLogShareBusy(");
-        assertContains(config,
-                "state.inventoryComplete", "state.foundFiles", "state.knownBytes",
-                "known so far", "відомо наразі", "state.totalFiles ?: state.foundFiles",
-                "state.totalBytes ?: state.knownBytes", "state.copiedFiles", "state.copiedBytes",
-                "state.unavailableFiles", "state.archiveAvailable", "state.eventId");
+        assertContains(config, "state.archiveAvailable", "state.expiresAtEpochMs", "state.volumeSizes");
+        String detail = between(source, "private fun ConfigurationExportDetailsOverlay(", "private fun operationDetails(");
+        assertContains(detail, "state.foundFiles", "state.copiedFiles", "state.unavailableFiles",
+                "state.totalBytes ?: state.knownBytes", "state.copiedBytes");
         assertFalse(config.contains("%"));
         for (String phase : new String[] { "INVENTORY", "DIAGNOSTICS", "COPYING", "ARCHIVING",
-                "VERIFYING", "WAITING_FOR_SHARE", "READY", "UPLOADING", "SENT", "FAILED",
+                "WAITING_FOR_SHARE", "READY", "EXPIRED", "FAILED",
                 "CANCELLING", "CANCELLED" }) {
             assertTrue("missing phase " + phase, config.contains("ConfigurationExportPhase." + phase));
         }
@@ -94,50 +93,42 @@ public final class ConfigurationExportUiSourceContractTest {
                 "val sending = state.phase == StorageLogSharePhase.UPLOADING",
                 "stopEnabled = busy && !sending && state.phase != StorageLogSharePhase.CANCELLING",
                 "closeEnabled = sending || terminal",
-                "val sending = state.phase == ConfigurationExportPhase.UPLOADING",
-                "stopEnabled = busy && !sending && state.phase != ConfigurationExportPhase.CANCELLING",
-                "closeEnabled = sending || !busy");
+                "stopEnabled = busy && state.phase != ConfigurationExportPhase.CANCELLING",
+                "closeEnabled = !busy");
         String hostBack = between(source("MainActivity.java"), "public void onBackPressed()",
                 "//builds this artifact here");
         assertContains(hostBack, "getOnBackPressedDispatcher().hasEnabledCallbacks()",
                 "getOnBackPressedDispatcher().onBackPressed()", "moveTaskToBack(true)");
 
         String workflow = source("VehicleConfigurationExport.kt");
-        String admission = between(workflow, "val uploadFile = synchronized(this) {",
-                "if (uploadFile != null) {");
-        assertContains(admission,
-                "active === control && !control.isCancelled && toDeveloper",
-                "state.value = state.value!!.copy(phase = ConfigurationExportPhase.UPLOADING)");
-        assertTrue(workflow.indexOf("val uploadFile = synchronized(this) {")
-                < workflow.indexOf("SentryLogUploader.uploadConfiguration"));
+        assertFalse(workflow.contains("SentryLogUploader"));
         String cancel = between(workflow, "fun cancel()", "fun dismiss()");
         assertFalse(cancel.contains("ConfigurationExportPhase.UPLOADING"));
     }
 
     @Test
-    public void consentDisclosesRawFilesAndRetainsOversizeArchiveForAnotherApp()
-            throws IOException {
+    public void configurationConsentAndDetailsMatchAcceptedPipeline() throws IOException {
         String source = source("BydHudRuntimeCompose.kt");
         String consent = between(source, "private fun ConfigurationShareDestinationOverlay(",
                 "private fun StorageDeleteConfirmOverlay(");
-        String details = between(source, "private fun configurationExportDetails(",
+        String details = between(source, "private fun ConfigurationExportDetailsOverlay(",
                 "private fun operationDetails(");
-        assertContains(consent, "BackHandler(onBack = onCancel)", "ModalInputBlocker()",
-                "copy.configurationWarning", "copy.shareLogsSentryNotice",
-                "onClick = onSentry", "onClick = onAnotherApp", "onClick = onCancel", "startError");
-        assertContains(source,
-                "split APK", "libraries, framework, cluster resources",
-                "бібліотеки, framework, ресурси приборки",
-                "Binary firmware files are copied unchanged",
-                "Бінарні файли прошивки копіюються без змін", "trusted recipient", "довіреному отримувачу");
-        assertContains(details,
-                "Full reasons are recorded in manifest.json",
-                "state.archiveBytes > SentryLogUploader.MAX_ZIP_BYTES",
-                "The complete archive is retained for another app",
-                "Повний архів збережено для іншого застосунку");
-        assertContains(stack(source),
-                "state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE",
-                "onPrimary = onShareConfiguration");
+        assertContains(consent, "onClick = onCreate", "onClick = onCancel", "startError",
+                "15 minutes", "1 GB", "copy.configurationWarning");
+        assertFalse(consent.contains("Sentry"));
+        assertFalse(details.contains("manifest.json"));
+        assertFalse(details.contains("CarSettingsPlugins"));
+        assertContains(details, "completedAtEpochMs", "expiresAtEpochMs", "volumeSizes", "unavailableFiles");
+        String workflow = source("VehicleConfigurationExport.kt");
+        assertFalse(workflow.contains("SentryLogUploader"));
+        assertTrue(workflow.indexOf("ConfigurationExportArtifacts.checkBeforeExport(app)")
+                < workflow.indexOf("VehicleConfigurationZip.createFull(app, control)"));
+        assertContains(workflow, "inventory=${snapshot.foundFiles}", "volumes=${snapshot.volumeSizes.size}");
+        String card = between(source, "private fun ConfigurationExportProgressCard(",
+                "private fun ConfigurationExportDetailsOverlay(");
+        assertContains(card, "alpha = 0.70f", "width = 100.dp", "width = 138.dp", "width = 108.dp");
+        assertFalse(card.contains("unavailableFiles"));
+        assertFalse(card.contains("copiedFiles"));
     }
 
     private static String stack(String source) {

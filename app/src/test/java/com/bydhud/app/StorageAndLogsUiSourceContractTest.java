@@ -186,13 +186,13 @@ public final class StorageAndLogsUiSourceContractTest {
     }
 
     @Test
-    public void configurationExportCopyDisclosesNewReadOnlyGroupsWithoutChangingDestinations() throws IOException {
+    public void configurationExportCopyDisclosesReadOnlyGroupsAndUsesCreateOnly() throws IOException {
         String source = source();
         assertTrue(source.contains("shareConfiguration = \"Export configuration\""));
         assertTrue(source.contains("shareConfiguration = \"Експортувати конфігурацію\""));
         for (String copy : new String[]{
                 "available HUD/cluster values", "FIDs, permissions, BYD HUD state",
-                "relevant system apps with split APKs", "framework, cluster resources",
+                "relevant system apps with split APKs", "framework and configs",
                 "Nothing is uploaded automatically", "Share only with a trusted recipient",
                 "доступні значення HUD/приборки", "FID, дозволи, стан BYD HUD",
                 "системні застосунки з split APK", "Автоматичного надсилання немає"}) {
@@ -200,9 +200,9 @@ public final class StorageAndLogsUiSourceContractTest {
         }
         String modal = between(source, "private fun ConfigurationShareDestinationOverlay(",
                 "private fun StorageDeleteConfirmOverlay(");
-        assertTrue(modal.contains("copy.shareLogsSentryNotice"));
-        assertTrue(modal.contains("onClick = onSentry"));
-        assertTrue(modal.contains("onClick = onAnotherApp"));
+        assertFalse(modal.contains("copy.shareLogsSentryNotice"));
+        assertFalse(modal.contains("onClick = onSentry"));
+        assertTrue(modal.contains("onClick = onCreate"));
         assertTrue(modal.contains("onClick = onCancel"));
         assertTrue(source.contains("shareSelected = \"Share logs\""));
         assertTrue(source.contains("shareSelected = \"Поділитись логами\""));

@@ -2217,8 +2217,8 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeDismissStorageShare() { StorageLogShareWorkflow.dismiss(); }
 
-    public boolean composeBeginConfigurationExport(boolean toDeveloper) {
-        return VehicleConfigurationExport.start(getApplicationContext(), toDeveloper);
+    public boolean composeBeginConfigurationExport() {
+        return VehicleConfigurationExport.start(getApplicationContext());
     }
 
     public void composeCancelConfigurationExport() { VehicleConfigurationExport.cancel(); }
@@ -2231,12 +2231,12 @@ public final class MainActivity extends ComponentActivity {
 
     static void releaseShareOperation() { SHARE_OPERATION.set(false); }
 
-    static void queueConfigurationShare(File file, String operationId) {
-        queuePendingShare(file, Collections.emptyList(), ShareOwner.CONFIGURATION, operationId);
+    static void queueConfigurationShare(List<File> files, String operationId) {
+        queuePendingShare(files, Collections.emptyList(), ShareOwner.CONFIGURATION, operationId);
     }
 
     static void queueStorageShare(File file, List<String> storageDays, String operationId) {
-        queuePendingShare(file, immutableStorageDays(storageDays), ShareOwner.STORAGE_LOGS,
+        queuePendingShare(Collections.singletonList(file), immutableStorageDays(storageDays), ShareOwner.STORAGE_LOGS,
                 operationId);
     }
 
@@ -2255,13 +2255,13 @@ public final class MainActivity extends ComponentActivity {
         return Collections.unmodifiableList(new ArrayList<>(days));
     }
 
-    private static void queuePendingShare(File file, List<String> storageDays,
+    private static void queuePendingShare(List<File> files, List<String> storageDays,
             ShareOwner owner, String operationId) {
-        if (file == null) {
+        if (files == null || files.isEmpty()) {
             return;
         }
         PENDING_SHARE.set(new PendingShare(
-                file,
+                files,
                 SHARE_LAUNCH_SEQUENCE.incrementAndGet(),
                 immutableStorageDays(storageDays),
                 owner,
@@ -2282,21 +2282,26 @@ public final class MainActivity extends ComponentActivity {
             }
             return;
         }
-        if (!pending.file.isFile()) {
+        if ((pending.owner == ShareOwner.CONFIGURATION
+                && !VehicleConfigurationExport.canShare(pending.operationId))
+                || pending.files.stream().anyMatch(file -> !file.isFile())) {
             PENDING_SHARE.compareAndSet(pending, null);
             notifyShareFailed(pending, "Archive is missing", true);
             return;
         }
         try {
-            android.net.Uri uri = FileProvider.getUriForFile(
-                    this,
-                    getPackageName() + ".fileprovider",
-                    pending.file);
-            Intent send = new Intent(Intent.ACTION_SEND)
-                    .setType("application/zip")
-                    .putExtra(Intent.EXTRA_STREAM, uri)
+            ArrayList<android.net.Uri> uris = new ArrayList<>();
+            for (File file : pending.files) {
+                uris.add(FileProvider.getUriForFile(this, getPackageName() + ".fileprovider", file));
+            }
+            Intent send = new Intent(uris.size() == 1 ? Intent.ACTION_SEND : Intent.ACTION_SEND_MULTIPLE)
+                    .setType(uris.size() == 1 ? "application/zip" : "application/octet-stream")
                     .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-            send.setClipData(ClipData.newRawUri(pending.file.getName(), uri));
+            if (uris.size() == 1) send.putExtra(Intent.EXTRA_STREAM, uris.get(0));
+            else send.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            ClipData clips = ClipData.newRawUri(pending.files.get(0).getName(), uris.get(0));
+            for (int index = 1; index < uris.size(); index++) clips.addItem(new ClipData.Item(uris.get(index)));
+            send.setClipData(clips);
             startActivity(Intent.createChooser(send, null));
             PENDING_SHARE.compareAndSet(pending, null);
             boolean accepted = notifyShareLaunched(pending);
@@ -2426,15 +2431,15 @@ public final class MainActivity extends ComponentActivity {
     private enum ShareOwner { STORAGE_LOGS, CONFIGURATION }
 
     private static final class PendingShare {
-        final File file;
+        final List<File> files;
         final long launchId;
         final List<String> storageDays;
         final ShareOwner owner;
         final String operationId;
 
-        PendingShare(File file, long launchId, List<String> storageDays,
+        PendingShare(List<File> files, long launchId, List<String> storageDays,
                 ShareOwner owner, String operationId) {
-            this.file = file;
+            this.files = Collections.unmodifiableList(new ArrayList<>(files));
             this.launchId = launchId;
             this.storageDays = immutableStorageDays(storageDays);
             this.owner = owner;

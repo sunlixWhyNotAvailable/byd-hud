@@ -17,6 +17,52 @@ import java.nio.charset.StandardCharsets;
 import org.junit.Test;
 
 public class AdbSyncWireTest {
+    @Test public void cancellationClosesFileAndDiagnosticsSessionsEvenAfterDetach() throws Exception {
+        Constructor<LocalAdbBridge.ConfigurationExportSession> constructor =
+                LocalAdbBridge.ConfigurationExportSession.class.getDeclaredConstructor(
+                        Socket.class, long.class, boolean.class);
+        constructor.setAccessible(true);
+        FakeSocket fileSocket = new FakeSocket(new byte[0]);
+        FakeSocket diagnosticsSocket = new FakeSocket(new byte[0]);
+        VehicleConfigurationZip.Control control = new VehicleConfigurationZip.Control();
+        control.attach(constructor.newInstance(fileSocket, 0, true));
+        control.attach(constructor.newInstance(diagnosticsSocket, 0, true));
+        control.attach(null);
+        control.cancel();
+        org.junit.Assert.assertTrue(fileSocket.closed);
+        org.junit.Assert.assertTrue(diagnosticsSocket.closed);
+        FakeSocket lateSocket = new FakeSocket(new byte[0]);
+        control.attach(constructor.newInstance(lateSocket, 0, true));
+        org.junit.Assert.assertTrue(lateSocket.closed);
+        control.close(); // Closing a cancelled operation remains idempotent.
+    }
+
+    @Test public void deniedFileDoesNotPoisonNextReadOnSameExportSession() throws Exception {
+        ByteArrayOutputStream wire = new ByteArrayOutputStream();
+        AdbPacket.write(wire, AdbPacket.A_OKAY, 42, 1, new byte[0]);
+        AdbPacket.write(wire, AdbPacket.A_WRTE, 42, 1,
+                frame("FAIL", "permission denied".getBytes(StandardCharsets.UTF_8)));
+        AdbPacket.write(wire, AdbPacket.A_CLSE, 42, 1, new byte[0]);
+        AdbPacket.write(wire, AdbPacket.A_OKAY, 43, 2, new byte[0]);
+        AdbPacket.write(wire, AdbPacket.A_WRTE, 43, 2,
+                concat(frame("DATA", new byte[]{7, 8}), frame("DONE", new byte[0])));
+        FakeSocket socket = new FakeSocket(wire.toByteArray());
+        Constructor<LocalAdbBridge.ConfigurationExportSession> constructor =
+                LocalAdbBridge.ConfigurationExportSession.class.getDeclaredConstructor(
+                        Socket.class, long.class, boolean.class);
+        constructor.setAccessible(true);
+        try (LocalAdbBridge.ConfigurationExportSession session = constructor.newInstance(socket, 0, true)) {
+            java.lang.reflect.Field connection = session.getClass().getDeclaredField("connection");
+            connection.setAccessible(true);
+            connection.set(session, newConnection(socket));
+            org.junit.Assert.assertThrows(AdbSyncReader.FileUnavailableException.class,
+                    () -> session.readFile("/vendor/etc/denied.conf", new ByteArrayOutputStream(), 2, null));
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            assertEquals(2L, session.readFile("/vendor/etc/readable.conf", output, 2, null));
+            assertArrayEquals(new byte[]{7, 8}, output.toByteArray());
+        }
+    }
+
     @Test
     public void doneReturnsWithoutWaitingForRemoteClose() throws Exception {
         int localId = 1;
@@ -94,6 +140,7 @@ public class AdbSyncWireTest {
     private static final class FakeSocket extends Socket {
         private final InputStream input;
         final ByteArrayOutputStream sent = new ByteArrayOutputStream();
+        boolean closed;
 
         FakeSocket(byte[] incoming) {
             input = new ByteArrayInputStream(incoming);
@@ -102,7 +149,7 @@ public class AdbSyncWireTest {
         @Override public InputStream getInputStream() { return input; }
         @Override public OutputStream getOutputStream() { return sent; }
         @Override public void setSoTimeout(int timeout) { }
-        @Override public synchronized void close() { }
+        @Override public synchronized void close() { closed = true; }
 
     }
 }

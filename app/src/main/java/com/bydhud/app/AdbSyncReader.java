@@ -7,6 +7,10 @@ import java.util.function.LongConsumer;
 
 //Consumes one ADB sync RECV response without buffering the file in memory.
 final class AdbSyncReader {
+    static final class FileUnavailableException extends IOException {
+        FileUnavailableException(String detail) { super(detail); }
+    }
+
     private static final int DATA = AdbPacket.command("DATA");
     private static final int DONE = AdbPacket.command("DONE");
     private static final int FAIL = AdbPacket.command("FAIL");
@@ -93,7 +97,7 @@ final class AdbSyncReader {
         if (failed) throw new IOException("ADB sync failed");
         if (!done) throw new IOException("ADB sync ended before DONE");
         if (copiedBytes != expectedBytes) {
-            throw new IOException("ADB sync short read: expected " + expectedBytes
+            throw new FileUnavailableException("ADB sync short read: expected " + expectedBytes
                     + " bytes, received " + copiedBytes);
         }
     }
@@ -107,12 +111,12 @@ final class AdbSyncReader {
         }
         if (frameCommand == DATA) {
             if (frameLength > expectedBytes - copiedBytes) {
-                throw new IOException("ADB sync oversize read: expected " + expectedBytes
+                throw new FileUnavailableException("ADB sync oversize read: expected " + expectedBytes
                         + " bytes, received at least " + (copiedBytes + frameLength));
             }
         } else if (frameCommand == FAIL) {
             if (frameLength > MAX_FAIL_BYTES) {
-                throw new IOException("ADB sync FAIL message too large: " + frameLength);
+                throw new FileUnavailableException("ADB sync FAIL message too large: " + frameLength);
             }
             failBytes = 0;
         }
@@ -123,13 +127,13 @@ final class AdbSyncReader {
         if (frameCommand == DONE) {
             done = true;
             if (copiedBytes != expectedBytes) {
-                throw new IOException("ADB sync short read: expected " + expectedBytes
+                throw new FileUnavailableException("ADB sync short read: expected " + expectedBytes
                         + " bytes, received " + copiedBytes);
             }
         } else if (frameCommand == FAIL) {
             failed = true;
             String message = new String(failMessage, 0, failBytes, StandardCharsets.UTF_8).trim();
-            throw new IOException("ADB sync FAIL" + (message.isEmpty() ? "" : ": " + message));
+            throw new FileUnavailableException("ADB sync FAIL" + (message.isEmpty() ? "" : ": " + message));
         }
         headerBytes = 0;
         frameCommand = 0;
