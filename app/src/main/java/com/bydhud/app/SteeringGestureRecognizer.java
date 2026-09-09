@@ -80,11 +80,9 @@ final class SteeringGestureRecognizer {
                 emit(key, SteeringTransferPreferences.PRESS_HOLD, emit);
             } else if (press.second) {
                 emit(key, SteeringTransferPreferences.PRESS_DOUBLE, emit);
-            } else if (SteeringTransferPreferences.find(profiles, key,
-                    SteeringTransferPreferences.PRESS_DOUBLE) != null) {
-                pendingUps.put(key, eventTime);
             } else {
-                emit(key, SteeringTransferPreferences.PRESS_SINGLE, emit);
+                // Classify the gesture before looking up this app's matching action.
+                pendingUps.put(key, eventTime);
             }
         }
         return true;

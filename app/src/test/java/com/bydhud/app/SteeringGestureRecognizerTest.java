@@ -33,17 +33,22 @@ public final class SteeringGestureRecognizerTest {
         assertEquals(Arrays.asList(expected), actual);
     }
 
-    @Test public void singleWaitsForUpButNotForUnusedDoubleWindow() {
+    @Test public void singleOnlyStillWaitsForUniversalDoubleWindow() {
         configure(294, PRESS_SINGLE);
         assertTrue(event(294, 0, 0));
         modes();
         assertTrue(event(294, 1, 70));
+        modes();
+        assertEquals(371, recognizer.nextDeadline());
+        recognizer.advance(370, matches::add);
+        modes();
+        recognizer.advance(371, matches::add);
         modes(PRESS_SINGLE);
         assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
-        assertFalse(event(320, 0, 90));
+        assertFalse(event(320, 0, 400));
     }
 
-    @Test public void doubleUsesFirstUpToSecondDownAndCompletesOnSecondUp() {
+    @Test public void doubleAcceptsExactFirstUpToSecondDownBoundary() {
         configure(294, PRESS_SINGLE, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
         recognizer.advance(350, matches::add);
@@ -56,10 +61,14 @@ public final class SteeringGestureRecognizerTest {
         modes(PRESS_DOUBLE);
     }
 
-    @Test public void missedDoubleWindowEmitsTwoIndependentSingles() {
+    @Test public void oneMillisecondOutsideDoubleWindowEmitsTwoSingles() {
         configure(294, PRESS_SINGLE, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
+        recognizer.advance(350, matches::add);
+        modes();
         event(294, 0, 351); event(294, 1, 390);
+        modes(PRESS_SINGLE);
+        recognizer.advance(690, matches::add);
         modes(PRESS_SINGLE);
         recognizer.advance(691, matches::add);
         modes(PRESS_SINGLE, PRESS_SINGLE);
@@ -75,22 +84,51 @@ public final class SteeringGestureRecognizerTest {
         modes(PRESS_HOLD);
     }
 
-    @Test public void unmatchedHoldAndSingleAreConsumedWithoutAction() {
-        configure(294, PRESS_SINGLE, PRESS_DOUBLE);
-        event(294, 0, 0); event(294, 1, 500); // UP handles a delayed timer too.
-        recognizer.advance(1000, matches::add);
-        modes();
-        recognizer.configure(Collections.singletonList(profile(294, PRESS_HOLD)), 2);
-        event(294, 0, 1100); event(294, 1, 1150);
+    @Test public void assignedStreamsAreConsumedEvenWhenClassifiedGestureHasNoAction() {
+        configure(294, PRESS_SINGLE);
+        assertTrue(event(294, 0, 0)); assertTrue(event(294, 1, 50));
+        assertTrue(event(294, 0, 150)); assertTrue(event(294, 1, 200));
+        modes(); // Double on a Single-only button has no action.
+
+        configure(294, PRESS_HOLD);
+        assertTrue(event(294, 0, 300)); assertTrue(event(294, 1, 350));
+        recognizer.advance(651, matches::add);
+        modes(); // Single on a Hold-only button has no action.
+
+        configure(294, PRESS_DOUBLE);
+        assertTrue(event(294, 0, 700));
+        recognizer.advance(1100, matches::add);
+        assertTrue(event(294, 1, 1150));
+        recognizer.advance(2000, matches::add);
         modes();
     }
 
-    @Test public void secondHeldPressIsNotADouble() {
+    @Test public void unassignedStreamPassesThroughWithoutArmingDeadlines() {
+        assertFalse(event(294, 0, 0));
+        assertFalse(event(294, 1, 50));
+        assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
+        recognizer.advance(1000, matches::add);
+        modes();
+    }
+
+    @Test public void shortThenHeldWithinWindowEmitsOnlyHold() {
         configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);
         event(294, 0, 150); event(294, 1, 600);
         recognizer.advance(1000, matches::add);
         modes(PRESS_HOLD);
+    }
+
+    @Test public void tripleShortPressesEmitDoubleThenPendingSingle() {
+        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+        event(294, 0, 0); event(294, 1, 50);
+        event(294, 0, 150); event(294, 1, 180);
+        event(294, 0, 250); event(294, 1, 280);
+        modes(PRESS_DOUBLE);
+        recognizer.advance(580, matches::add);
+        modes(PRESS_DOUBLE);
+        recognizer.advance(581, matches::add);
+        modes(PRESS_DOUBLE, PRESS_SINGLE);
     }
 
     @Test public void everyOrdinaryKeyUsesTheSameHoldDeadlineWithoutNativeFeedback() {
@@ -190,8 +228,8 @@ public final class SteeringGestureRecognizerTest {
         modes();
     }
 
-    @Test public void canceledUpAndLifecycleCancelCannotTriggerAnAction() {
-        configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+    @Test public void canceledUpAndLifecycleCancelPendingSingleCannotTriggerAnAction() {
+        configure(294, PRESS_SINGLE);
         event(294, 0, 0);
         recognizer.onKey(294, 1, 0, true, 50, 50, false, matches::add);
         event(294, 0, 100); event(294, 1, 150);
@@ -228,6 +266,10 @@ public final class SteeringGestureRecognizerTest {
         recognizer.advance(3100, matches::add);
         event(294, 1, 3200);
         event(294, 0, 3300); event(294, 1, 3350);
+        modes();
+        recognizer.advance(3650, matches::add);
+        modes();
+        recognizer.advance(3651, matches::add);
         modes(PRESS_SINGLE);
     }
 }
