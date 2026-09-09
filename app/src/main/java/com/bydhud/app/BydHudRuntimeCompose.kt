@@ -6832,24 +6832,12 @@ private fun TransferProfileIconButton(
             .padding(9.dp),
         contentAlignment = Alignment.Center
     ) {
-        Canvas(Modifier.fillMaxSize()) {
-            val stroke = 2.dp.toPx()
-            if (delete) {
-                drawRect(tint, topLeft = Offset(size.width * .25f, size.height * .28f),
-                    size = Size(size.width * .5f, size.height * .58f), style = Stroke(stroke))
-                drawLine(tint, Offset(size.width * .18f, size.height * .22f),
-                    Offset(size.width * .82f, size.height * .22f), stroke)
-                drawLine(tint, Offset(size.width * .4f, size.height * .12f),
-                    Offset(size.width * .6f, size.height * .12f), stroke)
-            } else {
-                drawLine(tint, Offset(size.width * .22f, size.height * .76f),
-                    Offset(size.width * .72f, size.height * .26f), stroke, StrokeCap.Round)
-                drawLine(tint, Offset(size.width * .65f, size.height * .2f),
-                    Offset(size.width * .8f, size.height * .35f), stroke, StrokeCap.Round)
-                drawLine(tint, Offset(size.width * .18f, size.height * .82f),
-                    Offset(size.width * .38f, size.height * .76f), stroke, StrokeCap.Round)
-            }
-        }
+        Icon(
+            painter = painterResource(id = if (delete) R.drawable.ic_delete else R.drawable.ic_edit),
+            contentDescription = null,
+            tint = tint,
+            modifier = Modifier.fillMaxSize()
+        )
     }
 }
 

@@ -20,7 +20,7 @@ public final class SteeringGestureRecognizerTest {
     private void configure(int key, String... modes) {
         List<SteeringTransferProfile> profiles = new ArrayList<>();
         for (String mode : modes) profiles.add(profile(key, mode));
-        recognizer.configure(profiles, 1);
+        recognizer.configure(profiles, recognizer.revision() + 1);
     }
 
     private boolean event(int key, int action, long time) {
@@ -93,17 +93,89 @@ public final class SteeringGestureRecognizerTest {
         modes(PRESS_HOLD);
     }
 
-    @Test public void nativeAliasNeedsNoTimerAndDoesNotRepeat() {
-        configure(305, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
-        event(306, 0, 0); event(306, 0, 20);
-        recognizer.onKey(306, 0, 1, false, 30, 30, false, matches::add);
-        modes(PRESS_HOLD);
-        event(306, 1, 56);
-        event(305, 0, 100);
-        recognizer.advance(700, matches::add); // short semantic code is not a timed hold.
-        event(305, 1, 710);
-        recognizer.advance(1011, matches::add);
-        modes(PRESS_HOLD, PRESS_SINGLE);
+    @Test public void everyOrdinaryKeyUsesTheSameHoldDeadlineWithoutNativeFeedback() {
+        for (int key : new int[] {294, 304, 305, 87, 88, 353, 313, 1000}) {
+            matches.clear();
+            configure(key, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            event(key, 0, 1000);
+            assertEquals(1400, recognizer.nextDeadline());
+            recognizer.advance(1399, matches::add);
+            modes();
+            recognizer.advance(1400, matches::add);
+            modes(PRESS_HOLD);
+            event(key, 0, 1450); // Duplicate DOWN cannot restart or emit again.
+            recognizer.onKey(key, 0, 1, false, 1500, 1500, false, matches::add);
+            event(key, 1, 1600);
+            recognizer.advance(2000, matches::add);
+            modes(PRESS_HOLD);
+            assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
+        }
+    }
+
+    @Test public void knownFamiliesAlsoRecognizeHoldOnUpWhenTheTimerIsDelayed() {
+        for (int key : new int[] {304, 305}) {
+            matches.clear();
+            configure(key, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            event(key, 0, 0); event(key, 1, 400);
+            recognizer.advance(1000, matches::add);
+            modes(PRESS_HOLD);
+        }
+    }
+
+    @Test public void nativeAliasAloneNeverBecomesAnyGestureOrArmsATimer() {
+        for (int alias : new int[] {306, 312}) {
+            matches.clear();
+            configure(alias, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            assertTrue(event(alias, 0, 0));
+            assertTrue(event(alias, 1, 56));
+            assertTrue(event(alias, 0, 100));
+            recognizer.advance(500, matches::add);
+            assertTrue(event(alias, 1, 600));
+            recognizer.advance(1000, matches::add);
+            modes();
+            assertEquals(Long.MAX_VALUE, recognizer.nextDeadline());
+        }
+    }
+
+    @Test public void nativeAliasesCannotReleaseCancelOrDuplicateAnOrdinaryHold() {
+        for (int[] pair : new int[][] {{305, 306}, {304, 312}}) {
+            matches.clear();
+            configure(pair[0], PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+            event(pair[0], 0, 0);
+            assertTrue(event(pair[1], 0, 100));
+            assertTrue(recognizer.onKey(pair[1], 1, 0, true, 150, 150, false, matches::add));
+            assertEquals(400, recognizer.nextDeadline());
+            recognizer.advance(400, matches::add);
+            modes(PRESS_HOLD);
+            event(pair[0], 1, 500);
+            event(pair[1], 0, 510); event(pair[1], 1, 520); // Late semantic tail.
+            event(pair[0], 0, 600);
+            event(pair[1], 1, 650); // Old alias UP cannot end the new press.
+            recognizer.advance(1000, matches::add);
+            event(pair[0], 1, 1100);
+            recognizer.advance(2000, matches::add);
+            modes(PRESS_HOLD, PRESS_HOLD);
+        }
+    }
+
+    @Test public void doubleStillUsesTwoOrdinaryClicksWhenNativeFeedbackAppearsOrDisappears() {
+        for (int[] pair : new int[][] {{305, 306}, {304, 312}}) {
+            for (boolean nativeFeedback : new boolean[] {false, true}) {
+                matches.clear();
+                configure(pair[0], PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
+                event(pair[0], 0, 0); event(pair[0], 1, 50);
+                if (nativeFeedback) {
+                    event(pair[1], 0, 100); event(pair[1], 1, 120);
+                }
+                recognizer.advance(350, matches::add);
+                modes();
+                event(pair[0], 0, 350);
+                if (nativeFeedback) event(pair[1], 1, 360);
+                event(pair[0], 1, 390);
+                recognizer.advance(1000, matches::add);
+                modes(PRESS_DOUBLE);
+            }
+        }
     }
 
     @Test public void revisionChangeCancelsPendingAndHeldActionsButConsumesTheirTails() {

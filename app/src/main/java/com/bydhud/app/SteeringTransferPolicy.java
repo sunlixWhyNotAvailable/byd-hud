@@ -27,10 +27,6 @@ final class SteeringTransferPolicy {
         return keyCode == 306 || keyCode == 312;
     }
 
-    static boolean hasNativeLongAlias(int canonicalKeyCode) {
-        return canonicalKeyCode == 305 || canonicalKeyCode == 304;
-    }
-
     static boolean shouldStartTransfer(int action, int repeatCount, boolean keyActive) {
         return isFirstDown(action, repeatCount) && !keyActive;
     }

@@ -278,6 +278,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         int suppressed = suppressKeyCode;
         if (suppressed >= 0 && SteeringTransferPolicy.isMappedKey(keyCode, suppressed)) {
             logSteeringKey(event, "learning-tail");
+            if (SteeringTransferPolicy.isNativeLongAlias(keyCode)) return true;
             if (event.getAction() == KeyEvent.ACTION_UP) {
                 synchronized (steeringLock) {
                     suppressKeyCode = SteeringTransferPreferences.NO_KEY_CODE;

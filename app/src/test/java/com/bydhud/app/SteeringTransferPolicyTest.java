@@ -35,8 +35,6 @@ public final class SteeringTransferPolicyTest {
         assertTrue(SteeringTransferPolicy.isMappedKey(312, 304));
         assertTrue(SteeringTransferPolicy.isNativeLongAlias(306));
         assertTrue(SteeringTransferPolicy.isNativeLongAlias(312));
-        assertTrue(SteeringTransferPolicy.hasNativeLongAlias(305));
-        assertTrue(SteeringTransferPolicy.hasNativeLongAlias(304));
     }
 
     @Test

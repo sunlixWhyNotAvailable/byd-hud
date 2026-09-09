@@ -51,6 +51,9 @@ final class SteeringGestureRecognizer {
             if (profile.keyCode == key) { assigned = true; break; }
         }
         if (!assigned && press == null) return false;
+        // OEM semantic aliases are consumed as part of the assigned family only.
+        // They neither start a gesture nor release/cancel the ordinary key's press.
+        if (SteeringTransferPolicy.isNativeLongAlias(rawKey)) return true;
         if (cancelled) {
             pendingUps.remove(key);
             if (action == SteeringTransferPolicy.ACTION_UP) presses.remove(key);
@@ -60,7 +63,6 @@ final class SteeringGestureRecognizer {
         if (action == SteeringTransferPolicy.ACTION_DOWN) {
             if (press != null) press.lastSeen = now;
             if (repeats != 0) return true;
-            boolean nativeHold = SteeringTransferPolicy.isNativeLongAlias(rawKey);
             if (press == null) {
                 Long firstUp = pendingUps.remove(key);
                 boolean second = firstUp != null && eventTime >= firstUp
@@ -71,16 +73,10 @@ final class SteeringGestureRecognizer {
                 press = new Press(eventTime, now, second, blocked);
                 presses.put(key, press);
             }
-            if (nativeHold && !press.held && !press.cancelled) {
-                pendingUps.remove(key);
-                press.held = true;
-                emit(key, SteeringTransferPreferences.PRESS_HOLD, emit);
-            }
         } else if (action == SteeringTransferPolicy.ACTION_UP && press != null) {
             presses.remove(key);
             if (press.cancelled || blocked || press.held) return true;
-            if (!SteeringTransferPolicy.hasNativeLongAlias(key)
-                    && eventTime - press.downAt >= holdTimeout) {
+            if (eventTime - press.downAt >= holdTimeout) {
                 emit(key, SteeringTransferPreferences.PRESS_HOLD, emit);
             } else if (press.second) {
                 emit(key, SteeringTransferPreferences.PRESS_DOUBLE, emit);
@@ -101,7 +97,6 @@ final class SteeringGestureRecognizer {
             Press press = entry.getValue();
             if (now >= press.lastSeen + tailTimeout) { active.remove(); continue; }
             if (!press.cancelled && !press.held
-                    && !SteeringTransferPolicy.hasNativeLongAlias(entry.getKey())
                     && now >= press.downAt + holdTimeout) {
                 press.held = true;
                 emit(entry.getKey(), SteeringTransferPreferences.PRESS_HOLD, emit);
@@ -122,8 +117,7 @@ final class SteeringGestureRecognizer {
         for (Map.Entry<Integer, Press> entry : presses.entrySet()) {
             Press press = entry.getValue();
             next = Math.min(next, press.lastSeen + tailTimeout);
-            if (!press.cancelled && !press.held
-                    && !SteeringTransferPolicy.hasNativeLongAlias(entry.getKey())) {
+            if (!press.cancelled && !press.held) {
                 next = Math.min(next, press.downAt + holdTimeout);
             }
         }
