@@ -167,9 +167,23 @@ public final class NavInfoLogger {
                 Log.w(TAG, "CLIENT_REJECTED|reason=missing_messenger_extra");
                 return;
             }
-            PendingIntent identity = intent.getParcelableExtra(EXTRA_IDENTITY);
-            if (!isTrustedSender(identity)) {
-                Log.w(TAG, "CLIENT_REJECTED|reason=untrusted_sender");
+            final PendingIntent identity;
+            try {
+                identity = intent.getParcelableExtra(EXTRA_IDENTITY);
+            } catch (RuntimeException error) {
+                Log.w(TAG, "CLIENT_REJECTED|reason=malformed_identity|type="
+                        + error.getClass().getSimpleName());
+                return;
+            }
+            try {
+                if (!isTrustedSender(identity)) {
+                    Log.w(TAG, "CLIENT_REJECTED|reason=untrusted_sender|"
+                            + identityRejectionDetails(identity));
+                    return;
+                }
+            } catch (RuntimeException error) {
+                Log.w(TAG, "CLIENT_REJECTED|reason=identity_metadata_unreadable|type="
+                        + error.getClass().getSimpleName());
                 return;
             }
             if (unregister) {
@@ -517,6 +531,21 @@ public final class NavInfoLogger {
 
     private static boolean isTrustedSender(PendingIntent identity) {
         return identity != null && CLIENT_PACKAGE.equals(identity.getCreatorPackage());
+    }
+
+    private static String identityRejectionDetails(PendingIntent identity) {
+        if (identity == null) return "identityReason=missing_token";
+        try {
+            String creatorPackage = identity.getCreatorPackage();
+            return "identityReason=" + (creatorPackage == null
+                    ? "missing_creator_package" : "creator_package_mismatch")
+                    + "|creatorPackage=" + creatorPackage
+                    + "|creatorUid=" + identity.getCreatorUid()
+                    + "|expectedPackage=" + CLIENT_PACKAGE;
+        } catch (RuntimeException error) {
+            return "identityReason=metadata_unreadable|type="
+                    + error.getClass().getSimpleName();
+        }
     }
 
     private static void capturePendingManeuver(ImageView view, PendingCapture pending) {

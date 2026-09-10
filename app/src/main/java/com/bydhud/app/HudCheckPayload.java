@@ -389,10 +389,15 @@ public final class HudCheckPayload {
         for (int y = 0; y < height; y++) {
             raw[offset++] = 0;
             for (int x = 0; x < width; x++) {
-                raw[offset++] = 0;
-                raw[offset++] = 0;
-                raw[offset++] = 0;
-                raw[offset++] = 0;
+                // Both map diagnostics need visible content, not a transparent clear frame.
+                boolean route = (x >= 40 && x <= 164 && Math.abs(y - 140) <= 4)
+                        || (Math.abs(x - 160) <= 4 && y >= 40 && y <= 140)
+                        || (x >= 160 && x <= 280 && Math.abs(y - 40) <= 4);
+                boolean grid = x % 40 < 2 || y % 30 < 2;
+                raw[offset++] = (byte) (route ? 0 : grid ? 70 : 17);
+                raw[offset++] = (byte) (route ? 220 : grid ? 90 : 29);
+                raw[offset++] = (byte) (route ? 255 : grid ? 105 : 40);
+                raw[offset++] = (byte) 255;
             }
         }
         ByteArrayOutputStream compressed = new ByteArrayOutputStream();

@@ -107,12 +107,20 @@ public final class RouteStateBridgeV2
             identity = intent.getParcelableExtra(EXTRA_REQUEST_IDENTITY);
             protocol = intent.getIntExtra(EXTRA_PROTOCOL, -1);
         } catch (RuntimeException malformed) {
-            Log.w(TAG, "STATE_REQUEST_IGNORED|reason=malformed");
+            Log.w(TAG, "STATE_REQUEST_IGNORED|reason=malformed|type="
+                    + malformed.getClass().getSimpleName());
             return;
         }
-        if (identity == null
-                || !matchesStateRequest(identity.getCreatorPackage(), protocol)) {
-            Log.w(TAG, "STATE_REQUEST_IGNORED|reason=untrusted");
+        try {
+            if (identity == null
+                    || !matchesStateRequest(identity.getCreatorPackage(), protocol)) {
+                Log.w(TAG, "STATE_REQUEST_IGNORED|reason=untrusted|"
+                        + requestRejectionDetails(identity, protocol));
+                return;
+            }
+        } catch (RuntimeException error) {
+            Log.w(TAG, "STATE_REQUEST_IGNORED|reason=identity_metadata_unreadable|type="
+                    + error.getClass().getSimpleName());
             return;
         }
         resendCurrentState();
@@ -120,6 +128,24 @@ public final class RouteStateBridgeV2
 
     public static boolean matchesStateRequest(String creatorPackage, int protocol) {
         return protocol == PROTOCOL_VERSION && BYD_HUD_PACKAGE.equals(creatorPackage);
+    }
+
+    private static String requestRejectionDetails(PendingIntent identity, int protocol) {
+        String protocolDetails = "|protocol=" + protocol + "|expectedProtocol=" + PROTOCOL_VERSION;
+        if (identity == null) return "identityReason=missing_token" + protocolDetails;
+        try {
+            String creatorPackage = identity.getCreatorPackage();
+            String reason = creatorPackage == null ? "missing_creator_package"
+                    : !BYD_HUD_PACKAGE.equals(creatorPackage) ? "creator_package_mismatch"
+                    : "protocol_mismatch";
+            return "identityReason=" + reason
+                    + "|creatorPackage=" + creatorPackage
+                    + "|creatorUid=" + identity.getCreatorUid()
+                    + "|expectedPackage=" + BYD_HUD_PACKAGE + protocolDetails;
+        } catch (RuntimeException error) {
+            return "identityReason=metadata_unreadable|type="
+                    + error.getClass().getSimpleName() + protocolDetails;
+        }
     }
 
     private static synchronized void resendCurrentState() {

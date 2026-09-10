@@ -7,14 +7,63 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import javax.imageio.ImageIO;
 
 public final class HudCheckPayloadTest {
+    @Test
+    public void bothMapPacketsContainAnOpaqueVisibleDiagnosticImage() throws Exception {
+        byte[] previousPng = null;
+        for (int index : new int[]{15, 16}) {
+            HudCheckState state = new HudCheckState().selectMode(HudCheckState.Mode.EXTENDED)
+                    .withAutomatic(false).stepExtended(index);
+            List<HudCheckPayload.Packet> packets = HudCheckPayload.auxiliaryPackets(null, state);
+            assertEquals(1, packets.size());
+            HudCheckPayload.Packet packet = packets.get(0);
+            assertEquals(0x000B010A00010000L, packet.serviceId);
+            assertEquals(index == 15 ? 0x4010A00018002L : 0x4010A00018003L, packet.topicId);
+            byte[] encoded;
+            if (index == 15) {
+                Map<Integer, Value> fields = inner(packet.payload);
+                assertEquals(0L, fields.get(1).varint);
+                assertEquals(2L, fields.get(2).varint);
+                assertEquals(1L, fields.get(3).varint);
+                assertEquals(45L, fields.get(4).varint);
+                encoded = fields.get(6).bytes;
+            } else {
+                byte[] packed = decode(packet.payload).get(1).bytes;
+                StringBuilder text = new StringBuilder();
+                int[] offset = {0};
+                while (offset[0] < packed.length) text.append((char) readVarint(packed, offset));
+                encoded = text.toString().getBytes(StandardCharsets.US_ASCII);
+            }
+            byte[] png = Base64.getDecoder().decode(encoded);
+            if (previousPng != null) assertArrayEquals(previousPng, png);
+            previousPng = png;
+            BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
+            assertEquals(320, image.getWidth());
+            assertEquals(180, image.getHeight());
+            Set<Integer> colors = new HashSet<>();
+            for (int y = 0; y < image.getHeight(); y++) {
+                for (int x = 0; x < image.getWidth(); x++) {
+                    int pixel = image.getRGB(x, y);
+                    assertEquals("transparent map pixel at " + x + "," + y, 255, pixel >>> 24);
+                    colors.add(pixel);
+                }
+            }
+            assertTrue("map must show a pattern rather than a uniform rectangle", colors.size() >= 3);
+            assertTrue(image.getRGB(100, 140) != image.getRGB(101, 101));
+        }
+    }
+
     @Test
     public void stockRoadInfoUsesTypedEmptyLaneAndNeutralPngFields() {
         Map<Integer, Value> fields = inner(HudCheckPayload.buildRoadInfo(null,

@@ -62,11 +62,21 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
         try {
             identity = intent.getParcelableExtra(EXTRA_IDENTITY);
         } catch (RuntimeException malformed) {
-            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=malformed_identity");
+            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=malformed_identity"
+                    + " type=" + malformed.getClass().getSimpleName());
             return;
         }
-        if (!trustedIdentity(appContext, identity)) {
-            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=untrusted_identity");
+        final boolean trusted;
+        try {
+            trusted = trustedIdentity(appContext, identity);
+        } catch (RuntimeException error) {
+            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=identity_metadata_unreadable"
+                    + " type=" + error.getClass().getSimpleName());
+            return;
+        }
+        if (!trusted) {
+            WazeRouteLifecycleReceiver.log(context, "v2 ignored reason=untrusted_identity "
+                    + identityRejectionDetails(identity));
             return;
         }
 
@@ -180,6 +190,25 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
         if (identity == null) return false;
         return trustedIdentity(identity.getCreatorPackage(), identity.getCreatorUid(),
                 () -> readInstalledWazeUid(context));
+    }
+
+    private static String identityRejectionDetails(PendingIntent identity) {
+        if (identity == null) return "identityReason=missing_token";
+        try {
+            String creatorPackage = identity.getCreatorPackage();
+            int installedUid = cachedWazeUid;
+            String reason = creatorPackage == null ? "missing_creator_package"
+                    : !WazeRouteLifecycleStore.WAZE_PACKAGE.equals(creatorPackage)
+                    ? "creator_package_mismatch"
+                    : installedUid < 0 ? "installed_uid_unavailable" : "creator_uid_mismatch";
+            return "identityReason=" + reason
+                    + " creatorPackage=" + creatorPackage
+                    + " creatorUid=" + identity.getCreatorUid()
+                    + " expectedPackage=" + WazeRouteLifecycleStore.WAZE_PACKAGE
+                    + " cachedInstalledUid=" + installedUid;
+        } catch (RuntimeException error) {
+            return "identityReason=metadata_unreadable type=" + error.getClass().getSimpleName();
+        }
     }
 
     static boolean trustedIdentity(String creatorPackage, int creatorUid,
