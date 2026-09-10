@@ -18,8 +18,10 @@ public final class CompactHeaderUiSourceContractTest {
         String source = runtimeSource();
         String header = between(source, "private fun Header(", "private fun OptionsTab(");
         assertContains(header,
-                "Segmented(copy.ukr, copy.eng, snapshot.uaLanguage, palette,",
-                "onLeft = { onLanguage(true) }", "onRight = { onLanguage(false) }",
+                "Segmented(copy.ukr, copy.eng, copy.language == Language.Ua, palette,",
+                "onLeft = { onLanguage(Language.Ua) }", "onRight = { onLanguage(Language.En) }",
+                "third = copy.ru", "thirdActive = copy.language == Language.Ru",
+                "onThird = { onLanguage(Language.Ru) }",
                 "Segmented(copy.dark, copy.light, snapshot.darkTheme, palette,",
                 "onLeft = { onTheme(true) }", "onRight = { onTheme(false) }");
         assertEquals(4, occurrences(source, "Segmented("));
@@ -28,14 +30,15 @@ public final class CompactHeaderUiSourceContractTest {
         assertContains(segmented,
                 "itemWidth: Dp = 64.dp",
                 "val selectionOffset by animateDpAsState(",
-                "targetValue = if (leftActive) 0.dp else itemWidth",
+                "targetValue = when { thirdActive -> itemWidth * 2; leftActive -> 0.dp; else -> itemWidth }",
                 "animationSpec = tween(durationMillis = 140)",
                 "label = \"segmentedSelectionOffset\"", ".offset(x = selectionOffset)",
                 ".height(42.dp)", "RoundedCornerShape(22.dp)", ".padding(5.dp)",
                 ".width(itemWidth)", ".height(32.dp)", "RoundedCornerShape(18.dp)",
                 ".background(palette.accent)", "Row {",
                 "SegmentedItem(left, leftActive, palette, itemWidth, onLeft)",
-                "SegmentedItem(right, !leftActive, palette, itemWidth, onRight)");
+                "SegmentedItem(right, !leftActive && !thirdActive, palette, itemWidth, onRight)",
+                "if (third != null) SegmentedItem(third, thirdActive, palette, itemWidth, onThird)");
         String item = between(source, "private fun SegmentedItem(", "private fun Pill(");
         assertContains(item,
                 "itemWidth: Dp", "rememberPressFeedback()", ".height(32.dp)", ".width(itemWidth)",
@@ -46,7 +49,7 @@ public final class CompactHeaderUiSourceContractTest {
         assertFalse(item.contains("if (active) palette.accent"));
         assertFalse((header + segmented + item).contains("delay("));
         assertContains(source,
-                "onLanguage = { ua -> runAction { activity.composeSetUaLanguage(ua) } }",
+                "onLanguage = { selected -> runAction { activity.composeSetUiLanguage(selected.code) } }",
                 "onTheme = { dark -> runAction { activity.composeSetDarkTheme(dark) } }",
                 "fun runAction(action: () -> Unit) {\n        action()\n        refresh()");
     }

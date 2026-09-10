@@ -807,7 +807,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public ComposeSnapshot composeSnapshot() {
         NavRuntimePermissionStatus permissionStatus = navRuntimePermissionStatus();
-        boolean uaLanguage = HudPrefs.isUaLanguage(this);
+        String uiLanguage = HudPrefs.uiLanguage(this);
         NavAppDisplayController displayController = NavAppDisplayController.get(this);
         Set<String> capturePackages = NavCapturePrefs.getCapturePackages(this);
         Set<String> observedPackages = NavCapturePrefs.getObservedPackages(this);
@@ -835,7 +835,7 @@ public final class MainActivity extends ComponentActivity {
         DashboardProjectionPolicy.Profile dashboardProfile =
                 HudPrefs.dashboardProjectionProfile(this, dashboardScreenMode);
         return new ComposeSnapshot(
-                HudPrefs.isUaLanguage(this),
+                HudPrefs.uiLanguage(this),
                 HudPrefs.isDarkTheme(this),
                 HudPrefs.isBootEnabled(this),
                 HudPrefs.isDetailedDebugArtifactsEnabled(this),
@@ -899,7 +899,7 @@ public final class MainActivity extends ComponentActivity {
                 logPathsText(),
                 composeApplicationState(permissionStatus),
                 NavHudLiveSender.hudCheckSnapshot(),
-                NavHudLiveSender.hudCheckStatus(uaLanguage),
+                NavHudLiveSender.hudCheckStatus(uiLanguage),
                 appScan.lastScanText,
                 appScan.hasAuthoritativeTaskState(),
                 APP_SCAN_IN_PROGRESS.get(),
@@ -916,21 +916,21 @@ public final class MainActivity extends ComponentActivity {
                 supportedRows,
                 allRows,
                 patchRows,
-                localizedNavigatorAssetSnapshots(uaLanguage),
+                localizedNavigatorAssetSnapshots(uiLanguage),
                 composePatchOperations(),
                 shareLaunchEvent.id,
                 shareLaunchEvent.storageDays);
     }
 
     private static List<NavigatorAssetManager.AssetSnapshot> localizedNavigatorAssetSnapshots(
-            boolean ukrainian) {
+            String language) {
         List<NavigatorAssetManager.AssetSnapshot> cached = navigatorAssetSnapshots;
         if (cached.isEmpty()) {
             return Collections.emptyList();
         }
         List<NavigatorAssetManager.AssetSnapshot> localized = new ArrayList<>(cached.size());
         for (NavigatorAssetManager.AssetSnapshot asset : cached) {
-            localized.add(asset.localized(ukrainian));
+            localized.add(asset.localized(language));
         }
         return Collections.unmodifiableList(localized);
     }
@@ -1600,9 +1600,11 @@ public final class MainActivity extends ComponentActivity {
         if (!started) {
             Toast.makeText(
                     this,
-                    HudPrefs.isUaLanguage(this)
+                    "uk".equals(HudPrefs.uiLanguage(this))
                             ? "Служба спеціальних можливостей недоступна"
-                            : "Accessibility service is unavailable",
+                            : "ru".equals(HudPrefs.uiLanguage(this))
+                                    ? "Служба специальных возможностей недоступна"
+                                    : "Accessibility service is unavailable",
                     Toast.LENGTH_LONG).show();
         }
         invalidateComposeSnapshot();
@@ -1632,6 +1634,12 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetUaLanguage(boolean ua) {
         setUiLanguage(ua);
+        DashboardWidgetController.refresh(this);
+    }
+
+    public void composeSetUiLanguage(String language) {
+        HudPrefs.setUiLanguage(this, language);
+        appendStatus("UI language " + HudPrefs.uiLanguage(this).toUpperCase(java.util.Locale.ROOT));
         DashboardWidgetController.refresh(this);
     }
 
@@ -2221,14 +2229,24 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public boolean composeBeginStorageShare(List<String> days, boolean toDeveloper,
-            int selectedFileCount, long selectedBytes, SentryLogReport report) {
+            int selectedFileCount, long selectedBytes, SentryLogReport report,
+            int selectionRevision) {
         return StorageLogShareWorkflow.start(getApplicationContext(),
-                immutableStorageDays(days), toDeveloper, selectedFileCount, selectedBytes, report);
+                immutableStorageDays(days), toDeveloper, selectedFileCount, selectedBytes,
+                report, selectionRevision);
     }
 
-    public void composeCancelStorageShare() { StorageLogShareWorkflow.cancel(); }
+    public void composeCancelStorageShare(String operationId) {
+        StorageLogShareWorkflow.cancel(operationId);
+    }
 
-    public void composeDismissStorageShare() { StorageLogShareWorkflow.dismiss(); }
+    public void composeDismissStorageShare(String operationId) {
+        StorageLogShareWorkflow.dismiss(operationId);
+    }
+
+    public boolean composeShareOversizedStorageArchive(String operationId) {
+        return StorageLogShareWorkflow.shareOversized(operationId);
+    }
 
     public boolean composeBeginConfigurationExport() {
         return VehicleConfigurationExport.start(getApplicationContext());
@@ -2476,6 +2494,7 @@ public final class MainActivity extends ComponentActivity {
 
     //models ComposeSnapshot data here so transport and parser layers share a stable contract.
     public static final class ComposeSnapshot {
+        public final String uiLanguage;
         public final boolean uaLanguage;
         public final boolean darkTheme;
         public final boolean bootEnabled;
@@ -2563,7 +2582,7 @@ public final class MainActivity extends ComponentActivity {
         public final long shareLaunchId;
         public final List<String> shareLaunchDays;
 
-        ComposeSnapshot(boolean uaLanguage, boolean darkTheme, boolean bootEnabled,
+        ComposeSnapshot(String uiLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
                 boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
@@ -2610,7 +2629,8 @@ public final class MainActivity extends ComponentActivity {
                 List<NavigatorAssetManager.AssetSnapshot> navigatorAssets,
                 List<ComposePatchOperation> patchOperations,
                 long shareLaunchId, List<String> shareLaunchDays) {
-            this.uaLanguage = uaLanguage;
+            this.uiLanguage = uiLanguage == null ? "uk" : uiLanguage;
+            this.uaLanguage = "uk".equals(this.uiLanguage);
             this.darkTheme = darkTheme;
             this.bootEnabled = bootEnabled;
             this.detailedDebugArtifactsEnabled = detailedDebugArtifactsEnabled;
@@ -2722,7 +2742,8 @@ public final class MainActivity extends ComponentActivity {
             if (this == value) return true;
             if (!(value instanceof ComposeSnapshot)) return false;
             ComposeSnapshot other = (ComposeSnapshot) value;
-            return uaLanguage == other.uaLanguage
+            return Objects.equals(uiLanguage, other.uiLanguage)
+                    && uaLanguage == other.uaLanguage
                     && darkTheme == other.darkTheme
                     && bootEnabled == other.bootEnabled
                     && detailedDebugArtifactsEnabled == other.detailedDebugArtifactsEnabled
@@ -2812,7 +2833,7 @@ public final class MainActivity extends ComponentActivity {
         @Override
         public int hashCode() {
             return Objects.hash(
-                    uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
+                    uiLanguage, uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
                     pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
                     distanceOutputEnabled, streetOutputEnabled, transliterationMode,
                     textDirectionOutputEnabled,

@@ -41,7 +41,7 @@ public final class WazeLanePatchStateContractTest {
         assertTrue(pipeline.contains("Waze lanes post-verification failed"));
         assertTrue(store.contains("Waze\", \"Lanes\", \"Stable session"));
         assertTrue(store.contains("SCAN_CACHE_REVISION = 10"));
-        assertTrue(compose.contains("\"Смуги\" else \"Lanes\""));
+        assertTrue(compose.contains("language.choose(\"Смуги\", \"Lanes\", \"Полосы\")"));
     }
 
     private static String source(String fileName) throws IOException {

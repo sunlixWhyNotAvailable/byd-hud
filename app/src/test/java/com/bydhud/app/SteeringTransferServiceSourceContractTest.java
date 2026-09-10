@@ -176,8 +176,11 @@ public final class SteeringTransferServiceSourceContractTest {
     public void noTaskErrorsAndTimeoutsReleaseGateWithoutLaunchingOrReplayingKeys() throws Exception {
         String steering = steeringWorker();
         assertTrue(steering.contains("if (normalized.isEmpty()) { reportSteeringFailure("));
-        assertTrue(steering.contains("if (!SteeringTransferPolicy.canToggleTask(current, observed)) { "
-                + "reportSteeringFailure(normalized, \"task/display state unknown\"); return; }"));
+        String rejected = between(steering,
+                "if (!SteeringTransferPolicy.canToggleTask(current, observed)) {",
+                "boolean toDashboard =");
+        assertTrue(rejected.contains("steering_transfer_rejected observed="));
+        assertTrue(rejected.contains("reportSteeringFailure(normalized, \"task/display state unknown\"); return; }"));
         assertTrue(steering.contains("catch (RuntimeException error)"));
         assertTrue(steering.contains("finally { if (!executingMove) endMove(normalized); }"));
         String controller = source("NavAppDisplayController.java");

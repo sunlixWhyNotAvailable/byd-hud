@@ -7,15 +7,14 @@ import java.util.Collections;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
 import java.util.zip.ZipFile;
 
 import io.sentry.Attachment;
 import io.sentry.Hint;
-import io.sentry.Sentry;
+import io.sentry.SentryClient;
 import io.sentry.SentryEvent;
 import io.sentry.SentryLevel;
-import io.sentry.android.core.SentryAndroid;
+import io.sentry.SentryOptions;
 import io.sentry.hints.SubmissionResult;
 import io.sentry.protocol.Message;
 import io.sentry.protocol.SentryId;
@@ -23,7 +22,7 @@ import io.sentry.util.HintUtils;
 
 // Sends only an explicitly selected diagnostic archive; no automatic telemetry is enabled.
 final class SentryLogUploader {
-    static final long MAX_ZIP_BYTES = 20L * 1024L * 1024L;
+    static final long MAX_ZIP_BYTES = 39_000_000L;
 
     static final class Result {
         final boolean ok;
@@ -52,8 +51,8 @@ final class SentryLogUploader {
             return success;
         }
 
-        boolean await(long timeoutMs) throws InterruptedException {
-            return completion.await(timeoutMs, TimeUnit.MILLISECONDS);
+        void await() throws InterruptedException {
+            completion.await();
         }
     }
 
@@ -88,31 +87,10 @@ final class SentryLogUploader {
             LogShareZip.deleteArtifact(archive);
             return new Result(false, "", validation);
         }
-        boolean transportSucceeded = false;
+        SentryClient client = null;
         try {
-            SentryAndroid.init(context.getApplicationContext(), options -> {
-                options.setDsn(BuildConfig.SENTRY_DSN);
-                options.setSampleRate(1.0);
-                options.setTracesSampleRate(0.0);
-                options.setProfilesSampleRate(0.0);
-                options.setSendDefaultPii(false);
-                options.setEnableUncaughtExceptionHandler(false);
-                options.setAnrEnabled(false);
-                options.setReportHistoricalAnrs(false);
-                options.setEnableAutoSessionTracking(false);
-                options.setEnableActivityLifecycleBreadcrumbs(false);
-                options.setEnableAppLifecycleBreadcrumbs(false);
-                options.setEnableSystemEventBreadcrumbs(false);
-                options.setEnableAppComponentBreadcrumbs(false);
-                options.setEnableUserInteractionBreadcrumbs(false);
-                options.setEnableAutoActivityLifecycleTracing(false);
-                options.setEnableFramesTracking(false);
-                options.setAttachScreenshot(false);
-                options.setAttachViewHierarchy(false);
-                options.getIntegrations().clear();
-                options.setBeforeSend((event, hint) ->
-                        "true".equals(event.getTag("bydhud_manual_upload")) ? event : null);
-            });
+            SentryOptions options = buildOptions(BuildConfig.SENTRY_DSN);
+            client = new SentryClient(options);
 
             SentryEvent event = buildManualUploadEvent(
                     messageText, uploadType, selectedDays, uploadId, userComment);
@@ -122,38 +100,45 @@ final class SentryLogUploader {
                     archive.getAbsolutePath(), archive.getName(), "application/zip"));
             SubmissionResultTracker submissionResult = new SubmissionResultTracker();
             HintUtils.setTypeCheckHint(hint, submissionResult);
-            SentryId eventId = Sentry.captureEvent(event, hint);
+            SentryId eventId = client.captureEvent(event, hint);
             if (SentryId.EMPTY_ID.equals(eventId)) {
-                return new Result(false, "", "Sentry did not accept the upload; archive retained: "
-                        + archive.getName());
+                return new Result(false, "", "Sentry did not accept the upload");
             }
-            boolean callbackCompleted = submissionResult.await(30_000L);
-            if (!callbackCompleted || !submissionResult.isSuccess()) {
-                String detail = callbackCompleted
-                        ? "Sentry did not deliver the upload"
-                        : "Sentry upload timed out";
-                return new Result(false, "", detail + "; archive retained: "
-                        + archive.getName());
+            submissionResult.await();
+            if (!submissionResult.isSuccess()) {
+                return new Result(false, "", "Sentry did not deliver the upload");
             }
-            transportSucceeded = true;
             return new Result(true, eventId.toString(), "uploaded");
         } catch (InterruptedException error) {
             Thread.currentThread().interrupt();
-            return new Result(false, "", "Upload interrupted; archive retained: "
-                    + archive.getName());
+            return new Result(false, "", "Upload interrupted");
         } catch (Throwable error) {
             return new Result(false, "", error.getClass().getSimpleName() + ": "
-                    + String.valueOf(error.getMessage()) + "; archive retained: "
-                    + archive.getName());
+                    + String.valueOf(error.getMessage()));
         } finally {
             try {
-                Sentry.close();
+                if (client != null) client.close(false);
             } catch (Throwable ignored) {
             }
-            if (transportSucceeded) {
-                LogShareZip.deleteArtifact(archive);
-            }
+            LogShareZip.deleteArtifact(archive);
         }
+    }
+
+    static SentryOptions buildOptions(String dsn) {
+        SentryOptions options = new SentryOptions();
+        options.setDsn(dsn);
+        options.setSampleRate(1.0);
+        options.setTracesSampleRate(0.0);
+        options.setProfilesSampleRate(0.0);
+        options.setSendDefaultPii(false);
+        options.setEnableUncaughtExceptionHandler(false);
+        options.setEnableAutoSessionTracking(false);
+        options.setEnableShutdownHook(false);
+        options.setMaxAttachmentSize(MAX_ZIP_BYTES);
+        options.getIntegrations().clear();
+        options.setBeforeSend((event, hint) ->
+                "true".equals(event.getTag("bydhud_manual_upload")) ? event : null);
+        return options;
     }
 
     static SentryEvent buildManualUploadEvent(
@@ -199,8 +184,8 @@ final class SentryLogUploader {
             return "Archive is missing";
         }
         long bytes = archive.length();
-        if (bytes <= 0L || bytes > MAX_ZIP_BYTES) {
-            return "Archive must be between 1 byte and 20 MiB";
+        if (bytes <= 0L || bytes >= MAX_ZIP_BYTES) {
+            return "Archive must be between 1 byte and 38,999,999 bytes";
         }
         try (ZipFile zip = new ZipFile(archive)) {
             if (!zip.entries().hasMoreElements()) {

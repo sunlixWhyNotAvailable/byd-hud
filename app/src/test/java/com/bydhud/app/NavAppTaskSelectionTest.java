@@ -16,6 +16,52 @@ public final class NavAppTaskSelectionTest {
     }
 
     @Test
+    public void globalFocusedSummaryCannotReplaceHiddenOwnedTaskOrInheritLastDisplay() {
+        String dumpsys = "Display #8 (activities from top to bottom):\n"
+                + "  * Task{abc #28 type=standard A=101:com.waze U=0 visible=false}\n"
+                + "    mResumedActivity: ActivityRecord{abc com.waze/.MainActivity visible=false}\n"
+                + "Display #4 (activities from top to bottom):\n"
+                + "ActivityTaskSupervisor state:\n"
+                + "  topDisplayFocusedRootTask=Task{def #28 type=standard A=101:com.waze"
+                + " U=0 visible=true}\n";
+
+        NavAppDisplayState byPackage =
+                NavAppDisplayController.parseTaskForTest("com.waze", dumpsys);
+        NavAppDisplayState byTask =
+                NavAppDisplayController.parseTaskIdForTest("com.waze", 28, dumpsys);
+
+        assertEquals(28, byPackage.taskId);
+        assertEquals(8, byPackage.displayId);
+        assertFalse(byPackage.visible);
+        assertEquals(8, byTask.displayId);
+        assertFalse(byTask.visible);
+        assertTrue(NavAppTaskScanner.isGlobalTaskSummary(
+                "  topDisplayFocusedRootTask=Task{def #28 com.waze visible=true}"));
+        assertTrue(NavAppTaskScanner.parseTaskHeader(
+                "  topDisplayFocusedRootTask=Task{def #28 com.waze visible=true}", 4) == null);
+    }
+
+    @Test
+    public void multipleDisplaysAndSummaryTrailerKeepRealVisibleTaskAuthoritative() {
+        String dumpsys = "Display #0 (activities from top to bottom):\n"
+                + "  * Task{aaa #11 A=101:com.example.other visible=true}\n"
+                + "Display #6 (activities from top to bottom):\n"
+                + "  * Task{bbb #12 A=101:com.waze visible=true}\n"
+                + "    ActivityRecord{bbb com.waze/.MainActivity visible=true}\n"
+                + "Display #9 (activities from top to bottom):\n"
+                + "  * Task{ccc #19 A=101:com.waze visible=false}\n"
+                + "ActivityTaskSupervisor state:\n"
+                + "  topDisplayFocusedRootTask=Task{ddd #12 A=101:com.waze visible=false}\n";
+
+        NavAppDisplayState state =
+                NavAppDisplayController.parseTaskForTest("com.waze", dumpsys);
+
+        assertEquals(12, state.taskId);
+        assertEquals(6, state.displayId);
+        assertTrue(state.visible);
+    }
+
+    @Test
     public void sharedSelectionRuleOnlyReplacesHiddenWithVisible() {
         assertTrue(NavAppTaskScanner.shouldReplaceTaskSelection(false, false, false));
         assertTrue(NavAppTaskScanner.shouldReplaceTaskSelection(true, false, true));

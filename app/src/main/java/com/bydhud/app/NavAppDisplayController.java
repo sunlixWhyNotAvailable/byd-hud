@@ -59,21 +59,13 @@ final class NavAppDisplayController {
     private static final Pattern DISPLAY_INFO_DISPLAY_ID_PATTERN =
             Pattern.compile(".*displayId ([0-9]+).*");
     private static final Pattern DISPLAY_SECTION_PATTERN =
-            Pattern.compile(".*Display #([0-9]+).*");
+            Pattern.compile("\\s*Display #([0-9]+).*");
     private static final Pattern DISPLAY_ID_PATTERN =
             Pattern.compile(".*mDisplayId=([0-9]+).*");
     private static final Pattern REMOTE_DASHBOARD_DISPLAY_BEFORE = Pattern.compile(
             "(?s).*mDisplayId=([0-9]+).{0,700}remote_dashboard.*");
     private static final Pattern REMOTE_DASHBOARD_DISPLAY_AFTER = Pattern.compile(
             "(?s).*remote_dashboard.{0,700}mDisplayId=([0-9]+).*");
-    private static final Pattern ROOT_TASK_PATTERN =
-            Pattern.compile(".*RootTask id=([0-9]+).*displayId=([0-9]+).*");
-    private static final Pattern ROOT_TASK_HASH_PATTERN =
-            Pattern.compile(".*RootTask\\{[^#]*#([0-9]+).*displayId=([0-9]+).*");
-    private static final Pattern TASK_HASH_PATTERN =
-            Pattern.compile(".*Task\\{[^#]*#([0-9]+).*displayId=([0-9]+).*");
-    private static final Pattern TASK_HASH_NO_DISPLAY_PATTERN =
-            Pattern.compile(".*Task\\{[^#]*#([0-9]+).*");
     private static final Pattern TASK_ID_DISPLAY_PATTERN =
             Pattern.compile(".*taskId=([0-9]+).*displayId=([0-9]+).*");
     private static final Pattern DISPLAY_ID_TASK_PATTERN =
@@ -138,6 +130,11 @@ final class NavAppDisplayController {
     //parses source data here so downstream HUD code receives normalized navigation fields.
     static NavAppDisplayState parseTaskForTest(String packageName, String dumpsys) {
         return parseTask(packageName, dumpsys);
+    }
+
+    static NavAppDisplayState parseTaskIdForTest(
+            String logicalPackage, int targetTaskId, String dumpsys) {
+        return parseTaskId(logicalPackage, targetTaskId, dumpsys);
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
@@ -449,6 +446,13 @@ final class NavAppDisplayController {
                 if (!requestCurrent.getAsBoolean()) return;
                 DashboardProjectionPolicy.ObservedDisplay observed = observedDisplay(normalized, current);
                 if (!SteeringTransferPolicy.canToggleTask(current, observed)) {
+                    String owner = confirmedDashboardPackage();
+                    int ownedDisplay = owner.isEmpty()
+                            ? NavAppDisplayState.DISPLAY_UNKNOWN
+                            : ClusterProjectionService.projectedDisplayIdForPackage(owner);
+                    log(normalized, "steering_transfer_rejected observed=" + observed
+                            + " task=" + current.taskId + " display=" + current.displayId
+                            + " owner=" + owner + " ownedDisplay=" + ownedDisplay);
                     reportSteeringFailure(normalized, "task/display state unknown");
                     return;
                 }
@@ -1234,7 +1238,9 @@ final class NavAppDisplayController {
                 context,
                 HudPrefs.isUaLanguage(context)
                         ? "Не вдалося перенести застосунок"
-                        : "Unable to transfer app",
+                        : HudPrefs.isRuLanguage(context)
+                                ? "Не удалось перенести приложение"
+                                : "Unable to transfer app",
                 Toast.LENGTH_LONG).show());
     }
 
@@ -1251,7 +1257,9 @@ final class NavAppDisplayController {
                 context,
                 HudPrefs.isUaLanguage(context)
                         ? "Не вдалося підготувати чорне тло панелі приладів"
-                        : "Unable to prepare dashboard black output",
+                        : HudPrefs.isRuLanguage(context)
+                                ? "Не удалось подготовить чёрный фон приборной панели"
+                                : "Unable to prepare dashboard black output",
                 Toast.LENGTH_LONG).show());
     }
 
@@ -2197,9 +2205,23 @@ final class NavAppDisplayController {
         for (String line : lines) {
             Matcher displaySection = DISPLAY_SECTION_PATTERN.matcher(line);
             if (displaySection.matches()) {
+                selected = preferVisibleTask(selected, taskFromBlock(
+                        normalized, currentTaskId, currentDisplayId, block));
+                currentTaskId = -1;
+                currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+                block.setLength(0);
                 sectionDisplayId = parseInt(
                         displaySection.group(1),
                         NavAppDisplayState.DISPLAY_UNKNOWN);
+            }
+            if (NavAppTaskScanner.isGlobalTaskSummary(line)) {
+                selected = preferVisibleTask(selected, taskFromBlock(
+                        normalized, currentTaskId, currentDisplayId, block));
+                currentTaskId = -1;
+                currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+                sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+                block.setLength(0);
+                continue;
             }
             int[] header = parseTaskHeader(line, sectionDisplayId);
             if (header != null) {
@@ -2242,8 +2264,26 @@ final class NavAppDisplayController {
         for (String line : lines) {
             Matcher section = DISPLAY_SECTION_PATTERN.matcher(line);
             if (section.matches()) {
+                if (currentTaskId == targetTaskId) {
+                    return new NavAppDisplayState(logicalPackage, targetTaskId,
+                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id");
+                }
+                currentTaskId = -1;
+                currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+                block.setLength(0);
                 sectionDisplayId = parseInt(
                         section.group(1), NavAppDisplayState.DISPLAY_UNKNOWN);
+            }
+            if (NavAppTaskScanner.isGlobalTaskSummary(line)) {
+                if (currentTaskId == targetTaskId) {
+                    return new NavAppDisplayState(logicalPackage, targetTaskId,
+                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id");
+                }
+                currentTaskId = -1;
+                currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+                sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
+                block.setLength(0);
+                continue;
             }
             int[] header = parseTaskHeader(line, sectionDisplayId);
             if (header != null) {
@@ -2279,27 +2319,7 @@ final class NavAppDisplayController {
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
     private static int[] parseTaskHeader(String line, int fallbackDisplayId) {
-        Matcher root = ROOT_TASK_PATTERN.matcher(line);
-        if (!root.matches()) {
-            root = ROOT_TASK_HASH_PATTERN.matcher(line);
-        }
-        if (!root.matches()) {
-            root = TASK_HASH_PATTERN.matcher(line);
-        }
-        if (root.matches()) {
-            return new int[]{
-                    parseInt(root.group(1), -1),
-                    parseInt(root.group(2), NavAppDisplayState.DISPLAY_UNKNOWN)
-            };
-        }
-        root = TASK_HASH_NO_DISPLAY_PATTERN.matcher(line);
-        if (root.matches()) {
-            return new int[]{
-                    parseInt(root.group(1), -1),
-                    fallbackDisplayId
-            };
-        }
-        return null;
+        return NavAppTaskScanner.parseTaskHeader(line, fallbackDisplayId);
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.

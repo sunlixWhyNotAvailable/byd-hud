@@ -176,9 +176,26 @@ private enum class RuntimeTab {
     HudCheck
 }
 
-private enum class Language {
+internal enum class Language {
     Ua,
-    En
+    En,
+    Ru;
+
+    val code: String get() = when (this) { Ua -> "uk"; En -> "en"; Ru -> "ru" }
+
+    fun <T> choose(ukrainian: T, english: T, russian: T): T = when (this) {
+        Ua -> ukrainian
+        En -> english
+        Ru -> russian
+    }
+
+    companion object {
+        fun fromCode(code: String): Language = when (code.lowercase()) {
+            "uk", "ua" -> Ua
+            "ru" -> Ru
+            else -> En
+        }
+    }
 }
 
 //models UpdateCheckState data here so transport and parser layers share a stable contract.
@@ -242,6 +259,7 @@ private data class Copy(
     val permissionsMissing: String,
     val ukr: String,
     val eng: String,
+    val ru: String,
     val dark: String,
     val light: String,
     val mainHint: String,
@@ -752,7 +770,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var previousTab by remember(uiSession) { mutableStateOf(selectedTab) }
     var storageSortOldestFirst by rememberSaveable { mutableStateOf(false) }
     var selectedStorageDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
+    var storageSelectionRevision by rememberSaveable { mutableIntStateOf(0) }
     var handledStorageShareLaunchId by rememberSaveable { mutableStateOf(0L) }
+    var handledSentryOperationIds by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var pendingStorageDeleteDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteQueue by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageDeleteBusy by remember { mutableStateOf(false) }
@@ -770,9 +790,11 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var sentryCommentSubmitting by remember { mutableStateOf(false) }
     var sentryUploadCooldownUntilMs by rememberSaveable { mutableStateOf(0L) }
     var sentryUploadCooldownRemaining by remember { mutableIntStateOf(0) }
-    val storageLogShare by StorageLogShareWorkflow.snapshot.collectAsState()
+    val storageLogShares by StorageLogShareWorkflow.snapshots.collectAsState()
     val configurationExport by VehicleConfigurationExport.snapshot.collectAsState()
-    val storageLogShareBusy = storageLogShare?.let { storageLogShareBusy(it.phase) } ?: false
+    val storageLogSharePreparationBusy = storageLogShares.any {
+        storageLogSharePreparationBusy(it.phase)
+    }
     val configurationShareBusy = configurationExport?.let { configurationExportBusy(it.phase) } ?: false
     var configurationShareVisible by rememberSaveable { mutableStateOf(false) }
     var configurationStartFailed by remember { mutableStateOf(false) }
@@ -808,8 +830,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     val palette = remember(snapshot.darkTheme) {
         if (snapshot.darkTheme) darkPalette() else lightPalette()
     }
-    val copy = remember(snapshot.uaLanguage) {
-        if (snapshot.uaLanguage) uaCopy() else enCopy()
+    val language = remember(snapshot.uiLanguage) { Language.fromCode(snapshot.uiLanguage) }
+    val copy = remember(language) {
+        when (language) { Language.Ua -> uaCopy(); Language.En -> enCopy(); Language.Ru -> ruCopy() }
     }
     val shareCopy = remember(copy.language) { shareCopy(copy.language) }
     val blockingUiFlow = when {
@@ -948,7 +971,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
 
     //runs storage deletion as folder steps so the UI can stay responsive without a pre-scan.
     fun beginStorageDelete(days: List<String>) {
-        if (days.isEmpty() || storageDeleteBusy || storageShareBusy || storageLogShareBusy) {
+        if (days.isEmpty() || storageDeleteBusy || storageShareBusy || storageLogSharePreparationBusy) {
             return
         }
         if (!activity.composeTryStartBlockingUiFlow("storage-delete")) {
@@ -963,7 +986,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     }
 
     fun beginStorageShare(days: List<String>) {
-        if (days.isEmpty() || storageDeleteBusy || storageShareBusy || storageLogShareBusy ||
+        if (days.isEmpty() || storageDeleteBusy || storageShareBusy || storageLogSharePreparationBusy ||
             configurationShareBusy) {
             return
         }
@@ -1078,6 +1101,24 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         activity.composeAcknowledgeShareLaunch(launchId)
     }
 
+    LaunchedEffect(storageLogShares, storageSelectionRevision) {
+        storageLogShares.forEach { operation ->
+            if (operation.operationId in handledSentryOperationIds) return@forEach
+            if (!operation.toDeveloper) return@forEach
+            if (operation.phase != StorageLogSharePhase.SENT && operation.phase != StorageLogSharePhase.READY) {
+                return@forEach
+            }
+            handledSentryOperationIds = handledSentryOperationIds + operation.operationId
+            if (operation.selectionRevision == storageSelectionRevision) {
+                val completedDays = operation.selectedDays.toSet()
+                if (completedDays.isNotEmpty()) {
+                    selectedStorageDays = selectedStorageDays.filterNot { it in completedDays }
+                    storageSelectionRevision += 1
+                }
+            }
+        }
+    }
+
     DisposableEffect(activity) {
         activity.composeSetSnapshotInvalidationListener { refresh() }
         appInForeground = activity.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
@@ -1163,6 +1204,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             storageDeleteStep = 0
             storageDeleteTotal = 0
             selectedStorageDays = emptyList()
+            storageSelectionRevision += 1
             refresh()
             return@LaunchedEffect
         }
@@ -1184,6 +1226,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         storageDeleteStep = 0
         storageDeleteTotal = 0
         selectedStorageDays = emptyList()
+        storageSelectionRevision += 1
         refresh()
     }
 
@@ -1202,7 +1245,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 palette = palette,
                 snapshot = snapshot,
                 hudStatus = liveHudStatus,
-                onLanguage = { ua -> runAction { activity.composeSetUaLanguage(ua) } },
+                onLanguage = { selected -> runAction { activity.composeSetUiLanguage(selected.code) } },
                 onTheme = { dark -> runAction { activity.composeSetDarkTheme(dark) } }
             )
 
@@ -1266,12 +1309,12 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         scrollState = storageScrollState,
                         dayScrollState = storageDayScrollState,
                         snapshot = snapshot,
-                        configurationShareBusy = configurationShareBusy || storageLogShareBusy,
+                        configurationShareBusy = configurationShareBusy || storageLogSharePreparationBusy,
                         logcatBusy = logcatBusy,
                         onStartLogcat = { runLogcatAction(true) },
                         onStopLogcat = { runLogcatAction(false) },
                         onShareConfiguration = {
-                            if (!configurationShareBusy && !storageLogShareBusy
+                            if (!configurationShareBusy && !storageLogSharePreparationBusy
                                 && activity.composeTryStartBlockingUiFlow("configuration-share")) {
                                 configurationStartFailed = false
                                 configurationShareVisible = true
@@ -1279,7 +1322,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         },
                         sortOldestFirst = storageSortOldestFirst,
                         selectedDays = selectedStorageDays,
-                        storageActionBusy = storageDeleteBusy || storageShareBusy || storageLogShareBusy,
+                        storageActionBusy = storageDeleteBusy || storageShareBusy || storageLogSharePreparationBusy,
                         storageSortBusy = storageDeleteBusy,
                         storageLimitDraft = storageLimitDraft,
                         onStorageLimitDraftChange = { storageLimitDraft = it },
@@ -1291,6 +1334,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             } else {
                                 selectedStorageDays + day
                             }
+                            storageSelectionRevision += 1
                         },
                         onDeleteSelected = { deletableSelectedDays ->
                             if (activity.composeTryStartBlockingUiFlow("storage-delete")) {
@@ -1380,10 +1424,10 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             shareCopy = shareCopy,
             palette = palette,
             patchOperations = snapshot.patchOperations,
-            storageLogShare = storageLogShare,
+            storageLogShares = storageLogShares,
             configurationExport = configurationExport,
-            onCancelShare = { activity.composeCancelStorageShare() },
-            onCloseShare = { activity.composeDismissStorageShare() },
+            onCancelShare = { id -> activity.composeCancelStorageShare(id) },
+            onCloseShare = { id -> activity.composeDismissStorageShare(id) },
             onCancelConfiguration = { activity.composeCancelConfigurationExport() },
             onCloseConfiguration = { activity.composeDismissConfigurationExport() },
             onShareConfiguration = { activity.composeShareConfigurationExport() },
@@ -1424,7 +1468,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             UpdateCheckOverlay(
                 copy = copy,
                 palette = palette,
-                uaLanguage = snapshot.uaLanguage,
+                language = copy.language,
                 state = updateState,
                 onUpdate = {
                     val available = updateState
@@ -1583,7 +1627,8 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             false,
                             storageShareSummaryFileCount,
                             storageShareSummaryBytes,
-                            null
+                            null,
+                            storageSelectionRevision
                         )) {
                         storageShareSummaryVisible = false
                         storageShareDays = emptyList()
@@ -1618,14 +1663,15 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                                     "dd.MM.yyyy HH:mm",
                                     Locale.getDefault()
                                 ).format(Date()),
-                                if (copy.language == Language.Ua) "Логи" else "Logs"
+                                language.choose("Логи", "Logs", "Логи")
                             )
                             if (activity.composeBeginStorageShare(
                                     storageShareDays.toList(),
                                     true,
                                     storageShareSummaryFileCount,
                                     storageShareSummaryBytes,
-                                    report
+                                    report,
+                                    storageSelectionRevision
                                 )) {
                                 sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
                                 sentryUploadCooldownRemaining = 30
@@ -1643,15 +1689,26 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             )
         }
 
+        storageLogShares.lastOrNull {
+            it.phase == StorageLogSharePhase.OVERSIZED && !it.dismissed
+        }?.let { oversized ->
+            SentryArchiveLimitDialog(
+                language = copy.language,
+                palette = palette,
+                archiveBytes = oversized.archiveBytes,
+                onCancel = { activity.composeCancelStorageShare(oversized.operationId) },
+                onAnotherApp = { activity.composeShareOversizedStorageArchive(oversized.operationId) }
+            )
+        }
+
         if (configurationShareVisible) {
             ConfigurationShareDestinationOverlay(
                 copy = shareCopy,
                 palette = palette,
-                startError = if (!configurationStartFailed) "" else if (copy.language == Language.Ua) {
-                    "Інша операція ще триває. Зачекайте й повторіть спробу"
-                } else {
-                    "Another operation is still running. Wait and try again"
-                },
+                startError = if (!configurationStartFailed) "" else copy.language.choose(
+                    "Інша операція ще триває. Зачекайте й повторіть спробу",
+                    "Another operation is still running. Wait and try again",
+                    "Другая операция ещё выполняется. Подождите и повторите попытку"),
                 language = copy.language,
                 onCreate = { beginConfigurationShare() },
                 onCancel = { configurationShareVisible = false }
@@ -1677,7 +1734,7 @@ private fun Header(
     palette: Palette,
     snapshot: MainActivity.ComposeSnapshot,
     hudStatus: String,
-    onLanguage: (Boolean) -> Unit,
+    onLanguage: (Language) -> Unit,
     onTheme: (Boolean) -> Unit
 ) {
     Row(
@@ -1717,9 +1774,12 @@ private fun Header(
             Pill(if (snapshot.settingsPermissionsGranted) copy.permissionsOk else copy.permissionsMissing,
                 if (snapshot.settingsPermissionsGranted) palette.green else palette.red,
                 if (snapshot.settingsPermissionsGranted) palette.greenSoft else palette.redSoft)
-            Segmented(copy.ukr, copy.eng, snapshot.uaLanguage, palette,
-                onLeft = { onLanguage(true) },
-                onRight = { onLanguage(false) })
+            Segmented(copy.ukr, copy.eng, copy.language == Language.Ua, palette,
+                onLeft = { onLanguage(Language.Ua) },
+                onRight = { onLanguage(Language.En) },
+                third = copy.ru,
+                thirdActive = copy.language == Language.Ru,
+                onThird = { onLanguage(Language.Ru) })
             Segmented(copy.dark, copy.light, snapshot.darkTheme, palette,
                 onLeft = { onTheme(true) },
                 onRight = { onTheme(false) })
@@ -1751,7 +1811,7 @@ private fun OptionsTab(
     onDashboardWidgetChange: (DashboardWidgetState) -> Unit,
     onWidgetPermissionRequest: () -> Unit
 ) {
-    val ua = copy.language == Language.Ua
+    val language = copy.language
     var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
     var showSteeringButtonCapture by remember { mutableStateOf(false) }
     var steeringCaptureLearningRevision by remember { mutableStateOf(0L) }
@@ -1760,20 +1820,17 @@ private fun OptionsTab(
     var hudHelpRequest by remember { mutableStateOf<HudHelpRequest?>(null) }
     var hudColorTarget by remember { mutableStateOf<HudTextColorSlot?>(null) }
     val steeringLearningRevision = NavAccessibilityService.keyLearningRevision()
-    val steeringPressModes = if (ua) {
-        listOf("Одиночне", "Утримання", "Подвійне")
-    } else {
-        listOf("Single", "Hold", "Double")
-    }
-    val steeringWindowProfiles = if (ua) {
-        listOf("Поточний профіль", "Тільки частковий", "Тільки повний")
-    } else {
-        listOf("Current profile", "Partial only", "Full only")
-    }
-    val etaOutputFields = if (ua) listOf("Вулиці", "Експериментальне")
-        else listOf("Street", "Experimental")
-    val wazeAlertFields = if (ua) listOf("Маневру", "Експериментальне")
-        else listOf("Maneuver", "Experimental")
+    val steeringPressModes = language.choose(
+        listOf("Одиночне", "Утримання", "Подвійне"), listOf("Single", "Hold", "Double"),
+        listOf("Одиночное", "Удержание", "Двойное"))
+    val steeringWindowProfiles = language.choose(
+        listOf("Поточний профіль", "Тільки частковий", "Тільки повний"),
+        listOf("Current profile", "Partial only", "Full only"),
+        listOf("Текущий профиль", "Только частичный", "Только полный"))
+    val etaOutputFields = language.choose(listOf("Вулиці", "Експериментальне"),
+        listOf("Street", "Experimental"), listOf("Улица", "Экспериментальное"))
+    val wazeAlertFields = language.choose(listOf("Маневру", "Експериментальне"),
+        listOf("Maneuver", "Experimental"), listOf("Манёвр", "Экспериментальное"))
     fun pressModeIndex(mode: String): Int = when (mode) {
         SteeringTransferPreferences.PRESS_HOLD -> 1
         SteeringTransferPreferences.PRESS_DOUBLE -> 2
@@ -1788,7 +1845,7 @@ private fun OptionsTab(
         val app = InstalledTransferAppCatalog.selectionOrFallback(
             snapshot.steeringTransferApps, profile.packageName).label()
         return listOf(
-            steeringButtonLabel(profile.keyCode, ua),
+            steeringButtonLabel(profile.keyCode, language),
             steeringPressModes[pressModeIndex(profile.pressMode)],
             app,
             steeringWindowProfiles[windowProfileIndex(profile.windowProfile)]
@@ -1842,7 +1899,7 @@ private fun OptionsTab(
         freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
     )
     fun colorHelp(slot: HudTextColorSlot) = HudHelpRequest(
-        HudHelpTopicId.TextColor, slot.title(ua), HudHelpControlKind.Color,
+        HudHelpTopicId.TextColor, localizedColorTitle(slot, language), HudHelpControlKind.Color,
         presentation = hudPresentation, colorSlot = slot, etaMask = etaMask,
         etaStreet = false
     )
@@ -1870,76 +1927,40 @@ private fun OptionsTab(
             }
         }
     }
-    val routeMetricModes = if (ua) {
-        listOf("Вимкнений", "До зупинки", "Весь маршрут")
-    } else {
-        listOf("Off", "Next stop", "Entire route")
-    }
-    val textTransliterationModes = if (ua) {
-        listOf("Вимкнено", "Українська", "Універсальна")
-    } else {
-        listOf("Off", "Ukrainian", "Universal")
-    }
-    val speedLimitModes = if (ua) {
-        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний")
-    } else {
-        listOf("Off", "In maneuver field", "In lane field", "In a free field", "Composite")
-    }
-    val speedLimitFallbackModes = if (ua) {
-        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами")
-    } else {
-        listOf("Off", "In maneuver field", "In lane field")
-    }
-    val speedLimitCompositePlacementModes = if (ua) {
-        listOf("Тільки маневру", "Тільки смуг", "Вільне або маневру", "Вільне або смуг")
-    } else {
-        listOf("Maneuver only", "Lanes only", "Free or maneuver", "Free or lanes")
-    }
-    val dashboardScreenModes = if (ua) {
-        listOf("Немає", "Частковий", "Повний")
-    } else {
-        listOf("None", "Partial", "Full")
-    }
-    val routeMetricsTitle = if (ua) {
-        "Режим виводу ЕТА (час/дистанція)"
-    } else {
-        "ETA output mode (time/distance)"
-    }
-    val routeMetricsHint = if (ua) {
-        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze підтримує весь маршрут і використовує доступне значення до зупинки, якщо окремий показник маршруту відсутній."
-    } else {
-        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze supports the whole route and uses an available next-stop value when an individual route metric is missing."
-    }
-    val speedLimitModeHint = if (ua) {
-        "Показувати поточне обмеження швидкості у вибраному полі HUD."
-    } else {
-        "Show the current speed limit in the selected HUD field."
-    }
-    val freeFallbackHint = if (ua) {
-        "Визначає, чи можна тимчасово перекрити зайняте поле, коли вільного поля немає."
-    } else {
-        "Choose whether to temporarily replace an occupied field when no field is free."
-    }
-    val overlaySecondsHint = if (ua) {
-        "Кількість секунд показу обмеження поверх активного маневру або смуг. Ціле число від 1 до 10."
-    } else {
-        "Seconds to show the speed limit over an active maneuver or lane output. Whole numbers from 1 to 10."
-    }
-    val compositePlacementHint = if (ua) {
-        "Визначає поле для композитного знаку та пріоритет, коли одне з полів вільне."
-    } else {
-        "Choose the composite sign field and its priority when one field is free."
-    }
-    val compositeManeuverSizeHint = if (ua) {
-        "Розмір композитного знаку у пікселях для зображення маневру. Дозволено ціле число від 1 до 103."
-    } else {
-        "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only."
-    }
-    val compositeLaneSizeHint = if (ua) {
-        "Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36."
-    } else {
-        "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only."
-    }
+    val routeMetricModes = language.choose(listOf("Вимкнений", "До зупинки", "Весь маршрут"),
+        listOf("Off", "Next stop", "Entire route"), listOf("Выкл.", "До остановки", "Весь маршрут"))
+    val textTransliterationModes = language.choose(listOf("Вимкнено", "Українська", "Універсальна"),
+        listOf("Off", "Ukrainian", "Universal"), listOf("Выкл.", "Украинская", "Универсальная"))
+    val speedLimitModes = language.choose(
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
+        listOf("Off", "In maneuver field", "In lane field", "In a free field", "Composite"),
+        listOf("Выкл.", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
+    val speedLimitFallbackModes = language.choose(listOf("Вимкнено", "У полі з маневром", "У полі зі смугами"),
+        listOf("Off", "In maneuver field", "In lane field"), listOf("Выкл.", "В поле манёвра", "В поле полос"))
+    val speedLimitCompositePlacementModes = language.choose(
+        listOf("Тільки маневру", "Тільки смуг", "Вільне або маневру", "Вільне або смуг"),
+        listOf("Maneuver only", "Lanes only", "Free or maneuver", "Free or lanes"),
+        listOf("Только манёвр", "Только полосы", "Свободное или манёвр", "Свободное или полосы"))
+    val dashboardScreenModes = language.choose(listOf("Немає", "Частковий", "Повний"),
+        listOf("None", "Partial", "Full"), listOf("Нет", "Частичный", "Полный"))
+    val routeMetricsTitle = language.choose("Режим виводу ЕТА (час/дистанція)",
+        "ETA output mode (time/distance)", "Режим вывода ETA (время/расстояние)")
+    val routeMetricsHint = language.choose(
+        "До зупинки показує значення до наступної проміжної або кінцевої точки; весь маршрут - до кінцевої точки. Waze підтримує весь маршрут і використовує доступне значення до зупинки, якщо окремий показник маршруту відсутній.",
+        "Next stop uses the next intermediate or final stop; entire route uses the final destination. Waze supports the whole route and uses an available next-stop value when an individual route metric is missing.",
+        "До остановки показывает значения до следующей промежуточной или конечной точки; весь маршрут — до конечной точки. Waze использует доступное значение до остановки, если отдельного показателя маршрута нет.")
+    val speedLimitModeHint = language.choose("Показувати поточне обмеження швидкості у вибраному полі HUD.",
+        "Show the current speed limit in the selected HUD field.", "Показывать текущее ограничение скорости в выбранном поле HUD.")
+    val freeFallbackHint = language.choose("Визначає, чи можна тимчасово перекрити зайняте поле, коли вільного поля немає.",
+        "Choose whether to temporarily replace an occupied field when no field is free.", "Можно ли временно заменить занятое поле, когда свободного поля нет.")
+    val overlaySecondsHint = language.choose("Кількість секунд показу обмеження поверх активного маневру або смуг. Ціле число від 1 до 10.",
+        "Seconds to show the speed limit over an active maneuver or lane output. Whole numbers from 1 to 10.", "Сколько секунд показывать ограничение поверх активного манёвра или полос. Целое число от 1 до 10.")
+    val compositePlacementHint = language.choose("Визначає поле для композитного знаку та пріоритет, коли одне з полів вільне.",
+        "Choose the composite sign field and its priority when one field is free.", "Поле композитного знака и его приоритет, когда одно из полей свободно.")
+    val compositeManeuverSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення маневру. Дозволено ціле число від 1 до 103.",
+        "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only.", "Размер композитного знака в пикселях для изображения манёвра. Целое число от 1 до 103.")
+    val compositeLaneSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36.",
+        "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only.", "Размер композитного знака в пикселях для изображения полос. Целое число от 1 до 36.")
     val freeFallbackEnabled = snapshot.speedLimitMode == 3
     val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE
     val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
@@ -2064,7 +2085,7 @@ private fun OptionsTab(
                 ) { runAction { activity.composeSetSmallDistanceClamp(it) } }
             }
         }
-        optionsSection("route-eta", if (ua) "ЕТА маршруту" else "Route ETA", R.drawable.ic_options_schedule) {
+        optionsSection("route-eta", language.choose("ЕТА маршруту", "Route ETA", "ETA маршрута"), R.drawable.ic_options_schedule) {
             row("route-metrics-mode") {
                 SettingRow(routeMetricsTitle, routeMetricsHint, palette,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaMode, routeMetricsTitle, snapshot.routeMetricsMode, routeMetricModes) }) {
@@ -2078,11 +2099,12 @@ private fun OptionsTab(
                 }
             }
             row("eta-output-field") {
-                val title = if (ua) "Поле виводу ЕТА" else "ETA output field"
+                val title = language.choose("Поле виводу ЕТА", "ETA output field", "Поле вывода ETA")
                 SettingRow(
                     title,
-                    if (ua) "У вулиці або в окремому блоці праворуч."
-                    else "In the street text or a separate block on the right.",
+                    language.choose("У вулиці або в окремому блоці праворуч.",
+                        "In the street text or a separate block on the right.",
+                        "В тексте улицы или в отдельном блоке справа."),
                     palette,
                     enabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.EtaOutputField, title, snapshot.etaOutputField, etaOutputFields) }
@@ -2101,22 +2123,25 @@ private fun OptionsTab(
                     && snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET
             val etaColorsEnabled = snapshot.routeMetricsMode != HudPrefs.ROUTE_METRICS_OFF
                     && snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_EXPERIMENTAL
-            val etaStreetFormats = if (ua) listOf("Приставити", "Замінити")
-                else listOf("Prepend", "Replace")
-            val etaStreetFormatTitle = if (ua) "Формат ЕТА у полі вулиці"
-                else "ETA format in street field"
-            val etaWaitTitle = if (ua) "Дочікуватись повного показу тексту вулиці"
-                else "Wait for the full street text to display"
-            val etaWaitHint = if (ua) {
-                "Оновлювати ЕТА після повного проходження тексту або зміни вулиці"
-            } else {
-                "Update ETA after the text finishes scrolling or the street changes"
+            val etaStreetFormats = when (language) {
+                Language.Ua -> listOf("Приставити", "Замінити")
+                Language.En -> listOf("Prepend", "Replace")
+                Language.Ru -> listOf("Добавить", "Заменить")
             }
+            val etaStreetFormatTitle = language.choose("Формат ЕТА у полі вулиці",
+                "ETA format in street field", "Формат ETA в поле улицы")
+            val etaWaitTitle = language.choose("Дочікуватись повного показу тексту вулиці",
+                "Wait for the full street text to display", "Дождаться полного показа текста улицы")
+            val etaWaitHint = language.choose(
+                "Оновлювати ЕТА після повного проходження тексту або зміни вулиці",
+                "Update ETA after the text finishes scrolling or the street changes",
+                "Обновлять ETA после завершения прокрутки текста или смены улицы")
             row("eta-street-format") {
                 SettingRow(
                     etaStreetFormatTitle,
-                    if (ua) "Додати ЕТА перед вулицею або показувати лише вибрані складові ЕТА"
-                    else "Prepend ETA to the street or show only the selected ETA values",
+                    language.choose("Додати ЕТА перед вулицею або показувати лише вибрані складові ЕТА",
+                        "Prepend ETA to the street or show only the selected ETA values",
+                        "Добавить ETA перед улицей или показывать только выбранные значения ETA"),
                     palette,
                     enabled = etaStreetEnabled,
                     onHelp = {
@@ -2162,7 +2187,7 @@ private fun OptionsTab(
             }
             row("eta-arrival-color") {
                 WidgetColorLine(
-                    HudTextColorSlot.Arrival.title(ua),
+                    localizedColorTitle(HudTextColorSlot.Arrival, language),
                     hudPresentation.arrivalColor,
                     palette,
                     etaColorsEnabled && snapshot.etaOutputEnabled,
@@ -2178,7 +2203,7 @@ private fun OptionsTab(
             }
             row("eta-duration-color") {
                 WidgetColorLine(
-                    HudTextColorSlot.Duration.title(ua),
+                    localizedColorTitle(HudTextColorSlot.Duration, language),
                     hudPresentation.durationColor,
                     palette,
                     etaColorsEnabled && snapshot.remainingTimeOutputEnabled,
@@ -2194,7 +2219,7 @@ private fun OptionsTab(
             }
             row("eta-remaining-color") {
                 WidgetColorLine(
-                    HudTextColorSlot.Remaining.title(ua),
+                    localizedColorTitle(HudTextColorSlot.Remaining, language),
                     hudPresentation.remainingColor,
                     palette,
                     etaColorsEnabled && snapshot.remainingDistanceOutputEnabled,
@@ -2202,9 +2227,9 @@ private fun OptionsTab(
                 ) { hudColorTarget = HudTextColorSlot.Remaining }
             }
         }
-        optionsSection("speed-limit", if (ua) "Обмеження швидкості" else "Speed limit", R.drawable.ic_options_speed) {
+        optionsSection("speed-limit", language.choose("Обмеження швидкості", "Speed limit", "Ограничение скорости"), R.drawable.ic_options_speed) {
             row("speed-limit-mode") {
-                val title = if (ua) "Режим виводу обмеження швидкості" else "Speed limit output mode"
+                val title = language.choose("Режим виводу обмеження швидкості", "Speed limit output mode", "Режим вывода ограничения скорости")
                 SettingRow(title, speedLimitModeHint, palette,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitMode, title, snapshot.speedLimitMode, speedLimitModes) }) {
                     HudDropdown(
@@ -2218,12 +2243,12 @@ private fun OptionsTab(
             }
             row("speed-limit-fallback") {
                 SettingRow(
-                    if (ua) "Накладання у режимі «У вільному полі»" else "Overlay in \"In a free field\" mode",
+                    language.choose("Накладання у режимі «У вільному полі»", "Overlay in \"In a free field\" mode", "Наложение в режиме «В свободном поле»"),
                     freeFallbackHint,
                     palette,
                     enabled = freeFallbackEnabled,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitFallback,
-                        if (ua) "Накладання у режимі «У вільному полі»" else "Overlay in \"In a free field\" mode",
+                        language.choose("Накладання у режимі «У вільному полі»", "Overlay in \"In a free field\" mode", "Наложение в режиме «В свободном поле»"),
                         snapshot.speedLimitFreeFallback, speedLimitFallbackModes) }
                 ) {
                     HudDropdown(
@@ -2238,7 +2263,7 @@ private fun OptionsTab(
             }
             row("speed-limit-overlay-seconds") {
                 SettingRow(
-                    if (ua) "Час показу при накладанні" else "Display time when overlapping",
+                    language.choose("Час показу при накладанні", "Display time when overlapping", "Время показа при наложении"),
                     overlaySecondsHint,
                     palette,
                     enabled = overlaySecondsEnabled
@@ -2253,12 +2278,12 @@ private fun OptionsTab(
             }
             row("speed-limit-composite-placement") {
                 SettingRow(
-                    if (ua) "Поле для виводу у композитному режимі" else "Composite output field",
+                    language.choose("Поле для виводу у композитному режимі", "Composite output field", "Поле вывода в композитном режиме"),
                     compositePlacementHint,
                     palette,
                     enabled = compositeEnabled,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitCompositeField,
-                        if (ua) "Поле для виводу у композитному режимі" else "Composite output field",
+                        language.choose("Поле для виводу у композитному режимі", "Composite output field", "Поле вывода в композитном режиме"),
                         snapshot.speedLimitCompositePlacement, speedLimitCompositePlacementModes) }
                 ) {
                     HudDropdown(
@@ -2273,12 +2298,12 @@ private fun OptionsTab(
             }
             row("speed-limit-maneuver-size") {
                 SettingRow(
-                    if (ua) "Розмір знаку у полі маневру" else "Sign size in maneuver field",
+                    language.choose("Розмір знаку у полі маневру", "Sign size in maneuver field", "Размер знака в поле манёвра"),
                     compositeManeuverSizeHint,
                     palette,
                     enabled = compositeEnabled,
                     onHelp = { hudHelpRequest = integerHelp(HudHelpTopicId.SpeedLimitCompositeManeuverSize,
-                        if (ua) "Розмір знаку у полі маневру" else "Sign size in maneuver field",
+                        language.choose("Розмір знаку у полі маневру", "Sign size in maneuver field", "Размер знака в поле манёвра"),
                         snapshot.speedLimitManeuverOverlaySize) }
                 ) {
                     HudIntegerStepper(
@@ -2293,12 +2318,12 @@ private fun OptionsTab(
             }
             row("speed-limit-lane-size") {
                 SettingRow(
-                    if (ua) "Розмір знаку у полі для смуг" else "Sign size in lane field",
+                    language.choose("Розмір знаку у полі для смуг", "Sign size in lane field", "Размер знака в поле полос"),
                     compositeLaneSizeHint,
                     palette,
                     enabled = compositeEnabled,
                     onHelp = { hudHelpRequest = integerHelp(HudHelpTopicId.SpeedLimitCompositeLaneSize,
-                        if (ua) "Розмір знаку у полі для смуг" else "Sign size in lane field",
+                        language.choose("Розмір знаку у полі для смуг", "Sign size in lane field", "Размер знака в поле полос"),
                         snapshot.speedLimitLaneOverlaySize) }
                 ) {
                     HudIntegerStepper(
@@ -2320,11 +2345,12 @@ private fun OptionsTab(
                 }
             }
             row("waze-alert-field") {
-                val title = if (ua) "Поле виводу попередження Waze" else "Waze alert output field"
+                val title = language.choose("Поле виводу попередження Waze", "Waze alert output field", "Поле вывода предупреждения Waze")
                 SettingRow(
                     title,
-                    if (ua) "У полі маневру або окремо ліворуч від смуг."
-                    else "In the maneuver field or separately to the left of the lanes.",
+                    language.choose("У полі маневру або окремо ліворуч від смуг.",
+                        "In the maneuver field or separately to the left of the lanes.",
+                        "В поле манёвра или отдельно слева от полос."),
                     palette,
                     enabled = snapshot.wazeAlertsEnabled,
                     onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.WazeAlertField, title, snapshot.wazeAlertField, wazeAlertFields) }
@@ -2341,7 +2367,7 @@ private fun OptionsTab(
             }
             row("waze-warning-distance-color") {
                 WidgetColorLine(
-                    HudTextColorSlot.Warning.title(ua),
+                    localizedColorTitle(HudTextColorSlot.Warning, language),
                     hudPresentation.warningColor,
                     palette,
                     snapshot.wazeAlertsEnabled
@@ -2387,17 +2413,16 @@ private fun OptionsTab(
             if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE) {
                 row("dashboard-format-method") {
                     ActionRow(
-                        if (ua) "Спосіб встановлення формату екрану" else "Screen format method",
-                        if (ua) {
-                            "Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний"
-                        } else {
-                            "Preferred mode: Native. If Native does not work, use Alternative."
-                        },
+                        language.choose("Спосіб встановлення формату екрану", "Screen format method", "Способ установки формата экрана"),
+                        language.choose(
+                            "Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний",
+                            "Preferred mode: Native. If Native does not work, use Alternative.",
+                            "Предпочтительный режим — штатный. Если он не работает, используйте альтернативный."),
                         palette
                     ) {
                         Segmented(
-                            left = if (ua) "Штатний" else "Native",
-                            right = if (ua) "Альтернативний" else "Alternative",
+                            left = language.choose("Штатний", "Native", "Штатный"),
+                            right = language.choose("Альтернативний", "Alternative", "Альтернативный"),
                             leftActive = snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NATIVE,
                             palette = palette,
                             onLeft = {
@@ -2468,19 +2493,23 @@ private fun OptionsTab(
         }
         optionsSection(
             "dashboard-widget",
-            if (ua) "Віджет приборки" else "Dashboard widget",
+            language.choose("Віджет приборки", "Dashboard widget", "Виджет приборки"),
             R.drawable.ic_options_widgets,
-            preview = { DashboardWidgetSample(dashboardWidget, ua, palette) }
+            preview = { DashboardWidgetSample(dashboardWidget, copy.language, palette) }
         ) {
             row("widget-shape") {
                 SettingRow(
-                    if (ua) "Віджет зміни приборки" else "Dashboard switch widget",
-                    if (ua) "Оберіть форму, щоб увімкнути віджет" else "Choose a shape to enable the widget",
+                    language.choose("Віджет зміни приборки", "Dashboard switch widget", "Виджет переключения приборки"),
+                    language.choose("Оберіть форму, щоб увімкнути віджет", "Choose a shape to enable the widget", "Выберите форму, чтобы включить виджет"),
                     palette
                 ) {
                     HudDropdown(
                         selectedIndex = dashboardWidget.shape.ordinal,
-                        options = if (ua) listOf("Викл.", "Квадрат", "Коло") else listOf("Off", "Square", "Circle"),
+                        options = when (language) {
+                            Language.Ua -> listOf("Викл.", "Квадрат", "Коло")
+                            Language.En -> listOf("Off", "Square", "Circle")
+                            Language.Ru -> listOf("Выкл.", "Квадрат", "Круг")
+                        },
                         palette = palette,
                         width = 190.dp,
                         optionIcons = listOf(null, 1, 2),
@@ -2494,7 +2523,7 @@ private fun OptionsTab(
             }
             row("widget-auto-collapse") {
                 SwitchRow(
-                    if (ua) "Автоматично згортати віджет після зміни режиму" else "Automatically collapse the widget after a mode change",
+                    language.choose("Автоматично згортати віджет після зміни режиму", "Automatically collapse the widget after a mode change", "Автоматически сворачивать виджет после смены режима"),
                     "",
                     dashboardWidget.autoCollapse,
                     palette,
@@ -2505,7 +2534,7 @@ private fun OptionsTab(
             }
             row("widget-auto-collapse-inactivity") {
                 SwitchRow(
-                    if (ua) "Автоматично згортати віджет через 5 секунд неактивності" else "Automatically collapse the widget after 5 seconds of inactivity",
+                    language.choose("Автоматично згортати віджет через 5 секунд неактивності", "Automatically collapse the widget after 5 seconds of inactivity", "Автоматически сворачивать виджет через 5 секунд бездействия"),
                     "",
                     dashboardWidget.autoCollapseAfterInactivity,
                     palette,
@@ -2516,7 +2545,7 @@ private fun OptionsTab(
             }
             row("widget-apply-window-profile") {
                 SwitchRow(
-                    if (ua) "Застосовувати профіль вікна приборки" else "Apply dashboard window profile",
+                    language.choose("Застосовувати профіль вікна приборки", "Apply dashboard window profile", "Применять профиль окна приборки"),
                     "",
                     dashboardWidget.applyWindowProfile,
                     palette,
@@ -2528,12 +2557,12 @@ private fun OptionsTab(
             if (dashboardWidget.enabled && !widgetOverlayPermission) {
                 row("widget-overlay-permission") {
                     SettingRow(
-                        if (ua) "Показ поверх інших застосунків" else "Display over other apps",
-                        if (ua) "Потрібен для віджета на робочому столі" else "Required to show the widget on the home screen",
+                        language.choose("Показ поверх інших застосунків", "Display over other apps", "Показ поверх других приложений"),
+                        language.choose("Потрібен для віджета на робочому столі", "Required to show the widget on the home screen", "Нужен для виджета на рабочем столе"),
                         palette
                     ) {
                         HudButton(
-                            if (ua) "Надати дозвіл" else "Grant permission",
+                            language.choose("Надати дозвіл", "Grant permission", "Разрешить"),
                             palette,
                             primary = true,
                             width = 190.dp,
@@ -2544,7 +2573,7 @@ private fun OptionsTab(
             }
             row("widget-size") {
                 WidgetNumberLine(
-                    if (ua) "Розмір" else "Size",
+                    language.choose("Розмір", "Size", "Размер"),
                     "24–160 dp",
                     dashboardWidget.sizeDp,
                     DashboardWidgetState.SIZE_RANGE,
@@ -2556,14 +2585,18 @@ private fun OptionsTab(
             }
             row("widget-opening-direction") {
                 SettingRow(
-                    if (ua) "Напрямок розкриття віджету" else "Widget opening direction",
+                    language.choose("Напрямок розкриття віджету", "Widget opening direction", "Направление раскрытия виджета"),
                     "",
                     palette,
                     enabled = dashboardWidget.enabled
                 ) {
                     HudDropdown(
                         selectedIndex = dashboardWidget.openingDirectionIndex,
-                        options = if (ua) listOf("Вгору", "Вправо", "Вниз", "Вліво") else listOf("Up", "Right", "Down", "Left"),
+                        options = when (language) {
+                            Language.Ua -> listOf("Вгору", "Вправо", "Вниз", "Вліво")
+                            Language.En -> listOf("Up", "Right", "Down", "Left")
+                            Language.Ru -> listOf("Вверх", "Вправо", "Вниз", "Влево")
+                        },
                         palette = palette,
                         width = 190.dp,
                         enabled = dashboardWidget.enabled,
@@ -2573,8 +2606,8 @@ private fun OptionsTab(
             }
             row("widget-corner-radius") {
                 WidgetNumberLine(
-                    if (ua) "Заокруглення кутів" else "Corner rounding",
-                    if (ua) "Доступне тільки для квадратного віджета" else "Available only for the square widget",
+                    language.choose("Заокруглення кутів", "Corner rounding", "Скругление углов"),
+                    language.choose("Доступне тільки для квадратного віджета", "Available only for the square widget", "Доступно только для квадратного виджета"),
                     dashboardWidget.cornerRadiusDp,
                     dashboardWidget.cornerRadiusRange,
                     "dp",
@@ -2584,8 +2617,8 @@ private fun OptionsTab(
             }
             row("widget-transparency") {
                 WidgetNumberLine(
-                    if (ua) "Прозорість" else "Transparency",
-                    if (ua) "0% — видимий, 100% — невидимий" else "0% visible, 100% invisible",
+                    language.choose("Прозорість", "Transparency", "Прозрачность"),
+                    language.choose("0% — видимий, 100% — невидимий", "0% visible, 100% invisible", "0% — видимый, 100% — невидимый"),
                     dashboardWidget.transparency,
                     0..100,
                     "%",
@@ -2594,14 +2627,14 @@ private fun OptionsTab(
                 ) { value -> onDashboardWidgetChange(dashboardWidget.copy(transparency = value).normalized()) }
             }
             row("widget-color") {
-                WidgetColorLine(if (ua) "Колір" else "Color", dashboardWidget.fillArgb, palette, dashboardWidget.enabled) {
+                WidgetColorLine(language.choose("Колір", "Color", "Цвет"), dashboardWidget.fillArgb, palette, dashboardWidget.enabled) {
                     widgetColorTarget = false
                 }
             }
             row("widget-border-size") {
                 WidgetNumberLine(
-                    if (ua) "Розмір рамки" else "Border width",
-                    if (ua) "0 — прибрати рамку" else "0 removes the border",
+                    language.choose("Розмір рамки", "Border width", "Размер рамки"),
+                    language.choose("0 — прибрати рамку", "0 removes the border", "0 — убрать рамку"),
                     dashboardWidget.borderDp,
                     DashboardWidgetState.BORDER_RANGE,
                     "dp",
@@ -2610,19 +2643,19 @@ private fun OptionsTab(
                 ) { value -> onDashboardWidgetChange(dashboardWidget.copy(borderDp = value).normalized()) }
             }
             row("widget-border-color") {
-                WidgetColorLine(if (ua) "Колір рамки" else "Border color", dashboardWidget.borderArgb, palette, dashboardWidget.enabled) {
+                WidgetColorLine(language.choose("Колір рамки", "Border color", "Цвет рамки"), dashboardWidget.borderArgb, palette, dashboardWidget.enabled) {
                     widgetColorTarget = true
                 }
             }
         }
-        optionsSection("dashboard-move", if (ua) "Налаштування перенесення на приборку" else "Dashboard transfer settings", R.drawable.ic_options_open_in_new) {
+        optionsSection("dashboard-move", language.choose("Налаштування перенесення на приборку", "Dashboard transfer settings", "Настройки переноса на приборку"), R.drawable.ic_options_open_in_new) {
             row("move-create-profile") {
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     HudButton(
-                        if (ua) "+ Створити профіль" else "+ Create profile",
+                        language.choose("+ Створити профіль", "+ Create profile", "+ Создать профиль"),
                         palette,
                         primary = true,
                         width = 210.dp
@@ -2633,7 +2666,7 @@ private fun OptionsTab(
                 row("move-profile-${profile.id}") {
                     TransferProfileRow(
                         summary = profileSummary(profile),
-                        ua = ua,
+                        language = language,
                         palette = palette,
                         onEdit = {
                             transferDraft = SteeringTransferDraft(
@@ -2650,7 +2683,7 @@ private fun OptionsTab(
     SidebarOptionsSurface(
         title = copy.main,
         hint = copy.mainHint,
-        categoriesLabel = if (ua) "Категорії" else "Categories",
+        categoriesLabel = language.choose("Категорії", "Categories", "Категории"),
         sections = sections,
         palette = palette,
         selectedKey = selectedSectionKey,
@@ -2662,9 +2695,9 @@ private fun OptionsTab(
         WidgetColorPicker(
             initialArgb = if (border) dashboardWidget.borderArgb else dashboardWidget.fillArgb,
             title = if (border) {
-                if (ua) "Колір рамки" else "Border color"
+                language.choose("Колір рамки", "Border color", "Цвет рамки")
             } else {
-                if (ua) "Колір віджета" else "Widget color"
+                language.choose("Колір віджета", "Widget color", "Цвет виджета")
             },
             copy = copy,
             palette = palette,
@@ -2681,7 +2714,7 @@ private fun OptionsTab(
     hudColorTarget?.let { slot ->
         WidgetColorPicker(
             initialArgb = hudPresentation.color(slot),
-            title = slot.title(ua),
+            title = localizedColorTitle(slot, language),
             copy = copy,
             palette = palette,
             onDismiss = { hudColorTarget = null },
@@ -2705,7 +2738,7 @@ private fun OptionsTab(
             pressModes = steeringPressModes,
             windowProfiles = steeringWindowProfiles,
             conflictSummary = transferConflict?.let(::profileSummary),
-            ua = ua,
+            language = language,
             palette = palette,
             onDraftChange = { transferDraft = it },
             onSelectButton = {
@@ -2733,7 +2766,7 @@ private fun OptionsTab(
     }
     if (showSteeringButtonCapture) {
         SteeringButtonCaptureDialog(
-            ua = ua,
+            language = language,
             palette = palette,
             onDismiss = { showSteeringButtonCapture = false }
         )
@@ -2741,7 +2774,7 @@ private fun OptionsTab(
     transferDeleteTarget?.let { profile ->
         TransferProfileDeleteConfirmDialog(
             summary = profileSummary(profile),
-            ua = ua,
+            language = language,
             palette = palette,
             onNo = { transferDeleteTarget = null },
             onYes = {
@@ -2857,7 +2890,7 @@ private fun WidgetColorPicker(
     onDismiss: () -> Unit,
     onSelect: (Int) -> Unit
 ) {
-    val ua = copy.language == Language.Ua
+    val language = copy.language
     var draft by remember(initialArgb) { mutableIntStateOf(initialArgb or 0xFF000000.toInt()) }
     var hexDraft by remember(initialArgb) { mutableStateOf(String.format(Locale.ROOT, "%06X", initialArgb and 0xFFFFFF)) }
     fun updateDraftColor(value: Int) {
@@ -2917,8 +2950,8 @@ private fun WidgetColorPicker(
                 }
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                HudButton(if (ua) "Обрати" else "Select", palette, primary = true, width = 0.dp, modifier = Modifier.weight(1f)) { onSelect(draft) }
-                HudButton(if (ua) "Скасувати" else "Cancel", palette, primary = false, width = 0.dp, modifier = Modifier.weight(1f), onClick = onDismiss)
+                HudButton(language.choose("Обрати", "Select", "Выбрать"), palette, primary = true, width = 0.dp, modifier = Modifier.weight(1f)) { onSelect(draft) }
+                HudButton(language.choose("Скасувати", "Cancel", "Отмена"), palette, primary = false, width = 0.dp, modifier = Modifier.weight(1f), onClick = onDismiss)
             }
         }
     }
@@ -2954,9 +2987,9 @@ private fun DashboardWidgetGraphic(
 }
 
 @Composable
-private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, palette: Palette) {
+private fun DashboardWidgetSample(state: DashboardWidgetState, language: Language, palette: Palette) {
     Column(Modifier.fillMaxWidth().padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Text(if (ua) "Вигляд віджета" else "Widget preview", color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+        Text(language.choose("Вигляд віджета", "Widget preview", "Виджет"), color = palette.text, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
         Box(
             Modifier.fillMaxWidth().height(196.dp).clip(RoundedCornerShape(8.dp))
                 .background(palette.field).border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)),
@@ -2971,16 +3004,17 @@ private fun DashboardWidgetSample(state: DashboardWidgetState, ua: Boolean, pale
                     tint = foreground
                 )
             }
-            else Text(if (ua) "Вимкнено" else "Off", color = palette.muted, fontSize = 14.sp)
+            else Text(language.choose("Вимкнено", "Off", "Выкл."), color = palette.muted, fontSize = 14.sp)
         }
         Text(
-            if (ua) "Натисніть віджет, щоб розкрити режими\nПеретягніть у зручне місце\nЗатисніть, щоб приховати до наступного відкриття застосунку"
-            else "Tap the widget to expand the modes\nDrag to a convenient position\nLong-press to hide until the app is opened again",
+            language.choose("Натисніть віджет, щоб розкрити режими\nПеретягніть у зручне місце\nЗатисніть, щоб приховати до наступного відкриття застосунку",
+                "Tap the widget to expand the modes\nDrag to a convenient position\nLong-press to hide until the app is opened again",
+                "Нажмите на виджет, чтобы открыть режимы\nПеретащите его в удобное место\nУдерживайте, чтобы скрыть до следующего открытия приложения"),
             color = palette.muted, fontSize = 13.sp
         )
         if (state.hidden && state.enabled) Text(
-            if (ua) "Віджет приховано — відкрийте BYD HUD, щоб повернути"
-            else "Widget hidden — open BYD HUD to restore",
+            language.choose("Віджет приховано — відкрийте BYD HUD, щоб повернути",
+                "Widget hidden — open BYD HUD to restore", "Виджет скрыт — откройте BYD HUD, чтобы вернуть"),
             color = palette.yellow,
             fontSize = 13.sp
         )
@@ -3007,7 +3041,7 @@ private class DashboardWidgetPointerGesture {
 internal fun DashboardWidgetAnchorContent(
     state: DashboardWidgetState,
     windowSizeDp: Offset,
-    ua: Boolean,
+    language: Language,
     onChange: (DashboardWidgetState) -> Unit,
     onHide: () -> Unit,
     onPositionSettled: () -> Unit,
@@ -3030,15 +3064,15 @@ internal fun DashboardWidgetAnchorContent(
     val anchorInteraction = Modifier
         .semantics {
             role = Role.Button
-            contentDescription = if (ua) "Плаваючий віджет приборки" else "Floating dashboard widget"
-            onClick(if (state.expanded) { if (ua) "Згорнути" else "Collapse" } else { if (ua) "Розкрити" else "Expand" }) {
+            contentDescription = language.choose("Плаваючий віджет приборки", "Floating dashboard widget", "Плавающий виджет приборки")
+            onClick(if (state.expanded) language.choose("Згорнути", "Collapse", "Свернуть") else language.choose("Розкрити", "Expand", "Развернуть")) {
                 latestOnInteraction()
                 val next = latestState.toggleExpanded()
                 latestOnChange(next)
                 latestOnPositionSettled()
                 true
             }
-            onLongClick(if (ua) "Приховати до відкриття застосунку" else "Hide until the app opens") { latestOnHide(); true }
+            onLongClick(language.choose("Приховати до відкриття застосунку", "Hide until the app opens", "Скрыть до открытия приложения")) { latestOnHide(); true }
         }
         .pointerInteropFilter { event ->
             fun dragBy(delta: Offset) {
@@ -3269,7 +3303,7 @@ private fun SetupReminderOverlay(
 private fun UpdateCheckOverlay(
     copy: Copy,
     palette: Palette,
-    uaLanguage: Boolean,
+    language: Language,
     state: UpdateCheckState,
     onUpdate: () -> Unit,
     onClose: () -> Unit
@@ -3330,7 +3364,7 @@ private fun UpdateCheckOverlay(
                             version = state.info.version,
                             notes = AppUpdateManager.releaseNotesForLanguage(
                                 state.info.releaseNotes,
-                                uaLanguage
+                                language.code
                             )
                         )
                         is UpdateCheckState.Downloading -> {
@@ -3346,7 +3380,7 @@ private fun UpdateCheckOverlay(
                                 version = state.info.version,
                                 notes = AppUpdateManager.releaseNotesForLanguage(
                                     state.info.releaseNotes,
-                                    uaLanguage
+                                    language.code
                                 )
                             )
                         }
@@ -3734,15 +3768,52 @@ private fun SentryCommentDialog(
 }
 
 @Composable
+private fun SentryArchiveLimitDialog(
+    language: Language,
+    palette: Palette,
+    archiveBytes: Long,
+    onCancel: () -> Unit,
+    onAnotherApp: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onCancel,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+    ) {
+        Column(
+            Modifier.width(560.dp).clip(RoundedCornerShape(8.dp)).background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)).padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(language.choose(
+                "Перевищено розмір архіву для надсилання через Sentry",
+                "Archive size limit for sending via Sentry exceeded",
+                "Превышен размер архива для отправки через Sentry"
+            ), color = palette.red, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Text(language.choose(
+                "ZIP: ${archiveBytes / 1_000_000} МБ. Для Sentry — менше 39 МБ.",
+                "ZIP: ${archiveBytes / 1_000_000} MB. Sentry requires less than 39 MB.",
+                "ZIP: ${archiveBytes / 1_000_000} МБ. Для Sentry — менее 39 МБ."
+            ), color = palette.text, fontSize = 16.sp)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
+                HudButton(language.choose("Інший застосунок", "Another app", "Другое приложение"), palette,
+                    primary = true, width = 220.dp, onClick = onAnotherApp)
+                HudButton(language.choose("Скасувати", "Cancel", "Отмена"), palette,
+                    width = 140.dp, onClick = onCancel)
+            }
+        }
+    }
+}
+
+@Composable
 private fun OperationProgressStack(
     copy: Copy,
     shareCopy: ShareCopy,
     palette: Palette,
     patchOperations: List<MainActivity.ComposePatchOperation>,
-    storageLogShare: StorageLogShareSnapshot?,
+    storageLogShares: List<StorageLogShareSnapshot>,
     configurationExport: ConfigurationExportSnapshot?,
-    onCancelShare: () -> Unit,
-    onCloseShare: () -> Unit,
+    onCancelShare: (String) -> Unit,
+    onCloseShare: (String) -> Unit,
     onCancelConfiguration: () -> Unit,
     onCloseConfiguration: () -> Unit,
     onShareConfiguration: () -> Unit,
@@ -3750,14 +3821,11 @@ private fun OperationProgressStack(
     onDismissPatch: (String) -> Unit
 ) {
     var detailsKey by remember { mutableStateOf("") }
-    val ua = copy.language == Language.Ua
-    val visibleStorageShare = storageLogShare?.takeUnless { it.dismissed }
+    val language = copy.language
+    val visibleStorageShares = storageLogShares.filterNot { it.dismissed }
     val visibleConfigurationExport = configurationExport?.takeUnless { it.dismissed }
-    val showStorageShare = visibleStorageShare != null &&
-        (visibleConfigurationExport == null ||
-            visibleStorageShare.startedAtEpochMs >= visibleConfigurationExport.startedAtEpochMs)
     val cards = buildList {
-        visibleStorageShare?.takeIf { showStorageShare }?.let { state ->
+        visibleStorageShares.forEach { state ->
             val busy = storageLogShareBusy(state.phase)
             val sending = state.phase == StorageLogSharePhase.UPLOADING
             val terminal = !busy
@@ -3765,16 +3833,17 @@ private fun OperationProgressStack(
                 StorageLogSharePhase.WAITING_FOR_WRITES -> shareCopy.waitingForWrites
                 StorageLogSharePhase.COPYING -> shareCopy.copying
                 StorageLogSharePhase.ARCHIVING -> shareCopy.archiving
-                StorageLogSharePhase.WAITING_FOR_SHARE -> if (ua) "Очікування Android Share" else "Waiting for Android share"
-                StorageLogSharePhase.READY -> if (ua) "Готово до надсилання" else "Ready to share"
+                StorageLogSharePhase.WAITING_FOR_SHARE -> language.choose("Очікування Android Share", "Waiting for Android share", "Ожидание Android Share")
+                StorageLogSharePhase.READY -> language.choose("Готово до надсилання", "Ready to share", "Готово к отправке")
+                StorageLogSharePhase.OVERSIZED -> language.choose("Перевищено розмір ZIP", "ZIP size limit exceeded", "Превышен размер ZIP")
                 StorageLogSharePhase.UPLOADING -> shareCopy.uploading
                 StorageLogSharePhase.SENT -> shareCopy.success
                 StorageLogSharePhase.FAILED -> shareCopy.failure
-                StorageLogSharePhase.CANCELLING -> if (ua) "Зупинення" else "Stopping"
-                StorageLogSharePhase.CANCELLED -> if (ua) "Скасовано" else "Cancelled"
+                StorageLogSharePhase.CANCELLING -> language.choose("Зупинення", "Stopping", "Остановка")
+                StorageLogSharePhase.CANCELLED -> language.choose("Скасовано", "Cancelled", "Отменено")
             }
             val summary = buildString {
-                if (state.foundFiles > 0) append("${state.foundFiles} ${if (ua) "файлів" else "files"}")
+                if (state.foundFiles > 0) append("${state.foundFiles} ${language.choose("файлів", "files", "файлов")}")
                 if (state.knownBytes > 0) {
                     if (isNotEmpty()) append(" · ")
                     append(formatBytes(state.knownBytes, copy))
@@ -3785,8 +3854,8 @@ private fun OperationProgressStack(
                 }
             }
             add(OperationCardSpec(
-                key = "share",
-                title = shareCopy.shareLogsTitle,
+                key = "share-${state.operationId}",
+                title = shareCopy.uploadTitle,
                 phase = phase,
                 detail = summary,
                 startedAt = state.startedAtEpochMs,
@@ -3801,40 +3870,44 @@ private fun OperationProgressStack(
                     detail = state.detail,
                     eventId = state.eventId,
                     unavailable = 0,
-                    ua = ua,
+                    language = language,
                     reportTitle = state.reportTitle
                 ),
                 failed = state.phase == StorageLogSharePhase.FAILED,
                 success = state.phase == StorageLogSharePhase.SENT || state.phase == StorageLogSharePhase.READY,
-                onStop = onCancelShare,
-                onClose = onCloseShare
+                onStop = { onCancelShare(state.operationId) },
+                onClose = { onCloseShare(state.operationId) }
             ))
         }
-        visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->
+        visibleConfigurationExport?.let { state ->
             val busy = configurationExportBusy(state.phase)
             val phase = when (state.phase) {
-                ConfigurationExportPhase.INVENTORY -> if (ua) "Пошук доступних файлів" else "Finding available files"
-                ConfigurationExportPhase.DIAGNOSTICS -> if (ua) "Збирання діагностики" else "Collecting diagnostics"
-                ConfigurationExportPhase.COPYING -> if (ua) "Копіювання файлів" else "Copying files"
-                ConfigurationExportPhase.ARCHIVING -> if (ua) "Архівування · томи до 1 ГБ" else "Archiving · volumes up to 1 GB"
+                ConfigurationExportPhase.INVENTORY -> language.choose("Пошук доступних файлів", "Finding available files", "Поиск доступных файлов")
+                ConfigurationExportPhase.DIAGNOSTICS -> language.choose("Збирання діагностики", "Collecting diagnostics", "Сбор диагностики")
+                ConfigurationExportPhase.COPYING -> language.choose("Копіювання файлів", "Copying files", "Копирование файлов")
+                ConfigurationExportPhase.ARCHIVING -> language.choose("Архівування · томи до 1 ГБ", "Archiving · volumes up to 1 GB", "Архивирование · тома до 1 ГБ")
                 ConfigurationExportPhase.READY, ConfigurationExportPhase.WAITING_FOR_SHARE ->
                     if (state.volumeSizes.size > 1) {
-                        if (ua) "Готово · томів: ${state.volumeSizes.size} · ${state.archiveBytes / 1_000_000} МБ"
-                        else "Ready · ${state.volumeSizes.size} volumes · ${state.archiveBytes / 1_000_000} MB"
-                    } else if (ua) "Готово · 1 архів · ${state.archiveBytes / 1_000_000} МБ"
-                        else "Ready · 1 archive · ${state.archiveBytes / 1_000_000} MB"
-                ConfigurationExportPhase.EXPIRED -> if (ua) "Строк минув · архів недоступний" else "Expired · archive unavailable"
-                ConfigurationExportPhase.FAILED -> if (ua) "Помилка експорту" else "Export failed"
-                ConfigurationExportPhase.CANCELLING -> if (ua) "Скасування" else "Cancelling"
-                ConfigurationExportPhase.CANCELLED -> if (ua) "Експорт скасовано" else "Export cancelled"
+                        language.choose(
+                            "Готово · томів: ${state.volumeSizes.size} · ${state.archiveBytes / 1_000_000} МБ",
+                            "Ready · ${state.volumeSizes.size} volumes · ${state.archiveBytes / 1_000_000} MB",
+                            "Готово · томов: ${state.volumeSizes.size} · ${state.archiveBytes / 1_000_000} МБ")
+                    } else language.choose(
+                        "Готово · 1 архів · ${state.archiveBytes / 1_000_000} МБ",
+                        "Ready · 1 archive · ${state.archiveBytes / 1_000_000} MB",
+                        "Готово · 1 архив · ${state.archiveBytes / 1_000_000} МБ")
+                ConfigurationExportPhase.EXPIRED -> language.choose("Строк минув · архів недоступний", "Expired · archive unavailable", "Срок истёк · архив недоступен")
+                ConfigurationExportPhase.FAILED -> language.choose("Помилка експорту", "Export failed", "Ошибка экспорта")
+                ConfigurationExportPhase.CANCELLING -> language.choose("Скасування", "Cancelling", "Отмена")
+                ConfigurationExportPhase.CANCELLED -> language.choose("Експорт скасовано", "Export cancelled", "Экспорт отменён")
             }
             val summary = if (busy) state.currentFile else if (state.expiresAtEpochMs > 0) {
                 val deadline = configurationExportDateTime(state.expiresAtEpochMs)
-                if (ua) "Видалення: $deadline" else "Deletion: $deadline"
-            } else if (ua) "Щоб поділитися, сформуйте новий архів." else "Create a new archive to share it."
+                language.choose("Видалення: $deadline", "Deletion: $deadline", "Удаление: $deadline")
+            } else language.choose("Щоб поділитися, сформуйте новий архів.", "Create a new archive to share it.", "Для отправки сформируйте новый архив.")
             add(OperationCardSpec(
                 key = "configuration-export",
-                title = if (ua) "Експорт конфігурації" else "Configuration export",
+                title = language.choose("Експорт конфігурації", "Configuration export", "Экспорт конфигурации"),
                 phase = phase,
                 detail = summary,
                 startedAt = state.startedAtEpochMs,
@@ -3847,7 +3920,7 @@ private fun OperationProgressStack(
                 details = "configuration",
                 primaryActionText = if (state.archiveAvailable && !busy &&
                     state.phase != ConfigurationExportPhase.WAITING_FOR_SHARE
-                ) if (ua) "Поділитися" else "Share" else "",
+                ) language.choose("Поділитися", "Share", "Поделиться") else "",
                 failed = state.phase == ConfigurationExportPhase.FAILED || state.phase == ConfigurationExportPhase.EXPIRED,
                 success = state.phase == ConfigurationExportPhase.READY,
                 onStop = onCancelConfiguration,
@@ -3882,9 +3955,16 @@ private fun OperationProgressStack(
     }.sortedByDescending { it.startedAt }
 
     if (cards.isEmpty()) return
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.BottomEnd) {
+    BoxWithConstraints(
+        modifier = Modifier.fillMaxSize().padding(end = 24.dp, bottom = 24.dp),
+        contentAlignment = Alignment.BottomEnd
+    ) {
+        val stackHeight = 170.dp * cards.size + 12.dp * (cards.size - 1)
+        val scrollModifier = if (stackHeight > maxHeight) {
+            Modifier.verticalScroll(rememberScrollState())
+        } else Modifier
         Column(
-            modifier = Modifier.padding(end = 24.dp, bottom = 24.dp),
+            modifier = Modifier.width(460.dp).then(scrollModifier),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
             cards.forEach { card ->
@@ -3936,7 +4016,7 @@ private fun OperationProgressCard(
         append(card.detail)
         elapsed?.let {
             if (isNotEmpty()) append(" · ")
-            append(if (language == Language.Ua) "${it} с" else "${it} s")
+            append(language.choose("${it} с", "${it} s", "${it} с"))
         }
     }
     Column(
@@ -3993,7 +4073,7 @@ private fun OperationProgressCard(
         ) {
             if (card.details.isNotEmpty()) {
                 HudButton(
-                    if (language == Language.Ua) "Деталі" else "Details",
+                    language.choose("Деталі", "Details", "Детали"),
                     palette,
                     width = 105.dp,
                     onClick = onDetails
@@ -4010,7 +4090,7 @@ private fun OperationProgressCard(
             }
             if (card.busy && card.stopEnabled) {
                 HudButton(
-                    if (language == Language.Ua) "Зупинити" else "Stop",
+                    language.choose("Зупинити", "Stop", "Остановить"),
                     palette,
                     width = 105.dp,
                     onClick = card.onStop
@@ -4027,7 +4107,16 @@ private fun storageLogShareBusy(phase: StorageLogSharePhase): Boolean = when (ph
     StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
     StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.UPLOADING,
     StorageLogSharePhase.CANCELLING -> true
-    StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY, StorageLogSharePhase.SENT,
+    StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY, StorageLogSharePhase.OVERSIZED, StorageLogSharePhase.SENT,
+    StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED -> false
+}
+
+private fun storageLogSharePreparationBusy(phase: StorageLogSharePhase): Boolean = when (phase) {
+    StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
+    StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.CANCELLING,
+    StorageLogSharePhase.OVERSIZED -> true
+    StorageLogSharePhase.WAITING_FOR_SHARE, StorageLogSharePhase.READY,
+    StorageLogSharePhase.UPLOADING, StorageLogSharePhase.SENT,
     StorageLogSharePhase.FAILED, StorageLogSharePhase.CANCELLED -> false
 }
 
@@ -4045,7 +4134,6 @@ private fun configurationExportDateTime(value: Long): String =
 private fun ConfigurationExportProgressCard(
     card: OperationCardSpec, palette: Palette, language: Language, elapsed: Long, onDetails: () -> Unit
 ) {
-    val ua = language == Language.Ua
     val state = requireNotNull(card.configuration)
     Column(Modifier.size(width = 460.dp, height = 170.dp).clip(RoundedCornerShape(8.dp))
         .background(palette.surface.copy(alpha = 0.70f))
@@ -4054,7 +4142,7 @@ private fun ConfigurationExportProgressCard(
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically) {
             Text(card.title, color = palette.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-            Text(if (ua) "$elapsed с" else "$elapsed s", color = palette.muted, fontSize = 12.sp)
+            Text(language.choose("$elapsed с", "$elapsed s", "$elapsed с"), color = palette.muted, fontSize = 12.sp)
         }
         Text(card.phase, color = if (card.failed) palette.red else palette.text,
             fontSize = 14.sp, fontWeight = FontWeight.SemiBold, maxLines = 1)
@@ -4069,11 +4157,11 @@ private fun ConfigurationExportProgressCard(
                     UpdateProgressBar(if (total > 0) "${(state.copiedBytes * 100 / total).coerceIn(0, 100)}%" else "", palette)
                 }
             }
-            HudButton(if (ua) "Деталі" else "Details", palette, width = 100.dp, onClick = onDetails)
+            HudButton(language.choose("Деталі", "Details", "Детали"), palette, width = 100.dp, onClick = onDetails)
             if (card.primaryActionText.isNotEmpty()) {
                 HudButton(card.primaryActionText, palette, primary = true, width = 138.dp, onClick = card.onPrimary)
             }
-            HudButton(if (card.busy) { if (ua) "Скасувати" else "Cancel" } else if (ua) "Закрити" else "Close",
+            HudButton(if (card.busy) { language.choose("Скасувати", "Cancel", "Отмена") } else language.choose("Закрити", "Close", "Закрыть"),
                 palette, width = 108.dp, enabled = if (card.busy) card.stopEnabled else card.closeEnabled,
                 onClick = if (card.busy) card.onStop else card.onClose)
         }
@@ -4084,7 +4172,6 @@ private fun ConfigurationExportProgressCard(
 private fun ConfigurationExportDetailsOverlay(
     language: Language, palette: Palette, state: ConfigurationExportSnapshot, onClose: () -> Unit
 ) {
-    val ua = language == Language.Ua
     BackHandler(onBack = onClose)
     BoxWithConstraints(Modifier.fillMaxSize()
         .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
@@ -4095,31 +4182,37 @@ private fun ConfigurationExportDetailsOverlay(
             .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
             .verticalScroll(rememberScrollState()).padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text(if (ua) "Деталі експорту конфігурації" else "Configuration export details",
+            Text(language.choose("Деталі експорту конфігурації", "Configuration export details", "Детали экспорта конфигурации"),
                 color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
-            Text(if (ua) "Доступно: ${state.foundFiles} · зібрано: ${state.copiedFiles} · недоступно: ${state.unavailableFiles}"
-                else "Available: ${state.foundFiles} · collected: ${state.copiedFiles} · unavailable: ${state.unavailableFiles}",
+            Text(language.choose(
+                "Доступно: ${state.foundFiles} · зібрано: ${state.copiedFiles} · недоступно: ${state.unavailableFiles}",
+                "Available: ${state.foundFiles} · collected: ${state.copiedFiles} · unavailable: ${state.unavailableFiles}",
+                "Доступно: ${state.foundFiles} · собрано: ${state.copiedFiles} · недоступно: ${state.unavailableFiles}"),
                 color = palette.text, fontSize = 15.sp)
             val total = state.totalBytes ?: state.knownBytes
-            Text(if (ua) "Скопійовано: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} МБ"
-                else "Copied: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} MB",
+            Text(language.choose(
+                "Скопійовано: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} МБ",
+                "Copied: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} MB",
+                "Скопировано: ${state.copiedBytes / 1_000_000} / ${total / 1_000_000} МБ"),
                 color = palette.muted, fontSize = 14.sp)
             if (state.currentFile.isNotEmpty()) CodeBlock(state.currentFile, palette, compact = true)
             if (state.completedAtEpochMs > 0) {
                 val created = configurationExportDateTime(state.completedAtEpochMs)
                 val expires = configurationExportDateTime(state.expiresAtEpochMs)
-                Text(if (ua) "Створено: $created\nВидалення: $expires" else "Created: $created\nDeletion: $expires",
+                Text(language.choose("Створено: $created\nВидалення: $expires",
+                    "Created: $created\nDeletion: $expires", "Создано: $created\nУдаление: $expires"),
                     color = palette.text, fontSize = 14.sp, lineHeight = 21.sp)
                 Text(state.volumeSizes.mapIndexed { index, bytes ->
-                    if (ua) "Том ${index + 1}: ${bytes / 1_000_000} МБ" else "Volume ${index + 1}: ${bytes / 1_000_000} MB"
+                    language.choose("Том ${index + 1}: ${bytes / 1_000_000} МБ", "Volume ${index + 1}: ${bytes / 1_000_000} MB", "Том ${index + 1}: ${bytes / 1_000_000} МБ")
                 }.joinToString(" · "), color = palette.muted, fontSize = 14.sp)
             }
             if (state.detail.isNotBlank()) Text(state.detail, color = palette.text, fontSize = 14.sp)
             if (state.phase == ConfigurationExportPhase.EXPIRED) Text(
-                if (ua) "Строк зберігання минув. Сформуйте новий архів."
-                else "The retention period has expired. Create a new archive.", color = palette.text, fontSize = 14.sp)
+                language.choose("Строк зберігання минув. Сформуйте новий архів.",
+                    "The retention period has expired. Create a new archive.",
+                    "Срок хранения истёк. Создайте новый архив."), color = palette.text, fontSize = 14.sp)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                HudButton(if (ua) "Закрити" else "Close", palette, width = 138.dp, onClick = onClose)
+                HudButton(language.choose("Закрити", "Close", "Закрыть"), palette, width = 138.dp, onClick = onClose)
             }
         }
     }
@@ -4131,16 +4224,16 @@ private fun operationDetails(
     detail: String,
     eventId: String,
     unavailable: Int,
-    ua: Boolean,
+    language: Language,
     reportTitle: String = ""
 ): String = buildString {
     append("Operation ID: $operationId")
     if (reportTitle.isNotBlank()) {
-        append("\n\n${if (ua) "Заголовок звіту" else "Report title"}:\n$reportTitle")
+        append("\n\n${language.choose("Заголовок звіту", "Report title", "Заголовок отчёта")}:\n$reportTitle")
     }
-    if (currentFile.isNotBlank()) append("\n\n${if (ua) "Поточний файл" else "Current file"}:\n$currentFile")
+    if (currentFile.isNotBlank()) append("\n\n${language.choose("Поточний файл", "Current file", "Текущий файл")}:\n$currentFile")
     if (unavailable > 0 && !detail.contains("manifest.json")) {
-        append("\n\n${if (ua) "Недоступно" else "Unavailable"}: $unavailable")
+        append("\n\n${language.choose("Недоступно", "Unavailable", "Недоступно")}: $unavailable")
     }
     if (detail.isNotBlank()) append("\n\n$detail")
     if (eventId.isNotBlank() && !detail.contains(eventId)) append("\n\nEvent ID: $eventId")
@@ -4232,16 +4325,17 @@ private fun ConfigurationShareDestinationOverlay(
                     fontSize = 15.sp,
                     lineHeight = 21.sp
                 )
-                Text(if (language == Language.Ua)
-                    "Великий архів буде поділено на томи до 1 ГБ. Архів автоматично видалиться через 15 хвилин після завершення формування. Поділіться ним одразу. Закриття картки та повторне надсилання не подовжують строк; після закриття доведеться сформувати новий архів."
-                    else "Large archives will be split into volumes of up to 1 GB. The archive is automatically deleted 15 minutes after creation finishes. Share it promptly. Closing the card or sharing again does not extend the deadline; after closing, you will need to create a new archive.",
+                Text(language.choose(
+                    "Великий архів буде поділено на томи до 1 ГБ. Архів автоматично видалиться через 15 хвилин після завершення формування. Поділіться ним одразу. Закриття картки та повторне надсилання не подовжують строк; після закриття доведеться сформувати новий архів.",
+                    "Large archives will be split into volumes of up to 1 GB. The archive is automatically deleted 15 minutes after creation finishes. Share it promptly. Closing the card or sharing again does not extend the deadline; after closing, you will need to create a new archive.",
+                    "Большой архив будет разделён на тома до 1 ГБ. Архив автоматически удалится через 15 минут после завершения создания. Отправьте его сразу. Закрытие карточки и повторная отправка не продлевают срок; после закрытия потребуется создать новый архив."),
                     color = palette.yellow, fontSize = 15.sp, lineHeight = 21.sp)
             }
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
             ) {
-                HudButton(if (language == Language.Ua) "Сформувати архів" else "Create archive",
+                HudButton(language.choose("Сформувати архів", "Create archive", "Сформировать архив"),
                     palette, primary = true, width = 220.dp, onClick = onCreate)
                 HudButton(copy.cancel, palette, width = 138.dp, onClick = onCancel)
             }
@@ -4482,7 +4576,12 @@ private fun NavigatorAssetColumn(
         Text(title, color = palette.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(2.dp))
         assets.forEach { asset ->
-            val variant = asset.label.removePrefix("$title ").removePrefix("Waze ").trim()
+            val rawVariant = asset.label.removePrefix("$title ").removePrefix("Waze ").trim()
+            val variant = if (copy.language == Language.Ru) when (rawVariant) {
+                "original version" -> "оригинальная версия"
+                "patched version" -> "патченная версия"
+                else -> rawVariant
+            } else rawVariant
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                     if (variant.isEmpty() || variant == title) asset.versionName
@@ -4524,7 +4623,6 @@ private fun NavigatorAssetAction(
             && asset.state != NavigatorAssetManager.VERIFYING
             && asset.state != NavigatorAssetManager.INSTALL_REQUESTED
             && asset.state != NavigatorAssetManager.UNINSTALL_REQUESTED
-            && asset.state != NavigatorAssetManager.INSTALLED
     val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     val renderedBackground = if (asset.state == NavigatorAssetManager.RECOVERY_REQUIRED && press.pressed) {
         palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)
@@ -4551,6 +4649,11 @@ private fun NavigatorAssetAction(
             ) {
                 when (asset.state) {
                     NavigatorAssetManager.READY -> onInstall(asset.id)
+                    NavigatorAssetManager.INSTALLED -> if (asset.downloadReady) {
+                        onInstall(asset.id)
+                    } else {
+                        onDownload(asset.id)
+                    }
                     NavigatorAssetManager.RECOVERY_REQUIRED -> onRestore(asset.id)
                     else -> onDownload(asset.id)
                 }
@@ -4572,8 +4675,8 @@ private fun AppsTab(
     onInstallAsset: (String) -> Unit,
     onRestoreAsset: (String) -> Unit
 ) {
-    val scanningLabel = if (copy.language == Language.Ua) "Сканування" else "Scanning"
-    val scanFailedLabel = if (copy.language == Language.Ua) "Помилка сканування" else "Scan failed"
+    val scanningLabel = copy.language.choose("Сканування", "Scanning", "Сканирование")
+    val scanFailedLabel = copy.language.choose("Помилка сканування", "Scan failed", "Ошибка сканирования")
     val scanStatusText = when {
         snapshot.appScanInProgress -> scanningLabel
         snapshot.appScanStatus.isNotBlank() -> "$scanFailedLabel: ${snapshot.appScanStatus}"
@@ -4922,16 +5025,8 @@ private fun StorageTab(
     onDeleteSelected: (List<String>) -> Unit,
     onShareSelected: (List<String>) -> Unit
 ) {
-    val storageScanText = if (copy.language == Language.Ua) {
-        "Сканування сховища..."
-    } else {
-        "Scanning storage..."
-    }
-    val storageScanFailureText = if (copy.language == Language.Ua) {
-        "Помилка сканування"
-    } else {
-        "Scan failed"
-    }
+    val storageScanText = copy.language.choose("Сканування сховища...", "Scanning storage...", "Сканирование хранилища...")
+    val storageScanFailureText = copy.language.choose("Помилка сканування", "Scan failed", "Ошибка сканирования")
     val coldStorageText = if (snapshot.storageScanError.isNotBlank()) {
         "$storageScanFailureText: ${snapshot.storageScanError}"
     } else {
@@ -5370,9 +5465,9 @@ private fun patchOptionalLabel(
     language: Language
 ): String {
     if (row.profileId == "waze") {
-        return if (language == Language.Ua) "Стабільність" else "Stability"
+        return language.choose("Стабільність", "Stability", "Стабильность")
     }
-    return if (language == Language.Ua) "Аудіоканал" else row.optionalLabel
+    return language.choose("Аудіоканал", row.optionalLabel, "Аудиоканал")
 }
 
 private fun patchSecondaryLabel(
@@ -5380,7 +5475,7 @@ private fun patchSecondaryLabel(
     language: Language
 ): String {
     if (row.profileId == "waze") {
-        return if (language == Language.Ua) "Смуги" else "Lanes"
+        return language.choose("Смуги", "Lanes", "Полосы")
     }
     return row.gmsCoreLabel
 }
@@ -5558,8 +5653,11 @@ private fun highlightPatchSelectionText(
     highlight: Color
 ) = buildAnnotatedString {
     append(text)
-    val words = if (language == Language.Ua) listOf("іншу", "замінить")
-    else listOf("another", "replace")
+    val words = when (language) {
+        Language.Ua -> listOf("іншу", "замінить")
+        Language.En -> listOf("another", "replace")
+        Language.Ru -> listOf("другую", "заменит")
+    }
     words.forEach { word ->
         var start = text.indexOf(word)
         while (start >= 0) {
@@ -5663,11 +5761,10 @@ private fun PatchConfirmOverlay(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 Text(
-                    if (destructive) copy.patchConfirmText else if (copy.language == Language.Ua) {
-                        "Патч буде встановлено як оновлення. Дані навігатора буде збережено."
-                    } else {
-                        "The patch will be installed as an update. Navigation app data will be preserved."
-                    },
+                    if (destructive) copy.patchConfirmText else copy.language.choose(
+                        "Патч буде встановлено як оновлення. Дані навігатора буде збережено.",
+                        "The patch will be installed as an update. Navigation app data will be preserved.",
+                        "Патч будет установлен как обновление. Данные навигатора будут сохранены."),
                     color = palette.text,
                     fontSize = 15.sp,
                     lineHeight = 21.sp
@@ -5690,11 +5787,9 @@ private fun patchProgressTitle(
     copy: Copy
 ): String {
     return if (operation.kind == "CHECK" || operation.kind == "SELECT") {
-        if (copy.language == Language.Ua) {
-            "Перевірка сумісності навігатора для патчу"
-        } else {
-            "Checking navigator compatibility for patching"
-        }
+        copy.language.choose("Перевірка сумісності навігатора для патчу",
+            "Checking navigator compatibility for patching",
+            "Проверка совместимости навигатора для патча")
     } else {
         copy.patchProgress
     }
@@ -5727,28 +5822,28 @@ private fun patchStepLabel(
 }
 
 private fun patchPhaseLabel(phase: String, language: Language): String {
-    if (language == Language.Ua) {
+    if (language != Language.En) {
         return when (phase) {
-            "COPYING" -> "Копіювання застосунку"
-            "VERIFYING" -> "Перевірка пакета"
-            "SCANNING" -> "Перевірка сумісності"
-            "PATCHING" -> "Застосування патчу"
-            "REPACKING" -> "Перепакування APK"
-            "SIGNING" -> "Підпис APK"
-            "OUTPUT_VERIFY" -> "Перевірка результату"
-            "INSTALLED_VERIFY" -> "Перевірка встановленого APK"
-            "READY_TO_INSTALL" -> "Очікування черги встановлення"
-            "AWAITING_PERMISSION" -> "Очікування дозволу"
-            "CANCEL_REQUESTED" -> "Зупинка операції"
-            "INSTALL_PREPARING" -> "Підготовка системного інсталятора"
-            "COMMITTING" -> "Передавання APK системному інсталятору"
-            "UNINSTALL_REQUESTED" -> "Очікування видалення"
-            "INSTALL_REQUESTED" -> "Очікування встановлення"
-            "RECOVERY_REQUIRED" -> "Потрібне відновлення"
-            "FAILED" -> "Помилка"
-            "CANCELLED" -> "Скасовано"
-            "VERIFIED" -> "Перевірено"
-            else -> "Підготовка операції"
+            "COPYING" -> language.choose("Копіювання застосунку", "", "Копирование приложения")
+            "VERIFYING" -> language.choose("Перевірка пакета", "", "Проверка пакета")
+            "SCANNING" -> language.choose("Перевірка сумісності", "", "Проверка совместимости")
+            "PATCHING" -> language.choose("Застосування патчу", "", "Применение патча")
+            "REPACKING" -> language.choose("Перепакування APK", "", "Перепаковка APK")
+            "SIGNING" -> language.choose("Підпис APK", "", "Подпись APK")
+            "OUTPUT_VERIFY" -> language.choose("Перевірка результату", "", "Проверка результата")
+            "INSTALLED_VERIFY" -> language.choose("Перевірка встановленого APK", "", "Проверка установленного APK")
+            "READY_TO_INSTALL" -> language.choose("Очікування черги встановлення", "", "Ожидание очереди установки")
+            "AWAITING_PERMISSION" -> language.choose("Очікування дозволу", "", "Ожидание разрешения")
+            "CANCEL_REQUESTED" -> language.choose("Зупинка операції", "", "Остановка операции")
+            "INSTALL_PREPARING" -> language.choose("Підготовка системного інсталятора", "", "Подготовка системного установщика")
+            "COMMITTING" -> language.choose("Передавання APK системному інсталятору", "", "Передача APK системному установщику")
+            "UNINSTALL_REQUESTED" -> language.choose("Очікування видалення", "", "Ожидание удаления")
+            "INSTALL_REQUESTED" -> language.choose("Очікування встановлення", "", "Ожидание установки")
+            "RECOVERY_REQUIRED" -> language.choose("Потрібне відновлення", "", "Требуется восстановление")
+            "FAILED" -> language.choose("Помилка", "", "Ошибка")
+            "CANCELLED" -> language.choose("Скасовано", "", "Отменено")
+            "VERIFIED" -> language.choose("Перевірено", "", "Проверено")
+            else -> language.choose("Підготовка операції", "", "Подготовка операции")
         }
     }
     return when (phase) {
@@ -5964,11 +6059,13 @@ private fun HudCheckTab(
 ) {
     val state = snapshot.hudCheck
     val ukrainian = snapshot.uaLanguage
+    val language = copy.language
     val statusText = if (state.running) copy.hudCheckRunning else copy.hudCheckStopped
     val deliveryStatus = snapshot.hudCheckStatus.trim()
     val statusIsError = deliveryStatus.contains("error", ignoreCase = true)
         || deliveryStatus.contains("failed", ignoreCase = true)
         || deliveryStatus.contains("помил", ignoreCase = true)
+        || deliveryStatus.contains("ошиб", ignoreCase = true)
     val statusColor = when {
         statusIsError -> palette.red to palette.redSoft
         state.running -> palette.green to palette.greenSoft
@@ -6033,7 +6130,8 @@ private fun HudCheckTab(
                         .border(1.dp, palette.border, RoundedCornerShape(8.dp))
                         .background(palette.panel)
                 ) {
-                    HudCheckRow(copy.checkManeuvers, copy.checkManeuversHint, state.maneuverLabel(ukrainian), palette,
+                    HudCheckRow(copy.checkManeuvers, copy.checkManeuversHint,
+                        localizeHudCheckLabel(state.maneuverLabel(ukrainian), language), palette,
                         onPrevious = { step(HudCheckState.Field.MANEUVER, -1) },
                         onNext = { step(HudCheckState.Field.MANEUVER, 1) },
                         option = {
@@ -6073,7 +6171,8 @@ private fun HudCheckTab(
                             ) { runAction { activity.composeHudCheckSetTransliterate(it) } }
                         })
                     Divider(palette)
-                    HudCheckRow(copy.checkTrafficLight, copy.checkTrafficLightHint, state.trafficLightLabel(ukrainian), palette,
+                    HudCheckRow(copy.checkTrafficLight, copy.checkTrafficLightHint,
+                        localizeHudCheckLabel(state.trafficLightLabel(ukrainian), language), palette,
                         onPrevious = { step(HudCheckState.Field.TRAFFIC_LIGHT, -1) },
                         onNext = { step(HudCheckState.Field.TRAFFIC_LIGHT, 1) })
                 }
@@ -6083,7 +6182,7 @@ private fun HudCheckTab(
                 Section(copy.checkBaseline, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
                     val baseline = listOf(
                         "${copy.checkManeuvers} · ${copy.checkManeuversChannels}" to
-                            "${if (ukrainian) "Прямо" else "Straight"} · ${copy.stockImage}",
+                            "${language.choose("Прямо", "Straight", "Прямо")} · ${copy.stockImage}",
                         copy.checkLanes to "S* | S | S* | S | S* · ${copy.stockImage}",
                         copy.distanceMeters to "77",
                         copy.streetText to "Continue straight"
@@ -6117,7 +6216,7 @@ private fun HudCheckTab(
                                     .padding(12.dp),
                                 verticalArrangement = Arrangement.Center
                             ) {
-                                Text(state.extendedLabel(ukrainian), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                Text(localizeHudCheckLabel(state.extendedLabel(ukrainian), language), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
                                 Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                                 Spacer(Modifier.height(8.dp))
                                 Text(state.extendedValue(), color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
@@ -6658,7 +6757,6 @@ private fun HudHelpOverlay(
     palette: Palette,
     onDismiss: () -> Unit
 ) {
-    val ua = language == Language.Ua
     val topic = HudHelpCatalog.topic(request.topic)
     var localChecked by remember(request) { mutableStateOf(request.checked) }
     var localIndex by remember(request) { mutableIntStateOf(request.selectedIndex) }
@@ -6736,7 +6834,7 @@ private fun HudHelpOverlay(
     } else {
         HudHelpCatalog.streetFormatImage(selectedImage, localPresentation.streetFormat)
     }
-    val localizedImage = HudHelpCatalog.localizedImage(formattedImage, ua)
+    val localizedImage = HudHelpCatalog.localizedImage(formattedImage, language)
     val resources = androidx.compose.ui.platform.LocalContext.current.resources
     val coloredImage = remember(localizedImage, localPresentation) {
         tintedHudHelp(resources, localizedImage, localPresentation)
@@ -6759,7 +6857,7 @@ private fun HudHelpOverlay(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp)
         ) {
-            Text(if (ua) "Передпоказ" else "Preview", color = palette.text,
+            Text(language.choose("Передпоказ", "Preview", "Предпросмотр"), color = palette.text,
                 fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             Box(
                 modifier = Modifier
@@ -6879,7 +6977,7 @@ private fun HudHelpOverlay(
                     }
                 }
             }
-            HudButton(if (ua) "Закрити" else "Close", palette, width = 0.dp,
+            HudButton(language.choose("Закрити", "Close", "Закрыть"), palette, width = 0.dp,
                 modifier = Modifier.fillMaxWidth(), onClick = onDismiss)
         }
     }
@@ -6888,7 +6986,7 @@ private fun HudHelpOverlay(
         WidgetColorPicker(
             initialArgb = localPresentation.color(slot),
             title = request.title,
-            copy = if (ua) uaCopy() else enCopy(),
+            copy = when (language) { Language.Ua -> uaCopy(); Language.En -> enCopy(); Language.Ru -> ruCopy() },
             palette = palette,
             onDismiss = { showLocalColorPicker = false },
             onSelect = { color ->
@@ -6938,19 +7036,66 @@ private fun SettingRow(
     }
 }
 
-private fun steeringButtonLabel(keyCode: Int, ua: Boolean): String {
+private fun localizedColorTitle(slot: HudTextColorSlot, language: Language): String = when (slot) {
+    HudTextColorSlot.Arrival -> language.choose("Колір часу прибуття", "Arrival time color", "Цвет времени прибытия")
+    HudTextColorSlot.Duration -> language.choose("Колір залишку часу", "Remaining time color", "Цвет оставшегося времени")
+    HudTextColorSlot.Remaining -> language.choose("Колір залишку дистанції", "Remaining distance color", "Цвет оставшегося расстояния")
+    HudTextColorSlot.Warning -> language.choose("Колір дистанції до попередження", "Warning distance color", "Цвет расстояния до предупреждения")
+}
+
+private fun localizeHudCheckLabel(value: String, language: Language): String {
+    if (language != Language.Ru) return value
+    return when (value) {
+        "Straight" -> "Прямо"
+        "Left" -> "Налево"
+        "Right" -> "Направо"
+        "Slight left" -> "Плавно налево"
+        "Slight right" -> "Плавно направо"
+        "Sharp left" -> "Резко налево"
+        "Left U-turn" -> "Разворот налево"
+        "Right U-turn" -> "Разворот направо"
+        "Roundabout right exit 2" -> "Круг, второй съезд направо"
+        "Exit ramp left" -> "Съезд налево"
+        "Exit ramp right" -> "Съезд направо"
+        "Arrival time" -> "Время прибытия"
+        "Remaining time" -> "Оставшееся время"
+        "Remaining distance" -> "Оставшееся расстояние"
+        "Road speed limit" -> "Ограничение скорости дороги"
+        "Speed data" -> "Данные скорости"
+        "Camera type and distance" -> "Тип камеры и расстояние"
+        "Warning" -> "Предупреждение"
+        "Points of interest" -> "Объекты на маршруте"
+        "Destination" -> "Пункт назначения"
+        "Position" -> "Положение"
+        "Road data" -> "Данные дороги"
+        "Guide line" -> "Линия маршрута"
+        "Guide point" -> "Точка маршрута"
+        "Heading" -> "Курс"
+        "Route progress" -> "Прогресс маршрута"
+        "Map path" -> "Путь на карте"
+        "Navigation map" -> "Навигационная карта"
+        "Traffic speed limit" -> "Ограничение скорости движения"
+        "Speed camera" -> "Камера скорости"
+        else -> value.replace("Green", "Зелёный").replace("Red", "Красный")
+            .replace("Yellow", "Жёлтый").replace("straight", "прямо")
+            .replace("left", "налево").replace("right", "направо")
+            .replace("U-turn", "разворот").replace("Pass", "Проезд")
+            .replace("Wait", "Ожидание").replace("Caution", "Внимание")
+    }
+}
+
+private fun steeringButtonLabel(keyCode: Int, language: Language): String {
     if (keyCode < 0) return ""
     val name = when (keyCode) {
-        294 -> if (ua) "Камери 360°" else "360° cameras"
-        304 -> if (ua) "Голосове керування" else "Voice control"
-        305 -> if (ua) "Ліва зірочка" else "Left star"
-        309 -> if (ua) "Режими приборки / завершення виклику" else "Dashboard modes / end call"
-        310 -> if (ua) "Круговий огляд" else "Surround view"
-        320 -> if (ua) "Голосове керування" else "Voice control"
-        321 -> if (ua) "Ліва додаткова" else "Left auxiliary"
-        351 -> if (ua) "Права зірочка" else "Right star"
-        383 -> if (ua) "Права додаткова" else "Right auxiliary"
-        else -> return if (ua) "Кнопка (код $keyCode)" else "Button (code $keyCode)"
+        294 -> language.choose("Камери 360°", "360° cameras", "Камеры 360°")
+        304, 320 -> language.choose("Голосове керування", "Voice control", "Голосовое управление")
+        305 -> language.choose("Ліва зірочка", "Left star", "Левая звёздочка")
+        309 -> language.choose("Режими приборки / завершення виклику", "Dashboard modes / end call", "Режимы приборки / завершение вызова")
+        310 -> language.choose("Круговий огляд", "Surround view", "Круговой обзор")
+        321 -> language.choose("Ліва додаткова", "Left auxiliary", "Левая дополнительная")
+        351 -> language.choose("Права зірочка", "Right star", "Правая звёздочка")
+        383 -> language.choose("Права додаткова", "Right auxiliary", "Правая дополнительная")
+        else -> return language.choose("Кнопка (код $keyCode)", "Button (code $keyCode)", "Кнопка (код $keyCode)")
     }
     return "$name ($keyCode)"
 }
@@ -6958,7 +7103,7 @@ private fun steeringButtonLabel(keyCode: Int, ua: Boolean): String {
 @Composable
 private fun TransferProfileRow(
     summary: String,
-    ua: Boolean,
+    language: Language,
     palette: Palette,
     onEdit: () -> Unit,
     onDelete: () -> Unit
@@ -6977,9 +7122,9 @@ private fun TransferProfileRow(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        TransferProfileIconButton(false, if (ua) "Редагувати профіль" else "Edit profile",
+        TransferProfileIconButton(false, language.choose("Редагувати профіль", "Edit profile", "Редактировать профиль"),
             palette, onEdit)
-        TransferProfileIconButton(true, if (ua) "Видалити профіль" else "Delete profile",
+        TransferProfileIconButton(true, language.choose("Видалити профіль", "Delete profile", "Удалить профиль"),
             palette, onDelete)
     }
 }
@@ -7025,7 +7170,7 @@ private fun TransferProfileEditorDialog(
     pressModes: List<String>,
     windowProfiles: List<String>,
     conflictSummary: String?,
-    ua: Boolean,
+    language: Language,
     palette: Palette,
     onDraftChange: (SteeringTransferDraft) -> Unit,
     onSelectButton: () -> Unit,
@@ -7058,12 +7203,10 @@ private fun TransferProfileEditorDialog(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
-                if (ua) {
-                    if (draft.id == null) "Створення профілю перенесення"
-                    else "Редагування профілю перенесення"
-                } else {
-                    if (draft.id == null) "Create transfer profile" else "Edit transfer profile"
-                },
+                if (draft.id == null) language.choose("Створення профілю перенесення",
+                    "Create transfer profile", "Создание профиля переноса")
+                else language.choose("Редагування профілю перенесення",
+                    "Edit transfer profile", "Редактирование профиля переноса"),
                 color = palette.text,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.SemiBold
@@ -7077,19 +7220,19 @@ private fun TransferProfileEditorDialog(
                     .padding(14.dp),
                 verticalArrangement = Arrangement.spacedBy(14.dp)
             ) {
-                Text(if (ua) "Кнопка та тип натискання" else "Button and press type",
+                Text(language.choose("Кнопка та тип натискання", "Button and press type", "Кнопка и тип нажатия"),
                     color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.spacedBy(10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    HudButton(if (ua) "Вибрати кнопку" else "Select button", palette,
+                    HudButton(language.choose("Вибрати кнопку", "Select button", "Выбрать кнопку"), palette,
                         primary = true, width = 190.dp, onClick = onSelectButton)
                     HudReadOnlyField(
                         if (draft.keyCode < 0) {
-                            if (ua) "Кнопку не вибрано" else "No button selected"
-                        } else steeringButtonLabel(draft.keyCode, ua),
+                            language.choose("Кнопку не вибрано", "No button selected", "Кнопка не выбрана")
+                        } else steeringButtonLabel(draft.keyCode, language),
                         palette,
                         Modifier.weight(1f)
                     )
@@ -7108,20 +7251,20 @@ private fun TransferProfileEditorDialog(
                     )
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (ua) "Застосунок" else "Application", color = palette.text,
+                    Text(language.choose("Застосунок", "Application", "Приложение"), color = palette.text,
                         fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                         modifier = Modifier.weight(1f))
                     HudTransferAppDropdown(
                         entries = apps,
                         selectedPackage = draft.packageName,
-                        ua = ua,
+                        language = language,
                         palette = palette,
                         width = 350.dp,
                         onSelected = { onDraftChange(draft.copy(packageName = it)) }
                     )
                 }
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text(if (ua) "Профіль перенесення на приборку" else "Dashboard transfer profile",
+                    Text(language.choose("Профіль перенесення на приборку", "Dashboard transfer profile", "Профиль переноса на приборку"),
                         color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp,
                         modifier = Modifier.weight(1f))
                     HudDropdown(
@@ -7141,8 +7284,9 @@ private fun TransferProfileEditorDialog(
             }
             if (conflictSummary != null) {
                 Text(
-                    if (ua) "Такий профіль уже створено: $conflictSummary"
-                    else "This profile already exists: $conflictSummary",
+                    language.choose("Такий профіль уже створено: $conflictSummary",
+                        "This profile already exists: $conflictSummary",
+                        "Такой профиль уже создан: $conflictSummary"),
                     color = palette.yellow,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.SemiBold,
@@ -7154,13 +7298,13 @@ private fun TransferProfileEditorDialog(
                 horizontalArrangement = Arrangement.spacedBy(10.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                HudButton(if (ua) "Зберегти" else "Save", palette, primary = true,
+                HudButton(language.choose("Зберегти", "Save", "Сохранить"), palette, primary = true,
                     enabled = canSave, width = 150.dp, onClick = onSave)
-                HudButton(if (ua) "Скасувати" else "Cancel", palette,
+                HudButton(language.choose("Скасувати", "Cancel", "Отмена"), palette,
                     width = 150.dp, onClick = onDismiss)
                 Spacer(Modifier.weight(1f))
                 if (onDelete != null) {
-                    HudButton(if (ua) "Видалити" else "Delete", palette,
+                    HudButton(language.choose("Видалити", "Delete", "Удалить"), palette,
                         destructive = true, width = 150.dp, onClick = onDelete)
                 }
             }
@@ -7171,7 +7315,7 @@ private fun TransferProfileEditorDialog(
 @Composable
 private fun TransferProfileDeleteConfirmDialog(
     summary: String,
-    ua: Boolean,
+    language: Language,
     palette: Palette,
     onNo: () -> Unit,
     onYes: () -> Unit
@@ -7186,17 +7330,18 @@ private fun TransferProfileDeleteConfirmDialog(
                 .padding(18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            Text(if (ua) "Видалення профілю" else "Delete profile", color = palette.text,
+            Text(language.choose("Видалення профілю", "Delete profile", "Удалить профиль"), color = palette.text,
                 fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
             Text(
-                if (ua) "Ви впевнені, що хочете видалити профіль:\n$summary?"
-                else "Are you sure you want to delete this profile:\n$summary?",
+                language.choose("Ви впевнені, що хочете видалити профіль:\n$summary?",
+                    "Are you sure you want to delete this profile:\n$summary?",
+                    "Вы уверены, что хотите удалить профиль:\n$summary?"),
                 color = palette.text, fontSize = 16.sp, lineHeight = 23.sp
             )
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)) {
-                HudButton(if (ua) "Так" else "Yes", palette, destructive = true,
+                HudButton(language.choose("Так", "Yes", "Да"), palette, destructive = true,
                     width = 138.dp, onClick = onYes)
-                HudButton(if (ua) "Ні" else "No", palette, width = 138.dp, onClick = onNo)
+                HudButton(language.choose("Ні", "No", "Нет"), palette, width = 138.dp, onClick = onNo)
             }
         }
     }
@@ -7232,7 +7377,7 @@ private fun HudReadOnlyField(
 private fun HudTransferAppDropdown(
     entries: List<InstalledTransferAppCatalog.Entry>,
     selectedPackage: String,
-    ua: Boolean,
+    language: Language,
     palette: Palette,
     width: Dp,
     onSelected: (String) -> Unit
@@ -7243,7 +7388,7 @@ private fun HudTransferAppDropdown(
     }
     val hasSelection = selectedPackage.isNotBlank()
     val fieldText = if (hasSelection) selected.label() else {
-        if (ua) "Вибрати застосунок для перенесення" else "Select app to transfer"
+        language.choose("Вибрати застосунок для перенесення", "Select app to transfer", "Выбрать приложение для переноса")
     }
     val selectedBackground = palette.accent.copy(alpha = if (palette.dark) 0.20f else 0.04f)
     val fieldBackground = if (entries.isNotEmpty()) selectedBackground
@@ -7362,7 +7507,7 @@ private fun TransferAppIcon(
 
 @Composable
 private fun SteeringButtonCaptureDialog(
-    ua: Boolean,
+    language: Language,
     palette: Palette,
     onDismiss: () -> Unit
 ) {
@@ -7380,22 +7525,21 @@ private fun SteeringButtonCaptureDialog(
             verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
             Text(
-                if (ua) "Натисніть кнопку на кермі..." else "Press a steering-wheel button...",
+                language.choose("Натисніть кнопку на кермі...", "Press a steering-wheel button...", "Нажмите кнопку на руле..."),
                 color = palette.text,
                 fontSize = 22.sp,
                 fontWeight = FontWeight.SemiBold
             )
             Text(
-                if (ua) {
-                    "Під час роботи вибраного застосунку призначена кнопка не виконуватиме штатну дію"
-                } else {
-                    "While the selected app is active, the assigned button will not perform its original action"
-                },
+                language.choose(
+                    "Під час роботи вибраного застосунку призначена кнопка не виконуватиме штатну дію",
+                    "While the selected app is active, the assigned button will not perform its original action",
+                    "Пока выбранное приложение активно, назначенная кнопка не будет выполнять штатное действие"),
                 color = palette.muted,
                 fontSize = 13.sp
             )
             HudButton(
-                if (ua) "Скасувати" else "Cancel",
+                language.choose("Скасувати", "Cancel", "Отмена"),
                 palette,
                 width = 0.dp,
                 modifier = Modifier.fillMaxWidth(),
@@ -8133,10 +8277,13 @@ private fun Segmented(
     palette: Palette,
     onLeft: () -> Unit,
     onRight: () -> Unit,
-    itemWidth: Dp = 64.dp
+    itemWidth: Dp = 64.dp,
+    third: String? = null,
+    thirdActive: Boolean = false,
+    onThird: () -> Unit = {}
 ) {
     val selectionOffset by animateDpAsState(
-        targetValue = if (leftActive) 0.dp else itemWidth,
+        targetValue = when { thirdActive -> itemWidth * 2; leftActive -> 0.dp; else -> itemWidth },
         animationSpec = tween(durationMillis = 140),
         label = "segmentedSelectionOffset"
     )
@@ -8158,7 +8305,8 @@ private fun Segmented(
         )
         Row {
             SegmentedItem(left, leftActive, palette, itemWidth, onLeft)
-            SegmentedItem(right, !leftActive, palette, itemWidth, onRight)
+            SegmentedItem(right, !leftActive && !thirdActive, palette, itemWidth, onRight)
+            if (third != null) SegmentedItem(third, thirdActive, palette, itemWidth, onThird)
         }
     }
 }
@@ -8368,10 +8516,10 @@ private fun storageUsageColors(bytes: Long, limitGb: Int, palette: Palette): Pai
 }
 
 private fun gbUnit(copy: Copy): String =
-    if (copy.language == Language.Ua) "ГБ" else "GB"
+    copy.language.choose("ГБ", "GB", "ГБ")
 
 private fun mbUnit(copy: Copy): String =
-    if (copy.language == Language.Ua) "МБ" else "MB"
+    copy.language.choose("МБ", "MB", "МБ")
 
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun sessionLabel(count: Int, copy: Copy): String {
@@ -8380,11 +8528,20 @@ private fun sessionLabel(count: Int, copy: Copy): String {
     }
     val mod100 = count % 100
     val mod10 = count % 10
-    return when {
-        mod100 in 11..14 -> "сесій"
-        mod10 == 1 -> "сесія"
-        mod10 in 2..4 -> "сесії"
-        else -> "сесій"
+    return when (copy.language) {
+        Language.Ua -> when {
+            mod100 in 11..14 -> "сесій"
+            mod10 == 1 -> "сесія"
+            mod10 in 2..4 -> "сесії"
+            else -> "сесій"
+        }
+        Language.Ru -> when {
+            mod100 in 11..14 -> "сессий"
+            mod10 == 1 -> "сессия"
+            mod10 in 2..4 -> "сессии"
+            else -> "сессий"
+        }
+        Language.En -> error("handled above")
     }
 }
 
@@ -8452,6 +8609,7 @@ private fun enCopy() = Copy(
     permissionsMissing = "Permissions: missing",
     ukr = "UA",
     eng = "ENG",
+    ru = "RU",
     dark = "Dark",
     light = "Light",
     mainHint = "Navigation settings",
@@ -8809,6 +8967,7 @@ private fun uaCopy() = enCopy().copy(
     shareSelected = "Поділитись логами",
     ukr = "Укр",
     eng = "Англ",
+    ru = "Рос",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
     deleteSelected = "Видалити вибране",
@@ -8893,7 +9052,237 @@ private fun uaCopy() = enCopy().copy(
     next = "Наступний",
 )
 
-private fun shareCopy(language: Language) = if (language == Language.Ua) {
+private fun ruCopy() = enCopy().copy(
+    language = Language.Ru,
+    title = "BYD HUD",
+    subtitle = "Вывод навигации на HUD | v${BuildConfig.VERSION_NAME}",
+    main = "Настройки",
+    apps = "Приложения",
+    storage = "Хранилище и логи",
+    patch = "Патч",
+    hudCheck = "Проверка HUD",
+    hudRunning = "HUD: работает",
+    hudIdle = "HUD: ожидание",
+    hudFailed = "HUD: ошибка",
+    adbOk = "ADB: ОК",
+    adbNotGranted = "ADB: нет доступа",
+    permissionsOk = "Разрешения: ОК",
+    permissionsMissing = "Разрешения: отсутствуют",
+    ukr = "Укр",
+    eng = "Англ",
+    ru = "Рус",
+    dark = "Тёмная",
+    light = "Светлая",
+    mainHint = "Настройки навигации",
+    permissionsRuntime = "Разрешения и работа",
+    adbPermissions = "Разрешения ADB",
+    adbHint = "Самопроверка автоматически выдаёт необходимые разрешения для захвата навигации, когда ADB авторизован.",
+    grantAdb = "Выдать ADB",
+    backgroundApps = "Фоновые приложения",
+    backgroundHint = "Открыть экран управления фоновой работой.",
+    disableBgApps = "Фоновые приложения",
+    setupDialogTitle = "Работа в фоне",
+    setupDialogText = "Проверяйте после каждой установки или обновления, иначе DiLink может остановить HUD в фоне.",
+    setupDialogInstruction = "Установите Disable background Apps -> BYD HUD = OFF",
+    setupDialogPrimary = "Открыть",
+    setupDialogDismiss = "Понятно",
+    bootRuntime = "Автозапуск",
+    bootRuntimeHint = "Запускать службу HUD после загрузки, разблокировки, обновления пакета и проверки watchdog.",
+    saveScreenshotsLogs = "Сохранять диагностические снимки и расширенные логи",
+    saveScreenshotsLogsHint = "Хранить кадры Waze, детали обработки и полную историю логов для диагностики.",
+    checkForUpdates = "Проверить обновления",
+    checkForUpdatesHint = "Проверять наличие новой версии и предлагать обновление",
+    checkForUpdatesButton = "Проверить обновления",
+    betaTesting = "Участвовать в бета-тестировании",
+    betaTestingHint = "Проверять экспериментальные версии. Возможна нестабильная работа или ошибки",
+    shutdown = "Выключить",
+    shutdownHint = "Остановить приложение до следующего открытия",
+    updateTitle = "Обновление",
+    updateCurrentVersion = "Текущая версия:",
+    updateAvailableVersion = "Доступная версия:",
+    updateChecking = "Проверка обновления...",
+    updateLatest = "Установлена последняя версия приложения",
+    updateDownloading = "Загрузка обновления...",
+    updateClose = "Закрыть",
+    updateAction = "Обновить",
+    basicNavigationOutput = "Основной вывод навигации",
+    extraNavigationOptions = "Дополнительные параметры навигации",
+    dashboardWindowSize = "Профиль окна приборки",
+    logs = "Логи",
+    notice = "Обратите внимание",
+    wazeDirectNotice = "Вывод Waze на HUD лучше всего работает через прямой канал. Поддерживаемые версии:",
+    wazeSupportedVersions = "стоковая 4.95.0.3 / патченная 5.20.0.1",
+    pngOutput = "Вывод PNG",
+    pngHint = "Передавать исходное изображение манёвра.",
+    nativeOutput = "Штатный вывод",
+    nativeHint = "Передавать штатное динамическое изображение.",
+    laneOutput = "Вывод полос",
+    laneHint = "Передавать изображение полос, когда обнаружены указания по нескольким полосам.",
+    distanceOutput = "Вывод дистанции",
+    distanceHint = "Передавать дистанцию до манёвра в текущих данных навигации.",
+    streetOutput = "Вывод улицы",
+    streetHint = "Передавать следующую дорогу или текст улицы Waze, когда он доступен.",
+    textTransliteration = "Транслитерация текста",
+    textTransliterationHint = "Преобразовывать украинскую кириллицу и другие системы письма в латиницу для улиц и направлений, если HUD отображает их неправильно.",
+    textDirectionOutput = "Вывод текстового направления",
+    textDirectionOutputHint = "Передавать направление в поле улицы (\"Продолжайте прямо\"), если названия улицы нет. Название улицы имеет приоритет.",
+    showWazeAlerts = "Показывать предупреждения Waze",
+    showWazeAlertsHint = "Показывать предупреждения Waze на HUD.",
+    tbtWithoutHudOutput = "Создавать карточку TBT даже для активной сессии навигатора без вывода на HUD",
+    tbtWithoutHudOutputHint = "Карточка TBT также создаётся для активного навигатора, не выбранного для вывода на HUD.\nЕсли активны два навигатора, приоритет у навигатора с выводом на HUD; если вывод не выбран — у последнего запущенного.",
+    switchToTbtOnHudStart = "Переключаться на карточку TBT при запуске вывода на HUD",
+    switchToTbtOnHudStartHint = "Автоматически открывать карточку TBT при запуске вывода навигации на HUD.",
+    showWholeRouteMetrics = "Показывать ETA, время и дистанцию всего маршрута",
+    showWholeRouteMetricsHint = "Предпочитать значения всего маршрута. Waze использует доступное значение до остановки, если отдельного значения всего маршрута нет.",
+    showEta = "Показывать ETA",
+    showEtaHint = "Ожидаемое время прибытия в выбранную точку маршрута.",
+    showRemainingTime = "Показывать оставшееся время",
+    showRemainingTimeHint = "Оставшееся время в пути до выбранной точки маршрута.",
+    showRemainingDistance = "Показывать оставшееся расстояние",
+    showRemainingDistanceHint = "Оставшееся расстояние до выбранной точки маршрута.",
+    dashboardScreenMode = "Режим экрана приборки",
+    dashboardScreenModeHint = "Выберите режим экрана приборки",
+    dashboardWidth = "Ширина",
+    dashboardWidthHint = "Ширина окна в процентах от ширины приборки.",
+    dashboardHeight = "Высота",
+    dashboardHeightHint = "Высота окна в процентах от высоты приборки.",
+    dashboardOffset = "Горизонтальное смещение",
+    dashboardOffsetHint = "Положение в свободном пространстве: 0% слева, 50% по центру, 100% справа.",
+    dashboardScale = "Масштаб",
+    dashboardScaleHint = "Масштаб проецируемого содержимого внутри окна приборки.",
+    smallDistanceClamp = "Малая дистанция",
+    smallDistanceHint = "Передавать 11 м для дистанций от 0 до 10 м вместо штатного маркера близкого манёвра.",
+    appsHint = "Управление выводом навигаторов на HUD и приборку.",
+    lastScan = "Последнее сканирование",
+    refreshApps = "Обновить приложения",
+    supportedApps = "Поддерживаемые навигаторы",
+    allApps = "Все фоновые приложения",
+    installed = "установлено",
+    notInstalled = "не установлено",
+    running = "работает в фоне",
+    notRunning = "не запущено",
+    supported = "поддерживается",
+    dashboardUnavailable = "приборка недоступна",
+    logCandidate = "кандидат для логов",
+    navigatorAssetsNotice = "Вывод на HUD лучше всего работает с этими поддерживаемыми сборками навигаторов",
+    navigatorAssetDownload = "Скачать",
+    navigatorAssetInstall = "Установить",
+    navigatorAssetInstalled = "Установлено",
+    navigatorAssetRetry = "Повторить",
+    navigatorAssetRestore = "Восстановить",
+    navigatorAssetInstalling = "Установка...",
+    navigatorAssetVerifying = "Проверка...",
+    navigatorAssetConfirmTitle = "Заменить %s?",
+    navigatorAssetConfirmText = "Перед установкой этого APK установленный навигатор будет удалён. Его локальные данные могут быть потеряны. Предыдущий APK-set сохранён для восстановления.",
+    navigatorAssetConfirmOk = "Заменить",
+    navigatorAssetConfirmCancel = "Отмена",
+    wazeFeatures = "Возможности Waze",
+    customSurface = "Запускать с собственным surface",
+    customSurfaceHint = "Открывать навигационный surface Waze только после начала маршрута. Для поиска и построения маршрута используйте обычный Waze.",
+    log = "Лог",
+    sendDashboard = "На приборку",
+    sendMain = "На главный экран",
+    startAppFirst = "Сначала запусти",
+    noBackgroundApps = "Поддерживаемые приложения здесь не дублируются. Здесь только текущие несистемные фоновые приложения.",
+    startLogcat = "Начать Logcat",
+    stopLogcat = "Остановить Logcat",
+    shareConfiguration = "Экспорт конфигурации",
+    storageHint = "Запись, отправка, хранение и очистка навигационных логов.",
+    storageSettings = "Настройки хранилища",
+    navLogsFolderLimit = "Лимит папки навигационных логов",
+    navLogsFolderLimitHint = "Старые данные удаляются во время работы приложения при превышении лимита папки.",
+    storageLimitGb = "Лимит, ГБ",
+    currentNavLogsSize = "Текущий размер папки навигационных логов",
+    navigationLogsFolder = "Папка навигационных логов",
+    privateStorageLocation = "Приватная папка",
+    publicStorageLocation = "Публичная папка",
+    bothStorageLocations = "Публичная и приватная папки",
+    shareSelected = "Поделиться логами",
+    sortByDate = "Сначала новые",
+    sortByName = "Сначала старые",
+    deleteSelected = "Удалить выбранное",
+    activeToday = "активна сегодня",
+    sessions = "сессий",
+    created = "создано",
+    folderSelected = "выбрано",
+    folderNotSelected = "нажмите для выбора",
+    storageNoDayFolders = "Папок по дням пока нет. Новые навигационные логи появятся после создания сессий.",
+    storageCalculating = "подсчёт...",
+    storageSessionsShort = "сесс.",
+    storageDeleteTitle = "Удаление данных",
+    storageDeleteSelected = "Выбрано папок для удаления: %d",
+    storageDeleteQuestion = "Выполнить удаление?",
+    storageDeleteCannotStop = "После запуска операцию нельзя остановить из приложения.",
+    storageDeleteYes = "Да",
+    storageDeleteNo = "Нет",
+    storageDeletingFolder = "Удаление папки с данными",
+    storageDeleteStep = "шаг %d/%d",
+    patchTab = "ПАТЧ ПРИЛОЖЕНИЯ",
+    patchHint = "Патч навигаторов для прямого вывода на HUD.",
+    patchWarning = "Предупреждение",
+    patchWarningText = "Выберите установленный навигатор или файл APK/APKM/APKS/XAPK без OBB. Совместимые компоненты обрабатываются локально и проверяются перед запросом Android на установку. Возможность патча определяется пакетом, структурой архива, манифестом и точной структурой DEX; ключ репозитория не требуется. Несовпадение подписей может потребовать удаления приложения и привести к потере локальных данных. Сообщайте о неподдерживаемых версиях для анализа:",
+    patchRiskWarning = "Продолжайте на свой риск. Разработчик не несёт ответственности за потерю данных или ошибки.",
+    availableNavigators = "Доступные навигаторы",
+    noSupportedNavigators = "Нет поддерживаемых навигаторов",
+    appVersion = "Версия",
+    patchNotChecked = "проверить",
+    patchDirectChannel = "Прямой канал",
+    patchWazeAlerts = "Предупреждения",
+    patchClearSelection = "Отменить выбор файла",
+    patchSelectFile = "Можно выбрать файл",
+    patchSelectFileTitle = "Выбрать другую версию приложения?",
+    patchSelectFileText = "Выберите другую скачанную версию приложения, которая заменит установленную.",
+    patchUnsupportedFileText = "Поддерживаются только файлы APK, APKM, APKS и XAPK без OBB.",
+    patchSelectionErrorText = "Выбранный источник нельзя использовать.",
+    patchPatchable = "патч",
+    patchPatched = "готово",
+    patchFailed = "ошибка",
+    patchSource = "Источник",
+    patchInstalledSource = "установленное приложение",
+    patchProgress = "Применение патча навигатора",
+    patchRecovery = "Требуется восстановление",
+    patchRestore = "Восстановить исходный пакет",
+    checkPatch = "Проверить",
+    applyPatch = "Патч",
+    patchConfirmTitle = "Применить патч к %s?",
+    patchConfirmText = "Перед установкой изменённого пакета установленный навигатор нужно удалить. Его локальные данные будут потеряны. Выбранный исходный пакет сохраняется для восстановления.",
+    patchConfirmOk = "Ок",
+    patchConfirmCancel = "Отмена",
+    hudCheckHint = "Прямая проверка данных HUD и TBT-карточки приборки",
+    basicOutput = "Основной вывод",
+    basicOutputHint = "Независимые настройки основных полей вывода",
+    extendedOutput = "Расширенный вывод",
+    extendedOutputHint = "Постоянный базовый пакет · автоматический или ручной цикл",
+    checkManeuvers = "Манёвры",
+    checkManeuversHint = "PNG и штатный вывод соответствуют одному манёвру",
+    checkManeuversChannels = "OEM + native",
+    checkLanes = "Полосы",
+    checkLanesHint = "Рекомендуемые и совмещённые направления",
+    distanceMeters = "Дистанция, м",
+    checkDistanceHint = "1 · 11 · 20 · 55 · 155 · 1555 · 15555",
+    streetText = "Улица",
+    checkStreetHint = "Латиница и кириллица · транслитерация только кириллицы",
+    checkTransliteration = "Транслитерация",
+    checkTrafficLight = "Поле светофора",
+    checkTrafficLightHint = "Направления, цвета, числа и штатные символы",
+    stockImage = "Штатное",
+    bitmapImage = "Bitmap",
+    hudCheckRunning = "Работает",
+    hudCheckStopped = "Остановлено",
+    hudCheckStart = "Запустить",
+    hudCheckStop = "Остановить",
+    checkBaseline = "Постоянный базовый пакет",
+    currentField = "Ожидаемый дополнительный вывод",
+    checkAutomatic = "Авто",
+    checkManualCycle = "Ручной",
+    checkManualCycleHint = "Стрелки переключают поля · Авто продолжает с текущего шага",
+    checkCycle = "Шаг каждые 500 мс · выключите Авто, чтобы задержаться на текущем шаге",
+    checkExtendedNotice = "Базовый пакет не меняется · видимость дополнительных полей зависит от автомобиля",
+    previous = "Назад",
+    next = "Далее",
+)
+
+private fun shareCopy(language: Language) = when (language) { Language.Ua -> {
     ShareCopy(
         shareLogsTitle = "Поділитися навігаційними логами",
         shareLogsSelection = "Обрано днів: %d · файлів: %d · %s",
@@ -8922,7 +9311,7 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         configurationSuccess = "Конфігурацію успішно надіслано.",
         configurationFailure = "Не вдалося надіслати конфігурацію."
     )
-} else {
+}; Language.En -> {
     ShareCopy(
         shareLogsTitle = "Share navigation logs",
         shareLogsSelection = "%d selected days · %d files · %s",
@@ -8951,4 +9340,33 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         configurationSuccess = "Configuration sent successfully.",
         configurationFailure = "The configuration could not be sent."
     )
-}
+}; Language.Ru -> {
+    ShareCopy(
+        shareLogsTitle = "Поделиться навигационными логами",
+        shareLogsSelection = "Выбрано дней: %d · файлов: %d · %s",
+        shareLogsArchiveHint = "Будет подготовлен один ZIP-архив с полным содержимым выбранных папок за дни.",
+        shareLogsSensitiveWarning = "Архив может содержать точные координаты, маршруты, названия улиц и поисковые запросы, снимки или direct-изображения Waze и полный системный logcat.",
+        shareLogsSentryNotice = "Отправка разработчику использует сервис Sentry.",
+        shareToSentry = "Отправить разработчику",
+        commentTitle = "Комментарий к логам",
+        commentPlaceholder = "Опишите проблему или добавьте пояснение (необязательно)",
+        commentOk = "Ок",
+        shareToAnotherApp = "Другое приложение",
+        cancel = "Отмена",
+        waitingForWrites = "Ожидание записи",
+        copying = "Копирование",
+        archiving = "Архивация",
+        uploadTitle = "Отправка логов разработчику",
+        preparing = "Подготовка архива...",
+        uploading = "Отправка архива...",
+        success = "Логи успешно отправлены.",
+        failure = "Не удалось отправить логи.",
+        reportId = "ID отчёта",
+        close = "Закрыть",
+        configurationTitle = "Экспорт конфигурации авто",
+        configurationWarning = "Архив содержит доступные значения HUD/приборки, FID, разрешения, состояние BYD HUD, сведения о прошивке, дисплеях, аудио, сети и SOME/IP. Также добавляются необходимые для диагностики системные приложения со split APK, библиотеки, framework и конфигурации, включая полный CarSettingsPlugins. Пакет может быть большим, а сбор — длительным. Не связанные с диагностикой приложения и личные данные приложений (аккаунты, маршруты и записи) не читаются. Бинарные файлы прошивки копируются без изменений и могут содержать встроенные производителем данные. Сетевые адреса и чувствительные идентификаторы в текстовой диагностике и конфигурации маскируются. Автоматической отправки нет. Передавайте архив только доверенному получателю.",
+        configurationUploadTitle = "Отправка конфигурации разработчику",
+        configurationSuccess = "Конфигурация успешно отправлена.",
+        configurationFailure = "Не удалось отправить конфигурацию."
+    )
+} }

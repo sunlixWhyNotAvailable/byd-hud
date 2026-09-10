@@ -61,7 +61,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertFalse(assetScan.contains("refreshInstalledMatches(appContext)"));
         assertFalse(assetScan.contains("scanNavigatorPatchRows(appContext)"));
         assertTrue(assetScan.contains("publishSharedUiStateChange()"));
-        assertTrue(composeSnapshot.contains("localizedNavigatorAssetSnapshots(uaLanguage)"));
+        assertTrue(composeSnapshot.contains("localizedNavigatorAssetSnapshots(uiLanguage)"));
         assertFalse(composeSnapshot.contains("NavigatorAssetManager.snapshots("));
     }
 
@@ -223,7 +223,8 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(activity.contains("requestStorageRefreshAfterMutation(this, \"delete\")"));
         assertTrue(activity.contains("static void refreshAfterStorageShare(Context context, String reason)"));
         assertTrue(activity.contains("requestStorageRefreshAfterMutation(context, reason)"));
-        assertTrue(workflow.contains("if (toDeveloper) \"sentry-share\" else \"share\""));
+        assertTrue(workflow.contains(
+                "MainActivity.refreshAfterStorageShare(app, \"sentry-share\")"));
         assertTrue(storage.contains("app, \"retired-day-cleanup\")"));
         assertTrue(retention.contains("request.onComplete == null"));
         assertTrue(retention.contains("requestStorageRefreshAfterMutation("));
@@ -251,7 +252,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
         String source = source("BydHudRuntimeCompose.kt");
 
         assertTrue(source.contains("val palette = remember(snapshot.darkTheme)"));
-        assertTrue(source.contains("val copy = remember(snapshot.uaLanguage)"));
+        assertTrue(source.contains("val copy = remember(language)"));
         assertTrue(source.contains("val shareCopy = remember(copy.language)"));
         assertFalse(source.contains("VISUAL_PRESS_BEFORE_ACTION_MS"));
         assertFalse(source.contains("rememberVisualFirstClick"));

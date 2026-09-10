@@ -13,7 +13,7 @@ android {
         minSdk = 29
         targetSdk = 29
         versionCode = 99
-        versionName = "3.3.0"
+        versionName = "3.2.1"
         buildConfigField(
             "String",
             "UPDATE_RELEASE_API_URL",

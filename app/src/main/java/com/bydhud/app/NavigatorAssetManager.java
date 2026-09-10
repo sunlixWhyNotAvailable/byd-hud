@@ -59,6 +59,7 @@ final class NavigatorAssetManager {
         final String id;
         final String englishLabel;
         final String ukrainianLabel;
+        final String russianLabel;
         final String versionName;
         final long versionCode;
         final String packageName;
@@ -71,9 +72,17 @@ final class NavigatorAssetManager {
         Asset(String id, String englishLabel, String ukrainianLabel, String versionName,
                 long versionCode, String packageName, String signerSha256, String sha256,
                 String url, String fileName, NavigatorPatchStore.Profile profile) {
+            this(id, englishLabel, ukrainianLabel, englishLabel, versionName, versionCode,
+                    packageName, signerSha256, sha256, url, fileName, profile);
+        }
+
+        Asset(String id, String englishLabel, String ukrainianLabel, String russianLabel,
+                String versionName, long versionCode, String packageName, String signerSha256,
+                String sha256, String url, String fileName, NavigatorPatchStore.Profile profile) {
             this.id = id;
             this.englishLabel = englishLabel;
             this.ukrainianLabel = ukrainianLabel;
+            this.russianLabel = russianLabel;
             this.versionName = versionName;
             this.versionCode = versionCode;
             this.packageName = packageName;
@@ -87,6 +96,11 @@ final class NavigatorAssetManager {
         String label(boolean ukrainian) {
             return ukrainian ? ukrainianLabel : englishLabel;
         }
+
+        String label(String language) {
+            return "uk".equals(language) ? ukrainianLabel
+                    : "ru".equals(language) ? russianLabel : englishLabel;
+        }
     }
 
     static final class AssetSnapshot {
@@ -99,26 +113,45 @@ final class NavigatorAssetManager {
         public final String progress;
         public final String error;
         public final boolean installed;
+        public final boolean downloadReady;
         public final boolean downloadable;
 
         AssetSnapshot(Asset asset, boolean ukrainian, String state, String progress,
                 String error, boolean installed) {
+            this(asset, ukrainian, state, progress, error, installed, READY.equals(state));
+        }
+
+        AssetSnapshot(Asset asset, boolean ukrainian, String state, String progress,
+                String error, boolean installed, boolean downloadReady) {
+            this(asset, ukrainian ? "uk" : "en", state, progress, error, installed,
+                    downloadReady);
+        }
+
+        AssetSnapshot(Asset asset, String language, String state, String progress,
+                String error, boolean installed, boolean downloadReady) {
             this.asset = asset;
             this.id = asset.id;
-            this.label = asset.label(ukrainian);
+            this.label = asset.label(language);
             this.versionName = asset.versionName;
             this.packageName = asset.packageName;
             this.state = state;
             this.progress = progress;
             this.error = error;
             this.installed = installed;
+            this.downloadReady = downloadReady;
             this.downloadable = NOT_DOWNLOADED.equals(state) || ERROR.equals(state)
                     || (!installed && !DOWNLOADING.equals(state)
                     && !INSTALL_REQUESTED.equals(state) && !UNINSTALL_REQUESTED.equals(state));
         }
 
         AssetSnapshot localized(boolean ukrainian) {
-            return new AssetSnapshot(asset, ukrainian, state, progress, error, installed);
+            return new AssetSnapshot(
+                    asset, ukrainian, state, progress, error, installed, downloadReady);
+        }
+
+        AssetSnapshot localized(String language) {
+            return new AssetSnapshot(
+                    asset, language, state, progress, error, installed, downloadReady);
         }
 
         @Override
@@ -126,7 +159,8 @@ final class NavigatorAssetManager {
             if (this == value) return true;
             if (!(value instanceof AssetSnapshot)) return false;
             AssetSnapshot other = (AssetSnapshot) value;
-            return installed == other.installed && downloadable == other.downloadable
+            return installed == other.installed && downloadReady == other.downloadReady
+                    && downloadable == other.downloadable
                     && Objects.equals(id, other.id)
                     && Objects.equals(label, other.label)
                     && Objects.equals(versionName, other.versionName)
@@ -139,7 +173,7 @@ final class NavigatorAssetManager {
         @Override
         public int hashCode() {
             return Objects.hash(id, label, versionName, packageName, state, progress, error,
-                    installed, downloadable);
+                    installed, downloadReady, downloadable);
         }
     }
 
@@ -157,6 +191,7 @@ final class NavigatorAssetManager {
                 "waze-stock-4.95.0.3",
                 "Waze original version",
                 "Waze оригінальна версія",
+                "Waze оригинальная версия",
                 "4.95.0.3",
                 1023098L,
                 "com.waze",
@@ -170,6 +205,7 @@ final class NavigatorAssetManager {
                 "waze-direct-5.20.0.1",
                 "Waze patched version",
                 "Waze патчена версія",
+                "Waze патченная версия",
                 "5.20.0.1",
                 1030706L,
                 "com.waze",
@@ -183,6 +219,7 @@ final class NavigatorAssetManager {
                 "gmaps-direct-26.30.09.950492155",
                 "Google Maps ReVanced patched version",
                 "Google Maps ReVanced патчена версія",
+                "Google Maps ReVanced патченная версия",
                 "26.30.09.950492155",
                 1068694917L,
                 "app.revanced.android.apps.maps",
@@ -211,9 +248,13 @@ final class NavigatorAssetManager {
     static AssetSnapshot snapshot(Context context, Asset asset, boolean ukrainian) {
         reconcileCatalogRevision(context, asset);
         reconcileDownload(context, asset);
+        reconcileDownloadPresence(context, asset);
         boolean installed = matchesInstalledCached(context, asset);
-        String state = string(context, asset, "state", NOT_DOWNLOADED);
-        if (installed) state = INSTALLED;
+        boolean downloadReady = prefs(context).getBoolean(key(asset, "download_ready"), false);
+        String state = resolvedSnapshotState(
+                installed,
+                downloadReady,
+                string(context, asset, "state", NOT_DOWNLOADED));
         String progress = string(context, asset, "progress", "0%");
         String error = string(context, asset, "error", "");
         if (DOWNLOADING.equals(state)) {
@@ -221,7 +262,25 @@ final class NavigatorAssetManager {
         } else if (VERIFYING.equals(state)) {
             validateDownloadedAsync(context, asset);
         }
-        return new AssetSnapshot(asset, ukrainian, state, progress, error, installed);
+        return new AssetSnapshot(
+                asset, ukrainian, state, progress, error, installed, downloadReady);
+    }
+
+    static String resolvedSnapshotStateForTest(
+            boolean installed, boolean downloadReady, String persistedState) {
+        return resolvedSnapshotState(installed, downloadReady, persistedState);
+    }
+
+    private static String resolvedSnapshotState(
+            boolean installed, boolean downloadReady, String persistedState) {
+        String state = persistedState == null ? NOT_DOWNLOADED : persistedState;
+        if (DOWNLOADING.equals(state) || VERIFYING.equals(state)
+                || INSTALL_REQUESTED.equals(state) || UNINSTALL_REQUESTED.equals(state)
+                || RECOVERY_REQUIRED.equals(state)) {
+            return state;
+        }
+        if (installed) return INSTALLED;
+        return downloadReady ? READY : NOT_DOWNLOADED;
     }
 
     static void startDownload(Context context, String assetId) throws IOException {
@@ -254,6 +313,7 @@ final class NavigatorAssetManager {
                 .putString(key(asset, "state"), DOWNLOADING)
                 .putString(key(asset, "progress"), "0%")
                 .putString(key(asset, "error"), "")
+                .putBoolean(key(asset, "download_ready"), false)
                 .putString(key(asset, "phase"), PHASE_NONE)
                 .commit();
         AppEventLogger.event(context, "navigator_asset download_start id=" + asset.id);
@@ -275,10 +335,6 @@ final class NavigatorAssetManager {
         Asset asset = require(assetId);
         File file = requireValidDownload(context, asset);
         PackageInfo installed = installedInfo(context, asset.packageName);
-        if (installed != null && matchesInstalled(context, asset)) {
-            setState(context, asset, INSTALLED, "100%", "");
-            return;
-        }
         boolean destructive = installed != null && requiresDestructiveConfirmation(context, assetId);
         if (destructive && !destructiveApproved) throw new DestructiveConfirmationRequired();
         File staged = stageForInstaller(context, asset, file);
@@ -597,6 +653,7 @@ final class NavigatorAssetManager {
         if (!DOWNLOADING.equals(state)) {
             if (VERIFYING.equals(state)) validateDownloadedAsync(context, asset);
             if (READY.equals(state) && !downloadFile(context, asset).isFile()) {
+                setDownloadReady(context, asset, false);
                 setState(context, asset, ERROR, "0%", "Downloaded navigator asset is missing");
             }
             return;
@@ -628,6 +685,18 @@ final class NavigatorAssetManager {
         }
     }
 
+    private static void reconcileDownloadPresence(Context context, Asset asset) {
+        File file = downloadFile(context, asset);
+        boolean recorded = prefs(context).getBoolean(key(asset, "download_ready"), false);
+        if (recorded && !file.isFile()) {
+            setDownloadReady(context, asset, false);
+            AppEventLogger.event(context,
+                    "navigator_asset retained_apk_missing id=" + asset.id);
+        } else if (!recorded && file.isFile()) {
+            validateDownloadedAsync(context, asset);
+        }
+    }
+
     private static void validateDownloadedAsync(Context context, Asset asset) {
         synchronized (ACTIVE_VALIDATIONS) {
             if (!ACTIVE_VALIDATIONS.add(asset.id)) return;
@@ -637,10 +706,12 @@ final class NavigatorAssetManager {
             try {
                 File file = downloadFile(appContext, asset);
                 validate(appContext, asset, file);
+                setDownloadReady(appContext, asset, true);
                 setState(appContext, asset, READY, "100%", "");
                 AppEventLogger.event(appContext,
                         "navigator_asset verified id=" + asset.id);
             } catch (Exception error) {
+                setDownloadReady(appContext, asset, false);
                 deleteFile(downloadFile(appContext, asset));
                 fail(appContext, asset, clean(error.getMessage()));
             } finally {
@@ -676,9 +747,11 @@ final class NavigatorAssetManager {
         File file = downloadFile(context, asset);
         try {
             validate(context, asset, file);
+            setDownloadReady(context, asset, true);
             setState(context, asset, READY, "100%", "");
             return file;
         } catch (Exception error) {
+            setDownloadReady(context, asset, false);
             deleteFile(file);
             fail(context, asset, clean(error.getMessage()));
             throw error;
@@ -1042,7 +1115,8 @@ final class NavigatorAssetManager {
         android.content.SharedPreferences.Editor editor = prefs(context).edit()
                 .putString(key(asset, "catalog_sha"), asset.sha256)
                 .remove(key(asset, "installed_identity"))
-                .remove(key(asset, "installed_matches"));
+                .remove(key(asset, "installed_matches"))
+                .putBoolean(key(asset, "download_ready"), false);
         if (PHASE_NONE.equals(string(context, asset, "phase", PHASE_NONE))) {
             editor.putString(key(asset, "state"), NOT_DOWNLOADED)
                     .putString(key(asset, "progress"), "0%")
@@ -1136,6 +1210,20 @@ final class NavigatorAssetManager {
         return null;
     }
 
+    static boolean isCatalogPackage(String packageName) {
+        if (packageName == null || packageName.trim().isEmpty()) return false;
+        for (Asset asset : ASSETS) {
+            if (asset.packageName.equals(packageName)) return true;
+        }
+        return false;
+    }
+
+    static void onCatalogPackageChanged(Context context, String packageName) {
+        if (!isCatalogPackage(packageName)) return;
+        MainActivity.requestPatchUiStateRefresh(
+                context.getApplicationContext(), true, "navigator-package-change");
+    }
+
     private static File downloadFile(Context context, Asset asset) {
         File directory = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS);
         return new File(directory == null ? context.getFilesDir() : directory, asset.fileName);
@@ -1160,6 +1248,10 @@ final class NavigatorAssetManager {
                 .putString(key(asset, "progress"), progress == null ? "0%" : progress)
                 .putString(key(asset, "error"), error == null ? "" : error)
                 .commit();
+    }
+
+    private static void setDownloadReady(Context context, Asset asset, boolean ready) {
+        prefs(context).edit().putBoolean(key(asset, "download_ready"), ready).commit();
     }
 
     private static void fail(Context context, Asset asset, String detail) {

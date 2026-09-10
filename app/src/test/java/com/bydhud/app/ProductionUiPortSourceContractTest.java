@@ -24,7 +24,7 @@ public final class ProductionUiPortSourceContractTest {
         try (java.util.stream.Stream<Path> files = Files.list(assets)) {
             Path[] help = files.filter(path -> path.getFileName().toString()
                     .startsWith("hud_help_")).toArray(Path[]::new);
-            assertEquals(68, help.length);
+            assertEquals(82, help.length);
             for (Path image : help) {
                 assertTrue(image.toString(), image.toString().endsWith(".webp"));
                 byte[] bytes = Files.readAllBytes(image);
@@ -32,9 +32,13 @@ public final class ProductionUiPortSourceContractTest {
                 assertEquals("WEBP", new String(bytes, 8, 4, StandardCharsets.US_ASCII));
             }
         }
-        assertTrue(catalog.contains("fun localizedImage(imageRes: Int, ua: Boolean)"));
+        assertTrue(catalog.contains("fun localizedImage(imageRes: Int, language: Language)"));
+        assertTrue(catalog.contains("hud_help_eta_all_ru"));
         assertTrue(catalog.contains("hud_help_warning_maneuver_en"));
         assertTrue(catalog.contains("hud_help_eta_street_7_en"));
+        assertFalse(catalog.contains("Future preview candidate"));
+        assertFalse(catalog.contains("Майбутній кандидат preview"));
+        assertFalse(catalog.contains("Будущий вариант preview"));
     }
 
     @Test
@@ -53,6 +57,19 @@ public final class ProductionUiPortSourceContractTest {
                 "private fun ShareIconLabelButton(");
         assertTrue(helpButton.contains("rememberPressFeedback"));
         assertTrue(helpButton.contains("onClick = onClick"));
+    }
+
+    @Test
+    public void russianCopyOwnsAllFiveTabSubtitlesAndVersionedHeader() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String russian = between(compose, "private fun ruCopy()", "private fun shareCopy(");
+
+        assertTrue(russian.contains("subtitle = \"Вывод навигации на HUD | v${BuildConfig.VERSION_NAME}\""));
+        assertTrue(russian.contains("mainHint = \"Настройки навигации\""));
+        assertTrue(russian.contains("appsHint = \"Управление выводом навигаторов на HUD и приборку.\""));
+        assertTrue(russian.contains("storageHint = \"Запись, отправка, хранение и очистка навигационных логов.\""));
+        assertTrue(russian.contains("patchHint = \"Патч навигаторов для прямого вывода на HUD.\""));
+        assertTrue(russian.contains("hudCheckHint = \"Прямая проверка данных HUD и TBT-карточки приборки\""));
     }
 
     @Test

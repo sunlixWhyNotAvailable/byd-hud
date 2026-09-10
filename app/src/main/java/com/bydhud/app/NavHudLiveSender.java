@@ -403,9 +403,13 @@ final class NavHudLiveSender {
     }
 
     static synchronized String hudCheckStatus(boolean ukrainian) {
+        return hudCheckStatus(ukrainian ? "uk" : "en");
+    }
+
+    static synchronized String hudCheckStatus(String language) {
         if (instance == null || !instance.hudCheckState.running) return "";
-        return instance.hudOutput.hudCheckStatus(ukrainian) + " · "
-                + instance.tbtPublisher.hudCheckStatus(ukrainian);
+        return instance.hudOutput.hudCheckStatus(language) + " · "
+                + instance.tbtPublisher.hudCheckStatus(language);
     }
 
     void updateHudCheck(UnaryOperator<HudCheckState> action, String reason) {

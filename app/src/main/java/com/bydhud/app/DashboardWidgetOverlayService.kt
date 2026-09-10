@@ -85,7 +85,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
                 DashboardWidgetAnchorContent(
                     state = widgetState,
                     windowSizeDp = windowDp,
-                    ua = DashboardWidgetController.ukrainian,
+                    language = DashboardWidgetController.uiLanguage,
                     onChange = { DashboardWidgetController.updateGesture(it) },
                     onHide = { DashboardWidgetController.hide(this@DashboardWidgetOverlayService) },
                     onPositionSettled = { DashboardWidgetController.savePosition(this@DashboardWidgetOverlayService) },
@@ -167,8 +167,8 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         } catch (error: RuntimeException) {
             Log.e("DashboardWidget", "Unable to attach/update overlay", error)
             removeOverlay()
-            Toast.makeText(this, if (DashboardWidgetController.ukrainian) "Не вдалося показати віджет"
-                else "Unable to show widget", Toast.LENGTH_LONG).show()
+            Toast.makeText(this, DashboardWidgetController.uiLanguage.choose("Не вдалося показати віджет",
+                "Unable to show widget", "Не удалось показать виджет"), Toast.LENGTH_LONG).show()
             stopSelf()
         }
     }
@@ -223,13 +223,13 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     }
 
     private fun notification(): Notification {
-        val ua = DashboardWidgetController.ukrainian
+        val language = DashboardWidgetController.uiLanguage
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_hud_notification)
-            .setContentTitle(if (ua) "Віджет приборки · BYD HUD" else "Dashboard widget · BYD HUD")
-            .setContentText(if (ua) "Натисніть, щоб відкрити BYD HUD" else "Tap to open BYD HUD")
+            .setContentTitle(language.choose("Віджет приборки · BYD HUD", "Dashboard widget · BYD HUD", "Виджет приборки · BYD HUD"))
+            .setContentText(language.choose("Натисніть, щоб відкрити BYD HUD", "Tap to open BYD HUD", "Нажмите, чтобы открыть BYD HUD"))
             .setContentIntent(open).setOngoing(true).setOnlyAlertOnce(true).build()
     }
 

@@ -17,11 +17,11 @@ public final class ConfigurationExportUiSourceContractTest {
         String source = source("BydHudRuntimeCompose.kt");
         String runtime = between(source, "private fun RuntimeApp(", "private fun Header(");
         assertContains(runtime,
-                "val storageLogShare by StorageLogShareWorkflow.snapshot.collectAsState()",
+                "val storageLogShares by StorageLogShareWorkflow.snapshots.collectAsState()",
                 "val configurationExport by VehicleConfigurationExport.snapshot.collectAsState()",
-                "storageLogShare = storageLogShare", "configurationExport = configurationExport",
-                "onCancelShare = { activity.composeCancelStorageShare() }",
-                "onCloseShare = { activity.composeDismissStorageShare() }",
+                "storageLogShares = storageLogShares", "configurationExport = configurationExport",
+                "onCancelShare = { id -> activity.composeCancelStorageShare(id) }",
+                "onCloseShare = { id -> activity.composeDismissStorageShare(id) }",
                 "onCancelConfiguration = { activity.composeCancelConfigurationExport() }",
                 "onCloseConfiguration = { activity.composeDismissConfigurationExport() }",
                 "onShareConfiguration = { activity.composeShareConfigurationExport() }");
@@ -43,7 +43,7 @@ public final class ConfigurationExportUiSourceContractTest {
         String source = source("BydHudRuntimeCompose.kt");
         String stack = stack(source);
         String config = between(stack,
-                "visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->",
+                "visibleConfigurationExport?.let { state ->",
                 "patchOperations.filter {");
         String card = between(source, "private fun OperationProgressCard(",
                 "private fun storageLogShareBusy(");
@@ -73,13 +73,15 @@ public final class ConfigurationExportUiSourceContractTest {
                 "private fun ConfigurationShareDestinationOverlay(");
         assertFalse(stack.contains(".take(3)"));
         assertContains(stack,
-                "visibleStorageShare", "visibleConfigurationExport", "showStorageShare",
+                "visibleStorageShares", "visibleConfigurationExport",
+                "visibleStorageShares.forEach { state ->",
+                "visibleConfigurationExport?.let { state ->",
                 "padding(end = 24.dp, bottom = 24.dp)", "Arrangement.spacedBy(12.dp)",
                 "onDetails = { detailsKey = card.key }",
                 "cards.firstOrNull { it.key == detailsKey }");
         assertFalse(stack.contains("ModalInputBlocker()"));
         assertContains(card,
-                "if (card.details.isNotEmpty())", "\"Деталі\" else \"Details\"",
+                "if (card.details.isNotEmpty())", "language.choose(\"Деталі\", \"Details\", \"Детали\")",
                 "if (card.busy && card.stopEnabled)", "if (card.closeEnabled)");
         assertContains(details, "BackHandler(onBack = onClose)", "ModalInputBlocker()",
                 ".verticalScroll(rememberScrollState())", "onClick = onClose");

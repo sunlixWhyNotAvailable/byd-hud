@@ -46,6 +46,9 @@ public final class StorageAndLogsUiSourceContractTest {
         assertTrue(source.contains("publicStorageLocation = \"Публічна тека\""));
         assertTrue(source.contains("shareSelected = \"Share logs\""));
         assertTrue(source.contains("shareSelected = \"Поділитись логами\""));
+        assertTrue(source.contains("mod100 in 11..14 -> \"сессий\""));
+        assertTrue(source.contains("mod10 == 1 -> \"сессия\""));
+        assertTrue(source.contains("mod10 in 2..4 -> \"сессии\""));
         assertEquals(1, occurrences(storage,
                 "if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat"));
         assertTrue(runtimeState.contains(

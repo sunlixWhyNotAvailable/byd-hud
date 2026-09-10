@@ -13,25 +13,23 @@ import org.junit.Test;
 
 public final class ShareCompletionSourceContractTest {
     @Test
-    public void sentryCommitsOnlyImmutableSubmittedDaysAfterSuccess() throws IOException {
+    public void sentryKeepsImmutableSelectionPerOperationWithoutPublishingStaleGlobalCompletion()
+            throws IOException {
         String workflow = source("StorageLogShareWorkflow.kt");
 
         assertTrue(workflow.contains("val submittedDays = days.toList()"));
-        assertTrue(workflow.contains("LogShareZip.create(\n                        app,\n                        submittedDays,"));
-        assertTrue(workflow.contains("SentryLogUploader.upload(\n"
-                + "                        app, archive.file, submittedDays, operationId, report!!)"));
-        assertTrue(workflow.contains(
-                "if (upload.ok) publishCompletionIfOwned(control, submittedDays)"));
-        assertTrue(workflow.indexOf("if (!admit(control, StorageLogSharePhase.UPLOADING,")
+        assertTrue(workflow.contains("selectedDays = submittedDays"));
+        assertTrue(workflow.contains("selectionRevision = selectionRevision"));
+        assertTrue(workflow.contains("val upload = SentryLogUploader.upload(\n"
+                + "                            app, archive.file, submittedDays, control.operationId, report!!)"));
+        assertTrue(workflow.indexOf("StorageLogSharePhase.UPLOADING, detail,")
                 < workflow.indexOf("SentryLogUploader.upload("));
-        assertTrue(workflow.contains("LogShareZip.deleteArtifact(archive.file)\n                        return@execute"));
-        assertTrue(workflow.contains("if (control.cancelled) return@execute"));
-        assertTrue(workflow.contains("if (active !== control || control.cancelled) return false\n"
-                + "        MainActivity.publishStorageShareCompletion(submittedDays)"));
+        assertFalse(workflow.contains("publishStorageShareCompletion"));
+        assertTrue(workflow.contains("if (latestState.value?.operationId == operationId)"));
     }
 
     @Test
-    public void chooserAndSentryShareOneCompletionChannelWhileConfigHasNoDays()
+    public void chooserCompletionCarriesDaysWhileConfigurationHasNoDays()
             throws IOException {
         String activity = source("MainActivity.java");
         String deliver = between(activity, "private void deliverPendingShare()",
@@ -40,7 +38,7 @@ public final class ShareCompletionSourceContractTest {
 
         assertTrue(deliver.contains("publishShareCompletion(pending.launchId, pending.storageDays)"));
         assertTrue(!config.contains("SentryLogUploader"));
-        assertTrue(!config.contains("publishShareCompletion"));
+        assertFalse(config.contains("publishShareCompletion"));
         assertTrue(activity.contains(
                 "queuePendingShare(files, Collections.emptyList(), ShareOwner.CONFIGURATION"));
     }
@@ -49,8 +47,9 @@ public final class ShareCompletionSourceContractTest {
     public void navigationSentryUploadThreadsOneIdIntoArchiveAndEvent() throws IOException {
         String workflow = source("StorageLogShareWorkflow.kt");
         assertTrue(workflow.contains("if (toDeveloper) SentryLogUploader.newUploadId()"));
-        assertTrue(workflow.contains("if (toDeveloper) operationId else \"\""));
-        assertTrue(workflow.contains("app, archive.file, submittedDays, operationId, report"));
+        assertTrue(workflow.contains("app, submittedDays, if (toDeveloper) control.operationId else \"\""));
+        assertTrue(workflow.contains(
+                "app, archive.file, submittedDays, control.operationId, report"));
 
         String zip = source("LogShareZip.java");
         assertTrue(zip.contains("+ (uploadId.isEmpty() ? \"\" : \"-\" + uploadId)"));
@@ -58,6 +57,46 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(sentry.contains("event.setTag(\"upload_id\", uploadId)"));
         assertTrue(sentry.contains(
                 "event.setFingerprints(Collections.singletonList(\"manual-navigation-upload:\" + uploadId))"));
+    }
+
+    @Test
+    public void sentryZipBoundaryReusesOneOversizedArchiveAndPreparationDoesNotGateRawBytes()
+            throws IOException {
+        String workflow = source("StorageLogShareWorkflow.kt");
+        int archiveCreate = workflow.indexOf("val archive = LogShareZip.create(");
+        int sizeGate = workflow.indexOf("archive.file.length() >= SENTRY_ZIP_LIMIT_BYTES");
+        int upload = workflow.indexOf("SentryLogUploader.upload(");
+        String oversizeShare = between(workflow,
+                "fun shareOversized(operationId: String): Boolean",
+                "fun dismiss(operationId: String): Boolean");
+        String cancel = between(workflow,
+                "fun cancel(operationId: String): Boolean",
+                "fun cancel() {");
+
+        assertTrue(workflow.contains("const val SENTRY_ZIP_LIMIT_BYTES = 39_000_000L"));
+        assertTrue(archiveCreate >= 0 && sizeGate > archiveCreate && upload > sizeGate);
+        assertFalse(workflow.substring(sizeGate, upload).contains("knownBytes"));
+        assertFalse(workflow.substring(sizeGate, upload).contains("selectedBytes"));
+        assertTrue(oversizeShare.contains("val archive = control.archive ?: return false"));
+        assertTrue(oversizeShare.contains("MainActivity.queueStorageShare(archive,"));
+        assertFalse(oversizeShare.contains("LogShareZip.create("));
+        assertTrue(cancel.contains("completeCancellation(control)"));
+        assertTrue(workflow.contains("private fun completeCancellation("));
+        assertTrue(workflow.contains("LogShareZip.deleteArtifact(control.archive)\n"
+                + "            finish(control.operationId, StorageLogSharePhase.CANCELLED, \"\")"));
+    }
+
+    @Test
+    public void completedOlderUploadCannotReplaceLatestOperationAndUploadsRunInParallel()
+            throws IOException {
+        String workflow = source("StorageLogShareWorkflow.kt");
+        assertTrue(workflow.contains("newSingleThreadExecutor"));
+        assertTrue(workflow.contains("newCachedThreadPool"));
+        assertTrue(workflow.contains("uploadWorkers.execute"));
+        assertTrue(workflow.contains(
+                "if (latestState.value?.operationId == operationId) latestState.value = changed"));
+        assertTrue(workflow.contains("snapshot.toDeveloper || snapshot.phase in setOf("));
+        assertFalse(workflow.contains("state.value = null"));
     }
 
     @Test
@@ -114,9 +153,10 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(compose.contains("dismissOnClickOutside = false"));
 
         String activity = source("MainActivity.java");
-        assertTrue(activity.contains("int selectedFileCount, long selectedBytes, "
-                + "SentryLogReport report)"));
-        assertTrue(activity.contains("selectedFileCount, selectedBytes, report)"));
+        assertTrue(activity.contains("int selectedFileCount, long selectedBytes, SentryLogReport report,\n"
+                + "            int selectionRevision)"));
+        assertTrue(activity.contains("selectedFileCount, selectedBytes,\n"
+                + "                report, selectionRevision)"));
     }
 
     @Test
@@ -125,8 +165,8 @@ public final class ShareCompletionSourceContractTest {
         String stack = between(compose, "private fun OperationProgressStack(",
                 "private fun OperationProgressCard(");
         String storage = between(stack,
-                "visibleStorageShare?.takeIf { showStorageShare }?.let { state ->",
-                "visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->");
+                "visibleStorageShares.forEach { state ->",
+                "visibleConfigurationExport?.let { state ->");
         String summary = between(storage, "val summary = buildString {", "add(OperationCardSpec(");
         String details = between(compose, "private fun operationDetails(",
                 "private fun OperationDetailsOverlay(");
@@ -135,7 +175,8 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(storage.contains("reportTitle = state.reportTitle"));
         assertTrue(details.contains("reportTitle: String = \"\""));
         assertTrue(details.contains("if (reportTitle.isNotBlank())"));
-        assertTrue(details.contains("\"Заголовок звіту\" else \"Report title\""));
+        assertTrue(details.contains(
+                "language.choose(\"Заголовок звіту\", \"Report title\", \"Заголовок отчёта\")"));
     }
 
     @Test
@@ -143,24 +184,24 @@ public final class ShareCompletionSourceContractTest {
             throws IOException {
         String workflow = source("StorageLogShareWorkflow.kt");
         assertTrue(workflow.contains("object StorageLogShareWorkflow"));
-        assertTrue(workflow.contains("MutableStateFlow<StorageLogShareSnapshot?>"));
+        assertTrue(workflow.contains("MutableStateFlow<List<StorageLogShareSnapshot>>"));
+        assertTrue(workflow.contains("newSingleThreadExecutor"));
+        assertTrue(workflow.contains("newCachedThreadPool"));
         assertTrue(workflow.contains("val app = context.applicationContext"));
         assertTrue(workflow.contains("dismissed = true"));
-        assertTrue(workflow.contains(
-                "current.phase != StorageLogSharePhase.WAITING_FOR_SHARE) return"));
-        assertTrue(workflow.contains("storage_log_share operation_id=${current.operationId}"));
+        assertTrue(workflow.contains("fun dismiss(operationId: String): Boolean"));
+        assertTrue(workflow.contains("storage_log_share operation_id=$operationId"));
         assertTrue(workflow.contains("endedAtElapsedMs = ended"));
         assertTrue(workflow.contains("MainActivity.releaseShareOperation()"));
-        assertTrue(workflow.contains("queueStorageShareIfOwned(control, archive.file, submittedDays)"));
-        assertTrue(workflow.contains("if (active !== control || control.cancelled) return false\n"
-                + "        MainActivity.queueStorageShare(file, submittedDays, state.value!!.operationId)"));
+        assertTrue(workflow.contains(
+                "MainActivity.queueStorageShare(archive.file, submittedDays, control.operationId)"));
         assertTrue(workflow.contains("StorageLogSharePhase.WAITING_FOR_WRITES"));
         assertTrue(workflow.contains("StorageLogSharePhase.COPYING"));
         assertTrue(workflow.contains("StorageLogSharePhase.ARCHIVING"));
-        String cancel = between(workflow,
-                "@JvmStatic\n    @Synchronized\n    fun cancel()",
-                "@JvmStatic\n    @Synchronized\n    fun dismiss()");
-        assertTrue(!cancel.contains("StorageLogSharePhase.UPLOADING"));
+        assertTrue(workflow.contains("StorageLogSharePhase.OVERSIZED"));
+        String cancel = between(workflow, "fun cancel(operationId: String): Boolean",
+                "fun cancel() {");
+        assertFalse(cancel.contains("StorageLogSharePhase.UPLOADING"));
     }
 
     @Test
@@ -183,14 +224,13 @@ public final class ShareCompletionSourceContractTest {
         assertTrue(deliver.contains("boolean accepted = notifyShareLaunched(pending)"));
         assertTrue(deliver.contains("if (accepted && pending.owner == ShareOwner.STORAGE_LOGS)"));
         assertTrue(deliver.contains("notifyShareFailed(pending, detail, false)"));
-        assertTrue(logs.contains("if (current.operationId != operationId) return false"));
+        assertTrue(logs.contains("val current = find(operationId) ?: return false"));
         int waitingAdmission = logs.indexOf(
-                "admit(control, StorageLogSharePhase.WAITING_FOR_SHARE,");
+                "transition(control, StorageLogSharePhase.WAITING_FOR_SHARE, detail,");
         assertTrue(waitingAdmission >= 0);
         assertTrue(waitingAdmission < logs.indexOf(
-                "queueStorageShareIfOwned(control, archive.file, submittedDays)"));
-        assertTrue(logs.contains("phase = StorageLogSharePhase.FAILED"));
-        assertTrue(logs.contains("result=android_share_failed"));
+                "MainActivity.queueStorageShare(archive.file, submittedDays, control.operationId)"));
+        assertTrue(logs.contains("finish(operationId, StorageLogSharePhase.FAILED, detail)"));
         assertTrue(config.contains("if (current.operationId != operationId) return false"));
         assertTrue(config.contains("phase = ConfigurationExportPhase.WAITING_FOR_SHARE"));
         assertTrue(config.contains("archiveAvailable = !archiveMissing && current.archiveAvailable"));

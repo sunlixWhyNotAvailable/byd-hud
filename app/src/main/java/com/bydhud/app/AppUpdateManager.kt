@@ -49,11 +49,15 @@ object AppUpdateManager {
     private const val RELEASE_NOTES_EN_CLOSE = "<!-- /bydhud:release-notes:en -->"
     private const val RELEASE_NOTES_UK_OPEN = "<!-- bydhud:release-notes:uk -->"
     private const val RELEASE_NOTES_UK_CLOSE = "<!-- /bydhud:release-notes:uk -->"
+    private const val RELEASE_NOTES_RU_OPEN = "<!-- bydhud:release-notes:ru -->"
+    private const val RELEASE_NOTES_RU_CLOSE = "<!-- /bydhud:release-notes:ru -->"
     private val RELEASE_NOTES_MARKERS = setOf(
         RELEASE_NOTES_EN_OPEN,
         RELEASE_NOTES_EN_CLOSE,
         RELEASE_NOTES_UK_OPEN,
-        RELEASE_NOTES_UK_CLOSE
+        RELEASE_NOTES_UK_CLOSE,
+        RELEASE_NOTES_RU_OPEN,
+        RELEASE_NOTES_RU_CLOSE
     )
     private val GIT_TAG_PATTERN = Regex("""^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$""")
     private val ANDROID_VERSION_PATTERN = Regex("""^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-beta\.(0|[1-9]\d*))?$""")
@@ -87,16 +91,19 @@ object AppUpdateManager {
         val releaseNotes: String
     )
 
-    fun releaseNotesForLanguage(body: String, uaLanguage: Boolean): String {
-        val requested = if (uaLanguage) {
-            releaseNotesBlock(body, RELEASE_NOTES_UK_OPEN, RELEASE_NOTES_UK_CLOSE)
-        } else {
-            releaseNotesBlock(body, RELEASE_NOTES_EN_OPEN, RELEASE_NOTES_EN_CLOSE)
+    fun releaseNotesForLanguage(body: String, languageCode: String): String {
+        val requested = when (languageCode.lowercase()) {
+            "uk", "ua" -> releaseNotesBlock(body, RELEASE_NOTES_UK_OPEN, RELEASE_NOTES_UK_CLOSE)
+            "ru" -> releaseNotesBlock(body, RELEASE_NOTES_RU_OPEN, RELEASE_NOTES_RU_CLOSE)
+            else -> releaseNotesBlock(body, RELEASE_NOTES_EN_OPEN, RELEASE_NOTES_EN_CLOSE)
         }
         return requested
             ?: releaseNotesBlock(body, RELEASE_NOTES_EN_OPEN, RELEASE_NOTES_EN_CLOSE)
             ?: body
     }
+
+    fun releaseNotesForLanguage(body: String, uaLanguage: Boolean): String =
+        releaseNotesForLanguage(body, if (uaLanguage) "uk" else "en")
 
     private fun releaseNotesBlock(body: String, open: String, close: String): String? {
         val lines = body.replace("\r\n", "\n").replace('\r', '\n').lines()

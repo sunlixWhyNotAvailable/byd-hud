@@ -60,6 +60,7 @@ final class HudPrefs {
     private static final String KEY_SWITCH_TO_TBT_ON_HUD_START = "switch_to_tbt_on_hud_start";
     private static final String KEY_DARK_THEME = "dark_theme";
     private static final String KEY_UA_LANGUAGE = "ua_language";
+    private static final String KEY_UI_LANGUAGE = "ui_language";
 
     static final int ROUTE_METRICS_OFF = 0;
     static final int ROUTE_METRICS_NEXT_STOP = 1;
@@ -604,12 +605,33 @@ final class HudPrefs {
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isUaLanguage(Context context) {
-        return prefs(context).getBoolean(KEY_UA_LANGUAGE, true);
+        return "uk".equals(uiLanguage(context));
+    }
+
+    static boolean isRuLanguage(Context context) {
+        return "ru".equals(uiLanguage(context));
+    }
+
+    static String uiLanguage(Context context) {
+        android.content.SharedPreferences values = prefs(context);
+        if (!values.contains(KEY_UI_LANGUAGE)) {
+            return values.getBoolean(KEY_UA_LANGUAGE, true) ? "uk" : "en";
+        }
+        String language = values.getString(KEY_UI_LANGUAGE, "uk");
+        return "ru".equals(language) || "en".equals(language) ? language : "uk";
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void setUaLanguage(Context context, boolean enabled) {
-        prefs(context).edit().putBoolean(KEY_UA_LANGUAGE, enabled).apply();
+        setUiLanguage(context, enabled ? "uk" : "en");
+    }
+
+    static void setUiLanguage(Context context, String language) {
+        String normalized = "ru".equals(language) || "en".equals(language) ? language : "uk";
+        prefs(context).edit()
+                .putString(KEY_UI_LANGUAGE, normalized)
+                .putBoolean(KEY_UA_LANGUAGE, "uk".equals(normalized))
+                .apply();
         markOutputOptionChanged(KEY_UA_LANGUAGE);
     }
 

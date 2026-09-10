@@ -8,7 +8,8 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.3.0
+- **Version:** v3.2.1
+- **Interface languages:** Ukrainian, English and Russian; update notes follow the selected language, with English as the fallback for missing translations.
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
@@ -80,7 +81,7 @@ The patcher verifies that the selected package is intact and structurally compat
 
 The `Apps` tab is the normal starting screen after initial setup.
 
-The notice at the top lists the supported navigator builds. Each `Download` action retrieves the offered build from the project release, shows progress, checks the file's integrity and compatibility, then opens the Android installer. A compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot safely update the installed app.
+The notice at the top lists the supported navigator builds. Each `Download` action retrieves the offered build from the project release, shows progress, and checks the file's integrity and compatibility. `Install` opens the Android installer. `Installed` stays active: it can reinstall a retained APK, or download it first for installation on the next press. After removing the navigator, the action becomes `Install` if its validated APK remains, otherwise `Download`. A compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot safely update the installed app.
 
 1. Find Google Maps or Waze under `Supported navigation apps`.
 2. Enable `HUD` before or after launching the navigator.
@@ -108,7 +109,7 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 
 Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its controls change only the illustration, not your saved settings or the HUD. Samples follow the application's language, street format and selected colors. Experimental ETA/Waze locations use separate HUD regions. Some screenshots below show an earlier interface layout.
 
-The 68 help illustrations use compressed WebP (quality 60) at their original 2172×724 resolution to reduce the APK size. Their positions and language variants are preserved; this compression does not affect navigation images sent to the HUD.
+The 82 help illustrations use compressed WebP (quality 60) at their original 2172×724 resolution to reduce the APK size. Their positions and language variants are preserved; this compression does not affect navigation images sent to the HUD.
 
 ### Basic navigation output
 
@@ -350,7 +351,7 @@ Text diagnostics and configuration values are redacted and network addresses mas
 
 <p align="center"><img src="docs/screenshots/en/storage-and-logs.png" alt="Storage and logs tab with day-based diagnostics" width="100%"></p>
 
-Configuration export and selected-day log sharing keep the same progress card through preparation, sending and the result. Cards stack with Waze and Google Maps patch cards instead of overlapping them. During sending, `Close` hides the card but does not cancel the upload or allow another conflicting export. Progress does not reopen a dismissed card; the outcome is retained in diagnostics. Preparation still supports real cancellation, and consent is requested before creating or sending an archive.
+Each configuration export and selected-day log share keeps its own progress card through preparation, sending and the result. Cards stack with Waze and Google Maps patch cards instead of overlapping them. During sending, `Close` hides that card without cancelling the upload; progress does not reopen it, and the outcome is retained in diagnostics. Preparation supports cancellation. Another Sentry package can be prepared after the 30-second cooldown even while an earlier upload continues; each keeps its own result. Archive preparation remains one operation at a time.
 
 `Share logs` offers two explicit destinations:
 
@@ -359,9 +360,11 @@ Configuration export and selected-day log sharing keep the same progress card th
 
 A blank comment is omitted. A supplied comment accompanies the report, and its short form appears in the report title alongside the app version. Without a comment, the title uses the version and submission date/time. The generated title is available in the progress card's `Details`. Back from the comment dialog returns to the destination choice without uploading.
 
+BYD HUD sends ZIPs smaller than 39 MB (39,000,000 bytes) through Sentry. BYD HUD checks the completed ZIP, without rejecting a selection based on its uncompressed source size. At or above the limit, choose `Another app` to share that same ready archive, or `Cancel` to delete it immediately and retain the selected days. The 30-second cooldown begins when `OK` admits preparation; it does not limit upload duration.
+
 <p align="center"><img src="docs/screenshots/en/storage-share.png" alt="Navigation log sharing confirmation and privacy warning" width="100%"></p>
 
-After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears exactly the day checkboxes captured for that archive. Archive, chooser, upload, or cancellation failure keeps the selection. Days selected while an upload is running remain selected.
+After the Android share chooser opens successfully or `Send to developer` finishes successfully, BYD HUD clears the submitted day selection only if the user has not changed or resubmitted it since that operation started. Failure or cancellation keeps the selection. An older upload never clears a newer selection.
 
 With authorized ADB, Logcat records the full system log and additional performance diagnostics. Without ADB, it records only the logs and diagnostics available to the app. Configuration export does not request ADB access, repair permissions, or enable automatic reporting.
 

@@ -54,21 +54,74 @@ public final class ShareShutdownSourceContractTest {
         assertFalse(begin.contains("composeTryStartBlockingUiFlow(\"storage-share\")"));
         assertFalse(source.contains("LaunchedEffect(storageShareBusy, storageShareDays"));
         assertTrue(workflow.contains("Executors.newSingleThreadExecutor"));
+        assertTrue(workflow.contains("Executors.newCachedThreadPool"));
         assertTrue(workflow.contains("val app = context.applicationContext"));
-        assertTrue(workflow.contains("if (control.cancelled) return@execute"));
+        assertTrue(workflow.contains("if (control.cancelled) return"));
         assertTrue(workflow.contains("LogShareZip.attachProgressListener"));
         assertTrue(workflow.contains("StorageLogSharePhase.CANCELLING"));
-        assertTrue(workflow.contains("active?.cancel()"));
+        assertTrue(workflow.contains("activePreparation?.let"));
+        assertTrue(workflow.contains("it.cancelWorker()"));
+        assertTrue(workflow.contains(
+                "private val activeUploads = mutableMapOf<String, StorageLogShareControl>()"));
+        assertTrue(workflow.contains("activeUploads.values.toList().forEach"));
+        assertTrue(workflow.contains("generation += 1L"));
+        String register = between(workflow,
+                "@Synchronized\n    private fun registerUploadIfPreparationOwned(",
+                "@Synchronized\n    private fun publishUploadResultIfOwned(");
+        assertTrue(register.contains("activePreparation !== preparation"));
+        assertTrue(register.contains("preparation.cancelled"));
+        assertTrue(register.indexOf("activePreparation !== preparation")
+                < register.indexOf("activeUploads[preparation.operationId] = upload"));
+        assertTrue(register.indexOf("activeUploads[preparation.operationId] = upload")
+                < register.indexOf("return generation"));
+        assertTrue(workflow.contains("publishUploadResultIfOwned(\n"
+                + "                            uploadControl, uploadGeneration, upload, app)"));
+        String publish = between(workflow,
+                "@Synchronized\n    private fun publishUploadResultIfOwned(",
+                "@Synchronized\n    private fun update(");
+        assertTrue(publish.contains("storageLogShareUploadMayPublish("));
+        assertTrue(publish.indexOf("storageLogShareUploadMayPublish(")
+                < publish.indexOf("finish("));
+        assertTrue(publish.contains("if (!finish("));
+        assertTrue(publish.indexOf("finish(")
+                < publish.indexOf("MainActivity.refreshAfterStorageShare("));
+        assertFalse(workflow.contains("uploadWorkers.shutdown"));
         assertTrue(source.contains("OperationProgressStack("));
-        assertTrue(source.contains("onCancelShare = { activity.composeCancelStorageShare() }"));
-        assertTrue(source.contains("onCloseShare = { activity.composeDismissStorageShare() }"));
+        assertTrue(source.contains(
+                "onCancelShare = { id -> activity.composeCancelStorageShare(id) }"));
+        assertTrue(source.contains(
+                "onCloseShare = { id -> activity.composeDismissStorageShare(id) }"));
         assertTrue(source.contains("waitingForWrites = \"Очікування записів\""));
         assertTrue(source.contains("archiving = \"Archiving\""));
         assertTrue(source.contains("patchWazeAlerts = \"Попередження\""));
         assertTrue(source.contains("patchWazeAlerts = \"Alerts\""));
         assertTrue(source.contains("patchNotChecked = \"перевір\""));
         assertTrue(source.contains("patchNotChecked = \"check\""));
-        assertTrue(source.contains("\"Стабільність\" else \"Stability\""));
+        assertTrue(source.contains("language.choose(\"Стабільність\", \"Stability\", \"Стабильность\")"));
+    }
+
+    @Test
+    public void activeUploadKeepsItsProgressCardWithoutBlockingTheNextPreparation()
+            throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String progressBusy = between(source,
+                "private fun storageLogShareBusy(",
+                "private fun storageLogSharePreparationBusy(");
+        String preparationBusy = between(source,
+                "private fun storageLogSharePreparationBusy(",
+                "private fun configurationExportBusy(");
+        String runtime = between(source, "private fun RuntimeApp(", "private fun Header(");
+
+        assertTrue(progressBusy.contains("StorageLogSharePhase.UPLOADING"));
+        assertTrue(preparationBusy.contains("StorageLogSharePhase.OVERSIZED -> true"));
+        assertTrue(preparationBusy.contains("StorageLogSharePhase.UPLOADING, StorageLogSharePhase.SENT"));
+        assertTrue(preparationBusy.contains("StorageLogSharePhase.CANCELLED -> false"));
+        assertTrue(runtime.contains("storageLogSharePreparationBusy = storageLogShares.any"));
+        assertTrue(runtime.contains("storageShareBusy || storageLogSharePreparationBusy ||"));
+        assertTrue(runtime.contains(
+                "storageActionBusy = storageDeleteBusy || storageShareBusy || storageLogSharePreparationBusy"));
+        assertFalse(runtime.contains(
+                "storageActionBusy = storageDeleteBusy || storageShareBusy || storageLogShareBusy"));
     }
 
     @Test

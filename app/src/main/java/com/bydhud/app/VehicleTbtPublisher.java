@@ -69,13 +69,24 @@ final class VehicleTbtPublisher {
     private String hudCheckLightReason = "pending";
 
     String hudCheckStatus(boolean ukrainian) {
-        String result = "Instrument: " + checkResultText(hudCheckInstrumentResult, ukrainian)
-                + " · AMap: " + checkResultText(hudCheckAmapResult, ukrainian);
+        return hudCheckStatus(ukrainian ? "uk" : "en");
+    }
+
+    String hudCheckStatus(String language) {
+        String result = "Instrument: " + checkResultText(hudCheckInstrumentResult, language)
+                + " · AMap: " + checkResultText(hudCheckAmapResult, language);
         if (hudCheckLightIndex >= 0) {
-            result += (ukrainian ? " · Світлофор: " : " · Traffic light: ")
-                    + checkResultText(hudCheckLightResult, ukrainian);
+            result += ("uk".equals(language) ? " · Світлофор: "
+                    : "ru".equals(language) ? " · Светофор: " : " · Traffic light: ")
+                    + checkResultText(hudCheckLightResult, language);
         }
         return result;
+    }
+
+    private static String checkResultText(int result, String language) {
+        if (result > 0) return "uk".equals(language) ? "надіслано" : "ru".equals(language) ? "отправлено" : "sent";
+        if (result < 0) return "uk".equals(language) ? "недоступно/помилка" : "ru".equals(language) ? "недоступно/ошибка" : "unavailable/error";
+        return "uk".equals(language) ? "очікування" : "ru".equals(language) ? "ожидание" : "waiting";
     }
 
     private static String checkResultText(int result, boolean ukrainian) {

@@ -162,8 +162,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activeProfile.contains("\"Screen format method\""));
         assertTrue(activeProfile.contains("\"Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний\""));
         assertTrue(activeProfile.contains("\"Preferred mode: Native. If Native does not work, use Alternative.\""));
-        assertTrue(activeProfile.contains("left = if (ua) \"Штатний\" else \"Native\""));
-        assertTrue(activeProfile.contains("right = if (ua) \"Альтернативний\" else \"Alternative\""));
+        assertTrue(activeProfile.contains("left = language.choose(\"Штатний\", \"Native\", \"Штатный\")"));
+        assertTrue(activeProfile.contains("right = language.choose(\"Альтернативний\", \"Alternative\", \"Альтернативный\")"));
         assertTrue(activeProfile.contains("snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NATIVE"));
         assertTrue(activeProfile.contains("activity.composeSetDashboardFormatMethod("));
         assertTrue(activeProfile.contains("itemWidth = 150.dp"));
@@ -227,7 +227,7 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
         assertTrue(gradle.contains("versionCode = 99"));
-        assertTrue(gradle.contains("versionName = \"3.3.0\""));
+        assertTrue(gradle.contains("versionName = \"3.2.1\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

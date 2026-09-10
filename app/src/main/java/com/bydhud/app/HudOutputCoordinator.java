@@ -258,12 +258,23 @@ final class HudOutputCoordinator {
     }
 
     String hudCheckStatus(boolean ukrainian) {
-        String status = "RoadInfo: " + checkResultText(hudCheckRoadResult, ukrainian);
+        return hudCheckStatus(ukrainian ? "uk" : "en");
+    }
+
+    String hudCheckStatus(String language) {
+        String status = "RoadInfo: " + checkResultText(hudCheckRoadResult, language);
         if (hudCheckHasAuxiliary) {
-            status += (ukrainian ? " · Додаткові поля: " : " · Additional fields: ")
-                    + checkResultText(hudCheckAuxiliaryResult, ukrainian);
+            status += ("uk".equals(language) ? " · Додаткові поля: "
+                    : "ru".equals(language) ? " · Дополнительные поля: " : " · Additional fields: ")
+                    + checkResultText(hudCheckAuxiliaryResult, language);
         }
         return status;
+    }
+
+    private static String checkResultText(int result, String language) {
+        if (result > 0) return "uk".equals(language) ? "надіслано" : "ru".equals(language) ? "отправлено" : "sent";
+        if (result < 0) return "uk".equals(language) ? "недоступно/помилка" : "ru".equals(language) ? "недоступно/ошибка" : "unavailable/error";
+        return "uk".equals(language) ? "очікування" : "ru".equals(language) ? "ожидание" : "waiting";
     }
 
     private static String checkResultText(int result, boolean ukrainian) {

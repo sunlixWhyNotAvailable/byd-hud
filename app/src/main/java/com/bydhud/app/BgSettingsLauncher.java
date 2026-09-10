@@ -41,10 +41,22 @@ final class BgSettingsLauncher {
             fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(fallback);
             AppEventLogger.event(context, "bg_settings_open_fallback_app_details");
-            Toast.makeText(context, "Opened app settings fallback", Toast.LENGTH_LONG).show();
+            Toast.makeText(context, uiText(context,
+                    "Opened app settings fallback",
+                    "Відкрито резервні налаштування застосунку",
+                    "Открыты резервные настройки приложения"), Toast.LENGTH_LONG).show();
         } catch (RuntimeException e) {
             AppEventLogger.event(context, "bg_settings_open_fail " + e.getMessage());
-            Toast.makeText(context, "Cannot open background settings", Toast.LENGTH_LONG).show();
+            Toast.makeText(context, uiText(context,
+                    "Cannot open background settings",
+                    "Не вдалося відкрити налаштування фонової роботи",
+                    "Не удалось открыть настройки фоновой работы"), Toast.LENGTH_LONG).show();
         }
+    }
+
+    private static String uiText(Context context, String english, String ukrainian,
+            String russian) {
+        String language = HudPrefs.uiLanguage(context);
+        return "uk".equals(language) ? ukrainian : "ru".equals(language) ? russian : english;
     }
 }

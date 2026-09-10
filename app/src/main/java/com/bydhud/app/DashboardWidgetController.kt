@@ -14,7 +14,7 @@ import androidx.compose.runtime.setValue
 internal object DashboardWidgetController {
     var state by mutableStateOf(DashboardWidgetState())
         private set
-    var ukrainian by mutableStateOf(false)
+    var uiLanguage by mutableStateOf(Language.En)
         private set
     var busy by mutableStateOf(false)
         private set
@@ -92,8 +92,8 @@ internal object DashboardWidgetController {
         state = state.hide()
         DashboardWidgetPreferences.save(app, state)
         Log.i("DashboardWidget", "widget_hidden restore_on_app_open=true")
-        Toast.makeText(app, if (ukrainian) "Віджет приховано — відкрийте BYD HUD, щоб повернути"
-            else "Widget hidden — open BYD HUD to restore", Toast.LENGTH_LONG).show()
+        Toast.makeText(app, uiLanguage.choose("Віджет приховано — відкрийте BYD HUD, щоб повернути",
+            "Widget hidden — open BYD HUD to restore", "Виджет скрыт — откройте BYD HUD, чтобы вернуть"), Toast.LENGTH_LONG).show()
         refresh(app)
     }
 
@@ -109,8 +109,8 @@ internal object DashboardWidgetController {
                 if (generation != commandGeneration) return@post
                 busy = false
                 if (!HudPrefs.isUserShutdownActive(app) && !error.isNullOrEmpty()) {
-                    Toast.makeText(app, (if (ukrainian) "Не вдалося змінити режим: "
-                        else "Unable to change mode: ") + error, Toast.LENGTH_LONG).show()
+                    Toast.makeText(app, uiLanguage.choose("Не вдалося змінити режим: ",
+                        "Unable to change mode: ", "Не удалось изменить режим: ") + error, Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -120,7 +120,7 @@ internal object DashboardWidgetController {
         load(context)
         val app = context.applicationContext
         permissionGranted = MainActivity.cachedDashboardOverlayPermission()
-        ukrainian = HudPrefs.isUaLanguage(app)
+        uiLanguage = Language.fromCode(HudPrefs.uiLanguage(app))
         if (!state.visible || !permissionGranted || HudPrefs.isUserShutdownActive(app)) {
             stop(app)
         } else {
@@ -135,7 +135,7 @@ internal object DashboardWidgetController {
                 } catch (error: RuntimeException) {
                     startRequested = false
                     Log.e("DashboardWidget", "Unable to start overlay", error)
-                    Toast.makeText(app, if (ukrainian) "Не вдалося показати віджет" else "Unable to show widget",
+                    Toast.makeText(app, uiLanguage.choose("Не вдалося показати віджет", "Unable to show widget", "Не удалось показать виджет"),
                         Toast.LENGTH_LONG).show()
                 }
             }
@@ -145,7 +145,7 @@ internal object DashboardWidgetController {
 
     fun serviceCreated(active: DashboardWidgetOverlayService) {
         load(active)
-        ukrainian = HudPrefs.isUaLanguage(active)
+        uiLanguage = Language.fromCode(HudPrefs.uiLanguage(active))
         service = active
         startRequested = false
     }

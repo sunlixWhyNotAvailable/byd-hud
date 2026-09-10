@@ -79,8 +79,8 @@ public final class BackendPatchShareSourceContractTest {
         assertTrue(source.contains("queuePendingShare(files, Collections.emptyList(), ShareOwner.CONFIGURATION"));
         assertTrue(source.contains("queueStorageShare(File file, List<String> storageDays, String operationId)"));
         assertTrue(source.contains("ShareOwner.STORAGE_LOGS"));
-        assertTrue(workflow.contains("queueStorageShareIfOwned(control, archive.file, submittedDays)"));
-        assertTrue(workflow.contains("MainActivity.queueStorageShare(file, submittedDays, state.value!!.operationId)"));
+        assertTrue(workflow.contains(
+                "MainActivity.queueStorageShare(archive.file, submittedDays, control.operationId)"));
         assertTrue(snapshot.contains("shareLaunchId"));
         assertTrue(snapshot.contains("shareLaunchDays"));
         assertTrue(compose.contains(

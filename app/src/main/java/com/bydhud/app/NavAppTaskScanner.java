@@ -29,15 +29,17 @@ final class NavAppTaskScanner {
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int IMPORTANCE_NOT_RUNNING = Integer.MAX_VALUE;
     private static final Pattern DISPLAY_SECTION_PATTERN =
-            Pattern.compile(".*Display #([0-9]+).*");
+            Pattern.compile("\\s*Display #([0-9]+).*");
     private static final Pattern ROOT_TASK_PATTERN =
-            Pattern.compile(".*RootTask id=([0-9]+).*displayId=([0-9]+).*");
+            Pattern.compile("\\s*(?:\\*\\s*)?RootTask id=([0-9]+).*displayId=([0-9]+).*");
     private static final Pattern ROOT_TASK_HASH_PATTERN =
-            Pattern.compile(".*RootTask\\{[^#]*#([0-9]+).*displayId=([0-9]+).*");
+            Pattern.compile("\\s*(?:\\*\\s*)?RootTask\\{[^#]*#([0-9]+).*displayId=([0-9]+).*");
     private static final Pattern TASK_HASH_PATTERN =
-            Pattern.compile(".*Task\\{[^#]*#([0-9]+).*displayId=([0-9]+).*");
+            Pattern.compile("\\s*(?:\\*\\s*)?Task\\{[^#]*#([0-9]+).*displayId=([0-9]+).*");
     private static final Pattern TASK_HASH_NO_DISPLAY_PATTERN =
-            Pattern.compile(".*Task\\{[^#]*#([0-9]+).*");
+            Pattern.compile("\\s*(?:\\*\\s*)?Task\\{[^#]*#([0-9]+).*");
+    private static final Pattern GLOBAL_TASK_SUMMARY_PATTERN = Pattern.compile(
+            ".*\\b(?:topDisplayFocusedRootTask|topResumedActivity|mFocusedRootTask)\\s*=.*");
     private static final Pattern PACKAGE_PATTERN =
             Pattern.compile("(?<![A-Za-z0-9_])([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=[/\\s}:,]|$)");
     private static final Pattern FOREGROUND_SERVICE_PATTERN = Pattern.compile(
@@ -205,7 +207,19 @@ final class NavAppTaskScanner {
         for (String line : lines) {
             Matcher displaySection = DISPLAY_SECTION_PATTERN.matcher(line);
             if (displaySection.matches()) {
+                parseTaskBlock(currentTaskId, currentDisplayId, block, rows);
+                currentTaskId = -1;
+                currentDisplayId = -1;
+                block.setLength(0);
                 sectionDisplayId = parseInt(displaySection.group(1), -1);
+            }
+            if (isGlobalTaskSummary(line)) {
+                parseTaskBlock(currentTaskId, currentDisplayId, block, rows);
+                currentTaskId = -1;
+                currentDisplayId = -1;
+                sectionDisplayId = -1;
+                block.setLength(0);
+                continue;
             }
             int[] task = parseTaskHeader(line, sectionDisplayId);
             if (task != null) {
@@ -332,7 +346,7 @@ final class NavAppTaskScanner {
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
-    private static int[] parseTaskHeader(String line, int fallbackDisplayId) {
+    static int[] parseTaskHeader(String line, int fallbackDisplayId) {
         Matcher root = ROOT_TASK_PATTERN.matcher(line);
         if (!root.matches()) {
             root = ROOT_TASK_HASH_PATTERN.matcher(line);
@@ -355,6 +369,10 @@ final class NavAppTaskScanner {
                 parseInt(root.group(1), -1),
                 displayId
         };
+    }
+
+    static boolean isGlobalTaskSummary(String line) {
+        return GLOBAL_TASK_SUMMARY_PATTERN.matcher(line == null ? "" : line).matches();
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.

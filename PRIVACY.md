@@ -17,9 +17,9 @@ The uploaded ZIP is the same complete archive offered through Android's normal s
 - BYD HUD event, navigation, SOME/IP transmission, and recorded full-system logcat files;
 - data from both public and app-private log storage for the selected days.
 
-The app initializes the Sentry service SDK only for that explicit upload, sends one event with one ZIP attachment, waits for the transfer, and closes the SDK. Automatic crash, ANR, session, breadcrumb, tracing, profiling, screenshot, view-hierarchy, and replay collection are disabled. Failed uploads are not retried in the background.
+Each explicit upload uses its own Sentry client, sends one event with one ZIP attachment, waits for that transfer's result, and closes its client. Another upload can start after the 30-second admission cooldown while an earlier transfer continues. Automatic crash, ANR, session, breadcrumb, tracing, profiling, screenshot, view-hierarchy, and replay collection are disabled. Failed uploads are not retried in the background.
 
-Selected source logs are not deleted after an upload. The temporary ZIP is deleted after successful delivery; failed delivery may retain it in the local share cache.
+Selected source logs are not deleted after an upload. The temporary ZIP is deleted when Sentry delivery succeeds, fails or is interrupted. A ZIP at or above 39,000,000 bytes is never submitted to Sentry: the user can share that same file through another app, or cancel to delete it immediately. Files passed to Android's share chooser follow the existing local share-cache cleanup.
 
 ## Android share chooser
 
