@@ -2221,9 +2221,9 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public boolean composeBeginStorageShare(List<String> days, boolean toDeveloper,
-            int selectedFileCount, long selectedBytes) {
+            int selectedFileCount, long selectedBytes, SentryLogReport report) {
         return StorageLogShareWorkflow.start(getApplicationContext(),
-                immutableStorageDays(days), toDeveloper, selectedFileCount, selectedBytes);
+                immutableStorageDays(days), toDeveloper, selectedFileCount, selectedBytes, report);
     }
 
     public void composeCancelStorageShare() { StorageLogShareWorkflow.cancel(); }

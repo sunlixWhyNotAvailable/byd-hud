@@ -72,11 +72,17 @@ final class SentryLogUploader {
         return upload(context, archive,
                 "BYD HUD manual navigation log upload",
                 "navigation_logs",
-                days == null ? "" : String.join(",", days), uploadId);
+                days == null ? "" : String.join(",", days), uploadId, null);
+    }
+
+    static Result upload(Context context, File archive, List<String> days, String uploadId,
+            SentryLogReport report) {
+        return upload(context, archive, report.getTitle(), "navigation_logs",
+                days == null ? "" : String.join(",", days), uploadId, report.getComment());
     }
 
     private static Result upload(Context context, File archive, String messageText,
-            String uploadType, String selectedDays, String uploadId) {
+            String uploadType, String selectedDays, String uploadId, String userComment) {
         String validation = validate(BuildConfig.SENTRY_DSN, archive);
         if (!validation.isEmpty()) {
             LogShareZip.deleteArtifact(archive);
@@ -109,7 +115,7 @@ final class SentryLogUploader {
             });
 
             SentryEvent event = buildManualUploadEvent(
-                    messageText, uploadType, selectedDays, uploadId);
+                    messageText, uploadType, selectedDays, uploadId, userComment);
 
             Hint hint = new Hint();
             hint.addAttachment(new Attachment(
@@ -157,6 +163,11 @@ final class SentryLogUploader {
 
     static SentryEvent buildManualUploadEvent(
             String messageText, String uploadType, String selectedDays, String uploadId) {
+        return buildManualUploadEvent(messageText, uploadType, selectedDays, uploadId, null);
+    }
+
+    static SentryEvent buildManualUploadEvent(String messageText, String uploadType,
+            String selectedDays, String uploadId, String userComment) {
         SentryEvent event = new SentryEvent();
         Message message = new Message();
         message.setMessage(messageText);
@@ -172,6 +183,9 @@ final class SentryLogUploader {
         if (uploadId != null && !uploadId.isEmpty()) {
             event.setTag("upload_id", uploadId);
             event.setFingerprints(Collections.singletonList("manual-navigation-upload:" + uploadId));
+        }
+        if (userComment != null) {
+            event.setExtra("user_comment", userComment);
         }
         return event;
     }

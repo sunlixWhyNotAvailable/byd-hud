@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
@@ -17,7 +18,8 @@ public final class ShareCompletionSourceContractTest {
 
         assertTrue(workflow.contains("val submittedDays = days.toList()"));
         assertTrue(workflow.contains("LogShareZip.create(\n                        app,\n                        submittedDays,"));
-        assertTrue(workflow.contains("SentryLogUploader.upload(\n                        app, archive.file, submittedDays, operationId)"));
+        assertTrue(workflow.contains("SentryLogUploader.upload(\n"
+                + "                        app, archive.file, submittedDays, operationId, report!!)"));
         assertTrue(workflow.contains(
                 "if (upload.ok) publishCompletionIfOwned(control, submittedDays)"));
         assertTrue(workflow.indexOf("if (!admit(control, StorageLogSharePhase.UPLOADING,")
@@ -48,7 +50,7 @@ public final class ShareCompletionSourceContractTest {
         String workflow = source("StorageLogShareWorkflow.kt");
         assertTrue(workflow.contains("if (toDeveloper) SentryLogUploader.newUploadId()"));
         assertTrue(workflow.contains("if (toDeveloper) operationId else \"\""));
-        assertTrue(workflow.contains("app, archive.file, submittedDays, operationId"));
+        assertTrue(workflow.contains("app, archive.file, submittedDays, operationId, report"));
 
         String zip = source("LogShareZip.java");
         assertTrue(zip.contains("+ (uploadId.isEmpty() ? \"\" : \"-\" + uploadId)"));
@@ -59,14 +61,81 @@ public final class ShareCompletionSourceContractTest {
     }
 
     @Test
-    public void developerButtonUsesImmediateThirtySecondCooldownAndCallbackGuard()
+    public void developerCommentDefersThirtySecondCooldownUntilAcceptedAdmission()
             throws IOException {
         String compose = source("BydHudRuntimeCompose.kt");
+        String runtime = between(compose, "private fun RuntimeApp(", "private fun Header(");
+        String destination = between(runtime,
+                "if (storageShareSummaryVisible && !sentryCommentVisible)",
+                "if (sentryCommentVisible)");
+        String sentryAction = between(destination, "onSentry = {", "sentryButtonText =");
+        String comment = between(runtime, "if (sentryCommentVisible)",
+                "if (configurationShareVisible)");
+
         assertTrue(compose.contains("SENTRY_NAV_UPLOAD_COOLDOWN_MS = 30_000L"));
         assertTrue(compose.contains("sentryButtonEnabled = sentryButtonRemaining == 0"));
-        assertTrue(compose.contains(
-                "if (sentryUploadCooldownUntilMs <= now)"));
-        assertTrue(compose.contains("sentryUploadCooldownRemaining = 30"));
+        assertTrue(runtime.contains(
+                "var storageShareSummaryVisible by rememberSaveable { mutableStateOf(false) }"));
+        assertTrue(runtime.contains(
+                "var storageShareSummaryDayCount by rememberSaveable { mutableIntStateOf(0) }"));
+        assertTrue(runtime.contains(
+                "var storageShareSummaryFileCount by rememberSaveable { mutableIntStateOf(0) }"));
+        assertTrue(runtime.contains(
+                "var storageShareSummaryBytes by rememberSaveable { mutableLongStateOf(0L) }"));
+        assertTrue(runtime.contains(
+                "var storageShareDays by rememberSaveable { mutableStateOf(emptyList<String>()) }"));
+        assertTrue(runtime.contains(
+                "var sentryCommentVisible by rememberSaveable { mutableStateOf(false) }"));
+        assertTrue(runtime.contains(
+                "var sentryCommentDraft by rememberSaveable { mutableStateOf(\"\") }"));
+        assertTrue(sentryAction.contains("sentryCommentDraft = \"\"\n"
+                + "                    sentryCommentVisible = true"));
+        assertFalse(sentryAction.contains("composeBeginStorageShare"));
+        assertFalse(sentryAction.contains("sentryUploadCooldownUntilMs ="));
+        assertTrue(runtime.contains("storageShareSummaryVisible || sentryCommentVisible -> "
+                + "\"storage-share-consent\""));
+        assertTrue(comment.contains("SentryLogReport.create(\n"
+                + "                                sentryCommentDraft,\n"
+                + "                                BuildConfig.VERSION_NAME,"));
+        int cooldownCheck = comment.indexOf("if (sentryUploadCooldownUntilMs <= now)");
+        int reportCreate = comment.indexOf("SentryLogReport.create(");
+        int admission = comment.indexOf("if (activity.composeBeginStorageShare(");
+        int cooldownStart = comment.indexOf(
+                "sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS");
+        int acceptedClose = comment.indexOf("sentryCommentVisible = false", admission);
+        int failedStatus = comment.indexOf(
+                "activity.composeAppendStatus(\"Storage share already running\")", admission);
+        assertTrue(cooldownCheck >= 0 && cooldownCheck < reportCreate && reportCreate < admission);
+        assertTrue(admission < cooldownStart && cooldownStart < acceptedClose
+                && acceptedClose < failedStatus);
+        assertFalse(comment.substring(failedStatus).contains("storageShareDays = emptyList()"));
+        assertTrue(comment.contains("if (!sentryCommentSubmitting)"));
+        assertTrue(comment.contains("okEnabled = !sentryCommentSubmitting"));
+        assertTrue(compose.contains("dismissOnClickOutside = false"));
+
+        String activity = source("MainActivity.java");
+        assertTrue(activity.contains("int selectedFileCount, long selectedBytes, "
+                + "SentryLogReport report)"));
+        assertTrue(activity.contains("selectedFileCount, selectedBytes, report)"));
+    }
+
+    @Test
+    public void reportTitleAppearsOnlyInStorageShareDetails() throws IOException {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String stack = between(compose, "private fun OperationProgressStack(",
+                "private fun OperationProgressCard(");
+        String storage = between(stack,
+                "visibleStorageShare?.takeIf { showStorageShare }?.let { state ->",
+                "visibleConfigurationExport?.takeIf { !showStorageShare }?.let { state ->");
+        String summary = between(storage, "val summary = buildString {", "add(OperationCardSpec(");
+        String details = between(compose, "private fun operationDetails(",
+                "private fun OperationDetailsOverlay(");
+
+        assertFalse(summary.contains("reportTitle"));
+        assertTrue(storage.contains("reportTitle = state.reportTitle"));
+        assertTrue(details.contains("reportTitle: String = \"\""));
+        assertTrue(details.contains("if (reportTitle.isNotBlank())"));
+        assertTrue(details.contains("\"Заголовок звіту\" else \"Report title\""));
     }
 
     @Test

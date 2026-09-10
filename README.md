@@ -355,7 +355,9 @@ Configuration export and selected-day log sharing keep the same progress card th
 `Share logs` offers two explicit destinations:
 
 - `Another app` opens the normal Android share chooser;
-- `Send to developer` uploads the same selected ZIP to the Sentry service once.
+- `Send to developer` opens an optional comment field; `OK` starts a single upload of the selected ZIP to Sentry.
+
+A blank comment is omitted. A supplied comment accompanies the report, and its short form appears in the report title alongside the app version. Without a comment, the title uses the version and submission date/time. The generated title is available in the progress card's `Details`. Back from the comment dialog returns to the destination choice without uploading.
 
 <p align="center"><img src="docs/screenshots/en/storage-share.png" alt="Navigation log sharing confirmation and privacy warning" width="100%"></p>
 

@@ -6,7 +6,9 @@ BYD HUD does not automatically send crash reports, analytics, navigation data, s
 
 ## Navigation log upload
 
-Navigation logs are uploaded only when the user selects one or more stored days, presses Share, reviews the warning, and chooses `Send to developer`.
+Navigation logs are uploaded only when the user selects one or more stored days, presses Share, reviews the warning, chooses `Send to developer`, and confirms `OK` in the optional-comment dialog.
+
+An empty or whitespace-only comment is omitted. Otherwise, the full trimmed comment is included in the Sentry event's additional data, and a shortened single-line form is used in its title. The comment is not added to the ZIP or technical logs. Without a comment, the event title contains the app version and the local date/time of confirmation.
 
 The uploaded ZIP is the same complete archive offered through Android's normal share chooser. Depending on enabled diagnostics, it can contain:
 

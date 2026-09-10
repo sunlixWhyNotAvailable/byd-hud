@@ -26,6 +26,7 @@ data class StorageLogShareSnapshot(
     val toDeveloper: Boolean = false,
     val detail: String = "",
     val eventId: String = "",
+    val reportTitle: String = "",
     val dismissed: Boolean = false
 )
 
@@ -57,13 +58,16 @@ object StorageLogShareWorkflow {
 
     @JvmStatic
     @Synchronized
+    @JvmOverloads
     fun start(
         context: Context,
         days: List<String>,
         toDeveloper: Boolean,
         selectedFileCount: Int,
-        selectedBytes: Long
+        selectedBytes: Long,
+        report: SentryLogReport? = null
     ): Boolean {
+        if (toDeveloper && report == null) return false
         if (active != null || !MainActivity.claimShareOperation()) return false
         val app = context.applicationContext
         val submittedDays = days.toList()
@@ -81,7 +85,8 @@ object StorageLogShareWorkflow {
             foundFiles = selectedFileCount.coerceAtLeast(0),
             knownBytes = selectedBytes.coerceAtLeast(0L),
             inventoryComplete = true,
-            toDeveloper = toDeveloper
+            toDeveloper = toDeveloper,
+            reportTitle = if (toDeveloper) report!!.title else ""
         )
         log("started destination=${if (toDeveloper) "sentry" else "android"} " +
             "days=${submittedDays.joinToString(",")}")
@@ -130,7 +135,7 @@ object StorageLogShareWorkflow {
                         return@execute
                     }
                     val upload = SentryLogUploader.upload(
-                        app, archive.file, submittedDays, operationId)
+                        app, archive.file, submittedDays, operationId, report!!)
                     if (upload.ok) publishCompletionIfOwned(control, submittedDays)
                     finish(
                         control,

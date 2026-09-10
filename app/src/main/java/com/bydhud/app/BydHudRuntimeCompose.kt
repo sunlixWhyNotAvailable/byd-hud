@@ -88,6 +88,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -143,6 +144,8 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
 
@@ -460,6 +463,9 @@ private data class ShareCopy(
     val shareLogsSensitiveWarning: String,
     val shareLogsSentryNotice: String,
     val shareToSentry: String,
+    val commentTitle: String,
+    val commentPlaceholder: String,
+    val commentOk: String,
     val shareToAnotherApp: String,
     val cancel: String,
     val waitingForWrites: String,
@@ -755,9 +761,13 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var storageDeleteTotal by remember { mutableStateOf(0) }
     var storageShareDays by rememberSaveable { mutableStateOf(emptyList<String>()) }
     var storageShareBusy by remember { mutableStateOf(false) }
-    var storageShareSummary by remember {
-        mutableStateOf<MainActivity.ComposeStorageShareSummary?>(null)
-    }
+    var storageShareSummaryVisible by rememberSaveable { mutableStateOf(false) }
+    var storageShareSummaryDayCount by rememberSaveable { mutableIntStateOf(0) }
+    var storageShareSummaryFileCount by rememberSaveable { mutableIntStateOf(0) }
+    var storageShareSummaryBytes by rememberSaveable { mutableLongStateOf(0L) }
+    var sentryCommentVisible by rememberSaveable { mutableStateOf(false) }
+    var sentryCommentDraft by rememberSaveable { mutableStateOf("") }
+    var sentryCommentSubmitting by remember { mutableStateOf(false) }
     var sentryUploadCooldownUntilMs by rememberSaveable { mutableStateOf(0L) }
     var sentryUploadCooldownRemaining by remember { mutableIntStateOf(0) }
     val storageLogShare by StorageLogShareWorkflow.snapshot.collectAsState()
@@ -804,6 +814,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     val shareCopy = remember(copy.language) { shareCopy(copy.language) }
     val blockingUiFlow = when {
         showSetupDialog -> "setup"
+        storageShareSummaryVisible || sentryCommentVisible -> "storage-share-consent"
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
         configurationShareVisible -> "configuration-share"
@@ -964,14 +975,17 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                     activity.composeDescribeStorageShareDays(days)
                 }
                 if (summary.ok) {
-                    storageShareSummary = summary
+                    storageShareSummaryDayCount = summary.dayCount
+                    storageShareSummaryFileCount = summary.fileCount
+                    storageShareSummaryBytes = summary.sourceBytes
+                    storageShareSummaryVisible = true
                 } else {
                     storageShareDays = emptyList()
                     activity.composeAppendStatus("Storage share failed: ${summary.detail}")
                 }
             } catch (error: Exception) {
                 storageShareDays = emptyList()
-                storageShareSummary = null
+                storageShareSummaryVisible = false
                 activity.composeAppendStatus(
                     "Storage share failed: ${error.message ?: error.javaClass.simpleName}"
                 )
@@ -1539,7 +1553,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             )
         }
 
-        storageShareSummary?.let { summary ->
+        if (storageShareSummaryVisible && !sentryCommentVisible) {
             val sentryCooldownActive = sentryUploadCooldownUntilMs > SystemClock.elapsedRealtime()
             val sentryButtonRemaining = if (sentryCooldownActive) {
                 sentryUploadCooldownRemaining.coerceAtLeast(1)
@@ -1550,24 +1564,12 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 copy = copy,
                 shareCopy = shareCopy,
                 palette = palette,
-                summary = summary,
+                dayCount = storageShareSummaryDayCount,
+                fileCount = storageShareSummaryFileCount,
+                sourceBytes = storageShareSummaryBytes,
                 onSentry = {
-                    val now = SystemClock.elapsedRealtime()
-                    if (sentryUploadCooldownUntilMs <= now) {
-                        if (activity.composeBeginStorageShare(
-                                storageShareDays,
-                                true,
-                                summary.fileCount,
-                                summary.sourceBytes
-                            )) {
-                            sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
-                            sentryUploadCooldownRemaining = 30
-                            storageShareSummary = null
-                            storageShareDays = emptyList()
-                        } else {
-                            activity.composeAppendStatus("Storage share already running")
-                        }
-                    }
+                    sentryCommentDraft = ""
+                    sentryCommentVisible = true
                 },
                 sentryButtonText = if (sentryButtonRemaining > 0) {
                     sentryButtonRemaining.toString()
@@ -1579,18 +1581,64 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                     if (activity.composeBeginStorageShare(
                             storageShareDays,
                             false,
-                            summary.fileCount,
-                            summary.sourceBytes
+                            storageShareSummaryFileCount,
+                            storageShareSummaryBytes,
+                            null
                         )) {
-                        storageShareSummary = null
+                        storageShareSummaryVisible = false
                         storageShareDays = emptyList()
                     } else {
                         activity.composeAppendStatus("Storage share already running")
                     }
                 },
                 onCancel = {
-                    storageShareSummary = null
+                    storageShareSummaryVisible = false
                     storageShareDays = emptyList()
+                }
+            )
+        }
+
+        if (sentryCommentVisible) {
+            SentryCommentDialog(
+                copy = shareCopy,
+                palette = palette,
+                comment = sentryCommentDraft,
+                onCommentChange = { sentryCommentDraft = it },
+                onDismiss = { sentryCommentVisible = false },
+                okEnabled = !sentryCommentSubmitting,
+                onOk = {
+                    if (!sentryCommentSubmitting) {
+                        sentryCommentSubmitting = true
+                        val now = SystemClock.elapsedRealtime()
+                        if (sentryUploadCooldownUntilMs <= now) {
+                            val report = SentryLogReport.create(
+                                sentryCommentDraft,
+                                BuildConfig.VERSION_NAME,
+                                SimpleDateFormat(
+                                    "dd.MM.yyyy HH:mm",
+                                    Locale.getDefault()
+                                ).format(Date()),
+                                if (copy.language == Language.Ua) "Логи" else "Logs"
+                            )
+                            if (activity.composeBeginStorageShare(
+                                    storageShareDays.toList(),
+                                    true,
+                                    storageShareSummaryFileCount,
+                                    storageShareSummaryBytes,
+                                    report
+                                )) {
+                                sentryUploadCooldownUntilMs = now + SENTRY_NAV_UPLOAD_COOLDOWN_MS
+                                sentryUploadCooldownRemaining = 30
+                                sentryCommentVisible = false
+                                storageShareSummaryVisible = false
+                                storageShareDays = emptyList()
+                                sentryCommentDraft = ""
+                            } else {
+                                activity.composeAppendStatus("Storage share already running")
+                            }
+                        }
+                        sentryCommentSubmitting = false
+                    }
                 }
             )
         }
@@ -3521,7 +3569,9 @@ private fun StorageShareDestinationOverlay(
     copy: Copy,
     shareCopy: ShareCopy,
     palette: Palette,
-    summary: MainActivity.ComposeStorageShareSummary,
+    dayCount: Int,
+    fileCount: Int,
+    sourceBytes: Long,
     onSentry: () -> Unit,
     sentryButtonText: String,
     sentryButtonEnabled: Boolean,
@@ -3563,9 +3613,9 @@ private fun StorageShareDestinationOverlay(
                     String.format(
                         Locale.US,
                         shareCopy.shareLogsSelection,
-                        summary.dayCount,
-                        summary.fileCount,
-                        formatBytes(summary.sourceBytes, copy)
+                        dayCount,
+                        fileCount,
+                        formatBytes(sourceBytes, copy)
                     ),
                     color = palette.text,
                     fontSize = 16.sp,
@@ -3609,6 +3659,75 @@ private fun StorageShareDestinationOverlay(
                     onClick = onAnotherApp
                 )
                 HudButton(shareCopy.cancel, palette, width = 138.dp, onClick = onCancel)
+            }
+        }
+    }
+}
+
+@Composable
+private fun SentryCommentDialog(
+    copy: ShareCopy,
+    palette: Palette,
+    comment: String,
+    onCommentChange: (String) -> Unit,
+    onDismiss: () -> Unit,
+    okEnabled: Boolean,
+    onOk: () -> Unit
+) {
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(usePlatformDefaultWidth = false, dismissOnClickOutside = false)
+    ) {
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .heightIn(max = 400.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .verticalScroll(rememberScrollState())
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                copy.commentTitle,
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+            BasicTextField(
+                value = comment,
+                onValueChange = onCommentChange,
+                minLines = 3,
+                maxLines = 5,
+                textStyle = TextStyle(color = palette.text, fontSize = 16.sp),
+                cursorBrush = SolidColor(palette.accent),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 110.dp)
+                    .clip(RoundedCornerShape(7.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                    .padding(10.dp)
+                    .semantics { contentDescription = copy.commentTitle },
+                decorationBox = { field ->
+                    Box {
+                        if (comment.isEmpty()) {
+                            Text(copy.commentPlaceholder, color = palette.muted, fontSize = 16.sp)
+                        }
+                        field()
+                    }
+                }
+            )
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                HudButton(
+                    copy.commentOk,
+                    palette,
+                    primary = true,
+                    enabled = okEnabled,
+                    width = 138.dp,
+                    onClick = onOk
+                )
             }
         }
     }
@@ -3682,7 +3801,8 @@ private fun OperationProgressStack(
                     detail = state.detail,
                     eventId = state.eventId,
                     unavailable = 0,
-                    ua = ua
+                    ua = ua,
+                    reportTitle = state.reportTitle
                 ),
                 failed = state.phase == StorageLogSharePhase.FAILED,
                 success = state.phase == StorageLogSharePhase.SENT || state.phase == StorageLogSharePhase.READY,
@@ -4011,9 +4131,13 @@ private fun operationDetails(
     detail: String,
     eventId: String,
     unavailable: Int,
-    ua: Boolean
+    ua: Boolean,
+    reportTitle: String = ""
 ): String = buildString {
     append("Operation ID: $operationId")
+    if (reportTitle.isNotBlank()) {
+        append("\n\n${if (ua) "Заголовок звіту" else "Report title"}:\n$reportTitle")
+    }
     if (currentFile.isNotBlank()) append("\n\n${if (ua) "Поточний файл" else "Current file"}:\n$currentFile")
     if (unavailable > 0 && !detail.contains("manifest.json")) {
         append("\n\n${if (ua) "Недоступно" else "Unavailable"}: $unavailable")
@@ -8777,6 +8901,9 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         shareLogsSensitiveWarning = "Архів може містити точні координати, маршрути, назви вулиць і пошукові запити, знімки або direct-зображення Waze та повний системний logcat.",
         shareLogsSentryNotice = "Надсилання розробнику використовує сервіс Sentry.",
         shareToSentry = "Надіслати розробнику",
+        commentTitle = "Коментар до логів",
+        commentPlaceholder = "Опишіть проблему або додайте пояснення (необов’язково)",
+        commentOk = "Ок",
         shareToAnotherApp = "Інший застосунок",
         cancel = "Скасувати",
         waitingForWrites = "Очікування записів",
@@ -8803,6 +8930,9 @@ private fun shareCopy(language: Language) = if (language == Language.Ua) {
         shareLogsSensitiveWarning = "The archive may contain exact coordinates, routes, street and search text, Waze screenshots or direct images, and full system logcat output.",
         shareLogsSentryNotice = "Sending to developer uses Sentry service.",
         shareToSentry = "Send to developer",
+        commentTitle = "Comment on logs",
+        commentPlaceholder = "Describe the problem or add a note (optional)",
+        commentOk = "OK",
         shareToAnotherApp = "Another app",
         cancel = "Cancel",
         waitingForWrites = "Waiting for writes",

@@ -47,6 +47,33 @@ public final class SentryLogUploaderTest {
     }
 
     @Test
+    public void reportSetsMessageAndOptionalFullCommentWithoutChangingFingerprint() {
+        String uploadId = "0123abcd";
+        String comment = "Full comment\nwith context";
+        SentryLogReport report = new SentryLogReport(
+                comment, "BYD HUD 3.3.0 — Full comment with context");
+        SentryEvent event = SentryLogUploader.buildManualUploadEvent(
+                report.getTitle(), "navigation_logs", "20260803", uploadId,
+                report.getComment());
+
+        assertEquals(report.getTitle(), event.getMessage().getMessage());
+        assertEquals(comment, event.getExtra("user_comment"));
+        assertEquals(Collections.singletonList("manual-navigation-upload:" + uploadId),
+                event.getFingerprints());
+    }
+
+    @Test
+    public void reportWithoutCommentOmitsUserCommentExtra() {
+        SentryLogReport report = new SentryLogReport(
+                null, "BYD HUD 3.3.0 — Logs — Sep 10, 12:00");
+        SentryEvent event = SentryLogUploader.buildManualUploadEvent(
+                report.getTitle(), "navigation_logs", "20260803", "0123abcd",
+                report.getComment());
+
+        assertNull(event.getExtra("user_comment"));
+    }
+
+    @Test
     public void emptyUploadIdAndConfigurationKeepDefaultGrouping() {
         SentryEvent logs = SentryLogUploader.buildManualUploadEvent(
                 "logs", "navigation_logs", "20260803", "");
