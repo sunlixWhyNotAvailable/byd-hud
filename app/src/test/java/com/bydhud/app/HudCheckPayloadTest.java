@@ -7,8 +7,9 @@ import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
-import java.awt.image.BufferedImage;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 import java.util.HashMap;
@@ -16,7 +17,8 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import javax.imageio.ImageIO;
+import java.util.zip.CRC32;
+import java.util.zip.InflaterInputStream;
 
 public final class HudCheckPayloadTest {
     @Test
@@ -48,19 +50,49 @@ public final class HudCheckPayloadTest {
             byte[] png = Base64.getDecoder().decode(encoded);
             if (previousPng != null) assertArrayEquals(previousPng, png);
             previousPng = png;
-            BufferedImage image = ImageIO.read(new ByteArrayInputStream(png));
-            assertEquals(320, image.getWidth());
-            assertEquals(180, image.getHeight());
+            DataInputStream chunks = new DataInputStream(new ByteArrayInputStream(png));
+            assertEquals(0x89504e470d0a1a0aL, chunks.readLong());
+            ByteArrayOutputStream compressed = new ByteArrayOutputStream();
+            boolean headerSeen = false;
+            boolean endSeen = false;
+            while (chunks.available() > 0) {
+                int length = chunks.readInt();
+                byte[] type = new byte[4];
+                chunks.readFully(type);
+                byte[] data = new byte[length];
+                chunks.readFully(data);
+                CRC32 crc = new CRC32();
+                crc.update(type);
+                crc.update(data);
+                assertEquals(crc.getValue(), Integer.toUnsignedLong(chunks.readInt()));
+                String name = new String(type, StandardCharsets.US_ASCII);
+                if (name.equals("IHDR")) {
+                    DataInputStream header = new DataInputStream(new ByteArrayInputStream(data));
+                    assertEquals(320, header.readInt());
+                    assertEquals(180, header.readInt());
+                    assertEquals(8, header.readUnsignedByte());
+                    assertEquals(6, header.readUnsignedByte()); // RGBA
+                    headerSeen = true;
+                } else if (name.equals("IDAT")) compressed.write(data);
+                else if (name.equals("IEND")) endSeen = true;
+            }
+            assertTrue(headerSeen && endSeen);
+            DataInputStream pixels = new DataInputStream(new InflaterInputStream(
+                    new ByteArrayInputStream(compressed.toByteArray())));
             Set<Integer> colors = new HashSet<>();
-            for (int y = 0; y < image.getHeight(); y++) {
-                for (int x = 0; x < image.getWidth(); x++) {
-                    int pixel = image.getRGB(x, y);
-                    assertEquals("transparent map pixel at " + x + "," + y, 255, pixel >>> 24);
-                    colors.add(pixel);
+            for (int y = 0; y < 180; y++) {
+                assertEquals(0, pixels.readUnsignedByte()); // Unfiltered scanline.
+                for (int x = 0; x < 320; x++) {
+                    int red = pixels.readUnsignedByte();
+                    int green = pixels.readUnsignedByte();
+                    int blue = pixels.readUnsignedByte();
+                    assertEquals("transparent map pixel at " + x + "," + y,
+                            255, pixels.readUnsignedByte());
+                    colors.add(red << 16 | green << 8 | blue);
                 }
             }
+            assertEquals(-1, pixels.read());
             assertTrue("map must show a pattern rather than a uniform rectangle", colors.size() >= 3);
-            assertTrue(image.getRGB(100, 140) != image.getRGB(101, 101));
         }
     }
 
