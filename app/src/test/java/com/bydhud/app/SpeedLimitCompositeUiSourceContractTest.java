@@ -150,6 +150,56 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
+    public void dashboardFormatMethodMatchesAcceptedSettingsAndDeferredApplyContract() throws IOException {
+        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
+        String activeProfile = between(options,
+                "if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE)",
+                "row(\"dashboard-height\")");
+
+        assertOrdered(activeProfile, "row(\"dashboard-format-method\")", "row(\"dashboard-width\")");
+        assertTrue(activeProfile.contains("\"Спосіб встановлення формату екрану\""));
+        assertTrue(activeProfile.contains("\"Screen format method\""));
+        assertTrue(activeProfile.contains("\"Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний\""));
+        assertTrue(activeProfile.contains("\"Preferred mode: Native. If Native does not work, use Alternative.\""));
+        assertTrue(activeProfile.contains("left = if (ua) \"Штатний\" else \"Native\""));
+        assertTrue(activeProfile.contains("right = if (ua) \"Альтернативний\" else \"Alternative\""));
+        assertTrue(activeProfile.contains("snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NATIVE"));
+        assertTrue(activeProfile.contains("activity.composeSetDashboardFormatMethod("));
+        assertTrue(activeProfile.contains("itemWidth = 150.dp"));
+
+        String prefs = sourcePath("app/src/main/java/com/bydhud/app/HudPrefs.java");
+        assertTrue(prefs.contains("KEY_DASHBOARD_PARTIAL_FORMAT_METHOD"));
+        assertTrue(prefs.contains("KEY_DASHBOARD_FULL_FORMAT_METHOD"));
+        assertTrue(prefs.contains("static int dashboardFormatMethod(Context context, int dashboardMode)"));
+        assertTrue(prefs.contains("static void setDashboardFormatMethod(Context context, int dashboardMode, int method)"));
+        String prefsSetter = between(prefs,
+                "static void setDashboardFormatMethod(",
+                "static int normalizeDashboardFormatMethod(");
+        assertTrue(prefsSetter.contains("if (mode == DASHBOARD_MODE_NONE)"));
+        assertTrue(prefsSetter.contains("mode == DASHBOARD_MODE_FULL\n"
+                + "                ? KEY_DASHBOARD_FULL_FORMAT_METHOD : KEY_DASHBOARD_PARTIAL_FORMAT_METHOD"));
+        assertTrue(prefsSetter.contains("normalizeDashboardFormatMethod(mode, method)"));
+
+        String activity = sourcePath("app/src/main/java/com/bydhud/app/MainActivity.java");
+        String setter = between(activity,
+                "public void composeSetDashboardFormatMethod(",
+                "public void composeSetDashboardWidthPercent(");
+        assertTrue(setter.contains("AppEventLogger.event(this, \"ui dashboard_format_method mode=\""));
+        assertTrue(setter.contains("invalidateComposeSnapshot();"));
+        assertFalse(setter.contains("refreshControls"));
+        assertFalse(setter.contains("finishDashboardProfileChange"));
+        assertFalse(setter.contains("applyDashboardProfile"));
+        assertTrue(activity.contains("dashboardFormatMethod == other.dashboardFormatMethod"));
+        assertTrue(activity.contains("dashboardFormatMethod, dashboardWidthPercent"));
+
+        String diagnostics = sourcePath(
+                "app/src/main/java/com/bydhud/app/VehicleConfigurationDiagnostics.java");
+        assertTrue(diagnostics.contains(".put(\"miniFormatMethod\", HudPrefs.dashboardFormatMethod("));
+        assertTrue(diagnostics.contains(".put(\"fullFormatMethod\", HudPrefs.dashboardFormatMethod("));
+    }
+
+    @Test
     public void rowExplanationsStripOnlyFinalFullStopThroughSharedHelper() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         assertTrue(source.contains("private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(\".\")"));
@@ -176,8 +226,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 98"));
-        assertTrue(gradle.contains("versionName = \"3.2.0\""));
+        assertTrue(gradle.contains("versionCode = 99"));
+        assertTrue(gradle.contains("versionName = \"3.3.0\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {

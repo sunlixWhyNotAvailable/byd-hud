@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.2.0
+- **Version:** v3.3.0
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
 - **Get started:** [download the latest release](https://github.com/sunlixWhyNotAvailable/byd-hud/releases/latest) and follow [Installation](#installation)
@@ -205,19 +205,20 @@ You can start a Waze route before opening BYD HUD and enable `HUD` before or aft
 
 After returning an application, BYD HUD keeps the projection ready for reuse and draws black inside its virtual display to replace the application's remaining image. The black window is removed before the next transfer, which reuses valid projection resources and confirms the application's visible placement. A brief earlier frame may appear before the application redraws. Full BYD HUD shutdown releases the retained projection.
 
-Full uses the stock fullscreen layout and stays selected after `Send to main`, showing the black projection area. Partial uses AutoContainer and releases that connection when the app returns or the widget selects another mode. Return does not automatically select TBT. The existing automatic TBT option still applies when navigation starts, including from Full; the widget's TBT and IPC OFF buttons explicitly change the layout.
+Full and Partial each offer a `Screen format method`: Native uses the stock layout command; Alternative uses AutoContainer. Full defaults to Native and Partial to Alternative. Prefer Native; select Alternative if Native does not work on your vehicle. Native needs no layout cleanup after `Send to main`, leaving the black projection area. Alternative releases its AutoContainer connection when the app returns or leaves that method. Return does not automatically select TBT. The existing automatic TBT option still applies when navigation starts, including from Full; the widget's TBT and IPC OFF buttons explicitly change the layout.
 
 Find the screen mode and geometry controls under `Options → Dashboard window profile`.
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Dashboard screen mode` | Full | Selects `None`, `Partial`, or `Full` presentation after the navigator reaches the dashboard |
+| `Screen format method` | Full Native; Partial Alternative | Saves an independent choice for each mode; applies on the next transfer or MINI/FULL action |
 | `Width` | Full 100%; Partial 30% | Changes the projected window width live from 20% to 100% |
 | `Height` | Full 75%; Partial 75% | Changes the projected window height live from 20% to 100% |
 | `Horizontal offset` | Full 50%; Partial 99% | Positions the window in the remaining horizontal space: 0% left, 50% centered, 100% right |
 | `Scale` | Full 100%; Partial 50% | Changes the navigator content scale inside the window from 20% to 150% |
 
-The navigator must already be running and dashboard control requires authorized ADB access. `None` only moves the navigator and leaves the current cluster layout unchanged; its geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Choosing a mode alone does not switch the dashboard. If changing the presentation fails, the navigator stays on the dashboard and a message explains the failure. Use `Send to main` to return it. During a Waze custom-surface route, the route screen follows Waze between displays.
+The navigator must already be running and dashboard control requires authorized ADB access. `None` only moves the navigator and leaves the current cluster layout unchanged; its method and geometry controls are hidden. `Partial` and `Full` keep independent width, height, offset, and scale values, so tuning one mode does not change the other. Releasing a slider applies it immediately only when the matching mode is active; otherwise the value is saved for the next move. Choosing a mode or method alone does not switch the dashboard. The widget always uses the chosen method for MINI/FULL; `Apply dashboard window profile` controls geometry only. Return releases the method actually used, even if the saved choice has since changed. If changing the presentation fails, the navigator stays on the dashboard and a message explains the failure; no automatic method fallback is performed. Use `Send to main` to return it. During a Waze custom-surface route, the route screen follows Waze between displays.
 
 <p align="center"><img src="docs/screenshots/en/settings-dashboard.png" alt="Dashboard window profile with screen mode, width and height controls" width="100%"></p>
 

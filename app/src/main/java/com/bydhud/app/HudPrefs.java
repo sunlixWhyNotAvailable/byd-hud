@@ -54,6 +54,8 @@ final class HudPrefs {
     private static final String KEY_DASHBOARD_FULL_HEIGHT_PERCENT = "dashboard_full_height_percent";
     private static final String KEY_DASHBOARD_FULL_OFFSET_PERCENT = "dashboard_full_offset_percent";
     private static final String KEY_DASHBOARD_FULL_SCALE_PERCENT = "dashboard_full_scale_percent";
+    private static final String KEY_DASHBOARD_PARTIAL_FORMAT_METHOD = "dashboard_partial_format_method";
+    private static final String KEY_DASHBOARD_FULL_FORMAT_METHOD = "dashboard_full_format_method";
     private static final String KEY_TBT_WITHOUT_HUD_OUTPUT = "tbt_without_hud_output";
     private static final String KEY_SWITCH_TO_TBT_ON_HUD_START = "switch_to_tbt_on_hud_start";
     private static final String KEY_DARK_THEME = "dark_theme";
@@ -86,6 +88,8 @@ final class HudPrefs {
     static final int DASHBOARD_MODE_NONE = 0;
     static final int DASHBOARD_MODE_PARTIAL = 1;
     static final int DASHBOARD_MODE_FULL = 2;
+    static final int DASHBOARD_FORMAT_NATIVE = 0;
+    static final int DASHBOARD_FORMAT_ALTERNATIVE = 1;
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
@@ -465,6 +469,37 @@ final class HudPrefs {
 
     static int normalizeDashboardScreenMode(int mode) {
         return clamp(mode, DASHBOARD_MODE_NONE, DASHBOARD_MODE_FULL);
+    }
+
+    static int dashboardFormatMethod(Context context, int dashboardMode) {
+        int mode = normalizeDashboardScreenMode(dashboardMode);
+        int fallback = defaultDashboardFormatMethod(mode);
+        if (mode == DASHBOARD_MODE_NONE) {
+            return fallback;
+        }
+        String key = mode == DASHBOARD_MODE_FULL
+                ? KEY_DASHBOARD_FULL_FORMAT_METHOD : KEY_DASHBOARD_PARTIAL_FORMAT_METHOD;
+        return normalizeDashboardFormatMethod(mode, prefs(context).getInt(key, fallback));
+    }
+
+    static void setDashboardFormatMethod(Context context, int dashboardMode, int method) {
+        int mode = normalizeDashboardScreenMode(dashboardMode);
+        if (mode == DASHBOARD_MODE_NONE) {
+            return;
+        }
+        String key = mode == DASHBOARD_MODE_FULL
+                ? KEY_DASHBOARD_FULL_FORMAT_METHOD : KEY_DASHBOARD_PARTIAL_FORMAT_METHOD;
+        prefs(context).edit().putInt(key, normalizeDashboardFormatMethod(mode, method)).apply();
+    }
+
+    static int normalizeDashboardFormatMethod(int dashboardMode, int method) {
+        return method == DASHBOARD_FORMAT_NATIVE || method == DASHBOARD_FORMAT_ALTERNATIVE
+                ? method : defaultDashboardFormatMethod(dashboardMode);
+    }
+
+    private static int defaultDashboardFormatMethod(int dashboardMode) {
+        return normalizeDashboardScreenMode(dashboardMode) == DASHBOARD_MODE_FULL
+                ? DASHBOARD_FORMAT_NATIVE : DASHBOARD_FORMAT_ALTERNATIVE;
     }
 
     static DashboardProjectionPolicy.Profile dashboardProjectionProfile(Context context, int mode) {

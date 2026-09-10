@@ -870,6 +870,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.speedLimitLaneOverlaySize(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
                 dashboardScreenMode,
+                HudPrefs.dashboardFormatMethod(this, dashboardScreenMode),
                 dashboardProfile.widthPercent,
                 dashboardProfile.heightPercent,
                 dashboardProfile.offsetPercent,
@@ -1524,6 +1525,18 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setDashboardScreenMode(this, persistedMode);
         appendStatus("Dashboard screen mode " + persistedMode);
         refreshControls();
+    }
+
+    public void composeSetDashboardFormatMethod(int editedMode, int method) {
+        int mode = HudPrefs.normalizeDashboardScreenMode(editedMode);
+        if (mode == HudPrefs.DASHBOARD_MODE_NONE) {
+            return;
+        }
+        HudPrefs.setDashboardFormatMethod(this, mode, method);
+        int persistedMethod = HudPrefs.dashboardFormatMethod(this, mode);
+        AppEventLogger.event(this, "ui dashboard_format_method mode=" + mode
+                + " method=" + persistedMethod);
+        invalidateComposeSnapshot();
     }
 
     public void composeSetDashboardWidthPercent(int editedMode, int percent) {
@@ -2498,6 +2511,7 @@ public final class MainActivity extends ComponentActivity {
         public final int speedLimitLaneOverlaySize;
         public final boolean wazeCustomSurfaceEnabled;
         public final int dashboardScreenMode;
+        public final int dashboardFormatMethod;
         public final int dashboardWidthPercent;
         public final int dashboardHeightPercent;
         public final int dashboardOffsetPercent;
@@ -2569,6 +2583,7 @@ public final class MainActivity extends ComponentActivity {
                 int speedLimitLaneOverlaySize,
                 boolean wazeCustomSurfaceEnabled,
                 int dashboardScreenMode,
+                int dashboardFormatMethod,
                 int dashboardWidthPercent, int dashboardHeightPercent,
                 int dashboardOffsetPercent, int dashboardScalePercent,
                 DashboardWidgetState dashboardWidgetState,
@@ -2633,6 +2648,8 @@ public final class MainActivity extends ComponentActivity {
             this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
+            this.dashboardFormatMethod = HudPrefs.normalizeDashboardFormatMethod(
+                    this.dashboardScreenMode, dashboardFormatMethod);
             this.dashboardWidthPercent = dashboardWidthPercent;
             this.dashboardHeightPercent = dashboardHeightPercent;
             this.dashboardOffsetPercent = dashboardOffsetPercent;
@@ -2740,6 +2757,7 @@ public final class MainActivity extends ComponentActivity {
                     && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
                     && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
                     && dashboardScreenMode == other.dashboardScreenMode
+                    && dashboardFormatMethod == other.dashboardFormatMethod
                     && dashboardWidthPercent == other.dashboardWidthPercent
                     && dashboardHeightPercent == other.dashboardHeightPercent
                     && dashboardOffsetPercent == other.dashboardOffsetPercent
@@ -2807,7 +2825,8 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
-                    dashboardWidthPercent, dashboardHeightPercent, dashboardOffsetPercent,
+                    dashboardFormatMethod, dashboardWidthPercent, dashboardHeightPercent,
+                    dashboardOffsetPercent,
                     dashboardScalePercent, dashboardWidgetState, dashboardWidgetOverlayPermission,
                     steeringTransferApps, steeringTransferProfiles,
                     steeringTransferRevision, steeringButtonLearning, steeringCapturedKeyCode,

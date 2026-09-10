@@ -217,6 +217,10 @@ final class VehicleConfigurationDiagnostics {
                 .put("switchToTbtOnStart", HudPrefs.isSwitchToTbtOnHudStartEnabled(context))
                 .put("steeringTransferProfiles", steeringTransfers)
                 .put("dashboardMode", mode)
+                .put("miniFormatMethod", HudPrefs.dashboardFormatMethod(
+                        context, HudPrefs.DASHBOARD_MODE_PARTIAL))
+                .put("fullFormatMethod", HudPrefs.dashboardFormatMethod(
+                        context, HudPrefs.DASHBOARD_MODE_FULL))
                 .put("miniProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_PARTIAL)))
                 .put("fullProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_FULL)));
     }

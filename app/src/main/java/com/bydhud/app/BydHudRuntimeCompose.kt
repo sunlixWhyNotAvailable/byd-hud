@@ -2337,6 +2337,41 @@ private fun OptionsTab(
                 }
             }
             if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE) {
+                row("dashboard-format-method") {
+                    ActionRow(
+                        if (ua) "Спосіб встановлення формату екрану" else "Screen format method",
+                        if (ua) {
+                            "Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний"
+                        } else {
+                            "Preferred mode: Native. If Native does not work, use Alternative."
+                        },
+                        palette
+                    ) {
+                        Segmented(
+                            left = if (ua) "Штатний" else "Native",
+                            right = if (ua) "Альтернативний" else "Alternative",
+                            leftActive = snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NATIVE,
+                            palette = palette,
+                            onLeft = {
+                                runAction {
+                                    activity.composeSetDashboardFormatMethod(
+                                        snapshot.dashboardScreenMode,
+                                        HudPrefs.DASHBOARD_FORMAT_NATIVE
+                                    )
+                                }
+                            },
+                            onRight = {
+                                runAction {
+                                    activity.composeSetDashboardFormatMethod(
+                                        snapshot.dashboardScreenMode,
+                                        HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE
+                                    )
+                                }
+                            },
+                            itemWidth = 150.dp
+                        )
+                    }
+                }
                 row("dashboard-width") {
                     DashboardPercentRow(copy.dashboardWidth, copy.dashboardWidthHint,
                         snapshot.dashboardWidthPercent,
@@ -7973,10 +8008,11 @@ private fun Segmented(
     leftActive: Boolean,
     palette: Palette,
     onLeft: () -> Unit,
-    onRight: () -> Unit
+    onRight: () -> Unit,
+    itemWidth: Dp = 64.dp
 ) {
     val selectionOffset by animateDpAsState(
-        targetValue = if (leftActive) 0.dp else 64.dp,
+        targetValue = if (leftActive) 0.dp else itemWidth,
         animationSpec = tween(durationMillis = 140),
         label = "segmentedSelectionOffset"
     )
@@ -7991,26 +8027,32 @@ private fun Segmented(
         Box(
             Modifier
                 .offset(x = selectionOffset)
-                .width(64.dp)
+                .width(itemWidth)
                 .height(32.dp)
                 .clip(RoundedCornerShape(18.dp))
                 .background(palette.accent)
         )
         Row {
-            SegmentedItem(left, leftActive, palette, onLeft)
-            SegmentedItem(right, !leftActive, palette, onRight)
+            SegmentedItem(left, leftActive, palette, itemWidth, onLeft)
+            SegmentedItem(right, !leftActive, palette, itemWidth, onRight)
         }
     }
 }
 
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun SegmentedItem(text: String, active: Boolean, palette: Palette, onClick: () -> Unit) {
+private fun SegmentedItem(
+    text: String,
+    active: Boolean,
+    palette: Palette,
+    itemWidth: Dp,
+    onClick: () -> Unit
+) {
     val press = rememberPressFeedback()
     Box(
         modifier = Modifier
             .height(32.dp)
-            .width(64.dp)
+            .width(itemWidth)
             .clip(RoundedCornerShape(18.dp))
             .background(pressBackground(Color.Transparent, palette, press.pressed))
             .then(press.modifier)

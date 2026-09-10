@@ -144,7 +144,7 @@ public final class SteeringTransferServiceSourceContractTest {
         assertTrue(query >= 0 && guard > query && dispatch > guard);
         assertTrue(move.contains("current, observedDisplay(packageName, current))"));
         assertTrue(move.contains(
-                "returnPreviousDashboardApp( packageName, dashboardMode, reason, requestCurrent)"));
+                "returnPreviousDashboardApp( packageName, layoutCommand, reason, requestCurrent)"));
         String replacement = between(controller, "synchronized NavAppDisplayState moveTaskToDisplayBlocking(",
                 "LocalAdbBridge.ShellResult move = runCommand(");
         assertTrue(replacement.contains("checkDisplay(normalized, reason); "

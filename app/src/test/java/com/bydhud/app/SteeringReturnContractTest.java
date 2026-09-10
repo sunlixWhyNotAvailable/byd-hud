@@ -94,8 +94,10 @@ public final class SteeringReturnContractTest {
         assertTrue(steering.contains(
                 "boolean toDashboard = observed == DashboardProjectionPolicy.ObservedDisplay.MAIN;"));
         assertTrue(steering.contains(
-                "moveIndependentDashboardAppBlocking( normalized, toDashboard, dashboardMode, "
+                "moveIndependentDashboardAppBlocking( normalized, toDashboard, dashboardMode, formatMethod, "
                         + "steeringMoveReason(toDashboard, reason),"));
+        assertTrue(steering.indexOf("HudPrefs.dashboardFormatMethod(context, dashboardMode)")
+                < steering.indexOf("if (!beginMove(normalized,"));
         assertFalse(steering.contains("\"steering-key \" +"));
         assertFalse(steering.contains("com.waze"));
         assertFalse(steering.contains("GMapsDirectChannel"));
@@ -165,7 +167,7 @@ public final class SteeringReturnContractTest {
         assertFalse(beforeReturn.contains("returnToMain("));
         String replacement = between(move, "boolean alreadyProjected =", "if (alreadyProjected) {");
         assertTrue(replacement.contains("String returnedPrevious = alreadyProjected ? \"\" "
-                + ": returnPreviousDashboardApp( packageName, dashboardMode, reason, requestCurrent);"));
+                + ": returnPreviousDashboardApp( packageName, layoutCommand, reason, requestCurrent);"));
         assertTrue(replacement.contains("if (returnedPrevious == null) {"));
         String failedReturn = between(replacement, "if (returnedPrevious == null) {",
                 "if (requestCurrent != null && !requestCurrent.getAsBoolean())");
@@ -197,7 +199,7 @@ public final class SteeringReturnContractTest {
         assertTrue(prior.contains("if (previous.isEmpty() || previous.equals(nextPackageName)) { return \"\"; }"));
         int confirmed = prior.indexOf("if (onMain) {");
         int pending = prior.indexOf("prepareAutoContainerLeaseTransfer( previous, nextPackageName, "
-                + "nextDashboardMode);");
+                + "nextLayoutCommand);");
         int surface = prior.indexOf("ensureWazeSurfaceOnDisplay(");
         int returned = prior.indexOf("return previous;");
         assertTrue(confirmed >= 0 && pending > confirmed && surface > pending && returned > surface);

@@ -22,21 +22,23 @@ public final class CompactHeaderUiSourceContractTest {
                 "onLeft = { onLanguage(true) }", "onRight = { onLanguage(false) }",
                 "Segmented(copy.dark, copy.light, snapshot.darkTheme, palette,",
                 "onLeft = { onTheme(true) }", "onRight = { onTheme(false) }");
-        assertEquals(3, occurrences(source, "Segmented("));
+        assertEquals(4, occurrences(source, "Segmented("));
+        assertFalse(header.contains("itemWidth ="));
         String segmented = between(source, "private fun Segmented(", "private fun SegmentedItem(");
         assertContains(segmented,
+                "itemWidth: Dp = 64.dp",
                 "val selectionOffset by animateDpAsState(",
-                "targetValue = if (leftActive) 0.dp else 64.dp",
+                "targetValue = if (leftActive) 0.dp else itemWidth",
                 "animationSpec = tween(durationMillis = 140)",
                 "label = \"segmentedSelectionOffset\"", ".offset(x = selectionOffset)",
                 ".height(42.dp)", "RoundedCornerShape(22.dp)", ".padding(5.dp)",
-                ".width(64.dp)", ".height(32.dp)", "RoundedCornerShape(18.dp)",
+                ".width(itemWidth)", ".height(32.dp)", "RoundedCornerShape(18.dp)",
                 ".background(palette.accent)", "Row {",
-                "SegmentedItem(left, leftActive, palette, onLeft)",
-                "SegmentedItem(right, !leftActive, palette, onRight)");
+                "SegmentedItem(left, leftActive, palette, itemWidth, onLeft)",
+                "SegmentedItem(right, !leftActive, palette, itemWidth, onRight)");
         String item = between(source, "private fun SegmentedItem(", "private fun Pill(");
         assertContains(item,
-                "rememberPressFeedback()", ".height(32.dp)", ".width(64.dp)",
+                "itemWidth: Dp", "rememberPressFeedback()", ".height(32.dp)", ".width(itemWidth)",
                 ".background(pressBackground(Color.Transparent, palette, press.pressed))",
                 ".then(press.modifier)", "interactionSource = press.interactionSource",
                 "onClick = onClick", "color = if (active) Color.White else palette.muted");

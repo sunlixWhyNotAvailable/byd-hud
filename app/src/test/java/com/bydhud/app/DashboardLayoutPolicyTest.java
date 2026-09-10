@@ -8,71 +8,89 @@ import org.junit.Test;
 
 public final class DashboardLayoutPolicyTest {
     @Test
-    public void fullAlwaysUsesNativeProtocolAndReleasesAnyRealLeaseFirst() {
-        assertTrue(DashboardLayoutPolicy.usesFullProtocol(HudPrefs.DASHBOARD_MODE_FULL));
-        assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_FULL, DashboardLayoutPolicy.OWNERSHIP_NONE));
-        assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_FULL, DashboardLayoutPolicy.OWNERSHIP_MINI));
-        assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_FULL, DashboardLayoutPolicy.OWNERSHIP_LEGACY));
-        assertEquals(4, DashboardLayoutPolicy.PROTOCOL_FULL);
+    public void approvedModeAndMethodMatrixSelectsExactCommands() {
+        assertEquals(4, DashboardLayoutPolicy.layoutCommand(
+                HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_NATIVE));
+        assertEquals(3, DashboardLayoutPolicy.layoutCommand(
+                HudPrefs.DASHBOARD_MODE_PARTIAL, HudPrefs.DASHBOARD_FORMAT_NATIVE));
+        assertEquals(16, DashboardLayoutPolicy.layoutCommand(
+                HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE));
+        assertEquals(17, DashboardLayoutPolicy.layoutCommand(
+                HudPrefs.DASHBOARD_MODE_PARTIAL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE));
+        assertEquals(0, DashboardLayoutPolicy.layoutCommand(
+                HudPrefs.DASHBOARD_MODE_NONE, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE));
     }
 
     @Test
-    public void miniReusesOnlyConfirmedMiniOwnership() {
-        assertFalse(DashboardLayoutPolicy.usesFullProtocol(HudPrefs.DASHBOARD_MODE_PARTIAL));
+    public void nativeReleasesAnyActualAutoContainerOwnershipFirst() {
         assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_PARTIAL, DashboardLayoutPolicy.OWNERSHIP_NONE));
-        assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_PARTIAL, DashboardLayoutPolicy.OWNERSHIP_MINI));
+                DashboardLayoutPolicy.PROTOCOL_FULL, DashboardLayoutPolicy.OWNERSHIP_NONE));
         assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_PARTIAL, DashboardLayoutPolicy.OWNERSHIP_LEGACY));
-        assertEquals(17, DashboardLayoutPolicy.AUTOCONTAINER_MINI);
+                DashboardLayoutPolicy.PROTOCOL_FULL, DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
+        assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
+                DashboardLayoutPolicy.PROTOCOL_PARTIAL, DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
+    }
+
+    @Test
+    public void autoContainerTransitionsRetainEitherActualMechanismOwnership() {
+        assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
+                DashboardLayoutPolicy.AUTOCONTAINER_FULL, DashboardLayoutPolicy.OWNERSHIP_NONE));
+        assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
+                DashboardLayoutPolicy.AUTOCONTAINER_FULL, DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
+        assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
+                DashboardLayoutPolicy.AUTOCONTAINER_MINI, DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
     }
 
     @Test
     public void successfulMiniCommandDefinesOwnershipIndependentOfGeometryPreference() {
-        assertEquals(DashboardLayoutPolicy.OWNERSHIP_MINI,
+        assertEquals(DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER,
                 DashboardLayoutPolicy.ownershipKind(17, true));
         assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeDashboard(
-                HudPrefs.DASHBOARD_MODE_PARTIAL,
+                DashboardLayoutPolicy.AUTOCONTAINER_MINI,
                 DashboardLayoutPolicy.ownershipKind(17, true)));
-        assertEquals(DashboardLayoutPolicy.OWNERSHIP_LEGACY,
+        assertEquals(DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER,
                 DashboardLayoutPolicy.ownershipKind(0, true));
-        assertEquals(DashboardLayoutPolicy.OWNERSHIP_LEGACY,
+        assertEquals(DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER,
                 DashboardLayoutPolicy.ownershipKind(16, false));
     }
 
     @Test
-    public void onlyContinuousMiniReplacementRetainsTheLease() {
-        assertTrue(DashboardLayoutPolicy.shouldRetainMiniLeaseForReplacement(
-                HudPrefs.DASHBOARD_MODE_PARTIAL,
-                DashboardLayoutPolicy.OWNERSHIP_MINI));
-        assertFalse(DashboardLayoutPolicy.shouldRetainMiniLeaseForReplacement(
-                HudPrefs.DASHBOARD_MODE_FULL,
-                DashboardLayoutPolicy.OWNERSHIP_MINI));
-        assertFalse(DashboardLayoutPolicy.shouldRetainMiniLeaseForReplacement(
-                HudPrefs.DASHBOARD_MODE_PARTIAL,
-                DashboardLayoutPolicy.OWNERSHIP_LEGACY));
+    public void onlyContinuousAutoContainerReplacementRetainsTheLease() {
+        assertTrue(DashboardLayoutPolicy.shouldRetainLeaseForReplacement(
+                DashboardLayoutPolicy.AUTOCONTAINER_MINI,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
+        assertTrue(DashboardLayoutPolicy.shouldRetainLeaseForReplacement(
+                DashboardLayoutPolicy.AUTOCONTAINER_FULL,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
+        assertFalse(DashboardLayoutPolicy.shouldRetainLeaseForReplacement(
+                DashboardLayoutPolicy.PROTOCOL_FULL,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
     }
 
     @Test
     public void widgetAndIpcOffReleaseOnlyProvenAutoContainerOwnership() {
+        assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeWidget(
+                NavAppDisplayController.WIDGET_MODE_MINI,
+                DashboardLayoutPolicy.PROTOCOL_PARTIAL,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
         assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeWidget(
                 NavAppDisplayController.WIDGET_MODE_MINI,
-                DashboardLayoutPolicy.OWNERSHIP_MINI));
-        assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeWidget(
-                NavAppDisplayController.WIDGET_MODE_MINI,
-                DashboardLayoutPolicy.OWNERSHIP_LEGACY));
+                DashboardLayoutPolicy.AUTOCONTAINER_MINI,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
         assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeWidget(
                 NavAppDisplayController.WIDGET_MODE_FULL,
-                DashboardLayoutPolicy.OWNERSHIP_MINI));
+                DashboardLayoutPolicy.PROTOCOL_FULL,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
+        assertFalse(DashboardLayoutPolicy.shouldReleaseBeforeWidget(
+                NavAppDisplayController.WIDGET_MODE_FULL,
+                DashboardLayoutPolicy.AUTOCONTAINER_FULL,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
         assertTrue(DashboardLayoutPolicy.shouldReleaseBeforeWidget(
                 NavAppDisplayController.WIDGET_MODE_TBT,
-                DashboardLayoutPolicy.OWNERSHIP_MINI));
+                0,
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
         assertEquals(18, DashboardLayoutPolicy.ipcOffCommand(
-                DashboardLayoutPolicy.OWNERSHIP_MINI));
+                DashboardLayoutPolicy.OWNERSHIP_AUTOCONTAINER));
         assertEquals(1, DashboardLayoutPolicy.ipcOffCommand(
                 DashboardLayoutPolicy.OWNERSHIP_NONE));
     }

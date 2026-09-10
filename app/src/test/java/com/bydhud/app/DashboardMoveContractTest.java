@@ -33,6 +33,38 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
+    public void dashboardFormatMethodDefaultsAndNormalizesPerMode() {
+        assertEquals(HudPrefs.DASHBOARD_FORMAT_NATIVE,
+                HudPrefs.normalizeDashboardFormatMethod(
+                        HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_NATIVE));
+        assertEquals(HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE,
+                HudPrefs.normalizeDashboardFormatMethod(
+                        HudPrefs.DASHBOARD_MODE_PARTIAL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE));
+        assertEquals(HudPrefs.DASHBOARD_FORMAT_NATIVE,
+                HudPrefs.normalizeDashboardFormatMethod(HudPrefs.DASHBOARD_MODE_FULL, -1));
+        assertEquals(HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE,
+                HudPrefs.normalizeDashboardFormatMethod(HudPrefs.DASHBOARD_MODE_PARTIAL, 99));
+    }
+
+    @Test
+    public void transferCapturesFormatMethodBeforeAdmissionAndWorkerLaunch() throws Exception {
+        String source = source("NavAppDisplayController.java");
+        String entry = between(source,
+                "void moveIndependentDashboardApp(\n            String packageName,\n            boolean toDashboard,\n            int dashboardMode,\n            String reason)",
+                "//toggles a configured app");
+        assertTrue(entry.contains("HudPrefs.dashboardFormatMethod(context, dashboardMode)"));
+        String launch = between(source,
+                "private void moveIndependentDashboardApp(\n            String packageName,",
+                "//runs explicit widget vehicle commands");
+        int admitted = launch.indexOf("beginMove(normalized,");
+        int worker = launch.indexOf("Thread worker = new Thread(", admitted);
+        assertTrue(admitted >= 0 && worker > admitted);
+        assertTrue(launch.substring(worker).contains(
+                "normalizedDashboardMode,\n                        formatMethod,"));
+        assertFalse(launch.substring(admitted).contains("dashboardFormatMethod(context"));
+    }
+
+    @Test
     public void projectionPersistsTheExplicitModeForStickyRecovery() throws Exception {
         java.nio.file.Path controller = Paths.get(
                 "app/src/main/java/com/bydhud/app/NavAppDisplayController.java");
@@ -107,15 +139,21 @@ public final class DashboardMoveContractTest {
     @Test
     public void autoContainerPolicyOnlySelectsExplicitTransitions() {
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_FULL, true));
+                true, HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_NATIVE, true));
+        assertEquals(16, NavAppDisplayController.autoContainerValueForTest(
+                true, HudPrefs.DASHBOARD_MODE_FULL,
+                HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
         assertEquals(17, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_PARTIAL, true));
+                true, HudPrefs.DASHBOARD_MODE_PARTIAL,
+                HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_NONE, true));
+                true, HudPrefs.DASHBOARD_MODE_PARTIAL, HudPrefs.DASHBOARD_FORMAT_NATIVE, true));
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_FULL, false));
+                true, HudPrefs.DASHBOARD_MODE_NONE, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
         assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                false, HudPrefs.DASHBOARD_MODE_FULL, true));
+                true, HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, false));
+        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
+                false, HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
         assertTrue(NavAppDisplayController.isUserRequestedReturnForTest(
                 "ui-independent-dashboard-explicit"));
         assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("shutdown"));
@@ -250,7 +288,7 @@ public final class DashboardMoveContractTest {
         assertTrue(senderStart >= 0 && senderEnd > senderStart);
         String sender = source.substring(senderStart, senderEnd);
         assertFalse(sender.contains("returnToMain"));
-        assertTrue(sender.indexOf("if (value == DashboardLayoutPolicy.AUTOCONTAINER_MINI)")
+        assertTrue(sender.indexOf("if (DashboardLayoutPolicy.isAutoContainerCommand(value))")
                 < sender.indexOf("LocalAdbBridge.runAutoContainer(context, value)"));
         assertTrue(sender.contains("existing AutoContainer lease retained"));
 
@@ -258,8 +296,9 @@ public final class DashboardMoveContractTest {
                 "private int autoContainerOwnership(");
         int release = layout.indexOf("releasePersistedAutoContainerOwnership(");
         int releaseGate = layout.indexOf("if (!releaseFailure.isEmpty()) return releaseFailure;");
-        int full = layout.indexOf("DashboardLayoutPolicy.PROTOCOL_FULL", releaseGate);
-        assertTrue(release >= 0 && releaseGate > release && full > releaseGate);
+        int dispatch = layout.indexOf("StockMapProtocol30011.dispatch(", releaseGate);
+        assertTrue(release >= 0 && releaseGate > release && dispatch > releaseGate);
+        assertTrue(layout.contains("DashboardLayoutPolicy.isAutoContainerCommand(command)"));
         assertFalse(layout.contains("LEGACY_AUTO_CONTAINER_FULLSCREEN"));
         assertFalse(layout.contains("returnToMain"));
 
@@ -358,9 +397,8 @@ public final class DashboardMoveContractTest {
         assertTrue(sent >= 0 && failed > sent && clear > failed);
         String sender = between(source, "private String sendAutoContainerIfRequested(",
                 "private String applyDashboardLayout(");
-        assertTrue(sender.contains("value == DashboardLayoutPolicy.AUTOCONTAINER_MINI"));
-        assertTrue(sender.contains(
-                "|| value == DashboardLayoutPolicy.AUTOCONTAINER_RELEASE"));
+        assertTrue(sender.contains("DashboardLayoutPolicy.isAutoContainerCommand(value)"));
+        assertTrue(sender.contains("value == DashboardLayoutPolicy.AUTOCONTAINER_RELEASE"));
     }
 
     @Test
