@@ -114,25 +114,29 @@ public final class SteeringReturnContractTest {
         assertTrue(returning.contains(
                 "projectionReleased = waitForProjectionRelease( packageName, \"independent-return-release\");"));
         assertTrue(returning.contains(
-                "releaseAutoContainerLeaseIfRequested( packageName, returnGeneration, projectionReleased, reason); "
-                        + "if (!isShutdownReturnCurrent(shutdownToken)) return; "
-                        + "requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason);"));
+                "String releaseFailure = releaseAutoContainerLeaseIfRequested( "
+                        + "packageName, returnGeneration, onMain, reason);"));
+        assertTrue(returning.contains("autoContainerStatus(returnStatus, releaseFailure)"));
+        assertFalse(returning.contains("requestTbt"));
+        assertFalse(returning.contains("PROTOCOL_NATIVE"));
+        assertFalse(returning.contains("PROTOCOL_TBT"));
 
         String requestedRelease = between(controller,
-                "private void releaseAutoContainerLeaseIfRequested(",
-                "private void releaseAutoContainerLease(");
+                "private String releaseAutoContainerLeaseIfRequested(",
+                "private String releaseAutoContainerLease(");
         assertTrue(requestedRelease.contains(
-                "if (!projectionReleased || !isUserRequestedReturnForTest(reason)) return;"));
+                "if (!projectionReleased || !isUserRequestedReturnForTest(reason)) return \"\";"));
         assertTrue(requestedRelease.contains(
-                "releaseAutoContainerLease(packageName, generation, \"return-release\", reason);"));
+                "return releaseAutoContainerLease(packageName, generation, \"return-release\", reason);"));
 
         String release = between(controller,
-                "private void releaseAutoContainerLease(",
+                "private String releaseAutoContainerLease(",
                 "private void releaseAutoContainerLeaseAfterFailedSuccessor(");
         assertTrue(release.contains(
                 "if (!normalized.equals(leasePackage) || generation <= 0L || leaseGeneration != generation) {"));
-        assertTrue(release.contains("return; } String failure = sendAutoContainerIfRequested("));
-        assertTrue(release.contains("normalized, AUTO_CONTAINER_RELEASE, true, operation);"));
+        assertTrue(release.contains("return \"\"; } String failure = sendAutoContainerIfRequested("));
+        assertTrue(release.contains(
+                "normalized, DashboardLayoutPolicy.AUTOCONTAINER_RELEASE, true, operation);"));
         assertTrue(release.contains(
                 "if (failure == null || failure.isEmpty()) { if (clearAutoContainerLeaseIfExact( "
                         + "normalized, generation, operation + \":\" + safe(reason))) {"));
@@ -143,17 +147,10 @@ public final class SteeringReturnContractTest {
     }
 
     @Test
-    public void sharedNavigatorNotificationKeepsExplicitReturnAndPackageGuards() throws Exception {
-        String notification = between(source(),
-                "private void requestTbtAfterReturnIfRequested(",
-                "private String returnPreviousDashboardApp(");
-        assertTrue(notification.contains(
-                "if (!onMain || !isUserRequestedReturnForTest(reason)) return;"));
-        assertTrue(notification.contains(
-                "if (!\"com.waze\".equals(normalized) "
-                        + "&& !GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) return;"));
-        assertTrue(notification.contains(
-                "NavHudLiveSender.get(context).onDashboardReturnConfirmed(normalized, reason);"));
+    public void sharedReturnHasNoAutomaticTbtCallback() throws Exception {
+        String controller = source();
+        assertFalse(controller.contains("requestTbtAfterReturnIfRequested"));
+        assertFalse(controller.contains("onDashboardReturnConfirmed"));
     }
 
     @Test
@@ -168,7 +165,7 @@ public final class SteeringReturnContractTest {
         assertFalse(beforeReturn.contains("returnToMain("));
         String replacement = between(move, "boolean alreadyProjected =", "if (alreadyProjected) {");
         assertTrue(replacement.contains("String returnedPrevious = alreadyProjected ? \"\" "
-                + ": returnPreviousDashboardApp(packageName, reason, requestCurrent);"));
+                + ": returnPreviousDashboardApp( packageName, dashboardMode, reason, requestCurrent);"));
         assertTrue(replacement.contains("if (returnedPrevious == null) {"));
         String failedReturn = between(replacement, "if (returnedPrevious == null) {",
                 "if (requestCurrent != null && !requestCurrent.getAsBoolean())");
@@ -199,7 +196,8 @@ public final class SteeringReturnContractTest {
                 "synchronized NavAppDisplayState moveTaskToDisplayBlocking(");
         assertTrue(prior.contains("if (previous.isEmpty() || previous.equals(nextPackageName)) { return \"\"; }"));
         int confirmed = prior.indexOf("if (onMain) {");
-        int pending = prior.indexOf("prepareAutoContainerLeaseTransfer(previous, nextPackageName);");
+        int pending = prior.indexOf("prepareAutoContainerLeaseTransfer( previous, nextPackageName, "
+                + "nextDashboardMode);");
         int surface = prior.indexOf("ensureWazeSurfaceOnDisplay(");
         int returned = prior.indexOf("return previous;");
         assertTrue(confirmed >= 0 && pending > confirmed && surface > pending && returned > surface);
@@ -234,7 +232,9 @@ public final class SteeringReturnContractTest {
                 "boolean alreadyProjected =");
         assertTrue(returning.contains("\"independent-dashboard return-main \" + safe(reason), shutdownToken"));
         assertTrue(returning.contains("() -> isShutdownReturnCurrent(shutdownToken)"));
-        assertTrue(returning.contains("if (!isShutdownReturnCurrent(shutdownToken)) return; releaseAutoContainerLeaseIfRequested("));
+        assertTrue(returning.contains(
+                "if (!isShutdownReturnCurrent(shutdownToken)) return; "
+                        + "String releaseFailure = releaseAutoContainerLeaseIfRequested("));
     }
 
     @Test
@@ -268,7 +268,7 @@ public final class SteeringReturnContractTest {
                 < release.indexOf("if (!ProjectionLifecyclePolicy.canReleaseIdleForShutdown("));
         assertTrue(release.contains("isShutdownReturnCurrent(shutdownToken)"));
         assertTrue(release.contains("shutdown_release_deferred"));
-        String idle = between(service, "private void retainProjectionIdle(",
+        String idle = between(service, "private String retainProjectionIdle(",
                 "private void releaseIdleProjectionForShutdownOnMain(");
         assertTrue(idle.contains("drainPendingShutdownRelease(reason);"));
         assertTrue(idle.contains("releaseIdleProjectionForShutdownOnMain(pendingShutdownReleaseToken, reason)"));

@@ -45,6 +45,50 @@ public final class ProjectionLifecyclePolicyTest {
     }
 
     @Test
+    public void blackOutputMoveRequiresExactTaskDisplayGenerationAndOwner() {
+        assertTrue(ProjectionLifecyclePolicy.canPrepareOutputMove(
+                true, true, true, true,
+                "com.waze", 8, 3, 12, 41L,
+                "com.waze", 73, 0, 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canPrepareOutputMove(
+                true, true, true, true,
+                "com.waze", 8, 4, 12, 41L,
+                "com.waze", 73, 0, 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canPrepareOutputMove(
+                true, true, true, true,
+                "com.waze", 8, 3, 12, 42L,
+                "com.waze", 73, 0, 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canPrepareOutputMove(
+                false, true, true, true,
+                "com.waze", 8, 3, 12, 41L,
+                "com.waze", 73, 0, 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canPrepareOutputMove(
+                true, true, true, true,
+                "com.waze", 8, 3, 12, 41L,
+                "com.waze", -1, 0, 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canPrepareOutputMove(
+                true, true, true, true,
+                "com.waze", 8, 3, 12, 41L,
+                "com.waze", 73, -1, 8, 3, 12, 41L));
+    }
+
+    @Test
+    public void failedMoveRestoresIdleOnlyBeforeAnySuccessorBecomesVisible() {
+        assertTrue(ProjectionLifecyclePolicy.canRestoreIdleAfterFailedMove(
+                true, false, "com.waze", 8, 3, 12, 41L,
+                "com.waze", 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canRestoreIdleAfterFailedMove(
+                true, true, "com.waze", 8, 3, 12, 41L,
+                "com.waze", 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canRestoreIdleAfterFailedMove(
+                true, false, "com.waze", 8, 4, 12, 41L,
+                "com.waze", 8, 3, 12, 41L));
+        assertFalse(ProjectionLifecyclePolicy.canRestoreIdleAfterFailedMove(
+                true, false, "com.google.android.apps.maps", 8, 3, 13, 42L,
+                "com.waze", 8, 3, 12, 41L));
+    }
+
+    @Test
     public void shutdownReleaseRequiresUnchangedIdleState() {
         assertTrue(ProjectionLifecyclePolicy.canReleaseIdleForShutdown(
                 true, false, "", "", 0L));

@@ -41,9 +41,7 @@ final class NavAppDisplayController {
             "widget_autocontainer_value";
     private static final int MAIN_DISPLAY_ID = 0;
     private static final int FALLBACK_DASHBOARD_DISPLAY_ID = 2;
-    private static final int AUTO_CONTAINER_PARTIAL = 17;
-    private static final int AUTO_CONTAINER_FULLSCREEN = 16;
-    private static final int AUTO_CONTAINER_RELEASE = 18;
+    private static final int LEGACY_AUTO_CONTAINER_FULLSCREEN = 16;
     static final int WIDGET_MODE_IPC_OFF = 0;
     static final int WIDGET_MODE_TBT = 1;
     static final int WIDGET_MODE_MINI = 2;
@@ -152,21 +150,14 @@ final class NavAppDisplayController {
     static int autoContainerValueForTest(
             boolean toDashboard, int dashboardMode, boolean explicit) {
         if (!toDashboard || !explicit) return 0;
-        return autoContainerValueForMode(dashboardMode);
+        return HudPrefs.normalizeDashboardScreenMode(dashboardMode)
+                == HudPrefs.DASHBOARD_MODE_PARTIAL
+                ? DashboardLayoutPolicy.AUTOCONTAINER_MINI
+                : 0;
     }
 
     static int widgetAutoContainerValueForTest(int mode) {
-        switch (mode) {
-            case WIDGET_MODE_IPC_OFF:
-            case WIDGET_MODE_TBT:
-                return AUTO_CONTAINER_RELEASE;
-            case WIDGET_MODE_MINI:
-                return AUTO_CONTAINER_PARTIAL;
-            case WIDGET_MODE_FULL:
-                return AUTO_CONTAINER_FULLSCREEN;
-            default:
-                return 0;
-        }
+        return mode == WIDGET_MODE_MINI ? DashboardLayoutPolicy.AUTOCONTAINER_MINI : 0;
     }
 
     static boolean widgetModeUsesTbtProtocolForTest(int mode) {
@@ -175,23 +166,14 @@ final class NavAppDisplayController {
 
     static boolean widgetModeUsesAutoContainerForTest(
             int mode, boolean releaseRequired) {
-        switch (mode) {
-            case WIDGET_MODE_IPC_OFF:
-            case WIDGET_MODE_MINI:
-            case WIDGET_MODE_FULL:
-                return true;
-            case WIDGET_MODE_TBT:
-                return releaseRequired;
-            default:
-                return false;
-        }
+        return mode == WIDGET_MODE_MINI || releaseRequired;
     }
 
     static boolean widgetTbtNeedsAutoContainerReleaseForTest(
             int lastWidgetAutoContainerValue, boolean hasProjectionLease) {
         return hasProjectionLease
-                || lastWidgetAutoContainerValue == AUTO_CONTAINER_PARTIAL
-                || lastWidgetAutoContainerValue == AUTO_CONTAINER_FULLSCREEN;
+                || lastWidgetAutoContainerValue == DashboardLayoutPolicy.AUTOCONTAINER_MINI
+                || lastWidgetAutoContainerValue == LEGACY_AUTO_CONTAINER_FULLSCREEN;
     }
 
     static int dashboardModeForWidgetForTest(int mode) {
@@ -200,17 +182,6 @@ final class NavAppDisplayController {
                 : mode == WIDGET_MODE_FULL
                         ? HudPrefs.DASHBOARD_MODE_FULL
                         : HudPrefs.DASHBOARD_MODE_NONE;
-    }
-
-    private static int autoContainerValueForMode(int dashboardMode) {
-        switch (HudPrefs.normalizeDashboardScreenMode(dashboardMode)) {
-            case HudPrefs.DASHBOARD_MODE_PARTIAL:
-                return AUTO_CONTAINER_PARTIAL;
-            case HudPrefs.DASHBOARD_MODE_FULL:
-                return AUTO_CONTAINER_FULLSCREEN;
-            default:
-                return 0;
-        }
     }
 
     static boolean isUserRequestedReturnForTest(String reason) {
@@ -237,7 +208,22 @@ final class NavAppDisplayController {
     private long widgetOperationToken;
     private boolean widgetOperationActive;
     private boolean widgetOperationCancelled;
+    private long automaticTbtToken;
+    private PendingAutomaticTbt pendingAutomaticTbt;
     private Listener listener;
+
+    private static final class PendingAutomaticTbt {
+        final long token;
+        final BooleanSupplier stillCurrent;
+        final Consumer<String> completion;
+
+        PendingAutomaticTbt(
+                long token, BooleanSupplier stillCurrent, Consumer<String> completion) {
+            this.token = token;
+            this.stillCurrent = stillCurrent;
+            this.completion = completion;
+        }
+    }
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAppDisplayController(Context context) {
@@ -442,6 +428,7 @@ final class NavAppDisplayController {
             BooleanSupplier requestCurrent) {
         final String normalized = normalizePackage(packageName);
         if (!requestCurrent.getAsBoolean()) return;
+        invalidatePendingAutomaticTbt("explicit steering move");
         //Reserve the common gate before dispatching any background work; busy keys never queue.
         if (!beginMove(normalized, "steering-precheck reason=" + safe(reason))) {
             log(normalized, "steering_transfer_ignored busy");
@@ -508,6 +495,7 @@ final class NavAppDisplayController {
         long shutdownToken = isShutdownReturnReason(reason)
                 ? UserRuntimeSession.PROCESS.shutdownToken() : 0L;
         if (isShutdownReturnReason(reason) && shutdownToken <= 0L) return;
+        invalidatePendingAutomaticTbt("explicit display move");
         if (!beginMove(normalized, label + " reason=" + safe(reason),
                 isShutdownReturnReason(reason) ? reason : "")) {
             log(normalized, label + " skipped already_running reason=" + safe(reason));
@@ -534,10 +522,11 @@ final class NavAppDisplayController {
 
     //runs explicit widget vehicle commands on the existing move gate, never on the UI thread.
     void requestWidgetMode(int mode, boolean applyProfile, Consumer<String> completion) {
-        if (widgetAutoContainerValueForTest(mode) == 0) {
+        if (mode < WIDGET_MODE_IPC_OFF || mode > WIDGET_MODE_FULL) {
             notifyWidgetCompletionAsync(completion, "unsupported widget mode=" + mode);
             return;
         }
+        invalidatePendingAutomaticTbt("explicit widget command");
         final long token;
         if (!beginMove("", "widget_mode_request mode=" + mode)) {
             notifyWidgetCompletionAsync(completion, "widget command busy");
@@ -550,6 +539,121 @@ final class NavAppDisplayController {
         }
         Thread worker = new Thread(() -> runWidgetMode(
                 token, mode, applyProfile, completion), "BydHudWidgetModeCommand");
+        worker.setDaemon(true);
+        worker.start();
+    }
+
+    //Queues only the newest route-bound automatic TBT request behind the shared layout gate.
+    void requestAutomaticTbt(BooleanSupplier stillCurrent, Consumer<String> completion) {
+        if (!isCurrent(stillCurrent)) {
+            notifyAutomaticTbtCompletionAsync(
+                    completion, "automatic TBT cancelled: route ended");
+            return;
+        }
+        PendingAutomaticTbt previous;
+        PendingAutomaticTbt request;
+        boolean startNow;
+        synchronized (lock) {
+            request = new PendingAutomaticTbt(
+                    ++automaticTbtToken, stillCurrent, completion);
+            previous = pendingAutomaticTbt;
+            if (moveInProgress) {
+                pendingAutomaticTbt = request;
+                startNow = false;
+            } else {
+                moveInProgress = true;
+                startNow = true;
+            }
+        }
+        if (previous != null) {
+            notifyAutomaticTbtCompletionAsync(
+                    previous.completion, "automatic TBT superseded by newer route");
+        }
+        if (startNow) {
+            remember(new NavAppDisplayState(
+                    "", -1, NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                    "automatic TBT running token=" + request.token));
+            startAutomaticTbt(request);
+        } else {
+            log("", "automatic_tbt_queued token=" + request.token);
+        }
+    }
+
+    private void startAutomaticTbt(PendingAutomaticTbt request) {
+        Thread worker = new Thread(() -> runAutomaticTbt(request), "BydHudAutomaticTbt");
+        worker.setDaemon(true);
+        try {
+            worker.start();
+        } catch (RuntimeException error) {
+            endMove("");
+            notifyAutomaticTbtCompletion(
+                    request.completion,
+                    "automatic TBT worker failed: " + error.getClass().getSimpleName());
+        }
+    }
+
+    private void runAutomaticTbt(PendingAutomaticTbt request) {
+        String error = "";
+        try {
+            if (!isCurrent(request.stillCurrent)) {
+                error = "automatic TBT cancelled: route ended";
+            } else {
+                int ownership = autoContainerOwnership();
+                if (ownership != DashboardLayoutPolicy.OWNERSHIP_NONE) {
+                    error = releasePersistedAutoContainerOwnership(
+                            request.stillCurrent, "automatic-tbt-release");
+                    if (error.isEmpty()) {
+                        error = dispatchAutomaticTbt(
+                                DashboardLayoutPolicy.PROTOCOL_NATIVE,
+                                request.stillCurrent);
+                    }
+                }
+                if (error.isEmpty()) {
+                    error = dispatchAutomaticTbt(
+                            DashboardLayoutPolicy.PROTOCOL_TBT,
+                            request.stillCurrent);
+                }
+            }
+        } catch (RuntimeException failure) {
+            error = "automatic TBT failed: " + safe(failure.getMessage());
+        } finally {
+            endMove("");
+            notifyAutomaticTbtCompletion(request.completion, error);
+        }
+    }
+
+    private String dispatchAutomaticTbt(int operation, BooleanSupplier stillCurrent) {
+        String failure = StockMapProtocol30011.dispatch(context, operation, stillCurrent);
+        return failure.isEmpty()
+                ? ""
+                : "automatic TBT type " + operation + " failed: " + failure;
+    }
+
+    private void invalidatePendingAutomaticTbt(String reason) {
+        PendingAutomaticTbt cancelled;
+        synchronized (lock) {
+            cancelled = pendingAutomaticTbt;
+            pendingAutomaticTbt = null;
+        }
+        if (cancelled != null) {
+            log("", "automatic_tbt_cancelled token=" + cancelled.token
+                    + " reason=" + safe(reason));
+            notifyAutomaticTbtCompletionAsync(
+                    cancelled.completion,
+                    "automatic TBT cancelled: " + safe(reason));
+        }
+    }
+
+    private void notifyAutomaticTbtCompletion(Consumer<String> completion, String error) {
+        notifyMoveCompletion(completion, error);
+    }
+
+    private void notifyAutomaticTbtCompletionAsync(
+            Consumer<String> completion, String error) {
+        if (completion == null) return;
+        Thread worker = new Thread(
+                () -> notifyAutomaticTbtCompletion(completion, error),
+                "BydHudAutomaticTbtCompletion");
         worker.setDaemon(true);
         worker.start();
     }
@@ -575,18 +679,32 @@ final class NavAppDisplayController {
             if (!isWidgetOperationCurrent(token)) {
                 error = widgetCancellationReason();
             } else {
-                boolean releaseRequired = widgetTbtNeedsAutoContainerReleaseForTest(
-                        persistedWidgetAutoContainerValue(),
-                        hasWidgetAutoContainerLease(owner));
-                String commandFailure = widgetModeUsesAutoContainerForTest(
-                        mode, releaseRequired)
-                        ? sendWidgetAutoContainer(
-                                owner, widgetAutoContainerValueForTest(mode), token, mode)
-                        : "";
-                if (!commandFailure.isEmpty()) {
-                    error = commandFailure;
-                } else if (widgetModeUsesTbtProtocolForTest(mode)) {
-                    error = sendWidgetTbtProtocolEdge(token);
+                int ownership = autoContainerOwnership();
+                if (DashboardLayoutPolicy.shouldReleaseBeforeWidget(mode, ownership)) {
+                    error = releasePersistedAutoContainerOwnership(
+                            () -> isWidgetOperationCurrent(token), "widget-mode=" + mode);
+                }
+                if (error.isEmpty()) {
+                    switch (mode) {
+                        case WIDGET_MODE_IPC_OFF:
+                            if (ownership == DashboardLayoutPolicy.OWNERSHIP_NONE) {
+                                error = sendWidgetProtocolOperation(
+                                        token, DashboardLayoutPolicy.PROTOCOL_NATIVE, "IPC OFF");
+                            }
+                            break;
+                        case WIDGET_MODE_TBT:
+                            error = sendWidgetTbtProtocolEdge(token);
+                            break;
+                        case WIDGET_MODE_MINI:
+                            error = sendWidgetAutoContainer(owner, token, mode);
+                            break;
+                        case WIDGET_MODE_FULL:
+                            error = sendWidgetProtocolOperation(
+                                    token, DashboardLayoutPolicy.PROTOCOL_FULL, "FULL");
+                            break;
+                        default:
+                            error = "unsupported widget mode=" + mode;
+                    }
                 }
                 if (error.isEmpty()
                         && applyProfile
@@ -623,46 +741,34 @@ final class NavAppDisplayController {
     }
 
     private String sendWidgetTbtProtocolEdge(long token) {
-        String typeOneFailure = StockMapProtocol30011.dispatch(
-                context,
-                1,
-                () -> isWidgetOperationCurrent(token));
-        if (!typeOneFailure.isEmpty()) {
-            return "TBT protocol type 1 failed: " + typeOneFailure;
-        }
-        String typeTwoFailure = StockMapProtocol30011.dispatch(
-                context,
-                2,
-                () -> isWidgetOperationCurrent(token));
-        return typeTwoFailure.isEmpty()
-                ? ""
-                : "TBT protocol type 2 failed: " + typeTwoFailure;
+        String typeOneFailure = sendWidgetProtocolOperation(
+                token, DashboardLayoutPolicy.PROTOCOL_NATIVE, "TBT protocol type 1");
+        return typeOneFailure.isEmpty()
+                ? sendWidgetProtocolOperation(
+                        token, DashboardLayoutPolicy.PROTOCOL_TBT, "TBT protocol type 2")
+                : typeOneFailure;
     }
 
-    private boolean hasWidgetAutoContainerLease(String owner) {
-        String normalizedOwner = normalizePackage(owner);
-        if (normalizedOwner.isEmpty()) return false;
-        SharedPreferences prefs = dashboardPrefs();
-        String leasePackage = normalizePackage(
-                prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
-        long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
-        return leaseGeneration > 0L
-                && normalizedOwner.equals(leasePackage)
-                && projectionGenerationForPackage(normalizedOwner) == leaseGeneration;
+    private String sendWidgetProtocolOperation(long token, int operation, String label) {
+        String failure = StockMapProtocol30011.dispatch(
+                context, operation, () -> isWidgetOperationCurrent(token));
+        return failure.isEmpty() ? "" : label + " failed: " + failure;
     }
 
     private int persistedWidgetAutoContainerValue() {
         int value = dashboardPrefs().getInt(KEY_WIDGET_AUTOCONTAINER_VALUE, 0);
-        return value == AUTO_CONTAINER_PARTIAL || value == AUTO_CONTAINER_FULLSCREEN
+        return value == DashboardLayoutPolicy.AUTOCONTAINER_MINI
+                || value == LEGACY_AUTO_CONTAINER_FULLSCREEN
                 ? value
                 : 0;
     }
 
     private void recordWidgetAutoContainerValue(int value) {
         SharedPreferences.Editor editor = dashboardPrefs().edit();
-        if (value == AUTO_CONTAINER_PARTIAL || value == AUTO_CONTAINER_FULLSCREEN) {
+        if (value == DashboardLayoutPolicy.AUTOCONTAINER_MINI
+                || value == LEGACY_AUTO_CONTAINER_FULLSCREEN) {
             editor.putInt(KEY_WIDGET_AUTOCONTAINER_VALUE, value);
-        } else if (value == AUTO_CONTAINER_RELEASE) {
+        } else if (value == DashboardLayoutPolicy.AUTOCONTAINER_RELEASE) {
             editor.remove(KEY_WIDGET_AUTOCONTAINER_VALUE);
         } else {
             return;
@@ -670,46 +776,39 @@ final class NavAppDisplayController {
         editor.apply();
     }
 
-    private String sendWidgetAutoContainer(
-            String owner, int value, long token, int mode) {
+    private String sendWidgetAutoContainer(String owner, long token, int mode) {
         if (!isWidgetOperationCurrent(token)) {
             return widgetCancellationReason();
         }
         String normalizedOwner = normalizePackage(owner);
         long leaseGeneration = projectionGenerationForPackage(normalizedOwner);
-        if ((value == AUTO_CONTAINER_FULLSCREEN || value == AUTO_CONTAINER_PARTIAL)
-                && !normalizedOwner.isEmpty()) {
+        if (!normalizedOwner.isEmpty()) {
             String leaseOwner = persistedAutoContainerLeasePackage();
             if (!leaseOwner.isEmpty() && !leaseOwner.equals(normalizedOwner)) {
                 return "existing AutoContainer lease retained";
             }
         }
         try {
-            LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(context, value);
+            LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(
+                    context, DashboardLayoutPolicy.AUTOCONTAINER_MINI);
             if (!result.success()) {
-                return "widget AutoContainer " + value + " failed: " + result.shortDetail();
+                return "widget AutoContainer 17 failed: " + result.shortDetail();
             }
-            recordWidgetAutoContainerValue(value);
-            log(normalizedOwner, "widget_autocontainer_sent mode=" + mode + " value=" + value);
+            recordWidgetAutoContainerValue(DashboardLayoutPolicy.AUTOCONTAINER_MINI);
+            log(normalizedOwner, "widget_autocontainer_sent mode=" + mode + " value=17");
             // A completed side effect still needs ownership bookkeeping if Shutdown
             // cancelled the following steps while the shell command was in flight.
             if (leaseGeneration > 0L
                     && projectionGenerationForPackage(normalizedOwner) == leaseGeneration) {
-                if (mode == WIDGET_MODE_IPC_OFF || mode == WIDGET_MODE_TBT) {
-                    clearAutoContainerLeaseIfExact(
-                            normalizedOwner, leaseGeneration, "widget-release");
-                } else if (mode == WIDGET_MODE_MINI || mode == WIDGET_MODE_FULL) {
-                    acquireAutoContainerLeaseIfSucceeded(
-                            normalizedOwner,
-                            dashboardModeForWidgetForTest(mode),
-                            "",
-                            "widget-mode");
-                }
+                acquireAutoContainerLeaseIfSucceeded(
+                        normalizedOwner,
+                        HudPrefs.DASHBOARD_MODE_PARTIAL,
+                        "",
+                        "widget-mode");
             }
-            if (!isWidgetOperationCurrent(token)) return widgetCancellationReason();
             return "";
         } catch (IOException | SecurityException e) {
-            return "widget AutoContainer " + value + " failed: " + safe(e.getMessage());
+            return "widget AutoContainer 17 failed: " + safe(e.getMessage());
         }
     }
 
@@ -905,18 +1004,17 @@ final class NavAppDisplayController {
                         }
                     }
                     clearDashboardProjection("independent-dashboard-already-main:" + safe(reason));
-                    releaseAutoContainerLeaseIfRequested(
+                    String releaseFailure = releaseAutoContainerLeaseIfRequested(
                             packageName, returnGeneration, true, reason);
-                    if (!isShutdownReturnCurrent(shutdownToken)) return;
-                    requestTbtAfterReturnIfRequested(packageName, true, reason);
                     remember(new NavAppDisplayState(
                             packageName,
                             current.taskId,
                             current.displayId,
                             current.visible,
-                            surfaceReady
+                            autoContainerStatus(surfaceReady
                                     ? "independent dashboard already on main"
-                                    : "independent dashboard already on main; surface handoff failed"));
+                                    : "independent dashboard already on main; surface handoff failed",
+                                    releaseFailure)));
                     return;
                 }
                 ClusterProjectionService.returnToMain(
@@ -955,10 +1053,8 @@ final class NavAppDisplayController {
                             + " reason=" + safe(reason));
                 }
                 if (!isShutdownReturnCurrent(shutdownToken)) return;
-                releaseAutoContainerLeaseIfRequested(
-                        packageName, returnGeneration, projectionReleased, reason);
-                if (!isShutdownReturnCurrent(shutdownToken)) return;
-                requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason);
+                String releaseFailure = releaseAutoContainerLeaseIfRequested(
+                        packageName, returnGeneration, onMain, reason);
                 String returnStatus = onMain
                         ? surfaceReady
                                 ? projectionReleased
@@ -971,12 +1067,13 @@ final class NavAppDisplayController {
                         confirmed.taskId,
                         confirmed.displayId,
                         confirmed.visible,
-                        returnStatus));
+                        autoContainerStatus(returnStatus, releaseFailure)));
                 return;
             }
             boolean alreadyProjected = isConfirmedProjectedDashboardDisplay(packageName, current);
             String returnedPrevious = alreadyProjected ? ""
-                    : returnPreviousDashboardApp(packageName, reason, requestCurrent);
+                    : returnPreviousDashboardApp(
+                            packageName, dashboardMode, reason, requestCurrent);
             if (returnedPrevious == null) {
                 remember(new NavAppDisplayState(
                         packageName,
@@ -1011,13 +1108,8 @@ final class NavAppDisplayController {
                         current,
                         dashboardMode,
                         "independent-dashboard-already-projected:" + safe(reason));
-                String layoutFailure = sendAutoContainerIfRequested(
-                        packageName,
-                        autoContainerValueForMode(dashboardMode),
-                        autoContainerValueForMode(dashboardMode) != 0,
-                        "existing-dashboard");
-                acquireAutoContainerLeaseIfSucceeded(
-                        packageName, dashboardMode, layoutFailure, "existing-dashboard");
+                String layoutFailure = applyDashboardLayout(
+                        packageName, dashboardMode, requestCurrent, "existing-dashboard");
                 remember(new NavAppDisplayState(
                         packageName,
                         current.taskId,
@@ -1064,13 +1156,8 @@ final class NavAppDisplayController {
                     "independent-dashboard-confirmed:" + safe(reason));
             boolean surfaceReady = ensureWazeSurfaceOnDisplay(
                     packageName, confirmed.displayId, "dashboard-confirmed:" + safe(reason));
-            String layoutFailure = sendAutoContainerIfRequested(
-                    packageName,
-                    autoContainerValueForMode(dashboardMode),
-                    autoContainerValueForMode(dashboardMode) != 0,
-                    "dashboard-confirmed");
-            acquireAutoContainerLeaseIfSucceeded(
-                    packageName, dashboardMode, layoutFailure, "dashboard-confirmed");
+            String layoutFailure = applyDashboardLayout(
+                    packageName, dashboardMode, requestCurrent, "dashboard-confirmed");
             remember(new NavAppDisplayState(
                     packageName,
                     confirmed.taskId,
@@ -1125,6 +1212,23 @@ final class NavAppDisplayController {
                 Toast.LENGTH_LONG).show());
     }
 
+    //Publishes a service-side output failure through the existing cached status listener.
+    void recordProjectionOutputFailure(String packageName, String detail) {
+        NavAppDisplayState current = lastState(packageName);
+        remember(new NavAppDisplayState(
+                current.packageName,
+                current.taskId,
+                current.displayId,
+                current.visible,
+                "projection output failed: " + safe(detail)));
+        new Handler(Looper.getMainLooper()).post(() -> Toast.makeText(
+                context,
+                HudPrefs.isUaLanguage(context)
+                        ? "Не вдалося підготувати чорне тло панелі приладів"
+                        : "Unable to prepare dashboard black output",
+                Toast.LENGTH_LONG).show());
+    }
+
     //rejects unauthorised ADB before projection or task state can be changed.
     private boolean preflightAuthorizedAdb(String packageName, String reason) {
         try {
@@ -1149,7 +1253,7 @@ final class NavAppDisplayController {
         if (!requested || value == 0) {
             return "";
         }
-        if (value == AUTO_CONTAINER_FULLSCREEN || value == AUTO_CONTAINER_PARTIAL) {
+        if (value == DashboardLayoutPolicy.AUTOCONTAINER_MINI) {
             String existingLease = persistedAutoContainerLeasePackage();
             String normalized = normalizePackage(packageName);
             if (!existingLease.isEmpty() && !existingLease.equals(normalized)) {
@@ -1161,7 +1265,8 @@ final class NavAppDisplayController {
         try {
             LocalAdbBridge.ShellResult result = LocalAdbBridge.runAutoContainer(context, value);
             if (result.success()) {
-                if (value == AUTO_CONTAINER_RELEASE) {
+                if (value == DashboardLayoutPolicy.AUTOCONTAINER_MINI
+                        || value == DashboardLayoutPolicy.AUTOCONTAINER_RELEASE) {
                     recordWidgetAutoContainerValue(value);
                 }
                 log(packageName, "dashboard_autocontainer_sent value=" + value
@@ -1180,6 +1285,65 @@ final class NavAppDisplayController {
         }
     }
 
+    private String applyDashboardLayout(
+            String packageName,
+            int dashboardMode,
+            BooleanSupplier requestCurrent,
+            String reason) {
+        if (!DashboardLayoutPolicy.supportsDashboardMode(dashboardMode)) return "";
+        BooleanSupplier current = requestCurrent == null ? () -> true : requestCurrent;
+        int ownership = autoContainerOwnership();
+        if (DashboardLayoutPolicy.shouldReleaseBeforeDashboard(dashboardMode, ownership)) {
+            String releaseFailure = releasePersistedAutoContainerOwnership(
+                    current, reason + "-before-dashboard");
+            if (!releaseFailure.isEmpty()) return releaseFailure;
+        }
+        if (DashboardLayoutPolicy.usesFullProtocol(dashboardMode)) {
+            String failure = StockMapProtocol30011.dispatch(
+                    context, DashboardLayoutPolicy.PROTOCOL_FULL, current);
+            return failure.isEmpty() ? "" : "layout command failed: " + failure;
+        }
+        if (!isCurrent(current)) return "layout command cancelled: stale request";
+        String failure = sendAutoContainerIfRequested(
+                packageName,
+                DashboardLayoutPolicy.AUTOCONTAINER_MINI,
+                true,
+                reason);
+        acquireAutoContainerLeaseIfSucceeded(
+                packageName, dashboardMode, failure, reason);
+        return failure;
+    }
+
+    private int autoContainerOwnership() {
+        SharedPreferences prefs = dashboardPrefs();
+        String leasePackage = normalizePackage(
+                prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
+        long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
+        return DashboardLayoutPolicy.ownershipKind(
+                persistedWidgetAutoContainerValue(),
+                !leasePackage.isEmpty() && leaseGeneration > 0L);
+    }
+
+    private String releasePersistedAutoContainerOwnership(
+            BooleanSupplier stillCurrent, String reason) {
+        if (autoContainerOwnership() == DashboardLayoutPolicy.OWNERSHIP_NONE) return "";
+        if (!isCurrent(stillCurrent)) return "layout command cancelled: stale request";
+        SharedPreferences prefs = dashboardPrefs();
+        String leasePackage = normalizePackage(
+                prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
+        long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
+        String failure = sendAutoContainerIfRequested(
+                leasePackage,
+                DashboardLayoutPolicy.AUTOCONTAINER_RELEASE,
+                true,
+                reason);
+        if (!failure.isEmpty()) return failure;
+        if (!leasePackage.isEmpty() && leaseGeneration > 0L) {
+            clearAutoContainerLeaseIfExact(leasePackage, leaseGeneration, reason);
+        }
+        return "";
+    }
+
     private static String autoContainerStatus(String base, String failure) {
         String safeBase = base == null ? "" : base;
         return failure == null || failure.isEmpty()
@@ -1189,7 +1353,8 @@ final class NavAppDisplayController {
 
     private void acquireAutoContainerLeaseIfSucceeded(
             String packageName, int dashboardMode, String layoutFailure, String reason) {
-        if (autoContainerValueForMode(dashboardMode) == 0
+        if (HudPrefs.normalizeDashboardScreenMode(dashboardMode)
+                        != HudPrefs.DASHBOARD_MODE_PARTIAL
                 || (layoutFailure != null && !layoutFailure.isEmpty())) return;
         long generation = projectionGenerationForPackage(packageName);
         if (generation <= 0L) return;
@@ -1209,13 +1374,13 @@ final class NavAppDisplayController {
                 + generation + " reason=" + safe(reason));
     }
 
-    private void releaseAutoContainerLeaseIfRequested(
+    private String releaseAutoContainerLeaseIfRequested(
             String packageName, long generation, boolean projectionReleased, String reason) {
-        if (!projectionReleased || !isUserRequestedReturnForTest(reason)) return;
-        releaseAutoContainerLease(packageName, generation, "return-release", reason);
+        if (!projectionReleased || !isUserRequestedReturnForTest(reason)) return "";
+        return releaseAutoContainerLease(packageName, generation, "return-release", reason);
     }
 
-    private void releaseAutoContainerLease(
+    private String releaseAutoContainerLease(
             String packageName, long generation, String operation, String reason) {
         String normalized = normalizePackage(packageName);
         SharedPreferences prefs = dashboardPrefs();
@@ -1226,10 +1391,10 @@ final class NavAppDisplayController {
             log(normalized, "dashboard_autocontainer_release_skipped leasePackage="
                     + leasePackage + " leaseGeneration=" + leaseGeneration
                     + " generation=" + generation + " reason=" + safe(reason));
-            return;
+            return "";
         }
         String failure = sendAutoContainerIfRequested(
-                normalized, AUTO_CONTAINER_RELEASE, true, operation);
+                normalized, DashboardLayoutPolicy.AUTOCONTAINER_RELEASE, true, operation);
         if (failure == null || failure.isEmpty()) {
             if (clearAutoContainerLeaseIfExact(
                     normalized, generation, operation + ":" + safe(reason))) {
@@ -1240,6 +1405,7 @@ final class NavAppDisplayController {
             log(normalized, "dashboard_autocontainer_lease_retained operation="
                     + operation + " generation=" + generation + " reason=" + safe(reason));
         }
+        return failure == null ? "" : failure;
     }
 
     private void releaseAutoContainerLeaseAfterFailedSuccessor(
@@ -1327,17 +1493,11 @@ final class NavAppDisplayController {
                 dashboardPrefs().getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
     }
 
-    private void requestTbtAfterReturnIfRequested(
-            String packageName, boolean onMain, String reason) {
-        if (!onMain || !isUserRequestedReturnForTest(reason)) return;
-        String normalized = normalizePackage(packageName);
-        if (!"com.waze".equals(normalized)
-                && !GMapsDirectChannel.PACKAGE_NAME.equals(normalized)) return;
-        NavHudLiveSender.get(context).onDashboardReturnConfirmed(normalized, reason);
-    }
-
     //Returns the retired package, empty when none was returned, or null if return failed.
-    private String returnPreviousDashboardApp(String nextPackageName, String reason,
+    private String returnPreviousDashboardApp(
+            String nextPackageName,
+            int nextDashboardMode,
+            String reason,
             BooleanSupplier requestCurrent) {
         String previous = confirmedDashboardPackage();
         if (previous.isEmpty()) {
@@ -1363,7 +1523,10 @@ final class NavAppDisplayController {
         boolean onMain = confirmed.taskId >= 0
                 && confirmed.displayId == MAIN_DISPLAY_ID;
         if (onMain) {
-            prepareAutoContainerLeaseTransfer(previous, nextPackageName);
+            prepareAutoContainerLeaseTransfer(
+                    previous,
+                    nextPackageName,
+                    nextDashboardMode);
             if (!ensureWazeSurfaceOnDisplay(
                     previous, MAIN_DISPLAY_ID,
                     "return-previous-dashboard:" + safe(reason))) {
@@ -1441,6 +1604,20 @@ final class NavAppDisplayController {
             if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
                 return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
                         current.visible, label + " blocked: request changed before command"));
+            }
+            String outputFailure = ClusterProjectionService.prepareOutputForTaskMove(
+                    normalized,
+                    current.taskId,
+                    current.displayId,
+                    targetDisplay,
+                    requestCurrent);
+            if (!outputFailure.isEmpty()) {
+                return remember(new NavAppDisplayState(
+                        normalized,
+                        current.taskId,
+                        current.displayId,
+                        current.visible,
+                        label + " failed: " + outputFailure));
             }
             LocalAdbBridge.ShellResult move = runCommand(
                     normalized,
@@ -1671,13 +1848,17 @@ final class NavAppDisplayController {
     }
 
     private void prepareAutoContainerLeaseTransfer(
-            String previousPackage, String nextPackage) {
+            String previousPackage,
+            String nextPackage,
+            int nextDashboardMode) {
         SharedPreferences prefs = dashboardPrefs();
         String leasePackage = normalizePackage(
                 prefs.getString(KEY_AUTOCONTAINER_LEASE_PACKAGE, ""));
         long leaseGeneration = prefs.getLong(KEY_AUTOCONTAINER_LEASE_GENERATION, 0L);
-        if (shouldPrepareAutoContainerLeaseTransfer(
-                previousPackage, nextPackage, leasePackage, leaseGeneration)) {
+        if (DashboardLayoutPolicy.shouldRetainMiniLeaseForReplacement(
+                        nextDashboardMode, autoContainerOwnership())
+                && shouldPrepareAutoContainerLeaseTransfer(
+                        previousPackage, nextPackage, leasePackage, leaseGeneration)) {
             pendingAutoContainerLeaseTransferFrom = leasePackage;
             pendingAutoContainerLeaseTransferGeneration = leaseGeneration;
         }
@@ -1870,13 +2051,44 @@ final class NavAppDisplayController {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void endMove(String packageName) {
         String deferredReturnReason;
+        PendingAutomaticTbt automaticToStart = null;
+        PendingAutomaticTbt cancelledAutomatic = null;
         pendingAutoContainerLeaseTransferFrom = "";
         pendingAutoContainerLeaseTransferGeneration = 0L;
         synchronized (lock) {
-            moveInProgress = false;
             deferredReturnReason = pendingShutdownReturnReason;
             pendingShutdownReturnPackage = "";
             pendingShutdownReturnReason = "";
+            if (!deferredReturnReason.isEmpty()) {
+                cancelledAutomatic = pendingAutomaticTbt;
+                pendingAutomaticTbt = null;
+                moveInProgress = false;
+            } else if (pendingAutomaticTbt != null
+                    && !HudPrefs.isUserShutdownActive(context)
+                    && isCurrent(pendingAutomaticTbt.stillCurrent)) {
+                automaticToStart = pendingAutomaticTbt;
+                pendingAutomaticTbt = null;
+                moveInProgress = true;
+            } else {
+                cancelledAutomatic = pendingAutomaticTbt;
+                pendingAutomaticTbt = null;
+                moveInProgress = false;
+            }
+        }
+        if (cancelledAutomatic != null) {
+            notifyAutomaticTbtCompletionAsync(
+                    cancelledAutomatic.completion,
+                    !deferredReturnReason.isEmpty()
+                            ? "automatic TBT cancelled: shutdown return"
+                            : "automatic TBT cancelled: route ended");
+        }
+        if (automaticToStart != null) {
+            log(packageName, "automatic_tbt_draining token=" + automaticToStart.token);
+            remember(new NavAppDisplayState(
+                    "", -1, NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                    "automatic TBT running token=" + automaticToStart.token));
+            startAutomaticTbt(automaticToStart);
+            return;
         }
         log(packageName, "move idle");
         notifyStatusChanged();
@@ -2229,6 +2441,14 @@ final class NavAppDisplayController {
     //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static String normalizePackage(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(Locale.ROOT);
+    }
+
+    private static boolean isCurrent(BooleanSupplier current) {
+        try {
+            return current != null && current.getAsBoolean();
+        } catch (RuntimeException ignored) {
+            return false;
+        }
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.

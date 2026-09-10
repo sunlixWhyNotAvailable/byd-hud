@@ -67,7 +67,8 @@ public final class ClusterProjectionService extends Service
     private WindowManager overlayWindowManager;
     private FrameLayout overlayRoot;
     private SurfaceView overlaySurfaceView;
-    private View projectionCoverView;
+    private WindowManager blackWindowManager;
+    private View blackWindowView;
     private Surface projectionSurface;
     private VirtualDisplay virtualDisplay;
     private String projectedPackage = "";
@@ -87,7 +88,9 @@ public final class ClusterProjectionService extends Service
     private int projectionTop;
     private boolean projectionGeometryValid = true;
     private boolean projectionPlacementReady;
-    private boolean projectionCoverVisible = true;
+    private boolean blackWindowVisible;
+    private int virtualDisplayGeneration;
+    private int blackWindowDisplayGeneration;
     private boolean projectionContentVisible;
     private boolean projectionRecoveryInProgress;
 
@@ -241,6 +244,19 @@ public final class ClusterProjectionService extends Service
         if (service == null) return;
         service.mainHandler.post(() -> service.confirmProjectionVisibleOnMain(
                 packageName, expectedDisplayId, expectedOwnerToken, "task-confirmed-visible"));
+    }
+
+    //Hides retained idle pixels at the controller's final fence before moving a task into our VD.
+    static String prepareOutputForTaskMove(
+            String packageName,
+            int taskId,
+            int sourceDisplayId,
+            int targetDisplayId,
+            BooleanSupplier requestCurrent) {
+        ClusterProjectionService service = instance;
+        if (service == null) return "";
+        return service.prepareOutputForTaskMoveBlocking(
+                safe(packageName), taskId, sourceDisplayId, targetDisplayId, requestCurrent);
     }
 
     //Explicit app shutdown may release a retained idle allocation; active work always wins.
@@ -455,9 +471,6 @@ public final class ClusterProjectionService extends Service
                 + " dashboardMode=" + normalizedMode
                 + " reason=" + reason);
         ensureOverlay();
-        if (!preserveVisibleOwner) {
-            setProjectionCoverVisible(true, "projection-requested");
-        }
         VirtualDisplay existing;
         synchronized (lock) {
             existing = virtualDisplay;
@@ -559,7 +572,14 @@ public final class ClusterProjectionService extends Service
                     return;
                 }
                 controller.clearReturnedProjectionIntent(targetPackage, intentGeneration, reason);
-                retainProjectionIdle("return-main " + reason);
+                String blackFailure = retainProjectionIdle(
+                        targetPackage,
+                        returnGeneration,
+                        returnOwnerToken,
+                        "return-main " + reason);
+                if (!blackFailure.isEmpty()) {
+                    controller.recordProjectionOutputFailure(targetPackage, blackFailure);
+                }
             });
         }, "BydHudClusterProjectionReturn");
         worker.start();
@@ -579,6 +599,138 @@ public final class ClusterProjectionService extends Service
                     && projectionOwnerToken == expectedOwnerToken
                     && (projectedPackage.isEmpty() || projectedPackage.equals(packageName));
         }
+    }
+
+    private String prepareOutputForTaskMoveBlocking(
+            String packageName,
+            int taskId,
+            int sourceDisplayId,
+            int targetDisplayId,
+            BooleanSupplier requestCurrent) {
+        final int expectedDisplayGeneration;
+        final int expectedProjectionGeneration;
+        final long expectedOwnerToken;
+        synchronized (lock) {
+            int currentDisplayId = virtualDisplay == null || virtualDisplay.getDisplay() == null
+                    ? NavAppDisplayState.DISPLAY_UNKNOWN
+                    : virtualDisplay.getDisplay().getDisplayId();
+            if (targetDisplayId != currentDisplayId) return "";
+            if (!ProjectionLifecyclePolicy.canPrepareOutputMove(
+                    requestCurrent == null || requestCurrent.getAsBoolean(),
+                    projectionRequested,
+                    projectionGeometryValid,
+                    projectionPlacementReady,
+                    projectedPackage,
+                    currentDisplayId,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    taskId,
+                    sourceDisplayId,
+                    targetDisplayId,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken)) {
+                return "projection output changed before move";
+            }
+            expectedDisplayGeneration = virtualDisplayGeneration;
+            expectedProjectionGeneration = projectionGeneration;
+            expectedOwnerToken = projectionOwnerToken;
+        }
+        AtomicReference<String> result = new AtomicReference<>(
+                "projection output prepare timeout");
+        AtomicBoolean gate = new AtomicBoolean(true);
+        CountDownLatch completed = new CountDownLatch(1);
+        Runnable prepare = () -> {
+            if (!gate.get()) return;
+            try {
+                result.set(hideBlackWindowForMoveOnMain(
+                        packageName,
+                        taskId,
+                        sourceDisplayId,
+                        targetDisplayId,
+                        expectedDisplayGeneration,
+                        expectedProjectionGeneration,
+                        expectedOwnerToken,
+                        requestCurrent));
+            } finally {
+                gate.set(false);
+                completed.countDown();
+            }
+        };
+        if (Looper.myLooper() == mainHandler.getLooper()) {
+            prepare.run();
+            return result.get();
+        }
+        try {
+            mainHandler.post(prepare);
+            if (!completed.await(5000L, TimeUnit.MILLISECONDS)) {
+                gate.set(false);
+                mainHandler.removeCallbacks(prepare);
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            gate.set(false);
+            mainHandler.removeCallbacks(prepare);
+            return "projection output prepare interrupted";
+        } catch (RuntimeException e) {
+            gate.set(false);
+            return "projection output prepare failed: " + safe(e.getMessage());
+        }
+        return result.get();
+    }
+
+    private String hideBlackWindowForMoveOnMain(
+            String packageName,
+            int taskId,
+            int sourceDisplayId,
+            int targetDisplayId,
+            int expectedDisplayGeneration,
+            int expectedProjectionGeneration,
+            long expectedOwnerToken,
+            BooleanSupplier requestCurrent) {
+        View blackView;
+        synchronized (lock) {
+            int currentDisplayId = virtualDisplay == null || virtualDisplay.getDisplay() == null
+                    ? NavAppDisplayState.DISPLAY_UNKNOWN
+                    : virtualDisplay.getDisplay().getDisplayId();
+            if (!ProjectionLifecyclePolicy.canPrepareOutputMove(
+                    requestCurrent == null || requestCurrent.getAsBoolean(),
+                    projectionRequested,
+                    projectionGeometryValid,
+                    projectionPlacementReady,
+                    projectedPackage,
+                    currentDisplayId,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    taskId,
+                    sourceDisplayId,
+                    targetDisplayId,
+                    expectedDisplayGeneration,
+                    expectedProjectionGeneration,
+                    expectedOwnerToken)) {
+                return "projection output changed before move";
+            }
+            blackView = blackWindowView;
+            if (blackView == null || !blackWindowVisible) return "";
+            if (blackWindowDisplayGeneration != expectedDisplayGeneration) {
+                return "projection black window bound to stale display";
+            }
+            try {
+                blackView.setVisibility(View.GONE);
+            } catch (RuntimeException e) {
+                return "projection black window hide failed: "
+                        + e.getClass().getSimpleName() + " " + safe(e.getMessage());
+            }
+            blackWindowVisible = false;
+        }
+        log("projection_black hidden package=" + packageName
+                + " display=" + targetDisplayId
+                + " ownerToken=" + expectedOwnerToken);
+        return "";
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
@@ -605,14 +757,7 @@ public final class ClusterProjectionService extends Service
         }
         SurfaceView surfaceView = new SurfaceView(displayContext);
         FrameLayout root = new FrameLayout(displayContext);
-        View cover = new View(displayContext);
-        cover.setBackgroundColor(Color.BLACK);
-        cover.setClickable(false);
-        cover.setFocusable(false);
         root.addView(surfaceView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
-        root.addView(cover, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
         int dashboardMode;
@@ -640,8 +785,6 @@ public final class ClusterProjectionService extends Service
             overlayWindowManager = manager;
             overlayRoot = root;
             overlaySurfaceView = surfaceView;
-            projectionCoverView = cover;
-            projectionCoverVisible = true;
             projectionContentVisible = false;
             projectionWidth = geometry.width;
             projectionHeight = geometry.height;
@@ -659,9 +802,7 @@ public final class ClusterProjectionService extends Service
                     overlayWindowManager = null;
                     overlayRoot = null;
                     overlaySurfaceView = null;
-                    projectionCoverView = null;
                     projectionSurface = null;
-                    projectionCoverVisible = true;
                     projectionContentVisible = false;
                 }
             }
@@ -672,7 +813,6 @@ public final class ClusterProjectionService extends Service
         }
         log("overlay added mode=surface_view display=" + targetDisplay.getDisplayId()
                 + " name=" + targetDisplay.getName());
-        log("projection_cover shown reason=overlay-allocated");
     }
 
     //builds this artifact here so callers do not duplicate protocol or UI construction details.
@@ -735,6 +875,7 @@ public final class ClusterProjectionService extends Service
                     && expectedPackage.equals(projectedPackage);
             if (accepted) {
                 virtualDisplay = created;
+                virtualDisplayGeneration++;
                 projectionPlacementReady = true;
             }
         }
@@ -831,6 +972,7 @@ public final class ClusterProjectionService extends Service
         int oldLeft;
         int oldTop;
         boolean oldPlacementReady;
+        int expectedDisplayGeneration;
         int expectedProjectionGeneration;
         long expectedOwnerToken;
         String packageName;
@@ -872,6 +1014,7 @@ public final class ClusterProjectionService extends Service
             oldLeft = projectionLeft;
             oldTop = projectionTop;
             oldPlacementReady = projectionPlacementReady;
+            expectedDisplayGeneration = virtualDisplayGeneration;
             expectedProjectionGeneration = projectionGeneration;
             expectedOwnerToken = projectionOwnerToken;
             packageName = projectedPackage;
@@ -903,6 +1046,8 @@ public final class ClusterProjectionService extends Service
             params.x = geometry.left;
             params.y = geometry.top;
             manager.updateViewLayout(root, params);
+            updateBlackWindowLayoutOnMain(
+                    display, expectedDisplayGeneration, geometry.bufferWidth, geometry.bufferHeight);
             synchronized (lock) {
                 if (virtualDisplay != display
                         || overlayRoot != root
@@ -937,6 +1082,8 @@ public final class ClusterProjectionService extends Service
                 params.x = oldLeft;
                 params.y = oldTop;
                 manager.updateViewLayout(root, params);
+                updateBlackWindowLayoutOnMain(
+                        display, expectedDisplayGeneration, oldBufferWidth, oldBufferHeight);
                 synchronized (lock) {
                     if (virtualDisplay == display
                             && overlayRoot == root
@@ -1006,24 +1153,16 @@ public final class ClusterProjectionService extends Service
                 projectionMode = previousMode;
                 projectionPlacementReady = true;
             } else if (transition
-                    == ProjectionLifecyclePolicy.FailedRequestTransition.RETAIN_IDLE) {
-                projectionGeneration++;
-                projectionOwnerToken = 0L;
-                projectionRequested = false;
-                projectedPackage = "";
-                pendingPackage = "";
-                projectionContentVisible = false;
-                projectionPlacementReady = false;
-                surfaceGeneration++;
-            } else {
+                    == ProjectionLifecyclePolicy.FailedRequestTransition.RECOVER_INVALID_GEOMETRY) {
                 projectionPlacementReady = false;
             }
         }
         if (transition == ProjectionLifecyclePolicy.FailedRequestTransition.RETAIN_IDLE) {
-            setProjectionCoverVisible(true, "projection-resize-failed");
-            updateNotification("Dashboard projection idle");
-            log("projection_idle retained=true reason=projection-resize-failed "
-                    + safe(reason));
+            retainProjectionIdle(
+                    packageName,
+                    requestGeneration,
+                    requestOwnerToken,
+                    "projection-resize-failed " + safe(reason));
             return;
         }
         if (transition
@@ -1097,6 +1236,7 @@ public final class ClusterProjectionService extends Service
         int oldLeft;
         int oldTop;
         boolean oldPlacementReady;
+        int expectedDisplayGeneration;
         int expectedServiceGeneration;
         synchronized (lock) {
             if (!isCurrentWidgetRequestLocked(packageName, expectedProjectionGeneration)) {
@@ -1127,6 +1267,7 @@ public final class ClusterProjectionService extends Service
             oldLeft = projectionLeft;
             oldTop = projectionTop;
             oldPlacementReady = projectionPlacementReady;
+            expectedDisplayGeneration = virtualDisplayGeneration;
             expectedServiceGeneration = projectionGeneration;
             projectionGeometryValid = false;
             projectionPlacementReady = false;
@@ -1171,6 +1312,8 @@ public final class ClusterProjectionService extends Service
             params.x = geometry.left;
             params.y = geometry.top;
             manager.updateViewLayout(root, params);
+            updateBlackWindowLayoutOnMain(
+                    display, expectedDisplayGeneration, geometry.bufferWidth, geometry.bufferHeight);
             synchronized (lock) {
                 boolean expectedOwner = isExpectedWidgetProjectionLocked(
                         packageName, expectedProjectionGeneration);
@@ -1208,6 +1351,8 @@ public final class ClusterProjectionService extends Service
                 params.x = oldLeft;
                 params.y = oldTop;
                 manager.updateViewLayout(root, params);
+                updateBlackWindowLayoutOnMain(
+                        display, expectedDisplayGeneration, oldBufferWidth, oldBufferHeight);
                 synchronized (lock) {
                     if (virtualDisplay == display
                             && overlayRoot == root
@@ -1300,7 +1445,6 @@ public final class ClusterProjectionService extends Service
             }
             projectionRecoveryInProgress = true;
         }
-        setProjectionCoverVisible(true, "profile-resize-recovery");
         BooleanSupplier recoveryCurrent = () -> isResizeRecoveryCurrent(
                 packageName, expectedProjectionGeneration, expectedOwnerToken);
         Thread worker = new Thread(() -> {
@@ -1343,7 +1487,11 @@ public final class ClusterProjectionService extends Service
                     String shutdownReason = "profile-resize-recovery-shutdown:" + safe(reason);
                     controller.clearReturnedProjectionIntent(
                             packageName, intentGeneration, shutdownReason);
-                    retainProjectionIdle(shutdownReason);
+                    retainProjectionIdle(
+                            packageName,
+                            expectedProjectionGeneration,
+                            expectedOwnerToken,
+                            shutdownReason);
                     if (!shutdownReleasePending && !stopColdIdleServiceAfterShutdown()) {
                         releaseIdleProjectionForShutdownOnMain(
                                 UserRuntimeSession.PROCESS.shutdownToken(), shutdownReason);
@@ -1375,9 +1523,11 @@ public final class ClusterProjectionService extends Service
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void movePackageToDisplay(String packageName, int displayId, String reason) {
+        final int moveDisplayGeneration;
         final int moveGeneration;
         final long moveOwnerToken;
         synchronized (lock) {
+            moveDisplayGeneration = virtualDisplayGeneration;
             moveGeneration = projectionGeneration;
             moveOwnerToken = projectionOwnerToken;
         }
@@ -1408,10 +1558,57 @@ public final class ClusterProjectionService extends Service
                                 displayId,
                                 moveOwnerToken,
                                 "move-result-visible"));
+                    } else if (moved.displayId != displayId) {
+                        mainHandler.post(() -> restoreBlackIdleAfterFailedMove(
+                                packageName,
+                                displayId,
+                                moveDisplayGeneration,
+                                moveGeneration,
+                                moveOwnerToken,
+                                reason));
                     }
                 },
                 "BydHudClusterProjectionMove");
         worker.start();
+    }
+
+    private void restoreBlackIdleAfterFailedMove(
+            String packageName,
+            int displayId,
+            int displayGeneration,
+            int moveGeneration,
+            long moveOwnerToken,
+            String reason) {
+        synchronized (lock) {
+            int currentDisplayId = virtualDisplay == null || virtualDisplay.getDisplay() == null
+                    ? NavAppDisplayState.DISPLAY_UNKNOWN
+                    : virtualDisplay.getDisplay().getDisplayId();
+            if (!ProjectionLifecyclePolicy.canRestoreIdleAfterFailedMove(
+                    projectionRequested,
+                    projectionContentVisible,
+                    projectedPackage,
+                    currentDisplayId,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    displayId,
+                    displayGeneration,
+                    moveGeneration,
+                    moveOwnerToken)) {
+                log("projection_black restore_skipped stale-or-owned package=" + packageName
+                        + " reason=" + safe(reason));
+                return;
+            }
+        }
+        String failure = retainProjectionIdle(
+                packageName,
+                moveGeneration,
+                moveOwnerToken,
+                "move-failed " + safe(reason));
+        if (!failure.isEmpty()) {
+            NavAppDisplayController.get(this).recordProjectionOutputFailure(packageName, failure);
+        }
     }
 
     //guard dashboard moves so old workers cannot move an app after projection state changes.
@@ -1516,10 +1713,11 @@ public final class ClusterProjectionService extends Service
     private boolean hasAllocatedResourcesLocked() {
         return overlayRoot != null
                 || overlaySurfaceView != null
-                || projectionCoverView != null
+                || blackWindowView != null
                 || projectionSurface != null
                 || virtualDisplay != null
-                || overlayWindowManager != null;
+                || overlayWindowManager != null
+                || blackWindowManager != null;
     }
 
     private boolean hasReusableResourcesLocked() {
@@ -1534,11 +1732,31 @@ public final class ClusterProjectionService extends Service
                 projectionGeometryValid);
     }
 
-    //A confirmed normal Return clears ownership while retaining the valid allocation.
-    private void retainProjectionIdle(String reason) {
-        setProjectionCoverVisible(true, reason);
+    //A confirmed normal Return publishes black pixels before clearing the exact owner.
+    private String retainProjectionIdle(
+            String packageName,
+            int expectedProjectionGeneration,
+            long expectedOwnerToken,
+            String reason) {
+        String blackFailure = showBlackWindowForIdleOnMain(
+                packageName,
+                expectedProjectionGeneration,
+                expectedOwnerToken,
+                reason);
         boolean reusable;
         synchronized (lock) {
+            if (!ProjectionLifecyclePolicy.matchesOutputOwner(
+                    projectionRequested,
+                    projectedPackage,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    virtualDisplayGeneration,
+                    expectedProjectionGeneration,
+                    expectedOwnerToken)) {
+                return "projection output owner changed before idle";
+            }
             projectionGeneration++;
             pendingPackage = "";
             projectionRequested = false;
@@ -1553,10 +1771,292 @@ public final class ClusterProjectionService extends Service
         if (!reusable) {
             releaseProjection("idle-resource-invalid " + safe(reason));
             drainPendingShutdownRelease(reason);
-            return;
+            return blackFailure;
         }
-        log("projection_idle retained=true reason=" + safe(reason));
+        log("projection_idle retained=true black="
+                + (blackFailure.isEmpty() ? "shown" : "failed")
+                + " reason=" + safe(reason));
         drainPendingShutdownRelease(reason);
+        return blackFailure;
+    }
+
+    private String showBlackWindowForIdleOnMain(
+            String packageName,
+            int expectedProjectionGeneration,
+            long expectedOwnerToken,
+            String reason) {
+        VirtualDisplay display;
+        int expectedDisplayGeneration;
+        int displayId;
+        int bufferWidth;
+        int bufferHeight;
+        boolean reuseBlackWindow;
+        synchronized (lock) {
+            expectedDisplayGeneration = virtualDisplayGeneration;
+            if (!ProjectionLifecyclePolicy.matchesOutputOwner(
+                    projectionRequested,
+                    projectedPackage,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    expectedDisplayGeneration,
+                    expectedProjectionGeneration,
+                    expectedOwnerToken)
+                    || virtualDisplay == null
+                    || virtualDisplay.getDisplay() == null
+                    || !virtualDisplay.getDisplay().isValid()) {
+                return "projection output owner changed before black idle";
+            }
+            display = virtualDisplay;
+            displayId = display.getDisplay().getDisplayId();
+            bufferWidth = projectionBufferWidth;
+            bufferHeight = projectionBufferHeight;
+            reuseBlackWindow = blackWindowView != null
+                    && blackWindowDisplayGeneration == expectedDisplayGeneration;
+        }
+        if (reuseBlackWindow) {
+            try {
+                updateBlackWindowLayoutOnMain(
+                        display, expectedDisplayGeneration, bufferWidth, bufferHeight);
+                synchronized (lock) {
+                    if (!ProjectionLifecyclePolicy.matchesOutputOwner(
+                            projectionRequested,
+                            projectedPackage,
+                            virtualDisplayGeneration,
+                            projectionGeneration,
+                            projectionOwnerToken,
+                            packageName,
+                            expectedDisplayGeneration,
+                            expectedProjectionGeneration,
+                            expectedOwnerToken)
+                            || virtualDisplay != display
+                            || blackWindowView == null
+                            || blackWindowDisplayGeneration != expectedDisplayGeneration) {
+                        return "projection output owner changed before black reuse";
+                    }
+                    blackWindowView.setVisibility(View.VISIBLE);
+                    blackWindowVisible = true;
+                }
+                log("projection_black shown reused=true package=" + packageName
+                        + " ownerToken=" + expectedOwnerToken
+                        + " reason=" + safe(reason));
+                return "";
+            } catch (RuntimeException e) {
+                log("projection_black rebind package=" + packageName
+                        + " error=" + e.getClass().getSimpleName());
+            }
+        }
+        String removeFailure = removeBlackWindowOnMain("rebind-before-idle");
+        if (!removeFailure.isEmpty()) return removeFailure;
+        WindowManager manager;
+        View blackView;
+        WindowManager.LayoutParams params;
+        try {
+            Context displayContext = createDisplayContext(display.getDisplay());
+            Context windowContext = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                    ? displayContext.createWindowContext(
+                            WindowManager.LayoutParams.TYPE_PRIVATE_PRESENTATION, null)
+                    : displayContext;
+            manager = (WindowManager) windowContext.getSystemService(Context.WINDOW_SERVICE);
+            blackView = new View(windowContext);
+            blackView.setBackgroundColor(Color.BLACK);
+            blackView.setAlpha(1f);
+            blackView.setClickable(false);
+            blackView.setFocusable(false);
+            params = blackWindowParams(bufferWidth, bufferHeight);
+        } catch (RuntimeException e) {
+            String detail = e.getClass().getSimpleName() + " " + safe(e.getMessage());
+            log("projection_black failed stage=context package=" + packageName
+                    + " " + detail);
+            return "black idle add failed: " + detail;
+        }
+        if (manager == null) {
+            String failure = "black idle WindowManager unavailable";
+            log("projection_black failed stage=manager package=" + packageName);
+            return failure;
+        }
+        synchronized (lock) {
+            if (!ProjectionLifecyclePolicy.matchesOutputOwner(
+                    projectionRequested,
+                    projectedPackage,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    expectedDisplayGeneration,
+                    expectedProjectionGeneration,
+                    expectedOwnerToken)
+                    || virtualDisplay != display) {
+                return "projection output owner changed before black add";
+            }
+        }
+        try {
+            manager.addView(blackView, params);
+        } catch (RuntimeException e) {
+            String detail = e.getClass().getSimpleName() + " " + safe(e.getMessage());
+            log("projection_black failed stage=add package=" + packageName
+                    + " display=" + displayId
+                    + " " + detail);
+            return "black idle add failed: " + detail;
+        }
+        synchronized (lock) {
+            if (!ProjectionLifecyclePolicy.matchesOutputOwner(
+                    projectionRequested,
+                    projectedPackage,
+                    virtualDisplayGeneration,
+                    projectionGeneration,
+                    projectionOwnerToken,
+                    packageName,
+                    expectedDisplayGeneration,
+                    expectedProjectionGeneration,
+                    expectedOwnerToken)
+                    || virtualDisplay != display) {
+                boolean hidden = false;
+                RuntimeException hideError = null;
+                try {
+                    blackView.setVisibility(View.GONE);
+                    hidden = true;
+                } catch (RuntimeException e) {
+                    hideError = e;
+                }
+                try {
+                    manager.removeViewImmediate(blackView);
+                } catch (RuntimeException e) {
+                    if (!blackView.isAttachedToWindow()) {
+                        log("projection_black stale_cleanup_detached_after_error error="
+                                + e.getClass().getSimpleName());
+                        return "projection output owner changed after black add";
+                    }
+                    synchronized (lock) {
+                        if (blackWindowView == null) {
+                            blackWindowManager = manager;
+                            blackWindowView = blackView;
+                            blackWindowVisible = !hidden;
+                            blackWindowDisplayGeneration = expectedDisplayGeneration;
+                        }
+                    }
+                    String detail = e.getClass().getSimpleName() + " " + safe(e.getMessage());
+                    log("projection_black stale_cleanup_failed hidden=" + hidden
+                            + " hideError=" + (hideError == null
+                                    ? "none" : hideError.getClass().getSimpleName())
+                            + " " + detail);
+                    return "black idle stale cleanup failed: " + detail;
+                }
+                return "projection output owner changed after black add";
+            }
+            blackWindowManager = manager;
+            blackWindowView = blackView;
+            blackWindowVisible = true;
+            blackWindowDisplayGeneration = expectedDisplayGeneration;
+        }
+        log("projection_black shown reused=false package=" + packageName
+                + " display=" + displayId
+                + " ownerToken=" + expectedOwnerToken
+                + " reason=" + safe(reason));
+        return "";
+    }
+
+    private static WindowManager.LayoutParams blackWindowParams(int width, int height) {
+        //Private-presentation windows stay fully opaque on our private VD; overlays are alpha-capped.
+        WindowManager.LayoutParams params = new WindowManager.LayoutParams(
+                width,
+                height,
+                WindowManager.LayoutParams.TYPE_PRIVATE_PRESENTATION,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+                        | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                PixelFormat.OPAQUE);
+        params.gravity = Gravity.TOP | Gravity.LEFT;
+        params.x = 0;
+        params.y = 0;
+        params.alpha = 1f;
+        return params;
+    }
+
+    private void updateBlackWindowLayoutOnMain(
+            VirtualDisplay display,
+            int expectedDisplayGeneration,
+            int bufferWidth,
+            int bufferHeight) {
+        WindowManager manager;
+        View blackView;
+        synchronized (lock) {
+            if (blackWindowView == null) return;
+            if (virtualDisplay != display
+                    || virtualDisplayGeneration != expectedDisplayGeneration
+                    || blackWindowDisplayGeneration != expectedDisplayGeneration) {
+                throw new IllegalStateException("black window display changed");
+            }
+            manager = blackWindowManager;
+            blackView = blackWindowView;
+        }
+        if (manager == null
+                || !(blackView.getLayoutParams() instanceof WindowManager.LayoutParams)) {
+            throw new IllegalStateException("black window layout unavailable");
+        }
+        WindowManager.LayoutParams params =
+                (WindowManager.LayoutParams) blackView.getLayoutParams();
+        params.width = bufferWidth;
+        params.height = bufferHeight;
+        params.x = 0;
+        params.y = 0;
+        manager.updateViewLayout(blackView, params);
+    }
+
+    private String removeBlackWindowOnMain(String reason) {
+        WindowManager manager;
+        View blackView;
+        synchronized (lock) {
+            manager = blackWindowManager;
+            blackView = blackWindowView;
+        }
+        if (manager == null || blackView == null) return "";
+        boolean hidden = false;
+        RuntimeException hideError = null;
+        try {
+            blackView.setVisibility(View.GONE);
+            hidden = true;
+        } catch (RuntimeException e) {
+            hideError = e;
+        }
+        try {
+            manager.removeViewImmediate(blackView);
+        } catch (RuntimeException e) {
+            if (!blackView.isAttachedToWindow()) {
+                synchronized (lock) {
+                    if (blackWindowView == blackView && blackWindowManager == manager) {
+                        blackWindowManager = null;
+                        blackWindowView = null;
+                        blackWindowVisible = false;
+                        blackWindowDisplayGeneration = 0;
+                    }
+                }
+                log("projection_black removed_after_error reason=" + safe(reason)
+                        + " error=" + e.getClass().getSimpleName());
+                return "";
+            }
+            synchronized (lock) {
+                if (blackWindowView == blackView && blackWindowManager == manager && hidden) {
+                    blackWindowVisible = false;
+                }
+            }
+            String detail = e.getClass().getSimpleName() + " " + safe(e.getMessage());
+            log("projection_black remove_failed hidden=" + hidden
+                    + " hideError=" + (hideError == null
+                            ? "none" : hideError.getClass().getSimpleName())
+                    + " reason=" + safe(reason) + " " + detail);
+            return "black idle remove failed: " + detail;
+        }
+        synchronized (lock) {
+            if (blackWindowView == blackView && blackWindowManager == manager) {
+                blackWindowManager = null;
+                blackWindowView = null;
+                blackWindowVisible = false;
+                blackWindowDisplayGeneration = 0;
+            }
+        }
+        log("projection_black removed reason=" + safe(reason));
+        return "";
     }
 
     private void drainPendingShutdownRelease(String reason) {
@@ -1613,6 +2113,8 @@ public final class ClusterProjectionService extends Service
         VirtualDisplay display;
         View overlayView;
         WindowManager manager;
+        View blackView;
+        WindowManager blackManager;
         boolean hadState;
         synchronized (lock) {
             hadState = hasAllocatedResourcesLocked()
@@ -1623,9 +2125,15 @@ public final class ClusterProjectionService extends Service
             display = virtualDisplay;
             overlayView = overlayRoot;
             manager = overlayWindowManager;
+            blackView = blackWindowView;
+            blackManager = blackWindowManager;
+            blackWindowView = null;
+            blackWindowManager = null;
+            blackWindowVisible = false;
+            blackWindowDisplayGeneration = 0;
             virtualDisplay = null;
+            virtualDisplayGeneration++;
             projectionSurface = null;
-            projectionCoverView = null;
             overlaySurfaceView = null;
             overlayRoot = null;
             overlayWindowManager = null;
@@ -1643,9 +2151,16 @@ public final class ClusterProjectionService extends Service
             projectionTop = 0;
             projectionGeometryValid = true;
             projectionPlacementReady = false;
-            projectionCoverVisible = true;
             projectionContentVisible = false;
             surfaceGeneration++;
+        }
+        if (blackManager != null && blackView != null) {
+            try {
+                blackManager.removeViewImmediate(blackView);
+            } catch (RuntimeException e) {
+                log("projection_black remove_failed " + e.getClass().getSimpleName()
+                        + " reason=full-release");
+            }
         }
         if (display != null) {
             display.release();
@@ -1744,20 +2259,12 @@ public final class ClusterProjectionService extends Service
                         + " reason=" + safe(reason));
                 return;
             }
+            if (projectionContentVisible) return;
             projectionContentVisible = true;
         }
-        setProjectionCoverVisible(false, reason);
-    }
-
-    private void setProjectionCoverVisible(boolean visible, String reason) {
-        View cover;
-        synchronized (lock) {
-            cover = projectionCoverView;
-            if (cover == null || projectionCoverVisible == visible) return;
-            projectionCoverVisible = visible;
-        }
-        cover.setVisibility(visible ? View.VISIBLE : View.GONE);
-        log("projection_cover " + (visible ? "shown" : "hidden")
+        log("projection_content confirmed package=" + safe(packageName)
+                + " display=" + expectedDisplayId
+                + " ownerToken=" + expectedOwnerToken
                 + " reason=" + safe(reason));
     }
 

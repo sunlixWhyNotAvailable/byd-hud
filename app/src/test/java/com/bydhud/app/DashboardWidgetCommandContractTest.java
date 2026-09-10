@@ -14,13 +14,13 @@ import org.junit.Test;
 public final class DashboardWidgetCommandContractTest {
     @Test
     public void widgetModesKeepTheApprovedFourSequences() {
-        assertEquals(18, NavAppDisplayController.widgetAutoContainerValueForTest(
+        assertEquals(0, NavAppDisplayController.widgetAutoContainerValueForTest(
                 NavAppDisplayController.WIDGET_MODE_IPC_OFF));
-        assertEquals(18, NavAppDisplayController.widgetAutoContainerValueForTest(
+        assertEquals(0, NavAppDisplayController.widgetAutoContainerValueForTest(
                 NavAppDisplayController.WIDGET_MODE_TBT));
         assertEquals(17, NavAppDisplayController.widgetAutoContainerValueForTest(
                 NavAppDisplayController.WIDGET_MODE_MINI));
-        assertEquals(16, NavAppDisplayController.widgetAutoContainerValueForTest(
+        assertEquals(0, NavAppDisplayController.widgetAutoContainerValueForTest(
                 NavAppDisplayController.WIDGET_MODE_FULL));
         assertFalse(NavAppDisplayController.widgetModeUsesTbtProtocolForTest(
                 NavAppDisplayController.WIDGET_MODE_IPC_OFF));
@@ -30,7 +30,7 @@ public final class DashboardWidgetCommandContractTest {
                 NavAppDisplayController.WIDGET_MODE_MINI));
         assertFalse(NavAppDisplayController.widgetModeUsesTbtProtocolForTest(
                 NavAppDisplayController.WIDGET_MODE_FULL));
-        assertTrue(NavAppDisplayController.widgetModeUsesAutoContainerForTest(
+        assertFalse(NavAppDisplayController.widgetModeUsesAutoContainerForTest(
                 NavAppDisplayController.WIDGET_MODE_IPC_OFF, false));
         assertFalse(NavAppDisplayController.widgetModeUsesAutoContainerForTest(
                 NavAppDisplayController.WIDGET_MODE_TBT, false));
@@ -38,7 +38,7 @@ public final class DashboardWidgetCommandContractTest {
                 NavAppDisplayController.WIDGET_MODE_TBT, true));
         assertTrue(NavAppDisplayController.widgetModeUsesAutoContainerForTest(
                 NavAppDisplayController.WIDGET_MODE_MINI, false));
-        assertTrue(NavAppDisplayController.widgetModeUsesAutoContainerForTest(
+        assertFalse(NavAppDisplayController.widgetModeUsesAutoContainerForTest(
                 NavAppDisplayController.WIDGET_MODE_FULL, false));
         assertTrue(NavAppDisplayController.widgetTbtNeedsAutoContainerReleaseForTest(16, false));
         assertTrue(NavAppDisplayController.widgetTbtNeedsAutoContainerReleaseForTest(17, false));
@@ -64,21 +64,22 @@ public final class DashboardWidgetCommandContractTest {
         String source = source("NavAppDisplayController.java");
         String worker = between(source, "private void runWidgetMode(",
                 "private String sendWidgetTbtProtocolEdge(");
-        int persisted = worker.indexOf("persistedWidgetAutoContainerValue()");
-        int lease = worker.indexOf("hasWidgetAutoContainerLease(owner)");
-        int command = worker.indexOf("sendWidgetAutoContainer(", lease);
-        int edge = worker.indexOf("sendWidgetTbtProtocolEdge(token)", command);
-        assertTrue(persisted >= 0 && lease > persisted && command > lease && edge > command);
-        assertTrue(worker.contains("widgetModeUsesAutoContainerForTest("));
-        assertTrue(worker.contains("if (!commandFailure.isEmpty())"));
+        int ownership = worker.indexOf("int ownership = autoContainerOwnership()");
+        int release = worker.indexOf("releasePersistedAutoContainerOwnership(", ownership);
+        int edge = worker.indexOf("sendWidgetTbtProtocolEdge(token)", release);
+        int full = worker.indexOf("DashboardLayoutPolicy.PROTOCOL_FULL", release);
+        assertTrue(ownership >= 0 && release > ownership && edge > release && full > release);
+        assertTrue(worker.contains(
+                "DashboardLayoutPolicy.shouldReleaseBeforeWidget(mode, ownership)"));
+        assertTrue(worker.contains("ownership == DashboardLayoutPolicy.OWNERSHIP_NONE"));
         assertFalse(worker.contains("returnActiveDashboardToMain"));
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
 
         String tbtEdge = between(source, "private String sendWidgetTbtProtocolEdge(",
-                "private boolean hasWidgetAutoContainerLease(");
-        int typeOne = tbtEdge.indexOf("context,\n                1,");
-        int typeOneGate = tbtEdge.indexOf("if (!typeOneFailure.isEmpty())", typeOne);
-        int typeTwo = tbtEdge.indexOf("context,\n                2,", typeOneGate);
+                "private String sendWidgetProtocolOperation(");
+        int typeOne = tbtEdge.indexOf("DashboardLayoutPolicy.PROTOCOL_NATIVE");
+        int typeOneGate = tbtEdge.indexOf("typeOneFailure.isEmpty()", typeOne);
+        int typeTwo = tbtEdge.indexOf("DashboardLayoutPolicy.PROTOCOL_TBT", typeOneGate);
         assertTrue(typeOne >= 0 && typeOneGate > typeOne && typeTwo > typeOneGate);
         assertFalse(tbtEdge.contains("sleep"));
         assertFalse(tbtEdge.contains("delay"));
@@ -87,9 +88,10 @@ public final class DashboardWidgetCommandContractTest {
                 "private boolean isWidgetOperationCurrent(");
         int sent = widgetCommand.indexOf("LocalAdbBridge.runAutoContainer(");
         int accepted = widgetCommand.indexOf("if (!result.success())", sent);
-        int record = widgetCommand.indexOf("recordWidgetAutoContainerValue(value)", accepted);
-        int cancellation = widgetCommand.indexOf("if (!isWidgetOperationCurrent(token))", record);
-        assertTrue(sent >= 0 && accepted > sent && record > accepted && cancellation > record);
+        int record = widgetCommand.indexOf("recordWidgetAutoContainerValue(", accepted);
+        int bookkeeping = widgetCommand.indexOf("acquireAutoContainerLeaseIfSucceeded(", record);
+        assertTrue(sent >= 0 && accepted > sent && record > accepted && bookkeeping > record);
+        assertFalse(widgetCommand.substring(record).contains("widgetCancellationReason()"));
         assertTrue(source.contains(".remove(KEY_WIDGET_AUTOCONTAINER_VALUE)"));
     }
 
@@ -137,8 +139,8 @@ public final class DashboardWidgetCommandContractTest {
                 "private boolean isWidgetOperationCurrent(");
         int sent = command.indexOf("LocalAdbBridge.runAutoContainer(");
         int bookkeeping = command.indexOf("acquireAutoContainerLeaseIfSucceeded(", sent);
-        int postResultCancellation = command.indexOf("if (!isWidgetOperationCurrent(token))", sent);
-        assertTrue(sent >= 0 && bookkeeping > sent && postResultCancellation > bookkeeping);
+        assertTrue(sent >= 0 && bookkeeping > sent);
+        assertFalse(command.substring(sent).contains("widgetCancellationReason()"));
         assertTrue(command.contains("projectionGenerationForPackage(normalizedOwner) == leaseGeneration"));
     }
 

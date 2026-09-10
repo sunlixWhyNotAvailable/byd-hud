@@ -106,7 +106,7 @@ public final class DashboardMoveContractTest {
 
     @Test
     public void autoContainerPolicyOnlySelectsExplicitTransitions() {
-        assertEquals(16, NavAppDisplayController.autoContainerValueForTest(
+        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
                 true, HudPrefs.DASHBOARD_MODE_FULL, true));
         assertEquals(17, NavAppDisplayController.autoContainerValueForTest(
                 true, HudPrefs.DASHBOARD_MODE_PARTIAL, true));
@@ -169,32 +169,6 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
-    public void returnTbtReassertRequiresTheExactCurrentHudRoute() {
-        assertTrue(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
-                true, true, false, true, true,
-                "com.waze", "com.waze", 7L, 7L));
-        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
-                false, true, false, true, true,
-                "com.waze", "com.waze", 7L, 7L));
-        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
-                true, true, true, true, true,
-                "com.waze", "com.waze", 7L, 7L));
-        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
-                true, true, false, false, true,
-                "com.waze", "com.waze", 7L, 7L));
-        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
-                true, true, false, true, true,
-                "com.waze", "com.waze", 7L, 8L));
-        assertFalse(NavHudLiveSender.shouldReassertTbtAfterDashboardReturnForTest(
-                true, true, false, true, true,
-                "com.waze", GMapsDirectChannel.PACKAGE_NAME, 7L, 7L));
-        assertTrue(VehicleTbtPublisher.shouldReassertDashboardForTest(
-                true, true, "com.waze", 7L, "com.waze", 7L));
-        assertFalse(VehicleTbtPublisher.shouldReassertDashboardForTest(
-                true, false, "com.waze", 7L, "com.waze", 7L));
-    }
-
-    @Test
     public void autoContainerAllowlistAcceptsOnlyDashboardModesAndRelease() {
         assertTrue(LocalAdbBridge.isAllowedRuntimeShellCommandForTest("id"));
         String command = LocalAdbBridge.autoContainerCommandForTest("auto_container", 16);
@@ -240,7 +214,7 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
-    public void dashboardMovePreflightsBeforeProjectionAndDropsLegacyTaskProtocol() throws Exception {
+    public void dashboardMovePreflightsAndUsesTheAcceptedNativeLayoutTransitions() throws Exception {
         java.nio.file.Path file = Paths.get(
                 "app/src/main/java/com/bydhud/app/NavAppDisplayController.java");
         if (!Files.exists(file)) {
@@ -253,19 +227,16 @@ public final class DashboardMoveContractTest {
         String ordinaryMove = between(source,
                 "private void moveIndependentDashboardAppBlocking(",
                 "private boolean preflightAuthorizedAdb(");
-        assertFalse(ordinaryMove.contains("StockMapProtocol30011"));
+        assertTrue(ordinaryMove.contains("applyDashboardLayout("));
         assertTrue(source.contains("dashboard_autocontainer_failed"));
         assertTrue(source.contains("sendAutoContainerIfRequested"));
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
-        assertTrue(source.contains("onDashboardReturnConfirmed"));
+        assertFalse(source.contains("onDashboardReturnConfirmed"));
+        assertFalse(source.contains("requestTbtAfterReturnIfRequested"));
         int returnRelease = source.indexOf("projectionReleased = waitForProjectionRelease(");
         int compositorRelease = source.indexOf(
                 "releaseAutoContainerLeaseIfRequested(", returnRelease);
-        int returnReassert = source.indexOf(
-                "requestTbtAfterReturnIfRequested(packageName, projectionReleased, reason)");
         assertTrue(returnRelease >= 0 && compositorRelease > returnRelease);
-        assertTrue(returnReassert > compositorRelease);
-        assertTrue(source.contains("AUTO_CONTAINER_RELEASE = 18"));
         assertTrue(source.contains("KEY_AUTOCONTAINER_LEASE_GENERATION"));
         assertTrue(source.contains("dashboard_autocontainer_lease_transferred"));
         assertTrue(source.contains("dashboard_autocontainer_lease_retained"));
@@ -274,15 +245,23 @@ public final class DashboardMoveContractTest {
         assertTrue(source.contains("ClusterProjectionService.hasProjectionOwner()"));
         assertTrue(source.contains("dashboard_autocontainer_lease_acquire_skipped_existing="));
         assertFalse(source.contains("AUTO_CONTAINER_OFF"));
-        assertTrue(source.contains("AUTO_CONTAINER_PARTIAL"));
         int senderStart = source.indexOf("private String sendAutoContainerIfRequested");
-        int senderEnd = source.indexOf("private static String autoContainerStatus", senderStart);
+        int senderEnd = source.indexOf("private String applyDashboardLayout", senderStart);
         assertTrue(senderStart >= 0 && senderEnd > senderStart);
         String sender = source.substring(senderStart, senderEnd);
         assertFalse(sender.contains("returnToMain"));
-        assertTrue(sender.indexOf("if (value == AUTO_CONTAINER_FULLSCREEN || value == AUTO_CONTAINER_PARTIAL)")
+        assertTrue(sender.indexOf("if (value == DashboardLayoutPolicy.AUTOCONTAINER_MINI)")
                 < sender.indexOf("LocalAdbBridge.runAutoContainer(context, value)"));
         assertTrue(sender.contains("existing AutoContainer lease retained"));
+
+        String layout = between(source, "private String applyDashboardLayout(",
+                "private int autoContainerOwnership(");
+        int release = layout.indexOf("releasePersistedAutoContainerOwnership(");
+        int releaseGate = layout.indexOf("if (!releaseFailure.isEmpty()) return releaseFailure;");
+        int full = layout.indexOf("DashboardLayoutPolicy.PROTOCOL_FULL", releaseGate);
+        assertTrue(release >= 0 && releaseGate > release && full > releaseGate);
+        assertFalse(layout.contains("LEGACY_AUTO_CONTAINER_FULLSCREEN"));
+        assertFalse(layout.contains("returnToMain"));
 
         int failedBranch = source.indexOf(
                 "if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)");
@@ -300,11 +279,12 @@ public final class DashboardMoveContractTest {
                 && noOwner > failedHelper
                 && failedLeaseRelease > noOwner);
 
-        int leaseReleaseStart = source.indexOf("private void releaseAutoContainerLease(");
+        int leaseReleaseStart = source.indexOf("private String releaseAutoContainerLease(");
         int leaseReleaseEnd = source.indexOf(
                 "private void releaseAutoContainerLeaseAfterFailedSuccessor(", leaseReleaseStart);
         String leaseRelease = source.substring(leaseReleaseStart, leaseReleaseEnd);
-        int release18 = leaseRelease.indexOf("AUTO_CONTAINER_RELEASE, true");
+        int release18 = leaseRelease.indexOf(
+                "DashboardLayoutPolicy.AUTOCONTAINER_RELEASE, true");
         int clearAfterRelease = leaseRelease.indexOf("clearAutoContainerLeaseIfExact(", release18);
         int retainAfterFailure = leaseRelease.indexOf(
                 "dashboard_autocontainer_lease_retained", clearAfterRelease);
@@ -327,10 +307,79 @@ public final class DashboardMoveContractTest {
         assertEquals(-1, source.substring(reconcileStart, reconcileEnd)
                 .indexOf("AUTO_CONTAINER_RELEASE"));
         int endMoveStart = source.indexOf("private void endMove(String packageName)");
-        int endMoveEnd = source.indexOf("notifyStatusChanged();", endMoveStart);
+        int endMoveEnd = source.indexOf("private long widgetProjectionGenerationForPackage", endMoveStart);
         String endMove = source.substring(endMoveStart, endMoveEnd);
         assertTrue(endMove.contains("pendingAutoContainerLeaseTransferFrom = \"\";"));
         assertTrue(endMove.contains("pendingAutoContainerLeaseTransferGeneration = 0L;"));
+        assertTrue(endMove.contains("automatic_tbt_draining"));
+    }
+
+    @Test
+    public void automaticTbtKeepsOneLatestRouteBoundRequestBehindTheMoveGate() throws Exception {
+        String source = source("NavAppDisplayController.java");
+        String request = between(source, "void requestAutomaticTbt(",
+                "private void startAutomaticTbt(");
+        assertTrue(request.contains("synchronized (lock)"));
+        assertTrue(request.contains("previous = pendingAutomaticTbt"));
+        assertTrue(request.contains("pendingAutomaticTbt = request"));
+        assertTrue(request.contains("automatic TBT superseded by newer route"));
+
+        String run = between(source, "private void runAutomaticTbt(",
+                "private String dispatchAutomaticTbt(");
+        int ownership = run.indexOf("autoContainerOwnership()");
+        int release = run.indexOf("releasePersistedAutoContainerOwnership(", ownership);
+        int typeOne = run.indexOf("DashboardLayoutPolicy.PROTOCOL_NATIVE", release);
+        int typeTwo = run.indexOf("DashboardLayoutPolicy.PROTOCOL_TBT", typeOne);
+        assertTrue(ownership >= 0 && release > ownership && typeOne > release && typeTwo > typeOne);
+        assertTrue(run.contains("automatic TBT cancelled: route ended"));
+
+        assertTrue(source.contains("invalidatePendingAutomaticTbt(\"explicit steering move\")"));
+        assertTrue(source.contains("invalidatePendingAutomaticTbt(\"explicit display move\")"));
+        assertTrue(source.contains("invalidatePendingAutomaticTbt(\"explicit widget command\")"));
+        String endMove = between(source, "private void endMove(String packageName)",
+                "private long widgetProjectionGenerationForPackage");
+        assertTrue(endMove.contains("pendingAutomaticTbt = null"));
+        assertTrue(endMove.contains("startAutomaticTbt(automaticToStart)"));
+    }
+
+    @Test
+    public void actualAndLegacyAutoContainerProofAreCleanedOnlyAfterSuccessfulRelease() throws Exception {
+        String source = source("NavAppDisplayController.java");
+        String ownership = between(source, "private int autoContainerOwnership(",
+                "private String releasePersistedAutoContainerOwnership(");
+        assertTrue(ownership.contains("leaseGeneration > 0L"));
+        assertTrue(ownership.contains("DashboardLayoutPolicy.ownershipKind("));
+        assertFalse(ownership.contains("persistedDashboardMode()"));
+        String release = between(source, "private String releasePersistedAutoContainerOwnership(",
+                "private static String autoContainerStatus(");
+        int sent = release.indexOf("DashboardLayoutPolicy.AUTOCONTAINER_RELEASE");
+        int failed = release.indexOf("if (!failure.isEmpty()) return failure;", sent);
+        int clear = release.indexOf("clearAutoContainerLeaseIfExact", failed);
+        assertTrue(sent >= 0 && failed > sent && clear > failed);
+        String sender = between(source, "private String sendAutoContainerIfRequested(",
+                "private String applyDashboardLayout(");
+        assertTrue(sender.contains("value == DashboardLayoutPolicy.AUTOCONTAINER_MINI"));
+        assertTrue(sender.contains(
+                "|| value == DashboardLayoutPolicy.AUTOCONTAINER_RELEASE"));
+    }
+
+    @Test
+    public void taskMovePreparesBlackOutputAtTheLastCommandFence() throws Exception {
+        String move = between(source("NavAppDisplayController.java"),
+                "synchronized NavAppDisplayState moveTaskToDisplayBlocking(",
+                "private boolean ensureWazeSurfaceOnDisplay(");
+        int current = move.lastIndexOf("!requestCurrent.getAsBoolean()");
+        int prepare = move.indexOf("ClusterProjectionService.prepareOutputForTaskMove(", current);
+        int command = move.indexOf("LocalAdbBridge.ShellResult move = runCommand(", prepare);
+        assertTrue(current >= 0 && prepare > current && command > prepare);
+        assertTrue(move.contains("label + \" failed: \" + outputFailure"));
+        String failure = between(source("NavAppDisplayController.java"),
+                "void recordProjectionOutputFailure(",
+                "private boolean preflightAuthorizedAdb(");
+        assertTrue(failure.contains("projection output failed: "));
+        assertTrue(failure.contains("Unable to prepare dashboard black output"));
+        assertTrue(failure.contains("Не вдалося підготувати чорне тло панелі приладів"));
+        assertFalse(failure.contains("returnToMain"));
     }
 
     @Test

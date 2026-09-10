@@ -203,7 +203,9 @@ You can start a Waze route before opening BYD HUD and enable `HUD` before or aft
 
 `Send to dashboard` moves a running application to the instrument cluster. `Send to main` returns it to the center display.
 
-After returning an application, BYD HUD keeps the projection ready for reuse and covers its area with black. The next transfer reuses it when valid and removes the cover once the application is confirmed visible on the target display. A brief earlier frame may appear before the application redraws. Full BYD HUD shutdown releases the retained projection.
+After returning an application, BYD HUD keeps the projection ready for reuse and draws black inside its virtual display to replace the application's remaining image. The black window is removed before the next transfer, which reuses valid projection resources and confirms the application's visible placement. A brief earlier frame may appear before the application redraws. Full BYD HUD shutdown releases the retained projection.
+
+Full uses the stock fullscreen layout and stays selected after `Send to main`, showing the black projection area. Partial uses AutoContainer and releases that connection when the app returns or the widget selects another mode. Return does not automatically select TBT. The existing automatic TBT option still applies when navigation starts, including from Full; the widget's TBT and IPC OFF buttons explicitly change the layout.
 
 Find the screen mode and geometry controls under `Options → Dashboard window profile`.
 

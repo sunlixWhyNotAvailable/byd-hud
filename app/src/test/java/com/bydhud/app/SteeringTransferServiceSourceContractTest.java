@@ -143,11 +143,13 @@ public final class SteeringTransferServiceSourceContractTest {
         int dispatch = move.indexOf("ClusterProjectionService.returnToMain(");
         assertTrue(query >= 0 && guard > query && dispatch > guard);
         assertTrue(move.contains("current, observedDisplay(packageName, current))"));
-        assertTrue(move.contains("returnPreviousDashboardApp(packageName, reason, requestCurrent)"));
+        assertTrue(move.contains(
+                "returnPreviousDashboardApp( packageName, dashboardMode, reason, requestCurrent)"));
         String replacement = between(controller, "synchronized NavAppDisplayState moveTaskToDisplayBlocking(",
                 "LocalAdbBridge.ShellResult move = runCommand(");
         assertTrue(replacement.contains("checkDisplay(normalized, reason); "
                 + "if (requestCurrent != null && !requestCurrent.getAsBoolean())"));
+        assertTrue(replacement.contains("ClusterProjectionService.prepareOutputForTaskMove("));
     }
 
     @Test

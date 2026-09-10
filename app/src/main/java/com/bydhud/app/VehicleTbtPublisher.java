@@ -419,29 +419,6 @@ final class VehicleTbtPublisher {
         return ownerGeneration;
     }
 
-    void reassertDashboardForCurrentRoute(
-            String packageName, long generation, String reason) {
-        if (!shouldReassertDashboardForTest(
-                routeActive, ownerHasHudPriority,
-                packageName, generation, ownerPackage, ownerGeneration)) {
-            log("tbt_dashboard reassert skipped owner=" + safe(packageName)
-                    + " generation=" + generation);
-            return;
-        }
-        dispatchDashboard(
-                ownerPackage, ownerGeneration,
-                trace(ownerPackage, ownerGeneration, reason, null, null), null);
-    }
-
-    static boolean shouldReassertDashboardForTest(
-            boolean routeActive, boolean ownerHasHudPriority,
-            String packageName, long generation,
-            String currentOwner, long currentGeneration) {
-        return routeActive && ownerHasHudPriority
-                && safe(packageName).equals(safe(currentOwner))
-                && generation == currentGeneration;
-    }
-
     static int instrumentManeuverForAmap(int amapManeuver) {
         switch (amapManeuver) {
             case 2: return 1;
@@ -569,27 +546,18 @@ final class VehicleTbtPublisher {
         long currentRouteToken = routeToken;
         record(trace, "dashboard_30011", "request", "type=2",
                 ints(2), 0, 0L, "");
-        Thread dashboardWorker = new Thread(() -> {
-            long startedAt = System.nanoTime();
-            try {
-                if (!isCurrentRoute(owner, generation, currentRouteToken)) {
-                    record(trace, "dashboard_30011", "dispatch", "type=2",
-                            ints(2), -1, elapsedMs(startedAt), "stale route");
-                    log("tbt_dashboard operation=2 skipped stale_route");
-                    return;
-                }
-                String result = StockMapProtocol30011.dispatch(
-                        context, 2,
-                        () -> isCurrentRoute(owner, generation, currentRouteToken));
-                record(trace, "dashboard_30011", "dispatch", "type=2",
-                        ints(2), result.isEmpty() ? 0 : -1, elapsedMs(startedAt), result);
-                log("tbt_dashboard operation=2 result=" + safe(result));
-            } finally {
-                if (completion != null) completion.run();
-            }
-        }, "BydHudTbtDashboard");
-        dashboardWorker.setDaemon(true);
-        dashboardWorker.start();
+        long startedAt = System.nanoTime();
+        NavAppDisplayController.get(context).requestAutomaticTbt(
+                () -> isCurrentRoute(owner, generation, currentRouteToken),
+                result -> {
+                    try {
+                        record(trace, "dashboard_30011", "dispatch", "type=2",
+                                ints(2), result.isEmpty() ? 0 : -1, elapsedMs(startedAt), result);
+                        log("tbt_dashboard operation=2 result=" + safe(result));
+                    } finally {
+                        if (completion != null) completion.run();
+                    }
+                });
     }
 
     private void sendStatus(int status, Trace trace) {

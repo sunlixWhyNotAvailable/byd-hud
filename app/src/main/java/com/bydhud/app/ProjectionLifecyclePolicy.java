@@ -49,6 +49,89 @@ final class ProjectionLifecyclePolicy {
                 && safe(activePackage).equals(safe(confirmedPackage));
     }
 
+    static boolean matchesOutputOwner(
+            boolean projectionRequested,
+            String currentPackage,
+            int currentDisplayGeneration,
+            int currentProjectionGeneration,
+            long currentOwnerToken,
+            String expectedPackage,
+            int expectedDisplayGeneration,
+            int expectedProjectionGeneration,
+            long expectedOwnerToken) {
+        return projectionRequested
+                && expectedDisplayGeneration > 0
+                && currentDisplayGeneration == expectedDisplayGeneration
+                && currentProjectionGeneration == expectedProjectionGeneration
+                && expectedOwnerToken > 0L
+                && currentOwnerToken == expectedOwnerToken
+                && safe(currentPackage).equals(safe(expectedPackage));
+    }
+
+    static boolean canPrepareOutputMove(
+            boolean requestCurrent,
+            boolean projectionRequested,
+            boolean geometryValid,
+            boolean placementReady,
+            String currentPackage,
+            int currentDisplayId,
+            int currentDisplayGeneration,
+            int currentProjectionGeneration,
+            long currentOwnerToken,
+            String expectedPackage,
+            int taskId,
+            int sourceDisplayId,
+            int targetDisplayId,
+            int expectedDisplayGeneration,
+            int expectedProjectionGeneration,
+            long expectedOwnerToken) {
+        return requestCurrent
+                && geometryValid
+                && placementReady
+                && taskId >= 0
+                && sourceDisplayId >= 0
+                && sourceDisplayId != targetDisplayId
+                && targetDisplayId > 0
+                && currentDisplayId == targetDisplayId
+                && matchesOutputOwner(
+                        projectionRequested,
+                        currentPackage,
+                        currentDisplayGeneration,
+                        currentProjectionGeneration,
+                        currentOwnerToken,
+                        expectedPackage,
+                        expectedDisplayGeneration,
+                        expectedProjectionGeneration,
+                        expectedOwnerToken);
+    }
+
+    static boolean canRestoreIdleAfterFailedMove(
+            boolean projectionRequested,
+            boolean contentVisible,
+            String currentPackage,
+            int currentDisplayId,
+            int currentDisplayGeneration,
+            int currentProjectionGeneration,
+            long currentOwnerToken,
+            String expectedPackage,
+            int expectedDisplayId,
+            int expectedDisplayGeneration,
+            int expectedProjectionGeneration,
+            long expectedOwnerToken) {
+        return !contentVisible
+                && currentDisplayId == expectedDisplayId
+                && matchesOutputOwner(
+                        projectionRequested,
+                        currentPackage,
+                        currentDisplayGeneration,
+                        currentProjectionGeneration,
+                        currentOwnerToken,
+                        expectedPackage,
+                        expectedDisplayGeneration,
+                        expectedProjectionGeneration,
+                        expectedOwnerToken);
+    }
+
     static boolean canReleaseIdleForShutdown(
             boolean shutdownCurrent,
             boolean projectionRequested,

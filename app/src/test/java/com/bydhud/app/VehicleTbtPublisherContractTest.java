@@ -17,6 +17,30 @@ import java.util.Collections;
 
 public final class VehicleTbtPublisherContractTest {
     @Test
+    public void dashboardRequestsUseSharedLayoutQueueAndKeepLiveRouteFence() throws IOException {
+        String publisher = source("app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        String dispatch = publisher.substring(publisher.indexOf("private void dispatchDashboard("),
+                publisher.indexOf("private void sendStatus("));
+        assertTrue(dispatch.contains("NavAppDisplayController.get(context).requestAutomaticTbt("));
+        assertTrue(dispatch.contains("() -> isCurrentRoute(owner, generation, currentRouteToken)"));
+        assertTrue(dispatch.contains("if (completion != null) completion.run();"));
+        assertFalse(dispatch.contains("StockMapProtocol30011.dispatch("));
+        assertFalse(dispatch.contains("new Thread("));
+    }
+
+    @Test
+    public void normalReturnHasNoIndependentTbtReassertionPath() throws IOException {
+        String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
+        String publisher = source("app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
+        String controller = source("app/src/main/java/com/bydhud/app/NavAppDisplayController.java");
+        assertFalse(sender.contains("onDashboardReturnConfirmed"));
+        assertFalse(publisher.contains("reassertDashboardForCurrentRoute"));
+        assertFalse(controller.contains("requestTbtAfterReturnIfRequested"));
+        assertTrue(sender.contains("shouldRequestDashboardForDirectRouteForTest("));
+        assertTrue(publisher.contains("if (switchDashboard)"));
+    }
+
+    @Test
     public void publisherKeepsVerifiedProxyAndAmapPlanes() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/VehicleTbtPublisher.java");
         String proxy = source(

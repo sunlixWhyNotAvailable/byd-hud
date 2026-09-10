@@ -4102,40 +4102,6 @@ final class NavHudLiveSender {
         });
     }
 
-    //reasserts only the current Direct route after an explicit task return to display 0.
-    void onDashboardReturnConfirmed(String packageName, String reason) {
-        final String normalized = normalizePackage(packageName);
-        handler.post(() -> {
-            long directGeneration = directSessionGeneration(normalized);
-            boolean directRouteActive = WAZE_PACKAGE.equals(normalized)
-                    ? wazeDirectChannel.isActive() && wazeDirectNavigating
-                            && !wazeDirectRouteEnded && !wazeDirectRouteTerminalFence
-                            && wazeDirectChannel.sessionGeneration() == directGeneration
-                    : GMapsDirectChannel.PACKAGE_NAME.equals(normalized)
-                            && gmapsDirectChannel.isRunning()
-                            && gmapsDirectChannel.isNavigating()
-                            && !gmapsDirectRouteEnded
-                            && gmapsDirectChannel.sessionGeneration() == directGeneration;
-            boolean allowed = shouldReassertTbtAfterDashboardReturnForTest(
-                    HudPrefs.isSwitchToTbtOnHudStartEnabled(context),
-                    isHudOutputOwner(normalized),
-                    sourceSwitchInProgress || stopInProgress || runtimeReinitInProgress,
-                    directRouteActive,
-                    tbtPublisher.isRouteActive(),
-                    normalized, tbtPublisher.ownerPackage(),
-                    directGeneration, tbtPublisher.ownerGeneration());
-            if (!allowed) {
-                log("dashboard return TBT reassert skipped package=" + normalized
-                        + " directGeneration=" + directGeneration
-                        + " reason=" + safeReason(reason));
-                return;
-            }
-            tbtPublisher.reassertDashboardForCurrentRoute(
-                    normalized, directGeneration,
-                    "dashboard-return:" + safeReason(reason));
-        });
-    }
-
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     private void startOnMain(String packageName, String reason) {
         if (packageName.isEmpty() || !isRuntimeEnabled()
@@ -4374,17 +4340,6 @@ final class NavHudLiveSender {
     static boolean shouldRequestDashboardForDirectRouteForTest(
             boolean hudOwner, boolean switchDashboardEnabled) {
         return hudOwner && switchDashboardEnabled;
-    }
-
-    static boolean shouldReassertTbtAfterDashboardReturnForTest(
-            boolean preferenceEnabled, boolean hudOwner, boolean transitionInProgress,
-            boolean directRouteActive, boolean tbtRouteActive,
-            String returnedPackage, String tbtOwner,
-            long directGeneration, long tbtGeneration) {
-        return preferenceEnabled && hudOwner && !transitionInProgress
-                && directRouteActive && tbtRouteActive
-                && normalizePackage(returnedPackage).equals(normalizePackage(tbtOwner))
-                && directGeneration == tbtGeneration;
     }
 
     private long directSessionGeneration(String packageName) {
