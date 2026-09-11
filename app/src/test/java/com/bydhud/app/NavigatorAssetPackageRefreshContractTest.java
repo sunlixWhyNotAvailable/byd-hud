@@ -13,6 +13,38 @@ import java.nio.file.Paths;
 
 public final class NavigatorAssetPackageRefreshContractTest {
     @Test
+    public void existingInstallOrMissingReceiptCannotReleaseInstallerSource() {
+        assertFalse(NavigatorAssetManager.installIdentityChanged("same-copy", "same-copy"));
+        assertFalse(NavigatorAssetManager.installIdentityChanged("", "same-copy"));
+        assertFalse(NavigatorAssetManager.installIdentityChanged("same-copy", ""));
+        assertFalse(NavigatorAssetManager.installIdentityChanged("absent", ""));
+        assertFalse(NavigatorAssetManager.installIdentityChanged("old-version", "old-version"));
+        assertTrue(NavigatorAssetManager.installIdentityChanged("old-copy", "new-copy"));
+        assertTrue(NavigatorAssetManager.installIdentityChanged("absent", "new-copy"));
+    }
+
+    @Test
+    public void bothInstalledVerificationPathsGuardStagingCleanup() throws IOException {
+        String manager = source("NavigatorAssetManager.java");
+        String reconcile = between(manager, "private static void reconcileInstall(",
+                "private static boolean hasAuthoritativeRestoreReceipt(");
+        String verify = between(manager, "private static void verifyTargetInstalledAsync(",
+                "private static void verifyBackupInstalledAsync(");
+        assertTrue(reconcile.contains("if (installResultChanged(context, asset)) clearTransaction"));
+        assertTrue(verify.contains("if (installResultChanged(appContext, asset))"));
+        String pending = between(reconcile, "if (PHASE_INSTALL.equals(phase))",
+                "if (PHASE_RECOVERY.equals(phase))");
+        assertTrue(pending.contains("setState(context, asset, READY"));
+        assertFalse(pending.contains("PHASE_NONE"));
+        String install = between(manager, "static void install(", "String previousTransactionName");
+        assertTrue(install.indexOf("install_previous_identity") < install.indexOf("launchInstall"));
+        String stage = between(manager, "private static File stageForInstaller(",
+                "private static void launchInstall(");
+        assertTrue(stage.indexOf("asset.sha256.equals(sha256(staged))")
+                < stage.indexOf("copyFile(source, staged)"));
+    }
+
+    @Test
     public void mainProcessRegistersPackageChangesAndReceiverOnlyQueuesAsyncRefresh()
             throws IOException {
         String application = source("BydHudApplication.java");

@@ -415,18 +415,29 @@ final class NavigatorAssetManager {
         PackageInfo installed = installedInfo(context, asset.packageName);
         boolean destructive = installed != null && requiresDestructiveConfirmation(context, assetId);
         if (destructive && !destructiveApproved) throw new DestructiveConfirmationRequired();
-        File staged = stageForInstaller(context, asset, file);
-        if (!asset.sha256.equals(sha256(staged))) {
-            deleteFile(staged);
-            throw new IOException("Staged navigator asset SHA-256 mismatch");
-        }
-        if (!destructive) {
-            setState(context, asset, INSTALL_REQUESTED, "100%", "");
-            prefs(context).edit().putString(key(asset, "phase"), PHASE_INSTALL).commit();
-            launchInstall(context, staged);
-            AppEventLogger.event(context, "navigator_asset install_requested id=" + asset.id
-                    + " destructive=false");
-            return;
+        File staged;
+        synchronized (TRANSACTION_LOCK) {
+            if (!destructive) {
+                String before = installedInfo(context, asset.packageName) == null
+                        ? "absent" : installedIdentity(context, asset);
+                if (!prefs(context).edit().putString(
+                        key(asset, "install_previous_identity"), before).commit()) {
+                    throw new IOException("Cannot retain navigator install identity");
+                }
+            }
+            staged = stageForInstaller(context, asset, file);
+            if (!asset.sha256.equals(sha256(staged))) {
+                deleteFile(staged);
+                throw new IOException("Staged navigator asset SHA-256 mismatch");
+            }
+            if (!destructive) {
+                setState(context, asset, INSTALL_REQUESTED, "100%", "");
+                prefs(context).edit().putString(key(asset, "phase"), PHASE_INSTALL).commit();
+                launchInstall(context, staged);
+                AppEventLogger.event(context, "navigator_asset install_requested id=" + asset.id
+                        + " destructive=false");
+                return;
+            }
         }
 
         String previousTransactionName = string(context, asset, "transaction", "");
@@ -621,8 +632,10 @@ final class NavigatorAssetManager {
                 && installedMetadataMatches(context, asset, installed)) {
             Boolean cachedMatch = cachedInstalledMatch(context, asset, installed);
             if (Boolean.TRUE.equals(cachedMatch)) {
-                setState(context, asset, INSTALLED, "100%", "");
-                clearTransaction(context, asset);
+                synchronized (TRANSACTION_LOCK) {
+                    setState(context, asset, INSTALLED, "100%", "");
+                    if (installResultChanged(context, asset)) clearTransaction(context, asset);
+                }
                 return;
             }
             if (cachedMatch == null) {
@@ -676,7 +689,7 @@ final class NavigatorAssetManager {
                 return;
             }
             setState(context, asset, READY, "100%", "");
-            prefs(context).edit().putString(key(asset, "phase"), PHASE_NONE).commit();
+            // Cancellation leaves Install usable, but keep the receipt for a later package update.
             return;
         }
         if (PHASE_RECOVERY.equals(phase)) {
@@ -1066,7 +1079,9 @@ final class NavigatorAssetManager {
                                 .commit();
                         if (verified) {
                             setState(appContext, asset, INSTALLED, "100%", "");
-                            clearTransaction(appContext, asset);
+                            if (installResultChanged(appContext, asset)) {
+                                clearTransaction(appContext, asset);
+                            }
                         } else {
                             boolean destructive = !string(
                                     appContext, asset, "backup_signer", "").isEmpty();
@@ -1329,12 +1344,14 @@ final class NavigatorAssetManager {
     }
 
     private static File stageForInstaller(Context context, Asset asset, File source)
-            throws IOException {
+            throws Exception {
         File directory = new File(context.getFilesDir(), "updates");
         if (!directory.exists() && !directory.mkdirs()) {
             throw new IOException("Cannot create installer staging directory");
         }
         File staged = new File(directory, asset.fileName);
+        // A previous installer may still hold this URI: do not truncate identical bytes.
+        if (staged.isFile() && asset.sha256.equals(sha256(staged))) return staged;
         copyFile(source, staged);
         return staged;
     }
@@ -1615,6 +1632,23 @@ final class NavigatorAssetManager {
         clearLocalTransaction(context, asset, true);
     }
 
+    private static boolean installResultChanged(Context context, Asset asset) {
+        if (!PHASE_INSTALL.equals(string(context, asset, "phase", PHASE_NONE))) return true;
+        // Destructive replacement already requires removal of the original package.
+        if (!string(context, asset, "backup_signer", "").isEmpty()) return true;
+        try {
+            return installIdentityChanged(string(context, asset, "install_previous_identity", ""),
+                    installedIdentity(context, asset));
+        } catch (Exception unavailable) {
+            return false;
+        }
+    }
+
+    static boolean installIdentityChanged(String before, String current) {
+        return before != null && !before.isEmpty() && current != null
+                && !current.isEmpty() && !before.equals(current);
+    }
+
     private static void clearLocalTransaction(
             Context context, Asset asset, boolean deleteBackup) {
         synchronized (TRANSACTION_LOCK) {
@@ -1630,6 +1664,7 @@ final class NavigatorAssetManager {
                     .remove(key(asset, "backup_signer"))
                     .remove(key(asset, "backup_fingerprint"))
                     .remove(key(asset, "uninstall_requested_ms"))
+                    .remove(key(asset, "install_previous_identity"))
                     .remove(key(asset, "restore_verified_transaction"))
                     .remove(key(asset, "restore_verified_fingerprint"))
                     .putString(key(asset, "phase"), PHASE_NONE)
