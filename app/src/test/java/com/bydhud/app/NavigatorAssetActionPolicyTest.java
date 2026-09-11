@@ -31,13 +31,25 @@ public final class NavigatorAssetActionPolicyTest {
     public void retainedApkControlsInstallVersusDownloadForIdleStates() {
         for (String stale : new String[]{
                 NavigatorAssetManager.NOT_DOWNLOADED,
-                NavigatorAssetManager.READY,
-                NavigatorAssetManager.ERROR}) {
+                NavigatorAssetManager.READY}) {
             assertEquals(NavigatorAssetManager.READY,
                     NavigatorAssetManager.resolvedSnapshotStateForTest(false, true, stale));
             assertEquals(NavigatorAssetManager.NOT_DOWNLOADED,
                     NavigatorAssetManager.resolvedSnapshotStateForTest(false, false, stale));
         }
+    }
+
+    @Test
+    public void actualFailureRemainsVisibleUntilRetryWhileInstalledStillWins() {
+        assertEquals(NavigatorAssetManager.ERROR,
+                NavigatorAssetManager.resolvedSnapshotStateForTest(
+                        false, false, NavigatorAssetManager.ERROR));
+        assertEquals(NavigatorAssetManager.ERROR,
+                NavigatorAssetManager.resolvedSnapshotStateForTest(
+                        false, true, NavigatorAssetManager.ERROR));
+        assertEquals(NavigatorAssetManager.INSTALLED,
+                NavigatorAssetManager.resolvedSnapshotStateForTest(
+                        true, false, NavigatorAssetManager.ERROR));
     }
 
     @Test

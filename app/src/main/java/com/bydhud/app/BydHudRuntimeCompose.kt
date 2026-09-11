@@ -62,6 +62,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.MutableState
@@ -131,6 +132,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.ui.input.pointer.pointerInteropFilter
 import androidx.compose.ui.platform.LocalViewConfiguration
+import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.toArgb
@@ -357,6 +359,9 @@ private data class Copy(
     val navigatorAssetDownload: String,
     val navigatorAssetInstall: String,
     val navigatorAssetInstalled: String,
+    val navigatorAssetStock: String,
+    val navigatorAssetPatched: String,
+    val navigatorAssetError: String,
     val navigatorAssetRetry: String,
     val navigatorAssetRestore: String,
     val navigatorAssetInstalling: String,
@@ -365,6 +370,15 @@ private data class Copy(
     val navigatorAssetConfirmText: String,
     val navigatorAssetConfirmOk: String,
     val navigatorAssetConfirmCancel: String,
+    val navigatorAssetErrorTitle: String,
+    val navigatorAssetErrorNavigator: String,
+    val navigatorAssetErrorVersion: String,
+    val navigatorAssetErrorNetwork: String,
+    val navigatorAssetErrorStorage: String,
+    val navigatorAssetErrorMissingFile: String,
+    val navigatorAssetErrorInvalidApk: String,
+    val navigatorAssetErrorIntegrity: String,
+    val navigatorAssetErrorSystem: String,
     val wazeFeatures: String,
     val customSurface: String,
     val customSurfaceHint: String,
@@ -823,6 +837,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var patchSourceError by rememberSaveable { mutableStateOf("") }
     var patchActionPendingProfiles by remember { mutableStateOf(emptySet<String>()) }
     var pendingNavigatorAssetId by rememberSaveable { mutableStateOf("") }
+    var navigatorAssetErrorId by rememberSaveable { mutableStateOf("") }
     var navigatorAssetActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
     val updateScope = rememberCoroutineScope()
@@ -841,7 +856,8 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
         configurationShareVisible -> "configuration-share"
-        pendingNavigatorAssetId.isNotEmpty() || navigatorAssetActionPending -> "navigator-asset"
+        pendingNavigatorAssetId.isNotEmpty() || navigatorAssetErrorId.isNotEmpty()
+            || navigatorAssetActionPending -> "navigator-asset"
         pendingPatchFileConfirmProfile.isNotEmpty() || patchSourceError.isNotEmpty()
             || pendingPatchProfile.isNotEmpty() -> "patch"
         else -> ""
@@ -1301,7 +1317,8 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         runAction = ::runAction,
                         onDownloadAsset = ::startNavigatorAssetDownload,
                         onInstallAsset = ::installNavigatorAsset,
-                        onRestoreAsset = ::restoreNavigatorAsset
+                        onRestoreAsset = ::restoreNavigatorAsset,
+                        onShowAssetError = { navigatorAssetErrorId = it }
                     )
                     RuntimeTab.Storage -> StorageTab(
                         copy = copy,
@@ -1556,6 +1573,18 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         }
                     },
                     onDismiss = { pendingNavigatorAssetId = "" }
+                )
+            }
+        }
+
+        if (navigatorAssetErrorId.isNotEmpty()) {
+            val asset = snapshot.navigatorAssets.firstOrNull { it.id == navigatorAssetErrorId }
+            if (asset != null) {
+                NavigatorAssetErrorOverlay(
+                    copy = copy,
+                    palette = palette,
+                    asset = asset,
+                    onClose = { navigatorAssetErrorId = "" }
                 )
             }
         }
@@ -4527,42 +4556,44 @@ private fun NavigatorAssetList(
     assets: List<NavigatorAssetManager.AssetSnapshot>,
     onDownload: (String) -> Unit,
     onInstall: (String) -> Unit,
-    onRestore: (String) -> Unit
+    onRestore: (String) -> Unit,
+    onShowError: (String) -> Unit
 ) {
     Section("${copy.notice}: ${copy.navigatorAssetsNotice}", palette) {
         Row(
             modifier = Modifier.fillMaxWidth().height(IntrinsicSize.Min).padding(14.dp),
             horizontalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            NavigatorAssetColumn(
+            NavigatorVersionSection(
                 title = "Waze",
                 assets = assets.filter { it.packageName == "com.waze" },
                 copy = copy,
                 palette = palette,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).fillMaxHeight(),
                 onDownload = onDownload,
                 onInstall = onInstall,
-                onRestore = onRestore
+                onRestore = onRestore,
+                onShowError = onShowError
             )
-            Box(Modifier.width(1.dp).fillMaxHeight().background(palette.border))
-            NavigatorAssetColumn(
-                title = "Google Maps ReVanced",
+            NavigatorVersionSection(
+                title = "Google Maps\nReVanced",
                 assets = assets.filter {
                     it.packageName == "app.revanced.android.apps.maps"
                 },
                 copy = copy,
                 palette = palette,
-                modifier = Modifier.weight(1f),
+                modifier = Modifier.weight(1f).fillMaxHeight(),
                 onDownload = onDownload,
                 onInstall = onInstall,
-                onRestore = onRestore
+                onRestore = onRestore,
+                onShowError = onShowError
             )
         }
     }
 }
 
 @Composable
-private fun NavigatorAssetColumn(
+private fun NavigatorVersionSection(
     title: String,
     assets: List<NavigatorAssetManager.AssetSnapshot>,
     copy: Copy,
@@ -4570,30 +4601,56 @@ private fun NavigatorAssetColumn(
     modifier: Modifier,
     onDownload: (String) -> Unit,
     onInstall: (String) -> Unit,
-    onRestore: (String) -> Unit
+    onRestore: (String) -> Unit,
+    onShowError: (String) -> Unit
 ) {
-    Column(modifier = modifier) {
-        Text(title, color = palette.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(2.dp))
-        assets.forEach { asset ->
-            val rawVariant = asset.label.removePrefix("$title ").removePrefix("Waze ").trim()
-            val variant = if (copy.language == Language.Ru) when (rawVariant) {
-                "original version" -> "оригинальная версия"
-                "patched version" -> "патченная версия"
-                else -> rawVariant
-            } else rawVariant
-            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                    if (variant.isEmpty() || variant == title) asset.versionName
-                    else "$variant ${asset.versionName}",
-                color = palette.muted,
-                    fontSize = 13.sp,
-                    lineHeight = 18.sp,
-                    modifier = Modifier.weight(1f),
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-                NavigatorAssetAction(copy, palette, asset, onDownload, onInstall, onRestore)
+    Row(
+        modifier = modifier
+            .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))
+            .padding(horizontal = 10.dp, vertical = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        Text(
+            text = title,
+            color = palette.text,
+            fontSize = 15.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            modifier = Modifier.width(116.dp)
+        )
+        Column(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            assets.forEach { asset ->
+                val variant = if (asset.id.contains("-stock-")) {
+                    copy.navigatorAssetStock
+                } else {
+                    copy.navigatorAssetPatched
+                }
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(28.dp)
+                        .border(1.dp, palette.border, RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text(
+                        text = variant + " " + asset.versionName,
+                        color = palette.muted,
+                        fontSize = 13.sp,
+                        lineHeight = 18.sp,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    NavigatorAssetAction(
+                        copy, palette, asset, onDownload, onInstall, onRestore, onShowError
+                    )
+                }
             }
         }
     }
@@ -4606,7 +4663,8 @@ private fun NavigatorAssetAction(
     asset: NavigatorAssetManager.AssetSnapshot,
     onDownload: (String) -> Unit,
     onInstall: (String) -> Unit,
-    onRestore: (String) -> Unit
+    onRestore: (String) -> Unit,
+    onShowError: (String) -> Unit
 ) {
     val label = when (asset.state) {
         NavigatorAssetManager.DOWNLOADING -> asset.progress
@@ -4629,37 +4687,93 @@ private fun NavigatorAssetAction(
     } else {
         pressBackground(Color.Transparent, palette, press.pressed)
     }
-    Text(
-        text = label,
-        color = when {
-            asset.state == NavigatorAssetManager.RECOVERY_REQUIRED -> palette.red
-            enabled -> palette.accent
-            else -> palette.muted
-        },
-        fontSize = 13.sp,
-        fontWeight = FontWeight.SemiBold,
-        modifier = Modifier
-            .clip(RoundedCornerShape(4.dp))
-            .background(renderedBackground)
-            .then(press.modifier)
-            .clickable(
-                enabled = enabled,
-                interactionSource = press.interactionSource,
-                indication = null
-            ) {
-                when (asset.state) {
-                    NavigatorAssetManager.READY -> onInstall(asset.id)
-                    NavigatorAssetManager.INSTALLED -> if (asset.downloadReady) {
-                        onInstall(asset.id)
-                    } else {
-                        onDownload(asset.id)
-                    }
-                    NavigatorAssetManager.RECOVERY_REQUIRED -> onRestore(asset.id)
-                    else -> onDownload(asset.id)
-                }
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        if (asset.state == NavigatorAssetManager.ERROR) {
+            NavigatorAssetTextAction(
+                text = copy.navigatorAssetError,
+                color = palette.red,
+                palette = palette,
+                onClick = { onShowError(asset.id) }
+            )
+        }
+        val viewConfiguration = LocalViewConfiguration.current
+        val compactViewConfiguration = remember(viewConfiguration) {
+            object : ViewConfiguration by viewConfiguration {
+                override val minimumTouchTargetSize = DpSize(48.dp, 28.dp)
             }
-            .padding(horizontal = 8.dp, vertical = 6.dp)
-    )
+        }
+        CompositionLocalProvider(LocalViewConfiguration provides compactViewConfiguration) {
+            Text(
+                text = label,
+                color = when {
+                    asset.state == NavigatorAssetManager.RECOVERY_REQUIRED -> palette.red
+                    enabled -> palette.accent
+                    else -> palette.muted
+                },
+                fontSize = 13.sp,
+                lineHeight = 18.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(renderedBackground)
+                    .then(press.modifier)
+                    .clickable(
+                        enabled = enabled,
+                        interactionSource = press.interactionSource,
+                        indication = null
+                    ) {
+                        when (asset.state) {
+                            NavigatorAssetManager.READY -> onInstall(asset.id)
+                            NavigatorAssetManager.INSTALLED -> if (asset.downloadReady) {
+                                onInstall(asset.id)
+                            } else {
+                                onDownload(asset.id)
+                            }
+                            NavigatorAssetManager.RECOVERY_REQUIRED -> onRestore(asset.id)
+                            else -> onDownload(asset.id)
+                        }
+                    }
+                    .padding(horizontal = 8.dp, vertical = 4.dp)
+            )
+        }
+    }
+}
+
+@Composable
+private fun NavigatorAssetTextAction(
+    text: String,
+    color: Color,
+    palette: Palette,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback(true, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
+    val viewConfiguration = LocalViewConfiguration.current
+    val compactViewConfiguration = remember(viewConfiguration) {
+        object : ViewConfiguration by viewConfiguration {
+            override val minimumTouchTargetSize = DpSize(48.dp, 28.dp)
+        }
+    }
+    CompositionLocalProvider(LocalViewConfiguration provides compactViewConfiguration) {
+        Text(
+            text = text,
+            color = color,
+            fontSize = 13.sp,
+            lineHeight = 18.sp,
+            fontWeight = FontWeight.SemiBold,
+            maxLines = 1,
+            modifier = Modifier
+                .clip(RoundedCornerShape(4.dp))
+                .background(pressBackground(Color.Transparent, palette, press.pressed))
+                .then(press.modifier)
+                .clickable(
+                    interactionSource = press.interactionSource,
+                    indication = null,
+                    onClick = onClick
+                )
+                .padding(horizontal = 8.dp, vertical = 4.dp)
+        )
+    }
 }
 
 @Composable
@@ -4673,7 +4787,8 @@ private fun AppsTab(
     runAction: (() -> Unit) -> Unit,
     onDownloadAsset: (String) -> Unit,
     onInstallAsset: (String) -> Unit,
-    onRestoreAsset: (String) -> Unit
+    onRestoreAsset: (String) -> Unit,
+    onShowAssetError: (String) -> Unit
 ) {
     val scanningLabel = copy.language.choose("Сканування", "Scanning", "Сканирование")
     val scanFailedLabel = copy.language.choose("Помилка сканування", "Scan failed", "Ошибка сканирования")
@@ -4706,7 +4821,8 @@ private fun AppsTab(
                 assets = snapshot.navigatorAssets,
                 onDownload = onDownloadAsset,
                 onInstall = onInstallAsset,
-                onRestore = onRestoreAsset
+                onRestore = onRestoreAsset,
+                onShowError = onShowAssetError
             )
         }
 
@@ -5714,6 +5830,85 @@ private fun NavigatorAssetConfirmOverlay(
                     palette,
                     primary = true,
                     onClick = onConfirm
+                )
+            }
+        }
+    }
+}
+
+private fun navigatorAssetErrorReason(copy: Copy, category: String): String = when (category) {
+    NavigatorAssetManager.ERROR_NETWORK -> copy.navigatorAssetErrorNetwork
+    NavigatorAssetManager.ERROR_STORAGE -> copy.navigatorAssetErrorStorage
+    NavigatorAssetManager.ERROR_MISSING_OPERATION -> copy.navigatorAssetErrorMissingFile
+    NavigatorAssetManager.ERROR_INVALID_APK -> copy.navigatorAssetErrorInvalidApk
+    NavigatorAssetManager.ERROR_INTEGRITY -> copy.navigatorAssetErrorIntegrity
+    else -> copy.navigatorAssetErrorSystem
+}
+
+@Composable
+private fun NavigatorAssetErrorOverlay(
+    copy: Copy,
+    palette: Palette,
+    asset: NavigatorAssetManager.AssetSnapshot,
+    onClose: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = if (palette.dark) 0.48f else 0.32f)),
+        contentAlignment = Alignment.Center
+    ) {
+        ModalInputBlocker()
+        Column(
+            modifier = Modifier
+                .width(560.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .background(palette.surface)
+                .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp)
+        ) {
+            Text(
+                copy.navigatorAssetErrorTitle,
+                color = palette.text,
+                fontSize = 22.sp,
+                fontWeight = FontWeight.Bold
+            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.field)
+                    .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+                    .padding(14.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Text(
+                    "${copy.navigatorAssetErrorNavigator}: ${asset.label}",
+                    color = palette.text,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+                Text(
+                    "${copy.navigatorAssetErrorVersion}: ${asset.versionName}",
+                    color = palette.text,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+                Text(
+                    navigatorAssetErrorReason(copy, asset.errorCategory),
+                    color = palette.red,
+                    fontSize = 15.sp,
+                    lineHeight = 21.sp
+                )
+            }
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                HudButton(
+                    copy.updateClose,
+                    palette,
+                    primary = true,
+                    width = 138.dp,
+                    onClick = onClose
                 )
             }
         }
@@ -8706,6 +8901,9 @@ private fun enCopy() = Copy(
     navigatorAssetDownload = "Download",
     navigatorAssetInstall = "Install",
     navigatorAssetInstalled = "Installed",
+    navigatorAssetStock = "Stock",
+    navigatorAssetPatched = "Patched",
+    navigatorAssetError = "Error",
     navigatorAssetRetry = "Retry",
     navigatorAssetRestore = "Restore",
     navigatorAssetInstalling = "Installing...",
@@ -8714,6 +8912,15 @@ private fun enCopy() = Copy(
     navigatorAssetConfirmText = "The installed navigator will be removed before this APK is installed. Its local data may be lost. The previous APK-set is staged for recovery.",
     navigatorAssetConfirmOk = "Replace",
     navigatorAssetConfirmCancel = "Cancel",
+    navigatorAssetErrorTitle = "Download error",
+    navigatorAssetErrorNavigator = "Navigator",
+    navigatorAssetErrorVersion = "Version",
+    navigatorAssetErrorNetwork = "The network or download server is unavailable. Try again.",
+    navigatorAssetErrorStorage = "The download cannot access enough device storage.",
+    navigatorAssetErrorMissingFile = "The downloaded file could not be found.",
+    navigatorAssetErrorInvalidApk = "The downloaded file is not a valid supported APK.",
+    navigatorAssetErrorIntegrity = "The APK failed its integrity or identity check.",
+    navigatorAssetErrorSystem = "Android could not complete the download. Try again.",
     wazeFeatures = "Waze features",
     customSurface = "Start with custom surface",
     customSurfaceHint = "Open Waze's navigation surface only after a route starts. Use ordinary Waze for search and route setup.",
@@ -8933,6 +9140,9 @@ private fun uaCopy() = enCopy().copy(
     navigatorAssetDownload = "Скачати",
     navigatorAssetInstall = "Встановити",
     navigatorAssetInstalled = "Встановлено",
+    navigatorAssetStock = "Стокова",
+    navigatorAssetPatched = "Патчена",
+    navigatorAssetError = "Помилка",
     navigatorAssetRetry = "Повторити",
     navigatorAssetRestore = "Відновити",
     navigatorAssetInstalling = "Встановлення...",
@@ -8941,6 +9151,15 @@ private fun uaCopy() = enCopy().copy(
     navigatorAssetConfirmText = "Перед встановленням цього APK установлений навігатор буде видалено. Його локальні дані може бути втрачено. Попередній APK-set збережено для відновлення.",
     navigatorAssetConfirmOk = "Замінити",
     navigatorAssetConfirmCancel = "Скасувати",
+    navigatorAssetErrorTitle = "Помилка завантаження",
+    navigatorAssetErrorNavigator = "Навігатор",
+    navigatorAssetErrorVersion = "Версія",
+    navigatorAssetErrorNetwork = "Мережа або сервер завантаження недоступні. Спробуйте ще раз.",
+    navigatorAssetErrorStorage = "Для завантаження немає доступу до достатнього обсягу пам’яті пристрою.",
+    navigatorAssetErrorMissingFile = "Завантажений файл не знайдено.",
+    navigatorAssetErrorInvalidApk = "Завантажений файл не є дійсним підтримуваним APK.",
+    navigatorAssetErrorIntegrity = "APK не пройшов перевірку цілісності або ідентичності.",
+    navigatorAssetErrorSystem = "Android не вдалося завершити завантаження. Спробуйте ще раз.",
     wazeFeatures = "Функції Waze",
     customSurface = "Запускати з власним surface",
     customSurfaceHint = "Відкривати навігаційний surface Waze лише після початку маршруту. Для пошуку та побудови маршруту використовуйте звичайний Waze.",
@@ -9168,6 +9387,9 @@ private fun ruCopy() = enCopy().copy(
     navigatorAssetDownload = "Скачать",
     navigatorAssetInstall = "Установить",
     navigatorAssetInstalled = "Установлено",
+    navigatorAssetStock = "Оригинальная",
+    navigatorAssetPatched = "С патчем",
+    navigatorAssetError = "Ошибка",
     navigatorAssetRetry = "Повторить",
     navigatorAssetRestore = "Восстановить",
     navigatorAssetInstalling = "Установка...",
@@ -9176,6 +9398,15 @@ private fun ruCopy() = enCopy().copy(
     navigatorAssetConfirmText = "Перед установкой этого APK установленный навигатор будет удалён. Его локальные данные могут быть потеряны. Предыдущий APK-set сохранён для восстановления.",
     navigatorAssetConfirmOk = "Заменить",
     navigatorAssetConfirmCancel = "Отмена",
+    navigatorAssetErrorTitle = "Ошибка скачивания",
+    navigatorAssetErrorNavigator = "Навигатор",
+    navigatorAssetErrorVersion = "Версия",
+    navigatorAssetErrorNetwork = "Сеть или сервер скачивания недоступны. Попробуйте ещё раз.",
+    navigatorAssetErrorStorage = "Для скачивания нет доступа к достаточному объёму памяти устройства.",
+    navigatorAssetErrorMissingFile = "Скачанный файл не найден.",
+    navigatorAssetErrorInvalidApk = "Скачанный файл не является допустимым поддерживаемым APK.",
+    navigatorAssetErrorIntegrity = "APK не прошёл проверку целостности или идентичности.",
+    navigatorAssetErrorSystem = "Android не удалось завершить скачивание. Попробуйте ещё раз.",
     wazeFeatures = "Возможности Waze",
     customSurface = "Запускать с собственным surface",
     customSurfaceHint = "Открывать навигационный surface Waze только после начала маршрута. Для поиска и построения маршрута используйте обычный Waze.",

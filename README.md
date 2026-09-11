@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.2.1
+- **Version:** v3.2.2
 - **Interface languages:** Ukrainian, English and Russian; update notes follow the selected language, with English as the fallback for missing translations.
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
@@ -81,7 +81,7 @@ The patcher verifies that the selected package is intact and structurally compat
 
 The `Apps` tab is the normal starting screen after initial setup.
 
-The notice at the top lists the supported navigator builds. Each `Download` action retrieves the offered build from the project release, shows progress, and checks the file's integrity and compatibility. `Install` opens the Android installer. `Installed` stays active: it can reinstall a retained APK, or download it first for installation on the next press. After removing the navigator, the action becomes `Install` if its validated APK remains, otherwise `Download`. A compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot safely update the installed app.
+The notice at the top groups supported builds into compact navigator sections, with a separate bordered row for each version. Each `Download` action retrieves the offered build from the project release, shows progress, and checks the completed file's integrity and compatibility. A failed operation shows `Error`, which opens its reason, and `Retry` in the same row. Waiting for connectivity keeps the download active. `Install` opens the Android installer. `Installed` stays active: it can reinstall a retained APK, or download it first for installation on the next press. After removing the navigator, the action becomes `Install` if its validated APK remains, otherwise `Download`. A compatible installation is updated normally; uninstall is requested only after explicit confirmation when Android cannot safely update the installed app.
 
 1. Find Google Maps or Waze under `Supported navigation apps`.
 2. Enable `HUD` before or after launching the navigator.

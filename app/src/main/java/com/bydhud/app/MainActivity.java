@@ -98,6 +98,7 @@ public final class MainActivity extends ComponentActivity {
             new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
+    private static final AtomicBoolean ASSET_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicLong UI_STATE_REVISION = new AtomicLong();
     private static final Object PATCH_REFRESH_GATE_LOCK = new Object();
@@ -2083,11 +2084,14 @@ public final class MainActivity extends ComponentActivity {
                         + " error=" + e.getClass().getSimpleName());
             } finally {
                 try {
-                    PATCH_REFRESH_IN_PROGRESS.set(false);
+                    synchronized (PATCH_REFRESH_GATE_LOCK) {
+                        PATCH_REFRESH_IN_PROGRESS.set(false);
+                    }
                     publishSharedUiStateChange();
                     if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
                         requestPatchUiStateRefresh(appContext, true, "pending-force");
                     }
+                    drainNavigatorAssetCompletionRefresh(appContext);
                 } finally {
                     restoreCurrentThreadPriority(previousPriority);
                 }
@@ -2096,15 +2100,31 @@ public final class MainActivity extends ComponentActivity {
     }
 
     static void requestNavigatorAssetUiStateRefresh(Context context, String reason) {
+        requestNavigatorAssetUiStateRefresh(context, reason, false);
+    }
+
+    static void requestNavigatorAssetCompletionRefresh(Context context) {
+        requestNavigatorAssetUiStateRefresh(context, "asset-completion", true);
+    }
+
+    private static void drainNavigatorAssetCompletionRefresh(Context context) {
+        if (ASSET_FORCE_REFRESH_PENDING.getAndSet(false)) {
+            requestNavigatorAssetCompletionRefresh(context);
+        }
+    }
+
+    private static void requestNavigatorAssetUiStateRefresh(
+            Context context, String reason, boolean force) {
         Context appContext = context.getApplicationContext();
         long now = SystemClock.elapsedRealtime();
-        if (lastAssetUiRefreshAtMs > 0L
+        if (!force && lastAssetUiRefreshAtMs > 0L
                 && now - lastAssetUiRefreshAtMs < ASSET_UI_REFRESH_INTERVAL_MS) {
             return;
         }
         synchronized (PATCH_REFRESH_GATE_LOCK) {
             if (PATCH_REFRESH_IN_PROGRESS.get()
                     || !ASSET_REFRESH_IN_PROGRESS.compareAndSet(false, true)) {
+                if (force) ASSET_FORCE_REFRESH_PENDING.set(true);
                 return;
             }
             lastAssetUiRefreshAtMs = now;
@@ -2125,10 +2145,13 @@ public final class MainActivity extends ComponentActivity {
                         + " error=" + e.getClass().getSimpleName());
             } finally {
                 try {
-                    ASSET_REFRESH_IN_PROGRESS.set(false);
+                    synchronized (PATCH_REFRESH_GATE_LOCK) {
+                        ASSET_REFRESH_IN_PROGRESS.set(false);
+                    }
                     if (PATCH_FORCE_REFRESH_PENDING.getAndSet(false)) {
                         requestPatchUiStateRefresh(appContext, true, "pending-force");
                     }
+                    drainNavigatorAssetCompletionRefresh(appContext);
                 } finally {
                     restoreCurrentThreadPriority(previousPriority);
                 }

@@ -222,18 +222,94 @@ public final class ProductionUiPortSourceContractTest {
         assertTrue(action.contains("enabled = enabled"));
         assertTrue(action.contains("interactionSource = press.interactionSource"));
         assertTrue(action.contains("indication = null"));
-        assertTrue(action.contains(".padding(horizontal = 8.dp, vertical = 6.dp)"));
+        assertTrue(action.contains(".padding(horizontal = 8.dp, vertical = 4.dp)"));
+        assertTrue(action.contains("minimumTouchTargetSize = DpSize(48.dp, 28.dp)"));
         assertTrue(action.contains("onInstall(asset.id)"));
         assertTrue(action.contains("onRestore(asset.id)"));
         assertTrue(action.contains("onDownload(asset.id)"));
         assertFalse(action.contains("delay("));
         assertFalse(action.contains("scope.launch"));
 
-        String parent = between(compose, "private fun NavigatorAssetColumn(",
+        String parent = between(compose, "private fun NavigatorVersionSection(",
                 "private fun NavigatorAssetAction(");
         assertFalse(parent.contains("rememberPressFeedback"));
         assertFalse(parent.contains(".clickable("));
         assertFalse(parent.contains("VISUAL_PRESS_HOLD_MS"));
+    }
+
+    @Test
+    public void navigatorAssetsUseApprovedCompactSectionsAndLocalizedErrorModal() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String list = between(compose, "private fun NavigatorAssetList(",
+                "private fun NavigatorVersionSection(");
+        assertTrue(list.contains(".height(IntrinsicSize.Min)"));
+        assertTrue(list.contains("horizontalArrangement = Arrangement.spacedBy(14.dp)"));
+        assertTrue(list.contains("title = \"Google Maps\\nReVanced\""));
+        assertEquals(2, count(list, "Modifier.weight(1f).fillMaxHeight()"));
+        assertFalse(list.contains("Box(Modifier.width(1.dp)"));
+
+        String section = between(compose, "private fun NavigatorVersionSection(",
+                "private fun NavigatorAssetAction(");
+        assertTrue(section.contains(".border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))"));
+        assertTrue(section.contains(".padding(horizontal = 10.dp, vertical = 4.dp)"));
+        assertTrue(section.contains("modifier = Modifier.width(116.dp)"));
+        assertTrue(section.contains("verticalArrangement = Arrangement.spacedBy(4.dp)"));
+        assertTrue(section.contains(".height(28.dp)"));
+        assertTrue(section.contains(".border(1.dp, palette.border, RoundedCornerShape(4.dp))"));
+        assertTrue(section.contains("if (asset.id.contains(\"-stock-\"))"));
+        assertTrue(section.contains("copy.navigatorAssetStock"));
+        assertTrue(section.contains("copy.navigatorAssetPatched"));
+        assertTrue(section.contains("text = variant + \" \" + asset.versionName"));
+
+        String action = between(compose, "private fun NavigatorAssetAction(",
+                "private fun NavigatorAssetTextAction(");
+        assertTrue(action.contains("text = copy.navigatorAssetError"));
+        assertTrue(action.contains("color = palette.red"));
+        assertTrue(action.contains("onClick = { onShowError(asset.id) }"));
+        assertTrue(action.contains("NavigatorAssetManager.ERROR -> copy.navigatorAssetRetry"));
+        assertTrue(action.contains("else -> onDownload(asset.id)"));
+
+        String reason = between(compose, "private fun navigatorAssetErrorReason(",
+                "@Composable");
+        for (String category : new String[] {"ERROR_NETWORK", "ERROR_STORAGE",
+                "ERROR_MISSING_OPERATION", "ERROR_INVALID_APK", "ERROR_INTEGRITY"}) {
+            assertTrue(category, reason.contains("NavigatorAssetManager." + category));
+        }
+        assertTrue(reason.contains("else -> copy.navigatorAssetErrorSystem"));
+
+        String overlay = between(compose, "private fun NavigatorAssetErrorOverlay(",
+                "@Composable");
+        assertTrue(overlay.contains("asset.label"));
+        assertTrue(overlay.contains("asset.versionName"));
+        assertTrue(overlay.contains("navigatorAssetErrorReason(copy, asset.errorCategory)"));
+        assertTrue(overlay.contains("copy.updateClose"));
+        assertFalse(overlay.contains("asset.errorDetail"));
+        assertFalse(overlay.contains("asset.error)"));
+
+        for (String factory : new String[] {"enCopy", "uaCopy", "ruCopy"}) {
+            String copy = between(compose, "private fun " + factory + "()", factory.equals("ruCopy")
+                    ? "private fun shareCopy(" : factory.equals("enCopy") ? "private fun uaCopy()"
+                    : "private fun ruCopy()");
+            assertTrue(factory, copy.contains("navigatorAssetErrorTitle = "));
+            assertTrue(factory, copy.contains("navigatorAssetErrorNetwork = "));
+            assertTrue(factory, copy.contains("navigatorAssetErrorStorage = "));
+            assertTrue(factory, copy.contains("navigatorAssetErrorMissingFile = "));
+            assertTrue(factory, copy.contains("navigatorAssetErrorInvalidApk = "));
+            assertTrue(factory, copy.contains("navigatorAssetErrorIntegrity = "));
+            assertTrue(factory, copy.contains("navigatorAssetErrorSystem = "));
+        }
+        assertTrue(between(compose, "private fun enCopy()", "private fun uaCopy()")
+                .contains("navigatorAssetStock = \"Stock\""));
+        assertTrue(between(compose, "private fun enCopy()", "private fun uaCopy()")
+                .contains("navigatorAssetPatched = \"Patched\""));
+        assertTrue(between(compose, "private fun uaCopy()", "private fun ruCopy()")
+                .contains("navigatorAssetStock = \"Стокова\""));
+        assertTrue(between(compose, "private fun uaCopy()", "private fun ruCopy()")
+                .contains("navigatorAssetPatched = \"Патчена\""));
+        assertTrue(between(compose, "private fun ruCopy()", "private fun shareCopy(")
+                .contains("navigatorAssetStock = \"Оригинальная\""));
+        assertTrue(between(compose, "private fun ruCopy()", "private fun shareCopy(")
+                .contains("navigatorAssetPatched = \"С патчем\""));
     }
 
     private static String source(String name) throws Exception {
@@ -251,5 +327,12 @@ public final class ProductionUiPortSourceContractTest {
         int to = source.indexOf(end, from + start.length());
         if (from < 0 || to <= from) throw new AssertionError("missing source section: " + start);
         return source.substring(from, to);
+    }
+
+    private static int count(String source, String needle) {
+        int count = 0;
+        for (int index = 0; (index = source.indexOf(needle, index)) >= 0;
+                index += needle.length()) count++;
+        return count;
     }
 }

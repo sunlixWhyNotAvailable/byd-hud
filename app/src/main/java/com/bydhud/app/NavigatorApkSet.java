@@ -10,6 +10,7 @@ import com.android.apksig.ApkVerifier;
 import com.android.apksig.internal.apk.AndroidBinXmlParser;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -41,6 +42,22 @@ final class NavigatorApkSet {
     private static final long MAX_TOTAL_DEX_BYTES = 256L * 1024L * 1024L;
     private static final int MAX_DEX_ENTRIES = 32;
     private static final long STORAGE_RESERVE_BYTES = 32L * 1024L * 1024L;
+
+    static final class StorageException extends IOException {
+        StorageException(String detail) {
+            super(detail);
+        }
+
+        StorageException(String detail, Throwable cause) {
+            super(detail, cause);
+        }
+    }
+
+    private static final class PayloadLimitException extends IOException {
+        PayloadLimitException(String detail) {
+            super(detail);
+        }
+    }
 
     static final class Member {
         final File file;
@@ -123,9 +140,11 @@ final class NavigatorApkSet {
     static SetInfo materializeSource(Context context, NavigatorPatchStore.Profile profile,
             File source, File outputDirectory) throws Exception {
         deleteTree(outputDirectory);
-        if (!outputDirectory.mkdirs()) throw new IOException("Cannot create APK-set directory");
+        if (!outputDirectory.mkdirs()) {
+            throw new StorageException("Cannot create APK-set directory");
+        }
         File candidates = new File(outputDirectory, "candidates");
-        if (!candidates.mkdirs()) throw new IOException("Cannot create APK-set staging");
+        if (!candidates.mkdirs()) throw new StorageException("Cannot create APK-set staging");
         List<Candidate> all;
         if (isMonolithicApk(source)) {
             File candidate = new File(candidates, "candidate-0.apk");
@@ -144,6 +163,8 @@ final class NavigatorApkSet {
         rejectSize(source.length());
         try (ZipFile zip = new ZipFile(source)) {
             return zip.getEntry("AndroidManifest.xml") != null;
+        } catch (FileNotFoundException error) {
+            throw new StorageException("Cannot read APK source", error);
         } catch (java.util.zip.ZipException error) {
             throw new IOException("Unsupported source format", error);
         }
@@ -295,7 +316,9 @@ final class NavigatorApkSet {
         validatePackage(profile, candidates);
         List<Candidate> selected = selectCompatible(candidates, context);
         File membersDirectory = new File(outputDirectory, "members");
-        if (!membersDirectory.mkdirs()) throw new IOException("Cannot create APK-set members");
+        if (!membersDirectory.mkdirs()) {
+            throw new StorageException("Cannot create APK-set members");
+        }
         List<Member> members = new ArrayList<>();
         for (Candidate candidate : selected) {
             String name = canonicalName(candidate.manifest);
@@ -489,7 +512,12 @@ final class NavigatorApkSet {
         }
         manifest.versionName = info.versionName == null ? "" : info.versionName;
         manifest.versionCode = info.getLongVersionCode();
-        ApkVerifier.Result verified = new ApkVerifier.Builder(file).build().verify();
+        ApkVerifier.Result verified;
+        try {
+            verified = new ApkVerifier.Builder(file).build().verify();
+        } catch (IOException error) {
+            throw new StorageException("Cannot read APK for signature verification", error);
+        }
         if (!verified.isVerified() || verified.getSignerCertificates().size() != 1) {
             throw new IOException("APK signature verification failed");
         }
@@ -510,6 +538,8 @@ final class NavigatorApkSet {
             ZipEntry entry = zip.getEntry("AndroidManifest.xml");
             if (entry == null) throw new IOException("APK manifest is missing");
             bytes = readEntry(zip, entry, MAX_MANIFEST_BYTES);
+        } catch (FileNotFoundException error) {
+            throw new StorageException("Cannot read APK manifest", error);
         }
         ManifestInfo result = new ManifestInfo();
         try {
@@ -628,7 +658,11 @@ final class NavigatorApkSet {
         for (Member member : sorted) {
             digest.update(member.installName.getBytes(StandardCharsets.UTF_8));
             digest.update((byte) 0);
-            digest.update(sha256Bytes(member.file));
+            try {
+                digest.update(sha256Bytes(member.file));
+            } catch (IOException error) {
+                throw new StorageException("Cannot read APK member for fingerprint", error);
+            }
         }
         return hex(digest.digest());
     }
@@ -671,6 +705,8 @@ final class NavigatorApkSet {
         try (FileOutputStream output = new FileOutputStream(manifest)) {
             output.write(json.toString().getBytes(StandardCharsets.UTF_8));
             output.getFD().sync();
+        } catch (IOException error) {
+            throw new StorageException("Cannot write APK-set manifest", error);
         }
     }
 
@@ -686,6 +722,10 @@ final class NavigatorApkSet {
              FileOutputStream output = new FileOutputStream(target)) {
             copyStream(input, output, limit);
             output.getFD().sync();
+        } catch (PayloadLimitException error) {
+            throw error;
+        } catch (IOException error) {
+            throw new StorageException("Cannot read or stage APK source", error);
         }
     }
 
@@ -697,6 +737,12 @@ final class NavigatorApkSet {
             long total = copyStream(input, output, limit);
             output.getFD().sync();
             return total;
+        } catch (java.util.zip.ZipException error) {
+            throw error;
+        } catch (PayloadLimitException error) {
+            throw error;
+        } catch (IOException error) {
+            throw new StorageException("Cannot read or stage APK container member", error);
         }
     }
 
@@ -707,7 +753,7 @@ final class NavigatorApkSet {
         int read;
         while ((read = input.read(buffer)) >= 0) {
             total += read;
-            if (total > limit) throw new IOException("APK payload exceeds limit");
+            if (total > limit) throw new PayloadLimitException("APK payload exceeds limit");
             output.write(buffer, 0, read);
         }
         return total;
@@ -750,6 +796,8 @@ final class NavigatorApkSet {
                     throw new IOException("APK DEX payload exceeds 256 MiB limit");
                 }
             }
+        } catch (FileNotFoundException error) {
+            throw new StorageException("Cannot read APK DEX entries", error);
         }
     }
 
@@ -771,7 +819,7 @@ final class NavigatorApkSet {
     private static void requireFreeSpace(File directory, long declaredBytes) throws IOException {
         long expected = declaredBytes < 0L ? MAX_SOURCE_BYTES : declaredBytes;
         if (directory.getUsableSpace() < expected + STORAGE_RESERVE_BYTES) {
-            throw new IOException("Insufficient storage for APK-set staging");
+            throw new StorageException("Insufficient storage for APK-set staging");
         }
     }
 
@@ -786,6 +834,9 @@ final class NavigatorApkSet {
         try {
             return hex(sha256Bytes(file));
         } catch (Exception error) {
+            if (error instanceof IOException) {
+                throw new StorageException("Cannot read APK member", error);
+            }
             throw new IOException("Cannot fingerprint APK member", error);
         }
     }

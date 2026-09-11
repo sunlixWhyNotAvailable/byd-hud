@@ -14,6 +14,7 @@ import androidx.core.content.FileProvider;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
 import java.security.MessageDigest;
@@ -39,6 +40,12 @@ final class NavigatorAssetManager {
     static final String INSTALLED = "INSTALLED";
     static final String RECOVERY_REQUIRED = "RECOVERY_REQUIRED";
     static final String ERROR = "ERROR";
+    static final String ERROR_NETWORK = "NETWORK";
+    static final String ERROR_STORAGE = "STORAGE";
+    static final String ERROR_MISSING_OPERATION = "MISSING_OPERATION";
+    static final String ERROR_INVALID_APK = "INVALID_APK";
+    static final String ERROR_INTEGRITY = "INTEGRITY";
+    static final String ERROR_SYSTEM = "SYSTEM";
 
     private static final String PREFS = "navigator_asset_manager";
     private static final long NO_DOWNLOAD = -1L;
@@ -112,6 +119,8 @@ final class NavigatorAssetManager {
         public final String state;
         public final String progress;
         public final String error;
+        public final String errorCategory;
+        public final String errorDetail;
         public final boolean installed;
         public final boolean downloadReady;
         public final boolean downloadable;
@@ -129,6 +138,14 @@ final class NavigatorAssetManager {
 
         AssetSnapshot(Asset asset, String language, String state, String progress,
                 String error, boolean installed, boolean downloadReady) {
+            this(asset, language, state, progress, error == null ? "" : error,
+                    error == null || error.isEmpty() ? "" : ERROR_SYSTEM,
+                    error == null ? "" : error, installed, downloadReady);
+        }
+
+        AssetSnapshot(Asset asset, String language, String state, String progress,
+                String error, String errorCategory, String errorDetail,
+                boolean installed, boolean downloadReady) {
             this.asset = asset;
             this.id = asset.id;
             this.label = asset.label(language);
@@ -136,7 +153,9 @@ final class NavigatorAssetManager {
             this.packageName = asset.packageName;
             this.state = state;
             this.progress = progress;
-            this.error = error;
+            this.error = error == null ? "" : error;
+            this.errorCategory = errorCategory == null ? "" : errorCategory;
+            this.errorDetail = errorDetail == null ? "" : errorDetail;
             this.installed = installed;
             this.downloadReady = downloadReady;
             this.downloadable = NOT_DOWNLOADED.equals(state) || ERROR.equals(state)
@@ -145,13 +164,13 @@ final class NavigatorAssetManager {
         }
 
         AssetSnapshot localized(boolean ukrainian) {
-            return new AssetSnapshot(
-                    asset, ukrainian, state, progress, error, installed, downloadReady);
+            return new AssetSnapshot(asset, ukrainian ? "uk" : "en", state, progress, error,
+                    errorCategory, errorDetail, installed, downloadReady);
         }
 
         AssetSnapshot localized(String language) {
-            return new AssetSnapshot(
-                    asset, language, state, progress, error, installed, downloadReady);
+            return new AssetSnapshot(asset, language, state, progress, error,
+                    errorCategory, errorDetail, installed, downloadReady);
         }
 
         @Override
@@ -167,13 +186,15 @@ final class NavigatorAssetManager {
                     && Objects.equals(packageName, other.packageName)
                     && Objects.equals(state, other.state)
                     && Objects.equals(progress, other.progress)
-                    && Objects.equals(error, other.error);
+                    && Objects.equals(error, other.error)
+                    && Objects.equals(errorCategory, other.errorCategory)
+                    && Objects.equals(errorDetail, other.errorDetail);
         }
 
         @Override
         public int hashCode() {
             return Objects.hash(id, label, versionName, packageName, state, progress, error,
-                    installed, downloadReady, downloadable);
+                    errorCategory, errorDetail, installed, downloadReady, downloadable);
         }
     }
 
@@ -257,13 +278,41 @@ final class NavigatorAssetManager {
                 string(context, asset, "state", NOT_DOWNLOADED));
         String progress = string(context, asset, "progress", "0%");
         String error = string(context, asset, "error", "");
+        String errorCategory = string(context, asset, "error_category", "");
+        String errorDetail = string(context, asset, "error_detail", error);
         if (DOWNLOADING.equals(state)) {
             progress = queryProgress(context, asset);
         } else if (VERIFYING.equals(state)) {
             validateDownloadedAsync(context, asset);
         }
-        return new AssetSnapshot(
-                asset, ukrainian, state, progress, error, installed, downloadReady);
+        return new AssetSnapshot(asset, ukrainian ? "uk" : "en", state, progress, error,
+                errorCategory, errorDetail, installed, downloadReady);
+    }
+
+    private static final class ValidationTicket {
+        final long generation;
+        final long downloadId;
+        final String fileName;
+
+        ValidationTicket(long generation, long downloadId, String fileName) {
+            this.generation = generation;
+            this.downloadId = downloadId;
+            this.fileName = fileName;
+        }
+    }
+
+    private static final class AssetFailure extends IOException {
+        final String category;
+
+        AssetFailure(String category, String detail) {
+            super(detail);
+            this.category = category;
+        }
+
+        AssetFailure(String category, String detail, Throwable cause) {
+            super(detail, cause);
+            this.category = category;
+        }
     }
 
     static String resolvedSnapshotStateForTest(
@@ -280,12 +329,33 @@ final class NavigatorAssetManager {
             return state;
         }
         if (installed) return INSTALLED;
+        if (ERROR.equals(state)) return ERROR;
         return downloadReady ? READY : NOT_DOWNLOADED;
     }
 
     static void startDownload(Context context, String assetId) throws IOException {
         Asset asset = require(assetId);
-        DownloadManager manager = downloadManager(context);
+        NavigatorDownloadAttemptGuard.serialized(TRANSACTION_LOCK, () -> {
+            startDownloadLocked(context, asset);
+            return null;
+        });
+    }
+
+    private static void startDownloadLocked(Context context, Asset asset) throws IOException {
+        ValidationTicket previousTicket = validationTicket(context, asset);
+        long generation = prefs(context).getLong(key(asset, "attempt_generation"), 0L) + 1L;
+        File stable = downloadFile(context, asset);
+        File destination = new File(stable.getParentFile(),
+                NavigatorDownloadAttemptGuard.newAttemptFileName(asset.fileName, generation));
+        DownloadManager manager;
+        try {
+            manager = downloadManager(context);
+        } catch (RuntimeException error) {
+            failDownloadStart(context, asset, previousTicket, generation, destination,
+                    ERROR_SYSTEM,
+                    "DownloadManager unavailable: " + error.getMessage());
+            throw new IOException("DownloadManager unavailable", error);
+        }
         long previous = prefs(context).getLong(key(asset, "download_id"), NO_DOWNLOAD);
         if (previous != NO_DOWNLOAD) {
             try {
@@ -293,30 +363,38 @@ final class NavigatorAssetManager {
             } catch (RuntimeException ignored) {
             }
         }
-        File destination = downloadFile(context, asset);
         deleteFile(destination);
-        DownloadManager.Request request = new DownloadManager.Request(Uri.parse(asset.url))
-                .setTitle(asset.englishLabel + " " + asset.versionName)
-                .setDescription("BYD HUD navigator asset")
-                .setDestinationInExternalFilesDir(
-                        context, Environment.DIRECTORY_DOWNLOADS, asset.fileName)
-                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
-        long id;
-        try {
-            id = manager.enqueue(request);
-        } catch (RuntimeException error) {
-            fail(context, asset, "Download enqueue failed: " + error.getMessage());
-            throw new IOException("Download enqueue failed", error);
-        }
         prefs(context).edit()
-                .putLong(key(asset, "download_id"), id)
+                .remove(key(asset, "download_id"))
+                .putLong(key(asset, "attempt_generation"), generation)
+                .putString(key(asset, "attempt_file"), destination.getName())
                 .putString(key(asset, "state"), DOWNLOADING)
                 .putString(key(asset, "progress"), "0%")
                 .putString(key(asset, "error"), "")
+                .putString(key(asset, "error_category"), "")
+                .putString(key(asset, "error_detail"), "")
                 .putBoolean(key(asset, "download_ready"), false)
                 .putString(key(asset, "phase"), PHASE_NONE)
                 .commit();
-        AppEventLogger.event(context, "navigator_asset download_start id=" + asset.id);
+        deleteStaleCandidate(context, asset, candidateFile(context, asset, previousTicket));
+        long id;
+        try {
+            DownloadManager.Request request = new DownloadManager.Request(Uri.parse(asset.url))
+                    .setTitle(asset.englishLabel + " " + asset.versionName)
+                    .setDescription("BYD HUD navigator asset")
+                    .setDestinationInExternalFilesDir(
+                            context, Environment.DIRECTORY_DOWNLOADS, destination.getName())
+                    .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
+            id = manager.enqueue(request);
+        } catch (RuntimeException error) {
+            failDownloadStart(context, asset, previousTicket, generation, destination,
+                    ERROR_SYSTEM,
+                    "Download enqueue failed: " + error.getMessage());
+            throw new IOException("Download enqueue failed", error);
+        }
+        prefs(context).edit().putLong(key(asset, "download_id"), id).commit();
+        AppEventLogger.event(context, "navigator_asset download_start id=" + asset.id
+                + " generation=" + generation + " download=" + id);
     }
 
     static boolean requiresDestructiveConfirmation(Context context, String assetId)
@@ -652,72 +730,130 @@ final class NavigatorAssetManager {
         String state = string(context, asset, "state", NOT_DOWNLOADED);
         if (!DOWNLOADING.equals(state)) {
             if (VERIFYING.equals(state)) validateDownloadedAsync(context, asset);
-            if (READY.equals(state) && !downloadFile(context, asset).isFile()) {
-                setDownloadReady(context, asset, false);
-                setState(context, asset, ERROR, "0%", "Downloaded navigator asset is missing");
-            }
             return;
         }
-        long id = prefs(context).getLong(key(asset, "download_id"), NO_DOWNLOAD);
+        ValidationTicket ticket = validationTicket(context, asset);
+        long id = ticket.downloadId;
         if (id == NO_DOWNLOAD) {
-            fail(context, asset, "Download id is missing");
-            return;
+            id = recoverReservedDownloadId(context, asset, ticket);
+            if (id == NO_DOWNLOAD) {
+                failActiveDownload(context, asset, ticket, ERROR_MISSING_OPERATION,
+                        "Download id is missing");
+                return;
+            }
+            ticket = new ValidationTicket(ticket.generation, id, ticket.fileName);
         }
-        DownloadManager manager = downloadManager(context);
-        try (Cursor cursor = manager.query(new DownloadManager.Query().setFilterById(id))) {
+        try (Cursor cursor = downloadManager(context).query(
+                new DownloadManager.Query().setFilterById(id))) {
             if (cursor == null || !cursor.moveToFirst()) {
-                fail(context, asset, "Download row is missing");
+                failActiveDownload(context, asset, ticket, ERROR_MISSING_OPERATION,
+                        "Download row is missing id=" + id);
                 return;
             }
             int status = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS));
             if (status == DownloadManager.STATUS_SUCCESSFUL) {
-                setState(context, asset, VERIFYING, "100%", "");
-                validateDownloadedAsync(context, asset);
+                synchronized (TRANSACTION_LOCK) {
+                    if (!ownsActiveDownload(context, asset, ticket)) return;
+                    setState(context, asset, VERIFYING, "100%", "");
+                    validateDownloadedAsync(context, asset);
+                }
             } else if (status == DownloadManager.STATUS_FAILED) {
                 int reason = cursor.getInt(cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON));
-                fail(context, asset, "Download failed reason=" + reason);
-            } else {
+                failActiveDownload(context, asset, ticket,
+                        downloadFailureCategoryForTest(reason),
+                        "Download failed reason=" + reason);
+            } else if (isActiveDownloadManagerStatusForTest(status)) {
                 String progress = progressFromCursor(cursor);
-                prefs(context).edit().putString(key(asset, "progress"), progress).apply();
+                synchronized (TRANSACTION_LOCK) {
+                    if (ownsActiveDownload(context, asset, ticket)) {
+                        prefs(context).edit().putString(key(asset, "progress"), progress).apply();
+                    }
+                }
+            } else {
+                failActiveDownload(context, asset, ticket, ERROR_SYSTEM,
+                        "Download returned unknown status=" + status);
             }
         } catch (RuntimeException error) {
-            fail(context, asset, "Download status read failed: " + error.getMessage());
+            failActiveDownload(context, asset, ticket, ERROR_SYSTEM,
+                    "Download status read failed: " + error.getMessage());
         }
     }
 
     private static void reconcileDownloadPresence(Context context, Asset asset) {
-        File file = downloadFile(context, asset);
-        boolean recorded = prefs(context).getBoolean(key(asset, "download_ready"), false);
-        if (recorded && !file.isFile()) {
-            setDownloadReady(context, asset, false);
-            AppEventLogger.event(context,
-                    "navigator_asset retained_apk_missing id=" + asset.id);
-        } else if (!recorded && file.isFile()) {
-            validateDownloadedAsync(context, asset);
+        synchronized (TRANSACTION_LOCK) {
+            File file = downloadFile(context, asset);
+            boolean recorded = prefs(context).getBoolean(key(asset, "download_ready"), false);
+            String state = string(context, asset, "state", NOT_DOWNLOADED);
+            if (DOWNLOADING.equals(state) || VERIFYING.equals(state) || ERROR.equals(state)) return;
+            if (recorded && !file.isFile()) {
+                prefs(context).edit()
+                        .putBoolean(key(asset, "download_ready"), false)
+                        .putString(key(asset, "state"), NOT_DOWNLOADED)
+                        .putString(key(asset, "progress"), "0%")
+                        .putString(key(asset, "error"), "")
+                        .putString(key(asset, "error_category"), "")
+                        .putString(key(asset, "error_detail"), "")
+                        .commit();
+                AppEventLogger.event(context,
+                        "navigator_asset retained_apk_missing id=" + asset.id);
+            } else if (NavigatorDownloadAttemptGuard.shouldRediscover(state, recorded, file)) {
+                validateDownloadedAsync(context, asset);
+            }
         }
     }
 
     private static void validateDownloadedAsync(Context context, Asset asset) {
+        ValidationTicket ticket = validationTicket(context, asset);
         synchronized (ACTIVE_VALIDATIONS) {
             if (!ACTIVE_VALIDATIONS.add(asset.id)) return;
         }
         Context appContext = context.getApplicationContext();
         new Thread(() -> {
+            File stable = downloadFile(appContext, asset);
+            File candidate = NavigatorDownloadAttemptGuard.validationCandidate(
+                    string(appContext, asset, "state", NOT_DOWNLOADED),
+                    candidateFile(appContext, asset, ticket), stable);
             try {
-                File file = downloadFile(appContext, asset);
-                validate(appContext, asset, file);
-                setDownloadReady(appContext, asset, true);
-                setState(appContext, asset, READY, "100%", "");
-                AppEventLogger.event(appContext,
-                        "navigator_asset verified id=" + asset.id);
+                validate(appContext, asset, candidate);
+                synchronized (TRANSACTION_LOCK) {
+                    if (!settleValidatedAttempt(candidate, stable,
+                            ownsValidation(appContext, asset, ticket))) {
+                        AppEventLogger.event(appContext, "navigator_asset validation_stale id="
+                                + asset.id + " generation=" + ticket.generation);
+                        return;
+                    }
+                    prefs(appContext).edit()
+                            .remove(key(asset, "download_id"))
+                            .remove(key(asset, "attempt_file"))
+                            .putBoolean(key(asset, "download_ready"), true)
+                            .putString(key(asset, "state"), READY)
+                            .putString(key(asset, "progress"), "100%")
+                            .putString(key(asset, "error"), "")
+                            .putString(key(asset, "error_category"), "")
+                            .putString(key(asset, "error_detail"), "")
+                            .commit();
+                    AppEventLogger.event(appContext, "navigator_asset verified id=" + asset.id
+                            + " generation=" + ticket.generation);
+                }
             } catch (Exception error) {
-                setDownloadReady(appContext, asset, false);
-                deleteFile(downloadFile(appContext, asset));
-                fail(appContext, asset, clean(error.getMessage()));
+                synchronized (TRANSACTION_LOCK) {
+                    if (ownsValidation(appContext, asset, ticket)) {
+                        deleteFile(candidate);
+                        failDownload(appContext, asset, failureCategory(error),
+                                clean(error.getMessage()));
+                    } else {
+                        try {
+                            NavigatorDownloadAttemptGuard.settleValidated(candidate,
+                                    downloadFile(appContext, asset), false);
+                        } catch (IOException ignored) {
+                        }
+                    }
+                }
             } finally {
                 synchronized (ACTIVE_VALIDATIONS) {
                     ACTIVE_VALIDATIONS.remove(asset.id);
                 }
+                MainActivity.requestNavigatorAssetCompletionRefresh(appContext);
             }
         }, "navigator-asset-verify-" + asset.id).start();
     }
@@ -759,25 +895,53 @@ final class NavigatorAssetManager {
     }
 
     private static void validate(Context context, Asset asset, File file) throws Exception {
-        if (!file.isFile()) throw new IOException("Downloaded navigator asset is missing");
-        if (!isMonolithicApk(file)) {
-            throw new IOException("Navigator asset must be a monolithic APK");
+        if (!file.isFile()) {
+            throw new AssetFailure(ERROR_MISSING_OPERATION,
+                    "Downloaded navigator asset is missing");
         }
-        String actualSha = sha256(file);
+        try {
+            if (!isMonolithicApk(file)) {
+                throw new AssetFailure(ERROR_INVALID_APK,
+                        "Navigator asset must be a monolithic APK");
+            }
+        } catch (AssetFailure error) {
+            throw error;
+        } catch (IOException error) {
+            throw new AssetFailure(ERROR_INVALID_APK, clean(error.getMessage()), error);
+        }
+        String actualSha;
+        try {
+            actualSha = sha256(file);
+        } catch (IOException error) {
+            throw new AssetFailure(ERROR_STORAGE,
+                    "Navigator asset could not be read: " + clean(error.getMessage()), error);
+        }
         if (!asset.sha256.equals(actualSha)) {
-            throw new IOException("Navigator asset SHA-256 mismatch expected=" + asset.sha256
-                    + " actual=" + actualSha);
+            throw new AssetFailure(ERROR_INTEGRITY,
+                    "Navigator asset SHA-256 mismatch expected=" + asset.sha256
+                            + " actual=" + actualSha);
         }
         File validation = new File(new File(context.getCacheDir(), "navigator-assets"),
                 "validate-" + asset.id + "-" + UUID.randomUUID());
         try {
-            NavigatorApkSet.SetInfo set = NavigatorApkSet.materializeSource(
-                    context, asset.profile, file, validation);
+            NavigatorApkSet.SetInfo set;
+            try {
+                set = NavigatorApkSet.materializeSource(
+                        context, asset.profile, file, validation);
+            } catch (NavigatorApkSet.StorageException error) {
+                throw new AssetFailure(materializationFailureCategoryForTest(error),
+                        "Navigator asset could not be staged: " + clean(error.getMessage()),
+                        error);
+            } catch (Exception error) {
+                throw new AssetFailure(ERROR_INVALID_APK,
+                        "Navigator asset package could not be read: " + clean(error.getMessage()),
+                        error);
+            }
             if (set.members.size() != 1 || !asset.packageName.equals(set.packageName)
                     || !asset.versionName.equals(set.versionName)
                     || asset.versionCode != set.versionCode
                     || !asset.signerSha256.equals(set.signerSha256)) {
-                throw new IOException("Navigator asset metadata mismatch");
+                throw new AssetFailure(ERROR_INTEGRITY, "Navigator asset metadata mismatch");
             }
         } finally {
             deleteTree(validation);
@@ -1229,6 +1393,133 @@ final class NavigatorAssetManager {
         return new File(directory == null ? context.getFilesDir() : directory, asset.fileName);
     }
 
+    private static ValidationTicket validationTicket(Context context, Asset asset) {
+        long generation = prefs(context).getLong(key(asset, "attempt_generation"), 0L);
+        long downloadId = prefs(context).getLong(key(asset, "download_id"), NO_DOWNLOAD);
+        String fileName = string(context, asset, "attempt_file", asset.fileName);
+        return new ValidationTicket(generation, downloadId, fileName);
+    }
+
+    private static File candidateFile(Context context, Asset asset, ValidationTicket ticket) {
+        File stable = downloadFile(context, asset);
+        return new File(stable.getParentFile(), ticket.fileName);
+    }
+
+    private static long recoverReservedDownloadId(
+            Context context, Asset asset, ValidationTicket reservation) {
+        File expected = candidateFile(context, asset, reservation);
+        try (Cursor cursor = downloadManager(context).query(new DownloadManager.Query())) {
+            if (cursor == null) return NO_DOWNLOAD;
+            int idColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_ID);
+            int uriColumn = cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_LOCAL_URI);
+            // DownloadManager exposes its underlying provider columns to Query results. The
+            // destination hint is populated before COLUMN_LOCAL_URI becomes available.
+            int hintColumn = cursor.getColumnIndex("hint");
+            while (cursor.moveToNext()) {
+                String localUri = cursor.getString(uriColumn);
+                String hint = hintColumn < 0 ? null : cursor.getString(hintColumn);
+                if (!matchesReservedDestination(expected, localUri, hint)) continue;
+                long recovered = cursor.getLong(idColumn);
+                synchronized (TRANSACTION_LOCK) {
+                    if (!ownsValidation(context, asset, reservation)) return NO_DOWNLOAD;
+                    prefs(context).edit().putLong(key(asset, "download_id"), recovered).commit();
+                }
+                AppEventLogger.event(context, "navigator_asset download_recovered id="
+                        + asset.id + " generation=" + reservation.generation
+                        + " download=" + recovered);
+                return recovered;
+            }
+        } catch (IOException | RuntimeException ignored) {
+        }
+        return NO_DOWNLOAD;
+    }
+
+    static boolean matchesReservedDestinationForTest(
+            File expected, String localUri, String hint) throws IOException {
+        return matchesReservedDestination(expected, localUri, hint);
+    }
+
+    private static boolean matchesReservedDestination(
+            File expected, String localUri, String hint) throws IOException {
+        File canonicalExpected = expected.getCanonicalFile();
+        for (String value : new String[]{localUri, hint}) {
+            if (value == null || value.isEmpty()) continue;
+            String path = value;
+            if (value.startsWith("file:")) {
+                try {
+                    path = new File(java.net.URI.create(value)).getPath();
+                } catch (IllegalArgumentException error) {
+                    path = null;
+                }
+            } else if (value.contains("://")) {
+                path = null;
+            }
+            if (path != null && canonicalExpected.equals(new File(path).getCanonicalFile())) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean ownsValidation(
+            Context context, Asset asset, ValidationTicket expected) {
+        ValidationTicket current = validationTicket(context, asset);
+        return ownsAttemptForTest(expected.generation, expected.downloadId, expected.fileName,
+                current.generation, current.downloadId, current.fileName);
+    }
+
+    private static boolean ownsActiveDownload(
+            Context context, Asset asset, ValidationTicket expected) {
+        return DOWNLOADING.equals(string(context, asset, "state", NOT_DOWNLOADED))
+                && ownsValidation(context, asset, expected);
+    }
+
+    private static void failActiveDownload(Context context, Asset asset,
+            ValidationTicket ticket, String category, String detail) {
+        synchronized (TRANSACTION_LOCK) {
+            if (ownsActiveDownload(context, asset, ticket)) {
+                try {
+                    NavigatorDownloadAttemptGuard.discardFailed(
+                            candidateFile(context, asset, ticket));
+                } catch (IOException cleanupError) {
+                    detail = clean(detail) + "; cleanup failed: "
+                            + clean(cleanupError.getMessage());
+                }
+                failDownload(context, asset, category, detail);
+            }
+        }
+    }
+
+    static boolean ownsAttemptForTest(long expectedGeneration, long expectedDownloadId,
+            String expectedFileName, long currentGeneration, long currentDownloadId,
+            String currentFileName) {
+        return expectedGeneration == currentGeneration && expectedDownloadId == currentDownloadId
+                && Objects.equals(expectedFileName, currentFileName);
+    }
+
+    static boolean isActiveDownloadManagerStatusForTest(int status) {
+        return status == DownloadManager.STATUS_PENDING || status == DownloadManager.STATUS_RUNNING
+                || status == DownloadManager.STATUS_PAUSED;
+    }
+
+    private static void deleteStaleCandidate(Context context, Asset asset, File candidate) {
+        try {
+            NavigatorDownloadAttemptGuard.settleValidated(
+                    candidate, downloadFile(context, asset), false);
+        } catch (IOException ignored) {
+        }
+    }
+
+    private static boolean settleValidatedAttempt(
+            File candidate, File stable, boolean ownsAttempt) throws IOException {
+        try {
+            return NavigatorDownloadAttemptGuard.settleValidated(candidate, stable, ownsAttempt);
+        } catch (IOException error) {
+            throw new AssetFailure(ERROR_STORAGE,
+                    "Navigator cache promotion failed: " + clean(error.getMessage()), error);
+        }
+    }
+
     private static android.content.SharedPreferences prefs(Context context) {
         return context.getApplicationContext().getSharedPreferences(PREFS, Context.MODE_PRIVATE);
     }
@@ -1243,10 +1534,13 @@ final class NavigatorAssetManager {
 
     private static void setState(Context context, Asset asset, String state, String progress,
             String error) {
+        String detail = error == null ? "" : error;
         prefs(context).edit()
                 .putString(key(asset, "state"), state)
                 .putString(key(asset, "progress"), progress == null ? "0%" : progress)
-                .putString(key(asset, "error"), error == null ? "" : error)
+                .putString(key(asset, "error"), detail)
+                .putString(key(asset, "error_category"), detail.isEmpty() ? "" : ERROR_SYSTEM)
+                .putString(key(asset, "error_detail"), detail)
                 .commit();
     }
 
@@ -1255,9 +1549,66 @@ final class NavigatorAssetManager {
     }
 
     private static void fail(Context context, Asset asset, String detail) {
+        failDownload(context, asset, ERROR_SYSTEM, detail);
+    }
+
+    private static void failDownload(
+            Context context, Asset asset, String category, String detail) {
         String safe = clean(detail);
-        setState(context, asset, ERROR, "0%", safe);
-        AppEventLogger.event(context, "navigator_asset error id=" + asset.id + " detail=" + safe);
+        prefs(context).edit()
+                .putBoolean(key(asset, "download_ready"), false)
+                .putString(key(asset, "state"), ERROR)
+                .putString(key(asset, "progress"), "0%")
+                .putString(key(asset, "error"), safe)
+                .putString(key(asset, "error_category"), category)
+                .putString(key(asset, "error_detail"), safe)
+                .commit();
+        AppEventLogger.event(context, "navigator_asset error id=" + asset.id
+                + " category=" + category + " detail=" + safe);
+        MainActivity.requestNavigatorAssetCompletionRefresh(context.getApplicationContext());
+    }
+
+    private static void failDownloadStart(Context context, Asset asset,
+            ValidationTicket previousTicket, long generation, File destination,
+            String category, String detail) {
+        synchronized (TRANSACTION_LOCK) {
+            prefs(context).edit()
+                    .remove(key(asset, "download_id"))
+                    .putLong(key(asset, "attempt_generation"), generation)
+                    .putString(key(asset, "attempt_file"), destination.getName())
+                    .commit();
+            deleteStaleCandidate(context, asset, candidateFile(context, asset, previousTicket));
+            try {
+                NavigatorDownloadAttemptGuard.discardFailed(destination);
+            } catch (IOException cleanupError) {
+                detail = clean(detail) + "; cleanup failed: "
+                        + clean(cleanupError.getMessage());
+            }
+            failDownload(context, asset, category, detail);
+        }
+    }
+
+    private static String failureCategory(Exception error) {
+        return error instanceof AssetFailure ? ((AssetFailure) error).category : ERROR_SYSTEM;
+    }
+
+    static String materializationFailureCategoryForTest(Exception error) {
+        return error instanceof NavigatorApkSet.StorageException
+                ? ERROR_STORAGE : ERROR_INVALID_APK;
+    }
+
+    static String downloadFailureCategoryForTest(int reason) {
+        return reason == DownloadManager.ERROR_INSUFFICIENT_SPACE
+                || reason == DownloadManager.ERROR_DEVICE_NOT_FOUND
+                || reason == DownloadManager.ERROR_FILE_ERROR
+                || reason == DownloadManager.ERROR_FILE_ALREADY_EXISTS
+                ? ERROR_STORAGE
+                : reason == DownloadManager.ERROR_CANNOT_RESUME
+                || reason == DownloadManager.ERROR_TOO_MANY_REDIRECTS
+                || reason == DownloadManager.ERROR_UNHANDLED_HTTP_CODE
+                || reason == DownloadManager.ERROR_HTTP_DATA_ERROR
+                || reason >= 400 && reason <= 599
+                ? ERROR_NETWORK : ERROR_SYSTEM;
     }
 
     private static void clearTransaction(Context context, Asset asset) {
@@ -1289,6 +1640,9 @@ final class NavigatorAssetManager {
     private static boolean isMonolithicApk(File file) throws IOException {
         try (ZipFile zip = new ZipFile(file)) {
             return zip.getEntry("AndroidManifest.xml") != null;
+        } catch (FileNotFoundException error) {
+            throw new AssetFailure(ERROR_STORAGE,
+                    "Downloaded file could not be opened", error);
         } catch (java.util.zip.ZipException error) {
             throw new IOException("Downloaded file is not a valid APK", error);
         }

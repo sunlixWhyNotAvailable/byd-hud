@@ -43,6 +43,23 @@ public final class NavigatorAssetPackageRefreshContractTest {
     }
 
     @Test
+    public void terminalResultBypassesThrottleAndIsRetainedWhileEitherRefreshIsBusy()
+            throws IOException {
+        String activity = source("MainActivity.java");
+        String patch = between(activity, "static void requestPatchUiStateRefresh(",
+                "static void requestNavigatorAssetUiStateRefresh(");
+        String completion = between(activity, "static void requestNavigatorAssetCompletionRefresh(",
+                "private static Map<String, String> scanInstalledAppVersions");
+        assertTrue(completion.contains("\"asset-completion\", true"));
+        assertTrue(completion.contains("if (!force && lastAssetUiRefreshAtMs"));
+        assertTrue(completion.contains("if (force) ASSET_FORCE_REFRESH_PENDING.set(true)"));
+        assertTrue(completion.contains("ASSET_FORCE_REFRESH_PENDING.getAndSet(false)"));
+        assertTrue(completion.contains("drainNavigatorAssetCompletionRefresh(appContext)"));
+        assertTrue(patch.contains("drainNavigatorAssetCompletionRefresh(appContext)"));
+        assertTrue(completion.contains("if (!next.equals(navigatorAssetSnapshots))"));
+    }
+
+    @Test
     public void packageReceiverIsNotManifestRegisteredAsAnImplicitBroadcast()
             throws IOException {
         String manifest = new String(
