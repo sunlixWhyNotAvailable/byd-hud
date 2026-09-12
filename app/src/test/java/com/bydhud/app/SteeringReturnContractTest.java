@@ -87,21 +87,24 @@ public final class SteeringReturnContractTest {
 
     @Test
     public void steeringDispatchUsesSharedDirectionalReasonForAnySelectedApp() throws Exception {
-        String steering = between(source(),
+        String controller = source();
+        String steering = between(controller,
                 "void requestSteeringToggle(",
+                "private void requestFreshToggle(");
+        String shared = between(controller,
+                "private void requestFreshToggle(",
                 "private void moveIndependentDashboardApp(");
 
-        assertTrue(steering.contains(
-                "boolean toDashboard = observed == DashboardProjectionPolicy.ObservedDisplay.MAIN;"));
-        assertTrue(steering.contains(
+        assertTrue(steering.contains("requestFreshToggle("));
+        assertTrue(shared.contains(
+                "boolean toDashboard = SteeringTransferPolicy.toggleMovesToDashboard(observed);"));
+        assertTrue(shared.contains(
                 "moveIndependentDashboardAppBlocking( normalized, toDashboard, dashboardMode, formatMethod, "
-                        + "steeringMoveReason(toDashboard, reason),"));
-        assertTrue(steering.indexOf("HudPrefs.dashboardFormatMethod(context, dashboardMode)")
-                < steering.indexOf("if (!beginMove(normalized,"));
-        assertFalse(steering.contains("\"steering-key \" +"));
-        assertFalse(steering.contains("com.waze"));
-        assertFalse(steering.contains("GMapsDirectChannel"));
-        assertFalse(steering.contains("runAutoContainer("));
+                        + "moveReason,"));
+        assertTrue(shared.contains("? steeringMoveReason(toDashboard, reason) : safe(reason)"));
+        assertFalse(shared.contains("com.waze"));
+        assertFalse(shared.contains("GMapsDirectChannel"));
+        assertFalse(shared.contains("runAutoContainer("));
     }
 
     @Test
@@ -161,7 +164,7 @@ public final class SteeringReturnContractTest {
         String move = between(controller, "private void moveIndependentDashboardAppBlocking(",
                 "private String completionErrorForState(");
         String beforeReturn = between(move,
-                "if (requestCurrent != null && (!requestCurrent.getAsBoolean()",
+                "if (requestCurrent != null && !requestCurrent.getAsBoolean())",
                 "if (current.taskId < 0)");
         assertTrue(beforeReturn.contains("return;"));
         assertFalse(beforeReturn.contains("returnToMain("));
@@ -229,10 +232,10 @@ public final class SteeringReturnContractTest {
                 "void requestWidgetMode(");
         assertTrue(worker.indexOf("UserRuntimeSession.PROCESS.shutdownToken()")
                 < worker.indexOf("Thread worker ="));
-        assertTrue(worker.contains("reason, completion, null, shutdownToken)"));
+        assertTrue(worker.contains("reason, completion, null, shutdownToken, null)"));
         String returning = between(controller, "if (!toDashboard)",
                 "boolean alreadyProjected =");
-        assertTrue(returning.contains("\"independent-dashboard return-main \" + safe(reason), shutdownToken"));
+        assertTrue(returning.contains("\"independent-dashboard return-main \" + safe(reason), shutdownToken, current"));
         assertTrue(returning.contains("() -> isShutdownReturnCurrent(shutdownToken)"));
         assertTrue(returning.contains(
                 "if (!isShutdownReturnCurrent(shutdownToken)) return; "
@@ -250,13 +253,13 @@ public final class SteeringReturnContractTest {
         assertTrue(intent.contains("EXTRA_SHUTDOWN_TOKEN, shutdownToken"));
         String returning = between(service, "private void returnPackageToMain(",
                 "private boolean isReturnMoveCurrent(");
-        assertTrue(returning.contains("BooleanSupplier requestCurrent = () -> isReturnMoveCurrent("));
+        assertTrue(returning.contains("BooleanSupplier requestCurrent = () -> transferCurrent(transferToken) && isReturnMoveCurrent("));
         assertTrue(returning.contains("\"cluster-projection return-main \" + reason, requestCurrent"));
         assertTrue(returning.contains("if (!isReturnOwnerCurrent(targetPackage, returnGeneration, returnOwnerToken) || !shouldRetainAfterReturn("));
         String command = between(source(),
-                "synchronized NavAppDisplayState moveTaskToDisplayBlocking( String packageName, int targetDisplay, String reason, BooleanSupplier requestCurrent)",
+                "synchronized NavAppDisplayState moveTaskToDisplayBlocking( String packageName, int targetDisplay, String reason, BooleanSupplier requestCurrent, NavAppDisplayState admittedState)",
                 "private boolean ensureWazeSurfaceOnDisplay(");
-        int issue = command.indexOf("LocalAdbBridge.ShellResult move = runCommand(");
+        int issue = command.indexOf("TaskMoveSequencer.execute(");
         assertTrue(command.lastIndexOf("!requestCurrent.getAsBoolean()", issue)
                 > command.indexOf("if (current.displayId == targetDisplay)"));
     }

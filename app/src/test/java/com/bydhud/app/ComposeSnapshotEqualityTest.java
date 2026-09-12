@@ -41,6 +41,15 @@ public final class ComposeSnapshotEqualityTest {
         assertFalse(snapshot("1.0").equals(snapshot("2.0")));
     }
 
+    @Test
+    public void foreignDisplayReturnActionInvalidatesCacheWithoutClaimingDashboardOwnership() {
+        MainActivity.ComposeAppRow main = appRow("1.0", false);
+        MainActivity.ComposeAppRow foreign = appRow("1.0", true);
+        assertFalse(main.onDashboard);
+        assertFalse(foreign.onDashboard);
+        assertFalse(main.equals(foreign));
+    }
+
     private static void assertValue(Object first, Object second) {
         assertNotSame(first, second);
         assertEquals(first, second);
@@ -52,11 +61,15 @@ public final class ComposeSnapshotEqualityTest {
     }
 
     private static MainActivity.ComposeAppRow appRow(String version) {
+        return appRow(version, false);
+    }
+
+    private static MainActivity.ComposeAppRow appRow(String version, boolean canReturnToMain) {
         return new MainActivity.ComposeAppRow(
                 "Example", "com.example.nav",
                 Collections.singletonList(packageVersion(version)),
                 true, true, false, true, true, true, false,
-                false, true, false, "com.example.nav", 100);
+                false, canReturnToMain, true, false, "com.example.nav", 100);
     }
 
     private static MainActivity.ComposeNavigatorPatchRow patchRow() {

@@ -157,9 +157,10 @@ public final class ProjectionLifecycleSourceContractTest {
         String move = controller.substring(
                 controller.indexOf("synchronized NavAppDisplayState moveTaskToDisplayBlocking("),
                 controller.indexOf("private NavAppDisplayState checkTaskId("));
-        int finalFence = move.lastIndexOf("requestCurrent.getAsBoolean()", move.indexOf("runCommand("));
+        int finalFence = move.lastIndexOf("requestCurrent.getAsBoolean()",
+                move.indexOf("runMutationCommandOnce("));
         int prepareOutput = move.indexOf("ClusterProjectionService.prepareOutputForTaskMove(", finalFence);
-        int command = move.indexOf("runCommand(", prepareOutput);
+        int command = move.indexOf("runMutationCommandOnce(", prepareOutput);
         assertTrue(finalFence >= 0 && prepareOutput > finalFence && command > prepareOutput);
     }
 

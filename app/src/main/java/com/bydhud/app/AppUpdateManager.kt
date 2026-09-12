@@ -127,7 +127,8 @@ object AppUpdateManager {
     data class Snapshot(
         val result: CheckResult? = null,
         val checking: Boolean = false,
-        val dialogRequested: Boolean = false
+        val dialogRequested: Boolean = false,
+        val resultId: Long = 0L
     )
 
     private val session = UpdateSession(
@@ -151,7 +152,14 @@ object AppUpdateManager {
     }
 
     @JvmStatic
-    fun dismissResult() = session.dismiss()
+    fun dismissResult() {
+        val resultId = session.dismiss()
+        if (resultId != 0L) UpdateHintManager.onResultInvalidated(resultId, "offer-dismissed")
+    }
+
+    /** Reopens only the retained offer represented by this process-local identity; never fetches. */
+    @JvmStatic
+    fun showRetainedOffer(resultId: Long): Boolean = session.showRetainedOffer(resultId)
 
     @JvmStatic
     fun resetForShutdown() = session.reset()
@@ -228,6 +236,7 @@ object AppUpdateManager {
         val snapshot: StateFlow<Snapshot> = state.asStateFlow()
         private var channel: Boolean? = null
         private var generation = 0L
+        private var nextResultId = 0L
         private var scheduled: Job? = null
         private var active: Request? = null
         private var lastCompletedAt: Long? = null
@@ -269,9 +278,19 @@ object AppUpdateManager {
             }
         }
 
-        fun dismiss() = synchronized(lock) {
+        fun dismiss(): Long = synchronized(lock) {
             active?.dismissed = true
             state.value = state.value.copy(dialogRequested = false)
+            state.value.resultId
+        }
+
+        fun showRetainedOffer(resultId: Long): Boolean = synchronized(lock) {
+            val current = state.value
+            if (resultId <= 0L || current.resultId != resultId || current.result !is CheckResult.Available) {
+                return@synchronized false
+            }
+            state.value = current.copy(dialogRequested = true)
+            true
         }
 
         fun disableAutomatic() = synchronized(lock) { disableAutomaticLocked() }
@@ -337,8 +356,12 @@ object AppUpdateManager {
                         if (active === request && generation == request.generation) {
                             active = null
                             lastCompletedAt = elapsedMs()
-                            state.value = Snapshot(result, checking = false,
-                                dialogRequested = !request.dismissed && (request.manual || result is CheckResult.Available))
+                            state.value = Snapshot(
+                                result = result,
+                                checking = false,
+                                dialogRequested = !request.dismissed && (request.manual || result is CheckResult.Available),
+                                resultId = ++nextResultId
+                            )
                         }
                     }
                 } catch (cancelled: CancellationException) {

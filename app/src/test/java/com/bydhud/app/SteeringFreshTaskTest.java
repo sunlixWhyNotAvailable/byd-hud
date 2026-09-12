@@ -33,14 +33,14 @@ public final class SteeringFreshTaskTest {
     }
 
     @Test
-    public void unknownForeignOrNoLongerOwnedDisplayCannotMove() {
+    public void unknownCannotMoveButAnyValidForeignDisplayCanReturn() {
         assertFalse(canToggle(new NavAppDisplayState("com.waze", 42, -1, true, "unknown"),
                 "com.waze", 7));
-        assertFalse(canToggle(new NavAppDisplayState("com.waze", 42, 8, true, "foreign"),
+        assertTrue(canToggle(new NavAppDisplayState("com.waze", 42, 8, true, "foreign"),
                 "com.waze", 7));
-        assertFalse(canToggle(new NavAppDisplayState("com.waze", 42, 7, true, "owner gone"),
+        assertTrue(canToggle(new NavAppDisplayState("com.waze", 42, 7, true, "owner gone"),
                 "", -1));
-        assertFalse(canToggle(new NavAppDisplayState("com.waze", 42, 7, true, "foreign owner"),
+        assertTrue(canToggle(new NavAppDisplayState("com.waze", 42, 7, true, "foreign owner"),
                 GMapsDirectChannel.PACKAGE_NAME, 7));
     }
 

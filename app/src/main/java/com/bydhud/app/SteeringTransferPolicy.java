@@ -54,8 +54,16 @@ final class SteeringTransferPolicy {
     static boolean canToggleTask(NavAppDisplayState task,
             DashboardProjectionPolicy.ObservedDisplay display) {
         return task != null && task.taskId >= 0
-                && (display == DashboardProjectionPolicy.ObservedDisplay.MAIN
-                || display == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD);
+                && (toggleMovesToDashboard(display) || canReturnToMain(display));
+    }
+
+    static boolean toggleMovesToDashboard(DashboardProjectionPolicy.ObservedDisplay display) {
+        return display == DashboardProjectionPolicy.ObservedDisplay.MAIN;
+    }
+
+    static boolean canReturnToMain(DashboardProjectionPolicy.ObservedDisplay display) {
+        return display == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD
+                || display == DashboardProjectionPolicy.ObservedDisplay.OTHER;
     }
 
     static int resolveDashboardMode(String profile, int selectedMode) {

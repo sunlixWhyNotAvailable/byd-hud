@@ -18,6 +18,10 @@ import java.util.HashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.TreeMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.regex.Matcher;
@@ -420,18 +424,42 @@ final class NavAppDisplayController {
                 HudPrefs.dashboardFormatMethod(context, dashboardMode), reason, null);
     }
 
+    //Resolves the UI toggle from the same fresh worker-side state used by steering.
+    void requestUiToggle(String packageName, String reason) {
+        final int dashboardMode = HudPrefs.dashboardScreenMode(context);
+        requestFreshToggle(
+                packageName,
+                dashboardMode,
+                HudPrefs.dashboardFormatMethod(context, dashboardMode),
+                reason,
+                () -> true,
+                false);
+    }
+
     //toggles a configured app only after a worker-side task/display recheck.
     void requestSteeringToggle(String packageName, String profile, String reason,
             BooleanSupplier requestCurrent) {
-        final String normalized = normalizePackage(packageName);
         if (!requestCurrent.getAsBoolean()) return;
         final int dashboardMode = SteeringTransferPolicy.resolveDashboardMode(
                 profile, HudPrefs.dashboardScreenMode(context));
-        final int formatMethod = HudPrefs.dashboardFormatMethod(context, dashboardMode);
-        invalidatePendingAutomaticTbt("explicit steering move");
+        requestFreshToggle(
+                packageName,
+                dashboardMode,
+                HudPrefs.dashboardFormatMethod(context, dashboardMode),
+                reason,
+                requestCurrent,
+                true);
+    }
+
+    private void requestFreshToggle(String packageName, int dashboardMode, int formatMethod,
+            String reason, BooleanSupplier requestCurrent, boolean steering) {
+        final String normalized = normalizePackage(packageName);
+        final String source = steering ? "steering" : "ui";
+        invalidatePendingAutomaticTbt(steering
+                ? "explicit steering move" : "explicit ui move");
         //Reserve the common gate before dispatching any background work; busy keys never queue.
-        if (!beginMove(normalized, "steering-precheck reason=" + safe(reason))) {
-            log(normalized, "steering_transfer_ignored busy");
+        if (!beginMove(normalized, source + "-toggle-precheck reason=" + safe(reason))) {
+            log(normalized, source + "_transfer_ignored busy");
             return;
         }
         Thread worker = new Thread(() -> {
@@ -442,7 +470,7 @@ final class NavAppDisplayController {
                     reportSteeringFailure(normalized, "selected package missing");
                     return;
                 }
-                NavAppDisplayState current = checkDisplay(normalized, "steering-precheck");
+                NavAppDisplayState current = checkDisplay(normalized, source + "-toggle-precheck");
                 if (!requestCurrent.getAsBoolean()) return;
                 DashboardProjectionPolicy.ObservedDisplay observed = observedDisplay(normalized, current);
                 if (!SteeringTransferPolicy.canToggleTask(current, observed)) {
@@ -456,31 +484,35 @@ final class NavAppDisplayController {
                     reportSteeringFailure(normalized, "task/display state unknown");
                     return;
                 }
-                boolean toDashboard = observed == DashboardProjectionPolicy.ObservedDisplay.MAIN;
+                boolean toDashboard = SteeringTransferPolicy.toggleMovesToDashboard(observed);
+                String moveReason = steering
+                        ? steeringMoveReason(toDashboard, reason)
+                        : safe(reason);
                 log(normalized, (toDashboard ? "independent_dashboard_on" : "independent_dashboard_off")
                         + " mode=" + dashboardMode + " method=" + formatMethod
-                        + " reason=" + steeringMoveReason(toDashboard, reason));
+                        + " reason=" + moveReason);
                 executingMove = true;
                 moveIndependentDashboardAppBlocking(
                         normalized,
                         toDashboard,
                         dashboardMode,
                         formatMethod,
-                        steeringMoveReason(toDashboard, reason),
+                        moveReason,
                         error -> {
                             if (error != null && !error.isEmpty()) {
                                 reportSteeringFailure(normalized, error);
                             }
                         },
                         requestCurrent,
-                        0L);
+                        0L,
+                        current);
             } catch (RuntimeException error) {
                 reportSteeringFailure(
                         normalized, "runtime " + error.getClass().getSimpleName());
             } finally {
                 if (!executingMove) endMove(normalized);
             }
-        }, "BydHudSteeringTransfer");
+        }, steering ? "BydHudSteeringTransfer" : "BydHudUiTransfer");
         try {
             worker.setDaemon(true);
             worker.start();
@@ -521,7 +553,8 @@ final class NavAppDisplayController {
                         reason,
                         completion,
                         null,
-                        shutdownToken),
+                        shutdownToken,
+                        null),
                 "BydHudIndependentDashboardDisplay");
         try {
             worker.start();
@@ -973,7 +1006,8 @@ final class NavAppDisplayController {
             String reason,
             Consumer<String> completion,
             BooleanSupplier requestCurrent,
-            long shutdownToken) {
+            long shutdownToken,
+            NavAppDisplayState admittedState) {
         final int layoutCommand = DashboardLayoutPolicy.layoutCommand(
                 dashboardMode, formatMethod);
         try {
@@ -987,25 +1021,14 @@ final class NavAppDisplayController {
                         "independent dashboard failed: empty package"));
                 return;
             }
-            if (!preflightAuthorizedAdb(packageName, reason)) {
-                remember(new NavAppDisplayState(
-                        packageName,
-                        -1,
-                        NavAppDisplayState.DISPLAY_UNKNOWN,
-                        false,
-                        "independent dashboard failed: authorized ADB unavailable"));
-                return;
-            }
-            NavAppDisplayState current = checkDisplay(
-                    packageName,
-                    toDashboard
+            NavAppDisplayState current = admittedState == null
+                    ? checkDisplay(packageName, toDashboard
                             ? "independent-dashboard-precheck"
-                            : "independent-return-precheck");
-            if (requestCurrent != null && (!requestCurrent.getAsBoolean()
-                    || !SteeringTransferPolicy.canToggleTask(
-                            current, observedDisplay(packageName, current)))) {
+                            : "independent-return-precheck")
+                    : admittedState;
+            if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
                 remember(new NavAppDisplayState(packageName, current.taskId, current.displayId,
-                        current.visible, "steering transfer blocked: request or task changed"));
+                        current.visible, "steering transfer blocked: request changed"));
                 return;
             }
             if (current.taskId < 0) {
@@ -1017,9 +1040,39 @@ final class NavAppDisplayController {
                         "independent dashboard failed: task missing"));
                 return;
             }
+            if (!SteeringTransferPolicy.canToggleTask(
+                    current, observedDisplay(packageName, current))) {
+                remember(new NavAppDisplayState(packageName, current.taskId, current.displayId,
+                        current.visible, "independent dashboard failed: task/display state unknown"));
+                return;
+            }
             if (!toDashboard) {
                 if (!isShutdownReturnCurrent(shutdownToken)) return;
                 long returnGeneration = projectionGenerationForPackage(packageName);
+                if (current.displayId != MAIN_DISPLAY_ID
+                        && !isConfirmedProjectedDashboardDisplay(packageName, current)) {
+                    NavAppDisplayState returned = moveTaskToDisplayBlocking(
+                            packageName,
+                            MAIN_DISPLAY_ID,
+                            "foreign-display return-main " + safe(reason),
+                            requestCurrent,
+                            current);
+                    boolean onMain = returned.taskId >= 0
+                            && returned.displayId == MAIN_DISPLAY_ID;
+                    boolean surfaceReady = !onMain || ensureWazeSurfaceOnDisplay(
+                            packageName, MAIN_DISPLAY_ID, "foreign-display-return:" + safe(reason));
+                    remember(new NavAppDisplayState(
+                            packageName,
+                            returned.taskId,
+                            returned.displayId,
+                            returned.visible,
+                            onMain
+                                    ? surfaceReady
+                                            ? "foreign display returned to main"
+                                            : "foreign display returned to main; surface handoff failed"
+                                    : "foreign display return failed display=" + returned.displayId));
+                    return;
+                }
                 if (current.displayId == MAIN_DISPLAY_ID
                         && !ClusterProjectionService.isProjectedPackageCurrent(packageName)) {
                     boolean surfaceReady = ensureWazeSurfaceOnDisplay(
@@ -1045,17 +1098,35 @@ final class NavAppDisplayController {
                                     releaseFailure)));
                     return;
                 }
+                CountDownLatch returnCompleted = new CountDownLatch(1);
+                AtomicReference<NavAppDisplayState> returnResult = new AtomicReference<>(current);
+                AtomicBoolean returnOpen = new AtomicBoolean(true);
                 ClusterProjectionService.returnToMain(
                         context,
                         packageName,
                         "independent-dashboard return-main " + safe(reason),
-                        shutdownToken);
+                        shutdownToken,
+                        current,
+                        () -> returnOpen.get()
+                                && (requestCurrent == null || requestCurrent.getAsBoolean()),
+                        state -> {
+                            if (state != null) returnResult.set(state);
+                            returnCompleted.countDown();
+                        });
                 log(packageName, "dashboard_return_main_requested package=" + packageName
                         + " reason=" + safe(reason));
-                NavAppDisplayState confirmed = waitForMainDisplay(
-                        packageName,
-                        "independent-return-confirm",
+                NavAppDisplayState confirmed = awaitTransferCompletion(
+                        returnCompleted,
+                        returnResult,
+                        DISPLAY_CONFIRM_TIMEOUT_MS,
                         () -> isShutdownReturnCurrent(shutdownToken));
+                returnOpen.set(false);
+                if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
+                    remember(new NavAppDisplayState(packageName, confirmed.taskId,
+                            confirmed.displayId, confirmed.visible,
+                            "return completion fenced: request changed"));
+                    return;
+                }
                 if (!isShutdownReturnCurrent(shutdownToken)) return;
                 boolean onMain = confirmed.taskId >= 0
                         && confirmed.displayId == MAIN_DISPLAY_ID;
@@ -1151,11 +1222,29 @@ final class NavAppDisplayController {
                                 layoutFailure)));
                 return;
             }
+            CountDownLatch projectionCompleted = new CountDownLatch(1);
+            AtomicReference<NavAppDisplayState> projectionResult = new AtomicReference<>(current);
+            AtomicBoolean projectionOpen = new AtomicBoolean(true);
             ClusterProjectionService.startProjection(
-                    context, packageName, dashboardMode, safe(reason));
-            NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(
-                    packageName,
-                    "independent-dashboard-start");
+                    context, packageName, dashboardMode, safe(reason), current,
+                    () -> projectionOpen.get()
+                            && (requestCurrent == null || requestCurrent.getAsBoolean()),
+                    state -> {
+                        if (state != null) projectionResult.set(state);
+                        projectionCompleted.countDown();
+                    });
+            NavAppDisplayState confirmed = awaitTransferCompletion(
+                    projectionCompleted,
+                    projectionResult,
+                    PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS,
+                    requestCurrent == null ? () -> true : requestCurrent);
+            projectionOpen.set(false);
+            if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
+                remember(new NavAppDisplayState(packageName, confirmed.taskId,
+                        confirmed.displayId, confirmed.visible,
+                        "projection completion fenced: request changed"));
+                return;
+            }
             if (!isConfirmedProjectedDashboardDisplay(packageName, confirmed)
                     || confirmed.taskId < 0 || !confirmed.visible) {
                 ClusterProjectionService.returnToMain(
@@ -1261,24 +1350,6 @@ final class NavAppDisplayController {
                                 ? "Не удалось подготовить чёрный фон приборной панели"
                                 : "Unable to prepare dashboard black output",
                 Toast.LENGTH_LONG).show());
-    }
-
-    //rejects unauthorised ADB before projection or task state can be changed.
-    private boolean preflightAuthorizedAdb(String packageName, String reason) {
-        try {
-            LocalAdbBridge.ShellResult result = LocalAdbBridge.runRuntimeShellCommand(
-                    context, "id");
-            if (!result.success()) {
-                log(packageName, "dashboard_preflight_adb_failed reason=" + safe(reason)
-                        + " detail=" + result.shortDetail());
-                return false;
-            }
-            return true;
-        } catch (IOException | SecurityException e) {
-            log(packageName, "dashboard_preflight_adb_rejected reason=" + safe(reason)
-                    + " detail=" + safe(e.getMessage()));
-            return false;
-        }
     }
 
     //sends only explicit compositor transitions; ordinary task moves stay layout-neutral.
@@ -1599,8 +1670,26 @@ final class NavAppDisplayController {
             int targetDisplay,
             String reason,
             BooleanSupplier requestCurrent) {
+        return moveTaskToDisplayBlocking(
+                packageName, targetDisplay, reason, requestCurrent, null);
+    }
+
+    synchronized NavAppDisplayState moveTaskToDisplayBlocking(
+            String packageName,
+            int targetDisplay,
+            String reason,
+            BooleanSupplier requestCurrent,
+            NavAppDisplayState admittedState) {
         String normalized = normalizePackage(packageName);
         String label = "move_to_display";
+        long startedMs = SystemClock.elapsedRealtime();
+        //An admitted state represents the operation owner's already completed fresh query.
+        int queries = 1;
+        int moves = 0;
+        long preparationMs = 0L;
+        long queryMs = 0L;
+        long moveMs = 0L;
+        long confirmationMs = 0L;
         try {
             if (normalized.isEmpty()) {
                 return remember(new NavAppDisplayState(
@@ -1610,15 +1699,8 @@ final class NavAppDisplayController {
                         false,
                         label + " failed: empty package"));
             }
-            if (!preflightAuthorizedAdb(normalized, reason)) {
-                return remember(new NavAppDisplayState(
-                        normalized,
-                        -1,
-                        NavAppDisplayState.DISPLAY_UNKNOWN,
-                        false,
-                        label + " failed: authorized ADB unavailable"));
-            }
-            NavAppDisplayState current = checkDisplay(normalized, reason);
+            NavAppDisplayState current = admittedState == null
+                    ? checkDisplay(normalized, reason) : admittedState;
             if (requestCurrent != null && !requestCurrent.getAsBoolean()) {
                 return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
                         current.visible, label + " blocked: request changed"));
@@ -1643,12 +1725,14 @@ final class NavAppDisplayController {
                 return remember(new NavAppDisplayState(normalized, current.taskId, current.displayId,
                         current.visible, label + " blocked: request changed before command"));
             }
+            long preparationStartedMs = SystemClock.elapsedRealtime();
             String outputFailure = ClusterProjectionService.prepareOutputForTaskMove(
                     normalized,
                     current.taskId,
                     current.displayId,
                     targetDisplay,
                     requestCurrent);
+            preparationMs = SystemClock.elapsedRealtime() - preparationStartedMs;
             if (!outputFailure.isEmpty()) {
                 return remember(new NavAppDisplayState(
                         normalized,
@@ -1657,19 +1741,54 @@ final class NavAppDisplayController {
                         current.visible,
                         label + " failed: " + outputFailure));
             }
-            LocalAdbBridge.ShellResult move = runCommand(
-                    normalized,
-                    "cmd activity display move-stack " + current.taskId + " " + targetDisplay,
-                    label + " target=" + targetDisplay + " reason=" + safe(reason));
-            if (!move.success()) {
+            String command = "cmd activity display move-stack " + current.taskId + " " + targetDisplay;
+            BooleanSupplier currentGate = requestCurrent == null ? () -> true : requestCurrent;
+            TaskMoveSequencer.Result sequence = TaskMoveSequencer.execute(
+                    current,
+                    targetDisplay,
+                    currentGate,
+                    new TaskMoveSequencer.Io() {
+                        @Override
+                        public NavAppDisplayState query(String stage) {
+                            return checkDisplay(normalized, label + "-" + stage);
+                        }
+
+                        @Override
+                        public TaskMoveSequencer.CommandResult move(String stage) throws IOException {
+                            LocalAdbBridge.ShellResult result = runMutationCommandOnce(
+                                    normalized,
+                                    command,
+                                    label + "-" + stage + " target=" + targetDisplay
+                                            + " reason=" + safe(reason));
+                            return new TaskMoveSequencer.CommandResult(
+                                    result.success(), result.shortDetail());
+                        }
+                    });
+            queries = sequence.queries;
+            moves = sequence.moves;
+            queryMs = sequence.queryMs;
+            moveMs = sequence.moveMs;
+            confirmationMs = sequence.confirmationMs;
+            NavAppDisplayState confirmed = sequence.state == null
+                    ? new NavAppDisplayState(normalized, current.taskId,
+                            NavAppDisplayState.DISPLAY_UNKNOWN, false, "confirmation missing")
+                    : sequence.state;
+            if (!sequence.current) {
                 return remember(new NavAppDisplayState(
                         normalized,
-                        current.taskId,
-                        current.displayId,
-                        current.visible,
-                        label + " failed: " + move.shortDetail()));
+                        confirmed.taskId,
+                        confirmed.displayId,
+                        confirmed.visible,
+                        label + " blocked: request changed after command"));
             }
-            NavAppDisplayState confirmed = checkDisplay(normalized, label + "-confirm");
+            if (!sequence.error.isEmpty()) {
+                return remember(new NavAppDisplayState(
+                        normalized,
+                        confirmed.taskId,
+                        confirmed.displayId,
+                        confirmed.visible,
+                        label + " failed: " + sequence.error));
+            }
             if (confirmed.displayId == targetDisplay) {
                 return remember(new NavAppDisplayState(
                         normalized,
@@ -1691,6 +1810,14 @@ final class NavAppDisplayController {
                     NavAppDisplayState.DISPLAY_UNKNOWN,
                     false,
                     label + " failed: " + safe(e.getMessage())));
+        } finally {
+            log(normalized, "transfer_operation elapsedMs="
+                    + (SystemClock.elapsedRealtime() - startedMs)
+                    + " queries=" + queries + " moves=" + moves
+                    + " preparationMs=" + preparationMs
+                    + " readbackMs=" + queryMs + " moveMs=" + moveMs
+                    + " confirmationMs=" + confirmationMs
+                    + " target=" + targetDisplay + " reason=" + safe(reason));
         }
     }
 
@@ -1712,18 +1839,29 @@ final class NavAppDisplayController {
             int taskId,
             int targetDisplay,
             String reason) {
+        return moveTaskIdToDisplayBlocking(
+                logicalPackage, taskId, targetDisplay, reason, () -> true);
+    }
+
+    synchronized NavAppDisplayState moveTaskIdToDisplayBlocking(
+            String logicalPackage,
+            int taskId,
+            int targetDisplay,
+            String reason,
+            BooleanSupplier requestCurrent) {
         String normalized = normalizePackage(logicalPackage);
         String label = "move_task_to_display";
+        long startedMs = SystemClock.elapsedRealtime();
+        int queries = 1;
+        int moves = 0;
+        long queryMs = 0L;
+        long moveMs = 0L;
+        long confirmationMs = 0L;
         try {
             if (normalized.isEmpty() || taskId < 0) {
                 return new NavAppDisplayState(normalized, taskId,
                         NavAppDisplayState.DISPLAY_UNKNOWN, false,
                         label + " failed: invalid target");
-            }
-            if (!preflightAuthorizedAdb(normalized, reason)) {
-                return new NavAppDisplayState(normalized, taskId,
-                        NavAppDisplayState.DISPLAY_UNKNOWN, false,
-                        label + " failed: authorized ADB unavailable");
             }
             NavAppDisplayState current = checkTaskId(normalized, taskId, reason);
             if (current == null) {
@@ -1731,26 +1869,59 @@ final class NavAppDisplayController {
                         NavAppDisplayState.DISPLAY_UNKNOWN, false,
                         label + " failed: task missing");
             }
-            if (current.displayId == targetDisplay) return current;
-            LocalAdbBridge.ShellResult move = runCommand(
-                    normalized,
-                    "cmd activity display move-stack " + taskId + " " + targetDisplay,
-                    label + " target=" + targetDisplay + " reason=" + safe(reason));
-            if (!move.success()) {
-                return new NavAppDisplayState(normalized, taskId, current.displayId,
-                        current.visible, label + " failed: " + move.shortDetail());
+            if (current.displayId == NavAppDisplayState.DISPLAY_UNKNOWN) {
+                return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false,
+                        label + " failed: task/display state unknown");
             }
-            NavAppDisplayState confirmed = checkTaskId(
-                    normalized, taskId, label + "-confirm");
-            return confirmed == null
+            if (current.displayId == targetDisplay) return current;
+            String command = "cmd activity display move-stack " + taskId + " " + targetDisplay;
+            TaskMoveSequencer.Result sequence = TaskMoveSequencer.execute(
+                    current, targetDisplay, requestCurrent, new TaskMoveSequencer.Io() {
+                        @Override
+                        public NavAppDisplayState query(String stage) throws IOException {
+                            return checkTaskId(normalized, taskId, label + "-" + stage);
+                        }
+
+                        @Override
+                        public TaskMoveSequencer.CommandResult move(String stage) throws IOException {
+                            LocalAdbBridge.ShellResult result = runMutationCommandOnce(
+                                    normalized, command, label + "-" + stage
+                                            + " target=" + targetDisplay
+                                            + " reason=" + safe(reason));
+                            return new TaskMoveSequencer.CommandResult(
+                                    result.success(), result.shortDetail());
+                        }
+                    });
+            queries = sequence.queries;
+            moves = sequence.moves;
+            queryMs = sequence.queryMs;
+            moveMs = sequence.moveMs;
+            confirmationMs = sequence.confirmationMs;
+            if (!sequence.error.isEmpty()) {
+                return new NavAppDisplayState(normalized, taskId,
+                        sequence.state == null ? NavAppDisplayState.DISPLAY_UNKNOWN
+                                : sequence.state.displayId,
+                        sequence.state != null && sequence.state.visible,
+                        label + " failed: " + sequence.error);
+            }
+            return sequence.state == null
                     ? new NavAppDisplayState(normalized, taskId,
                             NavAppDisplayState.DISPLAY_UNKNOWN, false,
                             label + " confirmation missing")
-                    : confirmed;
+                    : sequence.state;
         } catch (IOException | SecurityException error) {
             return new NavAppDisplayState(normalized, taskId,
                     NavAppDisplayState.DISPLAY_UNKNOWN, false,
                     label + " failed: " + safe(error.getMessage()));
+        } finally {
+            log(normalized, "transfer_companion elapsedMs="
+                    + (SystemClock.elapsedRealtime() - startedMs)
+                    + " queries=" + queries + " moves=" + moves
+                    + " preparationMs=0 readbackMs=" + queryMs + " moveMs=" + moveMs
+                    + " confirmationMs=" + confirmationMs
+                    + " task=" + taskId + " target=" + targetDisplay
+                    + " reason=" + safe(reason));
         }
     }
 
@@ -1763,37 +1934,24 @@ final class NavAppDisplayController {
         return result.success() ? parseTaskId(logicalPackage, taskId, result.output) : null;
     }
 
-    //waits for the app-owned virtual display, then moves the task there if Android created it late.
-    private NavAppDisplayState waitForProjectedDashboardDisplay(String packageName, String reason) {
-        NavAppDisplayState last = checkDisplay(packageName, reason + "-initial");
-        long deadline = android.os.SystemClock.elapsedRealtime() + PROJECTED_DISPLAY_CONFIRM_TIMEOUT_MS;
-        while (android.os.SystemClock.elapsedRealtime() < deadline) {
-            int projectedDisplayId = ClusterProjectionService.projectedDisplayIdForPackage(packageName);
-            log(packageName, "dashboard_confirm_wait projectedDisplay=" + projectedDisplayId
-                    + " actualDisplay=" + last.displayId
-                    + " reason=" + safe(reason));
-            if (projectedDisplayId > MAIN_DISPLAY_ID) {
-                if (last.displayId == projectedDisplayId && last.taskId >= 0 && last.visible) {
-                    log(packageName, "dashboard_confirmed_late package=" + packageName
-                            + " display=" + last.displayId);
-                    return last;
-                }
-                if (last.displayId != projectedDisplayId) {
-                    last = moveTaskToDisplayBlocking(
-                            packageName,
-                            projectedDisplayId,
-                            reason + "-late-projected-display");
-                    if (last.displayId == projectedDisplayId && last.taskId >= 0 && last.visible) {
-                        log(packageName, "dashboard_confirmed_late package=" + packageName
-                                + " display=" + last.displayId);
-                        return last;
-                    }
+    private static NavAppDisplayState awaitTransferCompletion(
+            CountDownLatch completed,
+            AtomicReference<NavAppDisplayState> result,
+            long timeoutMs,
+            BooleanSupplier requestCurrent) {
+        long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        try {
+            while (requestCurrent.getAsBoolean()) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0L || completed.await(
+                        Math.min(remaining, DISPLAY_CONFIRM_INTERVAL_MS), TimeUnit.MILLISECONDS)) {
+                    break;
                 }
             }
-            sleepDisplayConfirmInterval();
-            last = checkDisplay(packageName, reason);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
         }
-        return last;
+        return result.get();
     }
 
     //requires confirmation against the app-owned virtual display so unrelated dashboard displays do not win.
@@ -1945,13 +2103,13 @@ final class NavAppDisplayController {
 
     private NavAppDisplayState waitForMainDisplay(
             String packageName, String reason, BooleanSupplier requestCurrent) {
-        NavAppDisplayState last = checkDisplay(packageName, reason + "-initial");
+        NavAppDisplayState last = lastState(packageName);
         long deadline = android.os.SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
         while (requestCurrent.getAsBoolean() && last.taskId >= 0
                 && last.displayId != MAIN_DISPLAY_ID
                 && android.os.SystemClock.elapsedRealtime() < deadline) {
             sleepDisplayConfirmInterval();
-            last = checkDisplay(packageName, reason);
+            last = lastState(packageName);
         }
         return last;
     }
@@ -1994,9 +2152,24 @@ final class NavAppDisplayController {
             String packageName,
             String command,
             String label) throws IOException {
+        long startedMs = SystemClock.elapsedRealtime();
         LocalAdbBridge.ShellResult result =
                 LocalAdbBridge.runRuntimeShellCommand(context, command);
         log(packageName, label
+                + " elapsedMs=" + (SystemClock.elapsedRealtime() - startedMs)
+                + " command=\"" + NavCaptureStore.esc(command) + "\""
+                + " exit=" + result.exitCode
+                + " output=\"" + NavCaptureStore.esc(shortOutput(result.output)) + "\"");
+        return result;
+    }
+
+    private LocalAdbBridge.ShellResult runMutationCommandOnce(
+            String packageName, String command, String label) throws IOException {
+        long startedMs = SystemClock.elapsedRealtime();
+        LocalAdbBridge.ShellResult result =
+                LocalAdbBridge.runRuntimeShellCommandOnce(context, command);
+        log(packageName, label
+                + " elapsedMs=" + (SystemClock.elapsedRealtime() - startedMs)
                 + " command=\"" + NavCaptureStore.esc(command) + "\""
                 + " exit=" + result.exitCode
                 + " output=\"" + NavCaptureStore.esc(shortOutput(result.output)) + "\"");

@@ -779,11 +779,21 @@ final class LocalAdbBridge {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static ShellResult runRuntimeShellCommand(Context context, String command) throws IOException {
+        return runRuntimeShellCommand(context, command, true);
+    }
+
+    /** Mutations use readback before a caller decides whether sending again is safe. */
+    static ShellResult runRuntimeShellCommandOnce(Context context, String command) throws IOException {
+        return runRuntimeShellCommand(context, command, false);
+    }
+
+    private static ShellResult runRuntimeShellCommand(
+            Context context, String command, boolean retryTransportFailure) throws IOException {
         String safeCommand = command == null ? "" : command.trim();
         if (!isAllowedRuntimeShellCommand(safeCommand)) {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
-        return runTrustedRuntimeShellCommand(context, safeCommand);
+        return runTrustedRuntimeShellCommand(context, safeCommand, 0, retryTransportFailure);
     }
 
     //keeps AutoContainer values behind the same authenticated allowlist as task moves.
@@ -1196,6 +1206,12 @@ final class LocalAdbBridge {
 
     private static ShellResult runTrustedRuntimeShellCommand(
             Context context, String safeCommand, int maxOutputBytes) throws IOException {
+        return runTrustedRuntimeShellCommand(context, safeCommand, maxOutputBytes, true);
+    }
+
+    private static ShellResult runTrustedRuntimeShellCommand(
+            Context context, String safeCommand, int maxOutputBytes,
+            boolean retryTransportFailure) throws IOException {
         Context appContext = context.getApplicationContext();
         synchronized (RUNTIME_CONNECTION_LOCK) {
             try {
@@ -1208,6 +1224,7 @@ final class LocalAdbBridge {
                 return result;
             } catch (IOException e) {
                 closeRuntimeConnectionLocked(appContext, "io_exception");
+                if (!retryTransportFailure) throw e;
                 try {
                     Connection connection = runtimeConnectionLocked(appContext);
                     if (connection == null) {

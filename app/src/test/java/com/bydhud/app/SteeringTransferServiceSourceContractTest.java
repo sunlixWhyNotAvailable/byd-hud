@@ -93,7 +93,8 @@ public final class SteeringTransferServiceSourceContractTest {
         String steering = steeringWorker();
         int reserve = steering.indexOf("if (!beginMove(normalized,");
         int worker = steering.indexOf("Thread worker = new Thread(");
-        int precheck = steering.indexOf("checkDisplay(normalized, \"steering-precheck\")");
+        int precheck = steering.indexOf(
+                "checkDisplay(normalized, source + \"-toggle-precheck\")");
         int dispatch = steering.indexOf("moveIndependentDashboardAppBlocking(");
         assertTrue(reserve >= 0 && worker > reserve && precheck > worker && dispatch > precheck);
         assertTrue(steering.substring(reserve, worker).contains("return;"));
@@ -104,7 +105,7 @@ public final class SteeringTransferServiceSourceContractTest {
         String ui = between(controller, "private void moveIndependentDashboardApp(",
                 "void requestWidgetMode(");
         assertTrue(ui.indexOf("if (!beginMove(normalized,") < ui.indexOf("Thread worker ="));
-        assertTrue(ui.contains("reason, completion, null, shutdownToken)"));
+        assertTrue(ui.contains("reason, completion, null, shutdownToken, null)"));
         String widget = between(controller, "void requestWidgetMode(", "void cancelWidgetModeForShutdown()");
         assertTrue(widget.indexOf("if (!beginMove(\"\",") < widget.indexOf("Thread worker ="));
         String begin = between(controller, "private boolean beginMove(", "boolean reserveMove(");
@@ -130,24 +131,25 @@ public final class SteeringTransferServiceSourceContractTest {
         assertTrue(service.contains("bindingRevision, SteeringTransferPreferences.revision(this)"));
         assertTrue(service.contains("runtimeGeneration, steeringRuntimeGeneration"));
         String steering = steeringWorker();
-        assertTrue(steering.contains("checkDisplay(normalized, \"steering-precheck\"); "
+        assertTrue(steering.contains("checkDisplay(normalized, source + \"-toggle-precheck\"); "
                 + "if (!requestCurrent.getAsBoolean()) return;"));
         assertTrue(steering.contains("observedDisplay(normalized, current)"));
         assertTrue(steering.contains("SteeringTransferPolicy.canToggleTask(current, observed)"));
-        assertTrue(steering.contains("}, requestCurrent, 0L);"));
+        assertTrue(steering.contains("}, requestCurrent, 0L, current);"));
         String controller = source("NavAppDisplayController.java");
         String move = between(controller, "private void moveIndependentDashboardAppBlocking(",
                 "private String completionErrorForState(");
-        int query = move.indexOf("NavAppDisplayState current = checkDisplay(");
-        int guard = move.indexOf("requestCurrent != null && (!requestCurrent.getAsBoolean()");
+        int query = move.indexOf("NavAppDisplayState current = admittedState == null");
+        int guard = move.indexOf("requestCurrent != null && !requestCurrent.getAsBoolean()");
+        int knownDisplay = move.indexOf("if (!SteeringTransferPolicy.canToggleTask(");
         int dispatch = move.indexOf("ClusterProjectionService.returnToMain(");
-        assertTrue(query >= 0 && guard > query && dispatch > guard);
+        assertTrue(query >= 0 && guard > query && knownDisplay > guard && dispatch > knownDisplay);
         assertTrue(move.contains("current, observedDisplay(packageName, current))"));
         assertTrue(move.contains(
                 "returnPreviousDashboardApp( packageName, layoutCommand, reason, requestCurrent)"));
         String replacement = between(controller, "synchronized NavAppDisplayState moveTaskToDisplayBlocking(",
-                "LocalAdbBridge.ShellResult move = runCommand(");
-        assertTrue(replacement.contains("checkDisplay(normalized, reason); "
+                "private boolean ensureWazeSurfaceOnDisplay(");
+        assertTrue(replacement.contains("checkDisplay(normalized, reason) : admittedState; "
                 + "if (requestCurrent != null && !requestCurrent.getAsBoolean())"));
         assertTrue(replacement.contains("ClusterProjectionService.prepareOutputForTaskMove("));
     }

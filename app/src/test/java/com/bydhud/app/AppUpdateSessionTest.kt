@@ -297,6 +297,26 @@ class AppUpdateSessionTest {
         } finally { scope.cancel() }
     }
 
+    @Test fun completedResultsHaveMonotonicProcessIdentitiesAndRetainedOfferNeedsExactIdentity() {
+        Harness().use { h ->
+            h.session.requestManual(false)
+            h.complete(available)
+            val firstId = h.state.resultId
+            assertTrue(firstId > 0L)
+            h.session.dismiss()
+            assertFalse(h.state.dialogRequested)
+            assertFalse(h.session.showRetainedOffer(firstId + 1L))
+            assertTrue(h.session.showRetainedOffer(firstId))
+            assertTrue(h.state.dialogRequested)
+
+            h.session.changeChannel(true)
+            assertEquals(0L, h.state.resultId)
+            h.session.requestManual(true)
+            h.complete(available, 1)
+            assertTrue(h.state.resultId > firstId)
+        }
+    }
+
     @Test fun productionPolicyHasNoPersistentThrottleOrActivityOwnedRequest() {
         val source = String(Files.readAllBytes(Paths.get("src/main/java/com/bydhud/app/AppUpdateManager.kt")), Charsets.UTF_8)
         assertFalse(source.contains("last_check_ms"))

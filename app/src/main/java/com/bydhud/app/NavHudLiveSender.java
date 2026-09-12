@@ -19,6 +19,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.function.BooleanSupplier;
 import java.util.function.UnaryOperator;
 
 //defines the NavHudLiveSender module boundary so related behavior stays readable inside one unit.
@@ -1926,6 +1927,8 @@ final class NavHudLiveSender {
         if (!start.required) return true;
 
         long lastRelaunchRequestMs = 0L;
+        int confirmedMovedTask = -1;
+        int confirmedMovedTarget = NavAppDisplayState.DISPLAY_UNKNOWN;
         while (SystemClock.elapsedRealtime() < deadline) {
             int taskId = WazeSurfaceActivity.activeTaskId();
             int actualDisplay = WazeSurfaceActivity.activeDisplayId();
@@ -1965,12 +1968,24 @@ final class NavHudLiveSender {
                 return true;
             }
             if (action == SURFACE_HANDOFF_MOVE) {
+                if (taskId == confirmedMovedTask && targetDisplay == confirmedMovedTarget) {
+                    try {
+                        Thread.sleep(WAZE_SURFACE_HANDOFF_POLL_MS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        return false;
+                    }
+                    continue;
+                }
+                long activityInstanceId = WazeSurfaceActivity.activeInstanceId();
+                int directSessionGeneration = wazeDirectChannel.sessionGeneration();
+                int surfaceSessionGeneration = wazeSurfaceDirectChannel.sessionGeneration();
                 long transitionTimeoutMs = deadline - SystemClock.elapsedRealtime();
                 if (!switchWazeSurfaceToClusterBeforeReadinessLoss(
                         "surface-display-move", start.routeGeneration,
-                        taskId, WazeSurfaceActivity.activeInstanceId(),
-                        wazeDirectChannel.sessionGeneration(),
-                        wazeSurfaceDirectChannel.sessionGeneration(),
+                        taskId, activityInstanceId,
+                        directSessionGeneration,
+                        surfaceSessionGeneration,
                         transitionTimeoutMs)) {
                     log("surface_handoff_transition_failed target=" + targetDisplay
                             + " task=" + taskId
@@ -1979,10 +1994,23 @@ final class NavHudLiveSender {
                     return false;
                 }
                 wazeSurfaceDirectChannel.prepareSurfaceHandoff(reason);
+                BooleanSupplier handoffCurrent = () ->
+                        start.routeGeneration == wazeRouteGeneration
+                                && taskId == WazeSurfaceActivity.activeTaskId()
+                                && activityInstanceId == WazeSurfaceActivity.activeInstanceId()
+                                && directSessionGeneration == wazeDirectChannel.sessionGeneration()
+                                && surfaceSessionGeneration
+                                        == wazeSurfaceDirectChannel.sessionGeneration();
                 NavAppDisplayState moved = NavAppDisplayController.get(context)
                         .moveTaskIdToDisplayBlocking(
                                 WAZE_PACKAGE, taskId, targetDisplay,
-                                "surface-handoff:" + safeReason(reason));
+                                "surface-handoff:" + safeReason(reason),
+                                handoffCurrent);
+                if (handoffCurrent.getAsBoolean()
+                        && moved.taskId == taskId && moved.displayId == targetDisplay) {
+                    confirmedMovedTask = taskId;
+                    confirmedMovedTarget = targetDisplay;
+                }
                 log("surface_move task=" + taskId
                         + " target=" + targetDisplay
                         + " actual=" + moved.displayId

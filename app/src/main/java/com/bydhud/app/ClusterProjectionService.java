@@ -30,11 +30,13 @@ import android.view.WindowManager;
 import android.widget.FrameLayout;
 
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 //anchors the ClusterProjectionService android entry point so lifecycle recovery stays separate from business logic.
 public final class ClusterProjectionService extends Service
@@ -59,7 +61,16 @@ public final class ClusterProjectionService extends Service
     private static final String EXTRA_SHUTDOWN_TOKEN = "shutdownToken";
     private static final String EXTRA_RETURN_GENERATION = "returnGeneration";
     private static final String EXTRA_RETURN_OWNER_TOKEN = "returnOwnerToken";
+    private static final String EXTRA_TASK_ID = "taskId";
+    private static final String EXTRA_DISPLAY_ID = "displayId";
+    private static final String EXTRA_TASK_VISIBLE = "taskVisible";
+    private static final String EXTRA_TRANSFER_TOKEN = "transferToken";
     private static final AtomicLong NEXT_PROJECTION_TOKEN = new AtomicLong();
+    private static final AtomicLong NEXT_TRANSFER_TOKEN = new AtomicLong();
+    private static final ConcurrentHashMap<Long, Consumer<NavAppDisplayState>>
+            TRANSFER_COMPLETIONS = new ConcurrentHashMap<>();
+    private static final ConcurrentHashMap<Long, BooleanSupplier>
+            TRANSFER_CURRENTS = new ConcurrentHashMap<>();
     private static ClusterProjectionService instance;
 
     private final Object lock = new Object();
@@ -93,14 +104,34 @@ public final class ClusterProjectionService extends Service
     private int blackWindowDisplayGeneration;
     private boolean projectionContentVisible;
     private boolean projectionRecoveryInProgress;
+    private NavAppDisplayState pendingTaskState;
+    private long pendingTransferToken;
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startProjection(Context context, String packageName, int dashboardMode, String reason) {
+        startProjection(context, packageName, dashboardMode, reason, null);
+    }
+
+    static void startProjection(Context context, String packageName, int dashboardMode, String reason,
+            NavAppDisplayState taskState) {
+        startProjection(context, packageName, dashboardMode, reason, taskState, null);
+    }
+
+    static void startProjection(Context context, String packageName, int dashboardMode, String reason,
+            NavAppDisplayState taskState, Consumer<NavAppDisplayState> completion) {
+        startProjection(context, packageName, dashboardMode, reason, taskState, () -> true, completion);
+    }
+
+    static void startProjection(Context context, String packageName, int dashboardMode, String reason,
+            NavAppDisplayState taskState, BooleanSupplier requestCurrent,
+            Consumer<NavAppDisplayState> completion) {
         Intent intent = new Intent(context, ClusterProjectionService.class);
         intent.setAction(ACTION_PROJECT);
         intent.putExtra(EXTRA_PACKAGE, safe(packageName));
         intent.putExtra(EXTRA_MODE, HudPrefs.normalizeDashboardScreenMode(dashboardMode));
         intent.putExtra(EXTRA_REASON, safe(reason));
+        putTaskState(intent, taskState);
+        putCompletion(intent, requestCurrent, completion);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             context.startForegroundService(intent);
         } else {
@@ -115,10 +146,31 @@ public final class ClusterProjectionService extends Service
 
     static void returnToMain(
             Context context, String packageName, String reason, long shutdownToken) {
+        returnToMain(context, packageName, reason, shutdownToken, null);
+    }
+
+    static void returnToMain(
+            Context context, String packageName, String reason, long shutdownToken,
+            NavAppDisplayState taskState) {
+        returnToMain(context, packageName, reason, shutdownToken, taskState, null);
+    }
+
+    static void returnToMain(
+            Context context, String packageName, String reason, long shutdownToken,
+            NavAppDisplayState taskState, Consumer<NavAppDisplayState> completion) {
+        returnToMain(context, packageName, reason, shutdownToken, taskState, () -> true, completion);
+    }
+
+    static void returnToMain(
+            Context context, String packageName, String reason, long shutdownToken,
+            NavAppDisplayState taskState, BooleanSupplier requestCurrent,
+            Consumer<NavAppDisplayState> completion) {
         Intent intent = new Intent(context, ClusterProjectionService.class);
         intent.setAction(ACTION_RETURN);
         intent.putExtra(EXTRA_PACKAGE, safe(packageName));
         intent.putExtra(EXTRA_REASON, safe(reason));
+        putTaskState(intent, taskState);
+        putCompletion(intent, requestCurrent, completion);
         intent.putExtra(EXTRA_SHUTDOWN_TOKEN, shutdownToken);
         ClusterProjectionService service = instance;
         if (service != null) {
@@ -292,6 +344,9 @@ public final class ClusterProjectionService extends Service
                 : HudPrefs.normalizeDashboardScreenMode(intent.getIntExtra(
                         EXTRA_MODE, HudPrefs.DASHBOARD_MODE_FULL));
         String reason = safe(intent == null ? "" : intent.getStringExtra(EXTRA_REASON));
+        NavAppDisplayState taskState = taskState(intent, packageName);
+        long transferToken = intent == null ? 0L
+                : intent.getLongExtra(EXTRA_TRANSFER_TOKEN, 0L);
         if (action.isEmpty()) {
             restorePersistedProjection("sticky-restart-empty-action");
             return START_STICKY;
@@ -300,7 +355,7 @@ public final class ClusterProjectionService extends Service
             returnPackageToMain(packageName, reason,
                     intent.getLongExtra(EXTRA_SHUTDOWN_TOKEN, 0L),
                     intent.getIntExtra(EXTRA_RETURN_GENERATION, 0),
-                    intent.getLongExtra(EXTRA_RETURN_OWNER_TOKEN, 0L));
+                    intent.getLongExtra(EXTRA_RETURN_OWNER_TOKEN, 0L), taskState, transferToken);
             return START_NOT_STICKY;
         }
         if (ACTION_PROJECT.equals(action)) {
@@ -310,7 +365,7 @@ public final class ClusterProjectionService extends Service
                         UserRuntimeSession.PROCESS.shutdownToken(), "late-project-during-shutdown");
                 return START_NOT_STICKY;
             }
-            requestProjection(packageName, dashboardMode, reason);
+            requestProjection(packageName, dashboardMode, reason, taskState, transferToken);
             return START_STICKY;
         }
         log("unknown action=" + action + " reason=" + reason);
@@ -387,6 +442,16 @@ public final class ClusterProjectionService extends Service
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestProjection(String packageName, int dashboardMode, String reason) {
+        requestProjection(packageName, dashboardMode, reason, null);
+    }
+
+    private void requestProjection(String packageName, int dashboardMode, String reason,
+            NavAppDisplayState taskState) {
+        requestProjection(packageName, dashboardMode, reason, taskState, 0L);
+    }
+
+    private void requestProjection(String packageName, int dashboardMode, String reason,
+            NavAppDisplayState taskState, long transferToken) {
         if (packageName.isEmpty()) {
             log("projection ignored empty package reason=" + reason);
             return;
@@ -461,6 +526,8 @@ public final class ClusterProjectionService extends Service
             projectionMode = normalizedMode;
             projectionContentVisible = preserveVisibleOwner;
             projectionPlacementReady = preserveVisibleOwner;
+            pendingTaskState = taskState;
+            pendingTransferToken = transferToken;
             surfaceGeneration++;
             requestGeneration = projectionGeneration;
             requestOwnerToken = projectionOwnerToken;
@@ -526,10 +593,16 @@ public final class ClusterProjectionService extends Service
                     + (reusingIdleResources ? "idle" : "active")
                     + " id=" + existing.getDisplay().getDisplayId()
                     + " package=" + packageName);
+            synchronized (lock) {
+                pendingTaskState = null;
+                pendingTransferToken = 0L;
+            }
             movePackageToDisplay(
                     packageName,
                     existing.getDisplay().getDisplayId(),
-                    "project-existing " + reason);
+                    "project-existing " + reason,
+                    taskState,
+                    transferToken);
             return;
         }
         createVirtualDisplayIfReady(packageName, reason);
@@ -537,7 +610,8 @@ public final class ClusterProjectionService extends Service
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void returnPackageToMain(String packageName, String reason, long shutdownToken,
-            int returnGeneration, long returnOwnerToken) {
+            int returnGeneration, long returnOwnerToken, NavAppDisplayState taskState,
+            long transferToken) {
         String targetPackage;
         synchronized (lock) {
             targetPackage = packageName.isEmpty() ? projectedPackage : packageName;
@@ -549,15 +623,18 @@ public final class ClusterProjectionService extends Service
         Thread worker = new Thread(() -> {
             NavAppDisplayController controller = NavAppDisplayController.get(this);
             long intentGeneration = controller.projectionGenerationForPackage(targetPackage);
-            BooleanSupplier requestCurrent = () -> isReturnMoveCurrent(
-                    targetPackage, returnGeneration, returnOwnerToken, shutdownToken);
+            BooleanSupplier requestCurrent = () -> transferCurrent(transferToken)
+                    && isReturnMoveCurrent(
+                            targetPackage, returnGeneration, returnOwnerToken, shutdownToken);
             NavAppDisplayState returned = NavAppDisplayController.get(this)
                     .moveTaskToDisplayBlocking(
                             targetPackage,
                             MAIN_DISPLAY_ID,
                             "cluster-projection return-main " + reason,
-                            requestCurrent);
+                            requestCurrent,
+                            taskState);
             if (returned.taskId < 0 || returned.displayId != MAIN_DISPLAY_ID) {
+                completeTransfer(transferToken, returned);
                 log("return-main failed package=" + targetPackage
                         + " task=" + returned.taskId
                         + " display=" + returned.displayId
@@ -567,6 +644,7 @@ public final class ClusterProjectionService extends Service
             mainHandler.post(() -> {
                 if (!isReturnOwnerCurrent(targetPackage, returnGeneration, returnOwnerToken)
                         || !shouldRetainAfterReturn(targetPackage, returnGeneration)) {
+                    completeTransfer(transferToken, returned);
                     log("return-main failed stale package=" + targetPackage
                             + " reason=" + reason);
                     return;
@@ -580,6 +658,7 @@ public final class ClusterProjectionService extends Service
                 if (!blackFailure.isEmpty()) {
                     controller.recordProjectionOutputFailure(targetPackage, blackFailure);
                 }
+                completeTransfer(transferToken, returned);
             });
         }, "BydHudClusterProjectionReturn");
         worker.start();
@@ -599,6 +678,48 @@ public final class ClusterProjectionService extends Service
                     && projectionOwnerToken == expectedOwnerToken
                     && (projectedPackage.isEmpty() || projectedPackage.equals(packageName));
         }
+    }
+
+    private static void putTaskState(Intent intent, NavAppDisplayState state) {
+        if (state == null || state.taskId < 0) return;
+        intent.putExtra(EXTRA_TASK_ID, state.taskId);
+        intent.putExtra(EXTRA_DISPLAY_ID, state.displayId);
+        intent.putExtra(EXTRA_TASK_VISIBLE, state.visible);
+    }
+
+    private static void putCompletion(Intent intent, BooleanSupplier requestCurrent,
+            Consumer<NavAppDisplayState> completion) {
+        if (completion == null) return;
+        long next = NEXT_TRANSFER_TOKEN.incrementAndGet();
+        final long token = next <= 0L ? 1L : next;
+        TRANSFER_COMPLETIONS.put(token, completion);
+        TRANSFER_CURRENTS.put(token, requestCurrent == null ? () -> true : requestCurrent);
+        intent.putExtra(EXTRA_TRANSFER_TOKEN, token);
+        new Handler(Looper.getMainLooper()).postDelayed(() -> {
+            TRANSFER_COMPLETIONS.remove(token);
+            TRANSFER_CURRENTS.remove(token);
+        }, 15_000L);
+    }
+
+    private static void completeTransfer(long token, NavAppDisplayState state) {
+        Consumer<NavAppDisplayState> completion = TRANSFER_COMPLETIONS.remove(token);
+        TRANSFER_CURRENTS.remove(token);
+        if (completion != null) completion.accept(state);
+    }
+
+    private static boolean transferCurrent(long token) {
+        if (token == 0L) return true;
+        BooleanSupplier current = TRANSFER_CURRENTS.get(token);
+        return current != null && current.getAsBoolean();
+    }
+
+    private static NavAppDisplayState taskState(Intent intent, String packageName) {
+        if (intent == null || !intent.hasExtra(EXTRA_TASK_ID)) return null;
+        return new NavAppDisplayState(packageName,
+                intent.getIntExtra(EXTRA_TASK_ID, -1),
+                intent.getIntExtra(EXTRA_DISPLAY_ID, NavAppDisplayState.DISPLAY_UNKNOWN),
+                intent.getBooleanExtra(EXTRA_TASK_VISIBLE, false),
+                "transfer admission");
     }
 
     private String prepareOutputForTaskMoveBlocking(
@@ -891,7 +1012,16 @@ public final class ClusterProjectionService extends Service
                 + " buffer=" + bufferWidth + "x" + bufferHeight
                 + " left=" + left + " top=" + top);
         if (!expectedPackage.isEmpty()) {
-            movePackageToDisplay(expectedPackage, displayId, "project " + reason);
+            NavAppDisplayState taskState;
+            long transferToken;
+            synchronized (lock) {
+                taskState = pendingTaskState;
+                pendingTaskState = null;
+                transferToken = pendingTransferToken;
+                pendingTransferToken = 0L;
+            }
+            movePackageToDisplay(
+                    expectedPackage, displayId, "project " + reason, taskState, transferToken);
         }
     }
 
@@ -1523,6 +1653,16 @@ public final class ClusterProjectionService extends Service
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void movePackageToDisplay(String packageName, int displayId, String reason) {
+        movePackageToDisplay(packageName, displayId, reason, null, 0L);
+    }
+
+    private void movePackageToDisplay(
+            String packageName, int displayId, String reason, NavAppDisplayState taskState) {
+        movePackageToDisplay(packageName, displayId, reason, taskState, 0L);
+    }
+
+    private void movePackageToDisplay(String packageName, int displayId, String reason,
+            NavAppDisplayState taskState, long transferToken) {
         final int moveDisplayGeneration;
         final int moveGeneration;
         final long moveOwnerToken;
@@ -1533,11 +1673,13 @@ public final class ClusterProjectionService extends Service
         }
         Thread worker = new Thread(
                 () -> {
-                    String staleReason = staleMoveReason(
-                            packageName, displayId, moveGeneration, moveOwnerToken);
+                    String staleReason = transferCurrent(transferToken)
+                            ? staleMoveReason(packageName, displayId, moveGeneration, moveOwnerToken)
+                            : "transfer request changed";
                     if (!staleReason.isEmpty()) {
                         log("move skipped stale " + staleReason + " package=" + safe(packageName)
                                 + " display=" + displayId + " reason=" + reason);
+                        completeTransfer(transferToken, taskState);
                         return;
                     }
                     NavAppDisplayState moved = NavAppDisplayController.get(this)
@@ -1549,7 +1691,23 @@ public final class ClusterProjectionService extends Service
                                     packageName,
                                     displayId,
                                     moveGeneration,
-                                    moveOwnerToken).isEmpty());
+                                    moveOwnerToken).isEmpty()
+                                    && transferCurrent(transferToken),
+                            taskState);
+                    boolean transferStillCurrent = transferCurrent(transferToken);
+                    completeTransfer(transferToken, moved);
+                    if (!transferStillCurrent) {
+                        log("move completion fenced stale package=" + packageName
+                                + " display=" + displayId + " reason=" + reason);
+                        mainHandler.post(() -> restoreBlackIdleAfterFailedMove(
+                                packageName,
+                                displayId,
+                                moveDisplayGeneration,
+                                moveGeneration,
+                                moveOwnerToken,
+                                "stale-completion:" + reason));
+                        return;
+                    }
                     if (moved.taskId >= 0
                             && moved.displayId == displayId
                             && moved.visible) {
@@ -1759,6 +1917,8 @@ public final class ClusterProjectionService extends Service
             }
             projectionGeneration++;
             pendingPackage = "";
+            pendingTaskState = null;
+            pendingTransferToken = 0L;
             projectionRequested = false;
             projectedPackage = "";
             projectionOwnerToken = 0L;
@@ -2138,6 +2298,8 @@ public final class ClusterProjectionService extends Service
             overlayRoot = null;
             overlayWindowManager = null;
             pendingPackage = "";
+            pendingTaskState = null;
+            pendingTransferToken = 0L;
             projectionRequested = false;
             projectedPackage = "";
             projectionOwnerToken = 0L;

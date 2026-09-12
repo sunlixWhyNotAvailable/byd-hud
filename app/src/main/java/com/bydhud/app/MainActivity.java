@@ -1132,8 +1132,8 @@ public final class MainActivity extends ComponentActivity {
         boolean runtimeBacked = app.isRuntimeBacked();
         boolean observed = isObservedPackage(app.packageName, observedPackages);
         boolean onDashboard = observedDisplay == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD;
-        boolean dashboardStateKnown = observedDisplay
-                != DashboardProjectionPolicy.ObservedDisplay.UNKNOWN;
+        boolean canReturnToMain = SteeringTransferPolicy.canReturnToMain(observedDisplay);
+        boolean dashboardStateKnown = SteeringTransferPolicy.canToggleTask(displayState, observedDisplay);
         boolean supportedHud = isSupportedHudPackage(app.packageName);
         boolean installed = isInstalledPackage(app.packageName);
         return new ComposeAppRow(
@@ -1148,6 +1148,7 @@ public final class MainActivity extends ComponentActivity {
                 isSelectedPackage(app.packageName, hudPackage),
                 containsSelectedPackage(app.packageName, logOnlyPackages),
                 onDashboard,
+                canReturnToMain,
                 dashboardStateKnown,
                 controller.isMoveInProgress(),
                 app.processName,
@@ -2241,8 +2242,8 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeMoveDashboard(String packageName, boolean toDashboard) {
-        moveIndependentDashboardDisplay(packageName, toDashboard);
+    public void composeToggleDashboard(String packageName) {
+        toggleIndependentDashboardDisplay(packageName);
     }
 
     public ComposeStorageShareSummary composeDescribeStorageShareDays(List<String> days) {
@@ -3199,6 +3200,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean hudEnabled;
         public final boolean logOnlyEnabled;
         public final boolean onDashboard;
+        public final boolean canReturnToMain;
         public final boolean dashboardStateKnown;
         public final boolean dashboardMoveInProgress;
         public final String processName;
@@ -3208,7 +3210,7 @@ public final class MainActivity extends ComponentActivity {
                 boolean installed,
                 boolean runtimeBacked, boolean observed, boolean supportedHud,
                 boolean supportedSection, boolean hudEnabled, boolean logOnlyEnabled,
-                boolean onDashboard, boolean dashboardStateKnown,
+                boolean onDashboard, boolean canReturnToMain, boolean dashboardStateKnown,
                 boolean dashboardMoveInProgress, String processName, int importance) {
             this.label = label == null ? "" : label;
             this.packageName = packageName == null ? "" : packageName;
@@ -3223,6 +3225,7 @@ public final class MainActivity extends ComponentActivity {
             this.hudEnabled = hudEnabled;
             this.logOnlyEnabled = logOnlyEnabled;
             this.onDashboard = onDashboard;
+            this.canReturnToMain = canReturnToMain;
             this.dashboardStateKnown = dashboardStateKnown;
             this.dashboardMoveInProgress = dashboardMoveInProgress;
             this.processName = processName == null ? "" : processName;
@@ -3239,6 +3242,7 @@ public final class MainActivity extends ComponentActivity {
                     && supportedSection == other.supportedSection
                     && hudEnabled == other.hudEnabled && logOnlyEnabled == other.logOnlyEnabled
                     && onDashboard == other.onDashboard
+                    && canReturnToMain == other.canReturnToMain
                     && dashboardStateKnown == other.dashboardStateKnown
                     && dashboardMoveInProgress == other.dashboardMoveInProgress
                     && importance == other.importance
@@ -3252,7 +3256,7 @@ public final class MainActivity extends ComponentActivity {
         public int hashCode() {
             return Objects.hash(label, packageName, packageVersions, installed, runtimeBacked,
                     observed, supportedHud, supportedSection, hudEnabled, logOnlyEnabled,
-                    onDashboard, dashboardStateKnown, dashboardMoveInProgress, processName,
+                    onDashboard, canReturnToMain, dashboardStateKnown, dashboardMoveInProgress, processName,
                     importance);
         }
     }
@@ -3550,17 +3554,17 @@ public final class MainActivity extends ComponentActivity {
                 state,
                 controller.confirmedDashboardPackage(),
                 controller.confirmedDashboardDisplayId());
-        boolean onDashboard = observedDisplay == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD;
-        String label = onDashboard ? "Send to main" : "Send to dashboard";
+        boolean canReturnToMain = SteeringTransferPolicy.canReturnToMain(observedDisplay);
+        String label = canReturnToMain ? "Send to main" : "Send to dashboard";
         Button button = button(label,
-                v -> moveIndependentDashboardDisplay(normalized, !onDashboard));
-        button.setEnabled(observedDisplay != DashboardProjectionPolicy.ObservedDisplay.UNKNOWN
+                v -> toggleIndependentDashboardDisplay(normalized));
+        button.setEnabled(SteeringTransferPolicy.canToggleTask(state, observedDisplay)
                 && !controller.isMoveInProgress());
         return button;
     }
 
-    //moves to an explicit target so a stale label cannot invert the requested physical action.
-    private void moveIndependentDashboardDisplay(String packageName, boolean toDashboard) {
+    //The row is cached; the controller resolves this toggle from its fresh task lookup.
+    private void toggleIndependentDashboardDisplay(String packageName) {
         String normalized = normalizePackage(packageName);
         if (normalized.isEmpty()) {
             appendStatus("display move ignored: empty package");
@@ -3571,14 +3575,8 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("display move already running");
             return;
         }
-        controller.moveIndependentDashboardApp(
-                normalized,
-                toDashboard,
-                HudPrefs.dashboardScreenMode(this),
-                "ui-independent-dashboard-explicit");
-        appendStatus((toDashboard ? "sending " : "returning ")
-                + normalized
-                + (toDashboard ? " to dashboard" : " to main"));
+        controller.requestUiToggle(normalized, "ui-independent-dashboard-explicit");
+        appendStatus("display transfer requested for " + normalized);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -3874,6 +3872,7 @@ public final class MainActivity extends ComponentActivity {
         RuntimeUiSession.PROCESS.clear();
         UserRuntimeSession.PROCESS.shutdown();
         HudPrefs.setUserShutdownActive(this, true);
+        UpdateHintManager.shutdown();
         AppUpdateManager.resetForShutdown();
         VehicleConfigurationExport.shutdown();
         StorageLogShareWorkflow.shutdown();

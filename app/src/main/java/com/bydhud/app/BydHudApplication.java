@@ -16,6 +16,7 @@ public final class BydHudApplication extends Application {
         super.onCreate();
         ConfigurationExportArtifacts.checkAsync(this);
         if (!getPackageName().equals(Application.getProcessName())) return;
+        UpdateHintManager.initialize(this);
         IntentFilter packages = new IntentFilter();
         packages.addAction(Intent.ACTION_PACKAGE_ADDED);
         packages.addAction(Intent.ACTION_PACKAGE_REMOVED);

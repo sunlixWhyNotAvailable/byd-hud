@@ -43,6 +43,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.LazyListScope
@@ -96,6 +97,9 @@ import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.semantics.Role
@@ -817,7 +821,11 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var showSetupDialog by rememberSaveable { mutableStateOf(activity.composeShouldShowBackgroundReminder()) }
     var autoUpdateCheckEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isAutoCheckEnabled(activity)) }
     var betaChannelEnabled by rememberSaveable { mutableStateOf(AppUpdateManager.isBetaChannelEnabled(activity)) }
+    var updateHintEnabled by rememberSaveable { mutableStateOf(UpdateHintManager.isEnabled(activity)) }
+    var updateHintAppearance by remember { mutableStateOf(UpdateHintManager.appearance(activity)) }
+    var showUpdateHintSettings by rememberSaveable { mutableStateOf(false) }
     val updateSnapshot by AppUpdateManager.snapshot.collectAsState()
+    val pendingHintRouteResultId by UpdateHintManager.pendingRouteResultId.collectAsState()
     var showUpdateDialog by remember { mutableStateOf(false) }
     var updateDownloadState by remember(updateSnapshot) { mutableStateOf<UpdateCheckState?>(null) }
     val updateState = updateDownloadState ?: if (updateSnapshot.checking) {
@@ -853,6 +861,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     val blockingUiFlow = when {
         showSetupDialog -> "setup"
         storageShareSummaryVisible || sentryCommentVisible -> "storage-share-consent"
+        showUpdateHintSettings -> "update-hint-settings"
         showUpdateDialog -> "update"
         pendingStorageDeleteDays.isNotEmpty() || storageDeleteBusy -> "storage-delete"
         configurationShareVisible -> "configuration-share"
@@ -1089,6 +1098,20 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         showUpdateDialog = true
     }
 
+    LaunchedEffect(language, palette.dark) {
+        UpdateHintManager.setPresentation(language.code, palette.dark)
+    }
+
+    LaunchedEffect(pendingHintRouteResultId, appInForeground) {
+        val resultId = pendingHintRouteResultId ?: return@LaunchedEffect
+        if (!appInForeground) return@LaunchedEffect
+        selectedTab = RuntimeTab.Options
+        selectedOptionsSectionKey = "runtime-permissions"
+        optionsCategoryScrollState.scrollToItem(0)
+        optionsSectionScrollStates.getValue("runtime-permissions").scrollToItem(0)
+        UpdateHintManager.consumeRouteRequest(resultId)
+    }
+
     LaunchedEffect(uiSession) {
         snapshotFlow {
             (selectedTab to selectedOptionsSectionKey) to viewportStates.mapValues { it.value.position() }
@@ -1293,6 +1316,16 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                             AppUpdateManager.setBetaChannelEnabled(activity, enabled)
                         },
                         onManualUpdateCheck = { AppUpdateManager.requestManualCheck(activity) },
+                        updateHintEnabled = updateHintEnabled,
+                        onUpdateHintChange = { enabled ->
+                            updateHintEnabled = enabled
+                            UpdateHintManager.setEnabled(activity, enabled)
+                        },
+                        onUpdateHintSettings = {
+                            if (activity.composeTryStartBlockingUiFlow("update-hint-settings")) {
+                                showUpdateHintSettings = true
+                            }
+                        },
                         onDisableBgApps = {
                             if (activity.composeTryStartBlockingUiFlow("setup")) {
                                 showSetupDialog = true
@@ -1490,6 +1523,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 onUpdate = {
                     val available = updateState
                     if (available is UpdateCheckState.Available) {
+                        UpdateHintManager.onInstallStarted(updateSnapshot.resultId)
                         updateDownloadState = UpdateCheckState.Downloading(available.info, "0%")
                         updateScope.launch {
                             try {
@@ -1506,6 +1540,20 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                     AppUpdateManager.dismissResult()
                     showUpdateDialog = false
                 }
+            )
+        }
+
+
+        if (showUpdateHintSettings) {
+            UpdateHintSettingsDialog(
+                copy = copy,
+                palette = palette,
+                appearance = updateHintAppearance,
+                onAppearanceChange = { changed ->
+                    updateHintAppearance = changed.normalized()
+                    UpdateHintManager.setAppearance(activity, updateHintAppearance)
+                },
+                onClose = { showUpdateHintSettings = false }
             )
         }
 
@@ -1833,6 +1881,9 @@ private fun OptionsTab(
     betaChannelEnabled: Boolean,
     onBetaChannelChange: (Boolean) -> Unit,
     onManualUpdateCheck: () -> Unit,
+    updateHintEnabled: Boolean,
+    onUpdateHintChange: (Boolean) -> Unit,
+    onUpdateHintSettings: () -> Unit,
     onDisableBgApps: () -> Unit,
     onShutdownClick: () -> Unit,
     dashboardWidget: DashboardWidgetState,
@@ -2044,6 +2095,37 @@ private fun OptionsTab(
                     onCheckClick = onManualUpdateCheck,
                     palette = palette
                 )
+            }
+            row("update-hint-widget") {
+                ActionRow(
+                    language.choose(
+                        "Віджет-підказка нової версії",
+                        "New version hint widget",
+                        "Виджет-подсказка новой версии"
+                    ),
+                    language.choose(
+                        "Показувати підказку на 10 секунд, коли перевірка виявить оновлення",
+                        "Show a hint for 10 seconds when a check finds an update",
+                        "Показывать подсказку на 10 секунд, когда проверка найдёт обновление"
+                    ),
+                    palette
+                ) {
+                    Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                        HudIconButton(
+                            icon = R.drawable.ic_options_settings,
+                            contentDescription = language.choose(
+                                "Налаштування віджету-підказки",
+                                "Update hint widget settings",
+                                "Настройки виджета-подсказки"
+                            ),
+                            palette = palette,
+                            tint = palette.accent,
+                            modifier = Modifier.size(42.dp),
+                            onClick = onUpdateHintSettings
+                        )
+                        HudSwitch(updateHintEnabled, onUpdateHintChange, palette)
+                    }
+                }
             }
             row("beta-testing") {
                 SwitchRow(copy.betaTesting, copy.betaTestingHint, betaChannelEnabled, palette, onChecked = onBetaChannelChange)
@@ -2906,6 +2988,131 @@ private fun WidgetColorLine(
                 Box(Modifier.size(28.dp).background(Color(argb), RoundedCornerShape(4.dp)).border(1.dp, palette.borderStrong, RoundedCornerShape(4.dp)))
             }
             HudIconButton(R.drawable.ic_palette, title, palette, palette.accent, enabled = enabled, modifier = Modifier.size(44.dp), onClick = onPick)
+        }
+    }
+}
+
+@Composable
+private fun UpdateHintSettingsDialog(
+    copy: Copy,
+    palette: Palette,
+    appearance: UpdateHintAppearance,
+    onAppearanceChange: (UpdateHintAppearance) -> Unit,
+    onClose: () -> Unit
+) {
+    val language = copy.language
+    var choosingColor by remember { mutableStateOf(false) }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Box(Modifier.fillMaxSize().padding(18.dp), contentAlignment = Alignment.Center) {
+            Column(
+                Modifier.fillMaxSize().clip(RoundedCornerShape(8.dp)).background(palette.surface)
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp)).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    language.choose(
+                        "Налаштування віджету-підказки",
+                        "Update hint widget settings",
+                        "Настройки виджета-подсказки"
+                    ),
+                    color = palette.text,
+                    fontSize = 22.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Row(Modifier.weight(1f).fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(18.dp)) {
+                    Column(Modifier.weight(0.4f).fillMaxHeight().verticalScroll(rememberScrollState())) {
+                        WidgetNumberLine(
+                            language.choose("Прозорість", "Transparency", "Прозрачность"),
+                            language.choose(
+                                "0% — видимий, 100% — невидимий",
+                                "0% visible, 100% invisible",
+                                "0% — видимый, 100% — невидимый"
+                            ),
+                            appearance.transparencyPercent,
+                            UpdateHintAppearance.TRANSPARENCY_RANGE,
+                            "%", palette, true, showTicks = false
+                        ) { onAppearanceChange(appearance.copy(transparencyPercent = it)) }
+                        WidgetNumberLine(
+                            language.choose("Заокруглення країв", "Corner rounding", "Скругление краёв"),
+                            "", appearance.cornerRadiusDp, UpdateHintAppearance.CORNER_RANGE,
+                            "dp", palette, true
+                        ) { onAppearanceChange(appearance.copy(cornerRadiusDp = it)) }
+                        WidgetNumberLine(
+                            language.choose("Ширина рамки", "Border width", "Ширина рамки"),
+                            language.choose("0 — прибрати рамку", "0 removes the border", "0 — убрать рамку"),
+                            appearance.borderWidthDp, UpdateHintAppearance.BORDER_RANGE,
+                            "dp", palette, true
+                        ) { onAppearanceChange(appearance.copy(borderWidthDp = it)) }
+                        WidgetColorLine(
+                            language.choose("Колір рамки", "Border color", "Цвет рамки"),
+                            appearance.borderArgb, palette, true
+                        ) { choosingColor = true }
+                        WidgetNumberLine(
+                            language.choose("Розмір віджету", "Widget size", "Размер виджета"),
+                            "", appearance.sizePercent, UpdateHintAppearance.SIZE_RANGE,
+                            "%", palette, true, showTicks = false
+                        ) { onAppearanceChange(appearance.copy(sizePercent = it)) }
+                    }
+                    Column(Modifier.weight(0.6f).fillMaxHeight(), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(
+                            language.choose("Передпоказ · 1:1", "Preview · 1:1", "Предпросмотр · 1:1"),
+                            color = palette.text,
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        UpdateHintSettingsSample(language, palette, appearance, Modifier.weight(1f).fillMaxWidth())
+                    }
+                }
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    HudButton(
+                        language.choose("Закрити", "Close", "Закрыть"),
+                        palette,
+                        width = 160.dp,
+                        onClick = onClose
+                    )
+                }
+            }
+        }
+    }
+    if (choosingColor) {
+        WidgetColorPicker(
+            appearance.borderArgb,
+            language.choose("Колір рамки", "Border color", "Цвет рамки"),
+            copy,
+            palette,
+            onDismiss = { choosingColor = false },
+            onSelect = {
+                onAppearanceChange(appearance.copy(borderArgb = it))
+                choosingColor = false
+            }
+        )
+    }
+}
+
+@Composable
+private fun UpdateHintSettingsSample(
+    language: Language,
+    palette: Palette,
+    appearance: UpdateHintAppearance,
+    modifier: Modifier = Modifier
+) {
+    val context = LocalContext.current
+    val width = with(LocalDensity.current) {
+        UpdateHintCardView.preferredWidthPx(context, appearance).toDp()
+    }
+    Box(
+        modifier.clip(RoundedCornerShape(8.dp)).background(palette.background)
+            .border(1.dp, palette.border, RoundedCornerShape(8.dp))
+    ) {
+        Box(Modifier.fillMaxSize().horizontalScroll(rememberScrollState()).verticalScroll(rememberScrollState())) {
+            AndroidView(
+                factory = { UpdateHintCardView(it) },
+                update = { card ->
+                    card.bind(BuildConfig.VERSION_NAME, language.code, palette.dark, appearance)
+                    card.alpha = appearance.alpha
+                },
+                modifier = Modifier.padding(18.dp).width(width)
+            )
         }
     }
 }
@@ -5049,7 +5256,7 @@ private fun AppRow(
     val runningForStatus = row.runtimeBacked
     val dashboardText = when {
         !row.runtimeBacked -> copy.startAppFirst
-        row.onDashboard -> copy.sendMain
+        row.canReturnToMain -> copy.sendMain
         else -> copy.sendDashboard
     }
     Row(
@@ -5106,11 +5313,11 @@ private fun AppRow(
             HudButton(
                 dashboardText,
                 palette,
-                primary = row.runtimeBacked && !row.onDashboard,
+                primary = row.runtimeBacked && !row.canReturnToMain,
                 enabled = dashboardEnabled,
                 width = 220.dp
             ) {
-                runAction { activity.composeMoveDashboard(row.packageName, !row.onDashboard) }
+                runAction { activity.composeToggleDashboard(row.packageName) }
             }
         }
     }

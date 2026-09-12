@@ -72,6 +72,10 @@ public final class OptionsLazySourceContractTest {
                 "optionsSection(\"dashboard-window-profile\"",
                 "\"dashboard-widget\"",
                 "optionsSection(\"dashboard-move\"");
+        assertOrdered(options,
+                "row(\"check-for-updates\")",
+                "row(\"update-hint-widget\")",
+                "row(\"beta-testing\")");
         assertTrue(options.contains("R.drawable.ic_options_build"));
         assertTrue(options.contains("R.drawable.ic_options_navigation"));
         assertTrue(options.contains("R.drawable.ic_options_schedule"));
@@ -86,7 +90,7 @@ public final class OptionsLazySourceContractTest {
         assertEquals(1, occurrences(options, "R.drawable.ic_options_schedule"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_speed"));
         assertEquals(1, occurrences(options, "R.drawable.waze_app_icon"));
-        assertEquals(1, occurrences(options, "R.drawable.ic_options_settings"));
+        assertEquals(2, occurrences(options, "R.drawable.ic_options_settings"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_directions_car"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_widgets"));
         assertEquals(1, occurrences(options, "R.drawable.ic_options_open_in_new"));

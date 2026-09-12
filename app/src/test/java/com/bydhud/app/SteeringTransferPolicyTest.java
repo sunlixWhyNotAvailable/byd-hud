@@ -51,6 +51,25 @@ public final class SteeringTransferPolicyTest {
     }
 
     @Test
+    public void mainMovesOutWhileOwnedAndForeignDisplaysReturnToMain() {
+        assertTrue(SteeringTransferPolicy.toggleMovesToDashboard(
+                DashboardProjectionPolicy.ObservedDisplay.MAIN));
+        assertFalse(SteeringTransferPolicy.toggleMovesToDashboard(
+                DashboardProjectionPolicy.ObservedDisplay.OTHER));
+        assertTrue(SteeringTransferPolicy.canReturnToMain(
+                DashboardProjectionPolicy.ObservedDisplay.DASHBOARD));
+        assertTrue(SteeringTransferPolicy.canReturnToMain(
+                DashboardProjectionPolicy.ObservedDisplay.OTHER));
+        assertFalse(SteeringTransferPolicy.canReturnToMain(
+                DashboardProjectionPolicy.ObservedDisplay.UNKNOWN));
+        NavAppDisplayState task = new NavAppDisplayState("com.waze", 42, 4, true, "foreign");
+        assertTrue(SteeringTransferPolicy.canToggleTask(
+                task, DashboardProjectionPolicy.ObservedDisplay.OTHER));
+        assertFalse(SteeringTransferPolicy.canToggleTask(
+                task, DashboardProjectionPolicy.ObservedDisplay.UNKNOWN));
+    }
+
+    @Test
     public void orphanRepeatOrUpIsConsumedWithoutStartingWork() {
         assertTrue(SteeringTransferPolicy.isMappedKey(305, 305));
         assertFalse(SteeringTransferPolicy.shouldStartTransfer(0, 1, false));

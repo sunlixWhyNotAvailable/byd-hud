@@ -87,7 +87,7 @@ public final class DashboardMoveContractTest {
                 Files.readAllBytes(service), StandardCharsets.UTF_8);
         assertTrue(serviceSource.contains("EXTRA_MODE"));
         assertTrue(serviceSource.contains(
-                "requestProjection(packageName, dashboardMode, reason)"));
+                "requestProjection(packageName, dashboardMode, reason, taskState, transferToken)"));
         assertTrue(serviceSource.contains(
                 "requestProjection(packageName, dashboardMode, \"restore:\""));
         int resizeStart = serviceSource.indexOf("private boolean resizeActiveProjection(");
@@ -252,7 +252,7 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
-    public void dashboardMovePreflightsAndUsesTheAcceptedNativeLayoutTransitions() throws Exception {
+    public void dashboardMoveUsesTaskQueryAsAdbProofAndAcceptedNativeLayoutTransitions() throws Exception {
         java.nio.file.Path file = Paths.get(
                 "app/src/main/java/com/bydhud/app/NavAppDisplayController.java");
         if (!Files.exists(file)) {
@@ -260,11 +260,11 @@ public final class DashboardMoveContractTest {
         }
         String source = new String(Files.readAllBytes(file),
                 StandardCharsets.UTF_8);
-        assertTrue(source.indexOf("preflightAuthorizedAdb(packageName, reason)")
-                < source.indexOf("ClusterProjectionService.startProjection"));
+        assertFalse(source.contains("preflightAuthorizedAdb("));
         String ordinaryMove = between(source,
                 "private void moveIndependentDashboardAppBlocking(",
-                "private boolean preflightAuthorizedAdb(");
+                "private String sendAutoContainerIfRequested(");
+        assertTrue(ordinaryMove.contains("checkDisplay(packageName, toDashboard"));
         assertTrue(ordinaryMove.contains("applyDashboardLayout("));
         assertTrue(source.contains("dashboard_autocontainer_failed"));
         assertTrue(source.contains("sendAutoContainerIfRequested"));
@@ -372,7 +372,11 @@ public final class DashboardMoveContractTest {
         assertTrue(ownership >= 0 && release > ownership && typeOne > release && typeTwo > typeOne);
         assertTrue(run.contains("automatic TBT cancelled: route ended"));
 
-        assertTrue(source.contains("invalidatePendingAutomaticTbt(\"explicit steering move\")"));
+        String toggle = between(source, "private void requestFreshToggle(",
+                "private void moveIndependentDashboardApp(");
+        int invalidate = toggle.indexOf("invalidatePendingAutomaticTbt(steering");
+        assertTrue(invalidate >= 0 && invalidate < toggle.indexOf("beginMove("));
+        assertTrue(toggle.contains("? \"explicit steering move\" : \"explicit ui move\""));
         assertTrue(source.contains("invalidatePendingAutomaticTbt(\"explicit display move\")"));
         assertTrue(source.contains("invalidatePendingAutomaticTbt(\"explicit widget command\")"));
         String endMove = between(source, "private void endMove(String packageName)",
@@ -408,12 +412,12 @@ public final class DashboardMoveContractTest {
                 "private boolean ensureWazeSurfaceOnDisplay(");
         int current = move.lastIndexOf("!requestCurrent.getAsBoolean()");
         int prepare = move.indexOf("ClusterProjectionService.prepareOutputForTaskMove(", current);
-        int command = move.indexOf("LocalAdbBridge.ShellResult move = runCommand(", prepare);
+        int command = move.indexOf("TaskMoveSequencer.execute(", prepare);
         assertTrue(current >= 0 && prepare > current && command > prepare);
         assertTrue(move.contains("label + \" failed: \" + outputFailure"));
         String failure = between(source("NavAppDisplayController.java"),
                 "void recordProjectionOutputFailure(",
-                "private boolean preflightAuthorizedAdb(");
+                "private String sendAutoContainerIfRequested(");
         assertTrue(failure.contains("projection output failed: "));
         assertTrue(failure.contains("Unable to prepare dashboard black output"));
         assertTrue(failure.contains("Не вдалося підготувати чорне тло панелі приладів"));
@@ -450,7 +454,7 @@ public final class DashboardMoveContractTest {
     public void retainedProjectionRevealsOnlyAVisibleTaskWithTheObservedOwnerToken() throws Exception {
         String controller = source("NavAppDisplayController.java");
         String outbound = between(controller,
-                "NavAppDisplayState confirmed = waitForProjectedDashboardDisplay(",
+                "CountDownLatch projectionCompleted = new CountDownLatch(1);",
                 "} catch (SecurityException e)");
         int validated = outbound.indexOf("|| confirmed.taskId < 0 || !confirmed.visible");
         int captured = outbound.indexOf("projectedGenerationTokenForWidget(packageName)");
@@ -458,11 +462,11 @@ public final class DashboardMoveContractTest {
         assertTrue(validated >= 0 && captured > validated && revealed > captured);
         assertTrue(outbound.contains("packageName, confirmed.displayId, confirmedOwnerToken"));
         String waiting = between(controller,
-                "private NavAppDisplayState waitForProjectedDashboardDisplay(",
+                "private static NavAppDisplayState awaitTransferCompletion(",
                 "private boolean isConfirmedProjectedDashboardDisplay(");
-        assertTrue(waiting.contains("last.displayId == projectedDisplayId && last.taskId >= 0 && last.visible"));
-        assertTrue(waiting.indexOf("if (last.displayId != projectedDisplayId)")
-                < waiting.indexOf("moveTaskToDisplayBlocking("));
+        assertTrue(waiting.contains("completed.await("));
+        assertFalse(waiting.contains("checkDisplay("));
+        assertFalse(waiting.contains("moveTaskToDisplayBlocking("));
     }
 
     private static String source(String fileName) throws Exception {

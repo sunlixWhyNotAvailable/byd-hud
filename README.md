@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.2.2
+- **Version:** v3.2.3
 - **Interface languages:** Ukrainian, English and Russian; update notes follow the selected language, with English as the fallback for missing translations.
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
@@ -262,7 +262,7 @@ Open `Options → Dashboard transfer settings` and press `+ Create profile`. Lea
 
 Press Save to keep your changes or Cancel to discard them. The pencil edits a saved profile; Delete asks for confirmation. Profiles survive restarts, and existing shortcuts are preserved when updating the app.
 
-The selected application must already be running and dashboard transfer requires authorized ADB. Each new press checks its current window and display: an application on the main display moves to the dashboard with the selected profile; one already on the dashboard returns to the main display. If no running window can be confirmed, nothing is moved or launched. Repeated presses during a transfer are ignored, not queued. This also works after transfers started from the Apps tab. A failed transfer is reported with a message.
+The selected application must already be running and dashboard transfer requires authorized ADB. Each new press checks its current window and display: an application on the main display moves to the dashboard with the selected profile; one on the dashboard or another display returns to the main display. The Apps tab offers the same return action when the navigator has been moved to another display. If no running window can be confirmed, nothing is moved or launched. Repeated presses during a transfer are ignored, not queued. A failed transfer is reported with a message.
 
 Button learning and interception require the enabled Accessibility service. BYD HUD consumes an assigned button's delivered press/release events even if the gesture has no matching profile, the selected app is closed, or a transfer cannot be performed. Unmatched clicks are not forwarded to ordinary applications. This cannot cancel an action already handled by vehicle firmware or another Accessibility service. Delete all profiles for that button to stop BYD HUD consuming it. Splitting gestures of one button across independent key-mapping apps is not coordinated: a Double action here can also cause two Single actions in another app.
 
@@ -315,13 +315,16 @@ Back up important navigator data and sign in to its account before patching. The
 | `Boot runtime service` | On | Starts BYD HUD automatically after supported tablet restarts and app updates |
 | `Save diagnostic screenshots and extended logs` | Off | Records additional navigation evidence; use it only while diagnosing because it consumes more storage |
 | `Check for updates` | On | Checks the stable GitHub release channel |
+| `New version hint widget` | On | Shows a ten-second update hint while BYD HUD is in the background; the gear configures its appearance |
 | `Take part in beta-testing` | Off | Includes prereleases, which may be unstable or broken |
 
 `ADB permissions` runs the permission setup when needed. `Background apps` opens the BYD system page where BYD HUD should be excluded from background blocking. `Shutdown` stops HUD output and background operation.
 
 Turning off `Boot runtime service` disables automatic startup, not navigation you have started yourself. You can open BYD HUD and use navigation output or HUD check with this option off.
 
-With automatic update checks enabled, BYD HUD checks shortly after startup, including an allowed background startup. Available updates are shown when you open the app. A dismissed update may be offered again later. You can also check manually whenever needed, including after a failed check.
+With automatic update checks enabled, BYD HUD checks shortly after startup, including an allowed background startup. An available update uses the normal offer while BYD HUD is visible, or a ten-second hint while it is in the background. Tap the hint to open Options and the known update offer; the red cross closes it. Dismissing the offer or leaving the app does not replay a cached hint. A later scheduled check may offer the same newer version again. You can also check manually whenever needed, including after a failed check.
+
+The hint's gear opens an appearance editor with a full-size sample: transparency, corner rounding, border width/color and size. Settings persist; defaults are 0% transparency, 18 dp corners, a 1 dp blue border and 100% size. With compatible versions of BYD Extend and BYD Collector, hints share the top-left area in arrival order. They use additional columns and temporarily shrink if necessary, then reclaim space when a hint closes. Moving or resizing never renews their ten-second lifetimes. Older independent hints cannot participate until those apps are updated. Without overlay permission, the ordinary in-app update offer remains available.
 
 <p align="center"><img src="docs/screenshots/en/settings-permissions-runtime.png" alt="Permissions, background runtime, diagnostics, and update settings" width="100%"></p>
 
