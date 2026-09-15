@@ -28,7 +28,7 @@ public final class DashboardWidgetLifecycleContractTest {
                 service.indexOf("internal fun removeOverlay()"));
         assertFalse(detachMenu.contains("closing = true"));
         assertTrue(service.contains("closing = true"));
-        assertTrue(service.contains("!closing && DashboardWidgetController.state.visible"));
+        assertTrue(service.contains("DashboardWidgetController.serviceStart(this, controllerInstance)"));
         assertTrue(service.contains("SideEffect { updateWindows(widgetState) }"));
         assertTrue(service.contains("windowAnimations = 0"));
         assertTrue(service.contains("setViewTreeLifecycleOwner"));
@@ -36,9 +36,14 @@ public final class DashboardWidgetLifecycleContractTest {
         assertTrue(service.contains("anchorView.disposeComposition()"));
         assertTrue(service.contains("menuView.disposeComposition()"));
         assertTrue(service.contains("Display.DEFAULT_DISPLAY"));
-        assertTrue(service.contains("return START_STICKY"));
-        assertTrue(service.contains("!HudPrefs.isUserShutdownActive(this)"));
-        assertTrue(service.contains("DashboardWidgetController.hasOverlayPermission()"));
+        assertTrue(service.contains("return when (DashboardWidgetController.serviceStart(this, controllerInstance))"));
+        assertTrue(service.contains("WAIT_FOR_PERMISSION -> START_STICKY"));
+        assertTrue(service.contains("DashboardWidgetLifecyclePolicy.ServiceStart.WAIT_FOR_PERMISSION"));
+        assertTrue(service.contains("DashboardWidgetLifecyclePolicy.ServiceStart.SHOW"));
+        String render = service.substring(service.indexOf("internal fun render()"),
+                service.indexOf("private fun updateWindows("));
+        assertTrue(render.contains("WAIT_FOR_PERMISSION -> return"));
+        assertTrue(render.contains("ServiceStart.STOP ->"));
         assertFalse(service.contains("Settings.canDrawOverlays"));
         assertFalse(service.contains("NavHudLiveSender"));
     }
@@ -61,9 +66,15 @@ public final class DashboardWidgetLifecycleContractTest {
         assertTrue(controller.contains("state = state.onAppOpened()"));
         assertTrue(controller.contains("generation != commandGeneration"));
         assertTrue(controller.contains("private fun stop(context: Context)"));
-        assertTrue(controller.contains("service?.removeOverlay()"));
+        assertTrue(controller.contains("service?.closeFromController()"));
         assertFalse(controller.contains("Settings.canDrawOverlays"));
         assertTrue(controller.contains("MainActivity.cachedDashboardOverlayPermission()"));
+        String refreshed = controller.substring(controller.indexOf("fun onRuntimePermissionsRefreshed("),
+                controller.indexOf("fun onRuntimePermissionsRefreshFailed("));
+        assertTrue(refreshed.contains("refresh(app, publishUi = false)"));
+        String created = controller.substring(controller.indexOf("fun serviceCreated("),
+                controller.indexOf("fun serviceStart("));
+        assertTrue(created.contains("overlayPermission = MainActivity.cachedDashboardOverlayPermission()"));
         String hide = controller.substring(controller.indexOf("fun hide(context: Context)"),
                 controller.indexOf("fun requestMode(context: Context"));
         assertTrue(hide.contains("if (!state.visible) return"));

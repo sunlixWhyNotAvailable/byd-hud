@@ -47,7 +47,8 @@ public final class AppUpdateLifecycleContractTest {
     public void composeObservesRetainedResultsAndAcknowledgesCloseWithoutOwningRequests() throws Exception {
         String ui = source("BydHudRuntimeCompose.kt");
         assertTrue(ui.contains("AppUpdateManager.snapshot.collectAsState()"));
-        assertTrue(ui.contains("when (val result = updateSnapshot.result)"));
+        assertTrue(ui.contains("updateCheckStateFor(updateSnapshot, updateOperation)"));
+        assertTrue(ui.contains("when (val result = snapshot.result)"));
         assertTrue(ui.contains("onManualUpdateCheck = { AppUpdateManager.requestManualCheck(activity) }"));
         assertTrue(ui.contains("AppUpdateManager.dismissResult()"));
         assertTrue(ui.contains("!updateSnapshot.dialogRequested || !appInForeground || showSetupDialog"));
@@ -56,7 +57,19 @@ public final class AppUpdateLifecycleContractTest {
         assertFalse(ui.contains("autoCheckDelayRemainingMs"));
         assertFalse(ui.contains("consumeAutoCheckReady"));
         assertFalse(ui.contains("resetForShutdown"));
-        assertTrue(ui.contains("AppUpdateManager.downloadAndInstall(activity, available.info)"));
+        assertTrue(ui.contains("AppUpdateManager.operationSnapshot.collectAsState()"));
+        assertTrue(ui.contains("AppUpdateManager.startDownload(activity, offered)"));
+        assertTrue(ui.contains("AppUpdateManager.retryReadyInstall()"));
+        assertFalse(ui.contains("updateDownloadState"));
+    }
+
+    @Test
+    public void applicationInitializesDurableUpdaterRecoveryInTheMainProcess() throws Exception {
+        String application = source("BydHudApplication.java");
+        int processGuard = application.indexOf("if (!getPackageName().equals(Application.getProcessName())) return;");
+        int updater = application.indexOf("AppUpdateManager.initialize(this)", processGuard);
+        int hint = application.indexOf("UpdateHintManager.initialize(this)", processGuard);
+        assertTrue(processGuard >= 0 && updater > processGuard && hint > updater);
     }
 
     private static String source(String file) throws Exception {

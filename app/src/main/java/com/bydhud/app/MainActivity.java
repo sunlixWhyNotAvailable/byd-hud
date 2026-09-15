@@ -260,7 +260,8 @@ public final class MainActivity extends ComponentActivity {
         }
         NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
         if (HudPrefs.isBootEnabled(this)) {
-            HudRuntimeSupervisor.ensureStarted(this, "activity-create");
+            BootCleanupGate.runWhenReady(this,
+                    () -> HudRuntimeSupervisor.ensureStarted(this, "activity-create"));
         } else {
             HudRuntimeWatchdog.cancel(this);
         }
@@ -298,7 +299,8 @@ public final class MainActivity extends ComponentActivity {
         super.onStart();
         DashboardWidgetController.onAppOpened(this);
         if (HudPrefs.isBootEnabled(this)) {
-            HudRuntimeSupervisor.ensureStarted(this, "activity-start");
+            BootCleanupGate.runWhenReady(this,
+                    () -> HudRuntimeSupervisor.ensureStarted(this, "activity-start"));
         }
         maybeStartPendingAdbAuthorization();
         refreshControls();
@@ -1910,6 +1912,7 @@ public final class MainActivity extends ComponentActivity {
             } catch (RuntimeException error) {
                 AppEventLogger.event(appContext, "ui_runtime_status_refresh failed "
                         + error.getClass().getSimpleName());
+                DashboardWidgetController.onRuntimePermissionsRefreshFailed(appContext);
             } finally {
                 RUNTIME_STATUS_REFRESH_IN_PROGRESS.set(false);
                 if (RUNTIME_STATUS_REFRESH_PENDING.getAndSet(false)) {
@@ -1920,9 +1923,14 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //Uses the existing asynchronous permission cache; widget UI does not query AppOps itself.
-    static boolean cachedDashboardOverlayPermission() {
+    static DashboardWidgetLifecyclePolicy.Permission cachedDashboardOverlayPermission() {
         NavRuntimePermissionStatus status = cachedNavRuntimePermissionStatus;
-        return status != null && status.settings != null && status.settings.dashboardOverlayEnabled;
+        if (status == null || status.settings == null) {
+            return DashboardWidgetLifecyclePolicy.Permission.UNKNOWN;
+        }
+        return status.settings.dashboardOverlayEnabled
+                ? DashboardWidgetLifecyclePolicy.Permission.GRANTED
+                : DashboardWidgetLifecyclePolicy.Permission.DENIED;
     }
 
     //Publishes the same cache transition that the visible Compose snapshot must observe.
@@ -3943,7 +3951,8 @@ public final class MainActivity extends ComponentActivity {
         appendStatus("Boot " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui boot=" + enabled);
         if (enabled) {
-            HudRuntimeSupervisor.ensureStarted(this, "boot-on");
+            BootCleanupGate.runWhenReady(this,
+                    () -> HudRuntimeSupervisor.ensureStarted(this, "boot-on"));
         } else {
             HudRuntimeWatchdog.cancel(this);
             HudRuntimeService.stopPersistent(this, "boot-off");

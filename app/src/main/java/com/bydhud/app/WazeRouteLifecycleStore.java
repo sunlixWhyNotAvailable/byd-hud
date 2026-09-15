@@ -202,6 +202,7 @@ final class WazeRouteLifecycleStore {
     }
 
     static Snapshot snapshot(Context context) {
+        if (!BootCleanupGate.awaitReady(context)) return emptySnapshot();
         synchronized (LOCK) {
             return validatedSnapshotLocked(context, SystemClock.elapsedRealtime());
         }
@@ -212,6 +213,10 @@ final class WazeRouteLifecycleStore {
     }
 
     static RecordResult record(Context context, boolean active, long eventElapsedMs) {
+        if (!BootCleanupGate.awaitReady(context)) {
+            return new RecordResult(false, false, emptySnapshot(), "boot_cleanup_pending",
+                    false, active, REASON_UNAVAILABLE, "LOCAL_DIRECT");
+        }
         synchronized (LOCK) {
             long now = SystemClock.elapsedRealtime();
             Snapshot previous = validatedSnapshotLocked(context, now);
@@ -244,6 +249,11 @@ final class WazeRouteLifecycleStore {
     static RecordResult recordBridge(Context context, boolean navigating, int reasonCode,
             boolean reasonAvailable, long eventElapsedMs, long bridgeGeneration,
             int bridgeCapabilities, String eventType) {
+        if (!BootCleanupGate.awaitReady(context)) {
+            return new RecordResult(false, false, emptySnapshot(), "boot_cleanup_pending",
+                    false, navigating, reasonCode,
+                    reasonAvailable ? reasonName(reasonCode) : "UNAVAILABLE");
+        }
         synchronized (LOCK) {
             long now = SystemClock.elapsedRealtime();
             Snapshot previous = validatedSnapshotLocked(context, now);
@@ -336,6 +346,9 @@ final class WazeRouteLifecycleStore {
 
     static SpeedRecordResult recordSpeedEvent(Context context, long bridgeGeneration,
             int bridgeCapabilities, long eventElapsedMs) {
+        if (!BootCleanupGate.awaitReady(context)) {
+            return new SpeedRecordResult(false, emptySnapshot(), "boot_cleanup_pending");
+        }
         synchronized (LOCK) {
             long now = SystemClock.elapsedRealtime();
             Snapshot route = validatedSnapshotLocked(context, now);
@@ -431,10 +444,12 @@ final class WazeRouteLifecycleStore {
         return record(context, false, detectedAtMs);
     }
 
-    static void clearForBoot(Context context, String reason) {
+    static boolean clearForBoot(Context context, String reason) {
         synchronized (LOCK) {
-            prefs(context).edit().clear().commit();
-            AppEventLogger.event(context, "waze_route_lifecycle cleared reason=" + reason);
+            boolean committed = prefs(context).edit().clear().commit();
+            AppEventLogger.event(context, "waze_route_lifecycle boot_clear reason=" + reason
+                    + " committed=" + committed);
+            return committed;
         }
     }
 
@@ -603,16 +618,11 @@ final class WazeRouteLifecycleStore {
         int bridgeCapabilities = preferences.getInt(KEY_BRIDGE_CAPABILITIES, 0);
         long storedPackageUpdateMs = preferences.getLong(KEY_PACKAGE_UPDATE_MS, 0L);
         long currentPackageUpdateMs = installedPackageUpdateTime(context);
-        int storedBootCount = preferences.getInt(KEY_BOOT_COUNT, -1);
-        int currentBootCount = bootCount(context);
-        boolean rebooted = shouldInvalidateForBoot(
-                storedBootCount, currentBootCount, eventElapsedMs, nowElapsedMs);
         boolean packageChanged = storedPackageUpdateMs > 0L
                 && storedPackageUpdateMs != currentPackageUpdateMs;
-        if (rebooted || packageChanged) {
+        if (packageChanged) {
             preferences.edit().clear().commit();
-            AppEventLogger.event(context, "waze_route_lifecycle invalidated reboot=" + rebooted
-                    + " packageChanged=" + packageChanged);
+            AppEventLogger.event(context, "waze_route_lifecycle invalidated packageChanged=true");
             return new Snapshot(false, 0L, currentPackageUpdateMs, 0L, 0,
                     NO_TERMINAL_FENCE);
         }
@@ -644,6 +654,10 @@ final class WazeRouteLifecycleStore {
             return storedBootCount != currentBootCount;
         }
         return storedElapsedMs > 0L && nowElapsedMs < storedElapsedMs;
+    }
+
+    private static Snapshot emptySnapshot() {
+        return new Snapshot(false, 0L, 0L, 0L, 0, NO_TERMINAL_FENCE);
     }
 
     private static int bootCount(Context context) {

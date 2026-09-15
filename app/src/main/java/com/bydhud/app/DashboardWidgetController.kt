@@ -19,9 +19,11 @@ internal object DashboardWidgetController {
     var busy by mutableStateOf(false)
         private set
     private var loaded = false
-    private var permissionGranted = false
-    private var startRequested = false
+    private var overlayPermission = DashboardWidgetLifecyclePolicy.Permission.UNKNOWN
+    private var permissionRefreshFailed = false
     private var service: DashboardWidgetOverlayService? = null
+    private var lifecycle = DashboardWidgetLifecyclePolicy.initialState()
+    private var serviceGeneration = 0L
     private var commandGeneration = 0L
     private val main by lazy { Handler(Looper.getMainLooper()) }
 
@@ -30,12 +32,23 @@ internal object DashboardWidgetController {
         return state
     }
 
-    @JvmStatic fun hasOverlayPermission(): Boolean = permissionGranted
+    @JvmStatic fun hasOverlayPermission(): Boolean =
+        overlayPermission == DashboardWidgetLifecyclePolicy.Permission.GRANTED
 
     @JvmStatic fun onRuntimePermissionsRefreshed(context: Context) {
         val app = context.applicationContext
         main.post {
-            if (loaded && permissionGranted != MainActivity.cachedDashboardOverlayPermission()) refresh(app)
+            if (loaded) refresh(app, publishUi = false)
+        }
+    }
+
+    @JvmStatic fun onRuntimePermissionsRefreshFailed(context: Context) {
+        val app = context.applicationContext
+        main.post {
+            if (loaded && overlayPermission == DashboardWidgetLifecyclePolicy.Permission.UNKNOWN) {
+                permissionRefreshFailed = true
+                reconcile(app, allowRetry = false)
+            }
         }
     }
 
@@ -117,41 +130,88 @@ internal object DashboardWidgetController {
     }
 
     @JvmStatic fun refresh(context: Context) {
+        refresh(context, publishUi = true)
+    }
+
+    private fun refresh(context: Context, publishUi: Boolean) {
         load(context)
         val app = context.applicationContext
-        permissionGranted = MainActivity.cachedDashboardOverlayPermission()
+        overlayPermission = MainActivity.cachedDashboardOverlayPermission()
+        permissionRefreshFailed = false
+        lifecycle = DashboardWidgetLifecyclePolicy.allowRetry(lifecycle)
         uiLanguage = Language.fromCode(HudPrefs.uiLanguage(app))
-        if (!state.visible || !permissionGranted || HudPrefs.isUserShutdownActive(app)) {
-            stop(app)
-        } else {
-            val active = service
-            if (active != null) {
-                active.updateNotification()
-                active.render()
-            } else if (!startRequested) {
-                startRequested = true
-                try {
-                    app.startForegroundService(Intent(app, DashboardWidgetOverlayService::class.java))
-                } catch (error: RuntimeException) {
-                    startRequested = false
-                    Log.e("DashboardWidget", "Unable to start overlay", error)
-                    Toast.makeText(app, uiLanguage.choose("Не вдалося показати віджет", "Unable to show widget", "Не удалось показать виджет"),
-                        Toast.LENGTH_LONG).show()
-                }
+        reconcile(app, allowRetry = true)
+        if (publishUi) MainActivity.publishSharedUiStateChange()
+    }
+
+    private fun reconcile(app: Context, allowRetry: Boolean) {
+        val shutdown = HudPrefs.isUserShutdownActive(app)
+        val active = service
+        val transition = DashboardWidgetLifecyclePolicy.reconcile(
+            lifecycle, state.visible, overlayPermission, shutdown, permissionRefreshFailed,
+            active?.isClosing() == true, allowRetry)
+        lifecycle = transition.state
+        when (transition.action) {
+            DashboardWidgetLifecyclePolicy.Action.NONE -> Unit
+            DashboardWidgetLifecyclePolicy.Action.START -> start(app)
+            DashboardWidgetLifecyclePolicy.Action.RENDER -> active?.let {
+                it.updateNotification()
+                it.render()
             }
+            DashboardWidgetLifecyclePolicy.Action.CLOSE -> stop(app)
         }
-        MainActivity.publishSharedUiStateChange()
     }
 
-    fun serviceCreated(active: DashboardWidgetOverlayService) {
+    private fun start(app: Context) {
+        try {
+            app.startForegroundService(Intent(app, DashboardWidgetOverlayService::class.java))
+        } catch (error: RuntimeException) {
+            lifecycle = DashboardWidgetLifecyclePolicy.startFailed(lifecycle)
+            Log.e("DashboardWidget", "Unable to start overlay", error)
+            Toast.makeText(app, uiLanguage.choose("Не вдалося показати віджет", "Unable to show widget", "Не удалось показать виджет"),
+                Toast.LENGTH_LONG).show()
+        }
+    }
+
+    fun serviceCreated(active: DashboardWidgetOverlayService): Long {
         load(active)
+        overlayPermission = MainActivity.cachedDashboardOverlayPermission()
+        permissionRefreshFailed = false
         uiLanguage = Language.fromCode(HudPrefs.uiLanguage(active))
+        val instance = ++serviceGeneration
+        lifecycle = DashboardWidgetLifecyclePolicy.serviceCreated(lifecycle, instance)
         service = active
-        startRequested = false
+        return instance
     }
 
-    fun serviceDestroyed(active: DashboardWidgetOverlayService) {
-        if (service === active) service = null
+    fun serviceStart(active: DashboardWidgetOverlayService, instance: Long): DashboardWidgetLifecyclePolicy.ServiceStart {
+        if (service !== active || lifecycle.activeInstance != instance) {
+            return DashboardWidgetLifecyclePolicy.ServiceStart.STOP
+        }
+        return DashboardWidgetLifecyclePolicy.serviceStart(
+            state.visible, overlayPermission, HudPrefs.isUserShutdownActive(active),
+            permissionRefreshFailed, active.isClosing())
+    }
+
+    fun serviceAttachmentFailed(active: DashboardWidgetOverlayService, instance: Long) {
+        val transition = DashboardWidgetLifecyclePolicy.attachmentFailed(lifecycle, instance)
+        lifecycle = transition.state
+        if (service === active && transition.action == DashboardWidgetLifecyclePolicy.Action.CLOSE) {
+            active.closeFromController()
+        }
+    }
+
+    fun serviceDestroyed(active: DashboardWidgetOverlayService, instance: Long) {
+        val permission = MainActivity.cachedDashboardOverlayPermission()
+        val transition = DashboardWidgetLifecyclePolicy.serviceDestroyed(
+            lifecycle, instance, state.visible, permission, HudPrefs.isUserShutdownActive(active))
+        lifecycle = transition.state
+        if (service !== active || transition.state.activeInstance != 0L) return
+        service = null
+        overlayPermission = permission
+        if (transition.action == DashboardWidgetLifecyclePolicy.Action.START) {
+            start(active.applicationContext)
+        }
     }
 
     @JvmStatic fun shutdown(context: Context) {
@@ -162,9 +222,8 @@ internal object DashboardWidgetController {
     }
 
     private fun stop(context: Context) {
-        service?.removeOverlay()
-        service = null
-        startRequested = false
+        lifecycle = DashboardWidgetLifecyclePolicy.cancel(lifecycle).state
+        service?.closeFromController()
         context.stopService(Intent(context, DashboardWidgetOverlayService::class.java))
     }
 }

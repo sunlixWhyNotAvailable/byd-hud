@@ -29,6 +29,8 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -139,20 +141,45 @@ object AppUpdateManager {
 
     val snapshot: StateFlow<Snapshot> = session.snapshot
 
+    private val operationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    @Volatile private var operationController: AppUpdateOperationController? = null
+
+    internal val operationSnapshot: StateFlow<AppUpdateOperationSnapshot?>
+        get() = checkNotNull(operationController) { "AppUpdateManager.initialize must run first" }.snapshot
+
+    /** Main-process startup hook: recover only updater-owned work and never resume a download. */
+    @JvmStatic
+    fun initialize(context: Context) {
+        if (operationController != null) return
+        synchronized(this) {
+            if (operationController != null) return
+            val app = context.applicationContext
+            operationController = AppUpdateOperationController(
+                operationScope,
+                AndroidUpdateOperationDriver(app),
+                AppUpdateOperationIds.processSeed()
+            )
+                .also { it.recover() }
+        }
+    }
+
     /** Called only by admitted runtime startup or a user-open entry, never by a heartbeat. */
     @JvmStatic
     fun onSessionEntry(context: Context) {
         val app = context.applicationContext
+        initialize(app)
         session.enter(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
     }
 
     @JvmStatic
     fun requestManualCheck(context: Context) {
+        initialize(context)
         session.requestManual(isBetaChannelEnabled(context.applicationContext))
     }
 
     @JvmStatic
     fun dismissResult() {
+        operationController?.dismissTerminalFailure()
         val resultId = session.dismiss()
         if (resultId != 0L) UpdateHintManager.onResultInvalidated(resultId, "offer-dismissed")
     }
@@ -162,7 +189,19 @@ object AppUpdateManager {
     fun showRetainedOffer(resultId: Long): Boolean = session.showRetainedOffer(resultId)
 
     @JvmStatic
-    fun resetForShutdown() = session.reset()
+    fun resetForShutdown() {
+        session.reset()
+        operationController?.shutdown()
+    }
+
+    @JvmStatic
+    fun startDownload(context: Context, update: UpdateInfo): Long {
+        initialize(context)
+        return checkNotNull(operationController).start(update)
+    }
+
+    @JvmStatic
+    fun retryReadyInstall(): Boolean = operationController?.retryInstall() == true
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     fun isAutoCheckEnabled(context: Context): Boolean {
@@ -379,45 +418,147 @@ object AppUpdateManager {
         }
     }
 
-    //keeps update I/O here so network, file, and installer failures are handled in one path.
-    suspend fun downloadAndInstall(
-        context: Context,
-        update: UpdateInfo,
-        onProgress: (String) -> Unit
-    ) = withContext(Dispatchers.IO) {
-        val manager = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
-        val fileName = "BYD-HUD-${update.version}.apk"
-        val destination = File(context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS), fileName)
-        destination.parentFile?.mkdirs()
-        if (destination.exists()) {
-            destination.delete()
+    /** Android boundary; the controller above remains the sole operation/admission owner. */
+    private class AndroidUpdateOperationDriver(private val context: Context) : AppUpdateOperationDriver {
+        private val stagingRoot = File(context.filesDir, "updates")
+        private val environment = AppUpdateEnvironmentResolver(
+            downloadRoot = { context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) },
+            downloadService = { context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager }
+        )
+
+        override suspend fun recover(): AppUpdateOperationSnapshot? = withContext(Dispatchers.IO) {
+            val environment = environment.resolve()
+            val store = store(environment)
+            val recovery = recovery(environment, store)
+            val record = recovery.recover() ?: return@withContext null
+            val readyFile = store.readyFile(record)
+            AppUpdateOperationSnapshot(
+                id = record.operationId,
+                update = UpdateInfo(record.version, "", ""),
+                phase = AppUpdateOperationPhase.READY,
+                progress = "100%",
+                ready = AppUpdateReadyApk(
+                    path = readyFile.absolutePath,
+                    targetVersionCode = record.targetVersionCode,
+                    exposed = record.phase == AppUpdateOwnershipPhase.EXPOSED
+                )
+            )
         }
 
-        //download through Android DownloadManager so DiLink keeps a visible system-owned transfer.
-        val request = DownloadManager.Request(Uri.parse(requireHttpsDownloadUrl(update.downloadUrl)))
-            .setTitle("BYD HUD ${update.version}")
-            .setDescription("BYD HUD update")
-            .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, fileName)
-            .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+        override suspend fun prepare(
+            operationId: Long,
+            update: UpdateInfo,
+            onPreparing: () -> Unit,
+            onProgress: (String) -> Unit
+        ): AppUpdateReadyApk = withContext(Dispatchers.IO) {
+            val environment = environment.resolve()
+            val manager = environment.downloadService
+            val downloadRoot = environment.downloadRoot
+            val store = store(environment)
+            val safeVersion = update.version.replace(Regex("[^A-Za-z0-9._-]"), "_")
+            val baseName = "op-$operationId-BYD-HUD-$safeVersion.apk"
+            var record = AppUpdateOwnershipRecord(
+                operationId = operationId,
+                version = update.version,
+                downloadId = -1L,
+                downloadName = baseName,
+                partName = "$baseName.part",
+                readyName = baseName,
+                targetVersionCode = -1L,
+                phase = AppUpdateOwnershipPhase.ACTIVE
+            )
+            stagingRoot.mkdirs()
+            downloadRoot.mkdirs()
+            store.write(record)
+            val download = store.downloadFile(record)
+            val part = store.partFile(record)
+            val ready = store.readyFile(record)
+            listOf(download, part, ready).forEach { if (it.exists() && !it.delete()) throw IllegalStateException("Could not clear owned update file") }
 
-        val downloadId = manager.enqueue(request)
-        var installHandedOff = false
-        try {
-            emitProgress("0%", onProgress)
+            val request = DownloadManager.Request(Uri.parse(requireHttpsDownloadUrl(update.downloadUrl)))
+                .setTitle("BYD HUD ${update.version}")
+                .setDescription("BYD HUD update")
+                .setDestinationInExternalFilesDir(context, Environment.DIRECTORY_DOWNLOADS, record.downloadName)
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE)
+            val downloadId = manager.enqueue(request)
+            record = record.copy(downloadId = downloadId)
+            store.write(record)
+            onProgress("0%")
             pollDownload(manager, downloadId, onProgress)
-            val staged = stageDownloadedApk(context, destination, fileName)
-
-            //install downloaded APK through content URI; file:// is rejected on modern Android.
-            withContext(Dispatchers.Main) {
-                installDownloadedApk(context, staged)
-                installHandedOff = true
+            currentCoroutineContext().ensureActive()
+            onPreparing()
+            if (!download.isFile) throw IllegalStateException("Downloaded APK not found")
+            FileInputStream(download).use { input ->
+                FileOutputStream(part).use { output -> input.copyTo(output) }
             }
-        } finally {
-            if (!installHandedOff) {
-                runCatching { manager.remove(downloadId) }
-                runCatching { destination.delete() }
+            currentCoroutineContext().ensureActive()
+            val targetVersionCode = validateDownloadedApk(context, part)
+            if (ready.exists() && !ready.delete()) throw IllegalStateException("Could not replace owned update APK")
+            if (!part.renameTo(ready)) throw IllegalStateException("Could not publish update APK")
+            record = record.copy(
+                targetVersionCode = targetVersionCode,
+                phase = AppUpdateOwnershipPhase.READY
+            )
+            store.write(record)
+            removeDownload(manager, downloadId)
+            download.delete()
+            AppUpdateReadyApk(ready.absolutePath, targetVersionCode)
+        }
+
+        override suspend fun handoff(
+            operationId: Long,
+            ready: AppUpdateReadyApk,
+            onExposed: (AppUpdateReadyApk) -> Unit
+        ) {
+            val file = File(ready.path)
+            val exposed = withContext(Dispatchers.IO) {
+                val store = store(environment.resolve())
+                val record = store.read(operationId)
+                    ?: throw IllegalStateException("Update ownership missing")
+                if (!file.isFile || file.canonicalFile != store.readyFile(record).canonicalFile) {
+                    throw IllegalStateException("Downloaded APK not found")
+                }
+                val marked = record.copy(phase = AppUpdateOwnershipPhase.EXPOSED)
+                store.write(marked) //Durable before FileProvider creates or grants a URI.
+                ready.copy(exposed = true)
+            }
+            onExposed(exposed)
+            withContext(Dispatchers.Main) { launchInstaller(context, file) }
+        }
+
+        override suspend fun cancelUnexposed(operationId: Long) = withContext(Dispatchers.IO) {
+            val environment = environment.resolve()
+            recovery(environment, store(environment)).cancelUnexposed(operationId)
+        }
+
+        override fun recordCleanupFailure(operationId: Long, error: Throwable) {
+            runCatching {
+                AppEventLogger.event(
+                    context,
+                    "app_update cleanup_failed operation_id=$operationId error=${error.javaClass.simpleName}"
+                )
             }
         }
+
+        private fun store(environment: AppUpdateEnvironment<DownloadManager>) =
+            AppUpdateOwnershipStore(stagingRoot, environment.downloadRoot)
+
+        private fun recovery(
+            environment: AppUpdateEnvironment<DownloadManager>,
+            store: AppUpdateOwnershipStore
+        ) = AppUpdateOwnershipRecovery(
+            store,
+            ::installedVersionCode
+        ) { downloadId -> removeDownload(environment.downloadService, downloadId) }
+
+        private fun removeDownload(manager: DownloadManager, downloadId: Long) {
+            if (downloadId >= 0L) runCatching { manager.remove(downloadId) }
+        }
+
+        @Suppress("DEPRECATION")
+        private fun installedVersionCode(): Long = runCatching {
+            context.packageManager.getPackageInfo(EXPECTED_PACKAGE_NAME, 0).longVersionCode
+        }.getOrDefault(-1L)
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -581,29 +722,11 @@ object AppUpdateManager {
         }
     }
 
-    //guard the installer handoff so Package Installer reads an app-private staged APK.
-    private fun stageDownloadedApk(context: Context, downloaded: File, fileName: String): File {
-        if (!downloaded.isFile) {
-            throw IllegalStateException("Downloaded APK not found")
-        }
-        val updateDir = File(context.filesDir, "updates")
-        updateDir.mkdirs()
-        val staged = File(updateDir, fileName)
-        if (staged.exists() && !staged.delete()) {
-            throw IllegalStateException("Could not replace staged update APK")
-        }
-        downloaded.copyTo(staged, overwrite = true)
-        downloaded.delete()
-        return staged
-    }
-
-    //keeps update I/O here so network, file, and installer failures are handled in one path.
-    private fun installDownloadedApk(context: Context, file: File) {
+    //keeps installer launch separate from preparation; validation and exposure already completed.
+    private fun launchInstaller(context: Context, file: File) {
         if (!file.exists()) {
             throw IllegalStateException("Downloaded APK not found")
         }
-        //guard downloaded APK identity before Package Installer sees the file.
-        validateDownloadedApk(context, file)
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         val intent = Intent(Intent.ACTION_VIEW).apply {
             setDataAndType(uri, "application/vnd.android.package-archive")
@@ -615,7 +738,7 @@ object AppUpdateManager {
 
     //keeps update I/O here so network, file, and installer failures are handled in one path.
     @Suppress("DEPRECATION")
-    private fun validateDownloadedApk(context: Context, file: File) {
+    private fun validateDownloadedApk(context: Context, file: File): Long {
         val info = context.packageManager.getPackageArchiveInfo(
             file.absolutePath,
             PackageManager.GET_SIGNING_CERTIFICATES
@@ -629,6 +752,7 @@ object AppUpdateManager {
         if (!hasSameSigningCertificate(context, info)) {
             throw IllegalStateException("Downloaded APK signature mismatch")
         }
+        return info.longVersionCode
     }
 
     //guard app updates so only APKs signed like the installed app are installable.

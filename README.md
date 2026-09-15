@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.2.3
+- **Version:** v3.2.4
 - **Interface languages:** Ukrainian, English and Russian; update notes follow the selected language, with English as the fallback for missing translations.
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
@@ -323,6 +323,8 @@ Back up important navigator data and sign in to its account before patching. The
 Turning off `Boot runtime service` disables automatic startup, not navigation you have started yourself. You can open BYD HUD and use navigation output or HUD check with this option off.
 
 With automatic update checks enabled, BYD HUD checks shortly after startup, including an allowed background startup. An available update uses the normal offer while BYD HUD is visible, or a ten-second hint while it is in the background. Tap the hint to open Options and the known update offer; the red cross closes it. Dismissing the offer or leaving the app does not replay a cached hint. A later scheduled check may offer the same newer version again. You can also check manually whenever needed, including after a failed check.
+
+Closing the update dialog keeps an ongoing download running. Checking again shows the same operation and its current progress. If you cancel Android's installer, you can retry with the prepared APK; a later available version can still be downloaded. After a process restart, unfinished downloads require an explicit retry, while prepared installer files are retained.
 
 The hint's gear opens an appearance editor with a full-size sample: transparency, corner rounding, border width/color and size. Settings persist; defaults are 0% transparency, 18 dp corners, a 1 dp blue border and 100% size. With compatible versions of BYD Extend and BYD Collector, hints share the top-left area in arrival order. They use additional columns and temporarily shrink if necessary, then reclaim space when a hint closes. Moving or resizing never renews their ten-second lifetimes. Older independent hints cannot participate until those apps are updated. Without overlay permission, the ordinary in-app update offer remains available.
 

@@ -8,13 +8,23 @@ import java.io.IOException;
 final class LogcatCaptureFile {
     private final File part;
     private final File saved;
+    private final OutputOpener opener;
     private boolean started;
     private boolean finished;
     private FileOutputStream output;
 
     LogcatCaptureFile(File directory) {
+        this(directory, file -> new FileOutputStream(file, true));
+    }
+
+    LogcatCaptureFile(File directory, OutputOpener opener) {
         part = new File(directory, "logcat.log.part");
         saved = new File(directory, "logcat.log");
+        this.opener = opener;
+    }
+
+    interface OutputOpener {
+        FileOutputStream open(File file) throws IOException;
     }
 
     synchronized void append(byte[] bytes) throws IOException {
@@ -32,8 +42,16 @@ final class LogcatCaptureFile {
             if (saved.exists() || !part.createNewFile()) {
                 throw new IOException("Capture log already exists: " + part);
             }
-            started = true;
-            output = new FileOutputStream(part, true);
+            try {
+                output = opener.open(part);
+                started = true;
+            } catch (IOException | RuntimeException error) {
+                // This attempt created the file; never remove existing or nonempty evidence.
+                if (part.isFile() && part.length() == 0L && !part.delete()) {
+                    error.addSuppressed(new IOException("Unable to remove unopened capture " + part));
+                }
+                throw error;
+            }
         }
         output.write(bytes, offset, length);
     }

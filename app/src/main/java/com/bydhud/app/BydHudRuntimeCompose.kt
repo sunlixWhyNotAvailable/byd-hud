@@ -205,17 +205,46 @@ internal enum class Language {
 }
 
 //models UpdateCheckState data here so transport and parser layers share a stable contract.
-private sealed class UpdateCheckState {
+internal sealed class UpdateCheckState {
     //defines Checking UI/state support so Compose code can keep rendering intent explicit.
     data object Checking : UpdateCheckState()
     //defines Latest UI/state support so Compose code can keep rendering intent explicit.
     data object Latest : UpdateCheckState()
     //defines Available UI/state support so Compose code can keep rendering intent explicit.
     data class Available(val info: AppUpdateManager.UpdateInfo) : UpdateCheckState()
+    data class Ready(val info: AppUpdateManager.UpdateInfo, val installerError: Boolean) : UpdateCheckState()
     //defines Downloading UI/state support so Compose code can keep rendering intent explicit.
     data class Downloading(val info: AppUpdateManager.UpdateInfo, val progress: String) : UpdateCheckState()
     //defines Error UI/state support so Compose code can keep rendering intent explicit.
     data class Error(val message: String) : UpdateCheckState()
+}
+
+internal fun updateCheckStateFor(
+    snapshot: AppUpdateManager.Snapshot,
+    operation: AppUpdateOperationSnapshot?
+): UpdateCheckState {
+    val checked = (snapshot.result as? AppUpdateManager.CheckResult.Available)?.info
+    if (operation != null) {
+        val operationInfo = checked?.takeIf { it.version == operation.update.version } ?: operation.update
+        return when (operation.phase) {
+            AppUpdateOperationPhase.DOWNLOADING,
+            AppUpdateOperationPhase.PREPARING,
+            AppUpdateOperationPhase.INSTALLING -> UpdateCheckState.Downloading(operationInfo, operation.progress)
+            AppUpdateOperationPhase.READY -> {
+                val newer = checked?.takeIf { it.version != operation.update.version }
+                if (newer != null) UpdateCheckState.Available(newer)
+                else UpdateCheckState.Ready(operationInfo, installerError = operation.error != null)
+            }
+            AppUpdateOperationPhase.FAILED -> UpdateCheckState.Error(operation.error ?: "Update failed")
+        }
+    }
+    if (snapshot.checking) return UpdateCheckState.Checking
+    return when (val result = snapshot.result) {
+        AppUpdateManager.CheckResult.UpToDate -> UpdateCheckState.Latest
+        is AppUpdateManager.CheckResult.Available -> UpdateCheckState.Available(result.info)
+        is AppUpdateManager.CheckResult.Error -> UpdateCheckState.Error(result.message)
+        null -> UpdateCheckState.Checking
+    }
 }
 
 private enum class StorageShareDestination {
@@ -298,6 +327,7 @@ private data class Copy(
     val updateChecking: String,
     val updateLatest: String,
     val updateDownloading: String,
+    val updateInstallerError: String,
     val updateClose: String,
     val updateAction: String,
     val basicNavigationOutput: String,
@@ -825,19 +855,10 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var updateHintAppearance by remember { mutableStateOf(UpdateHintManager.appearance(activity)) }
     var showUpdateHintSettings by rememberSaveable { mutableStateOf(false) }
     val updateSnapshot by AppUpdateManager.snapshot.collectAsState()
+    val updateOperation by AppUpdateManager.operationSnapshot.collectAsState()
     val pendingHintRouteResultId by UpdateHintManager.pendingRouteResultId.collectAsState()
     var showUpdateDialog by remember { mutableStateOf(false) }
-    var updateDownloadState by remember(updateSnapshot) { mutableStateOf<UpdateCheckState?>(null) }
-    val updateState = updateDownloadState ?: if (updateSnapshot.checking) {
-        UpdateCheckState.Checking
-    } else {
-        when (val result = updateSnapshot.result) {
-            AppUpdateManager.CheckResult.UpToDate -> UpdateCheckState.Latest
-            is AppUpdateManager.CheckResult.Available -> UpdateCheckState.Available(result.info)
-            is AppUpdateManager.CheckResult.Error -> UpdateCheckState.Error(result.message)
-            null -> UpdateCheckState.Checking
-        }
-    }
+    val updateState = updateCheckStateFor(updateSnapshot, updateOperation)
     var pendingPatchProfile by rememberSaveable { mutableStateOf("") }
     var pendingPatchDestructive by rememberSaveable { mutableStateOf(false) }
     var pendingPatchFileConfirmProfile by rememberSaveable { mutableStateOf("") }
@@ -1521,19 +1542,19 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 language = copy.language,
                 state = updateState,
                 onUpdate = {
-                    val available = updateState
-                    if (available is UpdateCheckState.Available) {
+                    val offered = when (val state = updateState) {
+                        is UpdateCheckState.Available -> state.info
+                        is UpdateCheckState.Ready -> state.info
+                        else -> null
+                    }
+                    val operation = updateOperation
+                    if (operation?.phase == AppUpdateOperationPhase.READY &&
+                        offered?.version == operation.update.version
+                    ) {
+                        AppUpdateManager.retryReadyInstall()
+                    } else if (offered != null) {
                         UpdateHintManager.onInstallStarted(updateSnapshot.resultId)
-                        updateDownloadState = UpdateCheckState.Downloading(available.info, "0%")
-                        updateScope.launch {
-                            try {
-                                AppUpdateManager.downloadAndInstall(activity, available.info) { progress ->
-                                    updateDownloadState = UpdateCheckState.Downloading(available.info, progress)
-                                }
-                            } catch (e: Exception) {
-                                updateDownloadState = UpdateCheckState.Error(e.message ?: "Download failed")
-                            }
-                        }
+                        AppUpdateManager.startDownload(activity, offered)
                     }
                 },
                 onClose = {
@@ -3545,7 +3566,7 @@ private fun UpdateCheckOverlay(
     onClose: () -> Unit
 ) {
     val notesScroll = rememberScrollState()
-    val updateEnabled = state is UpdateCheckState.Available
+    val updateEnabled = state is UpdateCheckState.Available || state is UpdateCheckState.Ready
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -3603,6 +3624,25 @@ private fun UpdateCheckOverlay(
                                 language.code
                             )
                         )
+                        is UpdateCheckState.Ready -> {
+                            if (state.installerError) {
+                                Text(
+                                    copy.updateInstallerError,
+                                    color = palette.red,
+                                    fontSize = 15.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                            AvailableUpdateNotes(
+                                copy = copy,
+                                palette = palette,
+                                version = state.info.version,
+                                notes = AppUpdateManager.releaseNotesForLanguage(
+                                    state.info.releaseNotes,
+                                    language.code
+                                )
+                            )
+                        }
                         is UpdateCheckState.Downloading -> {
                             Text(
                                 copy.updateDownloading,
@@ -9009,9 +9049,9 @@ private fun enCopy() = Copy(
     adbNotGranted = "ADB: not granted",
     permissionsOk = "Permissions: OK",
     permissionsMissing = "Permissions: missing",
-    ukr = "UA",
+    ukr = "Укр",
     eng = "ENG",
-    ru = "RU",
+    ru = "Рос",
     dark = "Dark",
     light = "Light",
     mainHint = "Navigation settings",
@@ -9044,6 +9084,7 @@ private fun enCopy() = Copy(
     updateChecking = "Checking for update...",
     updateLatest = "This is the latest app version",
     updateDownloading = "Downloading update...",
+    updateInstallerError = "Android could not open the installer. Try the update again.",
     updateClose = "Close",
     updateAction = "Update",
     basicNavigationOutput = "Basic navigation output",
@@ -9283,6 +9324,7 @@ private fun uaCopy() = enCopy().copy(
     updateChecking = "Перевіряємо оновлення...",
     updateLatest = "Це остання версія застосунку",
     updateDownloading = "Завантажуємо оновлення...",
+    updateInstallerError = "Android не вдалося відкрити інсталятор. Спробуйте оновити ще раз.",
     updateClose = "Закрити",
     updateAction = "Оновити",
     basicNavigationOutput = "Базовий вивід навігації",
@@ -9392,7 +9434,7 @@ private fun uaCopy() = enCopy().copy(
     bothStorageLocations = "Публічна та приватна теки",
     shareSelected = "Поділитись логами",
     ukr = "Укр",
-    eng = "Англ",
+    eng = "ENG",
     ru = "Рос",
     sortByDate = "Нові спочатку",
     sortByName = "Старі спочатку",
@@ -9495,8 +9537,8 @@ private fun ruCopy() = enCopy().copy(
     permissionsOk = "Разрешения: ОК",
     permissionsMissing = "Разрешения: отсутствуют",
     ukr = "Укр",
-    eng = "Англ",
-    ru = "Рус",
+    eng = "ENG",
+    ru = "Рос",
     dark = "Тёмная",
     light = "Светлая",
     mainHint = "Настройки навигации",
@@ -9529,6 +9571,7 @@ private fun ruCopy() = enCopy().copy(
     updateChecking = "Проверка обновления...",
     updateLatest = "Установлена последняя версия приложения",
     updateDownloading = "Загрузка обновления...",
+    updateInstallerError = "Android не удалось открыть установщик. Попробуйте обновить ещё раз.",
     updateClose = "Закрыть",
     updateAction = "Обновить",
     basicNavigationOutput = "Основной вывод навигации",

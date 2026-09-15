@@ -303,16 +303,20 @@ final class NavAppDisplayController {
     }
 
     //a real boot invalidates the old virtual display; update and process recovery do not.
-    void clearStaleProjectionIntentForBoot(String reason) {
+    boolean clearStaleProjectionIntentForBoot(String reason) {
+        String previous = persistedDashboardPackage();
+        boolean committed = dashboardPrefs().edit().clear().commit();
+        if (!committed) {
+            log(previous, "dashboard_boot_clear_failed reason=" + safe(reason));
+            return false;
+        }
         synchronized (lock) {
             activeDashboardPackage = "";
         }
-        clearDashboardProjection("boot:" + safe(reason));
-        clearAutoContainerLease("boot:" + safe(reason));
-        dashboardPrefs().edit()
-                .remove(KEY_PROJECTION_GENERATION)
-                .remove(KEY_WIDGET_AUTOCONTAINER_VALUE)
-                .apply();
+        if (!previous.isEmpty()) {
+            log(previous, "dashboard_boot_clear reason=" + safe(reason));
+        }
+        return true;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

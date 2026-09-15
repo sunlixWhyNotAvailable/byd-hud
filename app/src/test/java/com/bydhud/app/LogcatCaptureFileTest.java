@@ -11,6 +11,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
@@ -119,6 +120,42 @@ public final class LogcatCaptureFileTest {
         capture.finish();
         assertFalse(capture.file().exists());
         assertThrows(IOException.class, () -> capture.append(utf8("after Stop")));
+    }
+
+    @Test
+    public void failedOpenRemovesOnlyItsEmptyPartAndDoesNotStartTheWriter() throws Exception {
+        File directory = temporaryFolder.newFolder("open-failure");
+        AtomicInteger opens = new AtomicInteger();
+        LogcatCaptureFile capture = new LogcatCaptureFile(directory, file -> {
+            if (opens.getAndIncrement() == 0) throw new IOException("open denied");
+            return new FileOutputStream(file, true);
+        });
+
+        assertThrows(IOException.class, () -> capture.append(utf8("not written")));
+        assertFalse(capture.file().exists());
+        assertEquals(0L, capture.bytes());
+        capture.append(utf8("next successful open"));
+        capture.finish();
+        assertArrayEquals(utf8("next successful open"), Files.readAllBytes(capture.file().toPath()));
+        assertEquals(2, opens.get());
+    }
+
+    @Test
+    public void openFailureNeverDeletesAnExistingOrNonemptyPart() throws Exception {
+        File directory = temporaryFolder.newFolder("nonempty-open-failure");
+        byte[] evidence = utf8("preserved evidence");
+        LogcatCaptureFile capture = new LogcatCaptureFile(directory, file -> {
+            Files.write(file.toPath(), evidence);
+            throw new IOException("open failed after another write");
+        });
+
+        assertThrows(IOException.class, () -> capture.append(utf8("not written")));
+        assertArrayEquals(evidence, Files.readAllBytes(capture.file().toPath()));
+        assertThrows(IOException.class, () -> capture.append(utf8("must not overwrite")));
+        capture.finish();
+        assertArrayEquals(evidence, Files.readAllBytes(
+                new File(directory, "logcat.log.part").toPath()));
+        assertFalse(new File(directory, "logcat.log").exists());
     }
 
     @Test

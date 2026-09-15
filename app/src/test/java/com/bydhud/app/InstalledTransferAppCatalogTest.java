@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
@@ -88,6 +89,25 @@ public final class InstalledTransferAppCatalogTest {
         assertTrue(fallback.icon().isNeutral());
         assertEquals(1, fallback.icon().width());
         assertEquals(1, fallback.icon().height());
+    }
+
+    @Test
+    public void mixedCaseSelectionReturnsOriginalCatalogIdentityAndLabel() throws Exception {
+        var constructor = InstalledTransferAppCatalog.Entry.class.getDeclaredConstructor(
+                String.class, String.class, InstalledTransferAppCatalog.IconSnapshot.class);
+        constructor.setAccessible(true);
+        InstalledTransferAppCatalog.Entry original = constructor.newInstance(
+                "com.Example.Navigator", "Example Navigator",
+                InstalledTransferAppCatalog.IconSnapshot.neutral());
+
+        InstalledTransferAppCatalog.Entry selected =
+                InstalledTransferAppCatalog.selectionOrFallback(
+                        Collections.singletonList(original), " com.example.navigator ");
+
+        assertSame(original, selected);
+        assertEquals("com.Example.Navigator", selected.packageName());
+        assertEquals("Example Navigator", selected.label());
+        assertSame(original.icon(), selected.icon());
     }
 
     @Test

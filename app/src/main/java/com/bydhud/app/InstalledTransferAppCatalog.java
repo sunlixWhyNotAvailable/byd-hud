@@ -111,7 +111,7 @@ public final class InstalledTransferAppCatalog {
         String normalized = normalizePackage(packageName);
         if (entries != null && !normalized.isEmpty()) {
             for (Entry entry : entries) {
-                if (entry != null && normalized.equals(entry.packageName)) {
+                if (entry != null && normalized.equals(normalizePackage(entry.packageName))) {
                     return entry;
                 }
             }

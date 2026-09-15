@@ -16,10 +16,29 @@ public final class BootReceiver extends BroadcastReceiver {
     public void onReceive(Context context, Intent intent) {
         ConfigurationExportArtifacts.checkAsync(context);
         String action = intent == null ? "" : intent.getAction();
-        if (isColdBootAction(action)) {
-            NavAppDisplayController.get(context).clearStaleProjectionIntentForBoot(action);
-            WazeRouteLifecycleStore.clearForBoot(context, action);
+        if (BootCleanupGate.handlesBootAction(action)) {
+            PendingResult pendingResult = goAsync();
+            BootCleanupGate.handleBootAction(context, action, admitted -> {
+                try {
+                    if (admitted) {
+                        completeReceive(context.getApplicationContext(), action);
+                    } else {
+                        AppEventLogger.event(context,
+                                "boot_receiver recovery_fenced action=" + action);
+                    }
+                } finally {
+                    pendingResult.finish();
+                }
+            });
+            return;
         }
+        PendingResult pendingResult = goAsync();
+        BootCleanupGate.runWhenReady(context,
+                () -> completeReceive(context.getApplicationContext(), action),
+                pendingResult::finish);
+    }
+
+    private static void completeReceive(Context context, String action) {
         AppEventLogger.event(context, "boot_receiver action=" + action
                 + " boot=" + HudPrefs.isBootEnabled(context)
                 + " runtimeRunning=" + HudPrefs.isRuntimeServiceRunning(context)
@@ -67,9 +86,4 @@ public final class BootReceiver extends BroadcastReceiver {
                 || Intent.ACTION_MY_PACKAGE_REPLACED.equals(action);
     }
 
-    //only a real boot makes the persisted virtual-display target inherently stale.
-    private static boolean isColdBootAction(String action) {
-        return Intent.ACTION_BOOT_COMPLETED.equals(action)
-                || ACTION_QUICKBOOT_POWERON.equals(action);
-    }
 }

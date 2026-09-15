@@ -52,9 +52,16 @@ public final class HudRuntimeService extends Service {
 
     private boolean runtimeStartInitialized;
     private boolean runtimeActiveWork;
+    private boolean runtimeDestroyed;
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.
     static void startPersistent(Context context, String reason) {
+        Context appContext = context.getApplicationContext();
+        BootCleanupGate.runWhenReady(appContext,
+                () -> startPersistentAfterBootGate(appContext, reason));
+    }
+
+    private static void startPersistentAfterBootGate(Context context, String reason) {
         Context appContext = context.getApplicationContext();
         String safeReason = reason == null ? "" : reason.trim();
         boolean shutdownActive = HudPrefs.isUserShutdownActive(appContext);
@@ -197,6 +204,7 @@ public final class HudRuntimeService extends Service {
         super.onCreate();
         runtimeStartInitialized = false;
         runtimeActiveWork = false;
+        runtimeDestroyed = false;
         HudRuntimeUpgradeGuard.recordVersionStart(this, "service-create");
         HudGraphicPayload.setContext(this);
         startForeground(NOTIFICATION_ID, buildNotification("Runtime active"));
@@ -207,7 +215,6 @@ public final class HudRuntimeService extends Service {
         //start must observe the live service, not a persisted heartbeat.
         clearStartRequestGate();
         scheduleHeartbeat();
-        requestInitialUiRefresh("runtime-create");
         log("runtime foreground active version=" + BuildConfig.VERSION_NAME
                 + "/" + BuildConfig.VERSION_CODE
                 + " logDir=" + AppEventLogger.logDir(this).getAbsolutePath());
@@ -240,6 +247,15 @@ public final class HudRuntimeService extends Service {
             HudRuntimeSupervisor.hardResetAfterPackageReplace(this, "service-start:" + reason);
             return START_NOT_STICKY;
         }
+        BootCleanupGate.runWhenReady(this, () -> heartbeatHandler.post(
+                () -> completeStartAfterBootGate(reason)));
+        return START_STICKY;
+    }
+
+    private void completeStartAfterBootGate(String reason) {
+        if (runtimeDestroyed
+                || HudPrefs.isUserShutdownActive(this)
+                || !HudPrefs.isBootEnabled(this)) return;
         AppUpdateManager.onSessionEntry(this);
         HudRuntimeState.publishServicePresent(this, "onStartCommand");
         clearStartRequestGate();
@@ -248,6 +264,7 @@ public final class HudRuntimeService extends Service {
         DashboardWidgetController.onRuntimeStart(this);
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         if (!runtimeStartInitialized || activeWork != runtimeActiveWork) {
+            if (!runtimeStartInitialized) requestInitialUiRefresh("runtime-create");
             InstrumentProxyManager.get(this).ensureStarted("runtime-service:" + reason);
             updateNotification(activeWork ? "Runtime active" : "Runtime idle");
             String hudPackage = NavCapturePrefs.getHudPackage(this);
@@ -275,7 +292,6 @@ public final class HudRuntimeService extends Service {
                     true,
                     LocalAdbBridge.AuthorizationPromptMode.NEVER);
         }
-        return START_STICKY;
     }
 
     @Override
@@ -300,6 +316,7 @@ public final class HudRuntimeService extends Service {
     @Override
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
+        runtimeDestroyed = true;
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         clearStartRequestGate();
         HudRuntimeState.clearServicePresent(this, "destroyed");

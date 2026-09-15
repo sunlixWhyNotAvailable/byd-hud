@@ -536,10 +536,19 @@ final class LogcatRecorder {
             }
             throw new FallbackStreamException("app-visible Logcat stream ended", null);
         } finally {
-            if (reconciler != null) {
-                LogcatStreamBoundary.Finish result = reconciler.finish();
-                recordPartial(session, capture.persistPartial(),
-                        result.pendingMismatch ? "transition_prefix_mismatch" : "transition_stop");
+            finishFallbackStream(session, capture, reconciler, fallback);
+        }
+    }
+
+    // Finalize both fallback paths through the same tail writer and unconditional close.
+    static void finishFallbackStream(Session session, CaptureOutput capture,
+            LogcatStreamBoundary.Reconciler reconciler, CaptureSource fallback) throws IOException {
+        try {
+            LogcatStreamBoundary.Finish result = reconciler == null ? null : reconciler.finish();
+            recordPartial(session, capture.persistPartial(),
+                    result != null && result.pendingMismatch
+                            ? "transition_prefix_mismatch" : "transition_stop");
+            if (result != null) {
                 if (result.pendingMismatch) {
                     recordInterruption(session,
                             "ADB partial record did not match fallback boundary",
@@ -552,6 +561,7 @@ final class LogcatRecorder {
                             "valid_prefix_persisted");
                 }
             }
+        } finally {
             session.streamControl.clearAndClose(fallback);
         }
     }
@@ -945,7 +955,7 @@ final class LogcatRecorder {
         }
     }
 
-    private static final class Session {
+    static final class Session {
         final Context context;
         final String day;
         final String captureId;
@@ -983,7 +993,7 @@ final class LogcatRecorder {
         }
     }
 
-    private interface CaptureSource extends Closeable {
+    interface CaptureSource extends Closeable {
         void readTo(OutputStream output) throws IOException;
     }
 
@@ -1040,7 +1050,7 @@ final class LogcatRecorder {
         }
     }
 
-    private static final class CaptureOutput extends OutputStream {
+    static final class CaptureOutput extends OutputStream {
         private static final int MAX_RECORD_BYTES = 64 * 1024;
         private final Session session;
         private final byte[] record = new byte[MAX_RECORD_BYTES + 1];

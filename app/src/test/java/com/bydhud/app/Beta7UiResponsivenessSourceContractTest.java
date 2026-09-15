@@ -99,7 +99,8 @@ public final class Beta7UiResponsivenessSourceContractTest {
         String bootstrap = between(activity, "static void requestInitialUiStateRefresh(",
                 "static void requestStorageRefreshAfterMutation(");
         String service = source("HudRuntimeService.java");
-        String onCreate = between(service, "public void onCreate()", "public int onStartCommand(");
+        String admittedStart = between(service, "private void completeStartAfterBootGate(",
+                "public void onTaskRemoved(");
         String heartbeat = between(service, "private final Runnable heartbeatRunnable",
                 "static void startPersistent(");
         String compose = source("BydHudRuntimeCompose.kt");
@@ -110,7 +111,7 @@ public final class Beta7UiResponsivenessSourceContractTest {
         assertTrue(bootstrap.contains("requestStorageRefresh(context, false"));
         assertTrue(bootstrap.contains("requestRuntimeUiStateRefresh(context, false"));
         assertTrue(bootstrap.contains("requestPatchUiStateRefresh(context, false"));
-        assertTrue(onCreate.contains("requestInitialUiRefresh(\"runtime-create\")"));
+        assertTrue(admittedStart.contains("if (!runtimeStartInitialized) requestInitialUiRefresh(\"runtime-create\")"));
         assertTrue(heartbeat.contains("requestRuntimeUiRefresh(false, \"runtime-heartbeat\")"));
         assertFalse(heartbeat.contains("requestInitialUiRefresh"));
         assertFalse(polling.contains("refresh()"));

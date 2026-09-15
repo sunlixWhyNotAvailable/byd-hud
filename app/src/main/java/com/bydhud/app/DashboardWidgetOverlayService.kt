@@ -49,6 +49,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     private var anchorAttached = false
     private var menuAttached = false
     private var closing = false
+    private var controllerInstance = 0L
     private var windowDp by mutableStateOf(Offset.Zero)
     private val main = Handler(Looper.getMainLooper())
     private val inactivityCallback = Runnable {
@@ -62,7 +63,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
 
     override fun onCreate() {
         super.onCreate()
-        DashboardWidgetController.serviceCreated(this)
+        controllerInstance = DashboardWidgetController.serviceCreated(this)
         MainActivity.requestRuntimeStatusRefresh(this, false, "widget-service")
         getSystemService(NotificationManager::class.java).createNotificationChannel(
             NotificationChannel(CHANNEL, "BYD HUD dashboard widget", NotificationManager.IMPORTANCE_LOW)
@@ -113,14 +114,18 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (!canShow()) {
-            removeOverlay()
-            stopSelf(startId)
-            return START_NOT_STICKY
+        return when (DashboardWidgetController.serviceStart(this, controllerInstance)) {
+            DashboardWidgetLifecyclePolicy.ServiceStart.WAIT_FOR_PERMISSION -> START_STICKY
+            DashboardWidgetLifecyclePolicy.ServiceStart.STOP -> {
+                closeFromController(startId)
+                START_NOT_STICKY
+            }
+            DashboardWidgetLifecyclePolicy.ServiceStart.SHOW -> {
+                render()
+                // Restore an already enabled widget after process loss, without sending a vehicle command.
+                START_STICKY
+            }
         }
-        render()
-        // Restore an already enabled widget after process loss, without sending a vehicle command.
-        return START_STICKY
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -130,15 +135,15 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         render()
     }
 
-    private fun canShow() = !closing && DashboardWidgetController.state.visible &&
-        !HudPrefs.isUserShutdownActive(this) && DashboardWidgetController.hasOverlayPermission()
-
     @Suppress("DEPRECATION")
     internal fun render() {
-        if (!canShow()) {
-            removeOverlay()
-            stopSelf()
-            return
+        when (DashboardWidgetController.serviceStart(this, controllerInstance)) {
+            DashboardWidgetLifecyclePolicy.ServiceStart.WAIT_FOR_PERMISSION -> return
+            DashboardWidgetLifecyclePolicy.ServiceStart.STOP -> {
+                closeFromController()
+                return
+            }
+            DashboardWidgetLifecyclePolicy.ServiceStart.SHOW -> Unit
         }
         val density = overlayContext.resources.displayMetrics.density
         windowDp = if (Build.VERSION.SDK_INT >= 30) {
@@ -156,7 +161,8 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     }
 
     private fun updateWindows(state: DashboardWidgetState) {
-        if (!canShow() || windowDp.x <= 0 || windowDp.y <= 0) return
+        if (DashboardWidgetController.serviceStart(this, controllerInstance) !=
+            DashboardWidgetLifecyclePolicy.ServiceStart.SHOW || windowDp.x <= 0 || windowDp.y <= 0) return
         val layout = state.layout(windowDp.x, windowDp.y)
         try {
             anchorAttached = updateWindow(anchorView, anchorParams, layout.anchor, anchorAttached)
@@ -166,10 +172,9 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
                 DashboardWidgetWindowLayout(menu.left, menu.top, menu.width, menu.height), menuAttached)
         } catch (error: RuntimeException) {
             Log.e("DashboardWidget", "Unable to attach/update overlay", error)
-            removeOverlay()
             Toast.makeText(this, DashboardWidgetController.uiLanguage.choose("Не вдалося показати віджет",
                 "Unable to show widget", "Не удалось показать виджет"), Toast.LENGTH_LONG).show()
-            stopSelf()
+            DashboardWidgetController.serviceAttachmentFailed(this, controllerInstance)
         }
     }
 
@@ -222,6 +227,13 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         }
     }
 
+    internal fun isClosing(): Boolean = closing
+
+    internal fun closeFromController(startId: Int? = null) {
+        removeOverlay()
+        if (startId == null) stopSelf() else stopSelf(startId)
+    }
+
     private fun notification(): Notification {
         val language = DashboardWidgetController.uiLanguage
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
@@ -242,7 +254,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         if (::anchorView.isInitialized) anchorView.disposeComposition()
         if (::menuView.isInitialized) menuView.disposeComposition()
         lifecycleRegistry.currentState = Lifecycle.State.DESTROYED
-        DashboardWidgetController.serviceDestroyed(this)
+        DashboardWidgetController.serviceDestroyed(this, controllerInstance)
         super.onDestroy()
     }
 
