@@ -136,7 +136,7 @@ public final class NavPermissionGrantPlanTest {
         assertEquals(Arrays.asList(
                 put("enabled_notification_listeners", "org.example/org.example.Notify$Inner:" + NOTIFICATION),
                 put("enabled_accessibility_services", ":org.other/org.other.Access:" + ACCESSIBILITY),
-                put("accessibility_enabled", "1"), "appops set com.bydhud.app SYSTEM_ALERT_WINDOW allow"), commands(plan));
+                put("accessibility_enabled", "1")), commands(plan));
         fixture.assertOnlyOwnLookups();
     }
 
@@ -249,7 +249,7 @@ public final class NavPermissionGrantPlanTest {
 
     @Test public void selectiveGrantFlagsDoNotChangeValidationOrTouchOtherSettings() throws Exception {
         Fixture fixture = new Fixture();
-        Object plan = fixture.plan("org.example/.Notify", "org.example/.Access", false, true, false, false);
+        Object plan = fixture.plan("org.example/.Notify", "org.example/.Access", false, true, false);
         assertValid(plan);
         assertEquals(Arrays.asList(put("enabled_accessibility_services", ":org.example/org.example.Access:" + ACCESSIBILITY)), commands(plan));
         fixture.assertOnlyOwnLookups();
@@ -295,8 +295,8 @@ public final class NavPermissionGrantPlanTest {
         }
         Object plan(String notification, String accessibility, boolean... grant) throws Exception {
             return invoke("fromCurrentSettings", new Class<?>[]{contextType, String.class, String.class, String.class,
-                            boolean.class, boolean.class, boolean.class, boolean.class}, context, PACKAGE, notification, accessibility,
-                    grant.length == 0 || grant[0], grant.length == 0 || grant[1], grant.length == 0 || grant[2], grant.length == 0 || grant[3]);
+                            boolean.class, boolean.class, boolean.class}, context, PACKAGE, notification, accessibility,
+                    grant.length == 0 || grant[0], grant.length == 0 || grant[1], grant.length == 0 || grant[2]);
         }
         @SuppressWarnings("unchecked") List<String> rebind(String accessibility) throws Exception {
             return (List<String>) invoke("accessibilityRuntimeRebindCommands", new Class<?>[]{contextType, String.class, String.class},

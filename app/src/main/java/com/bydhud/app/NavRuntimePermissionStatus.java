@@ -57,7 +57,7 @@ final class NavRuntimePermissionStatus {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean settingsGranted() {
-        return settings != null && settings.allGranted();
+        return settings != null && settings.captureGranted();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -70,14 +70,16 @@ final class NavRuntimePermissionStatus {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean needsAdbGrant() {
-        return settings == null || !settings.allGranted();
+        return settings == null || !settings.captureGranted();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     String uiSummary(boolean autoGrantAttempted, String adbKeyFingerprint) {
         StringBuilder builder = new StringBuilder();
         if (!needsAdbGrant()) {
-            builder.append("Permissions: OK");
+            builder.append("Capture permissions: OK");
+            builder.append(settings.dashboardOverlayEnabled
+                    ? "\nOverlay: enabled" : "\nOverlay: allow in Android settings");
             if (readyForCapture()) {
                 builder.append("\nCapture services: OK");
             } else {
@@ -92,8 +94,6 @@ final class NavRuntimePermissionStatus {
                 settings != null
                         && settings.accessibilityServiceEnabled
                         && settings.accessibilityMasterEnabled);
-        appendMissingPermission(builder, "dashboard overlay",
-                settings != null && settings.dashboardOverlayEnabled);
         appendMissingPermission(builder, "storage read",
                 settings != null && settings.storageReadEnabled);
         appendMissingPermission(builder, "storage write",
@@ -127,9 +127,6 @@ final class NavRuntimePermissionStatus {
         }
         if (accessibilityServiceCrashed) {
             builder.append(" accessibility-crashed");
-        }
-        if (settings == null || !settings.dashboardOverlayEnabled) {
-            builder.append(" dashboard-overlay");
         }
         if (settings == null || !settings.storageReadEnabled) {
             builder.append(" storage-read");

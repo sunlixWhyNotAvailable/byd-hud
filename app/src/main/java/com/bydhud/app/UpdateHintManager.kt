@@ -109,6 +109,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
     private var languageCode = "en"
     private var darkTheme = true
     private var active: ActiveHint? = null
+    private var lastLoggedResultId = 0L
     private var screenOnReceiverRegistered = false
     private val screenOnReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
@@ -137,7 +138,18 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
                     pendingRoute.value?.let { pending ->
                         if (pending != snapshot.resultId) pendingRoute.value = null
                     }
-                    applyDecision(policy.onSnapshot(snapshot, UpdateHintAppearance.isEnabled(application)))
+                    val enabled = UpdateHintAppearance.isEnabled(application)
+                    if (snapshot.resultId > lastLoggedResultId) {
+                        lastLoggedResultId = snapshot.resultId
+                        val reason = when {
+                            snapshot.result !is AppUpdateManager.CheckResult.Available -> "not-available"
+                            !enabled -> "disabled"
+                            visibleActivities.isNotEmpty() -> "own-ui-visible"
+                            else -> "eligible"
+                        }
+                        AppEventLogger.event(application, "update_hint admission resultId=${snapshot.resultId} reason=$reason")
+                    }
+                    applyDecision(policy.onSnapshot(snapshot, enabled))
                 }
             }
         }
@@ -224,6 +236,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
     private fun show(resultId: Long, info: AppUpdateManager.UpdateInfo) {
         val app = application ?: return
         if (!Settings.canDrawOverlays(app)) {
+            AppEventLogger.event(app, "update_hint skipped resultId=$resultId reason=overlay-permission-missing")
             policy.afterRelease(resultId)
             return
         }
@@ -232,6 +245,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             val display = app.getSystemService(DisplayManager::class.java)
                 .getDisplay(android.view.Display.DEFAULT_DISPLAY)
             if (display == null) {
+                AppEventLogger.event(app, "update_hint skipped resultId=$resultId reason=display-missing")
                 policy.afterRelease(resultId)
                 return
             }
@@ -265,6 +279,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             ) { placement -> onPlacement(hint, placement) }
         } catch (error: RuntimeException) {
             Log.w(TAG, "prepare failed: ${error.javaClass.simpleName}")
+            AppEventLogger.event(app, "update_hint failed resultId=$resultId stage=prepare error=${error.javaClass.simpleName}")
             dismiss(resultId, "prepare-failed")
         }
     }
@@ -301,8 +316,10 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
             registerScreenOnReceiver()
             scheduleExpiry(hint)
             Log.i(TAG, "shown resultId=${hint.resultId}")
+            application?.let { AppEventLogger.event(it, "update_hint shown resultId=${hint.resultId}") }
         } catch (error: RuntimeException) {
             Log.w(TAG, "attach failed: ${error.javaClass.simpleName}")
+            application?.let { AppEventLogger.event(it, "update_hint failed resultId=${hint.resultId} stage=attach error=${error.javaClass.simpleName}") }
             dismiss(hint.resultId, "attach-failed")
         }
     }
@@ -413,6 +430,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
         }
         UpdateHintCoordinator.release(hint.eventId, reason)
         Log.i(TAG, "released resultId=$resultId reason=$reason")
+        application?.let { AppEventLogger.event(it, "update_hint released resultId=$resultId reason=$reason") }
     }
 
     private fun registerScreenOnReceiver() {

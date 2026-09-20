@@ -604,14 +604,12 @@ final class LocalAdbBridge {
         boolean grantNotificationListener = !before.notificationListenerEnabled;
         boolean grantAccessibilityService = !before.accessibilityServiceEnabled;
         boolean grantAccessibilityMaster = !before.accessibilityMasterEnabled;
-        boolean grantDashboardOverlay = !before.dashboardOverlayEnabled;
         boolean grantStorageRead = !before.storageReadEnabled;
         boolean grantStorageWrite = !before.storageWriteEnabled;
         AppEventLogger.event(appContext, "adb_bridge targets"
                 + " notification=" + grantNotificationListener
                 + " accessibility=" + grantAccessibilityService
                 + " accessibilityMaster=" + grantAccessibilityMaster
-                + " overlay=" + grantDashboardOverlay
                 + " storageRead=" + grantStorageRead
                 + " storageWrite=" + grantStorageWrite
                 + " forceStorageAppOps="
@@ -659,8 +657,7 @@ final class LocalAdbBridge {
                     accessibility.output,
                     grantNotificationListener,
                     grantAccessibilityService,
-                    grantAccessibilityMaster,
-                    grantDashboardOverlay);
+                    grantAccessibilityMaster);
             if (!plan.isValid()) {
                 return Result.failed("ADB grant plan rejected: " + plan.error);
             }
@@ -707,7 +704,7 @@ final class LocalAdbBridge {
             }
 
             NavPermissionStatus after = waitForSettingsGranted(appContext);
-            if (!after.allGranted()) {
+            if (!after.captureGranted()) {
                 return Result.postGrantVerification(after, "endpoint=" + endpointSuffix);
             }
             return waitForRuntimeReady(appContext, endpointSuffix);
@@ -1494,7 +1491,7 @@ final class LocalAdbBridge {
         //keeps this step explicit so callers can rely on one documented behavior boundary.
         private static Result postGrantVerification(NavPermissionStatus after, String detail) {
             String safeDetail = detail == null ? "" : detail.trim();
-            if (after == null || !after.allGranted()) {
+            if (after == null || !after.captureGranted()) {
                 return Result.partial("ADB commands completed, but Android reports "
                         + (after == null ? "unknown permission state" : after.summary())
                         + (safeDetail.isEmpty() ? "" : ": " + safeDetail));
@@ -1535,7 +1532,7 @@ final class LocalAdbBridge {
         NavPermissionStatus last = NavPermissionStatus.check(appContext);
         while (android.os.SystemClock.elapsedRealtime() <= deadline) {
             last = NavPermissionStatus.check(appContext);
-            if (last.allGranted()) {
+            if (last.captureGranted()) {
                 return last;
             }
             Thread.sleep(POST_GRANT_POLL_INTERVAL_MS);
@@ -1549,7 +1546,6 @@ final class LocalAdbBridge {
                 packageName,
                 "",
                 "",
-                false,
                 false,
                 false,
                 false);
@@ -1566,7 +1562,6 @@ final class LocalAdbBridge {
                 packageName,
                 "",
                 "",
-                false,
                 false,
                 false,
                 false);

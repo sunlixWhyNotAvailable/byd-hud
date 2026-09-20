@@ -44,7 +44,7 @@ final class NavPermissionStatus {
     static NavPermissionStatus check(Context context) {
         String packageName = context.getPackageName();
         NavPermissionGrantPlan plan = NavPermissionGrantPlan.fromCurrentSettings(
-                context, packageName, "", "", false, false, false, false);
+                context, packageName, "", "", false, false, false);
         String notificationListeners = Settings.Secure.getString(
                 context.getContentResolver(),
                 NavPermissionGrantPlan.NOTIFICATION_LISTENERS);
@@ -90,18 +90,17 @@ final class NavPermissionStatus {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    boolean allGranted() {
+    boolean captureGranted() {
         return notificationListenerEnabled
                 && accessibilityServiceEnabled
                 && accessibilityMasterEnabled
-                && dashboardOverlayEnabled
                 && storageReadEnabled
                 && storageWriteEnabled;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     String summary() {
-        if (allGranted()) {
+        if (captureGranted()) {
             return "nav permissions OK";
         }
         StringBuilder builder = new StringBuilder("missing:");
@@ -113,9 +112,6 @@ final class NavPermissionStatus {
         }
         if (!accessibilityMasterEnabled) {
             builder.append(" accessibility-enabled");
-        }
-        if (!dashboardOverlayEnabled) {
-            builder.append(" dashboard-overlay");
         }
         if (!storageReadEnabled) {
             builder.append(" storage-read");

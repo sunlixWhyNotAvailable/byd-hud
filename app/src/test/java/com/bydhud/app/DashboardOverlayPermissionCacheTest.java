@@ -32,6 +32,14 @@ public final class DashboardOverlayPermissionCacheTest {
         assertEquals(GRANTED, MainActivity.cachedDashboardOverlayPermission());
     }
 
+    @Test public void overlayDenialDoesNotBlockCaptureOrRequestAdbRepair() {
+        NavRuntimePermissionStatus denied = permissionStatus(false);
+        org.junit.Assert.assertTrue(denied.readyForCapture());
+        org.junit.Assert.assertFalse(denied.needsAdbGrant());
+        org.junit.Assert.assertTrue(denied.uiSummary(false, "").contains("Overlay: allow in Android settings"));
+        org.junit.Assert.assertFalse(denied.settings.dashboardOverlayEnabled);
+    }
+
     private static NavRuntimePermissionStatus permissionStatus(boolean overlayGranted) {
         NavPermissionStatus settings = NavPermissionStatus.forTest(
                 true, true, true, overlayGranted, "notification", "accessibility");

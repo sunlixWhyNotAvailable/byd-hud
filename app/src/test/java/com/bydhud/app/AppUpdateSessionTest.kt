@@ -46,7 +46,7 @@ class AppUpdateSessionTest {
         val state get() = session.snapshot.value
         fun enter(automatic: Boolean = true, beta: Boolean = false) = session.enter(automatic, beta)
         fun fire(index: Int = delays.lastIndex) {
-            elapsed += AppUpdateManager.AUTO_CHECK_DELAY_MS
+            elapsed += delayLengths[index]
             delays[index].complete(Unit)
         }
         fun complete(result: AppUpdateManager.CheckResult, index: Int = replies.lastIndex) {
@@ -328,5 +328,84 @@ class AppUpdateSessionTest {
         assertTrue(source.contains("catch (cancelled: CancellationException)"))
         val channelSetter = source.substring(source.indexOf("fun setBetaChannelEnabled"), source.indexOf("private suspend fun fetchUpdate"))
         assertFalse(channelSetter.contains("onSessionEntry"))
+    }
+
+    @Test fun failuresRetryWithBackoffUntilSuccessWithoutUiEntry() {
+        Harness().use { h ->
+            h.enter(); h.fire()
+            for (expected in listOf(30_000L, 60_000L, 120_000L, 300_000L, 300_000L)) {
+                h.complete(AppUpdateManager.CheckResult.Error("offline"))
+                assertEquals(expected, h.delayLengths.last())
+                assertFalse(h.state.dialogRequested)
+                repeat(3) { h.enter() }
+                h.fire()
+            }
+            val waits = h.delays.size
+            h.complete(available)
+            h.enter()
+            assertEquals(waits, h.delays.size)
+        }
+    }
+
+    @Test fun wakeRefreshesRecentUnacknowledgedOfferAndResetsRetry() {
+        Harness().use { h ->
+            h.enter(); h.fire(); h.complete(available)
+            h.session.pauseForSleep()
+            h.session.wake(true, false)
+            assertEquals(2, h.delays.size)
+            h.fire(); h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            h.fire(); h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            assertEquals(60_000L, h.delayLengths.last())
+            h.session.pauseForSleep()
+            h.session.wake(true, false)
+            h.fire(); h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            assertEquals(30_000L, h.delayLengths.last())
+        }
+    }
+
+    @Test fun disablingAutomaticOrChangingChannelCancelsRetry() {
+        Harness().use { h ->
+            h.enter(); h.fire(); h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            h.session.disableAutomatic(); h.fire()
+            assertEquals(1, h.channels.size)
+            h.session.requestManual(false, false)
+            h.complete(AppUpdateManager.CheckResult.Error("manual offline"))
+            assertEquals(2, h.delays.size)
+            h.session.wake(true, false); h.fire()
+            h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            h.session.changeChannel(true); h.fire()
+            assertEquals(3, h.channels.size)
+            assertNull(h.state.result)
+        }
+    }
+
+    @Test fun manualJoinsOrReplacesRetryAndItsFailureRetriesSilently() {
+        Harness().use { h ->
+            h.enter(); h.fire(); h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            val retry = h.delays.lastIndex
+            h.session.requestManual(false, true)
+            h.fire(retry)
+            assertEquals(2, h.channels.size)
+            h.session.requestManual(false, true)
+            assertEquals(2, h.channels.size)
+            h.complete(AppUpdateManager.CheckResult.Error("offline"))
+            assertTrue(h.state.dialogRequested)
+            h.fire()
+            assertFalse(h.state.dialogRequested)
+            h.complete(available)
+            assertTrue(h.state.dialogRequested)
+        }
+    }
+
+    @Test fun wakeFencesPriorNoncooperativeAutomaticReply() {
+        Harness(ignoreCancellation = true).use { h ->
+            h.enter(); h.fire()
+            h.session.pauseForSleep()
+            h.session.wake(true, false)
+            h.complete(available, 0)
+            assertNull(h.state.result)
+            h.fire(); h.complete(AppUpdateManager.CheckResult.UpToDate, 1)
+            assertEquals(AppUpdateManager.CheckResult.UpToDate, h.state.result)
+        }
     }
 }

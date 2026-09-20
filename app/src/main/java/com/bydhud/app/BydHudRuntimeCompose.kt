@@ -2148,6 +2148,20 @@ private fun OptionsTab(
                     }
                 }
             }
+            if (updateHintEnabled && !widgetOverlayPermission) {
+                row("update-hint-overlay-permission") {
+                    SettingRow(
+                        language.choose("Показ поверх інших застосунків", "Display over other apps", "Показ поверх других приложений"),
+                        language.choose("Потрібен для віджета-підказки", "Required for the update hint widget", "Нужен для виджета-подсказки"),
+                        palette
+                    ) {
+                        HudButton(
+                            language.choose("Надати дозвіл", "Grant permission", "Разрешить"),
+                            palette, primary = true, width = 190.dp, onClick = onWidgetPermissionRequest
+                        )
+                    }
+                }
+            }
             row("beta-testing") {
                 SwitchRow(copy.betaTesting, copy.betaTestingHint, betaChannelEnabled, palette, onChecked = onBetaChannelChange)
             }

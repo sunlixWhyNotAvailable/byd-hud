@@ -33,6 +33,8 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.activity.ComponentActivity;
+import androidx.activity.result.ActivityResultLauncher;
+import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.core.content.FileProvider;
 
 import java.io.File;
@@ -218,6 +220,18 @@ public final class MainActivity extends ComponentActivity {
     private boolean activityWindowFocused;
     private boolean dashboardMoveInProgress;
     private String composeBlockingUiFlow = "compose-starting";
+    private boolean overlayPermissionFlow;
+    private boolean overlayPermissionManualPending;
+    private boolean overlayPermissionAttempted;
+    private final Runnable overlayPermissionRetry = this::maybeRequestOverlayPermission;
+    private final ActivityResultLauncher<Intent> overlayPermissionLauncher = registerForActivityResult(
+            new ActivityResultContracts.StartActivityForResult(), result -> {
+                overlayPermissionFlow = false;
+                composeBlockingUiFlow = "";
+                AppEventLogger.event(this, "overlay_permission returned granted=" + Settings.canDrawOverlays(this));
+                requestRuntimeStatusRefresh(this, true, "overlay-permission-return");
+                maybeStartPendingAdbAuthorization();
+            });
     private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean exitRequested;
     private boolean arrowCuratedMode = true;
@@ -244,6 +258,8 @@ public final class MainActivity extends ComponentActivity {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        overlayPermissionFlow = savedInstanceState != null
+                && savedInstanceState.getBoolean("overlay-permission-flow", false);
         destroyed = false;
         HudRuntimeUpgradeGuard.recordVersionStart(this, "activity-create");
         if (HudPrefs.isUserShutdownActive(this)) {
@@ -328,6 +344,7 @@ public final class MainActivity extends ComponentActivity {
 
     @Override
     protected void onPause() {
+        handler.removeCallbacks(overlayPermissionRetry);
         activityResumed = false;
         activityWindowFocused = false;
         if (NavAccessibilityService.isKeyLearning()) {
@@ -367,6 +384,7 @@ public final class MainActivity extends ComponentActivity {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     protected void onDestroy() {
         destroyed = true;
+        handler.removeCallbacks(overlayPermissionRetry);
         if (NavAccessibilityService.isKeyLearning()) {
             NavAccessibilityService.cancelKeyLearning();
         }
@@ -1319,7 +1337,7 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeReportMainUiState(String blockingFlow) {
         mainUiReady = true;
-        String normalizedFlow = normalizeBlockingUiFlow(blockingFlow);
+        String normalizedFlow = overlayPermissionFlow ? "overlay-permission" : normalizeBlockingUiFlow(blockingFlow);
         if (!normalizedFlow.equals(composeBlockingUiFlow)) {
             AppEventLogger.event(this, "adb_auto ui_blocker="
                     + (normalizedFlow.isEmpty() ? "none" : normalizedFlow)
@@ -1338,7 +1356,7 @@ public final class MainActivity extends ComponentActivity {
         if (nextFlow.isEmpty()) {
             return false;
         }
-        if (!activityResumed || !activityWindowFocused) {
+        if (!activityResumed || !activityWindowFocused || overlayPermissionFlow) {
             return false;
         }
         if (AdbAuthorizationUiPolicy.shouldCancelAuthorizationForFlow(
@@ -1595,8 +1613,51 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public void composeRequestDashboardWidgetPermission() {
-        startActivity(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                Uri.parse("package:" + getPackageName())));
+        overlayPermissionManualPending = true;
+        maybeRequestOverlayPermission();
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle outState) {
+        outState.putBoolean("overlay-permission-flow", overlayPermissionFlow);
+        super.onSaveInstanceState(outState);
+    }
+
+    private void maybeRequestOverlayPermission() {
+        handler.removeCallbacks(overlayPermissionRetry);
+        if (destroyed || exitRequested || overlayPermissionFlow) return;
+        android.content.SharedPreferences prefs = getSharedPreferences("overlay-permission", MODE_PRIVATE);
+        boolean alreadyAsked = overlayPermissionAttempted || prefs.getBoolean("initial-setup-handled", false);
+        if (!overlayPermissionManualPending && alreadyAsked) return;
+        if (Settings.canDrawOverlays(this)) {
+            overlayPermissionManualPending = false;
+            prefs.edit().putBoolean("initial-setup-handled", true).apply();
+            return;
+        }
+        boolean busy = adbGrantInProgress || LocalAdbBridge.isPermissionGrantInProgress()
+                || NavRuntimePermissionRepair.isRunning();
+        if (!AdbAuthorizationUiPolicy.canRequestOverlay(autoAdbAuthorizationState,
+                mainUiReady, activityResumed, activityWindowFocused, composeBlockingUiFlow, busy)) {
+            if (mainUiReady && activityResumed && activityWindowFocused
+                    && composeBlockingUiFlow.isEmpty() && busy) {
+                handler.postDelayed(overlayPermissionRetry, NAV_RUNTIME_RECHECK_DELAY_MS);
+            }
+            return;
+        }
+        overlayPermissionManualPending = false;
+        overlayPermissionAttempted = true;
+        overlayPermissionFlow = true;
+        composeBlockingUiFlow = "overlay-permission";
+        try {
+            overlayPermissionLauncher.launch(new Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:" + getPackageName())));
+            prefs.edit().putBoolean("initial-setup-handled", true).apply();
+            AppEventLogger.event(this, "overlay_permission opened");
+        } catch (RuntimeException error) {
+            overlayPermissionFlow = false;
+            composeBlockingUiFlow = "";
+            AppEventLogger.event(this, "overlay_permission open_failed error=" + error.getClass().getSimpleName());
+        }
     }
 
     public boolean composeBeginSteeringButtonLearning() {
@@ -4667,6 +4728,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void maybeStartPendingAdbAuthorization() {
+        maybeRequestOverlayPermission();
         boolean grantInProgress = adbGrantInProgress
                 || LocalAdbBridge.isPermissionGrantInProgress()
                 || NavRuntimePermissionRepair.isRunning();
@@ -4798,6 +4860,7 @@ public final class MainActivity extends ComponentActivity {
             AppEventLogger.event(this, "nav_permission_self_check "
                     + status.summary() + " keyKnown=true");
             refreshControls();
+            maybeRequestOverlayPermission();
             return;
         }
 

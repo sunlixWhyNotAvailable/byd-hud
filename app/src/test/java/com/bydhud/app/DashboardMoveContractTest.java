@@ -244,7 +244,6 @@ public final class DashboardMoveContractTest {
                 "com.example/.Outer$Inner",
                 false,
                 true,
-                false,
                 false);
         assertTrue(plan.isValid());
         assertTrue(plan.accessibilityServicesValue.contains("com.example/.Outer$Inner"));

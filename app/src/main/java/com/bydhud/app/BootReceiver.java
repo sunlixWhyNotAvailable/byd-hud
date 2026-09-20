@@ -75,6 +75,7 @@ public final class BootReceiver extends BroadcastReceiver {
             HudRuntimeWatchdog.cancel(context);
             return;
         }
+        AppUpdateManager.onRuntimeWake(context, action);
         HudRuntimeSupervisor.ensureStarted(context, "receiver:" + action);
     }
 

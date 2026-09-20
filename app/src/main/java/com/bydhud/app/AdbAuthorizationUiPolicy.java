@@ -31,6 +31,13 @@ final class AdbAuthorizationUiPolicy {
         return "setup".equals(flow) || "runtime-permissions".equals(flow);
     }
 
+    static boolean canRequestOverlay(AutoState state, boolean mainUiReady,
+            boolean resumed, boolean focused, String blockingFlow, boolean grantInProgress) {
+        return (state == AutoState.AUTHORIZED || state == AutoState.FAILED)
+                && mainUiReady && resumed && focused && !grantInProgress
+                && (blockingFlow == null || blockingFlow.isEmpty());
+    }
+
     static boolean shouldCancelAuthorizationForFlow(
             AutoState state,
             boolean grantInProgress,

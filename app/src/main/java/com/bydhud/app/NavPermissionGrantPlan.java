@@ -51,7 +51,6 @@ final class NavPermissionGrantPlan {
                 currentAccessibilityServices,
                 true,
                 true,
-                true,
                 true);
     }
 
@@ -67,7 +66,6 @@ final class NavPermissionGrantPlan {
                 currentAccessibilityServices,
                 true,
                 true,
-                true,
                 true);
     }
 
@@ -79,8 +77,7 @@ final class NavPermissionGrantPlan {
             String currentAccessibilityServices,
             boolean grantNotificationListener,
             boolean grantAccessibilityService,
-            boolean grantAccessibilityMaster,
-            boolean grantDashboardOverlay) {
+            boolean grantAccessibilityMaster) {
         try {
             String normalizedPackage = normalizePackageName(packageName);
             String notificationService = resolveServiceComponent(
@@ -95,15 +92,13 @@ final class NavPermissionGrantPlan {
             String canonicalAccessibilityServices = canonicalizeServiceList(
                     currentAccessibilityServices);
             return buildPlan(
-                    normalizedPackage,
                     notificationService,
                     accessibilityService,
                     canonicalNotificationListeners,
                     canonicalAccessibilityServices,
                     grantNotificationListener,
                     grantAccessibilityService,
-                    grantAccessibilityMaster,
-                    grantDashboardOverlay);
+                    grantAccessibilityMaster);
         } catch (RuntimeException e) {
             return invalidPlan(e.getMessage());
         }
@@ -117,25 +112,6 @@ final class NavPermissionGrantPlan {
             boolean grantNotificationListener,
             boolean grantAccessibilityService,
             boolean grantAccessibilityMaster) {
-        return fromCurrentSettings(
-                packageName,
-                currentNotificationListeners,
-                currentAccessibilityServices,
-                grantNotificationListener,
-                grantAccessibilityService,
-                grantAccessibilityMaster,
-                true);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    static NavPermissionGrantPlan fromCurrentSettings(
-            String packageName,
-            String currentNotificationListeners,
-            String currentAccessibilityServices,
-            boolean grantNotificationListener,
-            boolean grantAccessibilityService,
-            boolean grantAccessibilityMaster,
-            boolean grantDashboardOverlay) {
         String normalizedPackage = normalizePackageName(packageName);
         String notificationService = normalizedPackage + "/"
                 + normalizedPackage + ".NavNotificationListenerService";
@@ -143,28 +119,24 @@ final class NavPermissionGrantPlan {
                 + normalizedPackage + ".NavAccessibilityService";
 
         return buildPlan(
-                normalizedPackage,
                 notificationService,
                 accessibilityService,
                 currentNotificationListeners,
                 currentAccessibilityServices,
                 grantNotificationListener,
                 grantAccessibilityService,
-                grantAccessibilityMaster,
-                grantDashboardOverlay);
+                grantAccessibilityMaster);
     }
 
     //builds one validated command batch so all callers share the same shell boundary.
     private static NavPermissionGrantPlan buildPlan(
-            String normalizedPackage,
             String notificationService,
             String accessibilityService,
             String currentNotificationListeners,
             String currentAccessibilityServices,
             boolean grantNotificationListener,
             boolean grantAccessibilityService,
-            boolean grantAccessibilityMaster,
-            boolean grantDashboardOverlay) {
+            boolean grantAccessibilityMaster) {
 
         String notificationValue = joinSettingList(
                 addUnique(splitSettingList(currentNotificationListeners), notificationService),
@@ -184,9 +156,6 @@ final class NavPermissionGrantPlan {
         }
         if (grantAccessibilityMaster) {
             commands.add(secureSettingPutCommand(ACCESSIBILITY_ENABLED, "1"));
-        }
-        if (grantDashboardOverlay) {
-            commands.add("appops set " + normalizedPackage + " SYSTEM_ALERT_WINDOW allow");
         }
         return new NavPermissionGrantPlan(
                 notificationService,
@@ -308,7 +277,6 @@ final class NavPermissionGrantPlan {
                 packageName,
                 "",
                 currentAccessibilityServices,
-                false,
                 false,
                 false,
                 false);

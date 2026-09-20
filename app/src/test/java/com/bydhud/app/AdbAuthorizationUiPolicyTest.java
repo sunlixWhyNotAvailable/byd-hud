@@ -6,6 +6,19 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class AdbAuthorizationUiPolicyTest {
+    @Test public void overlayWaitsForAdbTerminalStateAndClearForegroundUi() {
+        for (AdbAuthorizationUiPolicy.AutoState state : AdbAuthorizationUiPolicy.AutoState.values()) {
+            boolean terminal = state == AdbAuthorizationUiPolicy.AutoState.AUTHORIZED
+                    || state == AdbAuthorizationUiPolicy.AutoState.FAILED;
+            org.junit.Assert.assertEquals(terminal,
+                    AdbAuthorizationUiPolicy.canRequestOverlay(state, true, true, true, "", false));
+            assertFalse(AdbAuthorizationUiPolicy.canRequestOverlay(state, true, true, true, "", true));
+            assertFalse(AdbAuthorizationUiPolicy.canRequestOverlay(state, true, true, true, "setup", false));
+            assertFalse(AdbAuthorizationUiPolicy.canRequestOverlay(state, true, false, true, "", false));
+            assertFalse(AdbAuthorizationUiPolicy.canRequestOverlay(state, true, true, false, "", false));
+            assertFalse(AdbAuthorizationUiPolicy.shouldCancelAuthorizationForFlow(state, true, "overlay-permission"));
+        }
+    }
     @Test
     public void pendingAuthorizationStartsOnlyOnClearFocusedMainUi() {
         assertTrue(canStart(true, true, true, "", false));
