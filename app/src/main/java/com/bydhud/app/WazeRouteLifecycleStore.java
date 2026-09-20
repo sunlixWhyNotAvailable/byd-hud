@@ -48,6 +48,7 @@ final class WazeRouteLifecycleStore {
     private static long cachedBridgeVersionCode = Long.MIN_VALUE;
     private static long cachedBridgeUpdateMs = Long.MIN_VALUE;
     private static boolean cachedBridgeSupported;
+    private static String lastCapabilityDecision = "";
 
     static final class Snapshot {
         final boolean active;
@@ -164,6 +165,16 @@ final class WazeRouteLifecycleStore {
                     PERMISSION, WAZE_PACKAGE) == PackageManager.PERMISSION_GRANTED;
             boolean supported = isBridgeCapabilitySupportedForTest(
                     declaredProtocol, permissionGranted);
+            String decision = versionCode + ":" + updateMs + ":" + declaredProtocol
+                    + ":" + permissionGranted + ":" + supported;
+            synchronized (BRIDGE_SUPPORT_LOCK) {
+                if (!decision.equals(lastCapabilityDecision)) {
+                    lastCapabilityDecision = decision;
+                    AppEventLogger.event(context, "waze_capability versionCode=" + versionCode
+                            + " updateMs=" + updateMs + " declaredProtocol=" + declaredProtocol
+                            + " legacyPermission=" + permissionGranted + " supported=" + supported);
+                }
+            }
             if (supported) cacheBridgeSupport(versionCode, updateMs);
             return supported;
         } catch (PackageManager.NameNotFoundException ignored) {
@@ -446,6 +457,7 @@ final class WazeRouteLifecycleStore {
 
     static boolean clearForBoot(Context context, String reason) {
         synchronized (LOCK) {
+            WazeStartAdmission.PROCESS.invalidate();
             boolean committed = prefs(context).edit().clear().commit();
             AppEventLogger.event(context, "waze_route_lifecycle boot_clear reason=" + reason
                     + " committed=" + committed);

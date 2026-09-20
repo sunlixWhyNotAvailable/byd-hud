@@ -105,6 +105,8 @@ public final class WazeDirectChannel {
     private String startReason = "";
     private boolean binding;
     private boolean bound;
+    private WazeStartAdmission.Permit connectionPermit;
+    private boolean attemptedBind;
     private boolean appStarted;
     private boolean resumed;
     private boolean navigationActive;
@@ -226,6 +228,18 @@ public final class WazeDirectChannel {
             log("start ignored after shutdown: " + safeText(reason));
             return;
         }
+        WazeStartAdmission.Permit permit = WazeStartCoordinator.beforeBind(context, false, reason);
+        if (permit == null) {
+            waitForAdmission(reason);
+            return;
+        }
+        if (binding && !WazeStartAdmission.PROCESS.isCurrent(connectionPermit)) {
+            releaseBinding(connection);
+            clearSessionState();
+            active = false;
+            generation++;
+        }
+        connectionPermit = permit;
         if (active && mode != requestedMode) {
             switchModeOnChannel(requestedMode, reason);
             return;
@@ -243,6 +257,7 @@ public final class WazeDirectChannel {
         suspended = false;
         generation++;
         sessionGeneration++;
+        attemptedBind = false;
         prepareRouteStart(reason);
         log("start generation=" + generation + " reason=" + startReason);
         connectWaze(generation);
@@ -275,6 +290,7 @@ public final class WazeDirectChannel {
         prepareRouteStart(reason);
         log("resume generation=" + generation + " reason=" + startReason);
         if (carApp != null && bound) {
+            if (connection != null) connection.permit = connectionPermit;
             try {
                 startSession(generation);
             } catch (Throwable t) {
@@ -370,7 +386,17 @@ public final class WazeDirectChannel {
     }
 
     private void connectWaze(int expectedGeneration) {
-        if (!isCurrent(expectedGeneration) || binding || bound) return;
+        if (!isCurrent(expectedGeneration) || suspended || binding || bound) return;
+
+        if (!WazeStartAdmission.PROCESS.isCurrent(connectionPermit)) {
+            waitForAdmission("invalidated:" + startReason);
+            return;
+        }
+        connectionPermit = WazeStartCoordinator.beforeBind(context, attemptedBind, startReason);
+        if (connectionPermit == null) {
+            waitForAdmission(startReason);
+            return;
+        }
 
         if (deferBindIfNeeded(expectedGeneration)) return;
 
@@ -390,6 +416,7 @@ public final class WazeDirectChannel {
             routeTiming.markBindStart(SystemClock.elapsedRealtime());
         }
         try {
+            attemptedBind = true;
             bound = context.bindService(intent, nextConnection, Context.BIND_AUTO_CREATE);
             binding = bound;
             if (routeTiming != null) {
@@ -476,8 +503,12 @@ public final class WazeDirectChannel {
 
     private void onConnected(int expectedGeneration, Connection source,
                              ComponentName name, IBinder binder) {
-        if (!isCurrent(expectedGeneration) || source != connection) {
+        WazeStartCoordinator.refreshRuntime(context);
+        if (!isCurrent(expectedGeneration) || source != connection || suspended
+                || !WazeStartAdmission.PROCESS.isCurrent(source.permit)) {
+            boolean currentConnection = source == connection;
             releaseBinding(source);
+            if (currentConnection) waitForAdmission("late-connection");
             return;
         }
         binding = false;
@@ -767,6 +798,7 @@ public final class WazeDirectChannel {
 
     private void setHandshakeAvailable(String reason) {
         if (suspended || handshakeAvailable) return;
+        WazeStartAdmission.PROCESS.established(connectionPermit, false);
         handshakeAvailable = true;
         int callbackGeneration = sessionGeneration;
         callback(() -> listener.onHandshakeAvailable(
@@ -792,6 +824,7 @@ public final class WazeDirectChannel {
             return;
         }
         navigationActive = true;
+        WazeStartAdmission.PROCESS.established(connectionPermit, true);
         maneuverIcons.clear();
         recordDirectActivity("navigation_started");
         int callbackGeneration = sessionGeneration;
@@ -1198,9 +1231,30 @@ public final class WazeDirectChannel {
     }
 
     private void postBinder(int expectedGeneration, Runnable action) {
+        WazeStartAdmission.Permit expectedPermit = connectionPermit;
         channelHandler.post(() -> {
-            if (isCurrent(expectedGeneration)) action.run();
+            if (isCurrent(expectedGeneration)
+                    && WazeStartAdmission.PROCESS.isCurrent(expectedPermit)) action.run();
         });
+    }
+
+    /** Transport waiting must not manufacture a navigation terminal or start an idle retry. */
+    private void waitForAdmission(String reason) {
+        cancelRebind();
+        cancelBindCallbackTimeout(null);
+        if (binding) {
+            releaseBinding(connection);
+            clearSessionState();
+        }
+        if (!bound) {
+            endNavigation("admission-wait", false);
+            clearSessionState();
+            setHandshakeUnavailable("admission-wait", false);
+            active = false;
+            generation++;
+        }
+        log("start waiting for evidence reason=" + safeText(reason));
+        NavHudLiveSender.onWazeAdmissionWaiting(context, reason);
     }
 
     private boolean isCurrent(int expectedGeneration) {
@@ -1471,9 +1525,11 @@ public final class WazeDirectChannel {
 
     private final class Connection implements ServiceConnection {
         private final int expectedGeneration;
+        private WazeStartAdmission.Permit permit;
 
         Connection(int expectedGeneration) {
             this.expectedGeneration = expectedGeneration;
+            this.permit = connectionPermit;
         }
 
         @Override

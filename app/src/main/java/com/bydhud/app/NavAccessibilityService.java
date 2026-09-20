@@ -187,6 +187,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         lastRuntimeDetail = "connected";
         AppEventLogger.event(this, "accessibility_service connected");
         NavCaptureIngressPolicy.refreshPreferencesAsync(this);
+        WazeStartCoordinator.requestLegacyReconcile(this, "accessibility-connected");
     }
 
     @Override
@@ -196,6 +197,10 @@ public final class NavAccessibilityService extends AccessibilityService {
         if (steeringSuspended) return;
         String packageName = safe(event.getPackageName());
         if (packageName.isEmpty()) return;
+        if ("com.waze".equals(packageName)
+                && event.getEventType() == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            WazeStartCoordinator.requestLegacyReconcile(this, "waze-window-opened");
+        }
         boolean newlyObserved;
         synchronized (observedThisProcess) {
             newlyObserved = observedThisProcess.size() < 128

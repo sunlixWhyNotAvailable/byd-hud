@@ -45,8 +45,10 @@ public final class WazeDirectTerminalFenceContractTest {
         assertTrue(template.contains("mode == Mode.MAIN_SURFACE"));
         assertFalse(template.contains("mode == Mode.CLUSTER"));
         assertEquals(3, channel.split("handleNavigationEndHint\\(", -1).length - 1);
-        assertTrue(body(channel, "private void postBinder(")
-                .contains("if (isCurrent(expectedGeneration)) action.run()"));
+        String dispatch = body(channel, "private void postBinder(");
+        assertTrue(dispatch.contains("isCurrent(expectedGeneration)"));
+        assertTrue(dispatch.contains("WazeStartAdmission.Permit expectedPermit = connectionPermit"));
+        assertTrue(dispatch.contains("WazeStartAdmission.PROCESS.isCurrent(expectedPermit)"));
     }
 
     @Test

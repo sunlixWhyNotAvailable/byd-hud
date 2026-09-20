@@ -229,10 +229,6 @@ final class NavHudLiveSender {
                 || (bridgeCapabilities & WAZE_CAP_SPEED_LIMIT_HEARTBEAT) != 0;
     }
 
-    static boolean shouldStartWazeDirectHost(boolean bridgeSupported, boolean routeActive) {
-        return !bridgeSupported || routeActive;
-    }
-
     static boolean shouldRestartWazeDirectForLifecycle(
             boolean changed, boolean channelActive, boolean navigating) {
         return !channelActive || (changed && !navigating);
@@ -1349,6 +1345,40 @@ final class NavHudLiveSender {
         startWazeDirectHost(reason, true, true, false);
     }
 
+    private void startWazeWhenAdmitted(String reason, boolean recovering) {
+        WazeStartCoordinator.refreshRuntime(context);
+        WazeStartAdmission.Permit permit = WazeStartAdmission.PROCESS.acquire(
+                SystemClock.elapsedRealtime());
+        if (permit == null) {
+            waitForWazeRouteLifecycle(reason);
+            WazeStartCoordinator.requestLegacyReconcile(context, reason);
+        } else if (permit.source == WazeStartAdmission.Source.LEGACY_PROCESS) {
+            startWazeDirectProbe(reason);
+        } else {
+            startWazeDirectForRoute(reason, recovering);
+        }
+    }
+
+    static void onWazeLegacyProcessObserved(Context context, String reason) {
+        if (!WazeStartCoordinator.refreshRuntime(context)) return;
+        NavHudLiveSender current = get(context);
+        current.handler.post(() -> {
+            if (!WazeStartCoordinator.refreshRuntime(current.context)
+                    || WazeStartAdmission.PROCESS.acquire(SystemClock.elapsedRealtime()) == null) return;
+            if (NavCapturePrefs.isHudEnabled(current.context, WAZE_PACKAGE)) {
+                current.startOnMain(WAZE_PACKAGE, "legacy-process:" + safeReason(reason));
+            } else {
+                current.refreshTbtObserversOnMain();
+            }
+        });
+    }
+
+    static void onWazeAdmissionWaiting(Context context, String reason) {
+        NavHudLiveSender current = instance;
+        if (current != null) current.handler.post(() ->
+                current.requestWazeRouteStateSnapshot("admission:" + safeReason(reason), false));
+    }
+
     private void startWazeDirectForRoute(String reason) {
         startWazeDirectForRoute(reason, false);
     }
@@ -1431,7 +1461,7 @@ final class NavHudLiveSender {
                 HudOutputCoordinator.Source.NONE,
                 "waze-wait-route:" + safeReason(reason));
         log("waze source=waiting_route_lifecycle reason=" + safeReason(reason));
-        requestWazeRouteStateSnapshot("wait-route:" + safeReason(reason), false);
+        requestWazeRouteStateSnapshot("wait-route:" + safeReason(reason), true);
     }
 
     private void onWazeDirectHandshakeAvailable(String ownerPackage,
@@ -3329,6 +3359,7 @@ final class NavHudLiveSender {
             log("waze direct terminal ignored; already applied reason=" + safeReason(reason));
             return;
         }
+        WazeStartAdmission.PROCESS.invalidate();
         wazeDirectRouteTerminalFence = true;
         if (terminal != null && terminal.snapshot != null
                 && terminal.snapshot.bridgeGeneration
@@ -3816,6 +3847,7 @@ final class NavHudLiveSender {
     }
 
     private void refreshTbtObserversOnMain() {
+        WazeStartCoordinator.refreshRuntime(context);
         refreshTbtObserver(WAZE_PACKAGE);
         refreshTbtObserver(GMapsDirectChannel.PACKAGE_NAME);
     }
@@ -3829,7 +3861,11 @@ final class NavHudLiveSender {
         boolean wantsObserver = shouldObserveTbtWithoutHud(context, packageName);
         boolean ownsHud = isHudOutputOwner(packageName);
         if (WAZE_PACKAGE.equals(packageName)) {
-            boolean routeActive = WazeRouteLifecycleStore.isRouteActive(context);
+            WazeStartCoordinator.refreshRuntime(context);
+            WazeStartAdmission.Permit permit = WazeStartAdmission.PROCESS.acquire(
+                    SystemClock.elapsedRealtime());
+            boolean routeActive = WazeRouteLifecycleStore.isRouteActive(context)
+                    && permit != null && permit.source != WazeStartAdmission.Source.LEGACY_PROCESS;
             if (wantsObserver && !ownsHud && !routeActive) {
                 requestWazeRouteStateSnapshot("tbt-observer", false);
             }
@@ -4170,16 +4206,7 @@ final class NavHudLiveSender {
             reconcileTbtOwnershipForHud(packageName);
             updateTbtOwnerPriority(packageName);
             if (WAZE_PACKAGE.equals(packageName) && !wazeDirectChannel.isActive()) {
-                boolean bridgeSupported = isWazeBridgeSupportedCached();
-                if (shouldStartWazeDirectHost(
-                        bridgeSupported, WazeRouteLifecycleStore.isRouteActive(context))) {
-                    if (bridgeSupported) {
-                        startWazeDirectForRoute(
-                                "active-restart:" + safeReason(reason), true);
-                    } else {
-                        startWazeDirectProbe("active-restart:" + safeReason(reason));
-                    }
-                }
+                startWazeWhenAdmitted("active-restart:" + safeReason(reason), true);
             }
             log("start ignored; already active package=" + packageName
                     + " reason=" + safeReason(reason));
@@ -4202,14 +4229,7 @@ final class NavHudLiveSender {
         log("start package=" + packageName + " reason=" + reason);
         if (WAZE_PACKAGE.equals(packageName)) {
             if (!resumeExistingDirectRouteForHud(packageName, reason)) {
-                boolean bridgeSupported = isWazeBridgeSupportedCached();
-                if (shouldStartWazeDirectHost(
-                        bridgeSupported, WazeRouteLifecycleStore.isRouteActive(context))) {
-                    if (bridgeSupported) startWazeDirectForRoute(reason);
-                    else startWazeDirectProbe(reason);
-                } else {
-                    waitForWazeRouteLifecycle(reason);
-                }
+                startWazeWhenAdmitted(reason, false);
             }
         } else if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
             if (!resumeExistingDirectRouteForHud(packageName, reason)) {
@@ -4419,6 +4439,7 @@ final class NavHudLiveSender {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopOnMain(String reason, boolean clearHud) {
+        WazeStartCoordinator.refreshRuntime(context);
         if (runtimeReinitInProgress) {
             pendingReinitStartPackage = "";
             pendingReinitStartReason = reason;
@@ -4570,6 +4591,7 @@ final class NavHudLiveSender {
     }
 
     private void hardStopDirectNavigatorsForPackageReplace() {
+        WazeStartAdmission.PROCESS.invalidate();
         if (tbtPublisher.isRouteActive()) {
             tbtPublisher.endRoute(
                     tbtPublisher.ownerPackage(), tbtPublisher.ownerGeneration(),
@@ -4598,6 +4620,7 @@ final class NavHudLiveSender {
 
     //resets stale post-update state before the first new navigation session binds SOME/IP again.
     private void resetRuntimeAfterPackageReplace(String packageName, String reason) {
+        WazeStartAdmission.PROCESS.invalidate();
         handler.removeCallbacks(sendLoop);
         runtimeReinitInProgress = true;
         pendingReinitStartPackage = packageName;

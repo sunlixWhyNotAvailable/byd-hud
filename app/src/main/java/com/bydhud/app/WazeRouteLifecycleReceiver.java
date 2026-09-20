@@ -258,6 +258,7 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
                 + " bridgeGeneration=" + bridgeGeneration
                 + " bridgeCapabilities=" + bridgeCapabilities);
         if (result.accepted) {
+            WazeStartCoordinator.acceptedRoute(context, result, eventElapsedMs);
             if (timing != null) timing.markAcceptedRouteState(result.snapshot.active);
             dispatchAccepted(context, eventElapsedMs, result);
         }

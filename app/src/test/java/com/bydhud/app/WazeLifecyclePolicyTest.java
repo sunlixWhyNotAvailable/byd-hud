@@ -41,10 +41,14 @@ public final class WazeLifecyclePolicyTest {
     }
 
     @Test
-    public void bridgeStartsHostOnlyForPersistedActiveRoute() {
-        assertFalse(NavHudLiveSender.shouldStartWazeDirectHost(true, false));
-        assertTrue(NavHudLiveSender.shouldStartWazeDirectHost(true, true));
-        assertTrue(NavHudLiveSender.shouldStartWazeDirectHost(false, false));
+    public void selectedSourceNeedsLiveAdmissionRegardlessOfColdCapability() {
+        WazeStartAdmission admission = new WazeStartAdmission();
+        admission.updateRuntime(true, 1L, false);
+        assertTrue(admission.acquire(1_000L) == null);
+        admission.updateRuntime(true, 1L, true);
+        assertTrue(admission.acquire(1_000L) == null);
+        admission.acceptedRoute(true, true, false, 1_000L);
+        assertTrue(admission.acquire(1_000L) != null);
     }
 
     @Test

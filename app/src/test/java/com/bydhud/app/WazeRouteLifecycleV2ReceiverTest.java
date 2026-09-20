@@ -134,7 +134,7 @@ public final class WazeRouteLifecycleV2ReceiverTest {
         assertTrue(receiver.contains("Intent.FLAG_RECEIVER_REGISTERED_ONLY"));
         assertTrue(receiver.contains(".setPackage(WazeRouteLifecycleStore.WAZE_PACKAGE)"));
         assertTrue(sender.contains(
-                "requestWazeRouteStateSnapshot(\"wait-route:\" + safeReason(reason), false)"));
+                "requestWazeRouteStateSnapshot(\"wait-route:\" + safeReason(reason), true)"));
         assertTrue(sender.contains(
                 "requestWazeRouteStateSnapshot(\"app-foreground\", true)"));
         assertTrue(sender.contains(

@@ -1298,6 +1298,7 @@ final class LocalAdbBridge {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isAllowedRuntimeShellCommand(String command) {
         return "id".equals(command)
+                || "pidof com.waze".equals(command)
                 || "dumpsys display".equals(command)
                 || "dumpsys activity activities".equals(command)
                 || isVehicleConfigurationCommand(command)
