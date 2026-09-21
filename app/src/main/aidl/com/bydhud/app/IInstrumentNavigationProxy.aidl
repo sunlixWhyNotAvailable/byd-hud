@@ -11,4 +11,6 @@ interface IInstrumentNavigationProxy {
             in int[] laneDirections, in int[] laneRecommendations);
     Bundle sendHudCheckTrafficLight(long generation, int sampleIndex);
     oneway void shutdown(long generation);
+    Bundle suspendOutput(long generation);
+    Bundle resumeOutput(long generation);
 }

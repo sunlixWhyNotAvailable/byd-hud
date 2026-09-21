@@ -105,6 +105,12 @@ final class SomeIpHudClient {
 
     //sends encoded data here so transport side effects stay behind a single boundary.
     int sendToTopic(long topic, byte[] payload) throws RemoteException {
+        if (!ShanghaiOutputGate.enterWrite()) return -1;
+        try { return sendToTopicWhenAllowed(topic, payload); }
+        finally { ShanghaiOutputGate.leaveWrite(); }
+    }
+
+    private int sendToTopicWhenAllowed(long topic, byte[] payload) throws RemoteException {
         if (binder == null) {
             throw new RemoteException("SomeIpServerService is not connected");
         }
@@ -226,6 +232,12 @@ final class SomeIpHudClient {
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
     private int transactLong(int transaction, long value) throws RemoteException {
+        if (!ShanghaiOutputGate.enterWrite()) return -1;
+        try { return transactLongWhenAllowed(transaction, value); }
+        finally { ShanghaiOutputGate.leaveWrite(); }
+    }
+
+    private int transactLongWhenAllowed(int transaction, long value) throws RemoteException {
         if (binder == null) {
             throw new RemoteException("SomeIpServerService is not connected");
         }

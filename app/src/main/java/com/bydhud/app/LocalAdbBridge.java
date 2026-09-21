@@ -66,6 +66,8 @@ final class LocalAdbBridge {
     private static final int INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES = 4 * 1024;
     private static final int FULL_EXPORT_IDLE_TIMEOUT_MS = 30_000;
     private static final long FULL_INVENTORY_COMMAND_TIMEOUT_MS = 60_000L;
+    private static final int SHANGHAI_SNAPSHOT_MAX_BYTES = 1024 * 1024;
+    private static final Pattern SHANGHAI_SESSION_TOKEN = Pattern.compile("[a-f0-9]{12}");
     private static final String KEY_DIR = "adb_keys";
     private static volatile boolean permissionGrantInProgress;
     private static final String PRIVATE_KEY_FILE = "adb_key.priv";
@@ -255,6 +257,180 @@ final class LocalAdbBridge {
     static LogcatStreamSession logcatStreamForTest(Socket socket) throws IOException {
         return new LogcatStreamSession(socket, new Connection(socket, null, false),
                 "09-08 15:45:20.226");
+    }
+
+    /** Opens an isolated fixed Shanghai helper/capture stream; it never uses the runtime socket. */
+    static ShanghaiStreamSession openShanghaiAdasStream(Context context, String token)
+            throws IOException {
+        requireShanghaiToken(token);
+        String apkPath = context.getApplicationInfo().sourceDir;
+        if (apkPath == null || apkPath.contains("..")
+                || !apkPath.matches("/data/app/[A-Za-z0-9_./+=:~-]{1,500}/base\\.apk")) {
+            throw new SecurityException("Unsupported installed APK path for Shanghai ADAS helper");
+        }
+        String pidFile = shanghaiPidFile(token, "adas");
+        String command = "if [ -x /system/bin/app_process ]; then "
+                + "/system/bin/app_process -Djava.class.path=" + apkPath
+                + " /system/bin --nice-name=bydhud-sh-" + token + "-adas"
+                + " com.bydhud.app.ShanghaiAdasEntryPoint & child=$!; "
+                + "start=$(awk '{print $22}' /proc/$child/stat 2>/dev/null); "
+                + "echo $child $start > " + pidFile + "; wait $child; code=$?; rm -f "
+                + pidFile + "; exit $code; else exit 127; fi";
+        return openShanghaiStream(context, command);
+    }
+
+    static ShanghaiStreamSession openShanghaiPcapStream(
+            Context context, String token, String tcpdumpPath, String networkInterface)
+            throws IOException {
+        requireShanghaiToken(token);
+        if (!("/system/bin/tcpdump".equals(tcpdumpPath)
+                || "/vendor/bin/tcpdump".equals(tcpdumpPath))) {
+            throw new SecurityException("Unsupported tcpdump path");
+        }
+        if (!("eth0".equals(networkInterface) || "any".equals(networkInterface))) {
+            throw new SecurityException("Unsupported capture interface");
+        }
+        String pidFile = shanghaiPidFile(token, "pcap");
+        String command = tcpdumpPath + " -i " + networkInterface
+                + " -U -w - udp 2>/dev/null & child=$!; "
+                + "start=$(awk '{print $22}' /proc/$child/stat 2>/dev/null); "
+                + "echo $child $start > " + pidFile
+                + "; (sleep " + ShanghaiDiagnostics.HELPER_HARD_LIMIT_SECONDS
+                + "; kill -INT $child 2>/dev/null) & guard=$!; "
+                + "wait $child; code=$?; kill $guard 2>/dev/null; rm -f " + pidFile
+                + "; exit $code";
+        return openShanghaiStream(context, command);
+    }
+
+    static ShellResult probeShanghaiPcap(Context context) throws IOException {
+        return runTrustedRuntimeShellCommand(context,
+                "if [ -x /system/bin/tcpdump ]; then echo /system/bin/tcpdump; "
+                        + "elif [ -x /vendor/bin/tcpdump ]; then echo /vendor/bin/tcpdump; "
+                        + "else exit 127; fi; "
+                        + "if ip link show eth0 >/dev/null 2>&1; then echo interface=eth0; "
+                        + "else echo interface=any; fi",
+                16 * 1024);
+    }
+
+    static ShellResult captureShanghaiSnapshot(Context context) throws IOException {
+        String command = "echo '[location]'; dumpsys location; "
+                + "echo '[someip-service]'; dumpsys activity services com.ts.car.someip.service; "
+                + "echo '[network-addresses]'; ip addr; echo '[network-routes]'; ip route show table all; "
+                + "echo '[processes]'; ps -A";
+        return runTrustedRuntimeShellCommand(context, command, SHANGHAI_SNAPSHOT_MAX_BYTES);
+    }
+
+    static ShellResult stopShanghaiStream(Context context, String token, String channel)
+            throws IOException {
+        requireShanghaiToken(token);
+        if (!("adas".equals(channel) || "pcap".equals(channel))) {
+            throw new SecurityException("Unsupported Shanghai channel");
+        }
+        String signal = "pcap".equals(channel) ? "INT" : "TERM";
+        String pidFile = shanghaiPidFile(token, channel);
+        String command = "if [ -r " + pidFile + " ]; then set -- $(cat " + pidFile
+                + "); pid=$1; expected=$2; case $pid:$expected in *[!0-9:]*) exit 65;; esac; "
+                + "current=$(awk '{print $22}' /proc/$pid/stat 2>/dev/null); "
+                + "if [ -z \"$expected\" ] || [ \"$current\" != \"$expected\" ]; then exit 66; fi; "
+                + "kill -" + signal + " $pid 2>/dev/null; code=$?; rm -f "
+                + pidFile + "; exit $code; else exit 0; fi";
+        return runTrustedRuntimeShellCommand(context, command, 16 * 1024, false);
+    }
+
+    static ShellResult readOwnMockLocationAppOp(Context context) throws IOException {
+        String packageName = requireOwnPackage(context);
+        int userId = android.os.Process.myUid() / 100000;
+        return runTrustedRuntimeShellCommand(context,
+                "appops get --user " + userId + " " + packageName + " android:mock_location",
+                64 * 1024);
+    }
+
+    static ShellResult setOwnMockLocationAppOp(Context context, String mode) throws IOException {
+        String safeMode = mode == null ? "" : mode.trim().toLowerCase(java.util.Locale.ROOT);
+        if (!("allow".equals(safeMode) || "deny".equals(safeMode)
+                || "ignore".equals(safeMode) || "default".equals(safeMode))) {
+            throw new SecurityException("Unsupported mock-location app-op mode");
+        }
+        String packageName = requireOwnPackage(context);
+        int userId = android.os.Process.myUid() / 100000;
+        return runTrustedRuntimeShellCommand(context,
+                "appops set --user " + userId + " " + packageName
+                        + " android:mock_location " + safeMode,
+                64 * 1024, false);
+    }
+
+    static ShellResult readGpsProviderState(Context context) throws IOException {
+        return runTrustedRuntimeShellCommand(context, "dumpsys location gps", 512 * 1024);
+    }
+
+    private static String requireOwnPackage(Context context) {
+        String packageName = context.getPackageName();
+        if (packageName == null || !packageName.matches("[A-Za-z0-9_.]{1,200}")) {
+            throw new SecurityException("Invalid current application package");
+        }
+        return packageName;
+    }
+
+    private static void requireShanghaiToken(String token) {
+        if (token == null || !SHANGHAI_SESSION_TOKEN.matcher(token).matches()) {
+            throw new SecurityException("Invalid Shanghai session token");
+        }
+    }
+
+    private static String shanghaiPidFile(String token, String channel) {
+        return "/data/local/tmp/bydhud-shanghai-" + token + "-" + channel + ".pid";
+    }
+
+    private static ShanghaiStreamSession openShanghaiStream(Context context, String command)
+            throws IOException {
+        Context app = context.getApplicationContext();
+        Socket socket = new Socket();
+        try {
+            File directory = new File(app.getFilesDir(), KEY_DIR);
+            KeyPair pair = loadConfigurationExportKeyPair(
+                    new File(directory, PRIVATE_KEY_FILE),
+                    new File(directory, PUBLIC_KEY_FILE));
+            if (pair == null) throw new IOException("existing complete ADB key unavailable");
+            socket.connect(new InetSocketAddress(HOST, PORT), CONNECT_TIMEOUT_MS);
+            socket.setSoTimeout(CONNECT_TIMEOUT_MS);
+            OpenResult opened = Connection.openConnectedSocket(app,
+                    AuthorizationPromptMode.NEVER, pair, "", socket,
+                    endpointLabel(PORT), 0L, false);
+            if (opened.authorizationRequired || opened.connection == null) {
+                throw new IOException("existing ADB key not authorized");
+            }
+            socket.setSoTimeout(0);
+            return new ShanghaiStreamSession(socket, opened.connection, command);
+        } catch (Exception error) {
+            closeExportSocket(socket);
+            if (error instanceof IOException) throw (IOException) error;
+            throw new IOException("Unable to open Shanghai diagnostic stream", error);
+        }
+    }
+
+    static final class ShanghaiStreamSession implements AutoCloseable {
+        private final Socket socket;
+        private final Connection connection;
+        private final String command;
+        private final AtomicBoolean reading = new AtomicBoolean();
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        private ShanghaiStreamSession(Socket socket, Connection connection, String command) {
+            this.socket = socket;
+            this.connection = connection;
+            this.command = command;
+        }
+
+        void readTo(OutputStream output) throws IOException {
+            if (output == null) throw new IllegalArgumentException("output is required");
+            if (closed.get()) throw new IOException("Shanghai stream closed");
+            if (!reading.compareAndSet(false, true)) throw new IOException("Shanghai stream already consumed");
+            connection.streamShell(command, output);
+        }
+
+        @Override public void close() {
+            if (closed.compareAndSet(false, true)) closeExportSocket(socket);
+        }
     }
 
     //The collector owns the overall deadline, including its pre-ADB local work.
@@ -790,7 +966,16 @@ final class LocalAdbBridge {
         if (!isAllowedRuntimeShellCommand(safeCommand)) {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
-        return runTrustedRuntimeShellCommand(context, safeCommand, 0, retryTransportFailure);
+        boolean outputWrite = MOVE_STACK_COMMAND.matcher(safeCommand).matches()
+                || AUTO_CONTAINER_COMMAND.matcher(safeCommand).matches();
+        if (outputWrite && !ShanghaiOutputGate.enterWrite()) {
+            return exportFailure("skipped", 125, "Shanghai output is suspended", "");
+        }
+        try {
+            return runTrustedRuntimeShellCommand(context, safeCommand, 0, retryTransportFailure);
+        } finally {
+            if (outputWrite) ShanghaiOutputGate.leaveWrite();
+        }
     }
 
     //keeps AutoContainer values behind the same authenticated allowlist as task moves.
@@ -798,13 +983,20 @@ final class LocalAdbBridge {
         if (value != 16 && value != 17 && value != 18) {
             throw new SecurityException("Unsupported AutoContainer value: " + value);
         }
-        ShellResult lowercase = normalizeAutoContainerResult(runRuntimeShellCommand(
-                context, autoContainerCommand("auto_container", value)));
-        if (lowercase.success() || !isUnknownServiceResult(lowercase)) {
-            return lowercase;
+        if (!ShanghaiOutputGate.enterWrite()) {
+            return exportFailure("skipped", 125, "Shanghai output is suspended", "");
         }
-        return normalizeAutoContainerResult(runRuntimeShellCommand(
-                context, autoContainerCommand("AutoContainer", value)));
+        try {
+            ShellResult lowercase = normalizeAutoContainerResult(runRuntimeShellCommand(
+                    context, autoContainerCommand("auto_container", value)));
+            if (lowercase.success() || !isUnknownServiceResult(lowercase)) {
+                return lowercase;
+            }
+            return normalizeAutoContainerResult(runRuntimeShellCommand(
+                    context, autoContainerCommand("AutoContainer", value)));
+        } finally {
+            ShanghaiOutputGate.leaveWrite();
+        }
     }
 
     //uses the proven service-call shape without accepting arbitrary shell text.

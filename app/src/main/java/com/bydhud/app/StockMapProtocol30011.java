@@ -82,9 +82,18 @@ final class StockMapProtocol30011 {
             try {
                 new Thread(() -> {
                     try {
-                        result.set(isCurrent(stillCurrent)
-                                ? transact(service, context.getPackageName(), operation)
-                                : "cancelled stale operation");
+                        if (!isCurrent(stillCurrent)) {
+                            result.set("cancelled stale operation");
+                        } else if (!ShanghaiOutputGate.enterWrite()) {
+                            result.set("stock Shanghai test owns navigation output");
+                        } else {
+                            try {
+                                result.set(transact(
+                                        service, context.getPackageName(), operation));
+                            } finally {
+                                ShanghaiOutputGate.leaveWrite();
+                            }
+                        }
                     } finally {
                         TRANSACTION_IN_FLIGHT.set(false);
                         transacted.countDown();

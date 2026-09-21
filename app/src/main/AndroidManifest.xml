@@ -37,6 +37,10 @@
         android:roundIcon="@drawable/hud_apk_icon"
         android:requestLegacyExternalStorage="true"
         android:theme="@style/AppTheme">
+        <service
+            android:name=".ShanghaiTestService"
+            android:exported="false"
+            android:stopWithTask="false" />
         <meta-data
             android:name="io.sentry.auto-init"
             android:value="false" />

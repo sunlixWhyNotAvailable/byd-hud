@@ -326,6 +326,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
+        ShanghaiTestController.get(this).recoverOwned("activity-open");
         if (!exitRequested) {
             NavHudLiveSender.get(this).resumeUserRuntime("activity-resume");
             AppUpdateManager.onSessionEntry(this);
@@ -1738,6 +1739,9 @@ public final class MainActivity extends ComponentActivity {
             return new ComposeDeleteDayResult(day, false, false, "invalid day");
         }
 
+        if (ShanghaiTestController.protectsStorageDay(day)) {
+            return new ComposeDeleteDayResult(day, false, false, "Shanghai capture is using this day");
+        }
         boolean restartLogcat = LogcatRecorder.isRecording()
                 && day.equals(LogcatRecorder.activeStartDay());
         boolean logcatUsesDay = LogcatRecorder.hasSessionForDay(day);
@@ -2487,11 +2491,13 @@ public final class MainActivity extends ComponentActivity {
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStartLogcat() {
+        if (ShanghaiTestController.snapshot().isBusy()) return;
         reportLogcatResult("start", LogcatRecorder.start(this));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeStopLogcat() {
+        if (ShanghaiTestController.snapshot().isBusy()) return;
         reportLogcatResult("stop", LogcatRecorder.stop(this));
     }
 
@@ -2501,6 +2507,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public void composeHudCheckSelectMode(HudCheckState.Mode mode) {
+        if (ShanghaiTestController.snapshot().isBusy()) return;
         NavHudLiveSender.get(this).updateHudCheck(
                 current -> current.selectMode(mode), "hud-check-mode");
     }
@@ -2511,6 +2518,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     public void composeHudCheckToggleRunning() {
+        if (ShanghaiTestController.snapshot().isBusy()) return;
         // A delayed visual click must not restart a test after the Activity left the foreground.
         if (!activityResumed || destroyed || exitRequested) return;
         if (!NavHudLiveSender.activateUserRuntime(this)) return;
@@ -2545,6 +2553,21 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeHudCheckStop(String reason) {
         NavHudLiveSender.stopHudCheckIfRunning(reason);
+    }
+
+    public void composeShanghaiStart() {
+        if (!activityResumed || destroyed || exitRequested) return;
+        NavHudLiveSender.stopHudCheckIfRunning("shanghai-start");
+        ShanghaiTestController.get(this).start();
+    }
+
+    public void composeShanghaiStop() {
+        ShanghaiTestController.get(this).stop("user-stop", null);
+    }
+
+    public void composeShanghaiResetMockGps() {
+        if (!activityResumed || destroyed || exitRequested) return;
+        ShanghaiTestController.get(this).resetAnyMockGps();
     }
 
     //normalizes values here so malformed app text cannot leak into HUD payloads.
@@ -2652,6 +2675,7 @@ public final class MainActivity extends ComponentActivity {
         public final String logPaths;
         public final String applicationState;
         public final HudCheckState hudCheck;
+        public final ShanghaiTestState shanghai;
         public final String hudCheckStatus;
         public final String lastScanText;
         public final boolean appRuntimeStatusKnown;
@@ -2795,6 +2819,7 @@ public final class MainActivity extends ComponentActivity {
             this.logPaths = logPaths == null ? "" : logPaths;
             this.applicationState = applicationState == null ? "" : applicationState;
             this.hudCheck = hudCheck;
+            this.shanghai = ShanghaiTestController.snapshot();
             this.hudCheckStatus = hudCheckStatus;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
             this.appRuntimeStatusKnown = appRuntimeStatusKnown;
@@ -3897,6 +3922,10 @@ public final class MainActivity extends ComponentActivity {
     }
 
     private void stopRecorderAsync(String action, Runnable continuation) {
+        ShanghaiTestController.get(this).stop(action, () -> stopRecorderAfterShanghai(action, continuation));
+    }
+
+    private void stopRecorderAfterShanghai(String action, Runnable continuation) {
         boolean hadSession = !LogcatRecorder.activeStartDay().isEmpty();
         LogcatRecorder.stopAsync(this, () -> {
             if (hadSession) {

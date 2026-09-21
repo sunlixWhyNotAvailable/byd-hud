@@ -131,7 +131,19 @@ final class NavHudLiveSender {
     static boolean activateUserRuntime(Context context) {
         if (HudPrefs.isUserShutdownActive(context)) return false;
         UserRuntimeSession.PROCESS.activate();
+        ShanghaiTestController.get(context).recoverOwned("runtime-enable");
         return true;
+    }
+
+    void resumeAfterShanghai() {
+        handler.post(() -> {
+            if (!isRuntimeEnabled()) return;
+            tbtPublisher.resumeAfterShanghai();
+            String owner = normalizePackage(tbtPublisher.ownerPackage());
+            if (!hasLatestDirectFrame(owner)) owner = normalizePackage(activePackage);
+            if (hasLatestDirectFrame(owner)) republishLatestDirectFrame(owner, "shanghai-finished");
+            hudOutput.resumeAfterShanghai();
+        });
     }
 
     void resumeUserRuntime(String reason) {

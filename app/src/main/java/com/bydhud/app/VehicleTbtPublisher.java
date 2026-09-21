@@ -801,6 +801,12 @@ final class VehicleTbtPublisher {
         return value > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;
     }
 
+    void resumeAfterShanghai() {
+        hasLastAmapSemantic = false;
+        hasLastInstrumentSemantic = false;
+        replayInstrumentState();
+    }
+
     private void replayInstrumentState() {
         if (hudCheckLightOwned && hudCheckLightIndex < 0) {
             publishHudCheckLight(-1, "hud-check-ready-clear", true);
@@ -1034,6 +1040,12 @@ final class VehicleTbtPublisher {
     }
 
     private boolean sendAmap(Intent intent, String operation, Trace trace, byte[] arguments) {
+        if (!ShanghaiOutputGate.enterWrite()) return false;
+        try { return sendAmapWhenAllowed(intent, operation, trace, arguments); }
+        finally { ShanghaiOutputGate.leaveWrite(); }
+    }
+
+    private boolean sendAmapWhenAllowed(Intent intent, String operation, Trace trace, byte[] arguments) {
         long startedAt = System.nanoTime();
         try {
             context.sendBroadcast(intent);

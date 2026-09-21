@@ -893,7 +893,18 @@ final class HudOutputCoordinator {
         worker.postDelayed(sendLoop, Math.max(0L, delayMs));
     }
 
+    void resumeAfterShanghai() {
+        worker.post(() -> {
+            reconcile("shanghai-finished");
+            scheduleImmediate("shanghai-finished");
+        });
+    }
+
     private void sendActive(String reason) {
+        if (ShanghaiOutputGate.isSuspended()) {
+            scheduleSend(1000L);
+            return;
+        }
         Source source = activeSource;
         if (source == Source.NONE || source != desiredSource() || !hasFrame(source)) {
             return;

@@ -84,6 +84,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private volatile int activeCapabilities;
     private boolean trafficLightOutputsOwned;
     private boolean trafficLightInitialized;
+    private boolean outputSuspended;
 
     InstrumentNavigationProxyService(
             Context systemContext, long generation, String nonce, int allowedUid,
@@ -192,6 +193,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         synchronized (operationLock) {
             long identity = Binder.clearCallingIdentity();
             try {
+                if (outputSuspended) return outputSuspendedResult();
                 List<InstrumentProxyContract.Operation> operations = new ArrayList<>(2);
                 InstrumentApi current = instrument();
                 boolean fidSucceeded = false;
@@ -231,6 +233,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         synchronized (operationLock) {
             long identity = Binder.clearCallingIdentity();
             try {
+                if (outputSuspended) return outputSuspendedResult();
                 List<InstrumentProxyContract.Operation> operations = new ArrayList<>(21);
                 InstrumentApi current = instrument();
                 boolean fidSucceeded = false;
@@ -272,6 +275,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         synchronized (operationLock) {
             long identity = Binder.clearCallingIdentity();
             try {
+                if (outputSuspended) return outputSuspendedResult();
                 if (!connected) {
                     return InstrumentProxyContract.operationResult(new ArrayList<>(),
                             "inactive Instrument proxy session");
@@ -332,9 +336,39 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     @Override
+    public Bundle suspendOutput(long requestGeneration) {
+        enforceSession(requestGeneration);
+        synchronized (operationLock) {
+            long identity = Binder.clearCallingIdentity();
+            try {
+                outputSuspended = true;
+                boolean cleared = !trafficLightOutputsOwned || clearTrafficLightOutputs();
+                return InstrumentProxyContract.operationResult(new ArrayList<>(),
+                        cleared ? "" : "traffic-light output surrender failed");
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+        }
+    }
+
+    @Override
+    public Bundle resumeOutput(long requestGeneration) {
+        enforceSession(requestGeneration);
+        synchronized (operationLock) {
+            outputSuspended = false;
+            return InstrumentProxyContract.operationResult(new ArrayList<>(), "");
+        }
+    }
+
+    @Override
     public void shutdown(long requestGeneration) {
         enforceSession(requestGeneration);
         stop("app shutdown");
+    }
+
+    private static Bundle outputSuspendedResult() {
+        return InstrumentProxyContract.operationResult(new ArrayList<>(),
+                "stock Shanghai test owns navigation output");
     }
 
     private void enforceSession(long requestGeneration) {
@@ -656,7 +690,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private void stop(String reason) {
         synchronized (operationLock) {
             connected = false;
-            if (trafficLightOutputsOwned) clearTrafficLightOutputs();
+            if (trafficLightOutputsOwned && !outputSuspended) clearTrafficLightOutputs();
         }
         IInstrumentNavigationClient current = client;
         client = null;
@@ -763,14 +797,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 int current = writer.intField.getInt(value);
                 if (!validVendorRead(current)) {
                     return new Readiness(false, "navigation_status=" + current);
-                }
-                Object unchangedValue = writer.constructor.newInstance();
-                writer.intField.setInt(unchangedValue, current);
-                Object result = writer.set.invoke(
-                        writer.device, new int[]{FID_NAV_STATUS}, unchangedValue);
-                if (!success(result)) {
-                    return new Readiness(false,
-                            "navigation_status_write=" + resultCode(result));
                 }
                 return new Readiness(true, "navigation_status=" + current);
             } catch (Throwable error) {

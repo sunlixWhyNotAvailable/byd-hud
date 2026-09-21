@@ -1,0 +1,36 @@
+{
+  "profile": "shanghai-east-city-drive",
+  "coordinateSystem": "WGS84",
+  "source": "https://routing.openstreetmap.de/routed-car/route/v1/driving/121.473732,31.230358;121.487396,31.232209;121.481802,31.238068?overview=full&geometries=geojson&steps=true&continue_straight=true",
+  "retrievedDate": "2026-09-12",
+  "attribution": "OpenStreetMap contributors (ODbL); OSRM routing.openstreetmap.de",
+  "sourceSha256": "D51E9D6FA9D39D3FDB24C8DA7E714F4E466E87C8847DF885C806E1280712A1EC",
+  "gpxSha256": "FF1D7DCF5325A174B60CE0AEC6EF35346A3D77EC6330D67EEB15F5F62A23422B",
+  "pointCount": 311,
+  "nominalDurationSeconds": 310,
+  "intervalMs": 1000,
+  "speedKmh": 40.0,
+  "startHoldSeconds": 30,
+  "endHoldSeconds": 10,
+  "distanceMeters": 2996.0,
+  "startLonLat": [
+    121.4737,
+    31.2304
+  ],
+  "endLonLat": [
+    121.481802,
+    31.238068
+  ],
+  "streets": [
+    "延安东路",
+    "四川南路",
+    "金陵东路",
+    "永安路",
+    "新永安路",
+    "人民路",
+    "河南南路",
+    "河南中路",
+    "汉口路"
+  ],
+  "limits": "Road geometry is OSM routing data, not a verified BYD map or sign inventory. Android mock coordinates are not converted to GCJ-02. Wall duration includes ADB overhead."
+}

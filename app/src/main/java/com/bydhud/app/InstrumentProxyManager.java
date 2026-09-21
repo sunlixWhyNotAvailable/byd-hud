@@ -22,10 +22,13 @@ import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Future;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
 
@@ -62,6 +65,7 @@ final class InstrumentProxyManager {
     private final Object callLock = new Object();
     private final Object receiverLock = new Object();
     private final ScheduledExecutorService worker;
+    private final ExecutorService shanghaiTransitions;
     private ExecutorService calls;
     private long callEpoch;
     private long activeOperationId;
@@ -132,6 +136,8 @@ final class InstrumentProxyManager {
     private boolean helperIdentityLoaded;
     private CapabilityMode capabilityMode = CapabilityMode.NONE;
     private boolean trafficLightCapable;
+    private boolean shanghaiSuspended;
+    private boolean shanghaiHelperAcknowledged;
 
     static InstrumentProxyManager get(Context context) {
         synchronized (INSTANCE_LOCK) {
@@ -149,6 +155,11 @@ final class InstrumentProxyManager {
             thread.setDaemon(true);
             return thread;
         });
+        this.shanghaiTransitions = Executors.newSingleThreadExecutor(runnable -> {
+            Thread thread = new Thread(runnable, "BydHudInstrumentShanghai");
+            thread.setDaemon(true);
+            return thread;
+        });
         this.calls = newCallExecutor(0L);
     }
 
@@ -159,6 +170,10 @@ final class InstrumentProxyManager {
         IInstrumentNavigationProxy staleProxy = null;
         long staleGeneration = 0L;
         synchronized (lock) {
+            if (shanghaiSuspended) {
+                logStartSkip(reason, "shanghai-suspended");
+                return;
+            }
             if (HudPrefs.isUserShutdownActive(context)) {
                 runtimeActive = false;
                 outputRetry.setActive(false);
@@ -201,7 +216,7 @@ final class InstrumentProxyManager {
             shutdownCandidate(staleProxy, staleGeneration);
         }
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || generation != requestGeneration || !nonce.equals(requestNonce)
                     || !launchToken.equals(requestLaunchToken)) {
                 return;
@@ -274,6 +289,146 @@ final class InstrumentProxyManager {
                 return;
             }
             ensureStarted("output:" + safe(reason));
+        }
+    }
+
+    /** Synchronously surrenders helper-owned output before the stock Shanghai test starts. */
+    void suspendForShanghai() throws IOException, InterruptedException {
+        IInstrumentNavigationProxy current = null;
+        IInstrumentNavigationProxy starting = null;
+        long requestGeneration = 0L;
+        boolean cancelledStart = false;
+        synchronized (lock) {
+            shanghaiSuspended = true;
+            outputRetry.cancel();
+            if (state == State.READY && proxy != null && proxyBinder != null
+                    && proxyBinder.isBinderAlive()) {
+                if (shanghaiHelperAcknowledged) return;
+                current = proxy;
+                requestGeneration = generation;
+            } else if (state == State.STARTING) {
+                cancelledStart = true;
+                starting = connectingProxy;
+                requestGeneration = generation;
+                clearProxyLocked();
+                state = State.IDLE;
+                generation = generationCounter.incrementAndGet();
+                nonce = "";
+                launchToken = "";
+                startStage = "shanghai-suspended";
+                unregisterHandoffReceiver();
+                shanghaiHelperAcknowledged = true;
+            } else {
+                shanghaiHelperAcknowledged = true;
+            }
+        }
+        if (starting != null) shutdownCandidate(starting, requestGeneration);
+        if (cancelledStart) resetCallWorker("shanghai-startup-cancelled");
+        if (current == null) {
+            if (!runShanghaiCleanup()) {
+                throw new IOException("Instrument helper cleanup could not be confirmed");
+            }
+            return;
+        }
+        awaitWorkerBarrier("suspend lifecycle");
+        final IInstrumentNavigationProxy active = current;
+        final long activeGeneration = requestGeneration;
+        Bundle result = runShanghaiTransition(
+                () -> active.suspendOutput(activeGeneration), "suspend");
+        String error = InstrumentProxyContract.error(result);
+        if (!error.isEmpty()) throw new IOException(error);
+        synchronized (lock) {
+            if (shanghaiSuspended && proxy == active && generation == activeGeneration) {
+                shanghaiHelperAcknowledged = true;
+            }
+        }
+    }
+
+    /** Restores helper output after Shanghai cleanup; callers should invoke this in a finally path. */
+    void resumeAfterShanghai() throws IOException, InterruptedException {
+        IInstrumentNavigationProxy current;
+        IBinder currentBinder;
+        long currentGeneration;
+        synchronized (lock) {
+            current = state == State.READY ? proxy : null;
+            currentBinder = state == State.READY ? proxyBinder : null;
+            currentGeneration = generation;
+        }
+        boolean failed = false;
+        try {
+            if (current != null) {
+                final IInstrumentNavigationProxy active = current;
+                final long activeGeneration = currentGeneration;
+                Bundle result = runShanghaiTransition(
+                        () -> active.resumeOutput(activeGeneration), "resume");
+                String error = InstrumentProxyContract.error(result);
+                if (!error.isEmpty()) throw new IOException(error);
+            }
+        } catch (IOException | InterruptedException | RuntimeException error) {
+            failed = true;
+            if (current != null) handleCallFailure(currentGeneration, currentBinder, error);
+            throw error;
+        } finally {
+            boolean restart;
+            synchronized (lock) {
+                shanghaiSuspended = false;
+                shanghaiHelperAcknowledged = false;
+                restart = runtimeActive && outputRetry.isActive();
+            }
+            if (restart) ensureStarted(failed
+                    ? "shanghai-resume-recovery" : "shanghai-resumed");
+        }
+    }
+
+    private Bundle runShanghaiTransition(ShanghaiTransition transition, String operation)
+            throws IOException, InterruptedException {
+        Future<Bundle> task = shanghaiTransitions.submit(transition::invoke);
+        try {
+            return task.get(CALL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException error) {
+            task.cancel(true);
+            throw new IOException("Instrument helper Shanghai " + operation + " timed out");
+        } catch (ExecutionException error) {
+            Throwable cause = error.getCause();
+            if (cause instanceof RemoteException) {
+                throw new IOException(describe(cause), cause);
+            }
+            if (cause instanceof RuntimeException) throw (RuntimeException) cause;
+            throw new IOException(describe(cause), cause);
+        }
+    }
+
+    private void awaitWorkerBarrier(String operation) throws IOException, InterruptedException {
+        Future<?> barrier;
+        try {
+            barrier = worker.submit(() -> { });
+        } catch (RejectedExecutionException error) {
+            throw new IOException("Instrument helper " + operation + " unavailable", error);
+        }
+        try {
+            barrier.get(START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException error) {
+            barrier.cancel(true);
+            throw new IOException("Instrument helper " + operation + " timed out");
+        } catch (ExecutionException error) {
+            throw new IOException("Instrument helper " + operation + " failed", error.getCause());
+        }
+    }
+
+    private boolean runShanghaiCleanup() throws IOException, InterruptedException {
+        Future<Boolean> cleanup;
+        try {
+            cleanup = worker.submit(() -> cleanupHelper("shanghai-suspended"));
+        } catch (RejectedExecutionException error) {
+            throw new IOException("Instrument helper cleanup unavailable", error);
+        }
+        try {
+            return cleanup.get(START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException error) {
+            cleanup.cancel(true);
+            throw new IOException("Instrument helper cleanup timed out");
+        } catch (ExecutionException error) {
+            throw new IOException("Instrument helper cleanup failed", error.getCause());
         }
     }
 
@@ -686,10 +841,25 @@ final class InstrumentProxyManager {
 
     private void executeCall(
             String operation, ResultCallback callback, RemoteCall remoteCall) {
+        if (!ShanghaiOutputGate.enterWrite()) {
+            deliver(callback, Result.unavailable("stock Shanghai test owns navigation output"));
+            return;
+        }
+        try { executeAllowedCall(operation, callback, remoteCall); }
+        finally { ShanghaiOutputGate.leaveWrite(); }
+    }
+
+    private void executeAllowedCall(
+            String operation, ResultCallback callback, RemoteCall remoteCall) {
         IInstrumentNavigationProxy current;
         IBinder currentBinder;
         long currentGeneration;
         synchronized (lock) {
+            if (shanghaiSuspended) {
+                deliver(callback, Result.unavailable(
+                        "stock Shanghai test owns navigation output"));
+                return;
+            }
             current = proxy;
             currentBinder = proxyBinder;
             currentGeneration = generation;
@@ -897,7 +1067,7 @@ final class InstrumentProxyManager {
     void acceptHandoff(long requestGeneration, String requestNonce, IBinder binder) {
         if (binder == null) return;
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || requestGeneration != generation
                     || !nonce.equals(requestNonce)) {
                 log("handoff rejected generation=" + requestGeneration);
@@ -937,7 +1107,7 @@ final class InstrumentProxyManager {
     private void launch(long requestGeneration, String requestNonce,
             String requestLaunchToken) {
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || generation != requestGeneration || !nonce.equals(requestNonce)
                     || !launchToken.equals(requestLaunchToken)) {
                 return;
@@ -1004,7 +1174,8 @@ final class InstrumentProxyManager {
 
     private boolean observeStartStage(long requestGeneration, String stage) {
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING || generation != requestGeneration) {
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
+                    || generation != requestGeneration) {
                 return false;
             }
             startStage = stage;
@@ -1033,7 +1204,7 @@ final class InstrumentProxyManager {
 
     private void beginConnect(long requestGeneration, String requestNonce, IBinder binder) {
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || requestGeneration != generation || !nonce.equals(requestNonce)) {
                 return;
             }
@@ -1049,7 +1220,7 @@ final class InstrumentProxyManager {
             return;
         }
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || requestGeneration != generation || !nonce.equals(requestNonce)) {
                 shutdownCandidate(candidate, requestGeneration);
                 return;
@@ -1071,7 +1242,7 @@ final class InstrumentProxyManager {
         String requestNonce;
         String requestLaunchToken;
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || requestGeneration != generation) {
                 return;
             }
@@ -1137,7 +1308,7 @@ final class InstrumentProxyManager {
             return;
         }
         synchronized (lock) {
-            if (!runtimeActive || state != State.STARTING
+            if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || requestGeneration != generation) {
                 shutdownCandidate(candidate, requestGeneration);
                 return;
@@ -1276,7 +1447,7 @@ final class InstrumentProxyManager {
         return Binder.getCallingUid() == SHELL_UID;
     }
 
-    private void cleanupHelper(String reason) {
+    private boolean cleanupHelper(String reason) {
         InstrumentProxyStore.Identity expected = helperIdentitySnapshot();
         log("cleanup started generation=" + expected.generation + " reason=" + safe(reason));
         if ("start-failed".equals(reason)) {
@@ -1296,18 +1467,22 @@ final class InstrumentProxyManager {
             if (!result.success()) {
                 log("cleanup failed reason=" + safe(reason)
                         + " generation=" + expected.generation + " exit=" + result.exitCode);
+                return false;
             } else {
                 if (!clearHelperIdentity(expected)) {
                     log("cleanup identity clear failed reason=" + safe(reason));
+                    return false;
                 } else {
                     log("cleanup complete generation=" + expected.generation
                             + " reason=" + safe(reason));
+                    return true;
                 }
             }
         } catch (IOException error) {
             log("cleanup failed reason=" + safe(reason)
                     + " generation=" + expected.generation
                     + " error=" + error.getClass().getSimpleName());
+            return false;
         }
     }
 
@@ -1500,6 +1675,10 @@ final class InstrumentProxyManager {
     private interface RemoteCall {
         Bundle invoke(IInstrumentNavigationProxy proxy, long generation)
                 throws RemoteException;
+    }
+
+    private interface ShanghaiTransition {
+        Bundle invoke() throws RemoteException;
     }
 
     private static final class PendingGuidance {

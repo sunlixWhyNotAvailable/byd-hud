@@ -17,6 +17,7 @@ public final class BydHudApplication extends Application {
         ConfigurationExportArtifacts.checkAsync(this);
         if (!getPackageName().equals(Application.getProcessName())) return;
         BootCleanupGate.initialize(this);
+        ShanghaiTestController.get(this).recoverOwned("process-start");
         AppUpdateManager.initialize(this);
         UpdateHintManager.initialize(this);
         IntentFilter packages = new IntentFilter();

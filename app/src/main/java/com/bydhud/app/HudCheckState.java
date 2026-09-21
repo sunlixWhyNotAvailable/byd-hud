@@ -4,7 +4,7 @@ import java.util.Objects;
 
 /** Immutable, bounded HUD output-check selections shared by Compose and senders. */
 public final class HudCheckState {
-    public enum Mode { BASIC, EXTENDED }
+    public enum Mode { BASIC, EXTENDED, SHANGHAI }
 
     public enum Field { MANEUVER, LANES, DISTANCE, STREET, TRAFFIC_LIGHT }
 
@@ -137,6 +137,7 @@ public final class HudCheckState {
     }
 
     public HudCheckState toggleRun() {
+        if (mode == Mode.SHANGHAI) return this;
         return new HudCheckState(mode, !running, automatic, maneuverIndex, laneIndex,
                 distanceIndex, streetIndex, trafficLightIndex, maneuverBitmap, laneBitmap,
                 transliterate, extendedIndex);

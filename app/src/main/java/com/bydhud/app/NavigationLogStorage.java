@@ -1038,6 +1038,7 @@ final class NavigationLogStorage {
     private static boolean isProtectedRetentionCandidate(
             RetentionCandidate candidate,
             ActiveRetentionState active) {
+        if (ShanghaiTestController.protectsStorageDay(candidate.day)) return true;
         if ("day".equals(candidate.kind)) {
             return candidate.day.equals(active.activeDay)
                     || candidate.day.equals(active.activeLogcatDay)
@@ -1302,6 +1303,10 @@ final class NavigationLogStorage {
             Context context,
             String day,
             boolean active) {
+        if (ShanghaiTestController.protectsStorageDay(day)) {
+            return new DayRetirement(false, day, active,
+                    Collections.emptyList(), "Shanghai capture is using this day");
+        }
         List<File> sources = new ArrayList<>();
         for (StorageRoot root : accessibleRootsLocked(context)) {
             File source = new File(root.dir, day);

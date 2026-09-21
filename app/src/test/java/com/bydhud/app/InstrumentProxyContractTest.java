@@ -143,7 +143,11 @@ public final class InstrumentProxyContractTest {
         assertTrue(service.contains("Instrument API unavailable"));
         assertTrue(service.contains("probeFidReadiness()"));
         assertTrue(service.contains("reader.invoke"));
-        assertTrue(service.contains("writer.set.invoke"));
+        String readinessProbe = service.substring(
+                service.indexOf("Readiness probeFidReadiness()"),
+                service.indexOf("static InstrumentApi open", service.indexOf(
+                        "Readiness probeFidReadiness()")));
+        assertFalse(readinessProbe.contains("writer.set.invoke"));
         assertFalse(service.contains("getInstrumentScreenType"));
         assertTrue(service.contains("BYDAUTO_INSTRUMENT_COMMON"));
         assertTrue(service.contains("BYDAUTO_INSTRUMENT_GET"));

@@ -85,6 +85,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -1382,6 +1383,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         snapshot = snapshot,
                         configurationShareBusy = configurationShareBusy || storageLogSharePreparationBusy,
                         logcatBusy = logcatBusy,
+                        logcatLocked = snapshot.shanghai.isBusy(),
                         onStartLogcat = { runLogcatAction(true) },
                         onStopLogcat = { runLogcatAction(false) },
                         onShareConfiguration = {
@@ -5391,6 +5393,7 @@ private fun StorageTab(
     snapshot: MainActivity.ComposeSnapshot,
     configurationShareBusy: Boolean,
     logcatBusy: Boolean,
+    logcatLocked: Boolean,
     onStartLogcat: () -> Unit,
     onStopLogcat: () -> Unit,
     onShareConfiguration: () -> Unit,
@@ -5580,7 +5583,7 @@ private fun StorageTab(
                         if (snapshot.logcatRecording) copy.stopLogcat else copy.startLogcat,
                         palette,
                         primary = true,
-                        enabled = !storageActionBusy && !logcatBusy,
+                        enabled = !storageActionBusy && !logcatBusy && !logcatLocked,
                         width = 180.dp,
                         modifier = Modifier.align(Alignment.CenterStart)
                     ) {
@@ -6518,6 +6521,8 @@ private fun HudCheckTab(
     runAction: (() -> Unit) -> Unit
 ) {
     val state = snapshot.hudCheck
+    val shanghai = snapshot.shanghai
+    val shanghaiBusy = shanghai.isBusy()
     val ukrainian = snapshot.uaLanguage
     val language = copy.language
     val statusText = if (state.running) copy.hudCheckRunning else copy.hudCheckStopped
@@ -6540,15 +6545,17 @@ private fun HudCheckTab(
         palette = palette,
         state = scrollState,
         headerAction = {
-            Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
-                Pill(statusText, statusColor.first, statusColor.second)
-                HudButton(
-                    if (state.running) copy.hudCheckStop else copy.hudCheckStart,
-                    palette,
-                    primary = true,
-                    width = 180.dp,
-                    modifier = Modifier.height(36.dp)
-                ) { runAction { activity.composeHudCheckToggleRunning() } }
+            if (state.mode != HudCheckState.Mode.SHANGHAI) {
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Pill(statusText, statusColor.first, statusColor.second)
+                    HudButton(
+                        if (state.running) copy.hudCheckStop else copy.hudCheckStart,
+                        palette,
+                        primary = true,
+                        width = 180.dp,
+                        modifier = Modifier.height(36.dp)
+                    ) { runAction { activity.composeHudCheckToggleRunning() } }
+                }
             }
         }
     ) {
@@ -6559,15 +6566,29 @@ private fun HudCheckTab(
                     copy.basicOutputHint,
                     state.mode == HudCheckState.Mode.BASIC,
                     palette,
-                    Modifier.weight(1f)
+                    Modifier.weight(1f),
+                    enabled = !shanghaiBusy
                 ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.BASIC) } }
                 HudCheckModeTile(
                     copy.extendedOutput,
                     copy.extendedOutputHint,
                     state.mode == HudCheckState.Mode.EXTENDED,
                     palette,
-                    Modifier.weight(1f)
+                    Modifier.weight(1f),
+                    enabled = !shanghaiBusy
                 ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.EXTENDED) } }
+                HudCheckModeTile(
+                    language.choose("Тест у Шанхаї", "Shanghai test", "Тест в Шанхае"),
+                    language.choose(
+                        "Штатна навігація · маршрут із підміною GPS",
+                        "Stock navigation · mock GPS route",
+                        "Штатная навигация · маршрут с подменой GPS"
+                    ),
+                    state.mode == HudCheckState.Mode.SHANGHAI,
+                    palette,
+                    Modifier.weight(1f),
+                    enabled = !shanghaiBusy
+                ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.SHANGHAI) } }
             }
         }
         item(key = "hud-check-status") {
@@ -6637,7 +6658,7 @@ private fun HudCheckTab(
                         onNext = { step(HudCheckState.Field.TRAFFIC_LIGHT, 1) })
                 }
             }
-        } else {
+        } else if (state.mode == HudCheckState.Mode.EXTENDED) {
             item(key = "hud-check-baseline") {
                 Section(copy.checkBaseline, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
                     val baseline = listOf(
@@ -6722,6 +6743,201 @@ private fun HudCheckTab(
                     Text(copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
                 }
             }
+        } else {
+            item(key = "hud-check-shanghai") {
+                ShanghaiTestSection(
+                    state = shanghai,
+                    copy = copy,
+                    palette = palette,
+                    onStart = { runAction { activity.composeShanghaiStart() } },
+                    onStop = { runAction { activity.composeShanghaiStop() } },
+                    onReset = { runAction { activity.composeShanghaiResetMockGps() } }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ShanghaiTestSection(
+    state: ShanghaiTestState,
+    copy: Copy,
+    palette: Palette,
+    onStart: () -> Unit,
+    onStop: () -> Unit,
+    onReset: () -> Unit
+) {
+    val language = copy.language
+    val duration = language.choose("4 хв 55 сек", "4 min 55 sec", "4 мин 55 сек")
+    val elapsedSeconds = state.elapsedSeconds.coerceIn(0, ShanghaiTestState.DURATION_SECONDS)
+    val progress = state.progress().toFloat().coerceIn(0f, 1f)
+    val phaseText = when (state.phase) {
+        ShanghaiTestState.Phase.IDLE -> language.choose("Готовий до запуску", "Ready to start", "Готов к запуску")
+        ShanghaiTestState.Phase.STARTING -> language.choose("Запуск тесту", "Starting the test", "Запуск теста")
+        ShanghaiTestState.Phase.PREPARING -> {
+            val remaining = (ShanghaiTestState.PREPARATION_SECONDS - elapsedSeconds).coerceAtLeast(0)
+            language.choose(
+                "Рух почнеться через $remaining с",
+                "Drive starts in $remaining s",
+                "Движение начнётся через $remaining с"
+            )
+        }
+        ShanghaiTestState.Phase.DRIVING -> language.choose("Поїздка маршрутом", "Driving the route", "Поездка по маршруту")
+        ShanghaiTestState.Phase.FINISHING -> language.choose("Завершення", "Finishing", "Завершение")
+        ShanghaiTestState.Phase.COMPLETED -> language.choose("Завершено", "Completed", "Завершено")
+        ShanghaiTestState.Phase.STOPPED -> language.choose("Завершено достроково", "Stopped early", "Завершено досрочно")
+        ShanghaiTestState.Phase.ERROR -> language.choose("Помилка тесту", "Test error", "Ошибка теста")
+        ShanghaiTestState.Phase.RECOVERING -> language.choose("Відновлення GPS", "Restoring GPS", "Восстановление GPS")
+    }
+    val statusColors = when {
+        state.phase == ShanghaiTestState.Phase.ERROR -> palette.red to palette.redSoft
+        state.isBusy() -> palette.green to palette.greenSoft
+        state.cleanupPending -> palette.yellow to palette.yellowSoft
+        else -> palette.muted to palette.disabled
+    }
+
+    Section(language.choose("Порядок тесту", "Test procedure", "Порядок теста"), palette) {
+        CodeBlock(
+            language.choose(
+                "1. Натисніть «Почати». Протягом 15 секунд відкрийте штатний навігатор і запустіть навігацію з виводом на HUD.\n2. Дочекайтеся завершення поїздки або натисніть «Завершити». Після тесту підміна GPS вимикається.\n3. Logcat записується протягом усього тесту. Перехід в інший застосунок не зупиняє поїздку.",
+                "1. Press Start. Within 15 seconds, open stock navigation and start guidance with HUD output.\n2. Wait for the drive to finish or press Stop. GPS simulation ends with the test.\n3. Logcat records throughout the test. Switching to another app does not stop the drive.",
+                "1. Нажмите «Начать». В течение 15 секунд откройте штатный навигатор и запустите навигацию с выводом на HUD.\n2. Дождитесь завершения поездки или нажмите «Завершить». После теста подмена GPS отключается.\n3. Logcat записывается в течение всего теста. Переход в другое приложение не останавливает поездку."
+            ),
+            palette,
+            compact = true
+        )
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                language.choose(
+                    "Шанхай · ≈3 км · $duration · 40 км/год",
+                    "Shanghai · ≈3 km · $duration · 40 km/h",
+                    "Шанхай · ≈3 км · $duration · 40 км/ч"
+                ),
+                color = palette.muted,
+                fontSize = 13.sp
+            )
+            Pill(
+                if (state.isBusy()) copy.hudCheckRunning else copy.hudCheckStopped,
+                statusColors.first,
+                statusColors.second
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(phaseText, color = palette.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Text(
+                "${elapsedSeconds / 60}:${(elapsedSeconds % 60).toString().padStart(2, '0')} / $duration",
+                color = palette.muted,
+                fontSize = 13.sp
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Canvas(Modifier.fillMaxWidth().height(6.dp).progressSemantics(progress)) {
+            val corner = CornerRadius(size.height / 2f)
+            val boundary = size.width * ShanghaiTestState.PREPARATION_SECONDS / ShanghaiTestState.DURATION_SECONDS
+            val halfGap = 2.dp.toPx()
+            fun drawSegment(start: Float, end: Float) {
+                val width = (end - start).coerceAtLeast(0f)
+                if (width <= 0f) return
+                drawRoundRect(palette.disabled, Offset(start, 0f), Size(width, size.height), corner)
+                val filledWidth = (size.width * progress - start).coerceIn(0f, width)
+                if (filledWidth > 0f) {
+                    drawRoundRect(palette.accent, Offset(start, 0f), Size(filledWidth, size.height), corner)
+                }
+            }
+            drawSegment(0f, boundary - halfGap)
+            drawSegment(boundary + halfGap, size.width)
+        }
+        Spacer(Modifier.height(12.dp))
+        Row(
+            Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            HudButton(
+                language.choose("Почати", "Start", "Начать"),
+                palette,
+                primary = true,
+                enabled = !state.isBusy() && !state.cleanupPending,
+                width = 180.dp,
+                onClick = onStart
+            )
+            HudButton(
+                language.choose("Завершити", "Stop", "Завершить"),
+                palette,
+                enabled = state.canStop(),
+                width = 180.dp,
+                onClick = onStop
+            )
+            Spacer(Modifier.weight(1f))
+            HudButton(
+                language.choose(
+                    "Скинути штучні координати",
+                    "Reset mock location",
+                    "Сбросить искусственные координаты"
+                ),
+                palette,
+                enabled = state.canReset(),
+                width = 320.dp,
+                onClick = onReset
+            )
+        }
+        val detail = state.detail.trim()
+        val coverage = state.captureCoverage.trim()
+        if (detail.isNotEmpty() || coverage.isNotEmpty() || state.cleanupPending || state.isBusy()) {
+            Spacer(Modifier.height(8.dp))
+            if (state.isBusy()) {
+                Text(
+                    language.choose(
+                        "Інші режими HUD Check та керування Logcat заблоковано до завершення тесту.",
+                        "Other HUD Check modes and Logcat controls are locked until the test ends.",
+                        "Другие режимы HUD Check и управление Logcat заблокированы до завершения теста."
+                    ),
+                    color = palette.muted,
+                    fontSize = 13.sp
+                )
+            }
+            if (state.cleanupPending) {
+                Text(
+                    language.choose(
+                        "Очищення штучних координат ще не завершено.",
+                        "Mock location cleanup is still pending.",
+                        "Очистка искусственных координат ещё не завершена."
+                    ),
+                    color = palette.yellow,
+                    fontSize = 13.sp
+                )
+            }
+            if (coverage.isNotEmpty()) {
+                Text(
+                    language.choose("Покриття запису: $coverage", "Capture coverage: $coverage", "Покрытие записи: $coverage"),
+                    color = palette.muted,
+                    fontSize = 13.sp
+                )
+            }
+            if (detail.isNotEmpty()) {
+                Text(
+                    detail,
+                    color = if (state.phase == ShanghaiTestState.Phase.ERROR) palette.red else palette.muted,
+                    fontSize = 13.sp
+                )
+            }
+        } else {
+            Spacer(Modifier.height(8.dp))
+            Text(
+                language.choose(
+                    "Після тесту відновлюється попередній стан Logcat.",
+                    "The previous Logcat state is restored after the test.",
+                    "После теста восстанавливается прежнее состояние Logcat."
+                ),
+                color = palette.muted,
+                fontSize = 13.sp
+            )
         }
     }
 }
@@ -6814,10 +7030,15 @@ private fun HudCheckModeTile(
     selected: Boolean,
     palette: Palette,
     modifier: Modifier,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    val press = rememberPressFeedback()
-    val background = if (selected) palette.active else palette.panelAlt
+    val press = rememberPressFeedback(enabled)
+    val background = when {
+        !enabled -> palette.disabled
+        selected -> palette.active
+        else -> palette.panelAlt
+    }
     Column(
         modifier = modifier
             .height(74.dp)
@@ -6827,6 +7048,7 @@ private fun HudCheckModeTile(
             .then(press.modifier)
             .selectable(
                 selected = selected,
+                enabled = enabled,
                 role = Role.RadioButton,
                 interactionSource = press.interactionSource,
                 indication = null,
@@ -6835,8 +7057,8 @@ private fun HudCheckModeTile(
             .padding(horizontal = 14.dp),
         verticalArrangement = Arrangement.Center
     ) {
-        Text(title, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-        Text(rowExplanation(hint), color = palette.muted, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        Text(title, color = if (enabled) palette.text else palette.muted, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
+        Text(rowExplanation(hint), color = palette.muted.copy(alpha = if (enabled) 1f else 0.62f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
     }
 }
 

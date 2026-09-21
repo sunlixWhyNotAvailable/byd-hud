@@ -71,6 +71,7 @@ final class LogcatRecorder {
 
     private static volatile Session activeSession;
     private static volatile Session finalizingSession;
+    private static CaptureLease shanghaiLease;
     private static volatile String activeStartDay = "";
     private static File lastSavedFile;
     private static String lastStatus = STATUS_WAITING;
@@ -81,6 +82,74 @@ final class LogcatRecorder {
 
     static synchronized boolean isRecording() {
         return activeSession != null;
+    }
+
+    /** Pins one concrete capture without restarting an existing recording. */
+    static CaptureLease acquireForShanghai(Context context) throws IOException {
+        Session session;
+        boolean created;
+        synchronized (LogcatRecorder.class) {
+            if (shanghaiLease != null || finalizingSession != null) {
+                throw new IOException("Logcat capture is already reserved or finalizing");
+            }
+            created = activeSession == null;
+            session = created ? createSessionLocked(context.getApplicationContext()) : activeSession;
+            shanghaiLease = new CaptureLease(session, created);
+            if (created) WORKER.submit(() -> runBegin(session));
+            return shanghaiLease;
+        }
+    }
+
+    static Result releaseForShanghai(CaptureLease lease) {
+        Future<?> finish = null;
+        synchronized (LogcatRecorder.class) {
+            if (lease == null || shanghaiLease != lease) {
+                return Result.failed(null, "capture lease no longer owned");
+            }
+            Session session = lease.session;
+            if (lease.startedByShanghai && activeSession == session) {
+                activeSession = null;
+                finalizingSession = session;
+                session.stopRequested = true;
+                lastStatus = STATUS_SAVING;
+                session.streamControl.stop();
+                finish = ensureFinishLocked(session);
+            } else if (lease.startedByShanghai && finalizingSession == session) {
+                finish = ensureFinishLocked(session);
+            }
+            shanghaiLease = null;
+        }
+        if (!lease.startedByShanghai) {
+            return lease.isHealthy() ? Result.recording(lease.manifestFile(), lease.mode())
+                    : Result.failed(lease.manifestFile(), "shared capture ended during Shanghai");
+        }
+        Throwable failure = finish == null ? null : await(finish, 90_000L);
+        if (failure != null || lease.session.failed) {
+            return Result.failed(lease.manifestFile(), failure == null
+                    ? lease.session.failureDetail : errorDetail(failure));
+        }
+        return Result.saved(lease.manifestFile(), "Shanghai-owned capture finalized");
+    }
+
+    static synchronized boolean isReservedForShanghai() { return shanghaiLease != null; }
+
+    static final class CaptureLease {
+        private final Session session;
+        final boolean startedByShanghai;
+        CaptureLease(Session session, boolean startedByShanghai) {
+            this.session = session;
+            this.startedByShanghai = startedByShanghai;
+        }
+        String captureId() { return session.captureId; }
+        String day() { return session.day; }
+        String mode() { return session.mode; }
+        File manifestFile() { return session.manifestFile; }
+        boolean isReady() { return session.readerStarted && isHealthy(); }
+        boolean isHealthy() {
+            return !session.failed && !session.finalized && !session.stopRequested
+                    && session.readerFailure == null;
+        }
+        boolean reducedCoverage() { return session.reducedCoverage || session.knownLoss; }
     }
 
     static synchronized String activeStartDay() {
@@ -119,16 +188,7 @@ final class LogcatRecorder {
                 lastStatus = STATUS_RECORDING;
                 return Result.recording(current.manifestFile, "already recording");
             }
-            String day = NavCaptureStore.todayDir();
-            String captureId = timestampForFile();
-            File directory = new File(NavigationLogStorage.logcatDir(appContext, day),
-                    "system_" + captureId);
-            session = new Session(appContext, day, captureId, directory);
-            activeSession = session;
-            activeStartDay = day;
-            lastSavedFile = null;
-            lastStatus = STATUS_RECORDING;
-            lastDetail = "starting full-system capture";
+            session = createSessionLocked(appContext);
         }
         Future<?> future = WORKER.submit(() -> runBegin(session));
         Throwable failure = await(future, 90_000L);
@@ -154,6 +214,19 @@ final class LogcatRecorder {
         return Result.recording(session.manifestFile, session.mode);
     }
 
+    private static Session createSessionLocked(Context context) {
+        String day = NavCaptureStore.todayDir();
+        String captureId = timestampForFile();
+        File directory = new File(NavigationLogStorage.logcatDir(context, day), "system_" + captureId);
+        Session session = new Session(context, day, captureId, directory);
+        activeSession = session;
+        activeStartDay = day;
+        lastSavedFile = null;
+        lastStatus = STATUS_RECORDING;
+        lastDetail = "starting full-system capture";
+        return session;
+    }
+
     static Result restartAfterRebase(Context context) {
         return start(context);
     }
@@ -162,6 +235,9 @@ final class LogcatRecorder {
         Session session;
         Future<?> future;
         synchronized (LogcatRecorder.class) {
+            if (shanghaiLease != null) {
+                return Result.failed(shanghaiLease.manifestFile(), "Logcat is in use by Shanghai test");
+            }
             session = activeSession;
             if (session == null) {
                 if (finalizingSession != null) {
@@ -200,6 +276,10 @@ final class LogcatRecorder {
     static void stopAsync(Context context, Runnable completion) {
         Session session;
         synchronized (LogcatRecorder.class) {
+            if (shanghaiLease != null) {
+                postCompletion(completion);
+                return;
+            }
             session = activeSession;
             if (session == null) {
                 session = finalizingSession;
@@ -443,6 +523,7 @@ final class LogcatRecorder {
     private static void runStream(Session session, CaptureSource initialSource) {
         CaptureOutput capture = new CaptureOutput(session);
         CaptureSource source = initialSource;
+        session.readerStarted = true;
         try {
             try {
                 source.readTo(capture);
@@ -475,6 +556,7 @@ final class LogcatRecorder {
             }
             requestReaderFailure(session, error);
         } finally {
+            session.readerStarted = false;
             session.streamControl.clearAndClose(source);
         }
     }
@@ -967,6 +1049,7 @@ final class LogcatRecorder {
         final StreamControl streamControl = new StreamControl();
         final List<JSONObject> interruptions = new ArrayList<>();
         volatile Future<?> readerFuture;
+        volatile boolean readerStarted;
         volatile Future<?> finishFuture;
         volatile boolean stopRequested;
         volatile boolean finalized;

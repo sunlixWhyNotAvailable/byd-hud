@@ -69,6 +69,14 @@ public final class HudCheckStateTest {
     }
 
     @Test
+    public void shanghaiModeNeverStartsTheSyntheticHudCheckSender() {
+        HudCheckState state = new HudCheckState().selectMode(HudCheckState.Mode.SHANGHAI);
+        assertFalse(state.running);
+        assertSame(state, state.toggleRun());
+        assertSame(state, state.stop());
+    }
+
+    @Test
     public void allExtendedLabelsAndValuesArePresent() {
         HudCheckState state = new HudCheckState().selectMode(HudCheckState.Mode.EXTENDED);
         for (int i = 0; i < HudCheckPayload.extendedCount(); i++) {
