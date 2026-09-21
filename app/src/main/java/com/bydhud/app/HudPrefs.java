@@ -76,6 +76,12 @@ final class HudPrefs {
     static final int SPEED_LIMIT_LANES = 2;
     static final int SPEED_LIMIT_FREE = 3;
     static final int SPEED_LIMIT_COMPOSITE = 4;
+    static final int SPEED_LIMIT_NATIVE = 5;
+    // UI order differs from persisted IDs; existing selections must not shift.
+    private static final int[] SPEED_LIMIT_MODE_UI_ORDER = {
+            SPEED_LIMIT_OFF, SPEED_LIMIT_NATIVE, SPEED_LIMIT_MANEUVER,
+            SPEED_LIMIT_LANES, SPEED_LIMIT_FREE, SPEED_LIMIT_COMPOSITE
+    };
     static final int SPEED_LIMIT_FALLBACK_OFF = 0;
     static final int SPEED_LIMIT_FALLBACK_MANEUVER = 1;
     static final int SPEED_LIMIT_FALLBACK_LANES = 2;
@@ -426,7 +432,20 @@ final class HudPrefs {
     }
 
     static int normalizeSpeedLimitMode(int mode) {
+        if (mode == SPEED_LIMIT_NATIVE) return SPEED_LIMIT_NATIVE;
         return clamp(mode, SPEED_LIMIT_OFF, SPEED_LIMIT_COMPOSITE);
+    }
+
+    static int speedLimitModeUiIndex(int mode) {
+        int normalized = normalizeSpeedLimitMode(mode);
+        for (int i = 0; i < SPEED_LIMIT_MODE_UI_ORDER.length; i++) {
+            if (SPEED_LIMIT_MODE_UI_ORDER[i] == normalized) return i;
+        }
+        return 0;
+    }
+
+    static int speedLimitModeFromUiIndex(int index) {
+        return SPEED_LIMIT_MODE_UI_ORDER[clamp(index, 0, SPEED_LIMIT_MODE_UI_ORDER.length - 1)];
     }
 
     static int normalizeSpeedLimitCompositePlacement(int placement) {

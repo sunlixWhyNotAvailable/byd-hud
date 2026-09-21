@@ -2033,9 +2033,10 @@ private fun OptionsTab(
     val textTransliterationModes = language.choose(listOf("Вимкнено", "Українська", "Універсальна"),
         listOf("Off", "Ukrainian", "Universal"), listOf("Выкл.", "Украинская", "Универсальная"))
     val speedLimitModes = language.choose(
-        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
-        listOf("Off", "In maneuver field", "In lane field", "In a free field", "Composite"),
-        listOf("Выкл.", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
+        listOf("Вимкнено", "Штатний", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
+        listOf("Off", "Native", "In maneuver field", "In lane field", "In a free field", "Composite"),
+        listOf("Выкл.", "Штатный", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
+    val speedLimitModeIndex = HudPrefs.speedLimitModeUiIndex(snapshot.speedLimitMode)
     val speedLimitFallbackModes = language.choose(listOf("Вимкнено", "У полі з маневром", "У полі зі смугами"),
         listOf("Off", "In maneuver field", "In lane field"), listOf("Выкл.", "В поле манёвра", "В поле полос"))
     val speedLimitCompositePlacementModes = language.choose(
@@ -2062,9 +2063,10 @@ private fun OptionsTab(
         "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only.", "Размер композитного знака в пикселях для изображения манёвра. Целое число от 1 до 103.")
     val compositeLaneSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36.",
         "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only.", "Размер композитного знака в пикселях для изображения полос. Целое число от 1 до 36.")
-    val freeFallbackEnabled = snapshot.speedLimitMode == 3
+    val freeFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_FREE
     val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE
-    val overlaySecondsEnabled = snapshot.speedLimitMode in 1..2
+    val overlaySecondsEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER
+            || snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES
             || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
     val transferConflict = transferDraft?.let { draft ->
         SteeringTransferPreferences.findConflict(
@@ -2377,13 +2379,15 @@ private fun OptionsTab(
             row("speed-limit-mode") {
                 val title = language.choose("Режим виводу обмеження швидкості", "Speed limit output mode", "Режим вывода ограничения скорости")
                 SettingRow(title, speedLimitModeHint, palette,
-                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitMode, title, snapshot.speedLimitMode, speedLimitModes) }) {
+                    onHelp = { hudHelpRequest = dropdownHelp(HudHelpTopicId.SpeedLimitMode, title, speedLimitModeIndex, speedLimitModes) }) {
                     HudDropdown(
-                        selectedIndex = snapshot.speedLimitMode,
+                        selectedIndex = speedLimitModeIndex,
                         options = speedLimitModes,
                         palette = palette,
                         width = 190.dp,
-                        onSelected = { mode -> runAction { activity.composeSetSpeedLimitMode(mode) } }
+                        onSelected = { index -> runAction {
+                            activity.composeSetSpeedLimitMode(HudPrefs.speedLimitModeFromUiIndex(index))
+                        } }
                     )
                 }
             }
@@ -7253,11 +7257,12 @@ private fun HudHelpOverlay(
         } else {
             HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask, localPresentation.streetFormat)
         }
-        HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 4)) {
+        HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 5)) {
             0 -> R.drawable.hud_help_baseline
-            1 -> R.drawable.hud_help_speed_maneuver
-            2 -> R.drawable.hud_help_speed_lanes
-            3 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
+            1 -> R.drawable.hud_help_speed_native
+            2 -> R.drawable.hud_help_speed_maneuver
+            3 -> R.drawable.hud_help_speed_lanes
+            4 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
                 1 -> R.drawable.hud_help_speed_maneuver
                 2 -> R.drawable.hud_help_speed_lanes
                 else -> R.drawable.hud_help_baseline

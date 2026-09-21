@@ -416,6 +416,51 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void nativeSpeedStubPreservesNavigationWithoutAnyBitmapPlacement() {
+        DirectTbtFrame[] frames = {
+                speedFrame(new byte[]{1, 2, 3}, new byte[]{4, 5}),
+                speedFrame(new byte[0], new byte[0]),
+                speedFrame(new byte[]{1, 2, 3}, new byte[0]),
+                speedFrame(new byte[0], new byte[]{4, 5}),
+                frame(11, 9, DirectTbtFrame.AlertOverlay.inactive()).withSpeedLimit(
+                        new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L)),
+                frame(11, 9, DirectTbtFrame.AlertOverlay.active(
+                        7, 25, "Camera", new byte[]{8, 9})).withSpeedLimit(
+                        new DirectTbtFrame.SpeedLimit(50, 50, "km/h", 1L))
+        };
+        for (DirectTbtFrame frame : frames) {
+            for (int fallback = HudPrefs.SPEED_LIMIT_FALLBACK_OFF;
+                    fallback <= HudPrefs.SPEED_LIMIT_FALLBACK_LANES; fallback++) {
+                DirectTbtPayload.Options nativeOptions = speedOptions(
+                        HudPrefs.SPEED_LIMIT_NATIVE, fallback);
+                assertEquals(DirectTbtPayload.SPEED_PLACEMENT_NONE,
+                        DirectTbtPayload.speedPlacement(frame, nativeOptions));
+                assertFalse(DirectTbtPayload.speedOverlaysOccupiedField(frame, nativeOptions));
+                assertArrayEquals(DirectTbtPayload.build(frame, 7,
+                                speedOptions(HudPrefs.SPEED_LIMIT_OFF, fallback)),
+                        DirectTbtPayload.build(frame, 7, nativeOptions));
+            }
+        }
+    }
+
+    @Test
+    public void speedLimitUiOrderPreservesPersistedModeIds() {
+        // Existing stored values must still select their original modes after upgrade.
+        int[] modes = {HudPrefs.SPEED_LIMIT_OFF, HudPrefs.SPEED_LIMIT_NATIVE,
+                HudPrefs.SPEED_LIMIT_MANEUVER, HudPrefs.SPEED_LIMIT_LANES,
+                HudPrefs.SPEED_LIMIT_FREE, HudPrefs.SPEED_LIMIT_COMPOSITE};
+        int[] storedIds = {0, 5, 1, 2, 3, 4};
+        assertArrayEquals(storedIds, modes);
+        for (int index = 0; index < storedIds.length; index++) {
+            assertEquals(storedIds[index], HudPrefs.normalizeSpeedLimitMode(storedIds[index]));
+            assertEquals(index, HudPrefs.speedLimitModeUiIndex(storedIds[index]));
+            assertEquals(storedIds[index], HudPrefs.speedLimitModeFromUiIndex(index));
+        }
+        assertEquals(0, HudPrefs.speedLimitModeFromUiIndex(-1));
+        assertEquals(4, HudPrefs.speedLimitModeFromUiIndex(6));
+    }
+
+    @Test
     public void compositePlacementUsesNamedAndOnlyFreeFields() {
         DirectTbtFrame bothOccupied = speedFrame(new byte[]{1}, new byte[]{2});
         DirectTbtFrame bothFree = speedFrame(new byte[0], new byte[0]);
@@ -466,7 +511,9 @@ public final class DirectTbtPayloadTest {
         assertEquals(0, HudPrefs.normalizeSpeedLimitMode(-1));
         assertEquals(0, HudPrefs.normalizeSpeedLimitMode(0));
         assertEquals(4, HudPrefs.normalizeSpeedLimitMode(4));
-        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(5));
+        assertEquals(5, HudPrefs.normalizeSpeedLimitMode(5));
+        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(6));
+        assertEquals(4, HudPrefs.normalizeSpeedLimitMode(Integer.MAX_VALUE));
 
         assertEquals(0, HudPrefs.normalizeSpeedLimitCompositePlacement(-1));
         assertEquals(0, HudPrefs.normalizeSpeedLimitCompositePlacement(0));

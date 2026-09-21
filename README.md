@@ -165,12 +165,14 @@ Missing values are completed separately for each destination. On a multi-stop ro
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Speed limit output mode` | Off | Selects `Off`, `In maneuver field`, `In lane field`, `In a free field`, or `Composite` |
+| `Speed limit output mode` | Off | Selects `Off`, `Native`, `In maneuver field`, `In lane field`, `In a free field`, or `Composite` |
 | `Overlay in "In a free field" mode` | Off | When both fields are occupied, optionally allows a timed replacement of the maneuver or lane field |
 | `Display time when overlapping` | 5 seconds | Sets the temporary replacement time from 1 to 10 seconds for non-composite output over an occupied field |
 | `Composite output field` | Maneuver only | Selects `Maneuver only`, `Lanes only`, `Free or maneuver`, or `Free or lanes` |
 | `Sign size in maneuver field` | 64 px | Sets the composite sign size in the maneuver image from 1 to 103 px |
 | `Sign size in lane field` | 36 px | Sets the composite sign size in the lane image from 1 to 36 px |
+
+`Native` is currently a selectable, saved placeholder in the source; vehicle output will be implemented separately. It sends no speed-limit sign and leaves the existing ADAS sign alone. Its help illustrates 115 in the native field (Off illustrates 40); changing the help selection does not change settings or send anything to the HUD. Fallback, overlap duration and composite controls are disabled in Native mode, with their values retained. This source change has not been built into an APK yet.
 
 An alert in shared-field mode occupies the maneuver field with the same priority as a route maneuver. A standalone sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when non-composite output replaces an occupied maneuver, alert, or lane field. Composite mode draws the sign into the selected maneuver or lane image without discarding its existing guidance and does not use the replacement timer. This feature requires a current compatible project-patched Google Maps or Waze build.
 

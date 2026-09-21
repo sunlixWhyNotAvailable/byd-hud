@@ -291,8 +291,10 @@ public final class DirectTbtPayload {
     }
 
     static int speedPlacement(DirectTbtFrame frame, Options options) {
+        // Native is a UI-only stub until its separate vehicle output is implemented.
         if (frame == null || options == null || !frame.getSpeedLimit().isActive()
-                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF) {
+                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF
+                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE) {
             return SPEED_PLACEMENT_NONE;
         }
         if (options.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER) {

@@ -2932,7 +2932,9 @@ final class NavHudLiveSender {
         speedOverlayDisplayValue = speed.getDisplayValue();
         speedOverlayKph = speed.getKph();
         speedOverlayUnit = speed.getUnit();
-        if (!speed.isActive() || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF) {
+        // Native currently has no output; retire an existing bitmap overlay like Off.
+        if (!speed.isActive() || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF
+                || options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE) {
             cancelSpeedOverlayTimeout();
             speedOverlayVisible = false;
             speedOverlayPlacement = DirectTbtPayload.SPEED_PLACEMENT_NONE;
