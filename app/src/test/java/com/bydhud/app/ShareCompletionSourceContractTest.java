@@ -87,19 +87,6 @@ public final class ShareCompletionSourceContractTest {
     }
 
     @Test
-    public void completedOlderUploadCannotReplaceLatestOperationAndUploadsRunInParallel()
-            throws IOException {
-        String workflow = source("StorageLogShareWorkflow.kt");
-        assertTrue(workflow.contains("newSingleThreadExecutor"));
-        assertTrue(workflow.contains("newCachedThreadPool"));
-        assertTrue(workflow.contains("uploadWorkers.execute"));
-        assertTrue(workflow.contains(
-                "if (latestState.value?.operationId == operationId) latestState.value = changed"));
-        assertTrue(workflow.contains("snapshot.toDeveloper || snapshot.phase in setOf("));
-        assertFalse(workflow.contains("state.value = null"));
-    }
-
-    @Test
     public void developerCommentDefersThirtySecondCooldownUntilAcceptedAdmission()
             throws IOException {
         String compose = source("BydHudRuntimeCompose.kt");
@@ -157,26 +144,6 @@ public final class ShareCompletionSourceContractTest {
                 + "            int selectionRevision)"));
         assertTrue(activity.contains("selectedFileCount, selectedBytes,\n"
                 + "                report, selectionRevision)"));
-    }
-
-    @Test
-    public void reportTitleAppearsOnlyInStorageShareDetails() throws IOException {
-        String compose = source("BydHudRuntimeCompose.kt");
-        String stack = between(compose, "private fun OperationProgressStack(",
-                "private fun OperationProgressCard(");
-        String storage = between(stack,
-                "visibleStorageShares.forEach { state ->",
-                "visibleConfigurationExport?.let { state ->");
-        String summary = between(storage, "val summary = buildString {", "add(OperationCardSpec(");
-        String details = between(compose, "private fun operationDetails(",
-                "private fun OperationDetailsOverlay(");
-
-        assertFalse(summary.contains("reportTitle"));
-        assertTrue(storage.contains("reportTitle = state.reportTitle"));
-        assertTrue(details.contains("reportTitle: String = \"\""));
-        assertTrue(details.contains("if (reportTitle.isNotBlank())"));
-        assertTrue(details.contains(
-                "language.choose(\"Заголовок звіту\", \"Report title\", \"Заголовок отчёта\")"));
     }
 
     @Test

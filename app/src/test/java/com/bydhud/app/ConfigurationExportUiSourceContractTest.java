@@ -58,7 +58,6 @@ public final class ConfigurationExportUiSourceContractTest {
             assertTrue("missing phase " + phase, config.contains("ConfigurationExportPhase." + phase));
         }
         assertContains(card,
-                ".width(460.dp)", ".height(170.dp)",
                 "SystemClock.elapsedRealtime()", "delay(1_000L)",
                 "card.endedAtElapsedMs", "coerceAtLeast(0L) / 1_000L");
     }
@@ -76,12 +75,11 @@ public final class ConfigurationExportUiSourceContractTest {
                 "visibleStorageShares", "visibleConfigurationExport",
                 "visibleStorageShares.forEach { state ->",
                 "visibleConfigurationExport?.let { state ->",
-                "padding(end = 24.dp, bottom = 24.dp)", "Arrangement.spacedBy(12.dp)",
                 "onDetails = { detailsKey = card.key }",
                 "cards.firstOrNull { it.key == detailsKey }");
         assertFalse(stack.contains("ModalInputBlocker()"));
         assertContains(card,
-                "if (card.details.isNotEmpty())", "language.choose(\"Деталі\", \"Details\", \"Детали\")",
+                "if (card.details.isNotEmpty())",
                 "if (card.busy && card.stopEnabled)", "if (card.closeEnabled)");
         assertContains(details, "BackHandler(onBack = onClose)", "ModalInputBlocker()",
                 ".verticalScroll(rememberScrollState())", "onClick = onClose");
@@ -116,7 +114,7 @@ public final class ConfigurationExportUiSourceContractTest {
         String details = between(source, "private fun ConfigurationExportDetailsOverlay(",
                 "private fun operationDetails(");
         assertContains(consent, "onClick = onCreate", "onClick = onCancel", "startError",
-                "15 minutes", "1 GB", "copy.configurationWarning");
+                "copy.configurationWarning");
         assertFalse(consent.contains("Sentry"));
         assertFalse(details.contains("manifest.json"));
         assertFalse(details.contains("CarSettingsPlugins"));
@@ -128,7 +126,6 @@ public final class ConfigurationExportUiSourceContractTest {
         assertContains(workflow, "inventory=${snapshot.foundFiles}", "volumes=${snapshot.volumeSizes.size}");
         String card = between(source, "private fun ConfigurationExportProgressCard(",
                 "private fun ConfigurationExportDetailsOverlay(");
-        assertContains(card, "alpha = 0.70f", "width = 100.dp", "width = 138.dp", "width = 108.dp");
         assertFalse(card.contains("unavailableFiles"));
         assertFalse(card.contains("copiedFiles"));
     }

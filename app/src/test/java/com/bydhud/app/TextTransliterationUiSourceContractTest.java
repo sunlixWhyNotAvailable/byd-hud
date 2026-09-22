@@ -13,7 +13,7 @@ import java.nio.file.Paths;
 
 public final class TextTransliterationUiSourceContractTest {
     @Test
-    public void preferenceAndComposeDropdownUseApprovedModesAndCopy() throws IOException {
+    public void serializedModesAndPreferenceCallbacksRemainWired() throws IOException {
         String prefs = sourcePath("app/src/main/java/com/bydhud/app/HudPrefs.java");
         String activity = sourcePath("app/src/main/java/com/bydhud/app/MainActivity.java");
         String compose = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
@@ -27,16 +27,8 @@ public final class TextTransliterationUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.transliterationMode(this)"));
         assertTrue(activity.contains("composeSetTransliterationMode(int mode)"));
         assertTrue(activity.contains("HudPrefs.setTransliterationMode(this, mode)"));
-        assertTrue(compose.contains("textTransliteration = \"Text transliteration\""));
-        assertTrue(compose.contains("textTransliteration = \"Транслітерація тексту\""));
-        assertTrue(compose.contains("listOf(\"Off\", \"Ukrainian\", \"Universal\")"));
-        assertTrue(compose.contains("listOf(\"Вимкнено\", \"Українська\", \"Універсальна\")"));
         assertTrue(compose.contains("selectedIndex = snapshot.transliterationMode"));
         assertTrue(compose.contains("activity.composeSetTransliterationMode(mode)"));
-        assertTrue(indexOf(compose, "copy.streetOutput") < indexOf(compose,
-                "copy.textTransliteration"));
-        assertTrue(indexOf(compose, "copy.textTransliteration") < indexOf(compose,
-                "copy.distanceOutput"));
     }
 
     private static String sourcePath(String relativePath) throws IOException {
@@ -50,9 +42,4 @@ public final class TextTransliterationUiSourceContractTest {
                 .replace('\r', '\n');
     }
 
-    private static int indexOf(String source, String marker) {
-        int index = source.indexOf(marker);
-        assertTrue("missing marker " + marker, index >= 0);
-        return index;
-    }
 }

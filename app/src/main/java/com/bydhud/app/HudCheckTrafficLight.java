@@ -77,6 +77,32 @@ final class HudCheckTrafficLight {
         }
     }
 
+    /** Owned by the proxy's operation lock; state changes surround the actual vendor writes. */
+    static final class Output {
+        private boolean owned;
+        private boolean initialized;
+
+        boolean write(int sample, java.util.function.BiFunction<Boolean, int[], Boolean> writer) {
+            boolean full = !initialized || sample == CLEAR;
+            if (sample == CLEAR) initialized = false;
+            else owned = true; // A partial write or exception still requires cleanup.
+            boolean success = writer.apply(full, sample == CLEAR ? clearValues() : valuesForSample(sample));
+            if (success) {
+                if (sample == CLEAR) owned = false;
+                else initialized = true;
+            }
+            return success;
+        }
+
+        boolean clearIfOwned(boolean suspended, java.util.function.BooleanSupplier clear) {
+            if (!owned || suspended) return true;
+            initialized = false;
+            boolean success = clear.getAsBoolean();
+            if (success) owned = false;
+            return success;
+        }
+    }
+
     private static int[] values(int state, int description, int direction, int countdown) {
         return new int[]{state, description, direction, 0, countdown, 0, 0};
     }

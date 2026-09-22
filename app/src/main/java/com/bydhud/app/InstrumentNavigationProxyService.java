@@ -82,8 +82,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private volatile IInstrumentNavigationClient client;
     private volatile boolean connected;
     private volatile int activeCapabilities;
-    private boolean trafficLightOutputsOwned;
-    private boolean trafficLightInitialized;
+    private final HudCheckTrafficLight.Output trafficLightOutput = new HudCheckTrafficLight.Output();
     private boolean outputSuspended;
 
     InstrumentNavigationProxyService(
@@ -285,48 +284,34 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                             "traffic-light capability unavailable");
                 }
                 List<InstrumentProxyContract.Operation> operations = new ArrayList<>(4);
-                boolean fullState = !trafficLightInitialized
-                        || sampleIndex == HudCheckTrafficLight.CLEAR;
-                if (sampleIndex != HudCheckTrafficLight.CLEAR) {
-                    // Mark before writes: a partial vendor failure still needs cleanup.
-                    trafficLightOutputsOwned = true;
-                } else {
-                    trafficLightInitialized = false;
-                }
-                int[] values = sampleIndex == HudCheckTrafficLight.CLEAR
-                        ? HudCheckTrafficLight.clearValues()
-                        : HudCheckTrafficLight.valuesForSample(sampleIndex);
-                BodyworkApi currentBodywork = bodywork();
-                if (currentBodywork == null || !currentBodywork.trafficLightCapable()) {
-                    operations.add(operation("bodywork_traffic_light", -1,
-                            SystemClock.elapsedRealtime(), "unavailable"));
-                } else {
-                    // Inactive records and distance belong to setup/cleanup, not 1Hz refresh.
-                    for (int intersection = 0;
-                            intersection < (fullState ? HudCheckTrafficLight.INTERSECTION_COUNT : 1);
-                            intersection++) {
-                        operations.add(setBodyworkTrafficLight(currentBodywork,
-                                intersection, intersection == 0
-                                        ? values : HudCheckTrafficLight.clearValues()));
-                    }
-                }
-                if (fullState) {
-                    InstrumentApi currentInstrument = instrument();
-                    if (currentInstrument == null || currentInstrument.writer == null) {
-                        operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
+                boolean allSucceeded = trafficLightOutput.write(sampleIndex, (fullState, values) -> {
+                    BodyworkApi currentBodywork = bodywork();
+                    if (currentBodywork == null || !currentBodywork.trafficLightCapable()) {
+                        operations.add(operation("bodywork_traffic_light", -1,
                                 SystemClock.elapsedRealtime(), "unavailable"));
                     } else {
-                        operations.add(setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT,
-                                sampleIndex == HudCheckTrafficLight.CLEAR
-                                        ? 0 : HudCheckTrafficLight.DISTANCE_METERS));
+                        // Inactive records and distance belong to setup/cleanup, not 1Hz refresh.
+                        for (int intersection = 0;
+                                intersection < (fullState ? HudCheckTrafficLight.INTERSECTION_COUNT : 1);
+                                intersection++) {
+                            operations.add(setBodyworkTrafficLight(currentBodywork,
+                                    intersection, intersection == 0
+                                            ? values : HudCheckTrafficLight.clearValues()));
+                        }
                     }
-                }
-                boolean allSucceeded = allOperationsSucceeded(operations);
-                if (sampleIndex == HudCheckTrafficLight.CLEAR && allSucceeded) {
-                    trafficLightOutputsOwned = false;
-                } else if (sampleIndex != HudCheckTrafficLight.CLEAR && allSucceeded) {
-                    trafficLightInitialized = true;
-                }
+                    if (fullState) {
+                        InstrumentApi currentInstrument = instrument();
+                        if (currentInstrument == null || currentInstrument.writer == null) {
+                            operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
+                                    SystemClock.elapsedRealtime(), "unavailable"));
+                        } else {
+                            operations.add(setInt(FID_DISTANCE_TO_TRAFFIC_LIGHT,
+                                    sampleIndex == HudCheckTrafficLight.CLEAR
+                                            ? 0 : HudCheckTrafficLight.DISTANCE_METERS));
+                        }
+                    }
+                    return allOperationsSucceeded(operations);
+                });
                 return InstrumentProxyContract.operationResult(operations,
                         allSucceeded ? "" : "traffic-light operation failed");
             } finally {
@@ -342,7 +327,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             long identity = Binder.clearCallingIdentity();
             try {
                 outputSuspended = true;
-                boolean cleared = !trafficLightOutputsOwned || clearTrafficLightOutputs();
+                boolean cleared = trafficLightOutput.clearIfOwned(false, this::clearTrafficLightOutputs);
                 return InstrumentProxyContract.operationResult(new ArrayList<>(),
                         cleared ? "" : "traffic-light output surrender failed");
             } finally {
@@ -690,7 +675,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private void stop(String reason) {
         synchronized (operationLock) {
             connected = false;
-            if (trafficLightOutputsOwned && !outputSuspended) clearTrafficLightOutputs();
+            trafficLightOutput.clearIfOwned(outputSuspended, this::clearTrafficLightOutputs);
         }
         IInstrumentNavigationClient current = client;
         client = null;
@@ -711,7 +696,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private boolean clearTrafficLightOutputs() {
-        trafficLightInitialized = false;
         List<InstrumentProxyContract.Operation> operations = new ArrayList<>(4);
         BodyworkApi currentBodywork = bodywork;
         if (currentBodywork != null && currentBodywork.trafficLightCapable()) {
@@ -732,9 +716,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             operations.add(operation("instrument_fid:distance_to_traffic_light", -1,
                     SystemClock.elapsedRealtime(), "unavailable"));
         }
-        boolean cleared = allOperationsSucceeded(operations);
-        if (cleared) trafficLightOutputsOwned = false;
-        return cleared;
+        return allOperationsSucceeded(operations);
     }
 
     private static boolean success(Object result) {

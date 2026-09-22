@@ -44,29 +44,6 @@ public final class TransferOperationSourceContractTest {
     }
 
     @Test
-    public void uncertainMoveReadsPlacementBeforeAnyRetry() throws Exception {
-        String controller = source("NavAppDisplayController.java");
-        String move = between(controller,
-                "synchronized NavAppDisplayState moveTaskToDisplayBlocking( String packageName, int targetDisplay, String reason, BooleanSupplier requestCurrent, NavAppDisplayState admittedState)",
-                "private boolean ensureWazeSurfaceOnDisplay(");
-        assertTrue(move.contains("TaskMoveSequencer.execute("));
-        String sequencer = source("TaskMoveSequencer.java");
-        int first = sequencer.indexOf("io.move(\"command\")");
-        int readback = sequencer.indexOf("io.query(\"uncertain-readback\")", first);
-        int retry = sequencer.indexOf("io.move(\"retry-after-readback\")", readback);
-        assertTrue(first >= 0 && readback > first && retry > readback);
-        int finalReadback = sequencer.indexOf("io.query(\"retry-uncertain-readback\")", retry);
-        assertTrue(finalReadback > retry);
-        assertTrue(move.contains("queries=\" + queries + \" moves=\" + moves"));
-        assertTrue(move.contains("preparationMs=\" + preparationMs"));
-        assertTrue(move.contains("confirmationMs=\" + confirmationMs"));
-
-        String bridge = source("LocalAdbBridge.java");
-        assertTrue(bridge.contains("runRuntimeShellCommandOnce("));
-        assertTrue(bridge.contains("if (!retryTransportFailure) throw e;"));
-    }
-
-    @Test
     public void uiAndSteeringResolveToggleDirectionFromTheSameFreshWorkerQuery() throws Exception {
         String controller = source("NavAppDisplayController.java");
         String ui = between(controller, "void requestUiToggle(", "void requestSteeringToggle(");

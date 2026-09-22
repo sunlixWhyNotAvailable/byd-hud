@@ -146,36 +146,6 @@ final class NavAppDisplayController {
         return parseDashboardDisplayId(dumpsys);
     }
 
-    //keeps compositor policy pure so tests cannot accidentally require a vehicle connection.
-    static int autoContainerValueForTest(
-            boolean toDashboard, int dashboardMode, int formatMethod, boolean explicit) {
-        if (!toDashboard || !explicit) return 0;
-        int command = DashboardLayoutPolicy.layoutCommand(dashboardMode, formatMethod);
-        return DashboardLayoutPolicy.isAutoContainerCommand(command) ? command : 0;
-    }
-
-    static int widgetLayoutCommandForTest(int mode, int formatMethod) {
-        int dashboardMode = dashboardModeForWidgetForTest(mode);
-        return DashboardLayoutPolicy.layoutCommand(dashboardMode, formatMethod);
-    }
-
-    static boolean widgetModeUsesTbtProtocolForTest(int mode) {
-        return mode == WIDGET_MODE_TBT;
-    }
-
-    static boolean widgetModeUsesAutoContainerForTest(
-            int mode, int formatMethod, boolean releaseRequired) {
-        return releaseRequired || DashboardLayoutPolicy.isAutoContainerCommand(
-                widgetLayoutCommandForTest(mode, formatMethod));
-    }
-
-    static boolean widgetTbtNeedsAutoContainerReleaseForTest(
-            int lastWidgetAutoContainerValue, boolean hasProjectionLease) {
-        return hasProjectionLease
-                || lastWidgetAutoContainerValue == DashboardLayoutPolicy.AUTOCONTAINER_MINI
-                || lastWidgetAutoContainerValue == DashboardLayoutPolicy.AUTOCONTAINER_FULL;
-    }
-
     static int dashboardModeForWidgetForTest(int mode) {
         return mode == WIDGET_MODE_MINI
                 ? HudPrefs.DASHBOARD_MODE_PARTIAL
@@ -735,32 +705,14 @@ final class NavAppDisplayController {
                 int ownership = autoContainerOwnership();
                 int layoutCommand = DashboardLayoutPolicy.layoutCommand(
                         dashboardMode, formatMethod);
-                if (DashboardLayoutPolicy.shouldReleaseBeforeWidget(
-                        mode, layoutCommand, ownership)) {
-                    error = releasePersistedAutoContainerOwnership(
-                            () -> isWidgetOperationCurrent(token), "widget-mode=" + mode);
-                }
-                if (error.isEmpty()) {
-                    switch (mode) {
-                        case WIDGET_MODE_IPC_OFF:
-                            if (ownership == DashboardLayoutPolicy.OWNERSHIP_NONE) {
-                                error = sendWidgetProtocolOperation(
-                                        token, DashboardLayoutPolicy.PROTOCOL_NATIVE, "IPC OFF");
-                            }
-                            break;
-                        case WIDGET_MODE_TBT:
-                            error = sendWidgetTbtProtocolEdge(token);
-                            break;
-                        case WIDGET_MODE_MINI:
-                        case WIDGET_MODE_FULL:
-                            error = sendWidgetDashboardLayout(
-                                    owner, token, mode, dashboardMode,
-                                    formatMethod, layoutCommand);
-                            break;
-                        default:
-                            error = "unsupported widget mode=" + mode;
-                    }
-                }
+                final String targetOwner = owner;
+                error = DashboardLayoutPolicy.executeWidget(mode, layoutCommand, ownership,
+                        () -> releasePersistedAutoContainerOwnership(
+                                () -> isWidgetOperationCurrent(token), "widget-mode=" + mode),
+                        operation -> sendWidgetProtocolOperation(token, operation,
+                                mode == WIDGET_MODE_TBT ? "TBT protocol type " + operation : "IPC OFF"),
+                        () -> sendWidgetDashboardLayout(targetOwner, token, mode, dashboardMode,
+                                formatMethod, layoutCommand));
                 if (error.isEmpty()
                         && applyProfile
                         && (mode == WIDGET_MODE_MINI || mode == WIDGET_MODE_FULL)
@@ -792,15 +744,6 @@ final class NavAppDisplayController {
             endMove("");
             notifyWidgetCompletion(completion, error);
         }
-    }
-
-    private String sendWidgetTbtProtocolEdge(long token) {
-        String typeOneFailure = sendWidgetProtocolOperation(
-                token, DashboardLayoutPolicy.PROTOCOL_NATIVE, "TBT protocol type 1");
-        return typeOneFailure.isEmpty()
-                ? sendWidgetProtocolOperation(
-                        token, DashboardLayoutPolicy.PROTOCOL_TBT, "TBT protocol type 2")
-                : typeOneFailure;
     }
 
     private String sendWidgetProtocolOperation(long token, int operation, String label) {

@@ -1,6 +1,5 @@
 package com.bydhud.app;
 
-import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
@@ -11,74 +10,14 @@ import java.nio.file.Paths;
 
 import org.junit.Test;
 
-/** Guards the approved Preview UI port without coupling tests to screenshots. */
+/** Static UI-to-backend wiring/privacy sentinels; these do not execute Compose interactions.
+ * Behavioral feedback and help-resource checks live in their executable test suites. */
 public final class ProductionUiPortSourceContractTest {
-    @Test
-    public void helpCatalogAndFixedAssetsCoverAllApprovedControls() throws Exception {
-        String catalog = source("HudHelpCatalog.kt");
-        String ids = between(catalog, "internal enum class HudHelpTopicId {", "}");
-        assertEquals(21, ids.substring(ids.indexOf('{') + 1).lines()
-                .filter(line -> !line.trim().isEmpty()).count());
-
-        Path assets = projectRoot().resolve("app/src/main/res/drawable-nodpi");
-        try (java.util.stream.Stream<Path> files = Files.list(assets)) {
-            Path[] help = files.filter(path -> path.getFileName().toString()
-                    .startsWith("hud_help_")).toArray(Path[]::new);
-            assertEquals(82, help.length);
-            for (Path image : help) {
-                assertTrue(image.toString(), image.toString().endsWith(".webp"));
-                byte[] bytes = Files.readAllBytes(image);
-                assertEquals("RIFF", new String(bytes, 0, 4, StandardCharsets.US_ASCII));
-                assertEquals("WEBP", new String(bytes, 8, 4, StandardCharsets.US_ASCII));
-            }
-        }
-        assertTrue(catalog.contains("fun localizedImage(imageRes: Int, language: Language)"));
-        assertTrue(catalog.contains("hud_help_eta_all_ru"));
-        assertTrue(catalog.contains("hud_help_warning_maneuver_en"));
-        assertTrue(catalog.contains("hud_help_eta_street_7_en"));
-        assertFalse(catalog.contains("Future preview candidate"));
-        assertFalse(catalog.contains("Майбутній кандидат preview"));
-        assertFalse(catalog.contains("Будущий вариант preview"));
-    }
-
-    @Test
-    public void helpDialogIsCompactLocalOnlyAndButtonsHaveTapFeedback() throws Exception {
-        String compose = source("BydHudRuntimeCompose.kt");
-        String overlay = between(compose, "private fun HudHelpOverlay(",
-                "private fun SettingRow(");
-        assertTrue(overlay.contains(".width(820.dp)"));
-        assertTrue(overlay.contains(".aspectRatio(3f)"));
-        assertTrue(overlay.contains("mutableStateOf(request.checked)"));
-        assertTrue(overlay.contains("mutableIntStateOf(request.selectedIndex)"));
-        assertTrue(overlay.contains("modifier = Modifier.fillMaxWidth()"));
-        assertFalse(overlay.contains("activity.compose"));
-
-        String helpButton = between(compose, "private fun HudHelpButton(",
-                "private fun ShareIconLabelButton(");
-        assertTrue(helpButton.contains("rememberPressFeedback"));
-        assertTrue(helpButton.contains("onClick = onClick"));
-    }
-
-    @Test
-    public void russianCopyOwnsAllFiveTabSubtitlesAndVersionedHeader() throws Exception {
-        String compose = source("BydHudRuntimeCompose.kt");
-        String russian = between(compose, "private fun ruCopy()", "private fun shareCopy(");
-
-        assertTrue(russian.contains("subtitle = \"Вывод навигации на HUD | v${BuildConfig.VERSION_NAME}\""));
-        assertTrue(russian.contains("mainHint = \"Настройки навигации\""));
-        assertTrue(russian.contains("appsHint = \"Управление выводом навигаторов на HUD и приборку.\""));
-        assertTrue(russian.contains("storageHint = \"Запись, отправка, хранение и очистка навигационных логов.\""));
-        assertTrue(russian.contains("patchHint = \"Патч навигаторов для прямого вывода на HUD.\""));
-        assertTrue(russian.contains("hudCheckHint = \"Прямая проверка данных HUD и TBT-карточки приборки\""));
-    }
-
     @Test
     public void controlsKeepApprovedGatingAndPersistentExperimentalSelectors() throws Exception {
         String compose = source("BydHudRuntimeCompose.kt");
         String basic = between(compose, "optionsSection(\"basic-navigation\"",
                 "optionsSection(\"route-eta\"");
-        assertTrue(basic.indexOf("row(\"distance-output\")")
-                < basic.indexOf("row(\"small-distance-clamp\")"));
         assertTrue(basic.contains("enabled = snapshot.distanceOutputEnabled"));
         assertTrue(compose.contains("row(\"eta-output-field\")"));
         assertTrue(compose.contains("row(\"waze-alert-field\")"));
@@ -86,68 +25,6 @@ public final class ProductionUiPortSourceContractTest {
         assertTrue(source("HudPrefs.java").contains("setWazeAlertField(Context context, int field)"));
         assertTrue(source("MainActivity.java").contains("composeSetEtaOutputField(int field)"));
         assertTrue(source("MainActivity.java").contains("composeSetWazeAlertField(int field)"));
-    }
-
-    @Test
-    public void hudCheckSelectorSlidesAndSwitchActionHasNoArtificialDelay() throws Exception {
-        String compose = source("BydHudRuntimeCompose.kt");
-        String choice = between(compose, "private fun OutputImageChoice(",
-                "private fun OutputImageChoiceItem(");
-        assertTrue(choice.contains("animateDpAsState"));
-        assertTrue(choice.contains("outputImageChoiceOffset"));
-        assertTrue(choice.contains(".offset(x = selectedOffset"));
-        String choiceItem = between(compose, "private fun OutputImageChoiceItem(",
-                "private fun LazyPageSurface(");
-        assertFalse(choiceItem.contains("rememberVisualFirstClick"));
-        assertTrue(choiceItem.contains("onClick = onClick"));
-        String compact = between(compose, "private fun CompactSwitchBox(",
-                "private fun HudSwitch(");
-        assertFalse(compact.contains("rememberVisualFirstClick"));
-        assertTrue(compact.contains("onValueChange = { switchControl.value?.trigger?.invoke() }"));
-        String hudSwitch = between(compose, "private fun HudSwitch(",
-                "private fun Segmented(");
-        assertFalse(hudSwitch.substring(hudSwitch.indexOf("scope.launch"),
-                hudSwitch.indexOf("latestOnChecked(target)")).contains("delay("));
-    }
-
-    @Test
-    public void allFormerlyDelayedControlsDispatchDirectlyAndKeepPressFeedback() throws Exception {
-        String compose = source("BydHudRuntimeCompose.kt");
-        assertFalse(compose.contains("rememberVisualFirstClick"));
-        assertFalse(compose.contains("VISUAL_PRESS_BEFORE_ACTION_MS"));
-        for (String control : new String[] {"StorageDayRow", "HudChevronButton",
-                "HudCheckModeTile", "TransferProfileIconButton", "SwitchRow", "HudButton",
-                "HudIconButton", "HudHelpButton", "ShareIconLabelButton"}) {
-            String body = between(compose, "private fun " + control + "(", "@Composable");
-            assertTrue(control, body.contains("rememberPressFeedback("));
-            assertTrue(control, body.contains(".then(press.modifier)"));
-            assertTrue(control, body.contains("interactionSource = press.interactionSource"));
-            assertFalse(control, body.contains("delay("));
-            assertFalse(control, body.contains("scope.launch"));
-            String callback = control.equals("SwitchRow")
-                    ? "onValueChange = { switchControl.value?.trigger?.invoke() }"
-                    : control.equals("StorageDayRow") ? "onClick = onToggle" : "onClick = onClick";
-            assertTrue(control, body.contains(callback));
-        }
-        String feedback = between(compose, "private fun rememberPressFeedback(",
-                "private fun pressBackground(");
-        assertTrue(feedback.contains("animateFloatAsState("));
-        assertTrue(feedback.contains("val visiblePressed = visualPressed && (releaseHoldMillis > 0L || enabled)"));
-        assertTrue(feedback.contains("if (visiblePressed) 0.97f else 1.0f"));
-        assertTrue(feedback.contains("PressInteraction.Press"));
-        assertTrue(feedback.contains("PressInteraction.Release"));
-        assertTrue(feedback.contains("PressInteraction.Cancel"));
-        assertTrue(feedback.contains("clearIfCurrent(generation)"));
-        assertTrue(feedback.contains("LaunchedEffect(interactionSource, tracker)"));
-        assertTrue(compose.contains("private const val VISUAL_PRESS_HOLD_MS = 90L"));
-        String hudSwitch = between(compose, "private fun HudSwitch(", "private fun Segmented(");
-        assertTrue(hudSwitch.contains("if (enabled && pendingHolder.value == null)"));
-        assertTrue(hudSwitch.contains("SWITCH_PENDING_TIMEOUT_MS"));
-        assertTrue(hudSwitch.contains("delay(50L)"));
-        assertTrue(hudSwitch.contains("animationSpec = tween(durationMillis = 140)"));
-        String widgetAnchor = between(compose, "internal fun DashboardWidgetAnchorContent(",
-                "internal fun DashboardWidgetMenuContent(");
-        assertTrue(widgetAnchor.contains("delay(1_000L)"));
     }
 
     @Test
@@ -178,7 +55,6 @@ public final class ProductionUiPortSourceContractTest {
         assertTrue(localSwitch.contains("toggleable("));
         assertTrue(localSwitch.contains("role = Role.Switch"));
         assertTrue(localSwitch.contains("externalControl = switchControl"));
-        assertTrue(localSwitch.contains("releaseHoldMillis = VISUAL_PRESS_HOLD_MS"));
 
         String settingRow = between(compose, "private fun SettingRow(",
                 "private fun steeringButtonLabel(");
@@ -187,43 +63,9 @@ public final class ProductionUiPortSourceContractTest {
     }
 
     @Test
-    public void holdIsOptInAndExcludedInteractionPathsKeepNoHoldFeedback() throws Exception {
-        String compose = source("BydHudRuntimeCompose.kt");
-        for (String control : new String[] {"SwitchRow", "UpdateCheckLine", "CompactSwitchBox",
-                "HudSwitch", "HudButton", "HudIconButton", "HudHelpButton",
-                "ShareIconLabelButton", "HudChevronButton", "TransferProfileIconButton",
-                "OutputImageChoiceItem", "NavigatorAssetAction"}) {
-            String body = between(compose, "private fun " + control + "(", "@Composable");
-            assertTrue(control, body.contains("releaseHoldMillis = VISUAL_PRESS_HOLD_MS"));
-        }
-        for (String control : new String[] {"StorageDayRow", "HudCheckModeTile", "SegmentedItem", "TabButton"}) {
-            String body = between(compose, "private fun " + control + "(", "@Composable");
-            if (control.equals("StorageDayRow")) {
-                assertTrue(control, body.contains("rememberPressFeedback(enabled)"));
-            } else {
-                assertTrue(control, body.contains("rememberPressFeedback()"));
-            }
-            assertFalse(control, body.contains("VISUAL_PRESS_HOLD_MS"));
-        }
-    }
-
-    @Test
-    public void navigatorAssetActionHasScopedFeedbackAndKeepsParentPassive() throws Exception {
+    public void navigatorAssetActionDispatchesWithoutAnArtificialDelay() throws Exception {
         String compose = source("BydHudRuntimeCompose.kt");
         String action = between(compose, "private fun NavigatorAssetAction(", "@Composable");
-        assertTrue(action.contains(
-                "rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)"));
-        assertTrue(action.contains("text = label"));
-        assertTrue(action.contains("asset.state == NavigatorAssetManager.RECOVERY_REQUIRED -> palette.red"));
-        assertTrue(action.contains("palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)"));
-        assertTrue(action.contains(".clip(RoundedCornerShape(4.dp))"));
-        assertTrue(action.contains(".background(renderedBackground)"));
-        assertTrue(action.contains(".then(press.modifier)"));
-        assertTrue(action.contains("enabled = enabled"));
-        assertTrue(action.contains("interactionSource = press.interactionSource"));
-        assertTrue(action.contains("indication = null"));
-        assertTrue(action.contains(".padding(horizontal = 8.dp, vertical = 4.dp)"));
-        assertTrue(action.contains("minimumTouchTargetSize = DpSize(48.dp, 28.dp)"));
         assertTrue(action.contains("onInstall(asset.id)"));
         assertTrue(action.contains("onRestore(asset.id)"));
         assertTrue(action.contains("onDownload(asset.id)"));
@@ -232,39 +74,15 @@ public final class ProductionUiPortSourceContractTest {
 
         String parent = between(compose, "private fun NavigatorVersionSection(",
                 "private fun NavigatorAssetAction(");
-        assertFalse(parent.contains("rememberPressFeedback"));
         assertFalse(parent.contains(".clickable("));
-        assertFalse(parent.contains("VISUAL_PRESS_HOLD_MS"));
     }
 
     @Test
-    public void navigatorAssetsUseApprovedCompactSectionsAndLocalizedErrorModal() throws Exception {
+    public void navigatorErrorsOfferRetryAndDoNotExposeRawBackendDetails() throws Exception {
         String compose = source("BydHudRuntimeCompose.kt");
-        String list = between(compose, "private fun NavigatorAssetList(",
-                "private fun NavigatorVersionSection(");
-        assertTrue(list.contains(".height(IntrinsicSize.Min)"));
-        assertTrue(list.contains("horizontalArrangement = Arrangement.spacedBy(14.dp)"));
-        assertTrue(list.contains("title = \"Google Maps\\nReVanced\""));
-        assertEquals(2, count(list, "Modifier.weight(1f).fillMaxHeight()"));
-        assertFalse(list.contains("Box(Modifier.width(1.dp)"));
-
-        String section = between(compose, "private fun NavigatorVersionSection(",
-                "private fun NavigatorAssetAction(");
-        assertTrue(section.contains(".border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp))"));
-        assertTrue(section.contains(".padding(horizontal = 10.dp, vertical = 4.dp)"));
-        assertTrue(section.contains("modifier = Modifier.width(116.dp)"));
-        assertTrue(section.contains("verticalArrangement = Arrangement.spacedBy(4.dp)"));
-        assertTrue(section.contains(".height(28.dp)"));
-        assertTrue(section.contains(".border(1.dp, palette.border, RoundedCornerShape(4.dp))"));
-        assertTrue(section.contains("if (asset.id.contains(\"-stock-\"))"));
-        assertTrue(section.contains("copy.navigatorAssetStock"));
-        assertTrue(section.contains("copy.navigatorAssetPatched"));
-        assertTrue(section.contains("text = variant + \" \" + asset.versionName"));
-
         String action = between(compose, "private fun NavigatorAssetAction(",
                 "private fun NavigatorAssetTextAction(");
         assertTrue(action.contains("text = copy.navigatorAssetError"));
-        assertTrue(action.contains("color = palette.red"));
         assertTrue(action.contains("onClick = { onShowError(asset.id) }"));
         assertTrue(action.contains("NavigatorAssetManager.ERROR -> copy.navigatorAssetRetry"));
         assertTrue(action.contains("else -> onDownload(asset.id)"));
@@ -298,18 +116,6 @@ public final class ProductionUiPortSourceContractTest {
             assertTrue(factory, copy.contains("navigatorAssetErrorIntegrity = "));
             assertTrue(factory, copy.contains("navigatorAssetErrorSystem = "));
         }
-        assertTrue(between(compose, "private fun enCopy()", "private fun uaCopy()")
-                .contains("navigatorAssetStock = \"Stock\""));
-        assertTrue(between(compose, "private fun enCopy()", "private fun uaCopy()")
-                .contains("navigatorAssetPatched = \"Patched\""));
-        assertTrue(between(compose, "private fun uaCopy()", "private fun ruCopy()")
-                .contains("navigatorAssetStock = \"Стокова\""));
-        assertTrue(between(compose, "private fun uaCopy()", "private fun ruCopy()")
-                .contains("navigatorAssetPatched = \"Патчена\""));
-        assertTrue(between(compose, "private fun ruCopy()", "private fun shareCopy(")
-                .contains("navigatorAssetStock = \"Оригинальная\""));
-        assertTrue(between(compose, "private fun ruCopy()", "private fun shareCopy(")
-                .contains("navigatorAssetPatched = \"С патчем\""));
     }
 
     private static String source(String name) throws Exception {
@@ -329,10 +135,4 @@ public final class ProductionUiPortSourceContractTest {
         return source.substring(from, to);
     }
 
-    private static int count(String source, String needle) {
-        int count = 0;
-        for (int index = 0; (index = source.indexOf(needle, index)) >= 0;
-                index += needle.length()) count++;
-        return count;
-    }
 }

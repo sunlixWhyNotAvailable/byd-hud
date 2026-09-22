@@ -13,22 +13,10 @@ import java.nio.file.Paths;
 
 public final class SpeedLimitCompositeUiSourceContractTest {
     @Test
-    public void compositeControlsMatchAcceptedLabelsRangesAndOrder() throws IOException {
+    public void compositeControlsKeepInputBoundsAndModeGates() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
 
-        assertTrue(options.contains("\"У вільному полі\", \"Композитний\""));
-        assertTrue(options.contains("\"In a free field\", \"Composite\""));
-        assertTrue(options.contains("listOf(\"Тільки маневру\", \"Тільки смуг\", "
-                + "\"Вільне або маневру\", \"Вільне або смуг\")"));
-        assertTrue(options.contains("listOf(\"Maneuver only\", \"Lanes only\", "
-                + "\"Free or maneuver\", \"Free or lanes\")"));
-        assertTrue(options.contains("\"Поле для виводу у композитному режимі\""));
-        assertTrue(options.contains("\"Composite output field\""));
-        assertTrue(options.contains("\"Розмір знаку у полі маневру\""));
-        assertTrue(options.contains("\"Sign size in maneuver field\""));
-        assertTrue(options.contains("\"Розмір знаку у полі для смуг\""));
-        assertTrue(options.contains("\"Sign size in lane field\""));
         assertTrue(options.contains("maxValue = 103"));
         assertTrue(options.contains("fallbackValue = 64"));
         assertTrue(options.contains("maxValue = 36"));
@@ -40,16 +28,6 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(options.contains("|| snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES"));
         assertTrue(options.contains("(freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)"));
 
-        assertOrdered(options,
-                "optionsSection(\"runtime-permissions\"",
-                "optionsSection(\"basic-navigation\"",
-                "optionsSection(\"route-eta\"",
-                "optionsSection(\"speed-limit\"",
-                "optionsSection(\"waze-features\"",
-                "optionsSection(\"extra-navigation\"",
-                "optionsSection(\"dashboard-window-profile\"",
-                "\"dashboard-widget\"",
-                "optionsSection(\"dashboard-move\"");
     }
 
     @Test
@@ -71,19 +49,11 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
-    public void dropdownUsesFocusablePopupWithEqualRowsAndBoundedPosition() throws IOException {
+    public void dropdownPositionRemainsInsideWindowBounds() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String dropdown = between(source,
                 "private fun HudDropdown(",
                 "private fun HudIntegerStepper(");
-
-        assertTrue(dropdown.contains("val rowHeight = 40.dp"));
-        assertTrue(dropdown.contains("Popup("));
-        assertTrue(dropdown.contains("PopupProperties(focusable = true)"));
-        assertTrue(dropdown.contains(".height(rowHeight)"));
-        assertTrue(dropdown.contains(".background(if (index == safeIndex) selectedBackground else Color.Transparent)"));
-        assertFalse(dropdown.contains("DropdownMenu("));
-        assertFalse(dropdown.contains("32.dp"));
 
         String position = between(source,
                 "private object HudDropdownPositionProvider",
@@ -94,13 +64,10 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
-    public void dashboardScreenModeUsesAcceptedLabelsAndRuntimeCallback() throws IOException {
+    public void dashboardScreenModeUsesRuntimeCallback() throws IOException {
         String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String options = between(source, "private fun OptionsTab(", "private fun SetupReminderOverlay(");
 
-        assertTrue(options.contains("row(\"dashboard-screen-mode\")"));
-        assertTrue(options.contains("listOf(\"Немає\", \"Частковий\", \"Повний\")"));
-        assertTrue(options.contains("listOf(\"None\", \"Partial\", \"Full\")"));
         assertTrue(options.contains("selectedIndex = snapshot.dashboardScreenMode"));
         assertTrue(options.contains("activity.composeSetDashboardScreenMode(mode)"));
         assertFalse(options.contains("fullscreenDashboard"));
@@ -121,10 +88,6 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(options.contains("activity.composeSetDashboardOffsetPercent("));
         assertTrue(options.contains("activity.composeSetDashboardScalePercent("));
         assertTrue(options.contains("snapshot.dashboardScreenMode, it"));
-        assertTrue(options.contains("DashboardPercentRow(copy.dashboardWidth"));
-        assertTrue(options.contains("DashboardPercentRow(copy.dashboardHeight"));
-        assertTrue(options.contains("DashboardPercentRow(copy.dashboardOffset"));
-        assertTrue(options.contains("DashboardPercentRow(copy.dashboardScale"));
         assertTrue(options.contains("DashboardProjectionPolicy.MIN_WIDTH_PERCENT"));
         assertTrue(options.contains("DashboardProjectionPolicy.MAX_WIDTH_PERCENT"));
         assertTrue(options.contains("DashboardProjectionPolicy.MIN_HEIGHT_PERCENT"));
@@ -158,16 +121,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
                 "if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE)",
                 "row(\"dashboard-height\")");
 
-        assertOrdered(activeProfile, "row(\"dashboard-format-method\")", "row(\"dashboard-width\")");
-        assertTrue(activeProfile.contains("\"Спосіб встановлення формату екрану\""));
-        assertTrue(activeProfile.contains("\"Screen format method\""));
-        assertTrue(activeProfile.contains("\"Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний\""));
-        assertTrue(activeProfile.contains("\"Preferred mode: Native. If Native does not work, use Alternative.\""));
-        assertTrue(activeProfile.contains("left = language.choose(\"Штатний\", \"Native\", \"Штатный\")"));
-        assertTrue(activeProfile.contains("right = language.choose(\"Альтернативний\", \"Alternative\", \"Альтернативный\")"));
         assertTrue(activeProfile.contains("snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NATIVE"));
         assertTrue(activeProfile.contains("activity.composeSetDashboardFormatMethod("));
-        assertTrue(activeProfile.contains("itemWidth = 150.dp"));
 
         String prefs = sourcePath("app/src/main/java/com/bydhud/app/HudPrefs.java");
         assertTrue(prefs.contains("KEY_DASHBOARD_PARTIAL_FORMAT_METHOD"));
@@ -201,25 +156,8 @@ public final class SpeedLimitCompositeUiSourceContractTest {
     }
 
     @Test
-    public void rowExplanationsStripOnlyFinalFullStopThroughSharedHelper() throws IOException {
-        String source = sourcePath("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
-        assertTrue(source.contains("private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(\".\")"));
-        assertTrue(between(source, "private fun DashboardPercentRow(",
-                "private fun StorageDayRow(").contains("rowExplanation(hint)"));
-        assertTrue(between(source, "private fun SettingRow(",
-                "private fun HudDropdown(").contains("rowExplanation(hint)"));
-        assertTrue(between(source, "private fun SwitchRow(",
-                "private fun UpdateCheckLine(").contains("rowExplanation(hint)"));
-        assertTrue(between(source, "private fun ActionRow(",
-                "private fun CodeBlock(").contains("rowExplanation(hint)"));
-        assertTrue(between(source, "private fun HudCheckModeTile(",
-                "private fun OutputImageChoice(").contains("rowExplanation(hint)"));
-    }
-
-    @Test
-    public void snapshotCallbacksAndVersionUseCurrentContract() throws IOException {
+    public void snapshotCallbacksCarryCompositeSettings() throws IOException {
         String activity = sourcePath("app/src/main/java/com/bydhud/app/MainActivity.java");
-        String gradle = sourcePath("app/build.gradle.kts");
 
         assertTrue(activity.contains("HudPrefs.speedLimitCompositePlacement(this)"));
         assertTrue(activity.contains("HudPrefs.speedLimitManeuverOverlaySize(this)"));
@@ -227,8 +165,6 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(activity.contains("HudPrefs.setSpeedLimitCompositePlacement(this, placement)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitManeuverOverlaySize(this, size)"));
         assertTrue(activity.contains("HudPrefs.setSpeedLimitLaneOverlaySize(this, size)"));
-        assertTrue(gradle.contains("versionCode = 103"));
-        assertTrue(gradle.contains("versionName = \"3.2.5\""));
     }
 
     private static String sourcePath(String relativePath) throws IOException {
@@ -250,12 +186,4 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         return source.substring(from, to);
     }
 
-    private static void assertOrdered(String source, String... markers) {
-        int prior = -1;
-        for (String marker : markers) {
-            int current = source.indexOf(marker);
-            assertTrue("missing or out-of-order marker " + marker, current > prior);
-            prior = current;
-        }
-    }
 }

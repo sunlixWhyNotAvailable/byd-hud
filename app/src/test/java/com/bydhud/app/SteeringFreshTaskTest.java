@@ -45,15 +45,13 @@ public final class SteeringFreshTaskTest {
     }
 
     @Test
-    public void latestUiMoveOrReturnObservationDeterminesTheNextSteeringDirection() {
+    public void observedTaskIsClassifiedAsMainOrOwnedDashboard() {
         NavAppDisplayState onMain = new NavAppDisplayState("com.waze", 42, 0, true, "returned");
         NavAppDisplayState onDashboard = new NavAppDisplayState("com.waze", 42, 7, false, "moved");
         assertTrue(DashboardProjectionPolicy.classifyObservedDisplay("com.waze", onMain, "", -1)
                 == DashboardProjectionPolicy.ObservedDisplay.MAIN);
         assertTrue(DashboardProjectionPolicy.classifyObservedDisplay("com.waze", onDashboard, "com.waze", 7)
                 == DashboardProjectionPolicy.ObservedDisplay.DASHBOARD);
-        assertTrue(DashboardProjectionPolicy.classifyObservedDisplay("com.waze", onMain, "", -1)
-                == DashboardProjectionPolicy.ObservedDisplay.MAIN);
     }
 
     @Test

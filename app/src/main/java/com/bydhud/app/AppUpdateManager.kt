@@ -35,8 +35,6 @@ import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.io.FileInputStream
-import java.io.FileOutputStream
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.Locale
@@ -598,22 +596,15 @@ object AppUpdateManager {
             pollDownload(manager, downloadId, onProgress)
             currentCoroutineContext().ensureActive()
             onPreparing()
-            if (!download.isFile) throw IllegalStateException("Downloaded APK not found")
-            FileInputStream(download).use { input ->
-                FileOutputStream(part).use { output -> input.copyTo(output) }
-            }
-            currentCoroutineContext().ensureActive()
-            val targetVersionCode = validateDownloadedApk(context, part)
-            if (ready.exists() && !ready.delete()) throw IllegalStateException("Could not replace owned update APK")
-            if (!part.renameTo(ready)) throw IllegalStateException("Could not publish update APK")
+            val prepared = prepareUpdateApk(download, part, ready) { validateDownloadedApk(context, it) }
             record = record.copy(
-                targetVersionCode = targetVersionCode,
+                targetVersionCode = prepared.targetVersionCode,
                 phase = AppUpdateOwnershipPhase.READY
             )
             store.write(record)
             removeDownload(manager, downloadId)
             download.delete()
-            AppUpdateReadyApk(ready.absolutePath, targetVersionCode)
+            prepared
         }
 
         override suspend fun handoff(
@@ -621,20 +612,9 @@ object AppUpdateManager {
             ready: AppUpdateReadyApk,
             onExposed: (AppUpdateReadyApk) -> Unit
         ) {
-            val file = File(ready.path)
-            val exposed = withContext(Dispatchers.IO) {
-                val store = store(environment.resolve())
-                val record = store.read(operationId)
-                    ?: throw IllegalStateException("Update ownership missing")
-                if (!file.isFile || file.canonicalFile != store.readyFile(record).canonicalFile) {
-                    throw IllegalStateException("Downloaded APK not found")
-                }
-                val marked = record.copy(phase = AppUpdateOwnershipPhase.EXPOSED)
-                store.write(marked) //Durable before FileProvider creates or grants a URI.
-                ready.copy(exposed = true)
+            handoffUpdateApk(operationId, ready, { store(environment.resolve()) }, onExposed) { file ->
+                withContext(Dispatchers.Main) { launchInstaller(context, file) }
             }
-            onExposed(exposed)
-            withContext(Dispatchers.Main) { launchInstaller(context, file) }
         }
 
         override suspend fun cancelUnexposed(operationId: Long) = withContext(Dispatchers.IO) {

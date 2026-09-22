@@ -3,6 +3,7 @@ package com.bydhud.app
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
@@ -10,6 +11,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -272,6 +274,46 @@ internal object AppUpdateOperationIds {
 }
 
 internal enum class AppUpdateOwnershipPhase { ACTIVE, READY, EXPOSED }
+
+/** Shared file transaction; Android supplies APK verification, never a prevalidated flag. */
+internal suspend fun prepareUpdateApk(
+    download: File,
+    part: File,
+    ready: File,
+    validate: (File) -> Long
+): AppUpdateReadyApk {
+    if (!download.isFile) throw IllegalStateException("Downloaded APK not found")
+    FileInputStream(download).use { input ->
+        FileOutputStream(part).use { output -> input.copyTo(output) }
+    }
+    currentCoroutineContext().ensureActive()
+    val version = validate(part)
+    if (ready.exists() && !ready.delete()) throw IllegalStateException("Could not replace owned update APK")
+    if (!part.renameTo(ready)) throw IllegalStateException("Could not publish update APK")
+    return AppUpdateReadyApk(ready.absolutePath, version)
+}
+
+internal suspend fun handoffUpdateApk(
+    operationId: Long,
+    ready: AppUpdateReadyApk,
+    store: () -> AppUpdateOwnershipStore,
+    onExposed: (AppUpdateReadyApk) -> Unit,
+    launchInstaller: suspend (File) -> Unit
+) {
+    val file = File(ready.path)
+    val exposed = withContext(Dispatchers.IO) {
+        val ownership = store()
+        val record = ownership.read(operationId)
+            ?: throw IllegalStateException("Update ownership missing")
+        if (!file.isFile || file.canonicalFile != ownership.readyFile(record).canonicalFile) {
+            throw IllegalStateException("Downloaded APK not found")
+        }
+        ownership.write(record.copy(phase = AppUpdateOwnershipPhase.EXPOSED))
+        ready.copy(exposed = true)
+    }
+    onExposed(exposed)
+    launchInstaller(file)
+}
 
 internal data class AppUpdateOwnershipRecord(
     val operationId: Long,

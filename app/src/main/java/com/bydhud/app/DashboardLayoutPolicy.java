@@ -1,5 +1,8 @@
 package com.bydhud.app;
 
+import java.util.function.IntFunction;
+import java.util.function.Supplier;
+
 /** Pure command ordering for dashboard format-method and TBT transitions. */
 final class DashboardLayoutPolicy {
     static final int AUTOCONTAINER_FULL = 16;
@@ -63,5 +66,26 @@ final class DashboardLayoutPolicy {
         return ownership == OWNERSHIP_NONE
                 ? PROTOCOL_NATIVE
                 : AUTOCONTAINER_RELEASE;
+    }
+
+    /** Executes the production command sequence; callbacks retain their current-operation fences. */
+    static String executeWidget(int mode, int command, int ownership,
+            Supplier<String> release, IntFunction<String> protocol, Supplier<String> layout) {
+        if (shouldReleaseBeforeWidget(mode, command, ownership)) {
+            String error = release.get();
+            if (!error.isEmpty()) return error;
+        }
+        switch (mode) {
+            case NavAppDisplayController.WIDGET_MODE_IPC_OFF:
+                return ownership == OWNERSHIP_NONE ? protocol.apply(PROTOCOL_NATIVE) : "";
+            case NavAppDisplayController.WIDGET_MODE_TBT:
+                String error = protocol.apply(PROTOCOL_NATIVE);
+                return error.isEmpty() ? protocol.apply(PROTOCOL_TBT) : error;
+            case NavAppDisplayController.WIDGET_MODE_MINI:
+            case NavAppDisplayController.WIDGET_MODE_FULL:
+                return layout.get();
+            default:
+                return "unsupported widget mode=" + mode;
+        }
     }
 }

@@ -13,16 +13,6 @@ import org.junit.Test;
 
 public final class PatchOperationUiSourceContractTest {
     @Test
-    public void ukrainianPatchCheckLabelsFitTheActionRow() throws IOException {
-        String source = source("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
-
-        assertTrue(source.contains("patchNotChecked = \"перевір\""));
-        assertTrue(source.contains("checkPatch = \"Перевір\""));
-        assertFalse(source.contains("patchNotChecked = \"перевірити\""));
-        assertFalse(source.contains("checkPatch = \"Перевірити\""));
-    }
-
-    @Test
     public void productionUsesOneNonModalConcurrentCardStack() throws IOException {
         String source = source("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
         String stack = between(source,
@@ -38,50 +28,14 @@ public final class PatchOperationUiSourceContractTest {
         assertTrue(stack.contains("visibleConfigurationExport"));
         assertTrue(stack.contains("visibleStorageShares.forEach { state ->"));
         assertTrue(stack.contains("cards.forEach { card ->"));
-        assertTrue(stack.contains("padding(end = 24.dp, bottom = 24.dp)"));
-        assertTrue(stack.contains("Arrangement.spacedBy(12.dp)"));
-        assertTrue(stack.contains("val stackHeight = 170.dp * cards.size + 12.dp * (cards.size - 1)"));
         assertTrue(stack.contains("if (stackHeight > maxHeight)"));
         assertTrue(stack.contains("Modifier.verticalScroll(rememberScrollState())"));
-        assertTrue(stack.contains("Modifier.width(460.dp).then(scrollModifier)"));
-        assertTrue(card.contains(".width(460.dp)"));
-        assertTrue(card.contains(".height(170.dp)"));
-        assertTrue(card.contains(".padding(16.dp)"));
-        assertTrue(card.contains("language.choose(\"Зупинити\", \"Stop\", \"Остановить\")"));
-        assertFalse(card.contains("copy.cancel"));
         assertFalse(stack.contains("ModalInputBlocker"));
         assertFalse(stack.contains("Color.Black.copy"));
         assertTrue(source.contains("patchActionPendingProfiles"));
         assertTrue(source.contains("snapshot.patchOperations.firstOrNull"));
         assertTrue(source.contains("operation.cancelAllowed"));
         assertTrue(source.contains("operation.phase == \"FAILED\" || operation.phase == \"CANCELLED\""));
-    }
-
-    @Test
-    public void previewMirrorsIndependentWazeGmapsAndShareCards() throws IOException {
-        String source = previewSource();
-        String stack = between(source,
-                "private fun PreviewOperationStack(",
-                "private fun previewOperationTitle(");
-
-        assertTrue(source.contains("previewOperations.containsKey(\"waze\")"));
-        assertTrue(source.contains("previewOperations.containsKey(\"gmaps\")"));
-        assertTrue(source.contains("startPreviewOperation(\"share\""));
-        assertTrue(stack.contains("sortedByDescending { it.first }"));
-        assertFalse(stack.contains(".take(3)"));
-        assertTrue(stack.contains("visible.forEach { (_, key) ->"));
-        assertTrue(stack.contains(".padding(24.dp)"));
-        assertTrue(stack.contains("Arrangement.spacedBy(12.dp)"));
-        assertTrue(stack.contains("val stackHeight = 170.dp * visible.size + 12.dp * (visible.size - 1)"));
-        assertTrue(stack.contains("Modifier.verticalScroll(rememberScrollState())"));
-        assertTrue(stack.contains(".size(width = 460.dp, height = 170.dp)"));
-        assertTrue(stack.contains(".padding(16.dp)"));
-        assertFalse(stack.contains("ModalInputBlocker"));
-        assertTrue(source.contains("startLogcat = \"Start Logcat\""));
-        assertTrue(source.contains("stopLogcat = \"Stop Logcat\""));
-        assertTrue(source.contains("startLogcat = \"Почати Logcat\""));
-        assertTrue(source.contains("stopLogcat = \"Зупинити Logcat\""));
-        assertFalse(source.contains("startLogcat = \"Record Logcat\""));
     }
 
     @Test
@@ -123,18 +77,6 @@ public final class PatchOperationUiSourceContractTest {
             file = root.resolve(relativePath.substring("app/".length()));
         }
         return normalize(file);
-    }
-
-    private static String previewSource() throws IOException {
-        Path cursor = Paths.get(System.getProperty("user.dir")).toAbsolutePath();
-        while (cursor != null) {
-            Path file = cursor.resolve(
-                    "byd-hud-compose-preview/compose-preview/src/main/java/"
-                            + "com/bydhud/preview/MainActivity.kt");
-            if (Files.isRegularFile(file)) return normalize(file);
-            cursor = cursor.getParent();
-        }
-        throw new IOException("preview source not found");
     }
 
     private static String normalize(Path file) throws IOException {

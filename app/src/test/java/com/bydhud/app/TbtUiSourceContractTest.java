@@ -19,18 +19,10 @@ public final class TbtUiSourceContractTest {
 
         assertTrue(compose.contains("tbtWithoutHudOutput"));
         assertTrue(compose.contains("switchToTbtOnHudStart"));
-        assertTrue(compose.contains("Create a TBT card even for an active navigator session without HUD output"));
-        assertTrue(compose.contains("Формувати TBT-картку навіть для активної сесії навігатора без виводу на HUD"));
         assertTrue(activity.contains("composeSetTbtWithoutHudOutputEnabled"));
         assertTrue(activity.contains("composeSetSwitchToTbtOnHudStartEnabled"));
         assertTrue(prefs.contains("getBoolean(KEY_TBT_WITHOUT_HUD_OUTPUT, true)"));
         assertTrue(prefs.contains("getBoolean(KEY_SWITCH_TO_TBT_ON_HUD_START, true)"));
-    }
-
-    @Test
-    public void roadInfoUsesAcceptedF2Constant() throws IOException {
-        String road = source("app/src/main/java/com/bydhud/app/HudRoadPayload.java");
-        assertTrue(road.contains("writeInt32(road, 2, 2)"));
     }
 
     @Test

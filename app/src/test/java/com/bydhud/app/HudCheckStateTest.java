@@ -64,8 +64,7 @@ public final class HudCheckStateTest {
         assertEquals(1, advanced.stop().extendedIndex);
         assertEquals(1, advanced.stop().toggleRun().extendedIndex);
         assertEquals(2, advanced.stop().stepExtended(1).extendedIndex);
-        assertEquals(0, advanced.stop().stepExtended(24).extendedIndex);
-        assertEquals(25, HudCheckPayload.extendedCount());
+        assertEquals(0, advanced.stop().stepExtended(HudCheckPayload.extendedCount() - 1).extendedIndex);
     }
 
     @Test

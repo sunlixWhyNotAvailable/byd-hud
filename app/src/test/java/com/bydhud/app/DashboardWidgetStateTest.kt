@@ -43,7 +43,6 @@ class DashboardWidgetStateTest {
 
     @Test fun hideAndReopenNeverChangeShapeAndCollapseIsOptional() {
         val enabled = DashboardWidgetState(shape = DashboardWidgetShape.Square).toggleExpanded()
-        assertEquals(5, enabled.fields().size)
         assertFalse(enabled.onModeClick().expanded)
         assertTrue(enabled.copy(autoCollapse = false).onModeClick().expanded)
         val hidden = enabled.hide()

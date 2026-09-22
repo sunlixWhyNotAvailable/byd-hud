@@ -22,6 +22,14 @@ import java.util.zip.InflaterInputStream;
 
 public final class HudCheckPayloadTest {
     @Test
+    public void roadPacketCarriesTheRequiredF2ProtocolValue() {
+        HudState state = new HudState();
+        state.turnBitmapMode = HudState.TURN_BITMAP_OMIT;
+        Map<Integer, Value> fields = inner(HudRoadPayload.build(state));
+        assertEquals(2L, fields.get(2).varint);
+    }
+
+    @Test
     public void bothMapPacketsContainAnOpaqueVisibleDiagnosticImage() throws Exception {
         byte[] previousPng = null;
         for (int index : new int[]{15, 16}) {

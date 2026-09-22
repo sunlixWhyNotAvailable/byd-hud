@@ -137,27 +137,7 @@ public final class DashboardMoveContractTest {
     }
 
     @Test
-    public void autoContainerPolicyOnlySelectsExplicitTransitions() {
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_NATIVE, true));
-        assertEquals(16, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_FULL,
-                HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
-        assertEquals(17, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_PARTIAL,
-                HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_PARTIAL, HudPrefs.DASHBOARD_FORMAT_NATIVE, true));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_NONE, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                true, HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, false));
-        assertEquals(0, NavAppDisplayController.autoContainerValueForTest(
-                false, HudPrefs.DASHBOARD_MODE_FULL, HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE, true));
-        assertTrue(NavAppDisplayController.isUserRequestedReturnForTest(
-                "ui-independent-dashboard-explicit"));
-        assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("shutdown"));
-        assertFalse(NavAppDisplayController.isUserRequestedReturnForTest("hud-switch-to-gmaps"));
+    public void leaseTransferRequiresDirectReplacementAndCurrentOwnedLease() {
         assertTrue(NavAppDisplayController.isDirectNavigatorReplacement(
                 "com.waze", GMapsDirectChannel.PACKAGE_NAME));
         assertTrue(NavAppDisplayController.isDirectNavigatorReplacement(
@@ -172,6 +152,8 @@ public final class DashboardMoveContractTest {
                 "", GMapsDirectChannel.PACKAGE_NAME, "com.waze", 7L));
         assertFalse(NavAppDisplayController.shouldPrepareAutoContainerLeaseTransfer(
                 "com.waze", GMapsDirectChannel.PACKAGE_NAME, "com.waze", 0L));
+        assertFalse(NavAppDisplayController.shouldPrepareAutoContainerLeaseTransfer(
+                "com.waze", GMapsDirectChannel.PACKAGE_NAME, GMapsDirectChannel.PACKAGE_NAME, 7L));
     }
 
     @Test
