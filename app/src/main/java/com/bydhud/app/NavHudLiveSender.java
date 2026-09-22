@@ -1364,21 +1364,21 @@ final class NavHudLiveSender {
         if (permit == null) {
             waitForWazeRouteLifecycle(reason);
             WazeStartCoordinator.requestLegacyReconcile(context, reason);
-        } else if (permit.source == WazeStartAdmission.Source.LEGACY_PROCESS) {
+        } else if (permit.source == WazeStartAdmission.Source.LEGACY_WINDOW) {
             startWazeDirectProbe(reason);
         } else {
             startWazeDirectForRoute(reason, recovering);
         }
     }
 
-    static void onWazeLegacyProcessObserved(Context context, String reason) {
+    static void onWazeLegacyWindowObserved(Context context, String reason) {
         if (!WazeStartCoordinator.refreshRuntime(context)) return;
         NavHudLiveSender current = get(context);
         current.handler.post(() -> {
             if (!WazeStartCoordinator.refreshRuntime(current.context)
                     || WazeStartAdmission.PROCESS.acquire(SystemClock.elapsedRealtime()) == null) return;
             if (NavCapturePrefs.isHudEnabled(current.context, WAZE_PACKAGE)) {
-                current.startOnMain(WAZE_PACKAGE, "legacy-process:" + safeReason(reason));
+                current.startOnMain(WAZE_PACKAGE, "legacy-window:" + safeReason(reason));
             } else {
                 current.refreshTbtObserversOnMain();
             }
@@ -3879,7 +3879,7 @@ final class NavHudLiveSender {
             WazeStartAdmission.Permit permit = WazeStartAdmission.PROCESS.acquire(
                     SystemClock.elapsedRealtime());
             boolean routeActive = WazeRouteLifecycleStore.isRouteActive(context)
-                    && permit != null && permit.source != WazeStartAdmission.Source.LEGACY_PROCESS;
+                    && permit != null && permit.source != WazeStartAdmission.Source.LEGACY_WINDOW;
             if (wantsObserver && !ownsHud && !routeActive) {
                 requestWazeRouteStateSnapshot("tbt-observer", false);
             }

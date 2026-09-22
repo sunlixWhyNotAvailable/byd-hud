@@ -14,8 +14,10 @@ import android.view.KeyEvent;
 import android.view.ViewConfiguration;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -44,6 +46,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     private boolean captureScheduled;
     private long lastCaptureElapsedMs;
     private final Set<String> observedThisProcess = new HashSet<>();
+    private final AtomicLong windowObservationGeneration = new AtomicLong();
     private final Object steeringLock = new Object();
     private volatile boolean keyLearning;
     private volatile boolean steeringSuspended;
@@ -72,6 +75,49 @@ public final class NavAccessibilityService extends AccessibilityService {
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     static boolean isCrashedForRuntimeCheck() {
         return runtimeCrashed;
+    }
+
+    /** Worker-only, root metadata only: an event package or cached task is not launch proof. */
+    static long observeWazeApplicationWindow() {
+        NavAccessibilityService service = activeService;
+        if (service == null || service.steeringSuspended) return -1L;
+        long generation = service.windowObservationGeneration.get();
+        long started = SystemClock.elapsedRealtime();
+        List<AccessibilityWindowInfo> windows = null;
+        boolean found = false;
+        try {
+            windows = service.getWindows();
+            if (windows == null) return -1L;
+            for (AccessibilityWindowInfo window : windows) {
+                if (window == null || window.getType() != AccessibilityWindowInfo.TYPE_APPLICATION
+                        || (!window.isActive() && !window.isFocused())) continue;
+                AccessibilityNodeInfo root = window.getRoot();
+                if (root == null) continue;
+                try {
+                    if (isWazeApplicationWindow(window.getType(), window.isActive(),
+                            window.isFocused(), root.getPackageName(), root.isVisibleToUser())) {
+                        found = true;
+                        break;
+                    }
+                } finally {
+                    root.recycle();
+                }
+            }
+        } catch (RuntimeException unavailable) {
+            return -1L;
+        } finally {
+            if (windows != null) for (AccessibilityWindowInfo window : windows) {
+                if (window != null) window.recycle();
+            }
+        }
+        return found && activeService == service && !service.steeringSuspended
+                && service.windowObservationGeneration.get() == generation ? started : -1L;
+    }
+
+    static boolean isWazeApplicationWindow(int type, boolean active, boolean focused,
+            CharSequence rootPackage, boolean rootVisible) {
+        return type == AccessibilityWindowInfo.TYPE_APPLICATION && (active || focused)
+                && rootVisible && rootPackage != null && "com.waze".contentEquals(rootPackage);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -116,6 +162,7 @@ public final class NavAccessibilityService extends AccessibilityService {
             return;
         }
         service.steeringSuspended = true;
+        service.windowObservationGeneration.incrementAndGet();
         Handler handler = service.captureHandler;
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
@@ -177,6 +224,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onServiceConnected() {
         super.onServiceConnected();
+        windowObservationGeneration.incrementAndGet();
         activeService = this;
         synchronized (steeringLock) {
             steeringRuntimeGeneration++;
@@ -221,6 +269,7 @@ public final class NavAccessibilityService extends AccessibilityService {
     @Override
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
+        windowObservationGeneration.incrementAndGet();
         clearSteeringTransientState();
         Handler handler = captureHandler;
         if (activeService == this) {

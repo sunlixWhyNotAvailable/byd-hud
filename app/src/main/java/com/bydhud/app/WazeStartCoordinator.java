@@ -5,8 +5,10 @@ import android.content.pm.PackageInfo;
 import android.os.SystemClock;
 
 import java.util.concurrent.FutureTask;
+import java.util.function.LongFunction;
+import java.util.function.LongSupplier;
 
-/** Event-driven admission and a coalesced, read-only legacy process check. */
+/** Event-driven admission from a real Waze window plus a coalesced process check. */
 final class WazeStartCoordinator {
     private static final ReconcileGate RECONCILE = new ReconcileGate();
     private static final Object PROCESS_CHECK_LOCK = new Object();
@@ -50,14 +52,25 @@ final class WazeStartCoordinator {
                     if (!refreshRuntime(appContext)
                             || WazeRouteLifecycleStore.isBridgeSupported(appContext)) continue;
                     long epoch = WazeStartAdmission.PROCESS.epoch();
+                    long windowObservedMs = NavAccessibilityService.observeWazeApplicationWindow();
+                    refreshRuntime(appContext);
+                    WazeStartAdmission.PROCESS.observedWindow(epoch, windowObservedMs);
+                    if (!WazeStartAdmission.PROCESS.hasFreshLegacyWindow(
+                            epoch, SystemClock.elapsedRealtime())) {
+                        logDecision(appContext, "waiting_window", trigger, epoch);
+                        continue;
+                    }
                     ProcessObservation observation = readProcess(appContext, epoch);
                     refreshRuntime(appContext);
-                    boolean admitted = WazeStartAdmission.PROCESS.observedProcess(epoch,
+                    WazeStartAdmission.PROCESS.observedProcess(epoch,
                             observation.canAdmit(epoch, SystemClock.elapsedRealtime()),
                             observation.startedElapsedMs);
-                    logDecision(appContext, admitted ? "legacy_ready" : "waiting_" + observation.presence,
+                    WazeStartAdmission.Permit permit = WazeStartAdmission.PROCESS.acquire(
+                            SystemClock.elapsedRealtime());
+                    boolean admitted = permit != null && permit.source == WazeStartAdmission.Source.LEGACY_WINDOW;
+                    logDecision(appContext, admitted ? "window_ready" : "waiting_evidence",
                             trigger, epoch);
-                    if (admitted) NavHudLiveSender.onWazeLegacyProcessObserved(appContext, trigger);
+                    if (admitted) NavHudLiveSender.onWazeLegacyWindowObserved(appContext, trigger);
                 } catch (RuntimeException unavailable) {
                     logDecision(appContext, "waiting_UNAVAILABLE", trigger,
                             WazeStartAdmission.PROCESS.epoch());
@@ -71,22 +84,29 @@ final class WazeStartCoordinator {
     /** Called only on a channel worker before a new bind, never from the UI thread. */
     static WazeStartAdmission.Permit beforeBind(Context context, boolean retry, String reason) {
         if (!refreshRuntime(context)) return null;
-        long epoch = WazeStartAdmission.PROCESS.epoch();
-        WazeStartAdmission.Permit permit = WazeStartAdmission.PROCESS.acquire(
-                SystemClock.elapsedRealtime());
-        if (retry && (permit == null || permit.source == WazeStartAdmission.Source.LEGACY_PROCESS)
-                && !WazeRouteLifecycleStore.isBridgeSupported(context)) {
-            ProcessObservation observation = readProcess(context, epoch);
-            refreshRuntime(context);
-            WazeStartAdmission.PROCESS.observedProcess(epoch,
-                    observation.canAdmit(epoch, SystemClock.elapsedRealtime()),
-                    observation.startedElapsedMs);
-            permit = WazeStartAdmission.PROCESS.acquire(SystemClock.elapsedRealtime());
-        }
-        if (epoch != WazeStartAdmission.PROCESS.epoch()) return null;
+        WazeStartAdmission.Permit permit = beforeBind(WazeStartAdmission.PROCESS, retry,
+                SystemClock::elapsedRealtime, epoch -> readProcess(context, epoch),
+                () -> refreshRuntime(context));
         logDecision(context, permit == null ? "waiting" : "admitted_" + permit.source,
-                reason, epoch);
+                reason, WazeStartAdmission.PROCESS.epoch());
         return permit;
+    }
+
+    /** The final decision is shared by both channel modes; collaborators keep its races testable. */
+    static WazeStartAdmission.Permit beforeBind(WazeStartAdmission admission, boolean retry,
+            LongSupplier clock, LongFunction<ProcessObservation> processRead, Runnable refresh) {
+        long epoch = admission.epoch();
+        WazeStartAdmission.Permit permit = admission.acquire(clock.getAsLong());
+        if (retry && (permit == null || permit.source == WazeStartAdmission.Source.LEGACY_WINDOW)
+                && admission.hasFreshLegacyWindow(epoch, clock.getAsLong())) {
+            ProcessObservation observation = processRead.apply(epoch);
+            refresh.run();
+            admission.observedProcess(epoch,
+                    observation.canAdmit(epoch, clock.getAsLong()),
+                    observation.startedElapsedMs);
+            permit = admission.acquire(clock.getAsLong());
+        }
+        return epoch == admission.epoch() ? permit : null;
     }
 
     static ProcessObservation readProcess(Context context, long epoch) {

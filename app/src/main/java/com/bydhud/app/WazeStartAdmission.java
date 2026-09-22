@@ -5,7 +5,7 @@ final class WazeStartAdmission {
     static final WazeStartAdmission PROCESS = new WazeStartAdmission();
     static final long FRESH_MS = 5_000L;
 
-    enum Source { LIVE_ROUTE, LEGACY_PROCESS, ACTIVE_RECOVERY }
+    enum Source { LIVE_ROUTE, LEGACY_WINDOW, ACTIVE_RECOVERY }
 
     static final class Permit {
         final long epoch;
@@ -25,6 +25,7 @@ final class WazeStartAdmission {
     private boolean establishedRoute;
     private long routeEvidenceMs = -1L;
     private long legacyEvidenceMs = -1L;
+    private long legacyWindowMs = -1L;
 
     synchronized long epoch() { return epoch; }
 
@@ -36,7 +37,10 @@ final class WazeStartAdmission {
         if (this.enabled && !enabled) invalidate();
         this.enabled = enabled;
         this.bridgeSupported = bridgeSupported;
-        if (bridgeSupported) legacyEvidenceMs = -1L;
+        if (bridgeSupported) {
+            legacyEvidenceMs = -1L;
+            legacyWindowMs = -1L;
+        }
     }
 
     synchronized void acceptedRoute(boolean active, boolean navigating,
@@ -47,6 +51,19 @@ final class WazeStartAdmission {
         }
         routeActive = true;
         if (navigating) routeEvidenceMs = eventElapsedMs;
+    }
+
+    synchronized boolean observedWindow(long expectedEpoch, long observedElapsedMs) {
+        if (expectedEpoch != epoch || !enabled || bridgeSupported || observedElapsedMs < 0L) {
+            return false;
+        }
+        legacyWindowMs = Math.max(legacyWindowMs, observedElapsedMs);
+        return true;
+    }
+
+    synchronized boolean hasFreshLegacyWindow(long expectedEpoch, long nowElapsedMs) {
+        return expectedEpoch == epoch && enabled && !bridgeSupported
+                && fresh(legacyWindowMs, nowElapsedMs);
     }
 
     synchronized boolean observedProcess(long expectedEpoch, boolean running,
@@ -62,15 +79,15 @@ final class WazeStartAdmission {
         if (routeActive && fresh(routeEvidenceMs, nowElapsedMs)) {
             return new Permit(epoch, Source.LIVE_ROUTE);
         }
-        if (!bridgeSupported && fresh(legacyEvidenceMs, nowElapsedMs)) {
-            return new Permit(epoch, Source.LEGACY_PROCESS);
+        if (hasFreshLegacyWindow(epoch, nowElapsedMs) && fresh(legacyEvidenceMs, nowElapsedMs)) {
+            return new Permit(epoch, Source.LEGACY_WINDOW);
         }
         return null;
     }
 
     synchronized boolean isCurrent(Permit permit) {
         return permit != null && enabled && permit.epoch == epoch
-                && (permit.source != Source.LEGACY_PROCESS || !bridgeSupported || routeActive);
+                && (permit.source != Source.LEGACY_WINDOW || !bridgeSupported || routeActive);
     }
 
     synchronized void established(Permit permit, boolean navigationStarted) {
@@ -87,6 +104,7 @@ final class WazeStartAdmission {
         establishedRoute = false;
         routeEvidenceMs = -1L;
         legacyEvidenceMs = -1L;
+        legacyWindowMs = -1L;
     }
 
     private static boolean fresh(long evidenceMs, long nowMs) {
