@@ -15,7 +15,10 @@ The uploaded ZIP is the same complete archive offered through Android's normal s
 - exact coordinates, routes, streets, navigation instructions, and search text;
 - Waze screenshots and direct-channel maneuver, lane, or alert images;
 - BYD HUD event, navigation, SOME/IP transmission, and recorded full-system logcat files;
+- Shanghai test evidence: UDP network packet captures, raw received SOME/IP messages, ADAS readings, and before/after system snapshots of location services, network interfaces and routes, and running processes;
 - data from both public and app-private log storage for the selected days.
+
+Shanghai evidence is included with its selected storage day. Location snapshots may contain the vehicle's real last-known coordinates in addition to the simulated route; network snapshots and packet captures may contain IP and MAC addresses and other network identifiers. These diagnostic files are not covered by the network-identifier masking described below for the separate vehicle configuration archive.
 
 Each explicit upload uses its own Sentry client, sends one event with one ZIP attachment, waits for that transfer's result, and closes its client. Another upload can start after the 30-second admission cooldown while an earlier transfer continues. Automatic crash, ANR, session, breadcrumb, tracing, profiling, screenshot, view-hierarchy, and replay collection are disabled. Failed uploads are not retried in the background.
 

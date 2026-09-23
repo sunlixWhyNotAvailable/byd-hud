@@ -2,7 +2,7 @@
 
 **English** | [Українська](README.uk.md)
 
-<img align="right" src="app/src/main/res/drawable-nodpi/hud_apk_icon.png" alt="BYD HUD icon" width="112">
+<img align="right" src="app/src/main/res/drawable-nodpi/hud_apk_icon.webp" alt="BYD HUD icon" width="112">
 
 BYD HUD connects an active Google Maps or Waze route to the navigation fields already available in compatible Chinese-market BYD vehicles. The map stays in the navigator; maneuver, distance, street, lanes, alerts, and optional trip metrics are sent separately to the HUD.
 
@@ -109,7 +109,7 @@ The `Options` tab controls what BYD HUD sends. Changing a switch affects the nex
 
 Use the rounded `?` beside Basic, ETA, speed-limit and Waze controls to open a schematic Preview. Its controls change only the illustration, not your saved settings or the HUD. Samples follow the application's language, street format and selected colors. Experimental ETA/Waze locations use separate HUD regions. Some screenshots below show an earlier interface layout.
 
-The 82 help illustrations use compressed WebP (quality 60) at their original 2172×724 resolution to reduce the APK size. Their positions and language variants are preserved; this compression does not affect navigation images sent to the HUD.
+The 83 help illustrations use compressed WebP (quality 60) at their original 2172×724 resolution to reduce the APK size. The launcher and top-bar icons also use quality-60 WebP with their original dimensions and transparency. Positions and language variants are preserved; this compression does not affect navigation images sent to the HUD.
 
 ### Basic navigation output
 

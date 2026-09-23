@@ -5,6 +5,8 @@
   "sourceRepositoryPath": "arhud/someip-subscriber-probe/routes/shanghai_east_city_drive.gpx",
   "sourceGpxSha256": "FF1D7DCF5325A174B60CE0AEC6EF35346A3D77EC6330D67EEB15F5F62A23422B",
   "sourceMetadataSha256": "6242A8C34B634D166AEDA3E59AF4E47CF0744A55B73BCB80C846C59CCC014BA8",
+  "packagedGpxSha256": "1D89B70CA45452FFEC5835535921371131D0131951B27F8E009F80A0D67F27A8",
+  "packagedMetadataSha256": "21227CCC7BF1742F84BAC7843A4E4382BC29E23820432754EE5060C1606F9483",
   "sourceOsrmSha256": "D51E9D6FA9D39D3FDB24C8DA7E714F4E466E87C8847DF885C806E1280712A1EC",
   "source": "https://routing.openstreetmap.de/routed-car/route/v1/driving/121.473732,31.230358;121.487396,31.232209;121.481802,31.238068?overview=full&geometries=geojson&steps=true&continue_straight=true",
   "retrievedDate": "2026-09-12",
@@ -14,5 +16,5 @@
   "productionStartHoldSeconds": 15,
   "productionDurationSeconds": 295,
   "intervalMs": 1000,
-  "transformation": "The packaged source GPX is byte-identical. Runtime omits 15 duplicate initial hold fixes; movement geometry and the 10-second end hold are unchanged."
+  "transformation": "Source hashes describe the original research files; packaged hashes describe the shipped LF-normalized GPX and source metadata. Runtime omits 15 duplicate initial hold fixes; movement geometry and the 10-second end hold are unchanged."
 }

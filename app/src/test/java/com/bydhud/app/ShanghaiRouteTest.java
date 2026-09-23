@@ -8,8 +8,30 @@ import java.io.InputStream;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.security.MessageDigest;
+import java.util.HexFormat;
+import org.json.JSONObject;
 
 public final class ShanghaiRouteTest {
+    @Test public void packagedProvenanceMatchesExactAssetBytes() throws Exception {
+        Path directory = asset().getParent();
+        JSONObject provenance = new JSONObject(new String(
+                Files.readAllBytes(directory.resolve("production-route.json")),
+                java.nio.charset.StandardCharsets.UTF_8));
+        assertEquals(provenance.getString("packagedGpxSha256"), sha256(asset()));
+        assertEquals(provenance.getString("packagedMetadataSha256"),
+                sha256(directory.resolve("shanghai_east_city_drive.source.json")));
+        assertEquals("FF1D7DCF5325A174B60CE0AEC6EF35346A3D77EC6330D67EEB15F5F62A23422B",
+                provenance.getString("sourceGpxSha256"));
+        assertEquals("6242A8C34B634D166AEDA3E59AF4E47CF0744A55B73BCB80C846C59CCC014BA8",
+                provenance.getString("sourceMetadataSha256"));
+    }
+
+    private static String sha256(Path file) throws Exception {
+        return HexFormat.of().withUpperCase().formatHex(
+                MessageDigest.getInstance("SHA-256").digest(Files.readAllBytes(file)));
+    }
+
     @Test public void retainedGeometryDropsOnlyFifteenInitialHoldFixes() throws Exception {
         ShanghaiRoute route;
         try (InputStream input = Files.newInputStream(asset())) {

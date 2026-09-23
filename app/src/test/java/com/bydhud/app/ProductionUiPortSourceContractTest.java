@@ -120,7 +120,8 @@ public final class ProductionUiPortSourceContractTest {
 
     private static String source(String name) throws Exception {
         return new String(Files.readAllBytes(projectRoot().resolve(
-                "app/src/main/java/com/bydhud/app/" + name)), StandardCharsets.UTF_8);
+                "app/src/main/java/com/bydhud/app/" + name)), StandardCharsets.UTF_8)
+                .replace("\r\n", "\n");
     }
 
     private static Path projectRoot() {
