@@ -13,4 +13,5 @@ interface IInstrumentNavigationProxy {
     oneway void shutdown(long generation);
     Bundle suspendOutput(long generation);
     Bundle resumeOutput(long generation);
+    Bundle nativeSpeedOperation(long generation, int operation, int value);
 }

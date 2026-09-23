@@ -461,6 +461,27 @@ public final class DirectTbtPayloadTest {
     }
 
     @Test
+    public void nativeFallbackUsesExistingBitmapPlacementWithoutChangingConfiguredOptions() {
+        DirectTbtFrame frame = speedFrame(new byte[]{1}, new byte[]{2});
+        DirectTbtPayload.Options configured = speedOptions(HudPrefs.SPEED_LIMIT_NATIVE,
+                HudPrefs.SPEED_LIMIT_FALLBACK_LANES);
+        DirectTbtPayload.Options maneuver = configured.withSpeedLimitMode(HudPrefs.SPEED_LIMIT_MANEUVER);
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_MANEUVER,
+                DirectTbtPayload.speedPlacement(frame, maneuver));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_LANES,
+                DirectTbtPayload.speedPlacement(frame,
+                        configured.withSpeedLimitMode(HudPrefs.SPEED_LIMIT_LANES)));
+        assertEquals(DirectTbtPayload.SPEED_PLACEMENT_NONE,
+                DirectTbtPayload.speedPlacement(frame, configured.withSpeedLimitMode(HudPrefs.SPEED_LIMIT_OFF)));
+        assertEquals(HudPrefs.SPEED_LIMIT_NATIVE, configured.speedLimitMode);
+        assertEquals(configured.speedLimitFreeFallback, maneuver.speedLimitFreeFallback);
+        assertEquals(configured.speedLimitOverlaySeconds, maneuver.speedLimitOverlaySeconds);
+        assertEquals(configured.speedLimitCompositePlacement, maneuver.speedLimitCompositePlacement);
+        assertFalse(NavHudLiveSender.shouldDispatchSemanticTbtForDirectReason("native-speed-fallback"));
+        assertTrue(NavHudLiveSender.shouldDispatchSemanticTbtForDirectReason("speed-limit-event"));
+    }
+
+    @Test
     public void compositePlacementUsesNamedAndOnlyFreeFields() {
         DirectTbtFrame bothOccupied = speedFrame(new byte[]{1}, new byte[]{2});
         DirectTbtFrame bothFree = speedFrame(new byte[0], new byte[0]);

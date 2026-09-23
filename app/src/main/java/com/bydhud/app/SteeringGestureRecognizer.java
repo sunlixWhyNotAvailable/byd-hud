@@ -18,6 +18,16 @@ final class SteeringGestureRecognizer {
         void accept(SteeringTransferProfile profile, String origin);
     }
 
+    static final class KeyResult {
+        final boolean consumed;
+        final String reason;
+
+        KeyResult(boolean consumed, String reason) {
+            this.consumed = consumed;
+            this.reason = reason;
+        }
+    }
+
     private final long holdTimeout;
     private final long doubleTimeout;
     private final long tailTimeout;
@@ -34,6 +44,28 @@ final class SteeringGestureRecognizer {
     }
 
     long revision() { return revision; }
+
+    boolean isConfiguredOrActiveKey(int rawKey) {
+        int key = SteeringTransferPolicy.canonicalKeyCode(rawKey);
+        for (SteeringTransferProfile profile : profiles) {
+            if (profile.keyCode == key) return true;
+        }
+        return presses.containsKey(key) || pendingUps.containsKey(key)
+                || lateNativeTails.containsKey(key);
+    }
+
+    String profileState(int rawKey) {
+        if (revision < 0) return "unloaded";
+        int key = SteeringTransferPolicy.canonicalKeyCode(rawKey);
+        StringBuilder state = new StringBuilder();
+        for (SteeringTransferProfile profile : profiles) {
+            if (profile.keyCode != key) continue;
+            if (state.length() > 0) state.append(',');
+            state.append(profile.pressMode).append(':').append(profile.packageName)
+                    .append('/').append(profile.windowProfile);
+        }
+        return state.length() == 0 ? "none" : state.toString();
+    }
 
     void configure(List<SteeringTransferProfile> values, long newRevision) {
         if (revision == newRevision) return;
@@ -56,6 +88,12 @@ final class SteeringGestureRecognizer {
 
     boolean onKey(int rawKey, int action, int repeats, boolean cancelled,
             long eventTime, long now, boolean blocked, MatchConsumer emit) {
+        return onKeyWithResult(rawKey, action, repeats, cancelled, eventTime, now,
+                blocked, emit).consumed;
+    }
+
+    KeyResult onKeyWithResult(int rawKey, int action, int repeats, boolean cancelled,
+            long eventTime, long now, boolean blocked, MatchConsumer emit) {
         int key = SteeringTransferPolicy.canonicalKeyCode(rawKey);
         Press press = presses.get(key);
         if (press != null && !press.expiredTimerHold
@@ -77,7 +115,9 @@ final class SteeringGestureRecognizer {
             if (profile.keyCode == key) { assigned = true; break; }
         }
         boolean nativeAlias = SteeringTransferPolicy.isNativeLongAlias(rawKey);
-        if (!assigned && press == null && !(nativeAlias && lateNativeTail != null)) return false;
+        if (!assigned && press == null && !(nativeAlias && lateNativeTail != null)) {
+            return result(false, "unassigned-no-active-press");
+        }
         if (nativeAlias) {
             return onNativeLong(key, action, repeats, cancelled, eventTime, now, blocked, emit);
         }
@@ -88,14 +128,14 @@ final class SteeringGestureRecognizer {
                 if (!press.nativeDown) presses.remove(key);
             }
             else if (press != null) press.cancelled = true;
-            return true;
+            return result(true, "cancelled-event");
         }
         if (action == SteeringTransferPolicy.ACTION_DOWN) {
-            if (repeats != 0) return true;
+            if (repeats != 0) return result(true, "repeat-down-consumed");
             if (press != null && press.expiredTimerHold) {
                 presses.remove(key);
                 press = null;
-                if (!assigned) return false;
+                if (!assigned) return result(false, "expired-press-without-profile");
             }
             if (press != null) press.lastSeen = now;
             if (press == null) {
@@ -111,17 +151,23 @@ final class SteeringGestureRecognizer {
             } else {
                 press.ordinaryDown = true;
             }
+            if (blocked) return result(true, "runtime-blocked-press");
+            if (press.cancelled) return result(true, "cancelled-press-tail");
+            return result(true, press.second
+                    ? "double-candidate-waiting-release"
+                    : "press-waiting-release-or-hold");
         } else if (action == SteeringTransferPolicy.ACTION_UP
                 && press != null && press.ordinaryDown) {
             press.ordinaryDown = false;
             if (!press.nativeDown) presses.remove(key);
-            if (press.cancelled || blocked) return true;
+            if (press.cancelled) return result(true, "cancelled-press-release");
+            if (blocked) return result(true, "runtime-blocked-press-release");
             if (press.held) {
                 if (press.timerHeld && !press.nativeSeen
                         && SteeringTransferPolicy.hasNativeLongAlias(key)) {
                     lateNativeTails.put(key, eventTime + doubleTimeout);
                 }
-                return true;
+                return result(true, "hold-already-classified");
             }
             if (eventTime - press.downAt >= holdTimeout) {
                 press.held = true;
@@ -129,15 +175,20 @@ final class SteeringGestureRecognizer {
                 if (SteeringTransferPolicy.hasNativeLongAlias(key)) {
                     lateNativeTails.put(key, eventTime + doubleTimeout);
                 }
-                emit(key, SteeringTransferPreferences.PRESS_HOLD, ORIGIN_TIMER, emit);
+                return result(true, emit(key, SteeringTransferPreferences.PRESS_HOLD,
+                        ORIGIN_TIMER, emit) ? "hold-action-matched"
+                        : "hold-classified-no-hold-profile");
             } else if (press.second) {
-                emit(key, SteeringTransferPreferences.PRESS_DOUBLE, ORIGIN_DOUBLE, emit);
+                return result(true, emit(key, SteeringTransferPreferences.PRESS_DOUBLE,
+                        ORIGIN_DOUBLE, emit) ? "double-action-matched"
+                        : "double-classified-no-double-profile");
             } else {
                 // Classify the gesture before looking up this app's matching action.
                 pendingUps.put(key, eventTime);
+                return result(true, "single-waiting-double-window");
             }
         }
-        return true;
+        return result(true, "assigned-event-consumed-no-transition");
     }
 
     void advance(long now, Consumer<SteeringTransferProfile> emit) {
@@ -189,13 +240,13 @@ final class SteeringGestureRecognizer {
         return next;
     }
 
-    private boolean onNativeLong(int key, int action, int repeats, boolean cancelled,
+    private KeyResult onNativeLong(int key, int action, int repeats, boolean cancelled,
             long eventTime, long now, boolean blocked, MatchConsumer emit) {
         Long lateUntil = lateNativeTails.get(key);
         if (lateUntil != null) {
             if (eventTime <= lateUntil) {
                 if (action == SteeringTransferPolicy.ACTION_UP) lateNativeTails.remove(key);
-                return true;
+                return result(true, "late-native-tail-suppressed");
             }
             lateNativeTails.remove(key);
         }
@@ -203,7 +254,7 @@ final class SteeringGestureRecognizer {
         if (press != null && press.expiredTimerHold
                 && action == SteeringTransferPolicy.ACTION_UP) {
             presses.remove(key);
-            return true;
+            return result(true, "expired-timer-hold-tail-suppressed");
         }
         if (cancelled) {
             if (press != null && (action == SteeringTransferPolicy.ACTION_DOWN
@@ -214,11 +265,11 @@ final class SteeringGestureRecognizer {
                     if (!press.ordinaryDown) presses.remove(key);
                 }
             }
-            return true;
+            return result(true, "cancelled-native-event");
         }
         if (action == SteeringTransferPolicy.ACTION_DOWN) {
             if (press != null) press.lastSeen = now;
-            if (repeats != 0) return true;
+            if (repeats != 0) return result(true, "native-repeat-consumed");
             if (press == null) {
                 Long firstUp = pendingUps.remove(key);
                 if (firstUp != null && (eventTime < firstUp
@@ -233,19 +284,31 @@ final class SteeringGestureRecognizer {
             press.nativeSeen = true;
             if (!press.cancelled && !press.held && !blocked) {
                 press.held = true;
-                emit(key, SteeringTransferPreferences.PRESS_HOLD, ORIGIN_NATIVE, emit);
+                return result(true, emit(key, SteeringTransferPreferences.PRESS_HOLD,
+                        ORIGIN_NATIVE, emit) ? "native-hold-action-matched"
+                        : "native-hold-classified-no-hold-profile");
             }
+            if (blocked) return result(true, "runtime-blocked-native-press");
+            return result(true, press.cancelled ? "cancelled-native-press-tail"
+                    : "native-hold-already-classified");
         } else if (action == SteeringTransferPolicy.ACTION_UP
                 && press != null && press.nativeDown) {
             press.nativeDown = false;
             if (!press.ordinaryDown) presses.remove(key);
+            return result(true, "native-release-consumed");
         }
+        return result(true, "assigned-native-event-consumed-no-transition");
+    }
+
+    private boolean emit(int key, String mode, String origin, MatchConsumer emit) {
+        SteeringTransferProfile profile = SteeringTransferPreferences.find(profiles, key, mode);
+        if (profile == null) return false;
+        emit.accept(profile, origin);
         return true;
     }
 
-    private void emit(int key, String mode, String origin, MatchConsumer emit) {
-        SteeringTransferProfile profile = SteeringTransferPreferences.find(profiles, key, mode);
-        if (profile != null) emit.accept(profile, origin);
+    private static KeyResult result(boolean consumed, String reason) {
+        return new KeyResult(consumed, reason);
     }
 
     private static final class Press {

@@ -363,6 +363,17 @@ class AppUpdateSessionTest {
         }
     }
 
+    @Test fun screenOffEntrySkipsStartupCheckAndWakeKeepsTheThirtySecondDelay() {
+        Harness().use { h ->
+            h.session.pauseForSleep()
+            h.enter()
+            assertTrue(h.delayLengths.isEmpty())
+            assertFalse(h.state.checking)
+            h.session.wake(true, false)
+            assertEquals(listOf(30_000L), h.delayLengths)
+        }
+    }
+
     @Test fun disablingAutomaticOrChangingChannelCancelsRetry() {
         Harness().use { h ->
             h.enter(); h.fire(); h.complete(AppUpdateManager.CheckResult.Error("offline"))

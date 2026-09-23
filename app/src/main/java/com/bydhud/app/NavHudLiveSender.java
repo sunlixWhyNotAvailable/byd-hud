@@ -135,6 +135,15 @@ final class NavHudLiveSender {
         return true;
     }
 
+    static void onNativeSpeedBitmapChanged(String owner) {
+        NavHudLiveSender current = instance;
+        if (current == null) return;
+        current.handler.post(() -> {
+            if (!current.isRuntimeEnabled() || ShanghaiOutputGate.isSuspended()) return;
+            current.republishLatestDirectFrame(owner, "native-speed-fallback");
+        });
+    }
+
     void resumeAfterShanghai() {
         handler.post(() -> {
             if (!isRuntimeEnabled()) return;
@@ -2933,7 +2942,7 @@ final class NavHudLiveSender {
         if (frame == null) return null;
         String owner = normalizeString(ownerPackage);
         DirectTbtFrame.SpeedLimit speed = DirectSpeedLimitStore.snapshot(owner);
-        DirectTbtPayload.Options options = DirectTbtPayload.Options.from(context);
+        DirectTbtPayload.Options options = NativeSpeedLimitController.outputOptions(context, owner);
         if (!owner.equals(speedOverlayOwner)) {
             resetSpeedOverlayState();
             speedOverlayOwner = owner;
@@ -2944,7 +2953,7 @@ final class NavHudLiveSender {
         speedOverlayDisplayValue = speed.getDisplayValue();
         speedOverlayKph = speed.getKph();
         speedOverlayUnit = speed.getUnit();
-        // Native currently has no output; retire an existing bitmap overlay like Off.
+        // Native output uses the configured bitmap fallback only after readback failure.
         if (!speed.isActive() || options.speedLimitMode == HudPrefs.SPEED_LIMIT_OFF
                 || options.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE) {
             cancelSpeedOverlayTimeout();
@@ -4089,9 +4098,10 @@ final class NavHudLiveSender {
                 || firstRouteEvidence && !currentHasHud;
     }
 
-    /** Rendered maneuver bitmap updates affect RoadInfo only, never semantic TBT. */
+    /** Bitmap-only changes affect RoadInfo, not the separate semantic TBT lifecycle. */
     static boolean shouldDispatchSemanticTbtForDirectReason(String reason) {
-        return !"maneuver-bitmap".equals(normalizeDirectReasonForTest(reason));
+        String normalized = normalizeDirectReasonForTest(reason);
+        return !"maneuver-bitmap".equals(normalized) && !"native-speed-fallback".equals(normalized);
     }
 
     private static String normalizeDirectReasonForTest(String reason) {

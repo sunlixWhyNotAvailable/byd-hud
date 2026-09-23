@@ -31,6 +31,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongConsumer;
+import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 
 /** Owns the bounded startup, handoff, liveness, and restart policy for the shell helper. */
 final class InstrumentProxyManager {
@@ -136,6 +138,7 @@ final class InstrumentProxyManager {
     private boolean helperIdentityLoaded;
     private CapabilityMode capabilityMode = CapabilityMode.NONE;
     private boolean trafficLightCapable;
+    private boolean nativeSpeedCapable;
     private boolean shanghaiSuspended;
     private boolean shanghaiHelperAcknowledged;
 
@@ -259,6 +262,7 @@ final class InstrumentProxyManager {
                     .put("pingInFlight", current.pingInFlight)
                     .put("capabilityMode", current.capabilityMode.name())
                     .put("trafficLightCapable", current.trafficLightCapable)
+                    .put("nativeSpeedCapable", current.nativeSpeedCapable)
                     .put("lastResult", new JSONObject().put("status", "unsupported")
                             .put("reason", "not_recorded"))
                     .put("binderLiveness", "not_queried");
@@ -849,6 +853,28 @@ final class InstrumentProxyManager {
         finally { ShanghaiOutputGate.leaveWrite(); }
     }
 
+    void nativeSpeedOperation(int operation, int value, BooleanSupplier current,
+            Consumer<NativeSpeedLimitEngine.Result> callback) {
+        if (!NativeSpeedLimitEngine.validOperation(operation, value)) {
+            throw new IllegalArgumentException("invalid native speed operation");
+        }
+        boolean ready;
+        synchronized (lock) { ready = state == State.READY && proxyBinder != null && proxyBinder.isBinderAlive(); }
+        if (!ready) ensureStarted("native-speed");
+        submitCall("native_speed:" + operation, result -> {
+            NativeSpeedLimitEngine.Result nativeResult = result.nativeSpeed;
+            long now = SystemClock.elapsedRealtime();
+            callback.accept(nativeResult != null ? nativeResult
+                    : new NativeSpeedLimitEngine.Result(false, 0, now, now, result.error));
+        }, (remote, requestGeneration) -> {
+            if (!current.getAsBoolean()) {
+                return InstrumentProxyContract.operationResult(Collections.emptyList(), "cancelled before dispatch");
+            }
+            // A late-initializing Setting/ADAS API may recover during the same helper session.
+            return remote.nativeSpeedOperation(requestGeneration, operation, value);
+        });
+    }
+
     private void executeAllowedCall(
             String operation, ResultCallback callback, RemoteCall remoteCall) {
         IInstrumentNavigationProxy current;
@@ -1289,8 +1315,7 @@ final class InstrumentProxyManager {
         boolean connectedTrafficLight = InstrumentProxyContract.hasCapability(
                 result, InstrumentProxyContract.CAP_TRAFFIC_LIGHT);
         if (!InstrumentProxyContract.isReady(result)
-                || !InstrumentProxyContract.hasUsableNavigationCapability(result)
-                || connectedMode == CapabilityMode.NONE) {
+                || !InstrumentProxyContract.hasUsableCapability(result)) {
             shutdownCandidate(candidate, requestGeneration);
             synchronized (lock) {
                 if (generation != requestGeneration || state != State.STARTING) return;
@@ -1323,6 +1348,8 @@ final class InstrumentProxyManager {
             helperIdentity = connectedIdentity;
             capabilityMode = connectedMode;
             trafficLightCapable = connectedTrafficLight;
+            nativeSpeedCapable = InstrumentProxyContract.hasCapability(result,
+                    InstrumentProxyContract.CAP_NATIVE_SPEED);
             connectedAtMs = SystemClock.elapsedRealtime();
             nextRetryAtMs = 0L;
             unregisterHandoffReceiver();
@@ -1548,6 +1575,7 @@ final class InstrumentProxyManager {
         pingToken++;
         capabilityMode = CapabilityMode.NONE;
         trafficLightCapable = false;
+        nativeSpeedCapable = false;
     }
 
     private String newNonce() {
@@ -1717,6 +1745,7 @@ final class InstrumentProxyManager {
         final boolean available;
         final List<InstrumentProxyContract.Operation> operations;
         final String error;
+        NativeSpeedLimitEngine.Result nativeSpeed;
 
         private Result(boolean available,
                 List<InstrumentProxyContract.Operation> operations, String error) {
@@ -1729,7 +1758,13 @@ final class InstrumentProxyManager {
             String error = InstrumentProxyContract.error(result);
             List<InstrumentProxyContract.Operation> operations =
                     InstrumentProxyContract.operations(result);
-            return new Result(result != null, operations, error);
+            Result parsed = new Result(result != null, operations, error);
+            if (result != null && result.containsKey("native_started")) {
+                parsed.nativeSpeed = new NativeSpeedLimitEngine.Result(error.isEmpty(),
+                        result.getInt("native_raw"), result.getLong("native_started"),
+                        result.getLong("native_finished"), error);
+            }
+            return parsed;
         }
 
         static Result unavailable(String error) {

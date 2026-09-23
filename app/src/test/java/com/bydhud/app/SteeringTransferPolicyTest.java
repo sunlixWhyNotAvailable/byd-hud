@@ -42,6 +42,17 @@ public final class SteeringTransferPolicyTest {
     }
 
     @Test
+    public void knownDiagnosticScopeIncludesSteeringButtonFamilies() {
+        for (int code : new int[] {305, 306, 304, 312, 88, 303, 87, 302,
+                294, 353, 313}) {
+            assertTrue(SteeringTransferPolicy.isKnownSteeringKey(code));
+        }
+        for (int code : new int[] {295, 354, 314, 1000, -1}) {
+            assertFalse(SteeringTransferPolicy.isKnownSteeringKey(code));
+        }
+    }
+
+    @Test
     public void repeatedDownCannotToggleAgainBeforeUpOrTailRecovery() {
         assertTrue(SteeringTransferPolicy.shouldStartTransfer(0, 0, false));
         assertFalse(SteeringTransferPolicy.shouldStartTransfer(0, 0, true));

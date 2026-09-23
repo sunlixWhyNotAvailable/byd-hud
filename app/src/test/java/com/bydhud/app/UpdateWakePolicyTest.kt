@@ -34,4 +34,11 @@ class UpdateWakePolicyTest {
         assertTrue(policy.onEntry(2_000L))
         assertFalse(policy.onWake("android.intent.action.SCREEN_ON", 2_001L))
     }
+
+    @Test fun firstEntryWithDisplayOffWaitsForTheScreenOnWake() {
+        val policy = UpdateWakePolicy()
+        assertFalse(policy.onEntry(10L, interactive = false))
+        assertTrue(policy.onWake("android.intent.action.SCREEN_ON", 12L))
+        assertFalse(policy.onWake("android.intent.action.QUICKBOOT_POWERON", 13L))
+    }
 }

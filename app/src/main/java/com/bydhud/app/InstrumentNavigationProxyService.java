@@ -79,6 +79,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private final Object operationLock = new Object();
     private volatile InstrumentApi instrument;
     private volatile BodyworkApi bodywork;
+    private NativeSpeedApi nativeSpeed;
     private volatile IInstrumentNavigationClient client;
     private volatile boolean connected;
     private volatile int activeCapabilities;
@@ -131,7 +132,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     capabilities |= InstrumentProxyContract.CAP_TRAFFIC_LIGHT;
                 }
                 activeCapabilities = capabilities;
-                boolean ready = hasNavigationCapability(capabilities);
+                long nativeIdentity = Binder.clearCallingIdentity();
+                try { nativeSpeed = NativeSpeedApi.open(systemContext); }
+                finally { Binder.restoreCallingIdentity(nativeIdentity); }
+                if (nativeSpeed != null) capabilities |= InstrumentProxyContract.CAP_NATIVE_SPEED;
+                activeCapabilities = capabilities;
+                boolean ready = InstrumentProxyContract.hasUsableCapability(capabilities);
                 if (ready) {
                     client = requestClient;
                     connected = true;
@@ -342,6 +348,57 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         synchronized (operationLock) {
             outputSuspended = false;
             return InstrumentProxyContract.operationResult(new ArrayList<>(), "");
+        }
+    }
+
+    @Override
+    public Bundle nativeSpeedOperation(long requestGeneration, int operation, int value) {
+        enforceSession(requestGeneration);
+        if (!NativeSpeedLimitEngine.validOperation(operation, value)) {
+            throw new IllegalArgumentException("invalid native speed operation");
+        }
+        synchronized (operationLock) {
+            long identity = Binder.clearCallingIdentity();
+            long startedAt = SystemClock.elapsedRealtime();
+            int raw = 0;
+            String error = "";
+            List<InstrumentProxyContract.Operation> operations = new ArrayList<>();
+            try {
+                if (outputSuspended || !connected) {
+                    error = "output suspended or inactive session";
+                } else {
+                    if (nativeSpeed == null) nativeSpeed = NativeSpeedApi.open(systemContext);
+                    if (nativeSpeed == null) throw new UnsupportedOperationException("native speed API unavailable");
+                    if (operation == NativeSpeedLimitEngine.READ) {
+                        startedAt = SystemClock.elapsedRealtime();
+                        Object event = nativeSpeed.get.invoke(nativeSpeed.adas,
+                                new int[]{0x2D500020}, Integer.TYPE);
+                        if (event == null) throw new UnsupportedOperationException("ADAS returned null");
+                        raw = nativeSpeed.intField.getInt(event);
+                        if (raw < 0) {
+                            throw new UnsupportedOperationException("ADAS speed raw unsupported: " + raw);
+                        }
+                    } else {
+                        int fid = operation == NativeSpeedLimitEngine.ROAD ? 0x4CA00050 : 0x4CA00040;
+                        Object event = nativeSpeed.constructor.newInstance();
+                        nativeSpeed.intField.setInt(event, value);
+                        startedAt = SystemClock.elapsedRealtime();
+                        Object result = nativeSpeed.set.invoke(nativeSpeed.setting, new int[]{fid}, event);
+                        if (!success(result)) error = "Setting returned " + resultCode(result);
+                    }
+                }
+            } catch (Throwable failure) {
+                error = describe(failure);
+                nativeSpeed = null;
+            } finally {
+                Binder.restoreCallingIdentity(identity);
+            }
+            operations.add(operation("native_speed:" + operation, error.isEmpty() ? 0 : -1, startedAt, error));
+            Bundle result = InstrumentProxyContract.operationResult(operations, error);
+            result.putInt("native_raw", raw);
+            result.putLong("native_started", startedAt);
+            result.putLong("native_finished", SystemClock.elapsedRealtime());
+            return result;
         }
     }
 
@@ -599,11 +656,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     private boolean hasCapability(int capability) {
         return (activeCapabilities & capability) != 0;
-    }
-
-    private static boolean hasNavigationCapability(int capabilities) {
-        return (capabilities & (InstrumentProxyContract.CAP_DIRECT_FID
-                | InstrumentProxyContract.CAP_INSTRUMENT_SDK)) != 0;
     }
 
     private static boolean succeeded(InstrumentProxyContract.Operation operation) {
@@ -903,6 +955,43 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
     }
 
+    /** Setting and ADAS are independent of Instrument's guidance/lane capabilities. */
+    private static final class NativeSpeedApi {
+        final Object setting, adas;
+        final Method set, get;
+        final Constructor<?> constructor;
+        final Field intField;
+
+        NativeSpeedApi(Object setting, Object adas, Method set, Method get,
+                Constructor<?> constructor, Field intField) {
+            this.setting = setting;
+            this.adas = adas;
+            this.set = set;
+            this.get = get;
+            this.constructor = constructor;
+            this.intField = intField;
+        }
+
+        static NativeSpeedApi open(Context context) {
+            try {
+                Context allowed = new BydPermissionContext(context);
+                Class<?> setting = Class.forName(SETTING_CLASS);
+                Class<?> adas = Class.forName("android.hardware.bydauto.adas.BYDAutoADASDevice");
+                Class<?> event = Class.forName(EVENT_VALUE_CLASS);
+                Object settingDevice = setting.getMethod("getInstance", Context.class).invoke(null, allowed);
+                Object adasDevice = adas.getMethod("getInstance", Context.class).invoke(null, allowed);
+                if (settingDevice == null || adasDevice == null) return null;
+                return new NativeSpeedApi(settingDevice, adasDevice,
+                        setting.getMethod("set", int[].class, event),
+                        adas.getMethod("get", int[].class, Class.class), event.getConstructor(),
+                        event.getField("intValue"));
+            } catch (Throwable unavailable) {
+                Log.w(TAG, "native speed API unavailable", unavailable);
+                return null;
+            }
+        }
+    }
+
     private static final class DirectWriter {
         final Object device;
         final Method set;
@@ -973,7 +1062,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     || SETTING_SET_PERMISSION.equals(permission)
                     || BODYWORK_COMMON_PERMISSION.equals(permission)
                     || BODYWORK_GET_PERMISSION.equals(permission)
-                    || BODYWORK_SET_PERMISSION.equals(permission);
+                    || BODYWORK_SET_PERMISSION.equals(permission)
+                    || "android.permission.BYDAUTO_ADAS_COMMON".equals(permission)
+                    || "android.permission.BYDAUTO_ADAS_GET".equals(permission);
         }
     }
 }

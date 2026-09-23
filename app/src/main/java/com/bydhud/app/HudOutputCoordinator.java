@@ -115,6 +115,7 @@ final class HudOutputCoordinator {
     private final Handler worker;
     private final SomeIpHudClient client;
     private final SomeIpTxLog txLog;
+    private final NativeSpeedLimitController nativeSpeed;
     private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
 
     private boolean manualEnabled;
@@ -230,6 +231,13 @@ final class HudOutputCoordinator {
         this.context = context;
         workerThread.start();
         worker = new Handler(workerThread.getLooper());
+        nativeSpeed = new NativeSpeedLimitController(context, worker,
+                () -> activeSource != Source.NONE && activeSource == desiredSource()
+                        && hasFrame(activeSource) && serviceStarted && clientBoundForNative(),
+                owner -> {
+                    preparedDirectOptionsRevision = -1;
+                    NavHudLiveSender.onNativeSpeedBitmapChanged(owner);
+                });
         txLog = SomeIpTxLog.get(context);
         client = new SomeIpHudClient(context, new SomeIpHudClient.Listener() {
             @Override
@@ -902,6 +910,7 @@ final class HudOutputCoordinator {
 
     private void sendActive(String reason) {
         if (ShanghaiOutputGate.isSuspended()) {
+            nativeSpeed.stop("shanghai");
             scheduleSend(1000L);
             return;
         }
@@ -959,6 +968,9 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
+            nativeSpeed.refresh(source == Source.DIRECT ? directOwnerPackage : "manual",
+                    source == Source.DIRECT ? directOwnerSessionGeneration : generation,
+                    source == Source.DIRECT ? DirectSpeedLimitStore.snapshot(directOwnerPackage).getKph() : 0);
             if (source == Source.MANUAL && manualState.hudCheck != null) {
                 setHudCheckRoadResult(1, "sent");
                 publishHudCheckAuxiliary(reason);
@@ -1014,7 +1026,7 @@ final class HudOutputCoordinator {
             if (sourceChanged) {
                 preparedDirectFrame = directFrame;
                 preparedDirectOptionsRevision = optionsRevision;
-                preparedDirectOptions = DirectTbtPayload.Options.from(context);
+                preparedDirectOptions = NativeSpeedLimitController.outputOptions(context, directOwnerPackage);
                 preparedEtaContext = etaStreetContext(preparedDirectOptions,
                         HudPrefs.transliterationMode(context));
             }
@@ -1520,6 +1532,7 @@ final class HudOutputCoordinator {
     }
 
     private void stopServiceAndUnbind(String reason) {
+        nativeSpeed.stop("transport-stop:" + reason);
         resetEtaStreetText("transport-stop:" + reason);
         releaseHudCheckAuxiliary(reason);
         ++bindGeneration;
@@ -1608,6 +1621,7 @@ final class HudOutputCoordinator {
     }
 
     private void handleTransportFailure(String reason, Throwable error) {
+        nativeSpeed.stop("transport-failure:" + reason);
         resetEtaStreetText("transport-failure:" + reason);
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
@@ -1657,6 +1671,7 @@ final class HudOutputCoordinator {
     }
 
     private void handleProtocolFailure(String detail) {
+        nativeSpeed.stop("protocol-failure:" + detail);
         HudDeliveryStatus.recordFailure();
         if (manualEnabled && manualState != null && manualState.hudCheck != null) {
             setHudCheckRoadResult(-1, "protocol-failed");
@@ -1713,6 +1728,7 @@ final class HudOutputCoordinator {
             return false;
         }
         if (decision == DirectOwnerDecision.ADVANCE) {
+            nativeSpeed.stop("direct-session-advanced");
             boolean preservePendingLossClear = shouldPreservePendingLossClearOnAdvance(
                     directLossClearPending, directOwnerPackage,
                     directOwnerSessionGeneration, owner, ownerSessionGeneration);
@@ -1858,6 +1874,7 @@ final class HudOutputCoordinator {
         }
         if (!shouldQueueDirectLossClear(
                 true, true, directLossClearSent, directLossClearPending)) return;
+        nativeSpeed.stop("producer-loss:" + reason);
         resetEtaStreetText("producer-loss:" + reason);
         directFrame = null;
         preparedDirectFrame = null;
@@ -1931,6 +1948,7 @@ final class HudOutputCoordinator {
     }
 
     private void invalidateDirectOwnerOnWorker(String reason) {
+        nativeSpeed.stop("owner-invalidated:" + reason);
         worker.removeCallbacks(directLeaseExpiry);
         directLeaseDeadlineMs = 0L;
         directOwnerPackage = "";
@@ -1957,6 +1975,7 @@ final class HudOutputCoordinator {
     }
 
     private void cancelScheduledWork() {
+        nativeSpeed.stop("hud-work-cancelled");
         worker.removeCallbacks(sendLoop);
         ++bindGeneration;
         finishBindAttempt();
@@ -1966,6 +1985,8 @@ final class HudOutputCoordinator {
         protocolRetryScheduled = false;
         protocolFailureCount = 0;
     }
+
+    private boolean clientBoundForNative() { return client != null && client.isBound(); }
 
     private void maybeLogStats(Source source, int payloadBytes, long lastSendMs) {
         long now = SystemClock.elapsedRealtime();

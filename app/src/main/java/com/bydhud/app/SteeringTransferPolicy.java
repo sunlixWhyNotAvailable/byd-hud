@@ -29,6 +29,12 @@ final class SteeringTransferPolicy {
         return keyCode == 306 || keyCode == 312 || keyCode == 303 || keyCode == 302;
     }
 
+    static boolean isKnownSteeringKey(int keyCode) {
+        return keyCode == 305 || keyCode == 306 || keyCode == 304 || keyCode == 312
+                || keyCode == 88 || keyCode == 303 || keyCode == 87 || keyCode == 302
+                || keyCode == 294 || keyCode == 353 || keyCode == 313;
+    }
+
     static boolean hasNativeLongAlias(int keyCode) {
         int canonical = canonicalKeyCode(keyCode);
         return canonical == 305 || canonical == 304 || canonical == 88 || canonical == 87;

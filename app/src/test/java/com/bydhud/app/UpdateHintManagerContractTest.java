@@ -17,7 +17,7 @@ public final class UpdateHintManagerContractTest {
         assertTrue(source.contains("override fun onActivityStarted(activity: Activity)"));
         assertTrue(source.contains("override fun onActivityStopped(activity: Activity)"));
         assertTrue(source.contains("activity is MainActivity"));
-        assertTrue(source.contains("override fun onActivityResumed(activity: Activity) = Unit"));
+        assertTrue(source.contains("override fun onActivityResumed(activity: Activity)"));
         assertTrue(source.contains("override fun onActivityPaused(activity: Activity) = Unit"));
         assertFalse(source.contains("AppUpdateManager.onSessionEntry"));
         assertFalse(source.contains("requestManualCheck"));
@@ -31,7 +31,7 @@ public final class UpdateHintManagerContractTest {
         int entryEnd = source.indexOf(".translationX(0f)", entryStart);
         int deadline = source.indexOf("hint.expiresAtElapsedMs = SystemClock.elapsedRealtime() + DISPLAY_DURATION_MS");
         int visible = source.indexOf("UpdateHintCoordinator.markVisible(hint.eventId, hint.expiresAtElapsedMs)");
-        assertTrue(add >= 0 && entryStart > add && entryEnd > entryStart && deadline > entryEnd && visible > deadline);
+        assertTrue(add >= 0 && deadline > add && visible > deadline && entryStart > add && entryEnd > entryStart);
         assertTrue(source.indexOf(".setDuration(MOVE_DURATION_MS)", entryEnd) > entryEnd);
         assertTrue(source.indexOf(".setInterpolator(DecelerateInterpolator())", entryEnd) > entryEnd);
         int retained = source.indexOf("AppUpdateManager.showRetainedOffer(resultId)");
@@ -41,9 +41,10 @@ public final class UpdateHintManagerContractTest {
         assertTrue(source.contains("private const val DISPLAY_DURATION_MS = 10_000L"));
         assertTrue(source.contains("private const val MOVE_DURATION_MS = 220L"));
         assertTrue(source.contains("Intent.ACTION_SCREEN_ON"));
+        assertTrue(source.contains("Intent.ACTION_SCREEN_OFF"));
         assertTrue(source.contains("SystemClock.elapsedRealtime() >= hint.expiresAtElapsedMs"));
-        assertTrue(source.indexOf("registerScreenOnReceiver()") > visible);
-        assertTrue(source.contains("unregisterScreenOnReceiver()"));
+        assertTrue(source.contains("registerScreenReceiver()"));
+        assertTrue(source.contains("unregisterScreenReceiver()"));
         assertTrue(source.contains("hint.container.animate().cancel()"));
     }
 

@@ -175,6 +175,13 @@ object AppUpdateManager {
         if (HudPrefs.isUserShutdownActive(app) || !HudPrefs.isBootEnabled(app)) return
         initialize(app)
         observeWake(app)
+        val interactive = app.getSystemService(PowerManager::class.java)?.isInteractive == true
+        if (!interactive && action != Intent.ACTION_SCREEN_ON) {
+            wakePolicy.onSleep()
+            session.pauseForSleep()
+            AppEventLogger.event(app, "update_check wake skipped reason=screen-off action=$action")
+            return
+        }
         if (!wakePolicy.onWake(action, SystemClock.elapsedRealtime())) return
         AppEventLogger.event(app, "update_check wake action=$action")
         session.wake(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
@@ -212,6 +219,11 @@ object AppUpdateManager {
         initialize(app)
         observeWake(app)
         val interactive = app.getSystemService(PowerManager::class.java)?.isInteractive == true
+        if (!interactive) {
+            wakePolicy.onSleep()
+            session.pauseForSleep()
+            AppEventLogger.event(app, "update_check entry skipped reason=screen-off")
+        }
         if (wakePolicy.onEntry(SystemClock.elapsedRealtime(), interactive)) {
             session.wake(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
         } else session.enter(isAutoCheckEnabled(app), isBetaChannelEnabled(app))
@@ -430,11 +442,11 @@ object AppUpdateManager {
 
         private fun changeChannelLocked(betaChannel: Boolean) {
             if (channel == betaChannel) return
-            clearLocked()
+            clearLocked(preserveSleep = true)
             channel = betaChannel
         }
 
-        private fun clearLocked() {
+        private fun clearLocked(preserveSleep: Boolean = false) {
             ++generation
             scheduled?.cancel()
             scheduled = null
@@ -443,7 +455,7 @@ object AppUpdateManager {
             previous?.job?.cancel()
             lastCompletedAt = null
             failures = 0
-            sleeping = false
+            if (!preserveSleep) sleeping = false
             state.value = Snapshot()
         }
 

@@ -885,6 +885,8 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
                 HudPrefs.speedLimitMode(this),
+                HudPrefs.getNativeSpeedLimitClearMode(this),
+                HudPrefs.getNativeSpeedLimitFallbackMode(this),
                 HudPrefs.speedLimitFreeFallback(this),
                 HudPrefs.speedLimitOverlaySeconds(this),
                 HudPrefs.speedLimitCompositePlacement(this),
@@ -1514,6 +1516,14 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetSpeedLimitMode(int mode) {
         setSpeedLimitMode(mode);
+    }
+
+    public void composeSetNativeSpeedLimitClearMode(int mode) {
+        setNativeSpeedLimitClearMode(mode);
+    }
+
+    public void composeSetNativeSpeedLimitFallbackMode(int mode) {
+        setNativeSpeedLimitFallbackMode(mode);
     }
 
     public void composeSetSpeedLimitFreeFallback(int mode) {
@@ -2639,6 +2649,8 @@ public final class MainActivity extends ComponentActivity {
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
         public final int speedLimitMode;
+        public final int nativeSpeedLimitClearMode;
+        public final int nativeSpeedLimitFallbackMode;
         public final int speedLimitFreeFallback;
         public final int speedLimitOverlaySeconds;
         public final int speedLimitCompositePlacement;
@@ -2714,6 +2726,7 @@ public final class MainActivity extends ComponentActivity {
                 int wazeWarningDistanceColor,
                 boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
                 boolean remainingDistanceOutputEnabled, int speedLimitMode,
+                int nativeSpeedLimitClearMode, int nativeSpeedLimitFallbackMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
                 int speedLimitLaneOverlaySize,
@@ -2778,6 +2791,10 @@ public final class MainActivity extends ComponentActivity {
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
             this.speedLimitMode = speedLimitMode;
+            this.nativeSpeedLimitClearMode = HudPrefs.normalizeNativeSpeedLimitClearMode(
+                    nativeSpeedLimitClearMode);
+            this.nativeSpeedLimitFallbackMode = HudPrefs.normalizeNativeSpeedLimitFallbackMode(
+                    nativeSpeedLimitFallbackMode);
             this.speedLimitFreeFallback = speedLimitFreeFallback;
             this.speedLimitOverlaySeconds = speedLimitOverlaySeconds;
             this.speedLimitCompositePlacement = speedLimitCompositePlacement;
@@ -2889,6 +2906,8 @@ public final class MainActivity extends ComponentActivity {
                     && remainingTimeOutputEnabled == other.remainingTimeOutputEnabled
                     && remainingDistanceOutputEnabled == other.remainingDistanceOutputEnabled
                     && speedLimitMode == other.speedLimitMode
+                    && nativeSpeedLimitClearMode == other.nativeSpeedLimitClearMode
+                    && nativeSpeedLimitFallbackMode == other.nativeSpeedLimitFallbackMode
                     && speedLimitFreeFallback == other.speedLimitFreeFallback
                     && speedLimitOverlaySeconds == other.speedLimitOverlaySeconds
                     && speedLimitCompositePlacement == other.speedLimitCompositePlacement
@@ -2961,7 +2980,8 @@ public final class MainActivity extends ComponentActivity {
                     etaArrivalColor, etaDurationColor, etaRemainingDistanceColor,
                     wazeWarningDistanceColor,
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
-                    speedLimitMode, speedLimitFreeFallback, speedLimitOverlaySeconds,
+                    speedLimitMode, nativeSpeedLimitClearMode, nativeSpeedLimitFallbackMode,
+                    speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
                     dashboardFormatMethod, dashboardWidthPercent, dashboardHeightPercent,
@@ -4178,6 +4198,24 @@ public final class MainActivity extends ComponentActivity {
         int persisted = HudPrefs.speedLimitMode(this);
         appendStatus("Speed limit mode " + persisted);
         AppEventLogger.event(this, "ui speed_limit_mode=" + persisted);
+        refreshControls();
+    }
+
+    private void setNativeSpeedLimitClearMode(int mode) {
+        HudPrefs.setNativeSpeedLimitClearMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.getNativeSpeedLimitClearMode(this);
+        appendStatus("Native speed limit clear mode " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_native_clear_mode=" + persisted);
+        refreshControls();
+    }
+
+    private void setNativeSpeedLimitFallbackMode(int mode) {
+        HudPrefs.setNativeSpeedLimitFallbackMode(this, mode);
+        cachedPayloadKey = "";
+        int persisted = HudPrefs.getNativeSpeedLimitFallbackMode(this);
+        appendStatus("Native speed limit fallback mode " + persisted);
+        AppEventLogger.event(this, "ui speed_limit_native_fallback_mode=" + persisted);
         refreshControls();
     }
 

@@ -767,6 +767,15 @@ public final class DirectTbtPayload {
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, value);
         }
 
+        Options withSpeedLimitMode(int mode) {
+            if (speedLimitMode == mode) return this;
+            return new Options(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, mode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, presentation);
+        }
+
         public static Options from(Context context) {
             Context safeContext = Objects.requireNonNull(context, "context");
             byte[] blankS72Png;

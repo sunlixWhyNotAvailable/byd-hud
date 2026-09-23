@@ -8,7 +8,11 @@ internal class UpdateWakePolicy {
 
     @Synchronized fun onEntry(now: Long, interactive: Boolean = true): Boolean {
         if (asleep && interactive) return onWake("user-entry", now)
-        if (!entered) { entered = true; lastWake = now }
+        if (!entered) {
+            entered = true
+            asleep = !interactive
+            lastWake = now
+        }
         return false
     }
 

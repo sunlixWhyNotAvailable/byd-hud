@@ -22,11 +22,12 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(options.contains("maxValue = 36"));
         assertTrue(options.contains("fallbackValue = 36"));
 
-        assertTrue(options.contains("val freeFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_FREE"));
-        assertTrue(options.contains("val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE"));
-        assertTrue(options.contains("val overlaySecondsEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER"));
-        assertTrue(options.contains("|| snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES"));
-        assertTrue(options.contains("(freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)"));
+        assertTrue(options.contains("HudPrefs.effectiveSpeedLimitBitmapMode("));
+        assertTrue(options.contains("val freeFallbackEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_FREE"));
+        assertTrue(options.contains("val compositeEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_COMPOSITE"));
+        assertTrue(options.contains("val overlaySecondsEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_MANEUVER"));
+        assertTrue(options.contains("|| effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_LANES"));
+        assertTrue(options.contains("(freeFallbackEnabled && snapshot.speedLimitFreeFallback != HudPrefs.SPEED_LIMIT_FALLBACK_OFF)"));
 
     }
 

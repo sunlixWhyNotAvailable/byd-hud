@@ -8,12 +8,22 @@ import java.util.List;
 
 /** Fixed IPC and diagnostic contract shared by the app and its shell helper. */
 final class InstrumentProxyContract {
-    static final int PROTOCOL_VERSION = 3;
+    static final int PROTOCOL_VERSION = 4;
     static final int CAP_SYSTEM_CONTEXT = 1;
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;
     static final int CAP_INSTRUMENT_LANES = 1 << 3;
     static final int CAP_TRAFFIC_LIGHT = 1 << 4;
+    static final int CAP_NATIVE_SPEED = 1 << 5;
+
+    static boolean hasUsableCapability(Bundle result) {
+        return hasUsableCapability(capabilities(result));
+    }
+
+    static boolean hasUsableCapability(int capabilities) {
+        return (capabilities & CAP_SYSTEM_CONTEXT) != 0
+                && (capabilities & (CAP_DIRECT_FID | CAP_INSTRUMENT_SDK | CAP_NATIVE_SPEED)) != 0;
+    }
     static final String ACTION_CONNECTED =
             "com.bydhud.app.action.INSTRUMENT_PROXY_CONNECTED";
     static final String EXTRA_GENERATION = "generation";

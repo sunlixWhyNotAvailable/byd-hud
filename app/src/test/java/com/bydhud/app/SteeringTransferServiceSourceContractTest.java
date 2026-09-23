@@ -15,10 +15,10 @@ public final class SteeringTransferServiceSourceContractTest {
     @Test
     public void accessibilityFiltersKeysAndLearningCapturesWithoutDispatchingAToggle() throws Exception {
         String key = keyHandler();
-        String learning = between(key, "if (keyLearning) {", "int keyCode = event.getKeyCode();");
+        String learning = between(key, "if (keyLearning) {", "int suppressed = suppressKeyCode;");
         assertTrue(learning.contains("SteeringTransferPolicy.isFirstDown("));
-        assertTrue(learning.contains("capturedKeyCode = canonical;"));
-        assertTrue(learning.contains("suppressKeyCode = canonical;"));
+        assertTrue(learning.contains("capturedKeyCode = canonicalKeyCode;"));
+        assertTrue(learning.contains("suppressKeyCode = canonicalKeyCode;"));
         assertTrue(learning.contains("return true;"));
         assertFalse(learning.contains("saveProfile("));
         assertFalse(learning.contains("requestSteeringTransfer("));
@@ -31,7 +31,8 @@ public final class SteeringTransferServiceSourceContractTest {
     public void everyMappedEventIncludingOrphanTailsIsConsumedWithoutTaskAdmission() throws Exception {
         String key = keyHandler();
         assertTrue(key.contains("if (event == null) return false;"));
-        assertTrue(key.contains("consumed = steeringGestures.onKey(keyCode, event.getAction(), event.getRepeatCount(),"));
+        assertTrue(key.contains("steeringGestures.onKeyWithResult( keyCode, event.getAction(), event.getRepeatCount(),"));
+        assertTrue(key.contains("consumed = result.consumed;"));
         assertTrue(key.contains("event.isCanceled(), event.getEventTime(), SystemClock.uptimeMillis(),"));
         assertTrue(key.contains("blocked, this::dispatchSteeringMatch)"));
         assertTrue(key.contains("if (blocked) steeringGestures.cancel();"));
@@ -237,7 +238,7 @@ public final class SteeringTransferServiceSourceContractTest {
 
     private static String keyHandler() throws IOException {
         return between(source("NavAccessibilityService.java"),
-                "public boolean onKeyEvent(KeyEvent event)", "private void logSteeringKey(").trim() + " ";
+                "public boolean onKeyEvent(KeyEvent event)", "private void logSteeringKeyIngress(").trim() + " ";
     }
 
     private static String steeringWorker() throws IOException {

@@ -111,6 +111,45 @@ public final class SteeringGestureRecognizerTest {
         modes();
     }
 
+    @Test public void keyResultExplainsUnassignedNativeAndAssignedNoActionOutcomes() {
+        SteeringGestureRecognizer.KeyResult unassigned = recognizer.onKeyWithResult(
+                303, 0, 0, false, 10, 10, false, (profile, origin) -> matches.add(profile));
+        assertFalse(unassigned.consumed);
+        assertEquals("unassigned-no-active-press", unassigned.reason);
+        assertEquals("unloaded", recognizer.profileState(303));
+
+        configure(88, PRESS_DOUBLE);
+        assertTrue(recognizer.isConfiguredOrActiveKey(303));
+        assertEquals("double:com.waze/selected", recognizer.profileState(303));
+        SteeringGestureRecognizer.KeyResult nativeHold = recognizer.onKeyWithResult(
+                303, 0, 0, false, 20, 20, false,
+                (profile, origin) -> matches.add(profile));
+        assertTrue(nativeHold.consumed);
+        assertEquals("native-hold-classified-no-hold-profile", nativeHold.reason);
+        assertEquals(0, matches.size());
+    }
+
+    @Test public void keyResultExplainsGestureWaitAndMatchedActionWithoutChangingConsumption() {
+        configure(294, PRESS_DOUBLE);
+        SteeringGestureRecognizer.KeyResult down = recognizer.onKeyWithResult(
+                294, 0, 0, false, 0, 0, false, (profile, origin) -> matches.add(profile));
+        assertTrue(down.consumed);
+        assertEquals("press-waiting-release-or-hold", down.reason);
+        SteeringGestureRecognizer.KeyResult firstUp = recognizer.onKeyWithResult(
+                294, 1, 0, false, 50, 50, false, (profile, origin) -> matches.add(profile));
+        assertTrue(firstUp.consumed);
+        assertEquals("single-waiting-double-window", firstUp.reason);
+        SteeringGestureRecognizer.KeyResult secondDown = recognizer.onKeyWithResult(
+                294, 0, 0, false, 150, 150, false, (profile, origin) -> matches.add(profile));
+        assertTrue(secondDown.consumed);
+        assertEquals("double-candidate-waiting-release", secondDown.reason);
+        SteeringGestureRecognizer.KeyResult secondUp = recognizer.onKeyWithResult(
+                294, 1, 0, false, 200, 200, false, (profile, origin) -> matches.add(profile));
+        assertTrue(secondUp.consumed);
+        assertEquals("double-action-matched", secondUp.reason);
+        modes(PRESS_DOUBLE);
+    }
+
     @Test public void shortThenHeldWithinWindowEmitsOnlyHold() {
         configure(294, PRESS_SINGLE, PRESS_HOLD, PRESS_DOUBLE);
         event(294, 0, 0); event(294, 1, 50);

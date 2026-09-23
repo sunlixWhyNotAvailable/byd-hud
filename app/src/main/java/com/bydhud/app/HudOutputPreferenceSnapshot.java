@@ -20,6 +20,8 @@ final class HudOutputPreferenceSnapshot {
     final boolean remainingTime;
     final boolean remainingDistance;
     final int speedLimitMode;
+    final int nativeSpeedFallback;
+    final int nativeSpeedClear;
     final int speedLimitFreeFallback;
     final int speedLimitOverlaySeconds;
     final int speedLimitCompositePlacement;
@@ -30,6 +32,13 @@ final class HudOutputPreferenceSnapshot {
     private HudOutputPreferenceSnapshot(
             DirectTbtPayload.Options options, boolean wazeAlerts,
             int textTransliterationMode) {
+        this(options, wazeAlerts, textTransliterationMode, 0, 0);
+    }
+
+    private HudOutputPreferenceSnapshot(DirectTbtPayload.Options options, boolean wazeAlerts,
+            int textTransliterationMode, int nativeSpeedFallback, int nativeSpeedClear) {
+        this.nativeSpeedFallback = nativeSpeedFallback;
+        this.nativeSpeedClear = nativeSpeedClear;
         png = options.png;
         nativeManeuver = options.nativeManeuver;
         lanes = options.lanes;
@@ -58,8 +67,10 @@ final class HudOutputPreferenceSnapshot {
             DirectTbtPayload.Options options = DirectTbtPayload.Options.from(context);
             boolean alerts = HudPrefs.isWazeAlertsEnabled(context);
             int transliteration = HudPrefs.transliterationMode(context);
+            int fallback = HudPrefs.getNativeSpeedLimitFallbackMode(context);
+            int clearing = HudPrefs.getNativeSpeedLimitClearMode(context);
             if (before == HudPrefs.outputOptionsRevision()) {
-                return new HudOutputPreferenceSnapshot(options, alerts, transliteration);
+                return new HudOutputPreferenceSnapshot(options, alerts, transliteration, fallback, clearing);
             }
         }
     }
@@ -92,6 +103,7 @@ final class HudOutputPreferenceSnapshot {
                 + " remainingTime=" + bit(remainingTime)
                 + " remainingDistance=" + bit(remainingDistance)
                 + " speedLimitMode=" + speedLimitMode
+                + " nativeSpeedFallback=" + nativeSpeedFallback + " nativeSpeedClear=" + nativeSpeedClear
                 + " speedFreeFallback=" + speedLimitFreeFallback
                 + " speedOverlaySeconds=" + speedLimitOverlaySeconds
                 + " speedPlacement=" + speedLimitCompositePlacement
@@ -119,6 +131,7 @@ final class HudOutputPreferenceSnapshot {
                 && remainingTime == other.remainingTime
                 && remainingDistance == other.remainingDistance
                 && speedLimitMode == other.speedLimitMode
+                && nativeSpeedFallback == other.nativeSpeedFallback && nativeSpeedClear == other.nativeSpeedClear
                 && speedLimitFreeFallback == other.speedLimitFreeFallback
                 && speedLimitOverlaySeconds == other.speedLimitOverlaySeconds
                 && speedLimitCompositePlacement == other.speedLimitCompositePlacement
@@ -132,7 +145,7 @@ final class HudOutputPreferenceSnapshot {
         return Objects.hash(
                 png, nativeManeuver, lanes, distance, street, textDirection,
                 textTransliterationMode, clampSmallDistance, wazeAlerts, routeMetricsMode, eta,
-                remainingTime, remainingDistance, speedLimitMode,
+                remainingTime, remainingDistance, speedLimitMode, nativeSpeedFallback, nativeSpeedClear,
                 speedLimitFreeFallback, speedLimitOverlaySeconds,
                 speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                 speedLimitLaneOverlaySize, presentationKey);

@@ -15,6 +15,16 @@ import java.util.Arrays;
 
 public final class InstrumentProxyContractTest {
     @Test
+    public void nativeCapabilityDoesNotRequireInstrumentGuidance() {
+        assertTrue(InstrumentProxyContract.hasUsableCapability(
+                InstrumentProxyContract.CAP_SYSTEM_CONTEXT | InstrumentProxyContract.CAP_NATIVE_SPEED));
+        assertTrue(InstrumentProxyContract.hasUsableCapability(
+                InstrumentProxyContract.CAP_SYSTEM_CONTEXT | InstrumentProxyContract.CAP_DIRECT_FID));
+        assertFalse(InstrumentProxyContract.hasUsableCapability(InstrumentProxyContract.CAP_NATIVE_SPEED));
+        assertFalse(InstrumentProxyContract.hasUsableCapability(InstrumentProxyContract.CAP_SYSTEM_CONTEXT));
+    }
+
+    @Test
     public void acceptsOnlyKnownNavigationStatuses() {
         assertTrue(InstrumentProxyContract.validStatus(1));
         assertTrue(InstrumentProxyContract.validStatus(2));
@@ -186,12 +196,14 @@ public final class InstrumentProxyContractTest {
     }
 
     @Test
-    public void navigationFramesNeverLaunchTheHelper() throws IOException {
+    public void guidanceCallsNeverLaunchTheHelper() throws IOException {
         String manager = source(
                 "app/src/main/java/com/bydhud/app/InstrumentProxyManager.java");
         String executeCall = manager.substring(
                 manager.indexOf("private void executeCall("),
-                manager.indexOf("private void handleCallTimeout("));
+                manager.indexOf("void nativeSpeedOperation("))
+                + manager.substring(manager.indexOf("private void executeAllowedCall("),
+                        manager.indexOf("private void handleCallTimeout("));
         assertFalse(executeCall.contains("ensureStarted("));
         assertTrue(manager.contains("state == State.BLOCKED"));
         assertTrue(manager.contains("InstrumentProxyStore.load(context)"));

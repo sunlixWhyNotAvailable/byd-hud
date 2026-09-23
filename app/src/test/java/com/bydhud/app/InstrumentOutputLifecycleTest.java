@@ -158,7 +158,8 @@ public final class InstrumentOutputLifecycleTest {
         String retry = between(manager, "private void scheduleOutputRetryLocked()", "void onAuthorizationVerified()");
         assertTrue(retry.contains("generation != requestGeneration"));
         assertTrue(retry.contains("state != State.IDLE"));
-        String calls = between(manager, "private void executeCall(", "private void handleCallTimeout(");
+        String calls = between(manager, "private void executeCall(", "void nativeSpeedOperation(")
+                + between(manager, "private void executeAllowedCall(", "private void handleCallTimeout(");
         assertFalse(calls.contains("ensureStarted("));
         assertTrue(manager.contains("START_TIMEOUT_MS = 5_000L"));
         assertTrue(manager.contains("RETRY_DELAY_MS = 30_000L"));

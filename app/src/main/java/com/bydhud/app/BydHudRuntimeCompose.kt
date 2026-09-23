@@ -2042,6 +2042,30 @@ private fun OptionsTab(
     val speedLimitModeIndex = HudPrefs.speedLimitModeUiIndex(snapshot.speedLimitMode)
     val speedLimitFallbackModes = language.choose(listOf("Вимкнено", "У полі з маневром", "У полі зі смугами"),
         listOf("Off", "In maneuver field", "In lane field"), listOf("Выкл.", "В поле манёвра", "В поле полос"))
+    val nativeSpeedLimitClearTitle = language.choose(
+        "Очищувати штатне поле обмеження швидкості",
+        "Clear native speed limit field",
+        "Очищать штатное поле ограничения скорости")
+    val nativeSpeedLimitClearModes = language.choose(
+        listOf("Ніколи", "Немає нав. даних", "Завжди"),
+        listOf("Never", "No nav. data", "Always"),
+        listOf("Никогда", "Нет нав. данных", "Всегда"))
+    val nativeSpeedLimitClearHint = language.choose(
+        "Оберіть, коли очищувати штатний знак обмеження швидкості",
+        "Choose when to clear the native speed limit sign",
+        "Выберите, когда очищать штатный знак ограничения скорости")
+    val nativeSpeedLimitFallbackTitle = language.choose(
+        "Запасний режим виводу обмеження швидкості",
+        "Fallback speed limit output mode",
+        "Запасной режим вывода ограничения скорости")
+    val nativeSpeedLimitFallbackModes = language.choose(
+        listOf("Вимкнено", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
+        listOf("Off", "In maneuver field", "In lane field", "In a free field", "Composite"),
+        listOf("Выкл.", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
+    val nativeSpeedLimitFallbackHint = language.choose(
+        "Якщо штатне поле не підтримується або тимчасово не оновлюється, показувати знак вибраним запасним способом",
+        "If the native field is unsupported or temporarily stops updating, show the sign using the selected fallback method",
+        "Если штатное поле не поддерживается или временно не обновляется, показывать знак выбранным запасным способом")
     val speedLimitCompositePlacementModes = language.choose(
         listOf("Тільки маневру", "Тільки смуг", "Вільне або маневру", "Вільне або смуг"),
         listOf("Maneuver only", "Lanes only", "Free or maneuver", "Free or lanes"),
@@ -2066,11 +2090,15 @@ private fun OptionsTab(
         "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only.", "Размер композитного знака в пикселях для изображения манёвра. Целое число от 1 до 103.")
     val compositeLaneSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36.",
         "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only.", "Размер композитного знака в пикселях для изображения полос. Целое число от 1 до 36.")
-    val freeFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_FREE
-    val compositeEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_COMPOSITE
-    val overlaySecondsEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_MANEUVER
-            || snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_LANES
-            || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != 0)
+    val nativeSpeedLimitClearEnabled = snapshot.speedLimitMode != HudPrefs.SPEED_LIMIT_NATIVE
+    val nativeSpeedLimitFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE
+    val effectiveSpeedLimitBitmapMode = HudPrefs.effectiveSpeedLimitBitmapMode(
+        snapshot.speedLimitMode, snapshot.nativeSpeedLimitFallbackMode)
+    val freeFallbackEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_FREE
+    val compositeEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_COMPOSITE
+    val overlaySecondsEnabled = effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_MANEUVER
+            || effectiveSpeedLimitBitmapMode == HudPrefs.SPEED_LIMIT_LANES
+            || (freeFallbackEnabled && snapshot.speedLimitFreeFallback != HudPrefs.SPEED_LIMIT_FALLBACK_OFF)
     val transferConflict = transferDraft?.let { draft ->
         SteeringTransferPreferences.findConflict(
             snapshot.steeringTransferProfiles,
@@ -2390,6 +2418,54 @@ private fun OptionsTab(
                         width = 190.dp,
                         onSelected = { index -> runAction {
                             activity.composeSetSpeedLimitMode(HudPrefs.speedLimitModeFromUiIndex(index))
+                        } }
+                    )
+                }
+            }
+            row("speed-limit-native-clear-mode") {
+                SettingRow(
+                    nativeSpeedLimitClearTitle,
+                    nativeSpeedLimitClearHint,
+                    palette,
+                    enabled = nativeSpeedLimitClearEnabled,
+                    onHelp = { hudHelpRequest = dropdownHelp(
+                        HudHelpTopicId.SpeedLimitNativeClearMode,
+                        nativeSpeedLimitClearTitle,
+                        snapshot.nativeSpeedLimitClearMode,
+                        nativeSpeedLimitClearModes) }
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.nativeSpeedLimitClearMode,
+                        options = nativeSpeedLimitClearModes,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = nativeSpeedLimitClearEnabled,
+                        onSelected = { mode -> runAction {
+                            activity.composeSetNativeSpeedLimitClearMode(mode)
+                        } }
+                    )
+                }
+            }
+            row("speed-limit-native-fallback-mode") {
+                SettingRow(
+                    nativeSpeedLimitFallbackTitle,
+                    nativeSpeedLimitFallbackHint,
+                    palette,
+                    enabled = nativeSpeedLimitFallbackEnabled,
+                    onHelp = { hudHelpRequest = dropdownHelp(
+                        HudHelpTopicId.SpeedLimitNativeFallbackMode,
+                        nativeSpeedLimitFallbackTitle,
+                        snapshot.nativeSpeedLimitFallbackMode,
+                        nativeSpeedLimitFallbackModes) }
+                ) {
+                    HudDropdown(
+                        selectedIndex = snapshot.nativeSpeedLimitFallbackMode,
+                        options = nativeSpeedLimitFallbackModes,
+                        palette = palette,
+                        width = 190.dp,
+                        enabled = nativeSpeedLimitFallbackEnabled,
+                        onSelected = { mode -> runAction {
+                            activity.composeSetNativeSpeedLimitFallbackMode(mode)
                         } }
                     )
                 }
@@ -7460,6 +7536,8 @@ private fun HudHelpOverlay(
         HudHelpTopicId.WazeAlerts -> topic.frames
             .getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }.imageRes
         HudHelpTopicId.BasicTransliteration,
+        HudHelpTopicId.SpeedLimitNativeClearMode,
+        HudHelpTopicId.SpeedLimitNativeFallbackMode,
         HudHelpTopicId.SpeedLimitFallback,
         HudHelpTopicId.SpeedLimitCompositeField,
         HudHelpTopicId.WazeAlertField -> topic.frames
@@ -7558,6 +7636,22 @@ private fun HudHelpOverlay(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
+                if (request.topic == HudHelpTopicId.SpeedLimitNativeClearMode && localIndex != 0) {
+                    // The approved clearing sample hides only the native sign.
+                    Canvas(Modifier.fillMaxSize()) {
+                        val scaleX = size.width / 2172f
+                        val scaleY = size.height / 724f
+                        drawImage(
+                            image = coloredImage,
+                            srcOffset = IntOffset(1546, 200),
+                            srcSize = IntSize(110, 111),
+                            dstOffset = IntOffset((1546f * scaleX).roundToInt(),
+                                (347f * scaleY).roundToInt()),
+                            dstSize = IntSize((110f * scaleX).roundToInt(),
+                                (111f * scaleY).roundToInt())
+                        )
+                    }
+                }
                 if (signBitmap != null) {
                     Canvas(Modifier.fillMaxSize()) {
                         val maneuver = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
@@ -7660,6 +7754,14 @@ private fun HudHelpOverlay(
                         }
                     }
                 }
+            }
+            if (request.topic == HudHelpTopicId.SpeedLimitNativeClearMode
+                || request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode) {
+                Text(
+                    topic.frames.getOrElse(localIndex) { topic.frames.first() }.caption(language),
+                    color = palette.muted,
+                    fontSize = 13.sp
+                )
             }
             HudButton(language.choose("Закрити", "Close", "Закрыть"), palette, width = 0.dp,
                 modifier = Modifier.fillMaxWidth(), onClick = onDismiss)

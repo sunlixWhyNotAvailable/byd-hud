@@ -33,6 +33,10 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
     private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
     private static final String KEY_SPEED_LIMIT_MODE = "speed_limit_mode";
+    private static final String KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE =
+            "speed_limit_native_clear_mode";
+    private static final String KEY_SPEED_LIMIT_NATIVE_FALLBACK_MODE =
+            "speed_limit_native_fallback_mode";
     private static final String KEY_SPEED_LIMIT_FREE_FALLBACK = "speed_limit_free_fallback";
     private static final String KEY_SPEED_LIMIT_OVERLAY_SECONDS = "speed_limit_overlay_seconds";
     private static final String KEY_SPEED_LIMIT_COMPOSITE_PLACEMENT =
@@ -77,6 +81,14 @@ final class HudPrefs {
     static final int SPEED_LIMIT_FREE = 3;
     static final int SPEED_LIMIT_COMPOSITE = 4;
     static final int SPEED_LIMIT_NATIVE = 5;
+    static final int SPEED_LIMIT_NATIVE_CLEAR_NEVER = 0;
+    static final int SPEED_LIMIT_NATIVE_CLEAR_NO_NAV_DATA = 1;
+    static final int SPEED_LIMIT_NATIVE_CLEAR_ALWAYS = 2;
+    static final int SPEED_LIMIT_NATIVE_FALLBACK_OFF = 0;
+    static final int SPEED_LIMIT_NATIVE_FALLBACK_MANEUVER = 1;
+    static final int SPEED_LIMIT_NATIVE_FALLBACK_LANES = 2;
+    static final int SPEED_LIMIT_NATIVE_FALLBACK_FREE = 3;
+    static final int SPEED_LIMIT_NATIVE_FALLBACK_COMPOSITE = 4;
     // UI order differs from persisted IDs; existing selections must not shift.
     private static final int[] SPEED_LIMIT_MODE_UI_ORDER = {
             SPEED_LIMIT_OFF, SPEED_LIMIT_NATIVE, SPEED_LIMIT_MANEUVER,
@@ -373,6 +385,44 @@ final class HudPrefs {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_MODE,
                 normalizeSpeedLimitMode(mode)).apply();
         markOutputOptionChanged(KEY_SPEED_LIMIT_MODE);
+    }
+
+    static int getNativeSpeedLimitClearMode(Context context) {
+        return normalizeNativeSpeedLimitClearMode(prefs(context).getInt(
+                KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE, SPEED_LIMIT_NATIVE_CLEAR_NEVER));
+    }
+
+    static void setNativeSpeedLimitClearMode(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE,
+                normalizeNativeSpeedLimitClearMode(mode)).apply();
+        markOutputOptionChanged(KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE);
+    }
+
+    static int getNativeSpeedLimitFallbackMode(Context context) {
+        return normalizeNativeSpeedLimitFallbackMode(prefs(context).getInt(
+                KEY_SPEED_LIMIT_NATIVE_FALLBACK_MODE, SPEED_LIMIT_NATIVE_FALLBACK_OFF));
+    }
+
+    static void setNativeSpeedLimitFallbackMode(Context context, int mode) {
+        prefs(context).edit().putInt(KEY_SPEED_LIMIT_NATIVE_FALLBACK_MODE,
+                normalizeNativeSpeedLimitFallbackMode(mode)).apply();
+        markOutputOptionChanged(KEY_SPEED_LIMIT_NATIVE_FALLBACK_MODE);
+    }
+
+    static int normalizeNativeSpeedLimitClearMode(int mode) {
+        return clamp(mode, SPEED_LIMIT_NATIVE_CLEAR_NEVER, SPEED_LIMIT_NATIVE_CLEAR_ALWAYS);
+    }
+
+    static int normalizeNativeSpeedLimitFallbackMode(int mode) {
+        return clamp(mode, SPEED_LIMIT_NATIVE_FALLBACK_OFF,
+                SPEED_LIMIT_NATIVE_FALLBACK_COMPOSITE);
+    }
+
+    static int effectiveSpeedLimitBitmapMode(int primaryMode, int nativeFallbackMode) {
+        int normalizedPrimary = normalizeSpeedLimitMode(primaryMode);
+        return normalizedPrimary == SPEED_LIMIT_NATIVE
+                ? normalizeNativeSpeedLimitFallbackMode(nativeFallbackMode)
+                : normalizedPrimary;
     }
 
     static int speedLimitFreeFallback(Context context) {
