@@ -338,6 +338,30 @@ final class ShanghaiDiagnostics {
             this.channels = ShanghaiJson.copy(channels);
         }
 
+        boolean hasPartialCoverage() {
+            if ("partial".equals(state)
+                    || channels.optInt("someIpSubscribedTopics") < channels.optInt("someIpRequestedTopics")
+                    || channels.optLong("someIpDropped") > 0L
+                    || channels.optInt("sessionEventsDropped") > 0) return true;
+            JSONObject adb = channels.optJSONObject("adb");
+            return adb == null || partialStream(adb.optJSONObject("adas"), "adas")
+                    || partialStream(adb.optJSONObject("pcap"), "pcap");
+        }
+
+        private boolean partialStream(JSONObject stream, String name) {
+            if (stream == null) return true;
+            String status = stream.optString("status", "unavailable");
+            if ("unavailable".equals(status) || "failed".equals(status)
+                    || "stop_unconfirmed".equals(status) || "not_started".equals(status)) return true;
+            if (stream.optLong("droppedBytes") > 0L || !stream.optString("error").isEmpty()
+                    || !stream.optString("stopError").isEmpty()) return true;
+            boolean finalized = "stopped".equals(state) || "failed".equals(state);
+            if (finalized) return !stream.optBoolean("captureComplete", false);
+            if ("adas".equals(name) && !stream.optBoolean("ready")) return true;
+            if ("pcap".equals(name) && stream.optLong("bytes") < 24L) return true;
+            return "completed".equals(status) || "stopped".equals(status);
+        }
+
         JSONObject toJson() {
             return ShanghaiJson.object(
                     "schemaVersion", 1,

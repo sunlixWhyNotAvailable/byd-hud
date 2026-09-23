@@ -170,8 +170,15 @@ public final class InstrumentOutputLifecycleTest {
             assertTrue(stage, manager.contains('"' + stage + '"'));
         }
         assertFalse(manager.contains(".shortDetail()"));
-        assertTrue(manager.contains("instrumentProxyStartupDiagnostic(context, expected)"));
+        assertTrue(manager.matches("(?s).*instrumentProxyStartupDiagnostic\\(\\s*context,\\s*expected\\).*"));
         assertTrue(manager.contains("clearInstrumentProxyStartupDiagnostic(context, expected)"));
+        String cleanup = between(manager, "private boolean cleanupHelper(String reason)",
+                "private InstrumentProxyStore.Identity helperIdentitySnapshot()");
+        assertTrue(cleanup.contains("\"start-failed\".equals(reason) || \"capability-blocked\".equals(reason)"));
+        assertTrue(cleanup.indexOf("instrumentProxyStartupDiagnostic(")
+                < cleanup.indexOf("clearStartupDiagnostic(expected)"));
+        assertTrue(cleanup.indexOf("log(\"startup diagnostic generation=")
+                < cleanup.indexOf("clearStartupDiagnostic(expected)"));
         String shutdown = between(manager, "void shutdown(String reason)", "private void launch(");
         assertTrue(shutdown.indexOf("shutdownCandidate(current, currentGeneration)")
                 < shutdown.indexOf("cleanupHelper(\"shutdown\")"));

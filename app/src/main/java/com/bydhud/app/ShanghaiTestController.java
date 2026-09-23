@@ -60,7 +60,8 @@ final class ShanghaiTestController {
             cached = new ShanghaiTestState(ShanghaiTestState.Phase.ERROR, 0, "",
                     localized("Попередній запис ще завершується. Повторіть запуск пізніше.",
                             "The previous capture is still finishing. Retry later.",
-                            "Предыдущая запись ещё завершается. Повторите запуск позже."), "", false, "", "");
+                            "Предыдущая запись ещё завершается. Повторите запуск позже."),
+                    ShanghaiTestState.CaptureStatus.FAILED, false, "", "");
             notifyUi();
             return;
         }
@@ -136,20 +137,21 @@ final class ShanghaiTestController {
             try {
                 if (!gps().hasPendingRecovery()) return;
                 cached = new ShanghaiTestState(ShanghaiTestState.Phase.RECOVERING, 0,
-                        gps().pendingSessionId(), "", "", true, "", "");
+                        gps().pendingSessionId(), "", ShanghaiTestState.CaptureStatus.NOT_STARTED, true, "", "");
                 notifyUi();
                 ShanghaiMockGps.Result result = gps().recoverOwned();
                 boolean pending = gps().hasPendingRecovery();
                 cached = new ShanghaiTestState(pending ? ShanghaiTestState.Phase.ERROR : ShanghaiTestState.Phase.IDLE,
                         0, "", pending ? localized("Не вдалося завершити очищення GPS. Повторіть скидання.",
                         "GPS cleanup is still pending. Retry reset.", "Очистка GPS не завершена. Повторите сброс.") : "",
-                        "", pending, "", "");
+                        ShanghaiTestState.CaptureStatus.NOT_STARTED, pending, "", "");
                 AppEventLogger.event(context, "shanghai_recovery reason=" + reason + " result=" + result.code
                         + " detail=" + result.detail);
             } catch (RuntimeException error) {
                 cached = new ShanghaiTestState(ShanghaiTestState.Phase.ERROR, 0, "",
                         localized("Не вдалося перевірити стан GPS.", "Could not check GPS state.",
-                                "Не удалось проверить состояние GPS."), "", true, "", "");
+                                "Не удалось проверить состояние GPS."),
+                        ShanghaiTestState.CaptureStatus.FAILED, true, "", "");
                 AppEventLogger.event(context, "shanghai_recovery_error " + describe(error));
             } finally {
                 synchronized (ShanghaiTestController.this) { recoveryQueued = false; }
@@ -198,6 +200,7 @@ final class ShanghaiTestController {
             } else worker.schedule(() -> awaitCapture(run), 100, TimeUnit.MILLISECONDS);
             return;
         }
+        run.captureReady = true;
         try {
             ShanghaiOutputGate.suspend();
             run.outputSuspended = true;
@@ -335,7 +338,7 @@ final class ShanghaiTestController {
                     "Тест прерван из-за ошибки. Подробности сохранены в логах.")
                     : run.resetOnly ? localized("Підміну GPS скинуто.", "GPS mock reset.", "Подмена GPS сброшена.") : "";
             cached = new ShanghaiTestState(phase, run.elapsed, run.id, detail,
-                    coverage(run), pending, run.day, run.logcat == null ? "" : run.logcat.day());
+                    captureStatus(run, phase), pending, run.day, run.logcat == null ? "" : run.logcat.day());
             synchronized (this) {
                 try { ShanghaiTestService.finish(context); }
                 catch (RuntimeException error) { record(run, "service_stop_error", describe(error)); }
@@ -378,20 +381,37 @@ final class ShanghaiTestController {
     }
 
     private void publish(Run run, ShanghaiTestState.Phase phase, String detail) {
-        cached = new ShanghaiTestState(phase, run.elapsed, run.id, detail, coverage(run), false,
+        cached = new ShanghaiTestState(phase, run.elapsed, run.id, detail, captureStatus(run, phase), false,
                 run.day, run.logcat == null ? "" : run.logcat.day());
         notifyUi();
     }
 
-    private String coverage(Run run) {
-        if (run.logcat == null) return "";
-        return run.logcat.reducedCoverage()
-                ? localized("Частковий запис: Logcat застосунку. Доступні канали — у звіті.",
-                "Partial capture: app Logcat. Available channels are listed in the report.",
-                "Частичная запись: Logcat приложения. Доступные каналы — в отчёте.")
-                : localized("Системний Logcat; доступність інших каналів збережено у звіті.",
-                "System Logcat; other channel availability is saved in the report.",
-                "Системный Logcat; доступность остальных каналов сохранена в отчёте.");
+    private ShanghaiTestState.CaptureStatus captureStatus(Run run, ShanghaiTestState.Phase phase) {
+        if (run.resetOnly) return ShanghaiTestState.CaptureStatus.NOT_STARTED;
+        if (!run.failure.isEmpty() || phase == ShanghaiTestState.Phase.ERROR) {
+            return ShanghaiTestState.CaptureStatus.FAILED;
+        }
+        if (run.logcat == null || run.diagnostics == null) {
+            return ShanghaiTestState.CaptureStatus.STARTING;
+        }
+        ShanghaiDiagnostics.Coverage coverage = run.diagnostics.coverage();
+        if ("failed".equals(coverage.state) || !coverage.failure.isEmpty() || !coverage.writersHealthy) {
+            return ShanghaiTestState.CaptureStatus.FAILED;
+        }
+        boolean finalized = phase == ShanghaiTestState.Phase.COMPLETED
+                || phase == ShanghaiTestState.Phase.STOPPED;
+        if (!finalized) {
+            if (!run.logcat.isHealthy() || !run.diagnostics.isHealthy()) {
+                return ShanghaiTestState.CaptureStatus.FAILED;
+            }
+            if (!run.logcat.isReady() || !coverage.ready) return ShanghaiTestState.CaptureStatus.STARTING;
+        } else if (!run.captureReady) {
+            return ShanghaiTestState.CaptureStatus.PARTIAL;
+        }
+        if (run.logcat.reducedCoverage() || coverage.hasPartialCoverage()) {
+            return ShanghaiTestState.CaptureStatus.PARTIAL;
+        }
+        return ShanghaiTestState.CaptureStatus.READY;
     }
 
     private String localized(String uk, String en, String ru) {
@@ -425,6 +445,7 @@ final class ShanghaiTestController {
         boolean instrumentSuspendAttempted;
         volatile boolean restoreOutput = true;
         boolean completed;
+        boolean captureReady;
         boolean cleanupFailed;
         long originElapsedMs;
         long startDeadlineMs;

@@ -303,13 +303,16 @@ final class LocalAdbBridge {
     }
 
     static ShellResult probeShanghaiPcap(Context context) throws IOException {
-        return runTrustedRuntimeShellCommand(context,
-                "if [ -x /system/bin/tcpdump ]; then echo /system/bin/tcpdump; "
-                        + "elif [ -x /vendor/bin/tcpdump ]; then echo /vendor/bin/tcpdump; "
-                        + "else exit 127; fi; "
-                        + "if ip link show eth0 >/dev/null 2>&1; then echo interface=eth0; "
-                        + "else echo interface=any; fi",
-                16 * 1024);
+        return runTrustedRuntimeShellCommand(context, shanghaiPcapProbeCommand(), 16 * 1024);
+    }
+
+    static String shanghaiPcapProbeCommand() {
+        // Keep early exits inside the subshell so shellWithExit can append the result.
+        return "( if [ -x /system/bin/tcpdump ]; then echo /system/bin/tcpdump; "
+                + "elif [ -x /vendor/bin/tcpdump ]; then echo /vendor/bin/tcpdump; "
+                + "else exit 127; fi; "
+                + "if ip link show eth0 >/dev/null 2>&1; then echo interface=eth0; "
+                + "else echo interface=any; fi )";
     }
 
     static ShellResult captureShanghaiSnapshot(Context context) throws IOException {
@@ -322,19 +325,23 @@ final class LocalAdbBridge {
 
     static ShellResult stopShanghaiStream(Context context, String token, String channel)
             throws IOException {
+        return runTrustedRuntimeShellCommand(context,
+                shanghaiStopCommand(token, channel), 16 * 1024, false);
+    }
+
+    static String shanghaiStopCommand(String token, String channel) {
         requireShanghaiToken(token);
         if (!("adas".equals(channel) || "pcap".equals(channel))) {
             throw new SecurityException("Unsupported Shanghai channel");
         }
         String signal = "pcap".equals(channel) ? "INT" : "TERM";
         String pidFile = shanghaiPidFile(token, channel);
-        String command = "if [ -r " + pidFile + " ]; then set -- $(cat " + pidFile
+        return "( if [ -r " + pidFile + " ]; then set -- $(cat " + pidFile
                 + "); pid=$1; expected=$2; case $pid:$expected in *[!0-9:]*) exit 65;; esac; "
                 + "current=$(awk '{print $22}' /proc/$pid/stat 2>/dev/null); "
                 + "if [ -z \"$expected\" ] || [ \"$current\" != \"$expected\" ]; then exit 66; fi; "
                 + "kill -" + signal + " $pid 2>/dev/null; code=$?; rm -f "
-                + pidFile + "; exit $code; else exit 0; fi";
-        return runTrustedRuntimeShellCommand(context, command, 16 * 1024, false);
+                + pidFile + "; exit $code; else exit 0; fi )";
     }
 
     static ShellResult readOwnMockLocationAppOp(Context context) throws IOException {
@@ -1096,8 +1103,12 @@ final class LocalAdbBridge {
         ShellResult result = runTrustedRuntimeShellCommand(context,
                 alive + "; if [ -f " + path + " ]; then tail -c "
                         + INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES + " " + path
-                        + "; else echo startupLog=missing; fi; rm -f " + path,
+                        + "; else echo startupLog=missing; fi",
                 INSTRUMENT_STARTUP_DIAGNOSTIC_BYTES + 512);
+        if (!result.success() || result.truncated) {
+            throw new IOException("Instrument startup diagnostic read failed: exit="
+                    + result.exitCode + " truncated=" + result.truncated);
+        }
         return sanitizeInstrumentProxyStartupDiagnostic(result.output);
     }
 

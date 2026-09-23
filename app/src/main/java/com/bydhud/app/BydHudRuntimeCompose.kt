@@ -6621,6 +6621,7 @@ private fun HudCheckTab(
         hint = copy.hudCheckHint,
         palette = palette,
         state = scrollState,
+        itemSpacing = if (state.mode == HudCheckState.Mode.SHANGHAI) 6.dp else 10.dp,
         headerAction = {
             if (state.mode != HudCheckState.Mode.SHANGHAI) {
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -6668,15 +6669,17 @@ private fun HudCheckTab(
                 ) { runAction { activity.composeHudCheckSelectMode(HudCheckState.Mode.SHANGHAI) } }
             }
         }
-        item(key = "hud-check-status") {
-            if (state.running && deliveryStatus.isNotBlank()) {
-                Text(
-                    deliveryStatus,
-                    color = if (statusIsError) palette.red else palette.muted,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 12.sp,
-                    modifier = Modifier.fillMaxWidth()
-                )
+        if (state.mode != HudCheckState.Mode.SHANGHAI) {
+            item(key = "hud-check-status") {
+                if (state.running && deliveryStatus.isNotBlank()) {
+                    Text(
+                        deliveryStatus,
+                        color = if (statusIsError) palette.red else palette.muted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 12.sp,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
             }
         }
         if (state.mode == HudCheckState.Mode.BASIC) {
@@ -6862,7 +6865,9 @@ private fun ShanghaiTestSection(
         ShanghaiTestState.Phase.DRIVING -> language.choose("Поїздка маршрутом", "Driving the route", "Поездка по маршруту")
         ShanghaiTestState.Phase.FINISHING -> language.choose("Завершення", "Finishing", "Завершение")
         ShanghaiTestState.Phase.COMPLETED -> language.choose("Завершено", "Completed", "Завершено")
-        ShanghaiTestState.Phase.STOPPED -> language.choose("Завершено достроково", "Stopped early", "Завершено досрочно")
+        ShanghaiTestState.Phase.STOPPED -> if (state.captureStatus == ShanghaiTestState.CaptureStatus.NOT_STARTED) {
+            language.choose("Підміну GPS скинуто", "GPS mock reset", "Подмена GPS сброшена")
+        } else language.choose("Завершено достроково", "Stopped early", "Завершено досрочно")
         ShanghaiTestState.Phase.ERROR -> language.choose("Помилка тесту", "Test error", "Ошибка теста")
         ShanghaiTestState.Phase.RECOVERING -> language.choose("Відновлення GPS", "Restoring GPS", "Восстановление GPS")
     }
@@ -6873,47 +6878,125 @@ private fun ShanghaiTestSection(
         else -> palette.muted to palette.disabled
     }
 
-    Section(language.choose("Порядок тесту", "Test procedure", "Порядок теста"), palette) {
-        CodeBlock(
-            language.choose(
-                "1. Натисніть «Почати». Протягом 15 секунд відкрийте штатний навігатор і запустіть навігацію з виводом на HUD.\n2. Дочекайтеся завершення поїздки або натисніть «Завершити». Після тесту підміна GPS вимикається.\n3. Logcat записується протягом усього тесту. Перехід в інший застосунок не зупиняє поїздку.",
-                "1. Press Start. Within 15 seconds, open stock navigation and start guidance with HUD output.\n2. Wait for the drive to finish or press Stop. GPS simulation ends with the test.\n3. Logcat records throughout the test. Switching to another app does not stop the drive.",
-                "1. Нажмите «Начать». В течение 15 секунд откройте штатный навигатор и запустите навигацию с выводом на HUD.\n2. Дождитесь завершения поездки или нажмите «Завершить». После теста подмена GPS отключается.\n3. Logcat записывается в течение всего теста. Переход в другое приложение не останавливает поездку."
-            ),
-            palette,
-            compact = true
+    val footerStatus = state.footerStatus()
+    val footerColor = when (footerStatus) {
+        ShanghaiTestState.FooterStatus.CLEANUP_PENDING,
+        ShanghaiTestState.FooterStatus.PARTIAL -> palette.yellow
+        ShanghaiTestState.FooterStatus.FAILURE -> palette.red
+        ShanghaiTestState.FooterStatus.NORMAL -> palette.muted
+    }
+    val footerPrimary = when (footerStatus) {
+        ShanghaiTestState.FooterStatus.CLEANUP_PENDING -> language.choose(
+            "Очищення штучних координат не завершено.",
+            "Mock location cleanup is still pending.",
+            "Очистка искусственных координат ещё не завершена."
         )
-        Spacer(Modifier.height(12.dp))
-        Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
+        ShanghaiTestState.FooterStatus.FAILURE -> language.choose(
+            "Тест або запис завершився з помилкою.",
+            "The test or recording failed.",
+            "Тест или запись завершились с ошибкой."
+        )
+        ShanghaiTestState.FooterStatus.PARTIAL -> language.choose(
+            "Покриття діагностики часткове.",
+            "Diagnostic coverage is partial.",
+            "Покрытие диагностики частичное."
+        )
+        ShanghaiTestState.FooterStatus.NORMAL -> when (state.phase) {
+            ShanghaiTestState.Phase.STARTING -> language.choose(
+                "Підготовка запису діагностики.", "Preparing diagnostic recording.", "Подготовка записи диагностики."
+            )
+            ShanghaiTestState.Phase.PREPARING,
+            ShanghaiTestState.Phase.DRIVING -> language.choose(
+                "Тест виконується; запис готовий.", "Test running; recording is ready.", "Тест выполняется; запись готова."
+            )
+            ShanghaiTestState.Phase.FINISHING -> language.choose(
+                "Завершення тесту й очищення GPS.", "Finishing the test and restoring GPS.", "Завершение теста и очистка GPS."
+            )
+            ShanghaiTestState.Phase.RECOVERING -> language.choose(
+                "Скидання штучних координат.", "Resetting mock location.", "Сброс искусственных координат."
+            )
+            ShanghaiTestState.Phase.COMPLETED -> language.choose(
+                "Діагностику збережено.", "Diagnostics saved.", "Диагностика сохранена."
+            )
+            ShanghaiTestState.Phase.STOPPED -> if (state.captureStatus == ShanghaiTestState.CaptureStatus.NOT_STARTED) {
+                language.choose("Готовий до нового тесту.", "Ready for a new test.", "Готов к новому тесту.")
+            } else language.choose("Тест завершено достроково.", "Test stopped early.", "Тест завершён досрочно.")
+            else -> language.choose("Готовий до запуску.", "Ready to start.", "Готов к запуску.")
+        }
+    }
+    val footerSecondary = when (footerStatus) {
+        ShanghaiTestState.FooterStatus.CLEANUP_PENDING -> language.choose(
+            "Натисніть «Скинути штучні координати», щоб повторити очищення.",
+            "Press Reset mock location to retry cleanup.",
+            "Нажмите «Сбросить искусственные координаты», чтобы повторить очистку."
+        )
+        ShanghaiTestState.FooterStatus.FAILURE -> language.choose(
+            "Перевірте результат у розділі «Сховище та логи».",
+            "Review the result in Storage and logs.",
+            "Проверьте результат в разделе «Хранилище и логи»."
+        )
+        ShanghaiTestState.FooterStatus.PARTIAL -> language.choose(
+            "Доступні канали й втрати описані у звіті.",
+            "Available channels and losses are listed in the report.",
+            "Доступные каналы и потери описаны в отчёте."
+        )
+        ShanghaiTestState.FooterStatus.NORMAL -> when {
+            state.isBusy() -> language.choose(
+                "Режими HUD Check і керування Logcat заблоковано до завершення тесту.",
+                "HUD Check modes and Logcat controls stay locked until the test ends.",
+                "Режимы HUD Check и управление Logcat заблокированы до завершения теста."
+            )
+            else -> language.choose(
+                "Після тесту відновлюється попередній стан Logcat.",
+                "The previous Logcat state is restored after the test.",
+                "После теста восстанавливается прежнее состояние Logcat."
+            )
+        }
+    }
+
+    Section(language.choose("Порядок тесту", "Test procedure", "Порядок теста"), palette,
+        bodyPadding = 14.dp, headerVerticalPadding = 4.dp) {
+        Text(
+            language.choose(
+                "1. Натисніть «Почати». За 15 секунд відкрийте штатний навігатор і запустіть маршрут з виводом на HUD.\n2. Дочекайтеся завершення маршруту або натисніть «Завершити»; після тесту GPS-мок вимикається.\n3. Logcat записується весь тест; перехід в інший застосунок не зупиняє маршрут.",
+                "1. Press Start. Within 15 seconds, open stock navigation and start guidance with HUD output.\n2. Wait for the route to finish or press Stop; mock GPS ends with the test.\n3. Logcat records throughout the test; switching apps does not stop the route.",
+                "1. Нажмите «Начать». За 15 секунд откройте штатный навигатор и запустите маршрут с выводом на HUD.\n2. Дождитесь завершения маршрута или нажмите «Завершить»; после теста GPS-мок отключается.\n3. Logcat записывается весь тест; переход в другое приложение не останавливает маршрут."
+            ),
+            color = palette.muted,
+            fontSize = 13.sp,
+            lineHeight = 18.sp
+        )
+        Spacer(Modifier.height(6.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Text(
                 language.choose(
-                    "Шанхай · ≈3 км · $duration · 40 км/год",
-                    "Shanghai · ≈3 km · $duration · 40 km/h",
-                    "Шанхай · ≈3 км · $duration · 40 км/ч"
+                    "Шанхай · ≈3 км · 40 км/год",
+                    "Shanghai · ≈3 km · 40 km/h",
+                    "Шанхай · ≈3 км · 40 км/ч"
                 ),
+                modifier = Modifier.weight(1f),
                 color = palette.muted,
-                fontSize = 13.sp
+                fontSize = 13.sp,
+                lineHeight = 18.sp
             )
+            Spacer(Modifier.width(8.dp))
+            Text(phaseText, color = palette.text, fontSize = 15.sp,
+                lineHeight = 20.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
             Pill(
                 if (state.isBusy()) copy.hudCheckRunning else copy.hudCheckStopped,
                 statusColors.first,
                 statusColors.second
             )
-        }
-        Spacer(Modifier.height(10.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(phaseText, color = palette.text, fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
             Text(
                 "${elapsedSeconds / 60}:${(elapsedSeconds % 60).toString().padStart(2, '0')} / $duration",
                 color = palette.muted,
-                fontSize = 13.sp
+                fontSize = 13.sp,
+                lineHeight = 18.sp
             )
         }
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(6.dp))
         Canvas(Modifier.fillMaxWidth().height(6.dp).progressSemantics(progress)) {
             val corner = CornerRadius(size.height / 2f)
             val boundary = size.width * ShanghaiTestState.PREPARATION_SECONDS / ShanghaiTestState.DURATION_SECONDS
@@ -6930,7 +7013,7 @@ private fun ShanghaiTestSection(
             drawSegment(0f, boundary - halfGap)
             drawSegment(boundary + halfGap, size.width)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(6.dp))
         Row(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -6964,57 +7047,10 @@ private fun ShanghaiTestSection(
                 onClick = onReset
             )
         }
-        val detail = state.detail.trim()
-        val coverage = state.captureCoverage.trim()
-        if (detail.isNotEmpty() || coverage.isNotEmpty() || state.cleanupPending || state.isBusy()) {
-            Spacer(Modifier.height(8.dp))
-            if (state.isBusy()) {
-                Text(
-                    language.choose(
-                        "Інші режими HUD Check та керування Logcat заблоковано до завершення тесту.",
-                        "Other HUD Check modes and Logcat controls are locked until the test ends.",
-                        "Другие режимы HUD Check и управление Logcat заблокированы до завершения теста."
-                    ),
-                    color = palette.muted,
-                    fontSize = 13.sp
-                )
-            }
-            if (state.cleanupPending) {
-                Text(
-                    language.choose(
-                        "Очищення штучних координат ще не завершено.",
-                        "Mock location cleanup is still pending.",
-                        "Очистка искусственных координат ещё не завершена."
-                    ),
-                    color = palette.yellow,
-                    fontSize = 13.sp
-                )
-            }
-            if (coverage.isNotEmpty()) {
-                Text(
-                    language.choose("Покриття запису: $coverage", "Capture coverage: $coverage", "Покрытие записи: $coverage"),
-                    color = palette.muted,
-                    fontSize = 13.sp
-                )
-            }
-            if (detail.isNotEmpty()) {
-                Text(
-                    detail,
-                    color = if (state.phase == ShanghaiTestState.Phase.ERROR) palette.red else palette.muted,
-                    fontSize = 13.sp
-                )
-            }
-        } else {
-            Spacer(Modifier.height(8.dp))
-            Text(
-                language.choose(
-                    "Після тесту відновлюється попередній стан Logcat.",
-                    "The previous Logcat state is restored after the test.",
-                    "После теста восстанавливается прежнее состояние Logcat."
-                ),
-                color = palette.muted,
-                fontSize = 13.sp
-            )
+        Spacer(Modifier.height(6.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Text(footerPrimary, color = footerColor, fontSize = 13.sp, lineHeight = 18.sp)
+            Text(footerSecondary, color = footerColor, fontSize = 13.sp, lineHeight = 18.sp)
         }
     }
 }

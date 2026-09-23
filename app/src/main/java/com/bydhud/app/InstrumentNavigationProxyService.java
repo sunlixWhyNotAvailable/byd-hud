@@ -101,17 +101,33 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     public void connect(long requestGeneration, String requestNonce,
             IInstrumentNavigationClient requestClient) {
         enforceCaller();
+        InstrumentProxyStartupLog.record(generation,
+                InstrumentProxyStartupLog.Stage.CONNECT_REQUESTED,
+                InstrumentProxyStartupLog.Outcome.STARTED);
         if (requestClient == null) {
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.CONNECT_REJECTED,
+                    InstrumentProxyStartupLog.Outcome.MISSING_CLIENT);
             stop("missing client");
             return;
         }
         Bundle result;
         if (requestGeneration != generation || !nonce.equals(requestNonce)) {
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.CONNECT_REJECTED,
+                    InstrumentProxyStartupLog.Outcome.IDENTITY_MISMATCH);
             result = connectionResult(false, "handoff rejected");
         } else {
             try {
                 requestClient.asBinder().linkToDeath(this::onClientDied, 0);
+                InstrumentProxyStartupLog.record(generation,
+                        InstrumentProxyStartupLog.Stage.OEM_INSTRUMENT,
+                        InstrumentProxyStartupLog.Outcome.STARTED);
                 InstrumentApi current = instrument();
+                InstrumentProxyStartupLog.record(generation,
+                        InstrumentProxyStartupLog.Stage.OEM_INSTRUMENT,
+                        current == null ? InstrumentProxyStartupLog.Outcome.UNAVAILABLE
+                                : InstrumentProxyStartupLog.Outcome.AVAILABLE);
                 int capabilities = InstrumentProxyContract.CAP_SYSTEM_CONTEXT;
                 Readiness fidReadiness = current == null
                         ? new Readiness(false, "Instrument API unavailable")
@@ -125,26 +141,52 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 if (current != null && current.laneCapable()) {
                     capabilities |= InstrumentProxyContract.CAP_INSTRUMENT_LANES;
                 }
-                BodyworkApi bodyworkApi = current == null || current.writer == null
-                        ? null : bodywork();
+                BodyworkApi bodyworkApi = null;
+                if (current != null && current.writer != null) {
+                    InstrumentProxyStartupLog.record(generation,
+                            InstrumentProxyStartupLog.Stage.OEM_BODYWORK,
+                            InstrumentProxyStartupLog.Outcome.STARTED);
+                    bodyworkApi = bodywork();
+                    InstrumentProxyStartupLog.record(generation,
+                            InstrumentProxyStartupLog.Stage.OEM_BODYWORK,
+                            bodyworkApi == null ? InstrumentProxyStartupLog.Outcome.UNAVAILABLE
+                                    : InstrumentProxyStartupLog.Outcome.AVAILABLE);
+                }
                 if (fidReadiness.ready && current != null && current.writer != null
                         && bodyworkApi != null && bodyworkApi.trafficLightCapable()) {
                     capabilities |= InstrumentProxyContract.CAP_TRAFFIC_LIGHT;
                 }
                 activeCapabilities = capabilities;
                 long nativeIdentity = Binder.clearCallingIdentity();
-                try { nativeSpeed = NativeSpeedApi.open(systemContext); }
-                finally { Binder.restoreCallingIdentity(nativeIdentity); }
+                InstrumentProxyStartupLog.record(generation,
+                        InstrumentProxyStartupLog.Stage.OEM_NATIVE_SPEED,
+                        InstrumentProxyStartupLog.Outcome.STARTED);
+                try {
+                    nativeSpeed = NativeSpeedApi.open(systemContext);
+                } finally {
+                    Binder.restoreCallingIdentity(nativeIdentity);
+                }
+                InstrumentProxyStartupLog.record(generation,
+                        InstrumentProxyStartupLog.Stage.OEM_NATIVE_SPEED,
+                        nativeSpeed == null
+                                ? InstrumentProxyStartupLog.Outcome.UNAVAILABLE
+                                : InstrumentProxyStartupLog.Outcome.AVAILABLE);
                 if (nativeSpeed != null) capabilities |= InstrumentProxyContract.CAP_NATIVE_SPEED;
                 activeCapabilities = capabilities;
                 boolean ready = InstrumentProxyContract.hasUsableCapability(capabilities);
                 if (ready) {
                     client = requestClient;
                     connected = true;
+                } else {
+                    InstrumentProxyStartupLog.record(generation,
+                            InstrumentProxyStartupLog.Stage.CONNECT_REJECTED,
+                            InstrumentProxyStartupLog.Outcome.CAPABILITIES_UNAVAILABLE);
                 }
                 result = connectionResult(ready, ready ? ""
                         : "Instrument capabilities unavailable: " + fidReadiness.detail);
             } catch (RemoteException error) {
+                InstrumentProxyStartupLog.recordException(generation,
+                        InstrumentProxyStartupLog.Stage.CONNECT_REQUESTED, error);
                 result = connectionResult(
                         false, "client already dead");
             }
@@ -154,10 +196,18 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             try {
                 requestClient.onProxyConnected(generation, result);
             } catch (RemoteException ignored) {
+                InstrumentProxyStartupLog.record(generation,
+                        InstrumentProxyStartupLog.Stage.CALLBACK_FAILED,
+                        InstrumentProxyStartupLog.Outcome.BINDER_REMOTE_EXCEPTION);
                 connected = false;
             }
         } finally {
             Binder.restoreCallingIdentity(identity);
+        }
+        if (InstrumentProxyContract.isReady(result) && connected) {
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.READY,
+                    InstrumentProxyStartupLog.Outcome.OK);
         }
         if (!InstrumentProxyContract.isReady(result) || !connected) {
             stop("handoff rejected");
@@ -725,6 +775,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private void stop(String reason) {
+        InstrumentProxyStartupLog.record(generation,
+                InstrumentProxyStartupLog.Stage.STOP_REQUESTED,
+                InstrumentProxyStartupLog.stopOutcome(reason));
         synchronized (operationLock) {
             connected = false;
             trafficLightOutput.clearIfOwned(outputSuspended, this::clearTrafficLightOutputs);
@@ -745,6 +798,9 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
         Log.i(TAG, "stopping generation=" + generation + " reason=" + reason);
         Looper.getMainLooper().quitSafely();
+        InstrumentProxyStartupLog.record(generation,
+                InstrumentProxyStartupLog.Stage.STOPPED,
+                InstrumentProxyStartupLog.Outcome.OK);
     }
 
     private boolean clearTrafficLightOutputs() {

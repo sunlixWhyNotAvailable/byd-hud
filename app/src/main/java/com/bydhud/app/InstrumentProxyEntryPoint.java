@@ -20,28 +20,71 @@ public final class InstrumentProxyEntryPoint {
 
     public static void main(String[] arguments) {
         Args args = Args.parse(arguments);
-        if (!args.valid || Process.myUid() != SHELL_UID) {
+        long generation = args.valid ? args.generation : -1L;
+        if (!args.valid) {
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.ENTRY_REJECTED,
+                    InstrumentProxyStartupLog.Outcome.INVALID_ARGUMENTS);
+            Log.e(TAG, "refusing invalid proxy launch arguments");
+            return;
+        }
+        if (Process.myUid() != SHELL_UID) {
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.ENTRY_REJECTED,
+                    InstrumentProxyStartupLog.Outcome.WRONG_UID);
             Log.e(TAG, "refusing invalid proxy launch uid=" + Process.myUid());
             return;
         }
+        InstrumentProxyStartupLog.record(generation,
+                InstrumentProxyStartupLog.Stage.ENTRY_VALIDATED,
+                InstrumentProxyStartupLog.Outcome.OK);
+        InstrumentProxyStartupLog.Stage stage =
+                InstrumentProxyStartupLog.Stage.LOOPER_PREPARE;
         try {
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.STARTED);
             Looper.prepareMainLooper();
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.OK);
+            stage = InstrumentProxyStartupLog.Stage.CONTEXT_CREATE;
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.STARTED);
             Context systemContext = systemContext();
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.CONTEXT_READY,
+                    InstrumentProxyStartupLog.Outcome.OK);
+            stage = InstrumentProxyStartupLog.Stage.SERVICE_CREATE;
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.STARTED);
             InstrumentNavigationProxyService proxy = new InstrumentNavigationProxyService(
                     systemContext, args.generation, args.nonce, args.appUid,
                     args.launchToken, args.versionCode);
+            InstrumentProxyStartupLog.record(generation,
+                    InstrumentProxyStartupLog.Stage.SERVICE_READY,
+                    InstrumentProxyStartupLog.Outcome.OK);
             Intent connected = new Intent(InstrumentProxyContract.ACTION_CONNECTED);
             connected.setPackage("com.bydhud.app");
             connected.putExtra(InstrumentProxyContract.EXTRA_GENERATION, args.generation);
             connected.putExtra(InstrumentProxyContract.EXTRA_NONCE, args.nonce);
             connected.putExtra(InstrumentProxyContract.EXTRA_BINDER,
                     new InstrumentProxyBinder(proxy.asBinder()));
+            stage = InstrumentProxyStartupLog.Stage.BINDER_HANDOFF;
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.STARTED);
             systemContext.sendBroadcast(connected);
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.OK);
             Log.i(TAG, "proxy handoff sent generation=" + args.generation);
             new Handler(Looper.getMainLooper()).postDelayed(
                     proxy::stopIfUnconnected, 10_000L);
+            stage = InstrumentProxyStartupLog.Stage.LOOPER;
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.STARTED);
             Looper.loop();
+            InstrumentProxyStartupLog.record(generation, stage,
+                    InstrumentProxyStartupLog.Outcome.OK);
         } catch (Throwable error) {
+            InstrumentProxyStartupLog.recordException(generation, stage, error);
             Log.e(TAG, "proxy startup failed", error);
         }
     }

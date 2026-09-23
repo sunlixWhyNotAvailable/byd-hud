@@ -227,8 +227,10 @@ final class ShanghaiDiagnosticAdb implements AutoCloseable {
                     "ready", ready.get(),
                     "bytes", bytes.get(),
                     "droppedBytes", droppedBytes.get(),
-                    "captureComplete", droppedBytes.get() == 0L && error.isEmpty()
-                            && stopError.isEmpty() && !"stop_unconfirmed".equals(status),
+                    "captureComplete", ("stopped".equals(status) || "completed".equals(status))
+                            && isTerminated() && ("adas".equals(name) ? ready.get() : bytes.get() >= 24L)
+                            && droppedBytes.get() == 0L && !helperError.get()
+                            && error.isEmpty() && stopError.isEmpty(),
                     "detail", detail,
                     "error", error,
                     "stopError", stopError);

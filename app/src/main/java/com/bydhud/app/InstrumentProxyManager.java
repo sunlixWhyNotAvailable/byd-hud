@@ -1477,10 +1477,13 @@ final class InstrumentProxyManager {
     private boolean cleanupHelper(String reason) {
         InstrumentProxyStore.Identity expected = helperIdentitySnapshot();
         log("cleanup started generation=" + expected.generation + " reason=" + safe(reason));
-        if ("start-failed".equals(reason)) {
+        if ("start-failed".equals(reason) || "capability-blocked".equals(reason)) {
             try {
+                String diagnostic = LocalAdbBridge.instrumentProxyStartupDiagnostic(
+                        context, expected);
                 log("startup diagnostic generation=" + expected.generation + " "
-                        + LocalAdbBridge.instrumentProxyStartupDiagnostic(context, expected));
+                        + diagnostic);
+                clearStartupDiagnostic(expected);
             } catch (IOException error) {
                 log("startup diagnostic unavailable generation=" + expected.generation
                         + " error=" + error.getClass().getSimpleName());
