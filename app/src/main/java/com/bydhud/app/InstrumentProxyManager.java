@@ -855,11 +855,22 @@ final class InstrumentProxyManager {
 
     void nativeSpeedOperation(int operation, int value, BooleanSupplier current,
             Consumer<NativeSpeedLimitEngine.Result> callback) {
+        nativeSpeedOperation(operation, value, false, current, callback);
+    }
+
+    void nativeSpeedOperation(int operation, int value, boolean readyOnly,
+            BooleanSupplier current, Consumer<NativeSpeedLimitEngine.Result> callback) {
         if (!NativeSpeedLimitEngine.validOperation(operation, value)) {
             throw new IllegalArgumentException("invalid native speed operation");
         }
         boolean ready;
         synchronized (lock) { ready = state == State.READY && proxyBinder != null && proxyBinder.isBinderAlive(); }
+        if (!ready && readyOnly) {
+            long now = SystemClock.elapsedRealtime();
+            callback.accept(new NativeSpeedLimitEngine.Result(false, 0, now, now,
+                    "terminal helper unavailable"));
+            return;
+        }
         if (!ready) ensureStarted("native-speed");
         submitCall("native_speed:" + operation, result -> {
             NativeSpeedLimitEngine.Result nativeResult = result.nativeSpeed;

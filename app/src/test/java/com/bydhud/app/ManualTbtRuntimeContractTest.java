@@ -95,6 +95,43 @@ public final class ManualTbtRuntimeContractTest {
     }
 
     @Test
+    public void terminalClearCompletesBeforeManualTbtAndRuntimeAreReleased() throws IOException {
+        String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
+        String main = source("app/src/main/java/com/bydhud/app/MainActivity.java");
+        String stop = sender.substring(sender.indexOf(
+                "private void stopManualOnWorker(String reason, boolean restoreDirect, Runnable completion)"),
+                sender.indexOf("private HudState effectiveManualState("));
+        assertTrue(stop.contains("remainingTbtOwner(MANUAL_TBT_OWNER)"));
+        assertTrue(stop.contains("generation == manualTbtGeneration && !manualTbtActive"));
+        assertTrue(stop.contains("generation == tbtPublisher.ownerGeneration()"));
+        assertTrue(stop.indexOf("hudOutput.stopManualOutput(") < stop.indexOf("tbtPublisher.endManualRoute("));
+        assertFalse(stop.contains("hudOutput.setManualEnabled(false"));
+        String shutdown = main.substring(main.indexOf("private void shutdownAndExit("),
+                main.indexOf("private void finishAfterStop("));
+        assertTrue(shutdown.contains("sender.stop(hudPackage, safeReason, true, () -> handler.post("));
+        assertTrue(shutdown.contains("stopImmediately(safeReason, true, true, () ->"));
+        assertTrue(shutdown.indexOf("stopImmediately(safeReason")
+                < shutdown.indexOf("HudRuntimeService.stopPersistent("));
+    }
+
+    @Test
+    public void delayedRouteTeardownFencesItsOwnerInsteadOfUnrelatedObserverEvents()
+            throws IOException {
+        String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
+        for (String owner : new String[] {"GMaps", "Waze"}) {
+            int start = sender.indexOf("private void on" + owner + "DirectNavigationEnded(");
+            int callback = sender.indexOf("Runnable finishTbt", start);
+            String finish = sender.substring(callback, sender.indexOf("if (lifecycleOwnsClear)", callback));
+            String endedFlag = owner.equals("GMaps") ? "gmapsDirectRouteEnded" : "wazeDirectRouteEnded";
+            assertTrue(finish.contains("if (!" + endedFlag + ") return;"));
+            assertTrue(finish.contains("ownerPackage, routeGeneration,"));
+            assertTrue(finish.contains("if (!tbtPublisher.isRouteActive())"));
+            assertTrue(finish.contains(", tbtLifecycleToken)"));
+            assertFalse(finish.contains("teardownToken"));
+        }
+    }
+
+    @Test
     public void hudCheckEditsUseTheSharedStateInsteadOfLegacyRawFields() throws IOException {
         String main = source("app/src/main/java/com/bydhud/app/MainActivity.java");
 

@@ -131,8 +131,11 @@ public final class UserRuntimeSessionTest {
         String sender = source("NavHudLiveSender.java");
         assertTrue(sender.contains("if (!manualTbtActive && shouldClaimTbtOwnerForFrameForTest("));
         assertTrue(sender.contains("recordDeferredLifecycle("));
-        assertTrue(body(sender, "private boolean selectRemainingTbtRoute(")
-                .contains("if (!isRuntimeEnabled()) return false;"));
+        assertTrue(body(sender, "private String remainingTbtOwner(")
+                .contains("if (!isRuntimeEnabled()) return \"\";"));
+        String restore = body(sender, "private boolean selectRemainingTbtRoute(");
+        assertTrue(restore.contains("String next = remainingTbtOwner(ended)"));
+        assertTrue(restore.contains("if (next.isEmpty()) return false;"));
     }
 
     @Test
@@ -200,12 +203,31 @@ public final class UserRuntimeSessionTest {
         assertTrue(revoke >= 0 && revoke < shutdown.indexOf("setUserShutdownActive(this, true)"));
         assertTrue(revoke < shutdown.indexOf("stopRecorderAsync"));
         // Observer teardown must follow the HUD-clear token, not invalidate it mid-clear.
-        assertTrue(shutdown.contains(
-                "sender.stop(hudPackage, safeReason, true, sender::refreshTbtObservers)"));
+        String afterHudStop = body(shutdown, "sender.stop(hudPackage, safeReason, true,");
+        assertTrue(afterHudStop.contains("sender.refreshTbtObservers()"));
+        String afterManualStop = body(afterHudStop,
+                "stopImmediately(safeReason, true, true, () ->");
+        assertTrue(afterManualStop.contains("HudRuntimeService.stopPersistent(this, safeReason)"));
+        assertTrue(afterManualStop.contains("finishAfterStop()"));
         for (String signature : new String[]{"protected void onPause()",
                 "protected void onStop()", "protected void onDestroy()"}) {
             assertFalse(signature, body(main, signature).contains("UserRuntimeSession.PROCESS.shutdown"));
         }
+    }
+
+    @Test
+    public void freshNavigationFencesTerminalWritesBeforePublishingNewRoute() throws IOException {
+        String sender = source("NavHudLiveSender.java");
+        for (String signature : new String[]{"private void onWazeDirectNavigationStarted(",
+                "private void onGMapsDirectNavigationStarted("}) {
+            String start = body(sender, signature);
+            int cancel = start.indexOf("hudOutput.cancelNativeEndClear(");
+            assertTrue(signature, cancel >= 0 && cancel < start.indexOf("tbtPublisher.beginRoute("));
+            int queuedRetirement = start.indexOf("clearDirectFrameForSupersedingSession(");
+            if (queuedRetirement >= 0) assertTrue(cancel < queuedRetirement);
+        }
+        String accepted = body(sender, "private void onWazeRouteLifecycleEventOnMain(");
+        assertTrue(accepted.contains("cancelNativeEndClear(\"waze-accepted-route-start\")"));
     }
 
     @Test

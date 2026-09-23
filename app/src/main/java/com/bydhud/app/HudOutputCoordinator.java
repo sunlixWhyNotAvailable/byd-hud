@@ -187,6 +187,14 @@ final class HudOutputCoordinator {
     private boolean finalClearCompletionDispatched;
     private boolean finalClearInProgress;
     private long finalClearStartedAtMs;
+    private final java.util.concurrent.atomic.AtomicLong nativeEndEpoch =
+            new java.util.concurrent.atomic.AtomicLong();
+
+    void cancelNativeEndClear(String reason) {
+        // Fence queued Binder writes immediately, before the HUD worker catches up.
+        nativeEndEpoch.incrementAndGet();
+        worker.post(() -> nativeSpeed.cancelEndClear(reason));
+    }
 
     private final Runnable directLeaseExpiry = this::expireDirectLease;
 
@@ -333,6 +341,22 @@ final class HudOutputCoordinator {
                 ownerPackage, ownerSessionGeneration);
     }
 
+    void stopManualOutput(String reason, boolean clearNativeAtEnd, Runnable completion) {
+        worker.post(() -> {
+            manualEnabled = false;
+            hudCheckDiagnostics.reset();
+            reconcile(reason, SystemClock.elapsedRealtime(), () -> {
+                releaseHudCheckAuxiliary(reason);
+                preparedHudCheck = null;
+                preparedHudCheckPayload = null;
+                hudCheckPackets = Collections.emptyList();
+                hudCheckHasAuxiliary = false;
+                hudCheckRoadResult = 0;
+                runCompletion(completion);
+            }, clearNativeAtEnd);
+        });
+    }
+
     void publishDirect(DirectTbtFrame frame, String reason, long receivedAtMs,
             String ownerPackage, long ownerSessionGeneration, String sourceRoad) {
         publishDirect(frame, reason, receivedAtMs, null, null,
@@ -473,17 +497,24 @@ final class HudOutputCoordinator {
             String reason, long detectedAtMs, Runnable firstClearCompletion) {
         worker.post(() -> {
             endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
-                    detectedAtMs, firstClearCompletion, false);
+                    detectedAtMs, firstClearCompletion, false, false);
         });
     }
 
     void endNavigationOutput(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs, Runnable firstClearCompletion) {
+        endNavigationOutput(ownerPackage, ownerSessionGeneration, reason, detectedAtMs,
+                false, firstClearCompletion);
+    }
+
+    void endNavigationOutput(String ownerPackage, long ownerSessionGeneration,
+            String reason, long detectedAtMs, boolean clearNativeAtEnd,
+            Runnable firstClearCompletion) {
         worker.post(() -> {
             boolean directSelected = directSelectedOnWorker();
             if (directSelected) {
                 endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
-                        detectedAtMs, firstClearCompletion, true);
+                        detectedAtMs, firstClearCompletion, true, clearNativeAtEnd);
                 return;
             }
             invalidateDirectOwnerOnWorker("navigation-end:" + reason);
@@ -493,7 +524,7 @@ final class HudOutputCoordinator {
 
     private void endDirectOutputOnWorker(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs, Runnable firstClearCompletion,
-            boolean administrativeStop) {
+            boolean administrativeStop, boolean clearNativeAtEnd) {
         if (!directSelectedOnWorker()) {
             invalidateDormantDirectOwnerOnWorker(
                     ownerPackage, ownerSessionGeneration, "end:" + reason);
@@ -503,6 +534,7 @@ final class HudOutputCoordinator {
             return;
         }
         if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) {
+            clearNativeAtEnd = false;
             logAsync("direct end rejected owner=" + safe(ownerPackage)
                     + " session=" + ownerSessionGeneration
                     + " reason=" + safe(reason));
@@ -537,7 +569,7 @@ final class HudOutputCoordinator {
         pendingDirectReceivedAtMs = 0L;
         pendingDirectReason = "";
         invalidateDirectOwnerOnWorker("end:" + reason);
-        reconcile(reason, detectedAtMs, firstClearCompletion);
+        reconcile(reason, detectedAtMs, firstClearCompletion, clearNativeAtEnd);
     }
 
     void renewDirectLease(String ownerPackage, long ownerSessionGeneration, String reason) {
@@ -591,6 +623,11 @@ final class HudOutputCoordinator {
 
     void shutdown(String reason) {
         worker.post(() -> {
+            // A repeated shutdown must not cut short the already bounded terminal clear.
+            if (finalClearInProgress && desiredSource() == Source.NONE) {
+                log("shutdown joined final clear reason=" + reason);
+                return;
+            }
             boolean interruptedClear = finalClearInProgress
                     || pendingFinalClearCompletion != null
                     || pendingTransitionClearCompletion != null;
@@ -633,9 +670,15 @@ final class HudOutputCoordinator {
 
     private void reconcile(String reason, long endDetectedAtMs,
             Runnable firstClearCompletion) {
+        reconcile(reason, endDetectedAtMs, firstClearCompletion, false);
+    }
+
+    private void reconcile(String reason, long endDetectedAtMs,
+            Runnable firstClearCompletion, boolean clearNativeAtEnd) {
         Source target = desiredSource();
         if (pendingSource == Source.NONE && target == activeSource) {
-            if (target == Source.NONE && pendingFinalClearCompletion != null) {
+            if (target == Source.NONE && (finalClearInProgress
+                    || pendingFinalClearCompletion != null)) {
                 pendingFinalClearCompletion = chainCompletions(
                         pendingFinalClearCompletion, firstClearCompletion);
                 return;
@@ -680,8 +723,29 @@ final class HudOutputCoordinator {
             finalClearInProgress = previous != Source.NONE;
             finalClearStartedAtMs = finalClearInProgress
                     ? SystemClock.elapsedRealtime() : 0L;
-            beginFinalStop(previous, reason, transitionGeneration, 1,
-                    endDetectedAtMs);
+            if (shouldClearNativeAtEnd(previous, target, clearNativeAtEnd,
+                    HudPrefs.speedLimitMode(context),
+                    HudPrefs.getNativeSpeedLimitClearMode(context))) {
+                // This deadline includes native readback AND ordinary HUD teardown.
+                worker.postDelayed(() -> {
+                    if (transitionGeneration == generation && finalClearInProgress) {
+                        abortFinalClearAfterTimeout(previous, reason);
+                    }
+                }, FINAL_CLEAR_TIMEOUT_MS);
+                long closingEpoch = nativeEndEpoch.get();
+                nativeSpeed.clearAtEnd(previous + ":end:" + transitionGeneration + ":" + reason,
+                        () -> transitionGeneration == generation && finalClearInProgress
+                                && closingEpoch == nativeEndEpoch.get()
+                                && desiredSource() == Source.NONE,
+                        () -> {
+                            if (transitionGeneration == generation && finalClearInProgress) {
+                                beginFinalStop(previous, reason, transitionGeneration, 1,
+                                        endDetectedAtMs);
+                            }
+                        });
+            } else {
+                beginFinalStop(previous, reason, transitionGeneration, 1, endDetectedAtMs);
+            }
             return;
         }
         pendingTransitionClearCompletion = clearCompletion;
@@ -1369,6 +1433,7 @@ final class HudOutputCoordinator {
     private void abortFinalClearAfterTimeout(Source previous, String reason) {
         log("final clear timeout; hard transport reset source=" + previous
                 + " reason=" + reason);
+        finalClearInProgress = false;
         cancelScheduledWork();
         stopServiceAndUnbind("final-clear-timeout:" + reason);
         activeSource = Source.NONE;
@@ -1483,6 +1548,12 @@ final class HudOutputCoordinator {
                 + ":" + options.showEta + ":" + options.showRemainingTime
                 + ":" + options.showRemainingDistance + ":" + options.street
                 + ":" + options.textDirection + ":" + transliterationMode;
+    }
+
+    static boolean shouldClearNativeAtEnd(Source previous, Source target, boolean requested,
+            int primary, int clearing) {
+        return requested && previous != Source.NONE && target == Source.NONE
+                && NativeSpeedLimitController.endClearSelected(primary, clearing);
     }
 
     private void logEtaStreetTextTransition() {

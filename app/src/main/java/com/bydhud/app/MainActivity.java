@@ -2792,7 +2792,7 @@ public final class MainActivity extends ComponentActivity {
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
             this.speedLimitMode = speedLimitMode;
             this.nativeSpeedLimitClearMode = HudPrefs.normalizeNativeSpeedLimitClearMode(
-                    nativeSpeedLimitClearMode);
+                    this.speedLimitMode, nativeSpeedLimitClearMode);
             this.nativeSpeedLimitFallbackMode = HudPrefs.normalizeNativeSpeedLimitFallbackMode(
                     nativeSpeedLimitFallbackMode);
             this.speedLimitFreeFallback = speedLimitFreeFallback;
@@ -3917,6 +3917,11 @@ public final class MainActivity extends ComponentActivity {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopImmediately(String reason, boolean clearHud, boolean unbindClient) {
+        stopImmediately(reason, clearHud, unbindClient, null);
+    }
+
+    private void stopImmediately(String reason, boolean clearHud, boolean unbindClient,
+            Runnable completion) {
         sending = false;
         if ("send-error".equals(reason)) {
             HudDeliveryStatus.recordFailure();
@@ -3929,9 +3934,11 @@ public final class MainActivity extends ComponentActivity {
         if (unbindClient) {
             sender.stopManual(stopReason, false, () -> {
                 if (!sender.isRunning()) hudOutput.shutdown(reason);
+                if (completion != null) handler.post(completion);
             });
         } else {
-            sender.stopManual(stopReason, false);
+            sender.stopManual(stopReason, false,
+                    () -> { if (completion != null) handler.post(completion); });
         }
         appendStatus("sending=false reason=" + reason);
         refreshControls();
@@ -3974,8 +3981,7 @@ public final class MainActivity extends ComponentActivity {
         RuntimeUiSession.PROCESS.clear();
         cancelActiveAdbAuthorization("exit", false);
         stopRecorderAsync("exit", () -> {
-            stopImmediately("exit", true, true);
-            finishAfterStop();
+            stopImmediately("exit", true, true, this::finishAfterStop);
         });
     }
 
@@ -4010,20 +4016,20 @@ public final class MainActivity extends ComponentActivity {
 
         String hudPackage = NavCapturePrefs.getHudPackage(this);
         NavHudLiveSender sender = NavHudLiveSender.get(this);
-        sender.stop(hudPackage, safeReason, true, sender::refreshTbtObservers);
-
         NavAppDisplayController.get(this).shutdownDashboardProjection(safeReason);
-
-        stopRecorderAsync("shutdown", () -> {
-            manualModeEnabled = false;
-            HudRuntimeWatchdog.cancel(this);
-            HudRuntimeService.stopPersistent(this, safeReason);
-            HudPrefs.setRuntimeServiceRunning(this, false);
-            HudRuntimeState.markStopped(this, safeReason);
-
-            stopImmediately(safeReason, true, true);
-            finishAfterStop();
-        });
+        sender.stop(hudPackage, safeReason, true, () -> handler.post(() -> {
+            sender.refreshTbtObservers();
+            stopRecorderAsync("shutdown", () -> {
+                manualModeEnabled = false;
+                stopImmediately(safeReason, true, true, () -> {
+                    HudRuntimeWatchdog.cancel(this);
+                    HudRuntimeService.stopPersistent(this, safeReason);
+                    HudPrefs.setRuntimeServiceRunning(this, false);
+                    HudRuntimeState.markStopped(this, safeReason);
+                    finishAfterStop();
+                });
+            });
+        }));
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

@@ -23,6 +23,7 @@ final class NativeSpeedLimitController {
     private String owner = "";
     private int mode, clearMode, limit;
     private boolean fallback;
+    private BooleanSupplier closingSession;
 
     NativeSpeedLimitController(Context context, Handler worker, BooleanSupplier outputActive,
             Consumer<String> bitmapChanged) {
@@ -46,6 +47,7 @@ final class NativeSpeedLimitController {
                     return;
                 }
                 InstrumentProxyManager.get(context).nativeSpeedOperation(operation, value,
+                        closingSession != null,
                         () -> current.getAsBoolean() && allowed(),
                         result -> worker.post(() -> callback.accept(result)));
             }
@@ -76,7 +78,42 @@ final class NativeSpeedLimitController {
         publishBitmap();
     }
 
+    void clearAtEnd(String session, BooleanSupplier current, Runnable completion) {
+        stop("session-end");
+        if (!endClearSelected(HudPrefs.speedLimitMode(context),
+                HudPrefs.getNativeSpeedLimitClearMode(context))
+                || ShanghaiOutputGate.isSuspended() || !current.getAsBoolean()) {
+            AppEventLogger.event(context, "native_speed terminal skipped session=" + session
+                    + " reason=policy-or-session");
+            completion.run();
+            return;
+        }
+        closingSession = current;
+        // Retain a healthy helper, but retire active-output recovery/relaunches.
+        InstrumentProxyManager.get(context).setOutputDemand(false, "native-terminal:" + session);
+        AppEventLogger.event(context, "native_speed terminal begin session=" + session);
+        engine.clearOnce(session, () -> {
+            closingSession = null;
+            completion.run();
+        });
+    }
+
+    static boolean endClearSelected(int primary, int clearing) {
+        return primary == HudPrefs.SPEED_LIMIT_NATIVE
+                && clearing == HudPrefs.SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END;
+    }
+
+    void cancelEndClear(String reason) {
+        if (closingSession != null) stop(reason);
+    }
+
     private boolean allowed() {
+        if (closingSession != null) {
+            // Only the captured closing session may finish through user shutdown.
+            return closingSession.getAsBoolean() && !ShanghaiOutputGate.isSuspended()
+                    && endClearSelected(HudPrefs.speedLimitMode(context),
+                            HudPrefs.getNativeSpeedLimitClearMode(context));
+        }
         return outputActive.getAsBoolean() && !ShanghaiOutputGate.isSuspended()
                 && !HudPrefs.isUserShutdownActive(context)
                 && HudPrefs.speedLimitMode(context) == mode

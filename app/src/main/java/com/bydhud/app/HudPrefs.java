@@ -35,6 +35,8 @@ final class HudPrefs {
     private static final String KEY_SPEED_LIMIT_MODE = "speed_limit_mode";
     private static final String KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE =
             "speed_limit_native_clear_mode";
+    private static final String KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE_NATIVE =
+            "speed_limit_native_clear_mode_native";
     private static final String KEY_SPEED_LIMIT_NATIVE_FALLBACK_MODE =
             "speed_limit_native_fallback_mode";
     private static final String KEY_SPEED_LIMIT_FREE_FALLBACK = "speed_limit_free_fallback";
@@ -84,6 +86,7 @@ final class HudPrefs {
     static final int SPEED_LIMIT_NATIVE_CLEAR_NEVER = 0;
     static final int SPEED_LIMIT_NATIVE_CLEAR_NO_NAV_DATA = 1;
     static final int SPEED_LIMIT_NATIVE_CLEAR_ALWAYS = 2;
+    static final int SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END = 3;
     static final int SPEED_LIMIT_NATIVE_FALLBACK_OFF = 0;
     static final int SPEED_LIMIT_NATIVE_FALLBACK_MANEUVER = 1;
     static final int SPEED_LIMIT_NATIVE_FALLBACK_LANES = 2;
@@ -388,14 +391,17 @@ final class HudPrefs {
     }
 
     static int getNativeSpeedLimitClearMode(Context context) {
-        return normalizeNativeSpeedLimitClearMode(prefs(context).getInt(
-                KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE, SPEED_LIMIT_NATIVE_CLEAR_NEVER));
+        int primaryMode = speedLimitMode(context);
+        return normalizeNativeSpeedLimitClearMode(primaryMode, prefs(context).getInt(
+                nativeSpeedLimitClearPreferenceKey(primaryMode), SPEED_LIMIT_NATIVE_CLEAR_NEVER));
     }
 
     static void setNativeSpeedLimitClearMode(Context context, int mode) {
-        prefs(context).edit().putInt(KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE,
-                normalizeNativeSpeedLimitClearMode(mode)).apply();
-        markOutputOptionChanged(KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE);
+        int primaryMode = speedLimitMode(context);
+        String key = nativeSpeedLimitClearPreferenceKey(primaryMode);
+        prefs(context).edit().putInt(key,
+                normalizeNativeSpeedLimitClearMode(primaryMode, mode)).apply();
+        markOutputOptionChanged(key);
     }
 
     static int getNativeSpeedLimitFallbackMode(Context context) {
@@ -410,7 +416,51 @@ final class HudPrefs {
     }
 
     static int normalizeNativeSpeedLimitClearMode(int mode) {
-        return clamp(mode, SPEED_LIMIT_NATIVE_CLEAR_NEVER, SPEED_LIMIT_NATIVE_CLEAR_ALWAYS);
+        return mode >= SPEED_LIMIT_NATIVE_CLEAR_NEVER
+                && mode <= SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END
+                ? mode : SPEED_LIMIT_NATIVE_CLEAR_NEVER;
+    }
+
+    static int normalizeNativeSpeedLimitClearMode(int primaryMode, int mode) {
+        int normalizedMode = normalizeNativeSpeedLimitClearMode(mode);
+        if (normalizeSpeedLimitMode(primaryMode) == SPEED_LIMIT_NATIVE) {
+            return normalizedMode == SPEED_LIMIT_NATIVE_CLEAR_NEVER
+                    || normalizedMode == SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END
+                    ? normalizedMode : SPEED_LIMIT_NATIVE_CLEAR_NEVER;
+        }
+        return normalizedMode == SPEED_LIMIT_NATIVE_CLEAR_NEVER
+                || normalizedMode == SPEED_LIMIT_NATIVE_CLEAR_ALWAYS
+                ? normalizedMode : SPEED_LIMIT_NATIVE_CLEAR_NEVER;
+    }
+
+    static int nativeSpeedLimitClearModeUiIndex(int mode) {
+        switch (normalizeNativeSpeedLimitClearMode(mode)) {
+            case SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END: return 1;
+            case SPEED_LIMIT_NATIVE_CLEAR_NO_NAV_DATA: return 2;
+            case SPEED_LIMIT_NATIVE_CLEAR_ALWAYS: return 3;
+            default: return 0;
+        }
+    }
+
+    static int nativeSpeedLimitClearModeFromUiIndex(int primaryMode, int index) {
+        if (normalizeSpeedLimitMode(primaryMode) == SPEED_LIMIT_NATIVE) {
+            return index == 1 ? SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END
+                    : SPEED_LIMIT_NATIVE_CLEAR_NEVER;
+        }
+        return index == 3 ? SPEED_LIMIT_NATIVE_CLEAR_ALWAYS
+                : SPEED_LIMIT_NATIVE_CLEAR_NEVER;
+    }
+
+    static boolean isNativeSpeedLimitClearModeUiOptionEnabled(int primaryMode, int index) {
+        if (index == 0) return true;
+        if (normalizeSpeedLimitMode(primaryMode) == SPEED_LIMIT_NATIVE) return index == 1;
+        return index == 3;
+    }
+
+    static String nativeSpeedLimitClearPreferenceKey(int primaryMode) {
+        return normalizeSpeedLimitMode(primaryMode) == SPEED_LIMIT_NATIVE
+                ? KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE_NATIVE
+                : KEY_SPEED_LIMIT_NATIVE_CLEAR_MODE;
     }
 
     static int normalizeNativeSpeedLimitFallbackMode(int mode) {

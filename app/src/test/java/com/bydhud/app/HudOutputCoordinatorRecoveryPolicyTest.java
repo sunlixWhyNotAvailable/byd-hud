@@ -8,6 +8,26 @@ import org.junit.Test;
 
 public final class HudOutputCoordinatorRecoveryPolicyTest {
     @Test
+    public void nativeEndClearRequiresAnEndingOwnerAndExplicitNativeEndPolicy() {
+        for (HudOutputCoordinator.Source previous : HudOutputCoordinator.Source.values()) {
+            for (HudOutputCoordinator.Source target : HudOutputCoordinator.Source.values()) {
+                for (int primary = 0; primary <= 5; primary++) {
+                    for (int clearing = 0; clearing <= 3; clearing++) {
+                        boolean expected = previous != HudOutputCoordinator.Source.NONE
+                                && target == HudOutputCoordinator.Source.NONE
+                                && primary == 5 && clearing == 3;
+                        assertEquals(expected, HudOutputCoordinator.shouldClearNativeAtEnd(
+                                previous, target, true, primary, clearing));
+                        // Handoff/recovery callers never admit this operation.
+                        assertFalse(HudOutputCoordinator.shouldClearNativeAtEnd(
+                                previous, target, false, primary, clearing));
+                    }
+                }
+            }
+        }
+    }
+
+    @Test
     public void classifiesResultsAndCapsProtocolBackoff() {
         assertTrue(HudOutputCoordinator.isStartReadyResult(0));
         assertTrue(HudOutputCoordinator.isStartReadyResult(13));

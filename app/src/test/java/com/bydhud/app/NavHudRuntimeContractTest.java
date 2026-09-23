@@ -440,7 +440,10 @@ public final class NavHudRuntimeContractTest {
         assertTrue(routeStart >= 0 && routeStartEnd > routeStart);
         String start = sender.substring(routeStart, routeStartEnd);
         int routeClear = start.indexOf("clearDirectFrameForSupersedingSession");
-        int routeCurrentGate = start.indexOf("isCurrentGMapsDirectCallback");
+        // Admission may be read early to fence a live terminal operation. Old producer
+        // retirement must still happen before rejecting a no-longer-current callback.
+        assertTrue(start.contains("boolean currentSession = isCurrentGMapsDirectCallback"));
+        int routeCurrentGate = start.indexOf("if (!currentSession) return;");
         assertTrue(routeClear >= 0);
         assertTrue(routeCurrentGate > routeClear);
     }

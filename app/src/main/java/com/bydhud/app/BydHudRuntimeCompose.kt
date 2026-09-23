@@ -756,6 +756,7 @@ private data class HudHelpRequest(
     val checked: Boolean = false,
     val selectedIndex: Int = 0,
     val options: List<String> = emptyList(),
+    val disabledOptions: Set<Int> = emptySet(),
     val value: Int = 0,
     val etaMask: Int = 0,
     val etaStreet: Boolean = true,
@@ -1986,9 +1987,10 @@ private fun OptionsTab(
         freeFieldOverlapIndex = snapshot.speedLimitFreeFallback
     )
     fun dropdownHelp(topic: HudHelpTopicId, title: String, selected: Int,
-        options: List<String>) = HudHelpRequest(
+        options: List<String>, disabledOptions: Set<Int> = emptySet()) = HudHelpRequest(
         topic, title, HudHelpControlKind.Dropdown, selectedIndex = selected,
-        options = options, presentation = hudPresentation, etaMask = etaMask,
+        options = options, disabledOptions = disabledOptions,
+        presentation = hudPresentation, etaMask = etaMask,
         etaStreet = snapshot.etaOutputField == HudPrefs.ETA_OUTPUT_FIELD_STREET,
         warningFieldIndex = snapshot.wazeAlertField,
         compositeFieldIndex = snapshot.speedLimitCompositePlacement,
@@ -2047,9 +2049,9 @@ private fun OptionsTab(
         "Clear native speed limit field",
         "Очищать штатное поле ограничения скорости")
     val nativeSpeedLimitClearModes = language.choose(
-        listOf("Ніколи", "Немає нав. даних", "Завжди"),
-        listOf("Never", "No nav. data", "Always"),
-        listOf("Никогда", "Нет нав. данных", "Всегда"))
+        listOf("Ніколи", "В кінці навігації", "Немає нав. даних", "Завжди"),
+        listOf("Never", "At navigation end", "No nav. data", "Always"),
+        listOf("Никогда", "В конце навигации", "Нет нав. данных", "Всегда"))
     val nativeSpeedLimitClearHint = language.choose(
         "Оберіть, коли очищувати штатний знак обмеження швидкості",
         "Choose when to clear the native speed limit sign",
@@ -2090,7 +2092,11 @@ private fun OptionsTab(
         "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only.", "Размер композитного знака в пикселях для изображения манёвра. Целое число от 1 до 103.")
     val compositeLaneSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36.",
         "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only.", "Размер композитного знака в пикселях для изображения полос. Целое число от 1 до 36.")
-    val nativeSpeedLimitClearEnabled = snapshot.speedLimitMode != HudPrefs.SPEED_LIMIT_NATIVE
+    val nativeSpeedLimitClearModeIndex = HudPrefs.nativeSpeedLimitClearModeUiIndex(
+        snapshot.nativeSpeedLimitClearMode)
+    val nativeSpeedLimitClearDisabledOptions = nativeSpeedLimitClearModes.indices
+        .filterNot { HudPrefs.isNativeSpeedLimitClearModeUiOptionEnabled(snapshot.speedLimitMode, it) }
+        .toSet()
     val nativeSpeedLimitFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE
     val effectiveSpeedLimitBitmapMode = HudPrefs.effectiveSpeedLimitBitmapMode(
         snapshot.speedLimitMode, snapshot.nativeSpeedLimitFallbackMode)
@@ -2427,21 +2433,23 @@ private fun OptionsTab(
                     nativeSpeedLimitClearTitle,
                     nativeSpeedLimitClearHint,
                     palette,
-                    enabled = nativeSpeedLimitClearEnabled,
                     onHelp = { hudHelpRequest = dropdownHelp(
                         HudHelpTopicId.SpeedLimitNativeClearMode,
                         nativeSpeedLimitClearTitle,
-                        snapshot.nativeSpeedLimitClearMode,
-                        nativeSpeedLimitClearModes) }
+                        nativeSpeedLimitClearModeIndex,
+                        nativeSpeedLimitClearModes,
+                        nativeSpeedLimitClearDisabledOptions) }
                 ) {
                     HudDropdown(
-                        selectedIndex = snapshot.nativeSpeedLimitClearMode,
+                        selectedIndex = nativeSpeedLimitClearModeIndex,
                         options = nativeSpeedLimitClearModes,
                         palette = palette,
                         width = 190.dp,
-                        enabled = nativeSpeedLimitClearEnabled,
-                        onSelected = { mode -> runAction {
-                            activity.composeSetNativeSpeedLimitClearMode(mode)
+                        disabledOptions = nativeSpeedLimitClearDisabledOptions,
+                        onSelected = { index -> runAction {
+                            activity.composeSetNativeSpeedLimitClearMode(
+                                HudPrefs.nativeSpeedLimitClearModeFromUiIndex(
+                                    snapshot.speedLimitMode, index))
                         } }
                     )
                 }
@@ -7755,6 +7763,7 @@ private fun HudHelpOverlay(
                             options = request.options,
                             palette = palette,
                             width = 230.dp,
+                            disabledOptions = request.disabledOptions,
                             onSelected = { localIndex = it }
                         )
                         HudHelpControlKind.Integer -> HudIntegerStepper(
@@ -8379,6 +8388,7 @@ private fun HudDropdown(
     width: Dp,
     enabled: Boolean = true,
     optionIcons: List<Int?> = emptyList(),
+    disabledOptions: Set<Int> = emptySet(),
     onSelected: (Int) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
@@ -8440,12 +8450,18 @@ private fun HudDropdown(
                         .background(palette.panel)
                 ) {
                     options.forEachIndexed { index, option ->
+                        val optionEnabled = index !in disabledOptions
+                        val optionColor = when {
+                            !optionEnabled -> palette.muted.copy(alpha = 0.62f)
+                            index == safeIndex && palette.dark -> Color.White
+                            else -> palette.text
+                        }
                         Box(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(rowHeight)
                                 .background(if (index == safeIndex) selectedBackground else Color.Transparent)
-                                .clickable {
+                                .clickable(enabled = optionEnabled) {
                                     onSelected(index)
                                     expanded = false
                                 },
@@ -8453,12 +8469,12 @@ private fun HudDropdown(
                         ) {
                             optionIcons.getOrNull(index)?.let {
                                 Box(Modifier.align(Alignment.CenterStart).padding(start = 8.dp)) {
-                                    WidgetOptionIcon(it, if (index == safeIndex && palette.dark) Color.White else palette.text)
+                                    WidgetOptionIcon(it, optionColor)
                                 }
                             }
                             Text(
                                 text = option,
-                                color = if (index == safeIndex && palette.dark) Color.White else palette.text,
+                                color = optionColor,
                                 fontSize = 14.sp,
                                 fontWeight = if (index == safeIndex) FontWeight.SemiBold else FontWeight.Normal,
                                 textAlign = TextAlign.Center,

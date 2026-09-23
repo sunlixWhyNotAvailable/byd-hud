@@ -21,6 +21,20 @@ class HudHelpCatalogTest {
     }
 
     @Test
+    fun nativeClearChoicesAndNavigationEndHelpFollowUiOrderInAllLanguages() {
+        val topic = HudHelpCatalog.topic(HudHelpTopicId.SpeedLimitNativeClearMode)
+        assertEquals(listOf("Ніколи", "В кінці навігації", "Немає нав. даних", "Завжди"),
+            topic.frames.map { it.label(Language.Ua) })
+        assertEquals(listOf("Never", "At navigation end", "No nav. data", "Always"),
+            topic.frames.map { it.label(Language.En) })
+        assertEquals(listOf("Никогда", "В конце навигации", "Нет нав. данных", "Всегда"),
+            topic.frames.map { it.label(Language.Ru) })
+        assertTrue(topic.frames[1].caption(Language.Ua).contains("після завершення навігації"))
+        assertTrue(topic.frames[1].caption(Language.En).contains("when navigation ends"))
+        assertTrue(topic.frames[1].caption(Language.Ru).contains("после завершения навигации"))
+    }
+
+    @Test
     fun everyReferencedLocalizedImageHasACompleteImageContainer() {
         val names = R.drawable::class.java.fields.associate { it.getInt(null) to it.name }
         val resources = listOf(File("src/main/res/drawable-nodpi"),

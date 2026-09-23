@@ -7,7 +7,7 @@ import java.util.function.Consumer;
 final class NativeSpeedLimitEngine {
     static final int READ = 0, ROAD = 1, LIMIT = 2;
     static final long ROAD_GAP_MS = 100L, READ_MS = 200L;
-    static final long CONFIRM_MS = 3_000L, RETRY_MS = 10_000L;
+    static final long CONFIRM_MS = 3_000L, RETRY_MS = 10_000L, CLEAR_TIMEOUT_MS = 6_000L;
 
     interface Port {
         long now();
@@ -45,6 +45,10 @@ final class NativeSpeedLimitEngine {
     private long attempt;
     private long nextAttemptAt;
     private long confirmAt;
+    private boolean singleShot;
+    private Runnable singleShotCompletion;
+    private long singleShotDeadlineAt;
+    private long singleShotConfirmAt;
 
     NativeSpeedLimitEngine(Port port) { this.port = port; }
 
@@ -64,7 +68,7 @@ final class NativeSpeedLimitEngine {
 
     static int requestedTarget(boolean nativeMode, int clearMode, int navigationLimit) {
         if (nativeMode) return navigationLimit > 0 ? navigationLimit : -1;
-        return clearMode == 2 || clearMode == 1 && navigationLimit <= 0 ? 1 : -1;
+        return clearMode == 2 ? 1 : -1;
     }
 
     static int bitmapMode(int primary, int configuredFallback, boolean failed) {
@@ -74,7 +78,8 @@ final class NativeSpeedLimitEngine {
     void configure(String session, int target, boolean clearing) {
         if (enabled && this.session.equals(session) && this.target == target
                 && this.clearing == clearing) return;
-        stop("superseded");
+        long token = retire("superseded");
+        if (epoch != token) return;
         this.session = session;
         this.target = target;
         this.clearing = clearing;
@@ -85,17 +90,51 @@ final class NativeSpeedLimitEngine {
             setFallback(true, "unsupported-limit");
             return;
         }
-        read(epoch);
+        read(token);
     }
 
     void stop(String reason) {
         if (!enabled && !fallback) return;
+        retire(reason);
+    }
+
+    void clearOnce(String session, Runnable completion) {
+        long token = retire("superseded");
+        if (epoch != token) {
+            if (completion != null) completion.run();
+            return;
+        }
+        this.session = session == null ? "" : session;
+        target = 1;
+        clearing = true;
+        singleShot = true;
+        singleShotCompletion = completion;
+        long startedAt = port.now();
+        singleShotDeadlineAt = startedAt + CLEAR_TIMEOUT_MS;
+        singleShotConfirmAt = 0L;
+        attempt++;
+        enabled = true;
+        log("clearOnce start timeoutMs=" + CLEAR_TIMEOUT_MS);
+        later(token, () -> finishClear(token, "operation-timeout"), CLEAR_TIMEOUT_MS);
+        clearRead(token, startedAt, false);
+    }
+
+    private long retire(String reason) {
         if (enabled) log("cancel reason=" + reason);
+        if (singleShot) log("clearOnce finish reason=" + reason);
+        Runnable completion = singleShotCompletion;
         enabled = false;
         epoch++;
+        long token = epoch;
         port.cancelTasks();
         awaiting = false;
+        singleShot = false;
+        singleShotCompletion = null;
+        singleShotDeadlineAt = 0L;
+        singleShotConfirmAt = 0L;
         setFallback(false, reason);
+        if (completion != null) completion.run();
+        return token;
     }
 
     private boolean current(long token) { return enabled && token == epoch; }
@@ -155,6 +194,81 @@ final class NativeSpeedLimitEngine {
                 later(token, () -> read(token), READ_MS);
             } else continuation.accept(result);
         });
+    }
+
+    private boolean currentClear(long token) {
+        return singleShot && current(token);
+    }
+
+    private void clearRead(long token, long plannedAt, boolean confirming) {
+        if (!currentClear(token)) return;
+        if (confirming && port.now() >= singleShotConfirmAt) {
+            finishClear(token, "confirmation-timeout");
+            return;
+        }
+        call(token, READ, 0, plannedAt, result -> {
+            if (!currentClear(token)) return;
+            if (result.finishedAt > singleShotDeadlineAt) {
+                finishClear(token, "operation-timeout");
+            } else if (!result.success) {
+                finishClear(token, "read-error");
+            } else if (confirming && result.finishedAt > singleShotConfirmAt) {
+                finishClear(token, "confirmation-timeout raw=" + result.raw);
+            } else if (result.raw == 1) {
+                finishClear(token, "confirmed raw=1");
+            } else if (!confirming) {
+                clearWriteAfter(token, ROAD, 7, result.finishedAt, road ->
+                        clearWriteAfter(token, LIMIT, 1, road.startedAt + ROAD_GAP_MS, limit -> {
+                            singleShotConfirmAt = limit.startedAt + CONFIRM_MS;
+                            long confirmDelay = singleShotConfirmAt - port.now();
+                            later(token, () -> finishClear(token, "confirmation-timeout"), confirmDelay);
+                            clearWriteAfter(token, ROAD, 6, limit.startedAt + ROAD_GAP_MS,
+                                    ignored -> clearRead(token, port.now(), true));
+                        }));
+            } else {
+                long nextReadAt = result.startedAt + READ_MS;
+                if (nextReadAt < singleShotConfirmAt) {
+                    later(token, () -> clearRead(token, nextReadAt, true), nextReadAt - port.now());
+                }
+            }
+        });
+    }
+
+    private void clearWrite(long token, int operation, int value, long plannedAt,
+            Consumer<Result> continuation) {
+        if (!currentClear(token)) return;
+        call(token, operation, value, plannedAt, result -> {
+            if (!currentClear(token)) return;
+            if (result.finishedAt > singleShotDeadlineAt) {
+                finishClear(token, "operation-timeout");
+            } else if (operation == ROAD && value == 6
+                    && singleShotConfirmAt > 0L && result.finishedAt > singleShotConfirmAt) {
+                finishClear(token, "confirmation-timeout");
+            } else if (!result.success) {
+                finishClear(token, "write-error operation=" + operation);
+            } else continuation.accept(result);
+        });
+    }
+
+    private void clearWriteAfter(long token, int operation, int value, long plannedAt,
+            Consumer<Result> continuation) {
+        later(token, () -> clearWrite(token, operation, value, plannedAt, continuation),
+                plannedAt - port.now());
+    }
+
+    private void finishClear(long token, String reason) {
+        if (!currentClear(token)) return;
+        log("clearOnce finish reason=" + reason);
+        Runnable completion = singleShotCompletion;
+        singleShotCompletion = null;
+        singleShot = false;
+        enabled = false;
+        epoch++;
+        port.cancelTasks();
+        awaiting = false;
+        singleShotDeadlineAt = 0L;
+        singleShotConfirmAt = 0L;
+        if (completion != null) completion.run();
     }
 
     private void call(long token, int operation, int value, long plannedAt,
