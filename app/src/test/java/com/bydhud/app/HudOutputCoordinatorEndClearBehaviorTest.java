@@ -4,6 +4,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertArrayEquals;
 
 import android.app.Application;
 import android.content.Context;
@@ -17,6 +18,9 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.LooperMode;
+
+import java.util.List;
+import java.util.stream.Collectors;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 29, application = Application.class, shadows = {
@@ -49,7 +53,6 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
     @Test public void nativeTerminalClearConfirmsBeforeHudClearAndTransportStop() {
         startManualOutput();
         int[] completed = {0};
-        int stopStarted = NativeSpeedLimitTestSupport.EVENTS.size();
         coordinator.stopManualOutput("manual-stop", true, () -> completed[0]++);
 
         NativeSpeedLimitTestSupport.idleMainLooper();
@@ -58,7 +61,7 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
         int terminalLimit = NativeSpeedLimitTestSupport.EVENTS.indexOf("native:2=1");
         int terminalRoad = indexOfAfter("native:1=6", terminalLimit + 1);
         int confirmationRead = indexOfAfter("native:0=0", terminalRoad + 1);
-        int firstHudClear = indexOfAfter("transport:send", stopStarted);
+        int firstHudClear = NativeSpeedLimitTestSupport.EVENTS.indexOf("tx:final_clear");
         int transportStop = NativeSpeedLimitTestSupport.EVENTS.indexOf("transport:stop");
 
         assertTrue("terminal Native target was written", terminalLimit >= 0);
@@ -73,6 +76,69 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
         assertEquals("transport stopped once", 1,
                 NativeSpeedLimitTestSupport.countEvents("transport:stop"));
         assertEquals(1, completed[0]);
+    }
+
+    @Test public void manualRoadInfoContinuesUntilRawOneThenClearsOnThatRead() {
+        startManualOutput();
+        byte[] lastPayload = packets("payload").get(0).payload;
+        NativeSpeedLimitTestSupport.applyNativeResult = false;
+        int[] completed = {0};
+        long startedAt = SystemClock.elapsedRealtime();
+        coordinator.stopManualOutput("manual-stop", true, () -> completed[0]++);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(1_100L);
+
+        List<NativeSpeedLimitTestSupport.Packet> held = packets("native_end_keepalive");
+        assertEquals(2, held.size());
+        assertEquals(1_000L, held.get(1).at - held.get(0).at);
+        for (NativeSpeedLimitTestSupport.Packet packet : held) {
+            assertArrayEquals(lastPayload, packet.payload);
+        }
+        assertTrue(packets("final_clear").isEmpty());
+        assertEquals(0, completed[0]);
+
+        NativeSpeedLimitTestSupport.raw = 1;
+        NativeSpeedLimitTestSupport.idleMainLooperFor(100L);
+        assertEquals("clear starts on the next read, without waiting for3s", startedAt + 1_200L,
+                packets("final_clear").get(0).at);
+        assertEquals(1, completed[0]);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(10_000L);
+        assertEquals("no active frame after confirmation", held.size(),
+                packets("native_end_keepalive").size());
+        assertEquals(1, completed[0]);
+        assertEquals(1, NativeSpeedLimitTestSupport.countEvents("native:2=1"));
+    }
+
+    @Test public void directRoadInfoKeepsContentAndCadenceUntilConfirmationTimeout() {
+        coordinator.publishDirect(DirectTbtFrame.empty(), "test-frame",
+                SystemClock.elapsedRealtime(), "com.waze", 1L);
+        coordinator.selectNavigationSource(HudOutputCoordinator.Source.DIRECT,
+                "test-start", "com.waze", 1L);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        byte[] semantic = packets("payload").get(0).semantic;
+        NativeSpeedLimitTestSupport.applyNativeResult = false;
+        long startedAt = SystemClock.elapsedRealtime();
+        coordinator.endNavigationOutput("com.waze", 1L, "route-end", startedAt, true, null);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(3_099L);
+
+        List<NativeSpeedLimitTestSupport.Packet> held = packets("native_end_keepalive");
+        assertTrue(held.size() >= 60);
+        for (int i = 0; i < held.size(); i++) {
+            assertArrayEquals(semantic, held.get(i).semantic);
+            if (i > 0) {
+                assertEquals(50L, held.get(i).at - held.get(i - 1).at);
+                assertFalse("Direct counter keeps advancing",
+                        java.util.Arrays.equals(held.get(i - 1).payload, held.get(i).payload));
+            }
+        }
+        assertTrue(packets("final_clear").isEmpty());
+        NativeSpeedLimitTestSupport.idleMainLooperFor(1L);
+        assertEquals(startedAt + 3_100L, packets("final_clear").get(0).at);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(10_000L);
+        assertEquals(held.size(), packets("native_end_keepalive").size());
+        assertEquals(1, NativeSpeedLimitTestSupport.countEvents("native:2=1"));
+        assertEquals(1, NativeSpeedLimitTestSupport.countEvents("transport:stop"));
     }
 
     @Test public void repeatedStopJoinsOneTerminalAttemptAndCompletesEachWaiterOnce() {
@@ -137,6 +203,9 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
         assertNotNull(stale);
         assertEquals(NativeSpeedLimitEngine.ROAD, stale.operation);
         assertEquals(7, stale.value);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(1_100L);
+        int heldCount = packets("native_end_keepalive").size();
+        assertTrue(heldCount > 0);
 
         coordinator.cancelNativeEndClear("navigation-session-start");
         coordinator.setManualEnabled(true, "new-session");
@@ -153,6 +222,13 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
                 NativeSpeedLimitTestSupport.EVENTS.contains("native:1=6"));
         assertEquals("new session keeps the transport alive", 0,
                 NativeSpeedLimitTestSupport.countEvents("transport:stop"));
+        assertEquals("retired RoadInfo must not reappear", heldCount,
+                packets("native_end_keepalive").size());
+    }
+
+    private static List<NativeSpeedLimitTestSupport.Packet> packets(String kind) {
+        return NativeSpeedLimitTestSupport.PACKETS.stream()
+                .filter(packet -> packet.kind.equals(kind)).collect(Collectors.toList());
     }
 
     private void startManualOutput() {

@@ -21,12 +21,14 @@ import java.util.function.Consumer;
 /** Shared test doubles at the Android and vehicle transport boundaries. */
 final class NativeSpeedLimitTestSupport {
     static final List<String> EVENTS = Collections.synchronizedList(new ArrayList<>());
+    static final List<Packet> PACKETS = new ArrayList<>();
 
     static int raw;
     static int lastLimit;
     static int failOperation;
     static int deferNextOperation;
     static int missingOperation;
+    static boolean applyNativeResult;
     static Pending pending;
 
     private static InstrumentProxyManager instrumentProxy;
@@ -37,11 +39,13 @@ final class NativeSpeedLimitTestSupport {
 
     static void reset() {
         EVENTS.clear();
+        PACKETS.clear();
         raw = 0;
         lastLimit = 0;
         failOperation = -1;
         deferNextOperation = -1;
         missingOperation = -1;
+        applyNativeResult = true;
         pending = null;
         instrumentProxy = null;
         someIpTxLog = null;
@@ -184,7 +188,7 @@ final class NativeSpeedLimitTestSupport {
             Consumer<NativeSpeedLimitEngine.Result> callback, long startedAt,
             boolean success) {
         if (success && operation == NativeSpeedLimitEngine.LIMIT) lastLimit = value;
-        if (success && operation == NativeSpeedLimitEngine.ROAD && value == 6) {
+        if (success && applyNativeResult && operation == NativeSpeedLimitEngine.ROAD && value == 6) {
             raw = lastLimit == 1 ? 1 : lastLimit / 5 + 1;
         }
         callback.accept(new NativeSpeedLimitEngine.Result(success, raw, startedAt,
@@ -205,6 +209,18 @@ final class NativeSpeedLimitTestSupport {
             this.current = current;
             this.callback = callback;
             this.startedAt = startedAt;
+        }
+    }
+
+    static final class Packet {
+        final long at = SystemClock.elapsedRealtime();
+        final String kind;
+        final byte[] payload, semantic;
+
+        Packet(String kind, byte[] payload, byte[] semantic) {
+            this.kind = kind;
+            this.payload = payload.clone();
+            this.semantic = semantic.clone();
         }
     }
 
@@ -252,7 +268,10 @@ final class NativeSpeedLimitTestSupport {
         }
         @Implementation protected void recordSend(String source, String channel, long topic,
                 String kind, String reason, byte[] payload, byte[] semanticPayload,
-                Integer result, String error, long durationMs) { }
+                Integer result, String error, long durationMs) {
+            EVENTS.add("tx:" + kind);
+            PACKETS.add(new Packet(kind, payload, semanticPayload));
+        }
         @Implementation protected void recordLifecycle(String kind, String source,
                 String channel, String reason, Integer result, String error,
                 long durationMs) { }
