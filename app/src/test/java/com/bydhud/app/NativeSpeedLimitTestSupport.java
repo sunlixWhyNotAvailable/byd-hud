@@ -58,7 +58,6 @@ final class NativeSpeedLimitTestSupport {
                 .edit().clear().commit();
         HudPrefs.setUserShutdownActive(context, false);
         HudPrefs.setSpeedLimitMode(context, HudPrefs.SPEED_LIMIT_NATIVE);
-        HudPrefs.setNativeSpeedLimitClearMode(context, HudPrefs.SPEED_LIMIT_NATIVE_CLEAR_NEVER);
         HudPrefs.setNativeSpeedLimitFallbackMode(context,
                 HudPrefs.SPEED_LIMIT_NATIVE_FALLBACK_LANES);
     }
@@ -189,7 +188,7 @@ final class NativeSpeedLimitTestSupport {
             boolean success) {
         if (success && operation == NativeSpeedLimitEngine.LIMIT) lastLimit = value;
         if (success && applyNativeResult && operation == NativeSpeedLimitEngine.ROAD && value == 6) {
-            raw = lastLimit == 1 ? 1 : lastLimit / 5 + 1;
+            raw = lastLimit / 5 + 1;
         }
         callback.accept(new NativeSpeedLimitEngine.Result(success, raw, startedAt,
                 SystemClock.elapsedRealtime(), success ? "" : "unavailable"));
@@ -231,7 +230,7 @@ final class NativeSpeedLimitTestSupport {
         }
 
         @Implementation protected void nativeSpeedOperation(int operation, int value,
-                boolean readyOnly, BooleanSupplier current,
+                BooleanSupplier current,
                 Consumer<NativeSpeedLimitEngine.Result> callback) {
             runNativeOperation(operation, value, current, callback);
         }

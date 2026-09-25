@@ -216,21 +216,6 @@ public final class UserRuntimeSessionTest {
     }
 
     @Test
-    public void freshNavigationFencesTerminalWritesBeforePublishingNewRoute() throws IOException {
-        String sender = source("NavHudLiveSender.java");
-        for (String signature : new String[]{"private void onWazeDirectNavigationStarted(",
-                "private void onGMapsDirectNavigationStarted("}) {
-            String start = body(sender, signature);
-            int cancel = start.indexOf("hudOutput.cancelNativeEndClear(");
-            assertTrue(signature, cancel >= 0 && cancel < start.indexOf("tbtPublisher.beginRoute("));
-            int queuedRetirement = start.indexOf("clearDirectFrameForSupersedingSession(");
-            if (queuedRetirement >= 0) assertTrue(cancel < queuedRetirement);
-        }
-        String accepted = body(sender, "private void onWazeRouteLifecycleEventOnMain(");
-        assertTrue(accepted.contains("cancelNativeEndClear(\"waze-accepted-route-start\")"));
-    }
-
-    @Test
     public void autoStartDefaultAndColdServiceWatchdogGuardsRemainUnchanged() throws IOException {
         assertTrue(body(source("HudPrefs.java"), "static boolean isBootEnabled(")
                 .contains("getBoolean(KEY_BOOT_ENABLED, true)"));

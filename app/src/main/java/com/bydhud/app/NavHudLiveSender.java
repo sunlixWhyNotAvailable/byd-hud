@@ -511,7 +511,6 @@ final class NavHudLiveSender {
     private void startManualOnWorker(HudState state, String reason) {
         if (state == null || !isRuntimeEnabled()) return;
         if (!manualTbtActive) {
-            hudOutput.cancelNativeEndClear("manual-session-start");
             manualTbtActive = true;
             manualTbtGeneration++;
             long generation = manualTbtGeneration;
@@ -585,7 +584,7 @@ final class NavHudLiveSender {
             pendingManualPublishReason = "";
         }
         if (!manualTbtActive) {
-            hudOutput.stopManualOutput("manual-stop:" + safeReason(reason), false,
+            hudOutput.stopManualOutput("manual-stop:" + safeReason(reason),
                     () -> handler.post(() -> { if (completion != null) completion.run(); }));
             return;
         }
@@ -594,8 +593,7 @@ final class NavHudLiveSender {
         latestManualSourceState = null;
         latestManualTbtState = null;
         ++tbtLifecycleToken;
-        boolean handoff = restoreDirect && !remainingTbtOwner(MANUAL_TBT_OWNER).isEmpty();
-        hudOutput.stopManualOutput("manual-stop:" + safeReason(reason), !handoff,
+        hudOutput.stopManualOutput("manual-stop:" + safeReason(reason),
                 () -> handler.post(() -> {
                     if (generation == manualTbtGeneration && !manualTbtActive
                             && MANUAL_TBT_OWNER.equals(tbtPublisher.ownerPackage())
@@ -1577,7 +1575,6 @@ final class NavHudLiveSender {
         logRouteStartOutputPreferences("waze", sessionGeneration, reason);
         boolean newRoute = !wazeDirectNavigating;
         if (newRoute) {
-            hudOutput.cancelNativeEndClear("waze-route-start");
             ++tbtLifecycleToken;
             if (wazeTbtRouteStartedAtMs <= 0L) {
                 wazeTbtRouteStartedAtMs = SystemClock.elapsedRealtime();
@@ -2686,7 +2683,6 @@ final class NavHudLiveSender {
     private void onGMapsDirectNavigationStarted(String ownerPackage,
             long sessionGeneration, String reason) {
         boolean currentSession = isCurrentGMapsDirectCallback(ownerPackage, sessionGeneration);
-        if (currentSession) hudOutput.cancelNativeEndClear("gmaps-route-start");
         hudOutput.clearDirectFrameForSupersedingSession(
                 ownerPackage, sessionGeneration,
                 "gmaps-route-superseded:" + safeReason(reason),
@@ -3259,7 +3255,7 @@ final class NavHudLiveSender {
             hudOutput.endNavigationOutput(
                     ownerPackage, routeGeneration,
                     "gmaps-direct-ended:" + safeReason(reason), detectedAtMs,
-                    !manualTbtActive && remainingTbtOwner(ownerPackage).isEmpty(), finishTbt);
+                    finishTbt);
         } else {
             finishTbt.run();
         }
@@ -3446,7 +3442,7 @@ final class NavHudLiveSender {
             hudOutput.endNavigationOutput(
                     ownerPackage, routeGeneration,
                     "waze-direct-ended:" + safeReason(reason), detectedAtMs,
-                    !manualTbtActive && remainingTbtOwner(ownerPackage).isEmpty(), finishTbt);
+                    finishTbt);
         } else {
             finishTbt.run();
         }
@@ -3622,9 +3618,6 @@ final class NavHudLiveSender {
         boolean tbtEnabled = shouldObserveTbtWithoutHud(context, WAZE_PACKAGE);
         if (!isRuntimeEnabled() || (!hudEnabled && !tbtEnabled)) {
             return;
-        }
-        if (result.freshRouteAccepted) {
-            hudOutput.cancelNativeEndClear("waze-accepted-route-start");
         }
         if (!active || !WAZE_PACKAGE.equals(activePackage)) {
             if (hudEnabled) {
@@ -4229,7 +4222,6 @@ final class NavHudLiveSender {
             return;
         }
         if (stopInProgress) {
-            hudOutput.cancelNativeEndClear("new-navigation-pending");
             pendingStopStartPackage = packageName;
             pendingStopStartReason = reason;
             log("start deferred during HUD clear package=" + packageName
@@ -4266,7 +4258,6 @@ final class NavHudLiveSender {
             return;
         }
         String previousPackage = activePackage;
-        hudOutput.cancelNativeEndClear("navigation-session-start");
         if (active && !previousPackage.equals(packageName)) {
             beginSourceSwitch(previousPackage, packageName, reason);
             return;
@@ -4553,8 +4544,6 @@ final class NavHudLiveSender {
                     WAZE_PACKAGE, wazeGeneration,
                     "waze-stop:" + safeReason(reason),
                     SystemClock.elapsedRealtime(),
-                    !forceTeardown && !manualTbtActive
-                            && remainingTbtOwner(WAZE_PACKAGE).isEmpty(),
                     () -> handler.post(() -> {
                         if (!acceptsHudStopCallbackForTest(
                                 teardownToken, tbtLifecycleToken)) {
@@ -4588,8 +4577,6 @@ final class NavHudLiveSender {
                     GMapsDirectChannel.PACKAGE_NAME, gmapsGeneration,
                     "gmaps-stop:" + safeReason(reason),
                     SystemClock.elapsedRealtime(),
-                    !forceTeardown && !manualTbtActive
-                            && remainingTbtOwner(GMapsDirectChannel.PACKAGE_NAME).isEmpty(),
                     () -> handler.post(() -> {
                         if (!acceptsHudStopCallbackForTest(
                                 teardownToken, tbtLifecycleToken)) {

@@ -2044,18 +2044,6 @@ private fun OptionsTab(
     val speedLimitModeIndex = HudPrefs.speedLimitModeUiIndex(snapshot.speedLimitMode)
     val speedLimitFallbackModes = language.choose(listOf("Вимкнено", "У полі з маневром", "У полі зі смугами"),
         listOf("Off", "In maneuver field", "In lane field"), listOf("Выкл.", "В поле манёвра", "В поле полос"))
-    val nativeSpeedLimitClearTitle = language.choose(
-        "Очищувати штатне поле обмеження швидкості",
-        "Clear native speed limit field",
-        "Очищать штатное поле ограничения скорости")
-    val nativeSpeedLimitClearModes = language.choose(
-        listOf("Ніколи", "В кінці навігації", "Немає нав. даних", "Завжди"),
-        listOf("Never", "At navigation end", "No nav. data", "Always"),
-        listOf("Никогда", "В конце навигации", "Нет нав. данных", "Всегда"))
-    val nativeSpeedLimitClearHint = language.choose(
-        "Оберіть, коли очищувати штатний знак обмеження швидкості",
-        "Choose when to clear the native speed limit sign",
-        "Выберите, когда очищать штатный знак ограничения скорости")
     val nativeSpeedLimitFallbackTitle = language.choose(
         "Запасний режим виводу обмеження швидкості",
         "Fallback speed limit output mode",
@@ -2092,11 +2080,6 @@ private fun OptionsTab(
         "Composite sign size in pixels for the maneuver image. Whole numbers from 1 to 103 only.", "Размер композитного знака в пикселях для изображения манёвра. Целое число от 1 до 103.")
     val compositeLaneSizeHint = language.choose("Розмір композитного знаку у пікселях для зображення смуг. Дозволено ціле число від 1 до 36.",
         "Composite sign size in pixels for the lane image. Whole numbers from 1 to 36 only.", "Размер композитного знака в пикселях для изображения полос. Целое число от 1 до 36.")
-    val nativeSpeedLimitClearModeIndex = HudPrefs.nativeSpeedLimitClearModeUiIndex(
-        snapshot.nativeSpeedLimitClearMode)
-    val nativeSpeedLimitClearDisabledOptions = nativeSpeedLimitClearModes.indices
-        .filterNot { HudPrefs.isNativeSpeedLimitClearModeUiOptionEnabled(snapshot.speedLimitMode, it) }
-        .toSet()
     val nativeSpeedLimitFallbackEnabled = snapshot.speedLimitMode == HudPrefs.SPEED_LIMIT_NATIVE
     val effectiveSpeedLimitBitmapMode = HudPrefs.effectiveSpeedLimitBitmapMode(
         snapshot.speedLimitMode, snapshot.nativeSpeedLimitFallbackMode)
@@ -2424,32 +2407,6 @@ private fun OptionsTab(
                         width = 190.dp,
                         onSelected = { index -> runAction {
                             activity.composeSetSpeedLimitMode(HudPrefs.speedLimitModeFromUiIndex(index))
-                        } }
-                    )
-                }
-            }
-            row("speed-limit-native-clear-mode") {
-                SettingRow(
-                    nativeSpeedLimitClearTitle,
-                    nativeSpeedLimitClearHint,
-                    palette,
-                    onHelp = { hudHelpRequest = dropdownHelp(
-                        HudHelpTopicId.SpeedLimitNativeClearMode,
-                        nativeSpeedLimitClearTitle,
-                        nativeSpeedLimitClearModeIndex,
-                        nativeSpeedLimitClearModes,
-                        nativeSpeedLimitClearDisabledOptions) }
-                ) {
-                    HudDropdown(
-                        selectedIndex = nativeSpeedLimitClearModeIndex,
-                        options = nativeSpeedLimitClearModes,
-                        palette = palette,
-                        width = 190.dp,
-                        disabledOptions = nativeSpeedLimitClearDisabledOptions,
-                        onSelected = { index -> runAction {
-                            activity.composeSetNativeSpeedLimitClearMode(
-                                HudPrefs.nativeSpeedLimitClearModeFromUiIndex(
-                                    snapshot.speedLimitMode, index))
                         } }
                     )
                 }
@@ -7580,7 +7537,6 @@ private fun HudHelpOverlay(
         HudHelpTopicId.WazeAlerts -> topic.frames
             .getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }.imageRes
         HudHelpTopicId.BasicTransliteration,
-        HudHelpTopicId.SpeedLimitNativeClearMode,
         HudHelpTopicId.SpeedLimitNativeFallbackMode,
         HudHelpTopicId.SpeedLimitFallback,
         HudHelpTopicId.SpeedLimitCompositeField,
@@ -7680,22 +7636,6 @@ private fun HudHelpOverlay(
                     contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
-                if (request.topic == HudHelpTopicId.SpeedLimitNativeClearMode && localIndex != 0) {
-                    // The approved clearing sample hides only the native sign.
-                    Canvas(Modifier.fillMaxSize()) {
-                        val scaleX = size.width / 2172f
-                        val scaleY = size.height / 724f
-                        drawImage(
-                            image = coloredImage,
-                            srcOffset = IntOffset(1546, 200),
-                            srcSize = IntSize(110, 111),
-                            dstOffset = IntOffset((1546f * scaleX).roundToInt(),
-                                (347f * scaleY).roundToInt()),
-                            dstSize = IntSize((110f * scaleX).roundToInt(),
-                                (111f * scaleY).roundToInt())
-                        )
-                    }
-                }
                 if (signBitmap != null) {
                     Canvas(Modifier.fillMaxSize()) {
                         val maneuver = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
@@ -7800,8 +7740,7 @@ private fun HudHelpOverlay(
                     }
                 }
             }
-            if (request.topic == HudHelpTopicId.SpeedLimitNativeClearMode
-                || request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode) {
+            if (request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode) {
                 Text(
                     topic.frames.getOrElse(localIndex) { topic.frames.first() }.caption(language),
                     color = palette.muted,

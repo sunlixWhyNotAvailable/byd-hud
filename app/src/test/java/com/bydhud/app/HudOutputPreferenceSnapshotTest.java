@@ -19,7 +19,7 @@ public final class HudOutputPreferenceSnapshotTest {
                         + " textTransliteration=2"
                         + " clampSmallDistance=1 wazeAlerts=1 routeMetrics=2 eta=1"
                         + " remainingTime=0 remainingDistance=1 speedLimitMode=4"
-                        + " nativeSpeedFallback=0 nativeSpeedClear=0"
+                        + " nativeSpeedFallback=0"
                         + " speedFreeFallback=2 speedOverlaySeconds=7 speedPlacement=3"
                         + " speedManeuverSize=80 speedLaneSize=30"
                         + " etaField=0 warningField=0 etaStreetFormat=0 etaLanguage=en"

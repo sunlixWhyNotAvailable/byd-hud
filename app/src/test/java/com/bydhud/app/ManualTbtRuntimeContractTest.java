@@ -95,13 +95,12 @@ public final class ManualTbtRuntimeContractTest {
     }
 
     @Test
-    public void terminalClearCompletesBeforeManualTbtAndRuntimeAreReleased() throws IOException {
+    public void ordinaryHudClearCompletesBeforeManualTbtAndRuntimeAreReleased() throws IOException {
         String sender = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
         String main = source("app/src/main/java/com/bydhud/app/MainActivity.java");
         String stop = sender.substring(sender.indexOf(
                 "private void stopManualOnWorker(String reason, boolean restoreDirect, Runnable completion)"),
                 sender.indexOf("private HudState effectiveManualState("));
-        assertTrue(stop.contains("remainingTbtOwner(MANUAL_TBT_OWNER)"));
         assertTrue(stop.contains("generation == manualTbtGeneration && !manualTbtActive"));
         assertTrue(stop.contains("generation == tbtPublisher.ownerGeneration()"));
         assertTrue(stop.indexOf("hudOutput.stopManualOutput(") < stop.indexOf("tbtPublisher.endManualRoute("));

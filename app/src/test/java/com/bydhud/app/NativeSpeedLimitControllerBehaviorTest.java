@@ -43,7 +43,6 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         context = RuntimeEnvironment.getApplication();
         NativeSpeedLimitTestSupport.resetPreferences(context);
         HudPrefs.setSpeedLimitMode(context, HudPrefs.SPEED_LIMIT_NATIVE);
-        HudPrefs.setNativeSpeedLimitClearMode(context, HudPrefs.SPEED_LIMIT_NATIVE_CLEAR_NEVER);
         HudPrefs.setNativeSpeedLimitFallbackMode(context,
                 HudPrefs.SPEED_LIMIT_NATIVE_FALLBACK_LANES);
         DirectSpeedLimitStore.update(WAZE, 60, 60, "km/h", 1L);
@@ -118,7 +117,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         assertFalse(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=60"));
     }
 
-    @Test public void changedClearPreferenceFencesTheOldNativeTarget() {
+    @Test public void changedOutputModeFencesTheOldNativeTarget() {
         NativeSpeedLimitTestSupport.raw = 12;
         NativeSpeedLimitTestSupport.deferNextOperation = NativeSpeedLimitEngine.ROAD;
         controller.refresh(WAZE, 1L, 60);
@@ -126,8 +125,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
 
         NativeSpeedLimitTestSupport.Pending stale = NativeSpeedLimitTestSupport.pending;
         assertNotNull(stale);
-        HudPrefs.setNativeSpeedLimitClearMode(context,
-                HudPrefs.SPEED_LIMIT_NATIVE_CLEAR_AT_NAVIGATION_END);
+        HudPrefs.setSpeedLimitMode(context, HudPrefs.SPEED_LIMIT_OFF);
         NativeSpeedLimitTestSupport.releasePending(true);
         NativeSpeedLimitTestSupport.idleMainLooperFor(NativeSpeedLimitEngine.ROAD_GAP_MS);
 
@@ -136,4 +134,42 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         assertEquals(HudPrefs.SPEED_LIMIT_OFF,
                 NativeSpeedLimitController.outputOptions(context, WAZE).speedLimitMode);
     }
+    @Test public void restoredLegacyClearSelectionsAreIgnoredInEveryOutputMode() {
+        android.content.SharedPreferences prefs = context.getSharedPreferences(
+                "byd_hud_prefs", Context.MODE_PRIVATE);
+        for (int mode = 0; mode <= 5; mode++) {
+            for (int legacy = 1; legacy <= 3; legacy++) {
+                controller.stop("next-case");
+                NativeSpeedLimitTestSupport.EVENTS.clear();
+                NativeSpeedLimitTestSupport.raw = 12;
+                // Simulate existing or restored preferences, including invalid old types.
+                prefs.edit().putInt("speed_limit_native_clear_mode", legacy)
+                        .putString("speed_limit_native_clear_mode_native", "legacy:" + legacy).commit();
+                HudPrefs.setSpeedLimitMode(context, mode);
+                controller.refresh(WAZE, legacy, 60);
+                NativeSpeedLimitTestSupport.idleMainLooperFor(500L);
+                if (mode == HudPrefs.SPEED_LIMIT_NATIVE) {
+                    assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=60"));
+                } else {
+                    assertFalse(NativeSpeedLimitTestSupport.EVENTS.stream()
+                            .anyMatch(event -> event.startsWith("native:")));
+                }
+                int ioBeforeLoss = (int) NativeSpeedLimitTestSupport.EVENTS.stream()
+                        .filter(event -> event.startsWith("native:")).count();
+                controller.refresh(WAZE, legacy, 0);
+                NativeSpeedLimitTestSupport.idleMainLooperFor(20_000L);
+                controller.stop("route-end");
+                assertEquals(ioBeforeLoss, NativeSpeedLimitTestSupport.EVENTS.stream()
+                        .filter(event -> event.startsWith("native:")).count());
+                assertFalse(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=1"));
+                assertEquals(mode, HudPrefs.speedLimitMode(context));
+                assertEquals(HudPrefs.SPEED_LIMIT_NATIVE_FALLBACK_LANES,
+                        HudPrefs.getNativeSpeedLimitFallbackMode(context));
+                assertEquals(legacy, prefs.getInt("speed_limit_native_clear_mode", -1));
+                assertEquals("legacy:" + legacy, prefs.getString("speed_limit_native_clear_mode_native", ""));
+                assertFalse(HudOutputPreferenceSnapshot.capture(context).compact().contains("nativeSpeedClear"));
+            }
+        }
+    }
+
 }

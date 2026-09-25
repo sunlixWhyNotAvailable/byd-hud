@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.2.6 (test candidate; release target v3.3.0)
+- **Version:** v3.3.0
 - **Interface languages:** Ukrainian, English and Russian; update notes follow the selected language, with English as the fallback for missing translations.
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
@@ -166,7 +166,6 @@ Missing values are completed separately for each destination. On a multi-stop ro
 | Setting | Default | Behavior |
 | --- | --- | --- |
 | `Speed limit output mode` | Off | Selects `Off`, `Native`, `In maneuver field`, `In lane field`, `In a free field`, or `Composite` |
-| `Clear native speed limit field` | Never | Outside Native mode, clears only during active HUD output: never, when navigation has no speed limit, or always |
 | `Fallback speed limit output mode` | Off | In Native mode, selects bitmap output if the native field is unavailable or fails to confirm the requested limit |
 | `Overlay in "In a free field" mode` | Off | When both fields are occupied, optionally allows a timed replacement of the maneuver or lane field |
 | `Display time when overlapping` | 5 seconds | Sets the temporary replacement time from 1 to 10 seconds for non-composite output over an occupied field |
@@ -174,7 +173,7 @@ Missing values are completed separately for each destination. On a multi-stop ro
 | `Sign size in maneuver field` | 64 px | Sets the composite sign size in the maneuver image from 1 to 103 px |
 | `Sign size in lane field` | 36 px | Sets the composite sign size in the lane image from 1 to 36 px |
 
-`Native` sends supported limits (5–130 km/h in steps of 5) to the vehicle's native field and checks ADAS readback. If confirmation fails within 3 seconds, the selected fallback is used; recovery attempts start at least 10 seconds apart. A matching result removes fallback. Unsupported limits use fallback immediately. A missing navigation limit leaves the existing native sign alone. Clearing is a separate opt-in policy, available even when speed-limit output is Off, but only while navigation HUD output is active. Native ignores that policy. Vehicle behavior remains subject to field validation of this test candidate.
+`Native` sends supported limits (5–130 km/h in steps of 5) to the vehicle's native field and checks ADAS readback. If confirmation fails within 3 seconds, the selected fallback is used; recovery attempts start at least 10 seconds apart. A matching result removes fallback. Unsupported limits use fallback immediately. A missing navigation limit leaves the existing native sign alone. BYD HUD does not clear the native sign, including at navigation end; former clearing preferences have no effect. The vehicle can apply an already transmitted limit later, even after fallback or route end; stopping our output does not revoke an accepted vehicle write.
 
 Native help illustrates 115 in the native field (Off illustrates 40); changing the help selection does not change settings or send anything to the HUD. Fallback controls are available only for Native, and subsequent bitmap controls follow the selected fallback. Disabled settings retain their values.
 

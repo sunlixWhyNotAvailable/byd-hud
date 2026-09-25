@@ -14,7 +14,6 @@ import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Consumer;
-import java.util.function.BooleanSupplier;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
@@ -188,18 +187,6 @@ final class HudOutputCoordinator {
     private boolean finalClearCompletionDispatched;
     private boolean finalClearInProgress;
     private long finalClearStartedAtMs;
-    private byte[] lastActiveRoadInfo;
-    private DirectTbtPayload.Prepared lastActiveDirectRoadInfo;
-    private Runnable nativeEndRoadInfoLoop;
-    private final java.util.concurrent.atomic.AtomicLong nativeEndEpoch =
-            new java.util.concurrent.atomic.AtomicLong();
-
-    void cancelNativeEndClear(String reason) {
-        // Fence queued Binder writes immediately, before the HUD worker catches up.
-        nativeEndEpoch.incrementAndGet();
-        worker.post(() -> nativeSpeed.cancelEndClear(reason));
-    }
-
     private final Runnable directLeaseExpiry = this::expireDirectLease;
 
     private final Runnable sendLoop = new Runnable() {
@@ -345,7 +332,7 @@ final class HudOutputCoordinator {
                 ownerPackage, ownerSessionGeneration);
     }
 
-    void stopManualOutput(String reason, boolean clearNativeAtEnd, Runnable completion) {
+    void stopManualOutput(String reason, Runnable completion) {
         worker.post(() -> {
             manualEnabled = false;
             hudCheckDiagnostics.reset();
@@ -357,7 +344,7 @@ final class HudOutputCoordinator {
                 hudCheckHasAuxiliary = false;
                 hudCheckRoadResult = 0;
                 runCompletion(completion);
-            }, clearNativeAtEnd);
+            });
         });
     }
 
@@ -501,24 +488,17 @@ final class HudOutputCoordinator {
             String reason, long detectedAtMs, Runnable firstClearCompletion) {
         worker.post(() -> {
             endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
-                    detectedAtMs, firstClearCompletion, false, false);
+                    detectedAtMs, firstClearCompletion, false);
         });
     }
 
     void endNavigationOutput(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs, Runnable firstClearCompletion) {
-        endNavigationOutput(ownerPackage, ownerSessionGeneration, reason, detectedAtMs,
-                false, firstClearCompletion);
-    }
-
-    void endNavigationOutput(String ownerPackage, long ownerSessionGeneration,
-            String reason, long detectedAtMs, boolean clearNativeAtEnd,
-            Runnable firstClearCompletion) {
         worker.post(() -> {
             boolean directSelected = directSelectedOnWorker();
             if (directSelected) {
                 endDirectOutputOnWorker(ownerPackage, ownerSessionGeneration, reason,
-                        detectedAtMs, firstClearCompletion, true, clearNativeAtEnd);
+                        detectedAtMs, firstClearCompletion, true);
                 return;
             }
             invalidateDirectOwnerOnWorker("navigation-end:" + reason);
@@ -528,7 +508,7 @@ final class HudOutputCoordinator {
 
     private void endDirectOutputOnWorker(String ownerPackage, long ownerSessionGeneration,
             String reason, long detectedAtMs, Runnable firstClearCompletion,
-            boolean administrativeStop, boolean clearNativeAtEnd) {
+            boolean administrativeStop) {
         if (!directSelectedOnWorker()) {
             invalidateDormantDirectOwnerOnWorker(
                     ownerPackage, ownerSessionGeneration, "end:" + reason);
@@ -538,7 +518,6 @@ final class HudOutputCoordinator {
             return;
         }
         if (!claimDirectOwner(ownerPackage, ownerSessionGeneration)) {
-            clearNativeAtEnd = false;
             logAsync("direct end rejected owner=" + safe(ownerPackage)
                     + " session=" + ownerSessionGeneration
                     + " reason=" + safe(reason));
@@ -573,7 +552,7 @@ final class HudOutputCoordinator {
         pendingDirectReceivedAtMs = 0L;
         pendingDirectReason = "";
         invalidateDirectOwnerOnWorker("end:" + reason);
-        reconcile(reason, detectedAtMs, firstClearCompletion, clearNativeAtEnd);
+        reconcile(reason, detectedAtMs, firstClearCompletion);
     }
 
     void renewDirectLease(String ownerPackage, long ownerSessionGeneration, String reason) {
@@ -674,17 +653,16 @@ final class HudOutputCoordinator {
 
     private void reconcile(String reason, long endDetectedAtMs,
             Runnable firstClearCompletion) {
-        reconcile(reason, endDetectedAtMs, firstClearCompletion, false);
-    }
-
-    private void reconcile(String reason, long endDetectedAtMs,
-            Runnable firstClearCompletion, boolean clearNativeAtEnd) {
         Source target = desiredSource();
         if (pendingSource == Source.NONE && target == activeSource) {
             if (target == Source.NONE && (finalClearInProgress
                     || pendingFinalClearCompletion != null)) {
-                pendingFinalClearCompletion = chainCompletions(
-                        pendingFinalClearCompletion, firstClearCompletion);
+                if (finalClearCompletionDispatched) {
+                    runCompletion(firstClearCompletion);
+                } else {
+                    pendingFinalClearCompletion = chainCompletions(
+                            pendingFinalClearCompletion, firstClearCompletion);
+                }
                 return;
             }
             runCompletion(firstClearCompletion);
@@ -701,8 +679,6 @@ final class HudOutputCoordinator {
             return;
         }
         int transitionGeneration = ++generation;
-        byte[] closingRoadInfo = lastActiveRoadInfo;
-        DirectTbtPayload.Prepared closingDirectRoadInfo = lastActiveDirectRoadInfo;
         cancelScheduledWork();
         boolean unfinishedFinalClear = pendingFinalClearCompletion != null;
         Runnable carriedCompletion = chainCompletions(
@@ -729,34 +705,7 @@ final class HudOutputCoordinator {
             finalClearInProgress = previous != Source.NONE;
             finalClearStartedAtMs = finalClearInProgress
                     ? SystemClock.elapsedRealtime() : 0L;
-            if (shouldClearNativeAtEnd(previous, target, clearNativeAtEnd,
-                    HudPrefs.speedLimitMode(context),
-                    HudPrefs.getNativeSpeedLimitClearMode(context))) {
-                // This deadline includes native readback AND ordinary HUD teardown.
-                worker.postDelayed(() -> {
-                    if (transitionGeneration == generation && finalClearInProgress) {
-                        abortFinalClearAfterTimeout(previous, reason);
-                    }
-                }, FINAL_CLEAR_TIMEOUT_MS);
-                long closingEpoch = nativeEndEpoch.get();
-                BooleanSupplier closingCurrent =
-                        () -> transitionGeneration == generation && finalClearInProgress
-                                && closingEpoch == nativeEndEpoch.get()
-                                && desiredSource() == Source.NONE;
-                keepNativeEndRoadInfo(previous, closingRoadInfo, closingDirectRoadInfo,
-                        closingCurrent);
-                nativeSpeed.clearAtEnd(previous + ":end:" + transitionGeneration + ":" + reason,
-                        closingCurrent,
-                        () -> {
-                            if (transitionGeneration == generation && finalClearInProgress) {
-                                stopNativeEndRoadInfo();
-                                beginFinalStop(previous, reason, transitionGeneration, 1,
-                                        endDetectedAtMs);
-                            }
-                        });
-            } else {
-                beginFinalStop(previous, reason, transitionGeneration, 1, endDetectedAtMs);
-            }
+            beginFinalStop(previous, reason, transitionGeneration, 1, endDetectedAtMs);
             return;
         }
         pendingTransitionClearCompletion = clearCompletion;
@@ -983,52 +932,6 @@ final class HudOutputCoordinator {
         });
     }
 
-    private void keepNativeEndRoadInfo(Source source, byte[] payload,
-            DirectTbtPayload.Prepared directPayload, BooleanSupplier current) {
-        if (payload == null) return;
-        String channel = channelFor(source);
-        long interval = source == Source.DIRECT ? DIRECT_INTERVAL_MS : DEFAULT_INTERVAL_MS;
-        byte[] semantic = directPayload == null ? payload : directPayload.build(0);
-        nativeEndRoadInfoLoop = new Runnable() {
-            @Override public void run() {
-                if (nativeEndRoadInfoLoop != this) return;
-                if (!current.getAsBoolean() || ShanghaiOutputGate.isSuspended()
-                        || !client.isBound() || !serviceStarted) {
-                    stopNativeEndRoadInfo();
-                    return;
-                }
-                try {
-                    // Repeat the last delivered frame, without refreshing native targets
-                    // or reviving the ended navigator. Preserve the Direct wire counter.
-                    byte[] next = directPayload == null ? payload : directPayload.build(directCounter);
-                    int result = sendPayload(source, channel, "native_end_keepalive",
-                            "native-terminal", next, semantic);
-                    if (!isPayloadSuccessResult(result)) {
-                        log("native_speed roadinfo hold failed result=" + result);
-                        stopNativeEndRoadInfo();
-                        return;
-                    }
-                    if (source == Source.DIRECT) directCounter = (directCounter + 1) & 0xff;
-                } catch (RemoteException | RuntimeException error) {
-                    log("native_speed roadinfo hold failed error=" + safe(error.getMessage()));
-                    stopNativeEndRoadInfo();
-                    return;
-                }
-                worker.postDelayed(this, interval);
-            }
-        };
-        log("native_speed roadinfo hold start source=" + source + " generation=" + generation
-                + " intervalMs=" + interval);
-        worker.post(nativeEndRoadInfoLoop);
-    }
-
-    private void stopNativeEndRoadInfo() {
-        if (nativeEndRoadInfoLoop == null) return;
-        worker.removeCallbacks(nativeEndRoadInfoLoop);
-        nativeEndRoadInfoLoop = null;
-        log("native_speed roadinfo hold stop generation=" + generation);
-    }
-
     private void sendActive(String reason) {
         if (ShanghaiOutputGate.isSuspended()) {
             nativeSpeed.stop("shanghai");
@@ -1089,8 +992,6 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
-            lastActiveRoadInfo = payload;
-            lastActiveDirectRoadInfo = source == Source.DIRECT ? preparedDirectPayload : null;
             nativeSpeed.refresh(source == Source.DIRECT ? directOwnerPackage : "manual",
                     source == Source.DIRECT ? directOwnerSessionGeneration : generation,
                     source == Source.DIRECT ? DirectSpeedLimitStore.snapshot(directOwnerPackage).getKph() : 0);
@@ -1609,12 +1510,6 @@ final class HudOutputCoordinator {
                 + ":" + options.textDirection + ":" + transliterationMode;
     }
 
-    static boolean shouldClearNativeAtEnd(Source previous, Source target, boolean requested,
-            int primary, int clearing) {
-        return requested && previous != Source.NONE && target == Source.NONE
-                && NativeSpeedLimitController.endClearSelected(primary, clearing);
-    }
-
     private void logEtaStreetTextTransition() {
         String event = etaStreetTextGate.drainEvent();
         if (!event.isEmpty()) log("eta_street " + event);
@@ -2105,9 +2000,6 @@ final class HudOutputCoordinator {
     }
 
     private void cancelScheduledWork() {
-        stopNativeEndRoadInfo();
-        lastActiveRoadInfo = null;
-        lastActiveDirectRoadInfo = null;
         nativeSpeed.stop("hud-work-cancelled");
         worker.removeCallbacks(sendLoop);
         ++bindGeneration;
