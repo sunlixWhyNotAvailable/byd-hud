@@ -1,12 +1,7 @@
 package com.bydhud.app;
 
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
-
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
 
 import org.junit.After;
 import org.junit.Test;
@@ -171,28 +166,58 @@ public final class WazeRouteTimingTest {
     }
 
     @Test
-    public void directHooksAndFrameLoggingRemainScoped() throws IOException {
-        String channel = source("WazeDirectChannel.java");
-        String sender = source("NavHudLiveSender.java");
+    public void tripStagesMeasureQueueAndRenderSeparatelyFromProducerLifecycle() {
+        WazeRouteTiming timing = new WazeRouteTiming(
+                "v2", "route_start", 1_000L, 7L, 1_010L, true);
+        WazeRouteTiming.Frame frame = timing.beginFrame(4_900L, "trip_current");
+        frame.markTripQueueIngress(42L, 4_500L, 7);
+        frame.markTripDrainStart(4_800L);
+        frame.markTripRenderEnd(4_900L);
+        frame.markListenerHandoff(4_910L);
+        frame.markListenerCallback(4_930L);
 
-        assertTrue(channel.contains("markBindRequest"));
-        assertTrue(channel.contains("markBindStart"));
-        assertTrue(channel.contains("markBindResult"));
-        assertTrue(channel.contains("markCarAppConnected"));
-        assertTrue(channel.contains("markSessionReady"));
-        assertTrue(channel.contains("beginFrame"));
-        assertTrue(sender.contains("pendingWazeDirectFrameTiming"));
-        assertTrue(sender.contains("logWazeDirectTiming"));
-        assertTrue(sender.contains("HudPrefs.isDetailedDebugArtifactsEnabled(context)"));
-        assertTrue(sender.contains("timing.shouldLog("));
+        String line = frame.line(4_940L, 4_950L, true, true);
+        assertTrue(line.contains("eventElapsedMs=1000"));
+        assertTrue(line.contains("tripIngressSequence=42"));
+        assertTrue(line.contains("tripIngressElapsedMs=4500"));
+        assertTrue(line.contains("tripDrainStartElapsedMs=4800"));
+        assertTrue(line.contains("tripRenderEndElapsedMs=4900"));
+        assertTrue(line.contains("tripCoalescedCount=7"));
+        assertTrue(line.contains("ingressToDrainMs=300"));
+        assertTrue(line.contains("drainToRenderMs=100"));
+        assertTrue(line.contains("renderToListenerMs=10"));
+        assertTrue(line.contains("listenerToCallbackMs=20"));
+        assertTrue(frame.directLine("coalesced_without_route").contains("tripCoalescedCount=7"));
     }
 
-    private static String source(String name) throws IOException {
-        Path root = Paths.get(System.getProperty("user.dir"));
-        Path file = root.resolve("app/src/main/java/com/bydhud/app/" + name);
-        if (!Files.isRegularFile(file)) {
-            file = root.resolve("src/main/java/com/bydhud/app/" + name);
-        }
-        return new String(Files.readAllBytes(file), StandardCharsets.UTF_8);
+    @Test
+    public void laterTripFramesLogOnlyCoalescingOrSlowStagesUnlessDetailed() {
+        WazeRouteTiming timing = new WazeRouteTiming(
+                "direct", "trip_ingress", -1L, 0L, -1L, false);
+        timing.beginFrame(100L, "first");
+
+        WazeRouteTiming.Frame fast = tripFrame(timing, 970L, 980L, 1_000L, 0);
+        assertFalse(fast.shouldLog(false, 1_003L, 1_004L));
+        assertTrue(fast.shouldLog(true, 1_003L, 1_004L));
+
+        WazeRouteTiming.Frame coalesced = tripFrame(timing, 1_970L, 1_980L, 2_000L, 3);
+        assertTrue(coalesced.shouldLog(false, 2_003L, 2_004L));
+
+        WazeRouteTiming.Frame queued = tripFrame(timing, 2_700L, 3_000L, 3_010L, 0);
+        assertTrue(queued.shouldLog(false, 3_013L, 3_014L));
+
+        WazeRouteTiming.Frame rendered = tripFrame(timing, 4_000L, 4_010L, 4_310L, 0);
+        assertTrue(rendered.shouldLog(false, 4_313L, 4_314L));
+    }
+
+    private static WazeRouteTiming.Frame tripFrame(WazeRouteTiming timing,
+            long ingress, long drain, long render, int coalesced) {
+        WazeRouteTiming.Frame frame = timing.beginFrame(render, "trip_current");
+        frame.markTripQueueIngress(render, ingress, coalesced);
+        frame.markTripDrainStart(drain);
+        frame.markTripRenderEnd(render);
+        frame.markListenerHandoff(render + 1L);
+        frame.markListenerCallback(render + 2L);
+        return frame;
     }
 }

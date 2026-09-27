@@ -33,6 +33,8 @@ final class HudPrefs {
     private static final String KEY_OUTPUT_REMAINING_TIME = "output_remaining_time";
     private static final String KEY_OUTPUT_REMAINING_DISTANCE = "output_remaining_distance";
     private static final String KEY_SPEED_LIMIT_MODE = "speed_limit_mode";
+    private static final String KEY_SPEED_LIMIT_NATIVE_DELAY_ENABLED =
+            "speed_limit_native_delay_enabled";
     private static final String KEY_SPEED_LIMIT_NATIVE_FALLBACK_MODE =
             "speed_limit_native_fallback_mode";
     private static final String KEY_SPEED_LIMIT_FREE_FALLBACK = "speed_limit_free_fallback";
@@ -374,6 +376,15 @@ final class HudPrefs {
     static int speedLimitMode(Context context) {
         return normalizeSpeedLimitMode(
                 prefs(context).getInt(KEY_SPEED_LIMIT_MODE, SPEED_LIMIT_OFF));
+    }
+
+    static boolean isNativeSpeedLimitDelayEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_SPEED_LIMIT_NATIVE_DELAY_ENABLED, true);
+    }
+
+    static void setNativeSpeedLimitDelayEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_SPEED_LIMIT_NATIVE_DELAY_ENABLED, enabled).apply();
+        markOutputOptionChanged(KEY_SPEED_LIMIT_NATIVE_DELAY_ENABLED);
     }
 
     static void setSpeedLimitMode(Context context, int mode) {

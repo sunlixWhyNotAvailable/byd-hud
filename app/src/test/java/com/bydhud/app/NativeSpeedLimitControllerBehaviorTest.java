@@ -62,6 +62,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
 
         controller.refresh(WAZE, 1L, 60);
         NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(6_200L);
 
         assertEquals(HudPrefs.SPEED_LIMIT_LANES,
                 NativeSpeedLimitController.outputOptions(context, WAZE).speedLimitMode);
@@ -81,6 +82,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         NativeSpeedLimitTestSupport.deferNextOperation = NativeSpeedLimitEngine.ROAD;
         controller.refresh(WAZE, 1L, 60);
         NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(6_000L);
 
         NativeSpeedLimitTestSupport.Pending stale = NativeSpeedLimitTestSupport.pending;
         assertNotNull(stale);
@@ -101,6 +103,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         NativeSpeedLimitTestSupport.deferNextOperation = NativeSpeedLimitEngine.ROAD;
         controller.refresh(WAZE, 1L, 60);
         NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(6_000L);
 
         NativeSpeedLimitTestSupport.Pending stale = NativeSpeedLimitTestSupport.pending;
         assertNotNull(stale);
@@ -111,7 +114,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         NativeSpeedLimitTestSupport.idleMainLooper();
         assertFalse(stale.current.getAsBoolean());
         NativeSpeedLimitTestSupport.releasePending(true);
-        NativeSpeedLimitTestSupport.idleMainLooperFor(300L);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(6_300L);
 
         assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=55"));
         assertFalse(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=60"));
@@ -122,6 +125,7 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         NativeSpeedLimitTestSupport.deferNextOperation = NativeSpeedLimitEngine.ROAD;
         controller.refresh(WAZE, 1L, 60);
         NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(6_000L);
 
         NativeSpeedLimitTestSupport.Pending stale = NativeSpeedLimitTestSupport.pending;
         assertNotNull(stale);
@@ -134,6 +138,50 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         assertEquals(HudPrefs.SPEED_LIMIT_OFF,
                 NativeSpeedLimitController.outputOptions(context, WAZE).speedLimitMode);
     }
+
+    @Test public void delayPreferenceRecomputesPendingDeadlineOnTheSameTarget() {
+        NativeSpeedLimitTestSupport.raw = 12;
+        controller.refresh(WAZE, 1L, 60);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(4_000L);
+        assertFalse(NativeSpeedLimitTestSupport.EVENTS.contains("native:1=7"));
+
+        HudPrefs.setNativeSpeedLimitDelayEnabled(context, false);
+        controller.refresh(WAZE, 1L, 60);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(NativeSpeedLimitEngine.READ_MS);
+        assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:1=7"));
+    }
+
+    @Test public void shanghaiSuspensionCancelsPendingNativeDelay() throws Exception {
+        NativeSpeedLimitTestSupport.raw = 12;
+        controller.refresh(WAZE, 1L, 60);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        ShanghaiOutputGate.suspend();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(10_000L);
+        assertFalse(NativeSpeedLimitTestSupport.EVENTS.stream()
+                .anyMatch(event -> event.startsWith("native:1=") || event.startsWith("native:2=")));
+    }
+
+    @Test public void stopDuringLimitCallMakesItsLateCallbackStale() {
+        NativeSpeedLimitTestSupport.raw = 12;
+        NativeSpeedLimitTestSupport.deferNextOperation = NativeSpeedLimitEngine.LIMIT;
+        controller.refresh(WAZE, 1L, 60);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(6_100L);
+
+        NativeSpeedLimitTestSupport.Pending stale = NativeSpeedLimitTestSupport.pending;
+        assertNotNull(stale);
+        assertEquals(NativeSpeedLimitEngine.LIMIT, stale.operation);
+        controller.stop("route-end");
+        assertFalse(stale.current.getAsBoolean());
+        NativeSpeedLimitTestSupport.releasePending(true);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(500L);
+
+        assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:1=7"));
+        assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=60"));
+        assertFalse(NativeSpeedLimitTestSupport.EVENTS.contains("native:1=6"));
+    }
+
     @Test public void restoredLegacyClearSelectionsAreIgnoredInEveryOutputMode() {
         android.content.SharedPreferences prefs = context.getSharedPreferences(
                 "byd_hud_prefs", Context.MODE_PRIVATE);
@@ -146,8 +194,9 @@ public final class NativeSpeedLimitControllerBehaviorTest {
                 prefs.edit().putInt("speed_limit_native_clear_mode", legacy)
                         .putString("speed_limit_native_clear_mode_native", "legacy:" + legacy).commit();
                 HudPrefs.setSpeedLimitMode(context, mode);
+                HudPrefs.setNativeSpeedLimitDelayEnabled(context, false);
                 controller.refresh(WAZE, legacy, 60);
-                NativeSpeedLimitTestSupport.idleMainLooperFor(500L);
+                NativeSpeedLimitTestSupport.idleMainLooperFor(1_200L);
                 if (mode == HudPrefs.SPEED_LIMIT_NATIVE) {
                     assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=60"));
                 } else {

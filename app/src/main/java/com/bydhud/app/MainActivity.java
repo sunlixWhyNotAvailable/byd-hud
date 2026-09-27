@@ -885,6 +885,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isRemainingTimeOutputEnabled(this),
                 HudPrefs.isRemainingDistanceOutputEnabled(this),
                 HudPrefs.speedLimitMode(this),
+                HudPrefs.isNativeSpeedLimitDelayEnabled(this),
                 HudPrefs.getNativeSpeedLimitFallbackMode(this),
                 HudPrefs.speedLimitFreeFallback(this),
                 HudPrefs.speedLimitOverlaySeconds(this),
@@ -1515,6 +1516,10 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetSpeedLimitMode(int mode) {
         setSpeedLimitMode(mode);
+    }
+
+    public void composeSetNativeSpeedLimitDelayEnabled(boolean enabled) {
+        setNativeSpeedLimitDelayEnabled(enabled);
     }
 
     public void composeSetNativeSpeedLimitFallbackMode(int mode) {
@@ -2644,6 +2649,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean remainingTimeOutputEnabled;
         public final boolean remainingDistanceOutputEnabled;
         public final int speedLimitMode;
+        public final boolean nativeSpeedLimitDelayEnabled;
         public final int nativeSpeedLimitFallbackMode;
         public final int speedLimitFreeFallback;
         public final int speedLimitOverlaySeconds;
@@ -2720,6 +2726,7 @@ public final class MainActivity extends ComponentActivity {
                 int wazeWarningDistanceColor,
                 boolean etaOutputEnabled, boolean remainingTimeOutputEnabled,
                 boolean remainingDistanceOutputEnabled, int speedLimitMode,
+                boolean nativeSpeedLimitDelayEnabled,
                 int nativeSpeedLimitFallbackMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
@@ -2785,6 +2792,7 @@ public final class MainActivity extends ComponentActivity {
             this.remainingTimeOutputEnabled = remainingTimeOutputEnabled;
             this.remainingDistanceOutputEnabled = remainingDistanceOutputEnabled;
             this.speedLimitMode = speedLimitMode;
+            this.nativeSpeedLimitDelayEnabled = nativeSpeedLimitDelayEnabled;
             this.nativeSpeedLimitFallbackMode = HudPrefs.normalizeNativeSpeedLimitFallbackMode(
                     nativeSpeedLimitFallbackMode);
             this.speedLimitFreeFallback = speedLimitFreeFallback;
@@ -2898,6 +2906,7 @@ public final class MainActivity extends ComponentActivity {
                     && remainingTimeOutputEnabled == other.remainingTimeOutputEnabled
                     && remainingDistanceOutputEnabled == other.remainingDistanceOutputEnabled
                     && speedLimitMode == other.speedLimitMode
+                    && nativeSpeedLimitDelayEnabled == other.nativeSpeedLimitDelayEnabled
                     && nativeSpeedLimitFallbackMode == other.nativeSpeedLimitFallbackMode
                     && speedLimitFreeFallback == other.speedLimitFreeFallback
                     && speedLimitOverlaySeconds == other.speedLimitOverlaySeconds
@@ -2971,7 +2980,7 @@ public final class MainActivity extends ComponentActivity {
                     etaArrivalColor, etaDurationColor, etaRemainingDistanceColor,
                     wazeWarningDistanceColor,
                     etaOutputEnabled, remainingTimeOutputEnabled, remainingDistanceOutputEnabled,
-                    speedLimitMode, nativeSpeedLimitFallbackMode,
+                    speedLimitMode, nativeSpeedLimitDelayEnabled, nativeSpeedLimitFallbackMode,
                     speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
@@ -4195,6 +4204,15 @@ public final class MainActivity extends ComponentActivity {
         int persisted = HudPrefs.speedLimitMode(this);
         appendStatus("Speed limit mode " + persisted);
         AppEventLogger.event(this, "ui speed_limit_mode=" + persisted);
+        refreshControls();
+    }
+
+    private void setNativeSpeedLimitDelayEnabled(boolean enabled) {
+        HudPrefs.setNativeSpeedLimitDelayEnabled(this, enabled);
+        cachedPayloadKey = "";
+        boolean persisted = HudPrefs.isNativeSpeedLimitDelayEnabled(this);
+        appendStatus("Native speed limit delay " + (persisted ? "ON" : "OFF"));
+        AppEventLogger.event(this, "ui speed_limit_native_delay_enabled=" + persisted);
         refreshControls();
     }
 

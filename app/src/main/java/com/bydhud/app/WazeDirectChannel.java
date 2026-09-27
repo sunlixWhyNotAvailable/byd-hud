@@ -59,6 +59,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.TreeSet;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -93,6 +94,16 @@ public final class WazeDirectChannel {
             "WazeDirectChannel", Process.THREAD_PRIORITY_BACKGROUND);
     private final Handler channelHandler;
     private final Map<Integer, byte[]> maneuverIcons = new HashMap<>();
+    private final Object tripStateLock = new Object();
+    private final TreeSet<Long> pendingTripControls = new TreeSet<>();
+    private final TreeSet<Long> pendingTripNormalizations = new TreeSet<>();
+    private final WazeTripStateQueue<WazeStepData, DirectTbtFrame.TripMetrics>
+            pendingTripState = new WazeTripStateQueue<>();
+    private final WazeRouteTiming ingressQueueTiming = new WazeRouteTiming(
+            "direct", "waze_trip_queue", 0L, 0L, 0L, false);
+    private final Runnable tripStateDrain = this::drainTripState;
+    private long navigationIngressSequence;
+    private boolean tripStateDrainScheduled;
 
     private volatile int generation;
     private volatile int sessionGeneration;
@@ -105,7 +116,7 @@ public final class WazeDirectChannel {
     private String startReason = "";
     private boolean binding;
     private boolean bound;
-    private WazeStartAdmission.Permit connectionPermit;
+    private volatile WazeStartAdmission.Permit connectionPermit;
     private boolean attemptedBind;
     private boolean appStarted;
     private boolean resumed;
@@ -156,7 +167,8 @@ public final class WazeDirectChannel {
 
     /** Applies the authoritative fresh-route decision already made by the lifecycle store. */
     void openAcceptedFreshRoute(String reason, long bridgeGeneration) {
-        runOnChannel(() -> {
+        postTripControl(-1, null, false, ingress -> {
+            discardTripStateThrough(ingress.sequence);
             if (bridgeGeneration > terminalBridgeGeneration) {
                 terminalBridgeGeneration = bridgeGeneration;
             }
@@ -167,7 +179,8 @@ public final class WazeDirectChannel {
     /** Applies a lifecycle terminal to callbacks that did not reach Waze's
      * navigation host (for example an observer-only state transition). */
     void noteRouteTerminalGeneration(String reason, long bridgeGeneration) {
-        runOnChannel(() -> {
+        postTripControl(-1, null, false, ingress -> {
+            discardTripStateThrough(ingress.sequence);
             if (bridgeGeneration > terminalBridgeGeneration) {
                 terminalBridgeGeneration = bridgeGeneration;
             }
@@ -211,6 +224,55 @@ public final class WazeDirectChannel {
         return sessionGeneration;
     }
 
+    /** Creates the real Binder hosts with a current process permit for Robolectric tests. */
+    IngressTestHosts ingressHostsForTest(Mode requestedMode) {
+        long now = SystemClock.elapsedRealtime();
+        WazeStartAdmission admission = WazeStartAdmission.PROCESS;
+        admission.updateRuntime(true, System.currentTimeMillis(), false);
+        admission.acceptedRoute(true, true, false, now);
+        WazeStartAdmission.Permit permit = admission.acquire(now);
+        if (permit == null) throw new IllegalStateException("test admission unavailable");
+        active = true;
+        suspended = false;
+        shutdown = false;
+        generation++;
+        connectionPermit = permit;
+        sessionGeneration++;
+        terminalRouteLatched = false;
+        acceptedRouteFrame = false;
+        navigationFrame = DirectTbtFrame.empty();
+        navigationActive = false;
+        mode = requestedMode == null ? Mode.CLUSTER : requestedMode;
+        CarHost host = new CarHost(generation);
+        carHost = host;
+        return new IngressTestHosts(
+                ICarHost.Stub.asInterface(host.asBinder()),
+                INavigationHost.Stub.asInterface(host.navigationHost.asBinder()));
+    }
+
+    IOnDoneCallback templateCallbackForTest() {
+        return templateCallbackForTest(null);
+    }
+
+    IOnDoneCallback templateCallbackForTest(Runnable completion) {
+        int expectedGeneration = generation;
+        return new DoneCallback(expectedGeneration, "getTemplate", null, completion,
+                (response, ingress) -> {
+                    onTemplate(expectedGeneration, response, ingress);
+                    recordTemplateResponse("getTemplate");
+                });
+    }
+
+    void clearIngressForTest() {
+        resetTripState();
+        if (carHost != null) carHost.appHost.clearSurfaceSession("test-reset");
+        carHost = null;
+        active = false;
+        suspended = false;
+        generation++;
+        WazeStartAdmission.PROCESS.invalidate();
+    }
+
     public void onWazeAlertsPreferenceChanged(boolean enabled) {
         wazeAlertsEnabled = enabled;
         runOnChannel(() -> {
@@ -229,17 +291,19 @@ public final class WazeDirectChannel {
             return;
         }
         WazeStartAdmission.Permit permit = WazeStartCoordinator.beforeBind(context, false, reason);
+        if ((binding || bound)
+                && !WazeStartAdmission.PROCESS.isCurrent(connectionPermit)) {
+            hardStopOnChannel("admission-invalidated:" + safeText(reason));
+        }
         if (permit == null) {
             waitForAdmission(reason);
             return;
         }
-        if (binding && !WazeStartAdmission.PROCESS.isCurrent(connectionPermit)) {
-            releaseBinding(connection);
-            clearSessionState();
-            active = false;
-            generation++;
-        }
-        connectionPermit = permit;
+        boolean retainCurrentPermit = active && mode == requestedMode
+                && connectionPermit != null
+                && connectionPermit.epoch == permit.epoch
+                && WazeStartAdmission.PROCESS.isCurrent(connectionPermit);
+        if (!retainCurrentPermit) connectionPermit = permit;
         if (active && mode != requestedMode) {
             switchModeOnChannel(requestedMode, reason);
             return;
@@ -302,6 +366,7 @@ public final class WazeDirectChannel {
     }
 
     private void prepareRouteStart(String reason) {
+        resetTripState();
         templateRefreshGate.reset();
         startReason = safeText(reason);
         routeTiming = null;
@@ -612,32 +677,39 @@ public final class WazeDirectChannel {
 
     private void startTemplateRequest(int expectedGeneration,
                                        TemplateRefreshGate.Request request) {
+        WazeStartAdmission.Permit expectedPermit = connectionPermit;
         try {
             appManager.getTemplate(new DoneCallback(
                     expectedGeneration, "getTemplate",
-                    response -> {
-                        onTemplate(expectedGeneration, response);
+                    null,
+                    () -> completeTemplateRequest(
+                            expectedGeneration, expectedPermit, request),
+                    (response, ingress) -> {
+                        onTemplate(expectedGeneration, response, ingress);
                         recordTemplateResponse("getTemplate");
-                    },
-                    () -> completeTemplateRequest(expectedGeneration, request)));
+                    }));
         } catch (Throwable t) {
             sessionFailure(expectedGeneration, "get_template_exception", t);
-            completeTemplateRequest(expectedGeneration, request);
+            completeTemplateRequest(expectedGeneration, expectedPermit, request);
         }
     }
 
     private void completeTemplateRequest(int expectedGeneration,
+                                         WazeStartAdmission.Permit expectedPermit,
                                          TemplateRefreshGate.Request request) {
         TemplateRefreshGate.Request followUp = templateRefreshGate.complete(request);
         if (followUp == null) return;
-        if (!isCurrent(expectedGeneration) || suspended || appManager == null) {
+        if (!isCurrent(expectedGeneration) || suspended || appManager == null
+                || expectedPermit != connectionPermit
+                || !WazeStartAdmission.PROCESS.isCurrent(expectedPermit)) {
             templateRefreshGate.reset();
             return;
         }
         startTemplateRequest(expectedGeneration, followUp);
     }
 
-    private void onTemplate(int expectedGeneration, Bundleable response) throws Exception {
+    private void onTemplate(int expectedGeneration, Bundleable response,
+            IngressStamp ingress) throws Exception {
         if (suspended) return;
         Object value = response == null ? null : response.get();
         if (!(value instanceof TemplateWrapper)) {
@@ -656,7 +728,7 @@ public final class WazeDirectChannel {
             log("navigation info=" + typeName(info));
             if (info == null) {
                 if (acceptedRouteFrame) {
-                    handleNavigationEndHint("navigation_info_null");
+                    handleNavigationEndHint("navigation_info_null", ingress.sequence);
                 } else {
                     log("navigation info null ignored before first route frame");
                 }
@@ -669,8 +741,13 @@ public final class WazeDirectChannel {
         log("routing sequence=" + sequence + " current=" + (current != null)
                 + " next=" + (routing.getNextStep() != null));
         if (current != null) {
-            publishCurrentStep(current, routing.getCurrentDistance(),
-                    true, "routing_info:" + sequence);
+            WazeStepData step = WazeStepData.from(current);
+            mergeTripUpdate(expectedGeneration, connectionPermit,
+                    new WazeTripStateQueue.Update<>(ingress.sequence,
+                            ingress.elapsedTimeMs, true, step,
+                            routing.getCurrentDistance() != null,
+                            meters(routing.getCurrentDistance()), true,
+                            step.rawType, step.lanes.hasGuidance, false, null));
         }
         logNextStep(routing.getNextStep(), "routing_next:" + sequence);
     }
@@ -773,6 +850,7 @@ public final class WazeDirectChannel {
     }
 
     private void clearSessionState() {
+        resetTripState();
         templateRefreshGate.reset();
         if (carHost != null) carHost.appHost.clearSurfaceSession("session-cleared");
         carApp = null;
@@ -845,17 +923,19 @@ public final class WazeDirectChannel {
     }
 
     private void latchRouteTerminal(String reason) {
+        acceptedRouteFrame = false;
         if (terminalRouteLatched) return;
         terminalRouteLatched = true;
         log("route terminal latch set reason=" + reason);
     }
 
-    private void handleNavigationEndHint(String reason) {
+    private void handleNavigationEndHint(String reason, long ingressSequence) {
         // AndroidX guidance may end while the bridge keeps a replacement route active.
         if (WazeRouteLifecycleStore.isBridgeSupported(context)) {
             log("navigation end hint deferred to lifecycle bridge reason=" + safeText(reason));
             return;
         }
+        discardTripStateThrough(ingressSequence);
         latchRouteTerminal(reason);
         endNavigation(reason);
     }
@@ -865,6 +945,8 @@ public final class WazeDirectChannel {
     }
 
     private void endNavigation(String reason, boolean notifyListener) {
+        resetTripState();
+        acceptedRouteFrame = false;
         cancelAlertWatchdog();
         cancelDirectHealth();
         alert = DirectTbtFrame.AlertOverlay.inactive();
@@ -885,14 +967,9 @@ public final class WazeDirectChannel {
         }
     }
 
-    private void publishCurrentStep(Step step, Distance distance,
-                                    boolean authoritativeLanes, String reason) {
-        publishCurrentStep(step, distance, authoritativeLanes, reason, null);
-    }
-
-    private void publishCurrentStep(Step step, Distance distance,
-                                    boolean authoritativeLanes, String reason,
-                                    DirectTbtFrame.TripMetrics tripMetrics) {
+    private void publishCurrentStep(
+            WazeTripStateQueue.Snapshot<WazeStepData, DirectTbtFrame.TripMetrics> snapshot,
+            String reason, long drainStartElapsedMs) {
         if (suspended) {
             log("route frame ignored while suspended source=" + reason);
             return;
@@ -902,55 +979,55 @@ public final class WazeDirectChannel {
             return;
         }
         if (!navigationActive) beginNavigation("frame_received:" + reason);
-        DirectTbtFrame.TripMetrics selectedMetrics = tripMetrics == null
-                ? navigationFrame.getTripMetrics() : tripMetrics;
-        DirectTbtFrame next = frameFromStep(step, distance, selectedMetrics);
-        navigationDistanceKnown = distance != null;
+        DirectTbtFrame.TripMetrics selectedMetrics = snapshot.metrics == null
+                ? navigationFrame.getTripMetrics() : snapshot.metrics;
+        DirectTbtFrame next = frameFromStep(snapshot.step, snapshot.distanceMeters,
+                selectedMetrics, snapshot.laneDisposition, snapshot.laneSource);
+        navigationDistanceKnown = snapshot.distanceKnown;
         acceptedRouteFrame = true;
-        int previousKnownRaw = lastKnownRawManeuverType;
-        int nextRaw = next.getRawManeuverType();
-        boolean maneuverChanged = previousKnownRaw >= 0
-                && nextRaw >= 0 && previousKnownRaw != nextRaw;
+        int nextRaw = snapshot.step.rawType;
         if (nextRaw >= 0) lastKnownRawManeuverType = nextRaw;
-        if (!authoritativeLanes && !maneuverChanged
+        if (snapshot.laneDisposition == WazeTripStateQueue.LANES_PRESERVE
                 && !next.hasLaneGuidance() && navigationFrame.hasLaneGuidance()) {
             next = next.withLanesFrom(navigationFrame);
             log("lanes preserved source=trip raw=" + next.getRawManeuverType());
-        } else if ((authoritativeLanes || maneuverChanged)
-                && navigationFrame.hasLaneGuidance() && !next.hasLaneGuidance()) {
-            log("lanes cleared source=" + (authoritativeLanes ? "routing_info" : "trip")
-                    + " maneuverChanged=" + maneuverChanged);
+        } else if (snapshot.laneDisposition == WazeTripStateQueue.LANES_CLEAR
+                && navigationFrame.hasLaneGuidance()) {
+            log("lanes cleared source=waze_ingress");
         }
         navigationFrame = next;
         recordDirectActivity("frame:" + reason);
-        emitFrame(reason, true);
+        long renderFinishedElapsedMs = SystemClock.elapsedRealtime();
+        WazeRouteTiming.Frame timing = beginTripFrameTiming(
+                renderFinishedElapsedMs, reason, snapshot,
+                drainStartElapsedMs, renderFinishedElapsedMs);
+        emitFrame(reason, true, timing);
     }
 
     private DirectTbtFrame frameFromStep(
-            Step step, Distance distance, DirectTbtFrame.TripMetrics tripMetrics) {
-        Maneuver maneuver = step.getManeuver();
-        int rawType = maneuver == null ? -1 : maneuver.getType();
-        int amap = maneuver == null ? 0 : mapWazeToAmap(rawType);
-        int byd = amap == 15 ? 99 : mapAmapToByd(amap);
-        int amapBroadcast = maneuver == null ? 0 : mapWazeToAmapBroadcast(rawType, amap);
-        int roundaboutExit = roundaboutExitNumber(maneuver);
-        String road = text(step.getRoad());
-        String cue = text(step.getCue());
-        byte[] lanePng = renderIcon(step.getLanesImage(), "lanes");
-        byte[] maneuverPng = maneuver == null
-                ? new byte[0] : renderIcon(maneuver.getIcon(), "maneuver");
-
-        if (rawType >= 0 && maneuverPng.length > 0) {
-            maneuverIcons.put(rawType, maneuverPng.clone());
-        } else if (rawType >= 0) {
-            byte[] cached = maneuverIcons.get(rawType);
+            WazeStepData step, int distanceMeters,
+            DirectTbtFrame.TripMetrics tripMetrics, int laneDisposition,
+            WazeStepData laneSource) {
+        byte[] lanePng = new byte[0];
+        List<DirectTbtFrame.Lane> lanes = Collections.emptyList();
+        if (laneDisposition == WazeTripStateQueue.LANES_FROM_UPDATE
+                && laneSource != null) {
+            lanePng = renderIcon(laneSource.lanes.icon, "lanes");
+            lanes = laneSource.lanes.mapped;
+        }
+        byte[] maneuverPng = renderIcon(step.maneuverIcon, "maneuver");
+        if (step.rawType >= 0 && maneuverPng.length > 0) {
+            maneuverIcons.put(step.rawType, maneuverPng.clone());
+        } else if (step.rawType >= 0) {
+            byte[] cached = maneuverIcons.get(step.rawType);
             maneuverPng = cached == null ? new byte[0] : cached.clone();
         }
 
-        return new DirectTbtFrame(rawType, amap, byd, meters(distance), road, cue,
-                road.isEmpty() ? cue : road, maneuverPng, lanePng,
-                mapLanes(step.getLanes()), DirectTbtFrame.AlertOverlay.inactive(),
-                tripMetrics).withVehicleTbt(amapBroadcast, roundaboutExit);
+        return new DirectTbtFrame(step.rawType, step.amap, step.byd,
+                distanceMeters, step.road, step.cue,
+                step.road.isEmpty() ? step.cue : step.road, maneuverPng, lanePng,
+                lanes, DirectTbtFrame.AlertOverlay.inactive(), tripMetrics)
+                .withVehicleTbt(step.amapBroadcast, step.roundaboutExit);
     }
 
     private void emitFrame(String reason) {
@@ -958,14 +1035,20 @@ public final class WazeDirectChannel {
     }
 
     private void emitFrame(String reason, boolean routeFrame) {
+        emitFrame(reason, routeFrame, null);
+    }
+
+    private void emitFrame(String reason, boolean routeFrame,
+            WazeRouteTiming.Frame suppliedTiming) {
         if (routeFrame) {
             alert = selectAlertOverlayCandidate(
                     alert, navigationFrame, navigationDistanceKnown);
         }
         DirectTbtFrame frame = navigationFrame.withAlertOverlay(alert);
         int callbackGeneration = sessionGeneration;
-        WazeRouteTiming.Frame timing = routeTiming == null || !routeFrame
-                ? null : routeTiming.beginFrame(SystemClock.elapsedRealtime(), reason);
+        WazeRouteTiming.Frame timing = suppliedTiming != null ? suppliedTiming
+                : routeTiming == null || !routeFrame ? null
+                : routeTiming.beginFrame(SystemClock.elapsedRealtime(), reason);
         if (timing != null) timing.markListenerHandoff(SystemClock.elapsedRealtime());
         callback(() -> listener.onFrame(
                 OWNER_PACKAGE, callbackGeneration, frame, reason, timing));
@@ -1236,6 +1319,162 @@ public final class WazeDirectChannel {
             if (isCurrent(expectedGeneration)
                     && WazeStartAdmission.PROCESS.isCurrent(expectedPermit)) action.run();
         });
+    }
+
+    private IngressStamp beginTripIngress(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit) {
+        synchronized (tripStateLock) {
+            if (!hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) return null;
+            IngressStamp ingress = new IngressStamp(++navigationIngressSequence,
+                    SystemClock.elapsedRealtime(), System.currentTimeMillis());
+            pendingTripNormalizations.add(ingress.sequence);
+            return ingress;
+        }
+    }
+
+    private void postTripControl(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit, boolean requireCurrent,
+            IngressControl action) {
+        synchronized (tripStateLock) {
+            IngressStamp ingress = new IngressStamp(++navigationIngressSequence,
+                    SystemClock.elapsedRealtime(), System.currentTimeMillis());
+            pendingTripControls.add(ingress.sequence);
+            boolean posted = channelHandler.post(() -> {
+                try {
+                    if (!requireCurrent || isCurrent(expectedGeneration)
+                            && expectedPermit == connectionPermit
+                            && WazeStartAdmission.PROCESS.isCurrent(expectedPermit)) {
+                        action.run(ingress);
+                    }
+                } finally {
+                    completeTripControl(ingress.sequence);
+                }
+            });
+            if (!posted) {
+                pendingTripControls.remove(ingress.sequence);
+                scheduleTripStateDrainLocked();
+            }
+        }
+    }
+
+    private void completeTripControl(long sequence) {
+        synchronized (tripStateLock) {
+            pendingTripControls.remove(sequence);
+            scheduleTripStateDrainLocked();
+        }
+    }
+
+    private void mergeTripUpdate(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit,
+            WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update) {
+        synchronized (tripStateLock) {
+            if (!hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) return;
+            pendingTripState.merge(update);
+            scheduleTripStateDrainLocked();
+        }
+    }
+
+    private void finishTripIngress(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit, IngressStamp ingress,
+            WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update) {
+        synchronized (tripStateLock) {
+            if (update != null && hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) {
+                pendingTripState.merge(update);
+            }
+            pendingTripNormalizations.remove(ingress.sequence);
+            scheduleTripStateDrainLocked();
+        }
+    }
+
+    private void scheduleTripStateDrainLocked() {
+        if (tripStateDrainScheduled || !pendingTripState.hasPending()) return;
+        long newestPending = pendingTripState.newestPendingSequence();
+        if (!pendingTripNormalizations.isEmpty()
+                && pendingTripNormalizations.first() <= newestPending) return;
+        if (!pendingTripControls.isEmpty()
+                && newestPending > pendingTripControls.first()) {
+            return;
+        }
+        tripStateDrainScheduled = channelHandler.post(tripStateDrain);
+    }
+
+    private void drainTripState() {
+        WazeTripStateQueue.Snapshot<WazeStepData, DirectTbtFrame.TripMetrics> snapshot;
+        long drainStartElapsedMs = SystemClock.elapsedRealtime();
+        synchronized (tripStateLock) {
+            tripStateDrainScheduled = false;
+            long newestPending = pendingTripState.newestPendingSequence();
+            if (!pendingTripNormalizations.isEmpty()
+                    && pendingTripNormalizations.first() <= newestPending) return;
+            if (!pendingTripControls.isEmpty()
+                    && newestPending > pendingTripControls.first()) return;
+            snapshot = pendingTripState.take();
+        }
+        if (snapshot == null) return;
+        try {
+            if (snapshot.stepUpdated || snapshot.laneUpdated) {
+                publishCurrentStep(snapshot,
+                        snapshot.stepUpdated
+                                ? "waze_ingress:" + snapshot.sequence
+                                : "waze_lanes:" + snapshot.sequence,
+                        drainStartElapsedMs);
+            } else if (snapshot.metricsUpdated) {
+                navigationFrame = navigationFrame.withTripMetrics(snapshot.metrics);
+                long renderFinishedElapsedMs = SystemClock.elapsedRealtime();
+                WazeRouteTiming.Frame timing = beginTripFrameTiming(
+                        renderFinishedElapsedMs, "trip_metrics_only", snapshot,
+                        drainStartElapsedMs, renderFinishedElapsedMs);
+                if (navigationActive || acceptedRouteFrame) {
+                    recordDirectActivity("frame:trip_metrics_only");
+                    emitFrame("trip_metrics_only", false, timing);
+                } else if (snapshot.coalescedCount > 0 && timing != null) {
+                    log(timing.directLine("coalesced_without_route"));
+                }
+            }
+        } catch (Throwable t) {
+            log("trip drain failed sequence=" + snapshot.sequence + ": " + t);
+        } finally {
+            synchronized (tripStateLock) {
+                pendingTripState.finishProcessing();
+                scheduleTripStateDrainLocked();
+            }
+        }
+    }
+
+    private WazeRouteTiming.Frame beginTripFrameTiming(long frameElapsedMs,
+            String reason,
+            WazeTripStateQueue.Snapshot<WazeStepData, DirectTbtFrame.TripMetrics> snapshot,
+            long drainStartElapsedMs, long renderFinishedElapsedMs) {
+        WazeRouteTiming owner = routeTiming == null ? ingressQueueTiming : routeTiming;
+        WazeRouteTiming.Frame timing = owner.beginFrame(frameElapsedMs, reason);
+        timing.markTripQueueIngress(snapshot.sequence, snapshot.ingressElapsedMs,
+                snapshot.coalescedCount);
+        timing.markTripDrainStart(drainStartElapsedMs);
+        timing.markTripRenderEnd(renderFinishedElapsedMs);
+        return timing;
+    }
+
+    private void resetTripState() {
+        synchronized (tripStateLock) {
+            long discardThrough = navigationIngressSequence;
+            pendingTripState.resetThrough(discardThrough);
+            pendingTripNormalizations.headSet(discardThrough, true).clear();
+            tripStateDrainScheduled = false;
+            channelHandler.removeCallbacks(tripStateDrain);
+        }
+    }
+
+    private void discardTripStateThrough(long sequence) {
+        synchronized (tripStateLock) {
+            pendingTripState.discardThrough(sequence);
+            pendingTripNormalizations.headSet(sequence, true).clear();
+        }
+    }
+
+    private boolean hasCurrentIngressIdentity(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit) {
+        return isCurrent(expectedGeneration) && expectedPermit == connectionPermit
+                && WazeStartAdmission.PROCESS.isCurrent(expectedPermit);
     }
 
     /** Transport waiting must not manufacture a navigation terminal or start an idle retry. */
@@ -1556,12 +1795,14 @@ public final class WazeDirectChannel {
 
     private final class CarHost extends ICarHost.Stub {
         private final int expectedGeneration;
+        private final WazeStartAdmission.Permit expectedPermit;
         final NavigationHost navigationHost;
         final AppHost appHost;
 
         CarHost(int expectedGeneration) {
             this.expectedGeneration = expectedGeneration;
-            navigationHost = new NavigationHost(expectedGeneration);
+            expectedPermit = connectionPermit;
+            navigationHost = new NavigationHost(expectedGeneration, expectedPermit);
             appHost = new AppHost(expectedGeneration);
             if (mode == Mode.MAIN_SURFACE) WazeSurfaceActivity.attachHostBridge(appHost);
         }
@@ -1587,7 +1828,8 @@ public final class WazeDirectChannel {
 
         @Override
         public void finish() {
-            postBinder(expectedGeneration, () -> {
+            postTripControl(expectedGeneration, expectedPermit, true, ingress -> {
+                discardTripStateThrough(ingress.sequence);
                 latchRouteTerminal("car_host_finish");
                 endNavigation("car_host_finish");
             });
@@ -1902,11 +2144,51 @@ public final class WazeDirectChannel {
         return mapWazeToAmapBroadcast(type, mapWazeToAmap(type));
     }
 
+    private void ingestTrip(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit, Bundleable bundle) {
+        IngressStamp ingress = beginTripIngress(expectedGeneration, expectedPermit);
+        if (ingress == null) return;
+        WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update = null;
+        try {
+            Object value = bundle == null ? null : bundle.get();
+            if (!(value instanceof Trip)) {
+                log("invalid trip=" + typeName(value));
+                return;
+            }
+            Trip trip = (Trip) value;
+            List<TravelEstimate> destinationEstimates =
+                    trip.getDestinationTravelEstimates();
+            DirectTbtFrame.TripMetrics tripMetrics = destinationMetrics(
+                    destinationEstimates, ingress.wallTimeMs);
+            List<Step> steps = trip.getSteps();
+            WazeStepData step = steps == null || steps.isEmpty()
+                    ? null : WazeStepData.from(steps.get(0));
+            Distance distance = null;
+            if (step != null) {
+                List<TravelEstimate> estimates = trip.getStepTravelEstimates();
+                if (estimates != null && !estimates.isEmpty()) {
+                    distance = estimates.get(0) == null
+                            ? null : estimates.get(0).getRemainingDistance();
+                }
+            }
+            update = new WazeTripStateQueue.Update<>(ingress.sequence,
+                    ingress.elapsedTimeMs, step != null, step, distance != null,
+                    meters(distance), false, step == null ? -1 : step.rawType,
+                    step != null && step.lanes.hasGuidance, true, tripMetrics);
+        } catch (Throwable t) {
+            log("trip parse failed: " + t);
+        } finally {
+            finishTripIngress(expectedGeneration, expectedPermit, ingress, update);
+        }
+    }
+
     private final class NavigationHost extends INavigationHost.Stub {
         private final int expectedGeneration;
+        private final WazeStartAdmission.Permit expectedPermit;
 
-        NavigationHost(int expectedGeneration) {
+        NavigationHost(int expectedGeneration, WazeStartAdmission.Permit expectedPermit) {
             this.expectedGeneration = expectedGeneration;
+            this.expectedPermit = expectedPermit;
         }
 
         @Override
@@ -1921,61 +2203,20 @@ public final class WazeDirectChannel {
 
         @Override
         public void navigationStarted() {
-            postBinder(expectedGeneration, WazeDirectChannel.this::explicitNavigationStarted);
+            postTripControl(expectedGeneration, expectedPermit, true,
+                    ingress -> explicitNavigationStarted());
         }
 
         @Override
         public void navigationEnded() {
-            postBinder(expectedGeneration, () ->
-                    handleNavigationEndHint("waze_navigation_ended"));
+            postTripControl(expectedGeneration, expectedPermit, true,
+                    ingress -> handleNavigationEndHint(
+                            "waze_navigation_ended", ingress.sequence));
         }
 
         @Override
         public void updateTrip(Bundleable bundle) {
-            postBinder(expectedGeneration, () -> {
-                try {
-                    Object value = bundle == null ? null : bundle.get();
-                    if (!(value instanceof Trip)) {
-                        log("invalid trip=" + typeName(value));
-                        return;
-                    }
-                    Trip trip = (Trip) value;
-                    List<TravelEstimate> destinationEstimates =
-                            trip.getDestinationTravelEstimates();
-                    DirectTbtFrame.TripMetrics tripMetrics =
-                            destinationMetrics(destinationEstimates, System.currentTimeMillis());
-                    List<Step> steps = trip.getSteps();
-                    if (steps == null || steps.isEmpty()) {
-                        navigationFrame = navigationFrame.withTripMetrics(tripMetrics);
-                        log("trip has no steps; destination metrics updated");
-                        if (navigationActive || acceptedRouteFrame) {
-                            recordDirectActivity("frame:trip_metrics_only");
-                            emitFrame("trip_metrics_only");
-                        }
-                        return;
-                    }
-                    Distance distance = null;
-                    List<TravelEstimate> estimates = trip.getStepTravelEstimates();
-                    if (estimates != null && !estimates.isEmpty()) {
-                        distance = estimates.get(0).getRemainingDistance();
-                    }
-                    publishCurrentStep(steps.get(0), distance, false,
-                            "trip_current", tripMetrics);
-                    logNextStep(steps.size() > 1 ? steps.get(1) : null, "trip_next");
-                    log("trip destination estimates="
-                            + (destinationEstimates == null ? 0 : destinationEstimates.size())
-                            + " nextStopSeconds="
-                            + tripMetrics.getNextStop().getRemainingTimeSeconds()
-                            + " nextStopMeters="
-                            + tripMetrics.getNextStop().getRemainingDistanceMeters()
-                            + " remainingSeconds="
-                            + tripMetrics.getWholeRoute().getRemainingTimeSeconds()
-                            + " remainingMeters="
-                            + tripMetrics.getWholeRoute().getRemainingDistanceMeters());
-                } catch (Throwable t) {
-                    log("trip parse failed: " + t);
-                }
-            });
+            ingestTrip(expectedGeneration, expectedPermit, bundle);
         }
     }
 
@@ -1983,8 +2224,10 @@ public final class WazeDirectChannel {
         private final int expectedGeneration;
         private final String name;
         private final ResultHandler success;
+        private final IngressResultHandler ingressSuccess;
         private final Runnable completion;
         private final int expectedSessionGeneration;
+        private final WazeStartAdmission.Permit expectedPermit;
 
         DoneCallback(int expectedGeneration, String name, ResultHandler success) {
             this(expectedGeneration, name, success, null);
@@ -1992,11 +2235,18 @@ public final class WazeDirectChannel {
 
         DoneCallback(int expectedGeneration, String name, ResultHandler success,
                 Runnable completion) {
+            this(expectedGeneration, name, success, completion, null);
+        }
+
+        DoneCallback(int expectedGeneration, String name, ResultHandler success,
+                Runnable completion, IngressResultHandler ingressSuccess) {
             this.expectedGeneration = expectedGeneration;
             this.expectedSessionGeneration = sessionGeneration;
+            this.expectedPermit = connectionPermit;
             this.name = name;
             this.success = success;
             this.completion = completion;
+            this.ingressSuccess = ingressSuccess;
         }
 
         @Override
@@ -2006,21 +2256,26 @@ public final class WazeDirectChannel {
 
         @Override
         public void onSuccess(Bundleable response) {
-            postBinder(expectedGeneration, () -> {
-                if (!callbackMatchesSession(
-                        expectedSessionGeneration, sessionGeneration, suspended)) {
+            IngressControl action = ingress -> {
+                if (!canRunCallback()) {
                     if (completion != null) completion.run();
                     return;
                 }
                 log("callback success=" + name);
                 try {
-                    if (success != null) success.run(response);
+                    if (ingressSuccess != null) ingressSuccess.run(response, ingress);
+                    else if (success != null) success.run(response);
                 } catch (Throwable t) {
                     sessionFailure(expectedGeneration, "callback_handler_" + name, t);
                 } finally {
                     if (completion != null) completion.run();
                 }
-            });
+            };
+            if (ingressSuccess != null) {
+                postTripControl(expectedGeneration, expectedPermit, false, action);
+            } else {
+                postBinder(expectedGeneration, () -> action.run(null));
+            }
         }
 
         @Override
@@ -2034,14 +2289,13 @@ public final class WazeDirectChannel {
                 payload = "failure decode error=" + t;
             }
             String finalPayload = payload;
-            postBinder(expectedGeneration, () -> {
-                if (!callbackMatchesSession(
-                        expectedSessionGeneration, sessionGeneration, suspended)) {
+            Runnable action = () -> {
+                if (!canRunCallback()) {
                     if (completion != null) completion.run();
                     return;
                 }
                 try {
-                    if (success == null) {
+                    if (success == null && ingressSuccess == null) {
                         log("callback failure=" + name + " detail=" + finalPayload);
                     } else {
                         sessionFailure(expectedGeneration, "callback_failure_" + name,
@@ -2050,7 +2304,28 @@ public final class WazeDirectChannel {
                 } finally {
                     if (completion != null) completion.run();
                 }
-            });
+            };
+            if (ingressSuccess != null) {
+                postTripControl(expectedGeneration, expectedPermit, false,
+                        ingress -> action.run());
+            } else {
+                postBinder(expectedGeneration, action);
+            }
+        }
+
+        private boolean isCurrentIngressCallback() {
+            return isCurrent(expectedGeneration)
+                    && expectedPermit == connectionPermit
+                    && WazeStartAdmission.PROCESS.isCurrent(expectedPermit)
+                    && callbackMatchesSession(
+                            expectedSessionGeneration, sessionGeneration, suspended);
+        }
+
+        private boolean canRunCallback() {
+            return ingressSuccess == null
+                    ? callbackMatchesSession(
+                            expectedSessionGeneration, sessionGeneration, suspended)
+                    : isCurrentIngressCallback();
         }
     }
 
@@ -2061,5 +2336,94 @@ public final class WazeDirectChannel {
 
     private interface ResultHandler {
         void run(Bundleable result) throws Exception;
+    }
+
+    static final class IngressTestHosts {
+        final ICarHost carHost;
+        final INavigationHost navigationHost;
+
+        IngressTestHosts(ICarHost carHost, INavigationHost navigationHost) {
+            this.carHost = carHost;
+            this.navigationHost = navigationHost;
+        }
+    }
+
+    private interface IngressResultHandler {
+        void run(Bundleable result, IngressStamp ingress) throws Exception;
+    }
+
+    private interface IngressControl {
+        void run(IngressStamp ingress);
+    }
+
+    private static final class IngressStamp {
+        final long sequence;
+        final long elapsedTimeMs;
+        final long wallTimeMs;
+
+        IngressStamp(long sequence, long elapsedTimeMs, long wallTimeMs) {
+            this.sequence = sequence;
+            this.elapsedTimeMs = elapsedTimeMs;
+            this.wallTimeMs = wallTimeMs;
+        }
+    }
+
+    private static final class WazeStepData {
+        final int rawType;
+        final int amap;
+        final int byd;
+        final int amapBroadcast;
+        final int roundaboutExit;
+        final String road;
+        final String cue;
+        final CarIcon maneuverIcon;
+        final WazeLaneData lanes;
+
+        private WazeStepData(int rawType, int amap, int byd, int amapBroadcast,
+                int roundaboutExit, String road, String cue, CarIcon maneuverIcon,
+                WazeLaneData lanes) {
+            this.rawType = rawType;
+            this.amap = amap;
+            this.byd = byd;
+            this.amapBroadcast = amapBroadcast;
+            this.roundaboutExit = roundaboutExit;
+            this.road = road;
+            this.cue = cue;
+            this.maneuverIcon = maneuverIcon;
+            this.lanes = lanes;
+        }
+
+        static WazeStepData from(Step step) {
+            if (step == null) return null;
+            Maneuver maneuver = step.getManeuver();
+            int rawType = maneuver == null ? -1 : maneuver.getType();
+            int amap = maneuver == null ? 0 : mapWazeToAmap(rawType);
+            return new WazeStepData(rawType, amap,
+                    amap == 15 ? 99 : mapAmapToByd(amap),
+                    maneuver == null ? 0 : mapWazeToAmapBroadcast(rawType, amap),
+                    roundaboutExitNumber(maneuver), text(step.getRoad()),
+                    text(step.getCue()), maneuver == null ? null : maneuver.getIcon(),
+                    WazeLaneData.from(step));
+        }
+    }
+
+    private static final class WazeLaneData {
+        final CarIcon icon;
+        final List<DirectTbtFrame.Lane> mapped;
+        final boolean hasGuidance;
+
+        private WazeLaneData(CarIcon icon, List<DirectTbtFrame.Lane> mapped,
+                boolean hasGuidance) {
+            this.icon = icon;
+            this.mapped = mapped;
+            this.hasGuidance = hasGuidance;
+        }
+
+        static WazeLaneData from(Step step) {
+            CarIcon icon = step.getLanesImage();
+            List<DirectTbtFrame.Lane> mapped = mapLanes(step.getLanes());
+            return new WazeLaneData(icon, mapped,
+                    icon != null || !mapped.isEmpty());
+        }
     }
 }

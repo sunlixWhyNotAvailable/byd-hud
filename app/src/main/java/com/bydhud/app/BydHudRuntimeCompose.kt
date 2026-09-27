@@ -2038,9 +2038,9 @@ private fun OptionsTab(
     val textTransliterationModes = language.choose(listOf("Вимкнено", "Українська", "Універсальна"),
         listOf("Off", "Ukrainian", "Universal"), listOf("Выкл.", "Украинская", "Универсальная"))
     val speedLimitModes = language.choose(
-        listOf("Вимкнено", "Штатний", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
-        listOf("Off", "Native", "In maneuver field", "In lane field", "In a free field", "Composite"),
-        listOf("Выкл.", "Штатный", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
+        listOf("Вимкнено", "Штатний/ADAS", "У полі з маневром", "У полі зі смугами", "У вільному полі", "Композитний"),
+        listOf("Off", "Native/ADAS", "In maneuver field", "In lane field", "In a free field", "Composite"),
+        listOf("Выкл.", "Штатный/ADAS", "В поле манёвра", "В поле полос", "В свободном поле", "Композитный"))
     val speedLimitModeIndex = HudPrefs.speedLimitModeUiIndex(snapshot.speedLimitMode)
     val speedLimitFallbackModes = language.choose(listOf("Вимкнено", "У полі з маневром", "У полі зі смугами"),
         listOf("Off", "In maneuver field", "In lane field"), listOf("Выкл.", "В поле манёвра", "В поле полос"))
@@ -2410,6 +2410,24 @@ private fun OptionsTab(
                         } }
                     )
                 }
+            }
+            row("speed-limit-native-delay") {
+                SwitchRow(
+                    language.choose(
+                        "Затримка зміни обмеження швидкості у режимі «Штатний/ADAS»",
+                        "Speed limit change delay in Native/ADAS mode",
+                        "Задержка изменения ограничения скорости в режиме «Штатный/ADAS»"),
+                    language.choose(
+                        "Додає 5 секунд очікування після зчитування знака перед зміною обмеження швидкості в ADAS, щоб уникати швидких перемикань.",
+                        "Adds a 5-second wait after reading a sign before changing the ADAS speed limit, to avoid rapid changes.",
+                        "Добавляет 5 секунд ожидания после считывания знака перед изменением ограничения скорости в ADAS, чтобы избежать быстрых переключений."),
+                    snapshot.nativeSpeedLimitDelayEnabled,
+                    palette,
+                    enabled = nativeSpeedLimitFallbackEnabled,
+                    onChecked = { enabled -> runAction {
+                        activity.composeSetNativeSpeedLimitDelayEnabled(enabled)
+                    } }
+                )
             }
             row("speed-limit-native-fallback-mode") {
                 SettingRow(

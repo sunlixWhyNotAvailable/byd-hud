@@ -319,6 +319,11 @@ final class WazeRouteTiming {
         private final long frameElapsedMs;
         private final String reason;
         private final boolean firstFrame;
+        private long tripIngressSequence = UNSET;
+        private long tripIngressElapsedMs = UNSET;
+        private long tripDrainStartElapsedMs = UNSET;
+        private long tripRenderEndElapsedMs = UNSET;
+        private int tripCoalescedCount;
         private long listenerHandoffElapsedMs = UNSET;
         private long listenerCallbackElapsedMs = UNSET;
 
@@ -328,6 +333,20 @@ final class WazeRouteTiming {
             this.frameElapsedMs = frameElapsedMs;
             this.reason = reason;
             this.firstFrame = firstFrame;
+        }
+
+        synchronized void markTripQueueIngress(long sequence, long elapsedMs, int coalescedCount) {
+            tripIngressSequence = sequence;
+            tripIngressElapsedMs = elapsedMs;
+            tripCoalescedCount = Math.max(0, coalescedCount);
+        }
+
+        synchronized void markTripDrainStart(long elapsedMs) {
+            tripDrainStartElapsedMs = first(tripDrainStartElapsedMs, elapsedMs);
+        }
+
+        synchronized void markTripRenderEnd(long elapsedMs) {
+            tripRenderEndElapsedMs = first(tripRenderEndElapsedMs, elapsedMs);
         }
 
         synchronized void markListenerHandoff(long elapsedMs) {
@@ -348,7 +367,10 @@ final class WazeRouteTiming {
 
         synchronized boolean shouldLog(boolean detailed,
                 long tbtDispatchElapsedMs, long hudDispatchElapsedMs) {
-            return detailed || firstFrame
+            return detailed || firstFrame || tripCoalescedCount > 0
+                    || slow(tripIngressElapsedMs, tripDrainStartElapsedMs)
+                    || slow(tripDrainStartElapsedMs, tripRenderEndElapsedMs)
+                    || slow(tripRenderEndElapsedMs, listenerHandoffElapsedMs)
                     || slow(frameElapsedMs, listenerHandoffElapsedMs)
                     || slow(listenerHandoffElapsedMs, listenerCallbackElapsedMs)
                     || slow(listenerCallbackElapsedMs, tbtDispatchElapsedMs)
@@ -363,14 +385,14 @@ final class WazeRouteTiming {
             return parent.markFirstHudDispatch(elapsedMs);
         }
 
-        String directLine(String stage) {
-            return parent.directLine(stage);
+        synchronized String directLine(String stage) {
+            return parent.directLine(stage) + tripQueueFields();
         }
 
         synchronized String line(long tbtDispatchElapsedMs,
                 long hudDispatchElapsedMs, boolean tbtDispatched,
                 boolean hudDispatched) {
-            return parent.directLine("frame")
+            return directLine("frame")
                     + " frameReason=" + reason
                     + " frameElapsedMs=" + frameElapsedMs
                     + " listenerHandoffElapsedMs=" + listenerHandoffElapsedMs
@@ -387,6 +409,17 @@ final class WazeRouteTiming {
                     + " firstFrame=" + firstFrame
                     + " tbtDispatched=" + tbtDispatched
                     + " hudDispatched=" + hudDispatched;
+        }
+
+        private String tripQueueFields() {
+            return " tripIngressSequence=" + tripIngressSequence
+                    + " tripIngressElapsedMs=" + tripIngressElapsedMs
+                    + " tripDrainStartElapsedMs=" + tripDrainStartElapsedMs
+                    + " tripRenderEndElapsedMs=" + tripRenderEndElapsedMs
+                    + " tripCoalescedCount=" + tripCoalescedCount
+                    + " ingressToDrainMs=" + delta(tripIngressElapsedMs, tripDrainStartElapsedMs)
+                    + " drainToRenderMs=" + delta(tripDrainStartElapsedMs, tripRenderEndElapsedMs)
+                    + " renderToListenerMs=" + delta(tripRenderEndElapsedMs, listenerHandoffElapsedMs);
         }
 
         boolean isFirstFrame() {

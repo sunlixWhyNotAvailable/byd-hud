@@ -69,6 +69,7 @@ final class NativeSpeedLimitController {
             stop("no-native-operation");
             return;
         }
+        engine.setDelayEnabled(HudPrefs.isNativeSpeedLimitDelayEnabled(context));
         engine.configure(owner + ":" + session + ":" + primary, target);
         publishBitmap();
     }

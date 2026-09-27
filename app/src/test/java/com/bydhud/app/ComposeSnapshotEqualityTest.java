@@ -7,6 +7,7 @@ import static org.junit.Assert.assertNotSame;
 import org.junit.Test;
 
 import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
 import java.lang.reflect.Type;
 import java.util.Collections;
 import java.util.List;
@@ -39,6 +40,15 @@ public final class ComposeSnapshotEqualityTest {
     @Test
     public void nestedValueChangeMakesSnapshotsUnequal() throws Exception {
         assertFalse(snapshot("1.0").equals(snapshot("2.0")));
+    }
+
+    @Test
+    public void nativeDelayChangeMakesSnapshotsUnequalAndChangesTheirHash() throws Exception {
+        MainActivity.ComposeSnapshot enabled = snapshot("1.0", true);
+        MainActivity.ComposeSnapshot disabled = snapshot("1.0", false);
+
+        assertFalse(enabled.equals(disabled));
+        assertFalse(enabled.hashCode() == disabled.hashCode());
     }
 
     @Test
@@ -97,6 +107,11 @@ public final class ComposeSnapshotEqualityTest {
     }
 
     private static MainActivity.ComposeSnapshot snapshot(String nestedVersion) throws Exception {
+        return snapshot(nestedVersion, true);
+    }
+
+    private static MainActivity.ComposeSnapshot snapshot(
+            String nestedVersion, boolean nativeDelayEnabled) throws Exception {
         Constructor<?> constructor = MainActivity.ComposeSnapshot.class.getDeclaredConstructors()[0];
         constructor.setAccessible(true);
         Class<?>[] parameterTypes = constructor.getParameterTypes();
@@ -134,6 +149,11 @@ public final class ComposeSnapshotEqualityTest {
                 throw new AssertionError("Unhandled snapshot parameter: " + genericName);
             }
         }
-        return (MainActivity.ComposeSnapshot) constructor.newInstance(arguments);
+        MainActivity.ComposeSnapshot snapshot =
+                (MainActivity.ComposeSnapshot) constructor.newInstance(arguments);
+        Field delay = MainActivity.ComposeSnapshot.class.getDeclaredField("nativeSpeedLimitDelayEnabled");
+        delay.setAccessible(true);
+        delay.setBoolean(snapshot, nativeDelayEnabled);
+        return snapshot;
     }
 }

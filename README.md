@@ -8,7 +8,7 @@ BYD HUD connects an active Google Maps or Waze route to the navigation fields al
 
 The app also controls navigator projection on the instrument cluster, keeps diagnostic logs by day, downloads verified navigator builds, and can locally patch compatible navigators to work with BYD HUD.
 
-- **Version:** v3.3.0
+- **Version:** v3.3.1
 - **Interface languages:** Ukrainian, English and Russian; update notes follow the selected language, with English as the fallback for missing translations.
 - **Supported navigators:** Google Maps and Waze
 - **Tested platform:** Android 12 / DiLink 5.0
@@ -165,17 +165,18 @@ Missing values are completed separately for each destination. On a multi-stop ro
 
 | Setting | Default | Behavior |
 | --- | --- | --- |
-| `Speed limit output mode` | Off | Selects `Off`, `Native`, `In maneuver field`, `In lane field`, `In a free field`, or `Composite` |
-| `Fallback speed limit output mode` | Off | In Native mode, selects bitmap output if the native field is unavailable or fails to confirm the requested limit |
+| `Speed limit output mode` | Off | Selects `Off`, `Native/ADAS`, `In maneuver field`, `In lane field`, `In a free field`, or `Composite` |
+| `Speed limit change delay in Native/ADAS mode` | On | Adds a 5-second wait after reading a sign before changing the ADAS speed limit, to avoid rapid changes; available only in Native/ADAS mode |
+| `Fallback speed limit output mode` | Off | In Native/ADAS mode, selects bitmap output if the native field is unavailable or fails to confirm the requested limit |
 | `Overlay in "In a free field" mode` | Off | When both fields are occupied, optionally allows a timed replacement of the maneuver or lane field |
 | `Display time when overlapping` | 5 seconds | Sets the temporary replacement time from 1 to 10 seconds for non-composite output over an occupied field |
 | `Composite output field` | Maneuver only | Selects `Maneuver only`, `Lanes only`, `Free or maneuver`, or `Free or lanes` |
 | `Sign size in maneuver field` | 64 px | Sets the composite sign size in the maneuver image from 1 to 103 px |
 | `Sign size in lane field` | 36 px | Sets the composite sign size in the lane image from 1 to 36 px |
 
-`Native` sends supported limits (5–130 km/h in steps of 5) to the vehicle's native field and checks ADAS readback. If confirmation fails within 3 seconds, the selected fallback is used; recovery attempts start at least 10 seconds apart. A matching result removes fallback. Unsupported limits use fallback immediately. A missing navigation limit leaves the existing native sign alone. BYD HUD does not clear the native sign, including at navigation end; former clearing preferences have no effect. The vehicle can apply an already transmitted limit later, even after fallback or route end; stopping our output does not revoke an accepted vehicle write.
+`Native/ADAS` sends supported limits (5–130 km/h in steps of 5) to the vehicle's native field and checks ADAS readback. A new ADAS value during the wait restarts the delay; an already matching value cancels the unnecessary send. Each cycle allows one initial attempt and one retry if needed, at least 10 seconds apart. No matching readback within 3 seconds activates the selected fallback; a successful call alone is not confirmation. An unresolved mismatch cannot trigger further writes after two attempts. A later matching result removes fallback; if ADAS subsequently diverges again, a new bounded cycle can begin. Unsupported limits use fallback immediately. A missing navigation limit leaves the existing native sign alone. BYD HUD does not clear the native sign, including at navigation end; former clearing preferences have no effect. The vehicle can apply an already transmitted limit later, even after fallback or route end; stopping our output does not revoke an accepted vehicle write.
 
-Native help illustrates 115 in the native field (Off illustrates 40); changing the help selection does not change settings or send anything to the HUD. Fallback controls are available only for Native, and subsequent bitmap controls follow the selected fallback. Disabled settings retain their values.
+Native/ADAS help illustrates 115 in the native field (Off illustrates 40); changing the help selection does not change settings or send anything to the HUD. Delay and fallback controls are available only for Native/ADAS, and subsequent bitmap controls follow the selected fallback. Disabled settings retain their values.
 
 An alert in shared-field mode occupies the maneuver field with the same priority as a route maneuver. A standalone sign in a genuinely free field remains visible until the direct source changes or clears it; the timer applies only when non-composite output replaces an occupied maneuver, alert, or lane field. Composite mode draws the sign into the selected maneuver or lane image without discarding its existing guidance and does not use the replacement timer. This feature requires a current compatible project-patched Google Maps or Waze build.
 

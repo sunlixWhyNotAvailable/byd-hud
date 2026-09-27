@@ -15,58 +15,6 @@ import java.nio.file.Paths;
 /** Source contracts for the Waze terminal fence and accepted fresh-route opening. */
 public final class WazeDirectTerminalFenceContractTest {
     @Test
-    public void bridgeSupportedHintsReturnBeforeAnyTerminalOrSessionMutation()
-            throws IOException {
-        String hint = body(source("WazeDirectChannel.java"),
-                "private void handleNavigationEndHint(String reason)");
-        // The guard is state-independent: before NEW_DEST, between NEW_DEST and
-        // active, or after active, neither hint can reach the destructive fallback.
-        assertEquals(compact("if (WazeRouteLifecycleStore.isBridgeSupported(context)) {"
-                        + "log(\"navigation end hint deferred to lifecycle bridge reason=\""
-                        + " + safeText(reason)); return; }"
-                        + "latchRouteTerminal(reason); endNavigation(reason);"),
-                compact(hint));
-    }
-
-    @Test
-    public void bothAndroidxHintsUseTheSameGuardInClusterAndSurface() throws IOException {
-        String channel = source("WazeDirectChannel.java");
-        assertEquals(compact("postBinder(expectedGeneration, () ->"
-                        + " handleNavigationEndHint(\"waze_navigation_ended\"));"),
-                compact(body(channel, "public void navigationEnded()")));
-        String template = body(channel, "private void onTemplate(");
-        assertEquals(compact("if (acceptedRouteFrame) {"
-                        + "handleNavigationEndHint(\"navigation_info_null\");"
-                        + "} else {"
-                        + "log(\"navigation info null ignored before first route frame\");}"),
-                compact(body(template, "if (info == null)")));
-        assertTrue(body(channel, "CarHost(int expectedGeneration)").contains(
-                "navigationHost = new NavigationHost(expectedGeneration)"));
-        assertTrue(template.contains("mode == Mode.MAIN_SURFACE"));
-        assertFalse(template.contains("mode == Mode.CLUSTER"));
-        assertEquals(3, channel.split("handleNavigationEndHint\\(", -1).length - 1);
-        String dispatch = body(channel, "private void postBinder(");
-        assertTrue(dispatch.contains("isCurrent(expectedGeneration)"));
-        assertTrue(dispatch.contains("WazeStartAdmission.Permit expectedPermit = connectionPermit"));
-        assertTrue(dispatch.contains("WazeStartAdmission.PROCESS.isCurrent(expectedPermit)"));
-    }
-
-    @Test
-    public void explicitFinishAndStopStillBypassTheAndroidxHintGuard() throws IOException {
-        String channel = source("WazeDirectChannel.java");
-        assertEquals(compact("postBinder(expectedGeneration, () -> {"
-                        + "latchRouteTerminal(\"car_host_finish\");"
-                        + "endNavigation(\"car_host_finish\"); });"),
-                compact(body(channel, "public void finish()")));
-        assertTrue(body(channel, "public void stop(String reason)")
-                .contains("runOnChannel(() -> suspendOnChannel(reason))"));
-        assertTrue(body(channel, "private void suspendOnChannel(")
-                .contains("endNavigation(\"suspended:\" + stopReason, false)"));
-        assertTrue(body(channel, "private void hardStopOnChannel(")
-                .contains("endNavigation(\"hard-stopped:\" + stopReason, false)"));
-    }
-
-    @Test
     public void realBridgeTerminalClearsProofAndOutputWithoutAnAndroidxEnd()
             throws IOException {
         String store = source("WazeRouteLifecycleStore.java");

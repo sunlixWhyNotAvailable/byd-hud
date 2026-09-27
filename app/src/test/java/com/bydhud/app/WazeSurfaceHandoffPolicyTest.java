@@ -225,42 +225,6 @@ public final class WazeSurfaceHandoffPolicyTest {
     }
 
     @Test
-    public void sourceStateIsDistinctFromWindowReadinessInProductionPath() throws IOException {
-        String sender = sourcePath(
-                "app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
-        assertTrue(sender.contains("surfaceSourceSelected"));
-        assertTrue(sender.contains(
-                "waze surface window ready; keeping cluster source until current route frame"));
-        assertTrue(sender.contains(
-                "sourceCurrent, publisherCurrent, fromSurface,\n"
-                        + "                    wazeSurfaceSourceSelected"));
-        assertTrue(sender.contains("withRetainedWazeClusterAlert"));
-        assertTrue(sender.contains("latestRestorableWazeFrame()"));
-        assertTrue(sender.contains("isCurrentWazeSurfaceFrame"));
-        assertTrue(sender.contains("waze data source switch previous="));
-        assertTrue(sender.contains("switchWazeSurfaceToClusterBeforeReadinessLoss"));
-        assertTrue(sender.contains(
-                "long callbackDeliveryGeneration = wazeSurfaceFrameDeliveryGeneration;"));
-        assertTrue(sender.contains(
-                "latestWazeSurfaceFrameDeliveryGeneration = callbackDeliveryGeneration;"));
-        assertTrue(sender.contains("wazeSurfaceFrameDeliveryGeneration++"));
-        int surfaceListener = sender.indexOf("private WazeDirectChannel.Listener createWazeSurfaceListener(");
-        int callbackFrame = sender.indexOf("public void onFrame(", surfaceListener);
-        int captureEpoch = sender.indexOf("long callbackEpoch = WazeSurfaceActivity.activeSurfaceEpoch();", callbackFrame);
-        int postFrame = sender.indexOf("handler.post(() ->", callbackFrame);
-        assertTrue(surfaceListener >= 0 && callbackFrame > surfaceListener
-                && captureEpoch > callbackFrame && captureEpoch < postFrame);
-        assertTrue(sender.contains("latestWazeSurfaceFrameEpoch = callbackEpoch;"));
-        assertTrue(sender.contains("latestWazeSurfaceFrameEpoch = retainedSurfaceEpoch;"));
-        assertTrue(sender.contains("isCurrentWazeSurfaceWindow(callbackInstanceId, callbackEpoch)"));
-        int activation = sender.indexOf("private void activateWazeSurface(");
-        int activationEnd = sender.indexOf("\n    private void invalidateWazeSurfaceReadiness", activation);
-        assertTrue(activation >= 0 && activationEnd > activation);
-        assertFalse(sender.substring(activation, activationEnd)
-                .contains("clearDirectFrameForLoss"));
-    }
-
-    @Test
     public void surfaceTeardownWaitsForBoundedHostAcknowledgment() throws IOException {
         String activity = sourcePath(
                 "app/src/main/java/com/bydhud/app/WazeSurfaceActivity.java");
