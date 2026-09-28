@@ -42,7 +42,8 @@ final class NativeSpeedLimitController {
             @Override public void call(int operation, int value, BooleanSupplier current,
                     Consumer<NativeSpeedLimitEngine.Result> callback) {
                 if (!allowed()) {
-                    stop("output-or-input-changed");
+                    if (outputAllowed()) engine.invalidateTarget();
+                    else stop("output-changed");
                     return;
                 }
                 InstrumentProxyManager.get(context).nativeSpeedOperation(operation, value,
@@ -75,10 +76,14 @@ final class NativeSpeedLimitController {
     }
 
     private boolean allowed() {
+        return outputAllowed()
+                && ("manual".equals(owner) || DirectSpeedLimitStore.snapshot(owner).getKph() == limit);
+    }
+
+    private boolean outputAllowed() {
         return outputActive.getAsBoolean() && !ShanghaiOutputGate.isSuspended()
                 && !HudPrefs.isUserShutdownActive(context)
-                && HudPrefs.speedLimitMode(context) == mode
-                && ("manual".equals(owner) || DirectSpeedLimitStore.snapshot(owner).getKph() == limit);
+                && HudPrefs.speedLimitMode(context) == mode;
     }
 
     void stop(String reason) {

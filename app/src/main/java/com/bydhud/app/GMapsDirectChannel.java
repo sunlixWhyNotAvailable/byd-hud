@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 import android.app.PendingIntent;
 import android.content.ComponentName;
+import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.graphics.BitmapFactory;
@@ -25,6 +26,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Consumer;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /** Receives bounded navigation snapshots from the separately patched ReVanced GMaps process. */
 final class GMapsDirectChannel {
@@ -39,6 +41,7 @@ final class GMapsDirectChannel {
     private static final String EXTRA_PROTOCOL = "com.bydhud.gmapsbridge.PROTOCOL_VERSION";
     private static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
     private static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
+    private static final String EXTRA_DIAGNOSTICS = "com.bydhud.gmapsbridge.DIAGNOSTICS";
     private static final int PROTOCOL_VERSION = 3;
     private static final int MESSAGE_HELLO = 1;
     private static final int MESSAGE_START = 2;
@@ -47,6 +50,7 @@ final class GMapsDirectChannel {
     private static final int MESSAGE_MANEUVER_BITMAP = 5;
     private static final int MESSAGE_SPEED_LIMIT = 6;
     private static final int MESSAGE_HEARTBEAT = 7;
+    private static final int MESSAGE_DIAGNOSTIC = 8;
     private static final int CAP_STATE_REPLAY = 1;
     private static final int CAP_HEARTBEAT = 1 << 1;
     private static final int CAP_BITMAP_GENERATION = 1 << 2;
@@ -87,6 +91,13 @@ final class GMapsDirectChannel {
     private boolean generationAwareProducer;
     private boolean routeGenerationCapable;
     private volatile String channelId = "";
+    private PendingIntent registrationIdentity;
+    private String identityChannelId = "";
+    private String registrationOutcome = "not_sent";
+    private boolean registrationHelloReceived;
+    private boolean identityEnvironmentLogged;
+    private final AtomicBoolean identitySystemCaptureRunning = new AtomicBoolean();
+    private long lastIdentitySystemCaptureMs = -60_000L;
     private long lastSequence = -1L;
     private long currentStructuredFrameAtMs;
     private String currentManeuver = "";
@@ -137,7 +148,10 @@ final class GMapsDirectChannel {
     void stop(String reason) {
         handler.post(() -> {
             if (!running) return;
+            logRegistrationIdentity("stopping");
             sendRegistration(ACTION_UNREGISTER, false, PROTOCOL_VERSION);
+            registrationIdentity = null;
+            identityChannelId = "";
             sessionGeneration++;
             running = false;
             connected = false;
@@ -166,8 +180,9 @@ final class GMapsDirectChannel {
         long handlerEntryElapsedMs = SystemClock.elapsedRealtime();
         return runMessageBoundary(
                 () -> handleMessageSafely(message, handlerEntryElapsedMs),
-                error -> listener.onLog("message rejected reason=exception error="
-                        + error.getClass().getSimpleName()));
+                error -> listener.onLog("message rejected reason=exception channelId=" + channelId
+                        + " what=" + (message == null ? -1 : message.what)
+                        + " error=" + GMapsIdentityDiagnostics.error(error)));
     }
 
     static boolean runMessageBoundary(MessageWork work, Consumer<Throwable> onError) {
@@ -242,6 +257,31 @@ final class GMapsDirectChannel {
         Bundle data = message.getData();
         int protocol = data == null ? -1 : data.getInt("protocolVersion", -1);
         String incomingChannelId = data == null ? "" : safe(data.getString("channelId"));
+        // Registration failures arrive before HELLO and have no navigation epoch/state.
+        if (message.what == MESSAGE_DIAGNOSTIC) {
+            if (protocol != PROTOCOL_VERSION || channelId.isEmpty()
+                    || !channelId.equals(incomingChannelId)) {
+                listener.onLog("bridge_diagnostic ignored reason=protocol_or_channel"
+                        + " expectedChannel=" + channelId
+                        + " incomingChannel=" + diagnosticText(incomingChannelId, 120)
+                        + " protocol=" + protocol + " senderUid=" + message.sendingUid);
+                return true;
+            }
+            listener.onLog("bridge_diagnostic channelId=" + channelId
+                    + " bridgeBuild=" + diagnosticText(data.getString("bridgeBuild"), 96)
+                    + " stage=" + diagnosticText(data.getString("stage"), 64)
+                    + " receivedElapsedMs=" + handlerEntryElapsedMs
+                    + " bridgeElapsedMs=" + data.getLong("bridgeElapsedMs", -1L)
+                    + " senderUid=" + message.sendingUid
+                    + " detail=" + diagnosticText(data.getString("detail"), 1024));
+            String stage = diagnosticText(data.getString("stage"), 64);
+            registrationOutcome = stage;
+            listener.onLog("identity_reply channelId=" + channelId + " "
+                    + GMapsIdentityDiagnostics.replySender(context, message.sendingUid));
+            logRegistrationIdentity("reply_" + stage);
+            if ("rejected".equals(stage)) captureIdentitySystemEvidence("rejected");
+            return true;
+        }
         long bridgeElapsedMs = data == null
                 ? -1L : data.getLong("bridgeElapsedMs", -1L);
         long sourceElapsedMs = data == null
@@ -292,6 +332,8 @@ final class GMapsDirectChannel {
         }
         switch (message.what) {
             case MESSAGE_HELLO:
+                registrationOutcome = "hello_received";
+                registrationHelloReceived = true;
                 boolean hadActiveRoute = navigating || currentFrame != null;
                 // A producer that was previously unknown may identify itself while
                 // an old route is retained; treat that as a replacement. Initial
@@ -917,24 +959,66 @@ final class GMapsDirectChannel {
     private boolean sendRegistration(String action, boolean includeClient, int protocol) {
         long beforeElapsedMs = SystemClock.elapsedRealtime();
         boolean sent = false;
+        String stage = "prepare";
         try {
+            if (includeClient) {
+                if (!identityChannelId.isEmpty()) {
+                    listener.onLog("identity_request_end channelId=" + identityChannelId
+                            + " outcome=" + registrationOutcome + " helloReceived=" + registrationHelloReceived);
+                    logRegistrationIdentity("before_replace");
+                    if (!registrationHelloReceived
+                            && !"rejected".equals(registrationOutcome)) {
+                        captureIdentitySystemEvidence("missing_hello_or_registration_result");
+                    }
+                }
+                channelId = "byd_hud_" + sessionGeneration + "_"
+                        + (++registrationNonce) + "_" + SystemClock.elapsedRealtime();
+                identityChannelId = channelId;
+                registrationOutcome = "creating";
+                registrationHelloReceived = false;
+                registrationIdentity = null;
+            }
+            if (!identityEnvironmentLogged) {
+                listener.onLog("identity_environment " + GMapsIdentityDiagnostics.environment(context));
+                identityEnvironmentLogged = true;
+            }
             Intent intent = new Intent(action);
             intent.setComponent(new ComponentName(PACKAGE_NAME, RECEIVER));
             intent.addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
-            intent.putExtra(EXTRA_IDENTITY, identity());
+            stage = "create_identity";
+            PendingIntent token = identity();
+            if (includeClient) registrationIdentity = token;
+            listener.onLog("identity_snapshot channelId=" + channelId + " stage=before_send"
+                    + " action=" + action + " requestCode=" + GMapsIdentityDiagnostics.REQUEST
+                    + " flags=" + GMapsIdentityDiagnostics.FLAGS + " "
+                    + GMapsIdentityDiagnostics.snapshot(context, token, true));
+            stage = "encode_extras";
+            intent.putExtra(EXTRA_IDENTITY, token);
             if (includeClient) {
-                channelId = "byd_hud_" + sessionGeneration + "_"
-                        + (++registrationNonce) + "_" + SystemClock.elapsedRealtime();
                 intent.putExtra(EXTRA_CHANNEL_ID, channelId);
                 intent.putExtra(EXTRA_PROTOCOL, protocol);
                 intent.putExtra(EXTRA_CLIENT, inbound);
+                intent.putExtra(EXTRA_DIAGNOSTICS, true);
             }
-            context.sendOrderedBroadcast(intent, null);
+            stage = "send_broadcast";
+            final String sentChannel = channelId;
+            context.sendOrderedBroadcast(intent, null, new BroadcastReceiver() {
+                @Override public void onReceive(Context ignored, Intent received) {
+                    listener.onLog("identity_broadcast_complete channelId=" + sentChannel
+                            + " resultCode=" + getResultCode()
+                            + " resultData=" + diagnosticText(getResultData(), 256)
+                            + " receiverAdmission=not_proven_by_completion");
+                }
+            }, handler, 0, null, null);
             sent = true;
+            if (includeClient) registrationOutcome = "sent";
+            logRegistrationIdentity("after_send");
             return true;
         } catch (Throwable error) {
-            listener.onLog("registration failed action=" + action
-                    + " error=" + error.getClass().getSimpleName());
+            registrationOutcome = "exception_" + stage;
+            listener.onLog("registration failed action=" + action + " channelId=" + channelId
+                    + " stage=" + stage + " error=" + GMapsIdentityDiagnostics.error(error));
+            captureIdentitySystemEvidence(registrationOutcome);
             return false;
         } finally {
             listener.onLog("gmaps_timing "
@@ -945,10 +1029,51 @@ final class GMapsDirectChannel {
     }
 
     private PendingIntent identity() {
-        Intent intent = new Intent(context, HudRuntimeService.class)
-                .setAction("com.bydhud.app.gmaps.DIRECT_IDENTITY");
-        return PendingIntent.getService(context, 2101, intent,
-                PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
+        return PendingIntent.getService(context, GMapsIdentityDiagnostics.REQUEST,
+                GMapsIdentityDiagnostics.identityIntent(context), GMapsIdentityDiagnostics.FLAGS);
+    }
+
+    private void logRegistrationIdentity(String stage) {
+        listener.onLog("identity_snapshot channelId=" + identityChannelId + " stage=" + stage
+                + " " + GMapsIdentityDiagnostics.snapshot(context, registrationIdentity, true));
+    }
+
+    private void captureIdentitySystemEvidence(String reason) {
+        long now = SystemClock.elapsedRealtime();
+        final String request = identityChannelId;
+        if (now - lastIdentitySystemCaptureMs < 60_000L
+                || !identitySystemCaptureRunning.compareAndSet(false, true)) {
+            listener.onLog("identity_system channelId=" + request
+                    + " state=coalesced reason=" + reason);
+            return;
+        }
+        lastIdentitySystemCaptureMs = now;
+        listener.onLog("identity_system channelId=" + request + " state=scheduled reason=" + reason);
+        Thread capture = new Thread(() -> {
+            try {
+                LocalAdbBridge.ShellResult result = LocalAdbBridge.captureGMapsIdentityEvidence(context);
+                listener.onLog("identity_system channelId=" + request + " exit=" + result.exitCode
+                        + " status=" + result.status + " error=" + GMapsIdentityDiagnostics.text(result.error, 900)
+                        + " truncated=" + result.truncated + " droppedBytes=" + result.droppedBytes);
+                String[] lines = result.output.split("\\r?\\n", -1);
+                for (int i = 0; i < lines.length; i++) {
+                    listener.onLog("identity_system channelId=" + request + " line=" + i + " "
+                            + GMapsIdentityDiagnostics.text(lines[i], 2000));
+                }
+                listener.onLog("identity_system channelId=" + request + " state=complete lines=" + lines.length);
+            } catch (Throwable error) {
+                listener.onLog("identity_system channelId=" + request + " state=failed error="
+                        + GMapsIdentityDiagnostics.error(error));
+            } finally {
+                identitySystemCaptureRunning.set(false);
+            }
+        }, "BydHudIdentityEvidence");
+        try { capture.start(); }
+        catch (Throwable error) {
+            identitySystemCaptureRunning.set(false);
+            listener.onLog("identity_system channelId=" + request + " state=schedule_failed error="
+                    + GMapsIdentityDiagnostics.error(error));
+        }
     }
 
     private void logRawFrame(long sequence, String frameCase, byte[] payload) {
@@ -1101,6 +1226,11 @@ final class GMapsDirectChannel {
         return new DirectTbtFrame.TravelMetrics(
                 -1L, DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS,
                 seconds, meters, frameWallTimeMs);
+    }
+
+    private static String diagnosticText(String value, int maximum) {
+        if (value == null) return "";
+        return value.substring(0, Math.min(value.length(), maximum)).replace('\n', ' ').replace('\r', ' ');
     }
 
     private static String stringValue(Object value) {

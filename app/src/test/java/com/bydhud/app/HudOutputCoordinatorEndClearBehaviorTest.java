@@ -80,7 +80,7 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
         NativeSpeedLimitTestSupport.raw = 12;
         DirectSpeedLimitStore.update("com.waze", 60, 60, "km/h", 1L);
         startDirectOutput(1L);
-        NativeSpeedLimitTestSupport.idleMainLooperFor(6_000L);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(1_000L);
         assertTrue(NativeSpeedLimitTestSupport.EVENTS.contains("native:1=7"));
         long startedAt = SystemClock.elapsedRealtime();
         int activePackets = packets("payload").size();

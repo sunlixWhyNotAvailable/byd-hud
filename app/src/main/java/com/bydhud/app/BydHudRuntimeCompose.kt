@@ -8596,8 +8596,7 @@ private fun SwitchRow(
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = 14.dp, vertical = 14.dp)
-            .clip(RoundedCornerShape(7.dp))
-            .background(pressBackground(Color.Transparent, palette, press.pressed))
+            .background(pressBackground(Color.Transparent, palette, press.pressed), RoundedCornerShape(7.dp))
             .then(press.modifier)
             .toggleable(
                 value = checked,

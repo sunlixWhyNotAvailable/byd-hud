@@ -35,6 +35,8 @@ public final class NavInfoLogger {
             "com.bydhud.gmapsbridge.PROTOCOL_VERSION";
     public static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
     public static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
+    public static final String EXTRA_DIAGNOSTICS = "com.bydhud.gmapsbridge.DIAGNOSTICS";
+    public static final String BRIDGE_BUILD = "3.3.1-test-20260928-r1";
     public static final int PROTOCOL_VERSION = 3;
     public static final int MESSAGE_HELLO = 1;
     public static final int MESSAGE_START = 2;
@@ -43,6 +45,7 @@ public final class NavInfoLogger {
     public static final int MESSAGE_MANEUVER_BITMAP = 5;
     public static final int MESSAGE_SPEED_LIMIT = 6;
     public static final int MESSAGE_HEARTBEAT = 7;
+    public static final int MESSAGE_DIAGNOSTIC = 8;
     public static final int CAP_STATE_REPLAY = 1;
     public static final int CAP_HEARTBEAT = 1 << 1;
     public static final int CAP_BITMAP_GENERATION = 1 << 2;
@@ -153,18 +156,29 @@ public final class NavInfoLogger {
             return;
         }
         applicationContext = context.getApplicationContext();
+        Messenger diagnosticClient = null;
+        String diagnosticChannel = "";
         try {
             String action = intent.getAction();
             boolean unregister = ACTION_UNREGISTER.equals(action);
             boolean startChannel = "ACTION_START_CHANNEL".equals(action);
             if (!unregister && !startChannel) return;
+            if (startChannel && intent.getBooleanExtra(EXTRA_DIAGNOSTICS, false)) {
+                diagnosticChannel = intent.getStringExtra(EXTRA_CHANNEL_ID);
+                diagnosticClient = intent.getParcelableExtra(EXTRA_CLIENT);
+            }
             boolean hasClient = intent.hasExtra(EXTRA_CLIENT);
             Log.i(TAG, "REGISTER_RECEIVED|action=" + action
                     + "|clientExtra=" + hasClient
                     + "|identityExtra=" + intent.hasExtra(EXTRA_IDENTITY)
                     + "|protocol=" + intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1));
+            diagnostic(diagnosticClient, diagnosticChannel, "register_received",
+                    "identityExtra=" + intent.hasExtra(EXTRA_IDENTITY)
+                    + "|protocol=" + intent.getIntExtra(EXTRA_PROTOCOL_VERSION, -1));
             if (startChannel && !hasClient) {
                 Log.w(TAG, "CLIENT_REJECTED|reason=missing_messenger_extra");
+                diagnostic(diagnosticClient, diagnosticChannel, "rejected",
+                        "reason=missing_messenger_extra");
                 return;
             }
             final PendingIntent identity;
@@ -173,17 +187,28 @@ public final class NavInfoLogger {
             } catch (RuntimeException error) {
                 Log.w(TAG, "CLIENT_REJECTED|reason=malformed_identity|type="
                         + error.getClass().getSimpleName());
+                diagnostic(diagnosticClient, diagnosticChannel, "rejected",
+                        "reason=malformed_identity|type=" + error.getClass().getSimpleName());
                 return;
             }
             try {
-                if (!isTrustedSender(identity)) {
+                String creatorPackage = identity == null ? null : identity.getCreatorPackage();
+                String identityDetails = identityRejectionDetails(identity, creatorPackage);
+                if (!isTrustedSender(identity, creatorPackage)) {
                     Log.w(TAG, "CLIENT_REJECTED|reason=untrusted_sender|"
-                            + identityRejectionDetails(identity));
+                            + identityDetails);
+                    diagnostic(diagnosticClient, diagnosticChannel, "rejected",
+                            "reason=untrusted_sender|" + identityDetails);
                     return;
                 }
+                diagnostic(diagnosticClient, diagnosticChannel, "identity_accepted", identityDetails);
             } catch (RuntimeException error) {
                 Log.w(TAG, "CLIENT_REJECTED|reason=identity_metadata_unreadable|type="
                         + error.getClass().getSimpleName());
+                diagnostic(diagnosticClient, diagnosticChannel, "rejected",
+                        "reason=identity_metadata_unreadable|tokenPresent=" + (identity != null)
+                        + "|expectedPackage=" + CLIENT_PACKAGE
+                        + "|type=" + error.getClass().getSimpleName());
                 return;
             }
             if (unregister) {
@@ -195,12 +220,17 @@ public final class NavInfoLogger {
             String channelId = intent.getStringExtra(EXTRA_CHANNEL_ID);
             if (protocol != PROTOCOL_VERSION || candidate == null) {
                 Log.w(TAG, "CLIENT_REJECTED|reason=protocol_or_messenger|protocol=" + protocol);
+                diagnostic(diagnosticClient, diagnosticChannel, "rejected",
+                        "reason=protocol_or_messenger|protocol=" + protocol);
                 return;
             }
-            installClient(candidate, channelId == null ? "" : channelId.trim());
+            String result = installClient(candidate, channelId == null ? "" : channelId.trim());
+            diagnostic(diagnosticClient, diagnosticChannel, "registration_result", "reason=" + result);
         } catch (RuntimeException error) {
             Log.w(TAG, "CLIENT_REJECTED|reason=malformed_extras|type="
                     + error.getClass().getSimpleName());
+            diagnostic(diagnosticClient, diagnosticChannel, "rejected",
+                    "reason=malformed_extras|type=" + error.getClass().getSimpleName());
         }
     }
 
@@ -452,7 +482,7 @@ public final class NavInfoLogger {
         }
     }
 
-    private static void installClient(Messenger candidate, String channelId) {
+    private static String installClient(Messenger candidate, String channelId) {
         final IBinder binder = candidate.getBinder();
         final IBinder.DeathRecipient deathRecipient = new IBinder.DeathRecipient() {
             @Override
@@ -466,7 +496,7 @@ public final class NavInfoLogger {
                 binder.linkToDeath(deathRecipient, 0);
             } catch (Throwable error) {
                 Log.w(TAG, "CLIENT_REJECTED|reason=dead_binder");
-                return;
+                return "dead_binder";
             }
             // Keep the global client unpublished until HELLO and the matching
             // replay have been sent under STATE_LOCK. This prevents a concurrent
@@ -524,28 +554,49 @@ public final class NavInfoLogger {
                 clientChannelId = "";
             }
             Log.w(TAG, "CLIENT_REJECTED|reason=hello_or_replay_failed");
-            return;
+            return "hello_or_replay_failed";
         }
         Log.i(TAG, "CLIENT_CONNECTED|protocol=" + PROTOCOL_VERSION);
+        return "connected";
     }
 
-    private static boolean isTrustedSender(PendingIntent identity) {
-        return identity != null && CLIENT_PACKAGE.equals(identity.getCreatorPackage());
+    private static boolean isTrustedSender(PendingIntent identity, String creatorPackage) {
+        return identity != null && CLIENT_PACKAGE.equals(creatorPackage);
     }
 
-    private static String identityRejectionDetails(PendingIntent identity) {
-        if (identity == null) return "identityReason=missing_token";
+    private static String identityRejectionDetails(PendingIntent identity, String creatorPackage) {
+        String detail = "tokenPresent=" + (identity != null) + "|expectedPackage=" + CLIENT_PACKAGE;
+        if (identity == null) return "identityReason=missing_token|" + detail;
+        detail += "|identityReason=" + (creatorPackage == null ? "missing_creator_package"
+                : CLIENT_PACKAGE.equals(creatorPackage) ? "trusted_creator" : "creator_package_mismatch")
+                + "|creatorPackage=" + diagnosticText(String.valueOf(creatorPackage), 256);
         try {
-            String creatorPackage = identity.getCreatorPackage();
-            return "identityReason=" + (creatorPackage == null
-                    ? "missing_creator_package" : "creator_package_mismatch")
-                    + "|creatorPackage=" + creatorPackage
-                    + "|creatorUid=" + identity.getCreatorUid()
-                    + "|expectedPackage=" + CLIENT_PACKAGE;
+            return detail + "|creatorUid=" + identity.getCreatorUid();
         } catch (RuntimeException error) {
-            return "identityReason=metadata_unreadable|type="
-                    + error.getClass().getSimpleName();
+            return detail + "|creatorUidError=" + error.getClass().getSimpleName();
         }
+    }
+
+    // A reply to this request only; never publishes the recipient as a navigation client.
+    private static void diagnostic(Messenger recipient, String channelId, String stage, String detail) {
+        if (recipient == null || channelId == null || channelId.isEmpty() || channelId.length() > 160) return;
+        try {
+            Bundle data = new Bundle();
+            data.putInt("protocolVersion", PROTOCOL_VERSION);
+            data.putString("channelId", channelId);
+            data.putString("bridgeBuild", BRIDGE_BUILD);
+            data.putString("stage", diagnosticText(stage, 64));
+            data.putString("detail", diagnosticText(detail, 1024));
+            data.putLong("bridgeElapsedMs", SystemClock.elapsedRealtime());
+            sendTo(recipient, MESSAGE_DIAGNOSTIC, data);
+        } catch (RuntimeException error) {
+            Log.w(TAG, "DIAGNOSTIC_FAILED|type=" + error.getClass().getSimpleName());
+        }
+    }
+
+    private static String diagnosticText(String value, int maximum) {
+        if (value == null) return "";
+        return value.substring(0, Math.min(value.length(), maximum)).replace('\n', ' ').replace('\r', ' ');
     }
 
     private static void capturePendingManeuver(ImageView view, PendingCapture pending) {

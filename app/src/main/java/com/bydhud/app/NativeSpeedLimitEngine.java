@@ -38,6 +38,7 @@ final class NativeSpeedLimitEngine {
 
     private final Port port;
     private volatile long epoch;
+    private long observationEpoch;
     private String session = "";
     private String lastReadLogKey = "";
     private String lastReadIoError = "";
@@ -45,12 +46,15 @@ final class NativeSpeedLimitEngine {
     private int cycle;
     private int attempt;
     private int lastRaw;
+    private int writtenRaw;
+    private int confirmedRaw;
     private boolean enabled;
     private boolean delayEnabled = true;
     private boolean fallback;
     private boolean hasLastRaw;
     private boolean delayStarted;
     private boolean targetConfirmed;
+    private boolean adasChangeDelay;
     private boolean seriesInFlight;
     private boolean awaiting;
     private boolean exhaustedLogged;
@@ -59,6 +63,7 @@ final class NativeSpeedLimitEngine {
     private long nextAttemptAt;
     private long nextReadAt;
     private long confirmAt;
+    private long writtenAt = -1L;
     private int confirmCycle;
     private int confirmAttempt;
 
@@ -99,6 +104,7 @@ final class NativeSpeedLimitEngine {
         if (enabled && this.session.equals(session) && this.target == target) return;
         long token = retire("superseded");
         if (epoch != token) return;
+        if (!this.session.equals(session)) clearObservedState();
         this.session = session;
         this.target = target;
         enabled = true;
@@ -106,8 +112,8 @@ final class NativeSpeedLimitEngine {
         attempt = 0;
         nextAttemptAt = 0L;
         nextReadAt = 0L;
-        hasLastRaw = false;
         targetConfirmed = false;
+        confirmAt = 0L;
         delayStarted = false;
         seriesInFlight = false;
         awaiting = false;
@@ -123,8 +129,23 @@ final class NativeSpeedLimitEngine {
     }
 
     void stop(String reason) {
+        clearObservedState();
         if (!enabled && !fallback) return;
         retire(reason);
+    }
+
+    void invalidateTarget() {
+        // Fence stale I/O while keeping this session's last accepted navigator value.
+        retire("input-changed");
+    }
+
+    private void clearObservedState() {
+        observationEpoch++;
+        hasLastRaw = false;
+        writtenRaw = 0;
+        writtenAt = -1L;
+        confirmedRaw = 0;
+        adasChangeDelay = false;
     }
 
     private long retire(String reason) {
@@ -174,6 +195,11 @@ final class NativeSpeedLimitEngine {
         int raw = result.raw;
         boolean changed = hasLastRaw && raw != lastRaw;
         long observedAt = port.now();
+        // A successful write can first appear in readback after the navigator target changes.
+        if (writtenRaw != 0 && raw == writtenRaw) {
+            confirmedRaw = raw;
+            adasChangeDelay = false;
+        }
         if (raw == expectedRaw(target)) {
             boolean hasWindow = confirmCycle == cycle && confirmAttempt == attempt && confirmAt > 0L;
             boolean withinWindow = hasWindow && result.finishedAt <= confirmAt;
@@ -191,12 +217,14 @@ final class NativeSpeedLimitEngine {
             }
             awaiting = false;
             targetConfirmed = true;
+            adasChangeDelay = false;
             if (delayStarted) {
                 delayStarted = false;
                 log("delay cancel reason=target-match actualAt=" + observedAt);
             }
             setFallback(false, "target-match");
         } else {
+            if (changed && confirmedRaw != 0) adasChangeDelay = raw != confirmedRaw;
             if (targetConfirmed) {
                 cycle++;
                 attempt = 0;
@@ -222,10 +250,13 @@ final class NativeSpeedLimitEngine {
         delayDueAt = startedAt + delayMs();
         log("delay " + (reason.equals("target-mismatch") ? "scheduled" : "reset")
                 + " reason=" + reason + " startedAt=" + startedAt
-                + " dueAt=" + delayDueAt + " enabled=" + delayEnabled);
+                + " dueAt=" + delayDueAt + " enabled=" + delayEnabled
+                + " confirmedRaw=" + confirmedRaw + " adasChange=" + adasChangeDelay);
     }
 
-    private long delayMs() { return BASE_DELAY_MS + (delayEnabled ? EXTRA_DELAY_MS : 0L); }
+    private long delayMs() {
+        return BASE_DELAY_MS + (delayEnabled && adasChangeDelay ? EXTRA_DELAY_MS : 0L);
+    }
 
     private boolean shouldStartAttempt(long now) {
         return enabled && !seriesInFlight && !awaiting && !targetConfirmed
@@ -307,10 +338,18 @@ final class NativeSpeedLimitEngine {
             Consumer<Result> continuation) {
         if (!current(token)) return;
         String callSession = session;
+        long callObservationEpoch = observationEpoch;
         int callCycle = cycle;
         int callAttempt = attempt;
         port.call(operation, value, () -> current(token), result -> {
             boolean stale = !current(token);
+            // Dispatched writes can succeed after target replacement, without reviving that attempt.
+            boolean trackedWrite = operation == LIMIT && result.success
+                    && callObservationEpoch == observationEpoch && result.startedAt >= writtenAt;
+            if (trackedWrite) {
+                writtenRaw = expectedRaw(value);
+                writtenAt = result.startedAt;
+            }
             if (operation != READ || stale) {
                 port.log("native_speed io session=" + callSession + " token=" + token
                         + " cycle=" + callCycle + " attempt=" + callAttempt
@@ -320,7 +359,7 @@ final class NativeSpeedLimitEngine {
                         + " actualAt=" + result.startedAt + " finishedAt=" + result.finishedAt
                         + " success=" + result.success
                         + " raw=" + (operation == READ && result.success ? result.raw : "unavailable")
-                        + " stale=" + stale + " error=" + result.error);
+                        + " stale=" + stale + " trackedWrite=" + trackedWrite + " error=" + result.error);
             } else {
                 String readKey = result.success ? "raw:" + result.raw : "error:" + result.error;
                 if (!readKey.equals(lastReadLogKey)) {

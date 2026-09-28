@@ -193,7 +193,7 @@ public final class GmapsBeta7PatcherSourceContractTest {
                 "app/src/main/java/com/bydhud/gmapsdiag/NavInfoLogger.java");
         String capture = between(source,
                 "public static void captureSpeedLimitStateV26(",
-                "private static void installClient(");
+                "private static String installClient(");
         String unit = between(source,
                 "private static String speedUnitV26(",
                 "private static void unlinkCurrentClientLocked(");
@@ -305,7 +305,7 @@ public final class GmapsBeta7PatcherSourceContractTest {
         assertTrue(registration.contains("catch (RuntimeException error)"));
         assertTrue(registration.contains(
                 "CLIENT_REJECTED|reason=malformed_extras|type="));
-        assertTrue(registration.contains("if (!isTrustedSender(identity))"));
+        assertTrue(registration.contains("if (!isTrustedSender(identity, creatorPackage))"));
         assertTrue(registration.contains("EXTRA_CHANNEL_ID"));
         assertTrue(registration.contains(
                 "installClient(candidate, channelId == null ? \"\" : channelId.trim())"));

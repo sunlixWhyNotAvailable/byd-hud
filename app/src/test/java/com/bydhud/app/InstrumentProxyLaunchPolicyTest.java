@@ -11,6 +11,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.concurrent.TimeUnit;
 
 public final class InstrumentProxyLaunchPolicyTest {
     private static final String APK =
@@ -26,6 +27,7 @@ public final class InstrumentProxyLaunchPolicyTest {
                 APK, 42L, NONCE, 10_123, TOKEN, 89);
 
         assertTrue(command.contains("/system/bin/app_process"));
+        assertTrue(command.contains("nohup /system/bin/sh -c"));
         assertTrue(command.contains("--nice-name="
                 + InstrumentProxyContract.processName(10_123, TOKEN)));
         assertTrue(command.contains("com.bydhud.app.InstrumentProxyEntryPoint"));
@@ -35,11 +37,14 @@ public final class InstrumentProxyLaunchPolicyTest {
         assertTrue(command.contains("--launch-token=" + TOKEN));
         assertTrue(command.contains("--version-code=89"));
         assertTrue(command.startsWith(
-                "umask 077; rm -f /data/local/tmp/bydhud-instrument-10123-42.log; "));
+                "umask 077; rm -f /data/local/tmp/bydhud-instrument-10123-42.log "));
         assertTrue(command.contains(
                 " >/data/local/tmp/bydhud-instrument-10123-42.log 2>&1"));
         assertFalse(command.contains(">/dev/null 2>&1"));
-        assertTrue(command.endsWith("& echo $!"));
+        assertTrue(command.contains("wait $child; code=$?"));
+        assertTrue(command.contains("instrument_child_exit childPid=$child exitCode=$code"));
+        assertTrue(command.contains("cat /data/local/tmp/bydhud-instrument-10123-42.log.pid; exit 0"));
+        assertFalse(command.endsWith("& echo $!"));
         assertFalse(LocalAdbBridge.isAllowedRuntimeShellCommandForTest(command));
     }
 
@@ -56,6 +61,55 @@ public final class InstrumentProxyLaunchPolicyTest {
         assertTrue(diagnostic.contains("--nonce=<redacted>"));
         assertTrue(diagnostic.contains("--launch-token=<redacted>"));
         assertTrue(diagnostic.length() <= 1_605);
+    }
+
+    @Test
+    public void supervisorReturnsChildPidAndPersistsExitBeforeJavaStarts() throws Exception {
+        checkSupervisorExit("exit 17", 17);
+        checkSupervisorExit("kill -TERM $$", 143);
+    }
+
+    private static void checkSupervisorExit(String childScript, int expected) throws Exception {
+        boolean windows = System.getProperty("os.name").toLowerCase().contains("win");
+        Path shell = windows ? Paths.get("D:/Programs/Git/bin/bash.exe") : Paths.get("/bin/sh");
+        org.junit.Assume.assumeTrue("POSIX shell required for launch behavior check", Files.isRegularFile(shell));
+        Path temp = Files.createTempDirectory("bydhud-instrument-test-");
+        Path log = temp.resolve("startup.log");
+        String shellPath = log.toString().replace('\\', '/');
+        if (windows) shellPath = "/" + Character.toLowerCase(shellPath.charAt(0)) + shellPath.substring(2);
+        String command = LocalAdbBridge.supervisedInstrumentCommand(
+                "sh -c 'sleep 0.2; " + childScript + "'", shellPath, "sh");
+        // Windows nohup detaches through a different process model; exercise wait/PID/exit here.
+        // The production-command assertion separately requires the existing Android nohup wrapper.
+        if (windows) command = command.replace("nohup sh", "sh");
+        Path script = temp.resolve("launch.sh");
+        Files.write(script, command.getBytes(StandardCharsets.UTF_8));
+        // A file avoids Windows command-line quote rewriting of the nested shell program.
+        ProcessBuilder launch = new ProcessBuilder(shell.toString(), script.toString().replace('\\', '/'))
+                .redirectErrorStream(true);
+        launch.environment().put("MSYS_NO_PATHCONV", "1");
+        if (windows) launch.environment().put("PATH", "D:/Programs/Git/usr/bin;" + System.getenv("PATH"));
+        Process process = launch.start();
+        boolean finished = process.waitFor(10, TimeUnit.SECONDS);
+        if (!finished) process.destroyForcibly();
+        assertTrue("launcher must finish", finished);
+        String pid = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8).trim();
+        org.junit.Assert.assertEquals(pid, 0, process.exitValue());
+        assertTrue("actual child PID: " + pid, pid.matches("[0-9]+"));
+        String evidence = "";
+        for (int i = 0; i < 150; i++) {
+            if (Files.exists(log)) evidence = new String(Files.readAllBytes(log), StandardCharsets.UTF_8);
+            if (evidence.contains("exitCode=" + expected)) break;
+            Thread.sleep(20);
+        }
+        assertTrue(evidence, evidence.contains("instrument_child_started childPid=" + pid));
+        assertTrue(evidence, evidence.contains("instrument_child_exit childPid=" + pid + " exitCode=" + expected));
+        assertFalse(evidence.contains("ENTRY_VALIDATED"));
+        if (expected == 143) assertTrue(evidence.contains("signalNotProvenByExitCodeAlone=1"));
+        Files.deleteIfExists(log);
+        Files.deleteIfExists(temp.resolve("startup.log.pid"));
+        Files.deleteIfExists(script);
+        Files.delete(temp);
     }
 
     @Test

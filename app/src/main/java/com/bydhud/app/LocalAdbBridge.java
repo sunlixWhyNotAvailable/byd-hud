@@ -610,19 +610,23 @@ final class LocalAdbBridge {
         }
 
         private ShellResult execute(String command, long timeoutMs) {
+            return execute(command, timeoutMs, MAX_DIAGNOSTIC_OUTPUT_BYTES);
+        }
+
+        private ShellResult execute(String command, long timeoutMs, int maxOutputBytes) {
             long observedAtMs = System.currentTimeMillis();
             long startedNanos = System.nanoTime();
-            return executeUntimed(command, timeoutMs).withTiming(observedAtMs,
+            return executeUntimed(command, timeoutMs, maxOutputBytes).withTiming(observedAtMs,
                     TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedNanos));
         }
 
-        private ShellResult executeUntimed(String command, long timeoutMs) {
+        private ShellResult executeUntimed(String command, long timeoutMs, int maxOutputBytes) {
             if (unavailable != null) return unavailable;
             if (!busy.compareAndSet(false, true)) {
                 return exportFailure("skipped", 125, "export command already in progress", "");
             }
             ScheduledFuture<?> guard = null;
-            OutputAccumulator output = new OutputAccumulator(MAX_DIAGNOSTIC_OUTPUT_BYTES, true);
+            OutputAccumulator output = new OutputAccumulator(maxOutputBytes, true);
             try {
                 if (System.nanoTime() >= deadlineNanos) stop("session deadline");
                 if (Thread.currentThread().isInterrupted()) stop("cancelled");
@@ -1078,6 +1082,28 @@ final class LocalAdbBridge {
         return runTrustedRuntimeShellCommand(context, command);
     }
 
+    static ShellResult captureGMapsIdentityEvidence(Context context) {
+        requireOwnPackage(context);
+        String path = context.getApplicationInfo().sourceDir;
+        if (path == null || path.contains("..")
+                || !path.matches("/data/app/[A-Za-z0-9_./+=:~-]{1,500}/base\\.apk")) {
+            throw new SecurityException("Invalid diagnostic APK path");
+        }
+        int user = android.os.Process.myUid() / 100000;
+        String command = "echo '[visibility]'; /system/bin/app_process -Djava.class.path=" + path
+                + " /system/bin com.bydhud.app.GMapsIdentityDiagnostics "
+                + user
+                + "; echo visibility_exit=$?; echo '[hud-pending-intents]'; "
+                + "dumpsys -t 3 activity intents com.bydhud.app; echo intents_exit=$?; "
+                + "echo '[package-uids]'; cmd package list packages -U --user " + user + " com.bydhud.app; "
+                + "echo hud_package_exit=$?; cmd package list packages -U --user " + user + " app.revanced.android.apps.maps; "
+                + "echo maps_package_exit=$?";
+        // Isolated, existing-key-only connection: this evidence must not hold up Instrument launch.
+        try (ConfigurationExportSession session = openConfigurationExport(context, 10_000L)) {
+            return session.execute(command, 8_000L, 32 * 1024);
+        }
+    }
+
     static int instrumentProxyPid(ShellResult launchResult) {
         if (launchResult == null || !launchResult.success()) return -1;
         String output = launchResult.output == null ? "" : launchResult.output.trim();
@@ -1116,7 +1142,8 @@ final class LocalAdbBridge {
             Context context, InstrumentProxyStore.Identity expected) throws IOException {
         if (expected == null || !expected.isValid()) return;
         runTrustedRuntimeShellCommand(context, "rm -f "
-                + instrumentProxyStartupDiagnosticPath(expected.uid, expected.generation));
+                + instrumentProxyStartupDiagnosticPath(expected.uid, expected.generation) + " "
+                + instrumentProxyStartupDiagnosticPath(expected.uid, expected.generation) + ".pid");
     }
 
     static ShellResult stopInstrumentProxy(
@@ -1365,7 +1392,7 @@ final class LocalAdbBridge {
                 + safePath + "!/lib/arm64-v8a";
         String processName = InstrumentProxyContract.processName(appUid, safeToken);
         String diagnosticPath = instrumentProxyStartupDiagnosticPath(appUid, generation);
-        return "umask 077; rm -f " + diagnosticPath + "; nohup /system/bin/app_process"
+        String childCommand = "/system/bin/app_process"
                 + " -Djava.class.path=" + classPath
                 + " -Djava.library.path=" + libraryPath
                 + " /system/bin"
@@ -1375,8 +1402,25 @@ final class LocalAdbBridge {
                 + " --nonce=" + safeNonce
                 + " --app-uid=" + appUid
                 + " --launch-token=" + safeToken
-                + " --version-code=" + appVersionCode
-                + " >" + diagnosticPath + " 2>&1 </dev/null & echo $!";
+                + " --version-code=" + appVersionCode;
+        return supervisedInstrumentCommand(childCommand, diagnosticPath, "/system/bin/sh");
+    }
+
+    static String supervisedInstrumentCommand(String childCommand, String diagnosticPath, String shell) {
+        // Only the validated production caller (or offline tests) supplies these strings.
+        // Keep the log fd open: deleting a READY generation's log must not recreate it at exit.
+        String script = "echo instrument_wrapper_started; " + childCommand + " </dev/null & child=$!; "
+                + "echo instrument_child_started childPid=$child; echo $child > " + diagnosticPath + ".pid; "
+                + "wait $child; code=$?; echo instrument_child_exit childPid=$child exitCode=$code; "
+                + "if [ $code -gt 128 ] && [ $code -le 192 ]; then "
+                + "echo signalCandidate=$((code - 128)) signalNotProvenByExitCodeAlone=1; fi";
+        return "umask 077; rm -f " + diagnosticPath + " " + diagnosticPath + ".pid; "
+                + "nohup " + shell + " -c '" + script.replace("'", "'\\''") + "'"
+                + " >" + diagnosticPath + " 2>&1 </dev/null & "
+                + "( attempt=0; while [ $attempt -lt 40 ]; do "
+                + "if [ -s " + diagnosticPath + ".pid ]; then cat " + diagnosticPath + ".pid; exit 0; fi; "
+                + "attempt=$((attempt + 1)); sleep 0.05; done; "
+                + "echo instrument_child_pid_unavailable; exit 1 )";
     }
 
     private static String instrumentProxyStartupDiagnosticPath(int appUid, long generation) {

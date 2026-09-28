@@ -30,7 +30,7 @@ public final class NativeSpeedLimitEngineTest {
         }
     }
 
-    @Test public void delayOffWaitsOneSecondAndDelayOnWaitsSixSeconds() {
+    @Test public void initialWriteWaitsOnlyOneSecondWithEitherPreference() {
         Fake off = new Fake();
         off.engine.setDelayEnabled(false);
         off.engine.configure("waze:1", 60);
@@ -41,27 +41,27 @@ public final class NativeSpeedLimitEngineTest {
 
         Fake on = new Fake();
         on.engine.configure("waze:1", 60);
-        on.until(5_999);
+        on.until(999);
         assertTrue(on.writes.isEmpty());
-        on.until(6_000);
-        assertEquals(6_000L, firstWriteAt(on));
+        on.until(1_000);
+        assertEquals(1_000L, firstWriteAt(on));
     }
 
     @Test public void actualRawChangeRestartsDelayButSameTargetHeartbeatDoesNot() {
         Fake f = new Fake();
         f.engine.configure("waze:1", 60);
-        f.at(4_000, () -> f.raw = 8);
-        f.at(5_000, () -> f.engine.configure("waze:1", 60));
-        f.until(9_999);
+        f.at(400, () -> f.raw = 8);
+        f.at(1_000, () -> f.engine.configure("waze:1", 60));
+        f.until(1_399);
         assertTrue(f.writes.isEmpty());
-        f.until(10_000);
-        assertEquals(10_000L, firstWriteAt(f));
+        f.until(1_400);
+        assertEquals(1_400L, firstWriteAt(f));
     }
 
     @Test public void targetMatchDuringDelayCancelsTheInitialWrite() {
         Fake f = new Fake();
         f.engine.configure("waze:1", 60);
-        f.at(4_000, () -> f.raw = 13);
+        f.at(400, () -> f.raw = 13);
         f.until(20_000);
         assertTrue(f.writes.isEmpty());
         assertTrue(f.logs.stream().anyMatch(line -> line.contains("delay cancel reason=target-match")));
@@ -71,18 +71,18 @@ public final class NativeSpeedLimitEngineTest {
         Fake f = new Fake();
         f.apply = true;
         f.engine.configure("waze:1", 60);
-        f.until(6_200);
-        assertEquals(List.of("6000:1=7", "6100:2=60", "6200:1=6"), f.writes);
+        f.until(1_200);
+        assertEquals(List.of("1000:1=7", "1100:2=60", "1200:1=6"), f.writes);
         assertEquals(13, f.raw);
         assertFalse(f.fallback);
 
         Fake unconfirmed = new Fake();
         unconfirmed.engine.configure("waze:1", 55);
-        unconfirmed.until(9_099);
+        unconfirmed.until(4_099);
         assertFalse(unconfirmed.fallback);
-        unconfirmed.until(9_100);
+        unconfirmed.until(4_100);
         assertFalse(unconfirmed.fallback);
-        unconfirmed.until(9_101);
+        unconfirmed.until(4_101);
         assertTrue(unconfirmed.fallback);
         assertTrue(unconfirmed.logs.stream().anyMatch(line -> line.contains("outcome=unconfirmed")));
         assertFalse(unconfirmed.logs.stream().anyMatch(line -> line.contains("outcome=io_error")));
@@ -91,14 +91,14 @@ public final class NativeSpeedLimitEngineTest {
     @Test public void matchAtThreeSecondBoundaryCountsAsConfirmed() {
         Fake f = new Fake();
         f.engine.configure("waze:1", 60);
-        f.until(6_200);
-        f.at(9_000, () -> { f.raw = 13; f.deferOperation = NativeSpeedLimitEngine.READ; });
-        f.until(9_000);
+        f.until(1_200);
+        f.at(4_000, () -> { f.raw = 13; f.deferOperation = NativeSpeedLimitEngine.READ; });
+        f.until(4_000);
         assertNotNull(f.pending);
-        f.until(9_100);
+        f.until(4_100);
         f.releasePending(true);
         assertFalse(f.fallback);
-        f.until(9_101);
+        f.until(4_101);
         assertFalse(f.fallback);
         assertTrue(f.logs.stream().anyMatch(line -> line.contains("outcome=confirmed")));
         assertFalse(f.logs.stream().anyMatch(line -> line.contains("outcome=unconfirmed")));
@@ -107,25 +107,25 @@ public final class NativeSpeedLimitEngineTest {
     @Test public void retryWaitsTenSecondsFromAttemptStartAndStopsAfterTwoAttempts() {
         Fake f = new Fake();
         f.engine.configure("waze:1", 55);
-        f.until(15_999);
+        f.until(10_999);
         assertEquals(3, f.writes.size());
-        f.until(16_200);
-        assertEquals(List.of("6000:1=7", "6100:2=55", "6200:1=6",
-                "16000:1=7", "16100:2=55", "16200:1=6"), f.writes);
+        f.until(11_200);
+        assertEquals(List.of("1000:1=7", "1100:2=55", "1200:1=6",
+                "11000:1=7", "11100:2=55", "11200:1=6"), f.writes);
         f.until(50_000);
         assertEquals(6, f.writes.size());
         assertEquals(1, countLogs(f, "outcome=exhausted"));
     }
 
-    @Test public void equalReadbackNeedsNoWritesAndLaterDriftStartsANewCycle() {
+    @Test public void preexistingMatchIsNotConfirmationOfOurWrite() {
         Fake f = new Fake();
         f.raw = 13;
         f.engine.configure("waze:1", 60);
         f.at(8_000, () -> { f.raw = 12; f.apply = true; });
-        f.until(13_999);
+        f.until(8_999);
         assertTrue(f.writes.isEmpty());
-        f.until(14_200);
-        assertEquals(List.of("14000:1=7", "14100:2=60", "14200:1=6"), f.writes);
+        f.until(9_200);
+        assertEquals(List.of("9000:1=7", "9100:2=60", "9200:1=6"), f.writes);
         assertFalse(f.fallback);
         assertTrue(f.logs.stream().anyMatch(line -> line.contains("cycle rearmed")));
     }
@@ -136,9 +136,9 @@ public final class NativeSpeedLimitEngineTest {
         f.engine.configure("waze:1", 60);
         f.at(10_000, () -> f.raw = 13);
         f.at(18_000, () -> { f.raw = 12; f.apply = true; });
-        f.until(9_100);
+        f.until(4_100);
         assertFalse(f.fallback);
-        f.until(9_101);
+        f.until(4_101);
         assertTrue(f.fallback);
         f.until(10_000);
         assertFalse(f.fallback);
@@ -146,7 +146,7 @@ public final class NativeSpeedLimitEngineTest {
         f.until(23_999);
         assertEquals(3, f.writes.size());
         f.until(24_200);
-        assertEquals(List.of("6000:1=7", "6100:2=60", "6200:1=6",
+        assertEquals(List.of("1000:1=7", "1100:2=60", "1200:1=6",
                 "24000:1=7", "24100:2=60", "24200:1=6"), f.writes);
     }
 
@@ -164,12 +164,14 @@ public final class NativeSpeedLimitEngineTest {
 
     @Test public void delayPreferenceChangeRecalculatesFromLastCauseWithoutResettingBudget() {
         Fake f = new Fake();
+        f.apply = true;
         f.engine.configure("waze:1", 60);
-        f.until(4_000);
-        assertTrue(f.writes.isEmpty());
+        f.at(12_000, () -> f.raw = 7);
+        f.until(14_000);
+        assertEquals(3, f.writes.size());
         f.engine.setDelayEnabled(false);
-        f.until(4_200);
-        assertEquals(4_200L, firstWriteAt(f));
+        f.until(14_200);
+        assertEquals("14200:1=7", f.writes.get(3));
 
         Fake retry = new Fake();
         retry.engine.setDelayEnabled(false);
@@ -195,9 +197,9 @@ public final class NativeSpeedLimitEngineTest {
         assertTrue(f.writes.isEmpty());
         f.readError = false;
         f.raw = 5;
-        f.until(15_999);
+        f.until(10_999);
         assertTrue(f.writes.isEmpty());
-        f.until(16_000);
+        f.until(11_000);
         assertEquals(1, countWrites(f, NativeSpeedLimitEngine.ROAD));
         assertTrue(f.logs.stream().anyMatch(line -> line.contains("outcome=io_error")));
     }
@@ -205,15 +207,15 @@ public final class NativeSpeedLimitEngineTest {
     @Test public void readErrorDuringConfirmationDoesNotUndoAttemptOrEnableAThird() {
         Fake f = new Fake();
         f.engine.configure("waze:1", 60);
-        f.until(6_000);
+        f.until(1_000);
         f.readError = true;
-        f.until(6_200);
-        f.until(9_101);
+        f.until(1_200);
+        f.until(4_101);
         assertTrue(f.fallback);
-        f.until(15_999);
+        f.until(10_999);
         assertEquals(3, f.writes.size());
         f.readError = false;
-        f.until(16_400);
+        f.until(11_400);
         assertEquals(6, f.writes.size());
         f.until(30_000);
         assertEquals(6, f.writes.size());
@@ -225,12 +227,12 @@ public final class NativeSpeedLimitEngineTest {
         Fake f = new Fake();
         f.failOperation = NativeSpeedLimitEngine.LIMIT;
         f.engine.configure("waze:1", 60);
-        f.until(6_200);
-        assertEquals(List.of("6000:1=7", "6100:2=60"), f.writes);
+        f.until(1_200);
+        assertEquals(List.of("1000:1=7", "1100:2=60"), f.writes);
         assertTrue(f.fallback);
         assertTrue(f.logs.stream().anyMatch(line -> line.contains("outcome=io_error")));
         f.failOperation = -1;
-        f.until(16_300);
+        f.until(11_300);
         assertEquals(5, f.writes.size());
         f.until(35_000);
         assertEquals(5, f.writes.size());
@@ -243,10 +245,10 @@ public final class NativeSpeedLimitEngineTest {
         f.until(5_000);
         assertTrue(f.writes.isEmpty());
         f.releasePending(true);
-        f.until(10_999);
+        f.until(5_999);
         assertTrue(f.writes.isEmpty());
-        f.until(11_000);
-        assertEquals(11_000L, firstWriteAt(f));
+        f.until(6_000);
+        assertEquals(6_000L, firstWriteAt(f));
     }
 
     @Test public void invalidNumericTargetFallsBackWithoutIoOrRetries() {
@@ -286,12 +288,12 @@ public final class NativeSpeedLimitEngineTest {
         Fake f = new Fake();
         f.deferOperation = NativeSpeedLimitEngine.ROAD;
         f.engine.configure("waze:1", 60);
-        f.until(6_000);
+        f.until(1_000);
         Consumer<NativeSpeedLimitEngine.Result> late = f.pending.callback;
         BooleanSupplier current = f.pending.current;
         f.engine.stop("Shanghai or source stop");
         assertFalse(current.getAsBoolean());
-        late.accept(new NativeSpeedLimitEngine.Result(true, 0, 6_000, 6_050, ""));
+        late.accept(new NativeSpeedLimitEngine.Result(true, 0, 1_000, 1_050, ""));
         f.until(30_000);
         assertEquals(1, f.writes.size());
         assertTrue(f.logs.stream().anyMatch(line -> line.contains("stale=true")));
@@ -300,9 +302,9 @@ public final class NativeSpeedLimitEngineTest {
     @Test public void sameInputDoesNotRestartAndBoundaryRejectsArbitraryWrites() {
         Fake f = new Fake();
         f.engine.configure("waze:1", 60);
-        f.until(5_000);
+        f.until(500);
         f.engine.configure("waze:1", 60);
-        f.until(6_200);
+        f.until(1_200);
         assertEquals(3, f.writes.size());
         assertFalse(NativeSpeedLimitEngine.validOperation(3, 60));
         assertFalse(NativeSpeedLimitEngine.validOperation(1, 8));
@@ -310,6 +312,196 @@ public final class NativeSpeedLimitEngineTest {
         assertFalse(NativeSpeedLimitEngine.validOperation(2, 54));
         assertFalse(NativeSpeedLimitEngine.validOperation(2, 1));
         assertTrue(NativeSpeedLimitEngine.validOperation(2, 130));
+    }
+
+    @Test public void onlyDriftAfterOurConfirmedWriteGetsTheExtraFiveSeconds() {
+        for (boolean enabled : new boolean[]{false, true}) {
+            Fake f = new Fake();
+            f.apply = true;
+            f.engine.setDelayEnabled(enabled);
+            f.engine.configure("waze:1", 60);
+            f.until(1_200);
+            assertEquals(13, f.raw);
+            assertEquals(3, f.writes.size());
+            f.at(12_000, () -> f.raw = 7);
+            long due = enabled ? 18_000 : 13_000;
+            f.until(due - 1);
+            assertEquals(3, f.writes.size());
+            f.until(due + 200);
+            assertEquals(due + ":1=7", f.writes.get(3));
+            assertEquals(6, f.writes.size());
+            f.until(30_000);
+            assertEquals(6, f.writes.size());
+        }
+    }
+
+    @Test public void furtherAdasChangeRestartsExtraWaitButMatchingTargetCancelsIt() {
+        Fake f = new Fake();
+        f.apply = true;
+        f.engine.configure("waze:1", 60);
+        f.at(12_000, () -> f.raw = 7);
+        f.at(14_000, () -> f.raw = 8);
+        f.at(15_000, () -> f.engine.configure("waze:1", 60));
+        f.until(19_999);
+        assertEquals(3, f.writes.size());
+        f.until(20_200);
+        assertEquals("20000:1=7", f.writes.get(3));
+        f.at(32_000, () -> f.raw = 7);
+        f.at(34_000, () -> f.raw = 13);
+        f.until(45_000);
+        assertEquals(6, f.writes.size());
+    }
+
+    @Test public void successfulSetterWithoutReadbackDoesNotQualifyForExtraWait() {
+        Fake f = new Fake();
+        f.engine.configure("waze:1", 60);
+        f.at(10_400, () -> f.raw = 7);
+        f.until(11_399);
+        assertEquals(3, f.writes.size());
+        f.until(11_400);
+        assertEquals("11400:1=7", f.writes.get(3));
+    }
+
+    @Test public void failedLimitAndUnrelatedMatchDoNotConfirmOurWrite() {
+        Fake f = new Fake();
+        f.failOperation = NativeSpeedLimitEngine.LIMIT;
+        f.engine.configure("waze:1", 60);
+        f.at(2_000, () -> f.raw = 13);
+        f.at(12_000, () -> f.raw = 7);
+        f.until(13_099);
+        assertEquals(2, f.writes.size());
+        f.until(13_200);
+        assertEquals("13100:1=7", f.writes.get(2));
+    }
+
+    @Test public void newTargetUsesBaseDelayAndItsReadbackUpdatesTheAcceptedBaseline() {
+        Fake f = new Fake();
+        f.apply = true;
+        f.engine.configure("waze:1", 60);
+        f.until(2_000);
+        f.engine.configure("waze:1", 55);
+        f.until(2_999);
+        assertEquals(3, f.writes.size());
+        f.until(3_200);
+        assertEquals("3000:1=7", f.writes.get(3));
+        f.until(4_000);
+        f.engine.configure("waze:1", 70);
+        f.at(4_400, () -> f.raw = 15);
+        // An OEM match of 70 did not replace our accepted 55 (raw 12).
+        f.at(6_000, () -> f.raw = 12);
+        f.until(6_999);
+        assertEquals(6, f.writes.size());
+        f.until(7_200);
+        assertEquals("7000:1=7", f.writes.get(6));
+    }
+
+    @Test public void targetReplacementRetainsAcceptedRawForTheNextAdasChange() {
+        for (boolean changedBeforeRefresh : new boolean[]{false, true}) {
+            Fake f = new Fake();
+            f.apply = true;
+            f.engine.configure("waze:1", 50);
+            f.until(2_000);
+            assertEquals(11, f.raw);
+            if (changedBeforeRefresh) f.raw = 9;
+            f.engine.configure("waze:1", 30);
+            if (!changedBeforeRefresh) f.at(2_400, () -> f.raw = 9);
+            long due = changedBeforeRefresh ? 8_000 : 8_400;
+            f.until(due - 1);
+            assertEquals(3, f.writes.size());
+            f.until(due + 200);
+            assertEquals(due + ":1=7", f.writes.get(3));
+            assertEquals(7, f.raw);
+        }
+    }
+
+    @Test public void newTargetMatchCancelsTheWaitEvenWithAnOlderAcceptedBaseline() {
+        Fake f = new Fake();
+        f.apply = true;
+        f.engine.configure("waze:1", 50);
+        f.until(2_000);
+        f.engine.configure("waze:1", 30);
+        f.at(2_400, () -> f.raw = 9);
+        f.at(3_000, () -> f.raw = 7);
+        f.until(20_000);
+        assertEquals(3, f.writes.size());
+    }
+
+    @Test public void ownWriteReadBackAfterTargetReplacementIsNotAnExternalChange() {
+        for (boolean laterDrift : new boolean[]{false, true}) {
+            Fake f = new Fake();
+            f.apply = true;
+            f.engine.configure("waze:1", 60);
+            f.until(2_000);
+            f.engine.configure("waze:1", 50);
+            f.until(3_150); // LIMIT succeeded; its readback has not arrived yet.
+            assertEquals(5, f.writes.size());
+            f.raw = 11;
+            f.engine.configure("waze:1", 30);
+            if (laterDrift) f.at(3_550, () -> f.raw = 9);
+            long due = laterDrift ? 9_550 : 4_150;
+            f.until(due - 1);
+            assertEquals(5, f.writes.size());
+            f.until(due + 200);
+            assertEquals(due + ":1=7", f.writes.get(5));
+        }
+    }
+
+    @Test public void newSessionOrStopAfterInputCancellationClearsAcceptedBaseline() {
+        for (boolean newSession : new boolean[]{false, true}) {
+            Fake f = new Fake();
+            f.apply = true;
+            f.engine.configure("waze:1", 50);
+            f.until(2_000);
+            if (!newSession) {
+                f.engine.invalidateTarget();
+                f.engine.stop("route-end");
+            }
+            f.engine.configure(newSession ? "waze:2" : "waze:1", 30);
+            f.at(2_400, () -> f.raw = 9);
+            f.until(3_399);
+            assertEquals(3, f.writes.size());
+            f.until(3_600);
+            assertEquals("3400:1=7", f.writes.get(3));
+        }
+    }
+
+    @Test public void dispatchedLimitSuccessAfterReplacementIsTrackedOnlyWithinItsSession() {
+        for (boolean stopped : new boolean[]{false, true}) {
+            Fake f = new Fake();
+            f.deferOperation = NativeSpeedLimitEngine.LIMIT;
+            f.engine.configure("waze:1", 50);
+            f.until(2_000);
+            assertNotNull(f.pending);
+            if (stopped) f.engine.stop("route-end");
+            f.engine.configure("waze:1", 30);
+            f.releasePending(true);
+            f.raw = 11;
+            f.at(2_400, () -> f.raw = 9);
+            long due = stopped ? 3_400 : 8_400;
+            f.until(due - 1);
+            assertEquals(2, f.writes.size());
+            f.until(due + 200);
+            assertEquals(due + ":1=7", f.writes.get(2));
+            assertEquals(due + 200 + ":1=6", f.writes.get(4));
+            assertEquals(1, countLogs(f, "stale=true trackedWrite=" + !stopped));
+        }
+    }
+
+    @Test public void olderSuccessfulCallbackCannotReplaceANewerAcceptedWrite() {
+        Fake f = new Fake();
+        f.apply = true;
+        f.deferOperation = NativeSpeedLimitEngine.LIMIT;
+        f.engine.configure("waze:1", 50);
+        f.until(2_000);
+        f.engine.configure("waze:1", 30);
+        f.until(4_000);
+        assertEquals(7, f.raw);
+        f.releasePending(true);
+        f.at(16_000, () -> f.raw = 11);
+        f.until(21_999);
+        assertEquals(5, f.writes.size());
+        f.until(22_200);
+        assertEquals("22000:1=7", f.writes.get(5));
     }
 
     private static long firstWriteAt(Fake fake) {
