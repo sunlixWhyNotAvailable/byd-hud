@@ -19,7 +19,7 @@ public final class HudExperimentalLayout {
     public static final String DURATION_EDGE_REFERENCE = "12 хв";
 
     // FullHud v15 baseline anchors. Adjustment offsets are intentionally zero.
-    public static final float BASE_ETA_X = 90f;
+    public static final float BASE_ETA_X = 86.5f;
     public static final float BASE_ETA_DURATION_Y = -2f;
     public static final float BASE_F7_X = 87f;
     public static final float BASE_F7_Y = -1f;

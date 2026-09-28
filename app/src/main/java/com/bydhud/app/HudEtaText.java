@@ -7,9 +7,10 @@ import java.util.SimpleTimeZone;
 
 /** Pure metric selection/formatting shared by the street field and separate HUD rows. */
 final class HudEtaText {
-    static final HudEtaText EMPTY = new HudEtaText("", "", "", "");
+    static final HudEtaText EMPTY = new HudEtaText("", "", "", "", "");
     final String arrival;
     final String duration;
+    final String compactDuration;
     final String remainingDistance;
     final String diagnostics;
 
@@ -18,10 +19,16 @@ final class HudEtaText {
     }
 
     HudEtaText(String arrival, String duration, String remainingDistance, String diagnostics) {
+        this(arrival, duration, remainingDistance, diagnostics, duration);
+    }
+
+    HudEtaText(String arrival, String duration, String remainingDistance,
+               String diagnostics, String compactDuration) {
         this.arrival = arrival;
         this.duration = duration;
         this.remainingDistance = remainingDistance;
         this.diagnostics = diagnostics;
+        this.compactDuration = compactDuration;
     }
 
     static HudEtaText from(DirectTbtFrame frame, DirectTbtPayload.Options options) {
@@ -54,10 +61,12 @@ final class HudEtaText {
             arrival = formatter.format(new Date(eta.getArrivalTimeEpochMs()));
         }
         boolean ua = options.presentation.ukrainian;
+        long seconds = time.getRemainingTimeSeconds();
         return new HudEtaText(arrival,
-                options.showRemainingTime ? duration(time.getRemainingTimeSeconds(), ua) : "",
+                options.showRemainingTime ? duration(seconds, ua) : "",
                 options.showRemainingDistance ? distance(distance.getRemainingDistanceMeters(), ua) : "",
-                resolved.diagnostics());
+                resolved.diagnostics(),
+                options.showRemainingTime ? compactDuration(seconds, ua) : "");
     }
 
     private static DirectTbtFrame.TravelMetrics select(boolean wholePreferred,
@@ -73,6 +82,14 @@ final class HudEtaText {
         String minutePart = minutes % 60 + (ua ? " хв" : " min");
         return minutes < 60 ? minutes + (ua ? " хв" : " min")
                 : minutes / 60 + (ua ? " г " : " h ") + minutePart;
+    }
+
+    static String compactDuration(long seconds, boolean ua) {
+        if (seconds < 0) return "";
+        long minutes = seconds / 60 + (seconds % 60 == 0 ? 0 : 1);
+        String minutePart = minutes % 60 + (ua ? "хв" : "m");
+        return minutes < 60 ? minutePart
+                : minutes / 60 + (ua ? "г " : "h ") + minutePart;
     }
 
     static String distance(long meters, boolean ua) {

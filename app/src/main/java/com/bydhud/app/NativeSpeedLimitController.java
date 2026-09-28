@@ -23,6 +23,7 @@ final class NativeSpeedLimitController {
     private String owner = "";
     private int mode, limit;
     private boolean fallback;
+    private long mapLiveSession;
 
     NativeSpeedLimitController(Context context, Handler worker, BooleanSupplier outputActive,
             Consumer<String> bitmapChanged) {
@@ -59,6 +60,7 @@ final class NativeSpeedLimitController {
     }
 
     void refresh(String owner, long session, int limit) {
+        if (mapLiveSession != 0L) endMapLiveSession(mapLiveSession, "owner-changed");
         int primary = HudPrefs.speedLimitMode(context);
         if (!this.owner.equals(owner)) stop("owner-changed");
         this.owner = owner;
@@ -75,8 +77,38 @@ final class NativeSpeedLimitController {
         publishBitmap();
     }
 
+    void refreshMapLive(long session, int limit) {
+        if (session <= 0L) return;
+        owner = "manual";
+        mapLiveSession = session;
+        mode = HudPrefs.speedLimitMode(context);
+        this.limit = limit;
+        String engineSession = mapLiveEngineSession(session);
+        int target = NativeSpeedLimitEngine.requestedTarget(
+                mode == HudPrefs.SPEED_LIMIT_NATIVE, limit);
+        if (!outputActive.getAsBoolean() || !mapLiveModeAllowed() || target < 0) {
+            engine.pauseMapLive(engineSession,
+                    !mapLiveModeAllowed() ? "map-mode-off" : "no-native-operation");
+            fallback = false;
+            publishBitmap();
+            return;
+        }
+        engine.setDelayEnabled(HudPrefs.isNativeSpeedLimitDelayEnabled(context));
+        engine.configureMapLive(engineSession, target);
+        publishBitmap();
+    }
+
+    void endMapLiveSession(long session, String reason) {
+        if (session <= 0L || mapLiveSession != session) return;
+        engine.endMapLiveSession(mapLiveEngineSession(session), reason);
+        mapLiveSession = 0L;
+        fallback = false;
+        publishBitmap();
+    }
+
     private boolean allowed() {
         return outputAllowed()
+                && (mapLiveSession == 0L || mapLiveModeAllowed())
                 && ("manual".equals(owner) || DirectSpeedLimitStore.snapshot(owner).getKph() == limit);
     }
 
@@ -86,8 +118,21 @@ final class NativeSpeedLimitController {
                 && HudPrefs.speedLimitMode(context) == mode;
     }
 
+    private boolean mapLiveModeAllowed() {
+        return mapLiveSession == 0L
+                || HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL;
+    }
+
+    private static String mapLiveEngineSession(long session) {
+        return "manual:map-live:" + session;
+    }
+
     void stop(String reason) {
-        engine.stop(reason);
+        if (mapLiveSession != 0L) {
+            engine.pauseMapLive(mapLiveEngineSession(mapLiveSession), reason);
+        } else {
+            engine.stop(reason);
+        }
         fallback = false;
         publishBitmap();
     }

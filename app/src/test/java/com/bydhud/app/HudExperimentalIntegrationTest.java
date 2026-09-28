@@ -51,7 +51,7 @@ public class HudExperimentalIntegrationTest {
         DirectTbtPayload.Prepared out = DirectTbtPayload.prepare(frame(), options(false, false, 1), compositor(calls));
         assertEquals(0, calls.get(0).maneuverPng.length);
         assertEquals("03:00", calls.get(0).arrival);
-        assertEquals("25 min", calls.get(0).duration);
+        assertEquals("25m", calls.get(0).duration);
         assertEquals(0, calls.get(1).lanePng.length);
         assertEquals("8.4 km", calls.get(1).remaining);
         assertTrue(out.maneuverPngBytes() > 0);
@@ -76,8 +76,25 @@ public class HudExperimentalIntegrationTest {
         List<HudExperimentalCompositor.Inputs> calls = new ArrayList<>();
         DirectTbtPayload.prepare(arrivalOnly, options(true, true, 1), compositor(calls), now);
         assertEquals("01:42", calls.get(0).arrival);
-        assertEquals("2 min", calls.get(0).duration);
+        assertEquals("2m", calls.get(0).duration);
         assertEquals("8.4 km", calls.get(1).remaining);
+    }
+
+    @Test public void mapOptionsReachTheSharedCompositorAndCopyBuildersPreserveThem() {
+        HudMapSettings settings = HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL)
+                .withValue(HudMapSettings.CONTROL_MAP_X, 25);
+        DirectTbtPayload.Options calibrated = options(true, true, 1)
+                .withMapSettings(settings).withMapCalibration(true);
+        DirectTbtPayload.Options copied = calibrated.withPresentation(style(1, 1))
+                .withSpeedLimitMode(HudPrefs.SPEED_LIMIT_COMPOSITE);
+        assertFalse(DirectTbtPayload.Options.ALL.mapCalibration);
+        assertTrue(copied.mapCalibration);
+        assertEquals(settings, copied.mapSettings);
+
+        List<HudExperimentalCompositor.Inputs> calls = new ArrayList<>();
+        DirectTbtPayload.prepare(frame(), copied, compositor(calls));
+        assertTrue(calls.get(0).mapCalibration);
+        assertEquals(settings, calls.get(0).mapSettings);
     }
 
     @Test public void warningDoesNotReservePrimarySpeedSlotInSeparateMode() {

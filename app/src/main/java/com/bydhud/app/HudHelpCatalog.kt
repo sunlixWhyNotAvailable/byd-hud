@@ -16,6 +16,7 @@ internal enum class HudHelpTopicId {
     RemainingTime,
     RemainingDistance,
     SpeedLimitMode,
+    MapOutputMode,
     SpeedLimitNativeFallbackMode,
     SpeedLimitFallback,
     SpeedLimitCompositeField,
@@ -49,6 +50,20 @@ internal data class HudHelpTopic(
 
 internal object HudHelpCatalog {
     val topics: List<HudHelpTopic> = listOf(
+        topic(HudHelpTopicId.MapOutputMode,
+            "Режим виводу мапи", "Map output mode", "Режим вывода карты",
+            frame("Вимкнено", "Off", "Выключено",
+                "Приклад розташування на Denza N9",
+                "Example layout on Denza N9",
+                "Пример расположения на Denza N9", R.drawable.hud_help_baseline),
+            frame("Штатний", "Native", "Штатный",
+                "Мапа праворуч від швидкості. Приклад розташування на Denza N9",
+                "Map to the right of the speed. Example layout on Denza N9",
+                "Карта справа от скорости. Пример расположения на Denza N9", R.drawable.hud_help_baseline),
+            frame("Експериментальний", "Experimental", "Экспериментальный",
+                "Тестове зображення для HUD SL07. Розташування визначимо після тестів",
+                "Test image for the SL07 HUD. Placement will be determined after testing",
+                "Тестовое изображение для HUD SL07. Расположение определим после тестов", R.drawable.hud_help_baseline)),
         topic(HudHelpTopicId.EtaStreetFormat, "Формат ЕТА у полі вулиці", "ETA format in street field", "Формат ETA в поле улицы",
             frame("Приставити", "Prepend", "Дополнять", "", "", "", R.drawable.hud_help_eta_street_1),
             frame("Замінити", "Replace", "Заменять", "", "", "", R.drawable.hud_help_eta_replace_1)),

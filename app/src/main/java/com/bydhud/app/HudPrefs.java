@@ -45,6 +45,14 @@ final class HudPrefs {
             "speed_limit_maneuver_overlay_size";
     private static final String KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE =
             "speed_limit_lane_overlay_size";
+    private static final String KEY_MAP_MODE = "map_mode";
+    private static final String KEY_MAP_PRESET = "map_preset";
+    private static final String KEY_MAP_CUSTOM_X = "map_custom_x";
+    private static final String KEY_MAP_CUSTOM_Y = "map_custom_y";
+    private static final String KEY_MAP_CUSTOM_SCALE = "map_custom_scale";
+    private static final String KEY_MAP_CUSTOM_LANE_X = "map_custom_lane_x";
+    private static final String KEY_MAP_CUSTOM_LANE_Y = "map_custom_lane_y";
+    private static final String KEY_MAP_CUSTOM_LANE_SCALE = "map_custom_lane_scale";
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     //keeps the legacy boolean only as a migration input for the mode selector.
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
@@ -470,6 +478,37 @@ final class HudPrefs {
         prefs(context).edit().putInt(KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE,
                 normalizeSpeedLimitLaneOverlaySize(size)).apply();
         markOutputOptionChanged(KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE);
+    }
+
+    static HudMapSettings mapSettings(Context context) {
+        SharedPreferences values = prefs(context);
+        HudMapSettings.Geometry defaults = HudMapSettings.defaults().custom;
+        return new HudMapSettings(
+                values.getInt(KEY_MAP_MODE, HudMapSettings.OFF),
+                values.getInt(KEY_MAP_PRESET, HudMapSettings.PRESET_CUSTOM),
+                new HudMapSettings.Geometry(
+                        values.getInt(KEY_MAP_CUSTOM_X, defaults.mapX),
+                        values.getInt(KEY_MAP_CUSTOM_Y, defaults.mapY),
+                        values.getInt(KEY_MAP_CUSTOM_SCALE, defaults.mapScale),
+                        values.getInt(KEY_MAP_CUSTOM_LANE_X, defaults.laneX),
+                        values.getInt(KEY_MAP_CUSTOM_LANE_Y, defaults.laneY),
+                        values.getInt(KEY_MAP_CUSTOM_LANE_SCALE, defaults.laneScale)));
+    }
+
+    static void setMapSettings(Context context, HudMapSettings settings) {
+        HudMapSettings value = settings == null ? HudMapSettings.defaults() : settings;
+        HudMapSettings.Geometry custom = value.custom;
+        prefs(context).edit()
+                .putInt(KEY_MAP_MODE, value.mode)
+                .putInt(KEY_MAP_PRESET, value.preset)
+                .putInt(KEY_MAP_CUSTOM_X, custom.mapX)
+                .putInt(KEY_MAP_CUSTOM_Y, custom.mapY)
+                .putInt(KEY_MAP_CUSTOM_SCALE, custom.mapScale)
+                .putInt(KEY_MAP_CUSTOM_LANE_X, custom.laneX)
+                .putInt(KEY_MAP_CUSTOM_LANE_Y, custom.laneY)
+                .putInt(KEY_MAP_CUSTOM_LANE_SCALE, custom.laneScale)
+                .apply();
+        markOutputOptionChanged("map_settings");
     }
 
     static int normalizeSpeedLimitMode(int mode) {

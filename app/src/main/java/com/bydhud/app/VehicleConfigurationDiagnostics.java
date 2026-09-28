@@ -213,6 +213,7 @@ final class VehicleConfigurationDiagnostics {
                 .put("speedLimitPlacement", HudPrefs.speedLimitCompositePlacement(context))
                 .put("speedLimitManeuverSize", HudPrefs.speedLimitManeuverOverlaySize(context))
                 .put("speedLimitLaneSize", HudPrefs.speedLimitLaneOverlaySize(context))
+                .put("mapLayout", mapSettings(HudPrefs.mapSettings(context)))
                 .put("tbtWithoutHud", HudPrefs.isTbtWithoutHudOutputEnabled(context))
                 .put("switchToTbtOnStart", HudPrefs.isSwitchToTbtOnHudStartEnabled(context))
                 .put("steeringTransferProfiles", steeringTransfers)
@@ -223,6 +224,18 @@ final class VehicleConfigurationDiagnostics {
                         context, HudPrefs.DASHBOARD_MODE_FULL))
                 .put("miniProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_PARTIAL)))
                 .put("fullProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_FULL)));
+    }
+
+    static JSONObject mapSettings(HudMapSettings settings) throws Exception {
+        return new JSONObject().put("mode", settings.mode).put("preset", settings.preset)
+                .put("effective", mapGeometry(settings.geometry()))
+                .put("custom", mapGeometry(settings.custom));
+    }
+
+    private static JSONObject mapGeometry(HudMapSettings.Geometry geometry) throws Exception {
+        return new JSONObject().put("mapX", geometry.mapX).put("mapY", geometry.mapY)
+                .put("mapScale", geometry.mapScale).put("laneX", geometry.laneX)
+                .put("laneY", geometry.laneY).put("laneScale", geometry.laneScale);
     }
 
     private static JSONObject profile(DashboardProjectionPolicy.Profile profile) throws Exception {

@@ -124,6 +124,8 @@ final class NavHudLiveSender {
                 .put("lifecycleGeneration", tbtLifecycleToken).put("sourceSwitchGeneration", sourceSwitchToken)
                 .put("manualTbtActive", manualTbtActive).put("manualTbtGeneration", manualTbtGeneration)
                 .put("manualHudCheckRunning", hudCheckState.running)
+                .put("manualMapLiveRunning", mapLiveState.running)
+                .put("manualMapLiveSession", mapLiveState.session)
                 .put("wazeObserver", tbtWazeObserver).put("gmapsObserver", tbtGMapsObserver)
                 .put("waze", waze).put("gmaps", gmaps);
     }
@@ -134,6 +136,46 @@ final class NavHudLiveSender {
         UserRuntimeSession.PROCESS.activate();
         ShanghaiTestController.get(context).recoverOwned("runtime-enable");
         return true;
+    }
+
+    static HudMapLiveState mapLiveSnapshot() {
+        NavHudLiveSender current = instance;
+        return current == null ? HudMapLiveState.STOPPED : current.mapLiveState;
+    }
+
+    static void startMapLive(Context context) {
+        NavHudLiveSender current = get(context);
+        if (HudPrefs.isUserShutdownActive(context)) {
+            current.handler.post(() -> current.log("map_live start rejected reason=user-shutdown"));
+            return;
+        }
+        if (ShanghaiOutputGate.isSuspended()) {
+            current.handler.post(() -> current.log("map_live start rejected reason=shanghai-active"));
+            return;
+        }
+        if (HudPrefs.mapSettings(context).mode != HudMapSettings.EXPERIMENTAL) {
+            current.handler.post(() -> current.log("map_live start rejected reason=map-mode-not-experimental"));
+            return;
+        }
+        if (!activateUserRuntime(context)) {
+            current.log("map_live start rejected reason=user-shutdown");
+            return;
+        }
+        current.handler.post(current::requestMapLiveStartOnWorker);
+    }
+
+    static void stopMapLiveIfRunning(String reason) {
+        NavHudLiveSender current = instance;
+        if (current != null) current.handler.post(() -> current.stopMapLiveOnWorker(reason));
+    }
+
+    static void refreshMapLiveSettings(String reason) {
+        NavHudLiveSender current = instance;
+        if (current == null) return;
+        HudMapLiveState snapshot = current.mapLiveState;
+        if (!snapshot.running) return;
+        current.handler.post(() -> current.refreshMapLiveSettingsOnWorker(
+                snapshot.session, reason));
     }
 
     static void onNativeSpeedBitmapChanged(String owner) {
@@ -459,6 +501,114 @@ final class NavHudLiveSender {
         if (current != null) current.updateHudCheck(HudCheckState::stop, reason);
     }
 
+    static boolean mapLiveStartAllowedForTest(
+            boolean runtimeEnabled, boolean shanghai, int mapMode) {
+        return runtimeEnabled && !shanghai && mapMode == HudMapSettings.EXPERIMENTAL;
+    }
+
+    static boolean isCurrentMapLiveSessionForTest(HudMapLiveState state, long session) {
+        return state != null && state.running && session > 0L && state.session == session;
+    }
+
+    private void requestMapLiveStartOnWorker() {
+        if (mapLiveState.running || mapLiveStartPending) return;
+        long request = ++mapLiveRequestGeneration;
+        String rejected = mapLiveStartGateFailure();
+        if (!rejected.isEmpty()) {
+            log("map_live start rejected reason=" + rejected);
+            return;
+        }
+        mapLiveStartPending = true;
+        stopManualOnWorker("map-live-start-replaces-manual-test", false,
+                () -> acceptMapLiveStart(request));
+    }
+
+    private void acceptMapLiveStart(long request) {
+        if (!mapLiveStartPending || request != mapLiveRequestGeneration) return;
+        mapLiveStartPending = false;
+        String rejected = mapLiveStartGateFailure();
+        if (!rejected.isEmpty()) {
+            log("map_live start rejected reason=" + rejected);
+            return;
+        }
+        long session = ++mapLiveSessionCounter;
+        mapLiveFrame = HudMapLiveFixture.frame(
+                System.currentTimeMillis(), SystemClock.elapsedRealtime());
+        mapLiveManualState = HudMapLiveFixture.manualState();
+        mapLiveSettings = HudPrefs.mapSettings(context);
+        mapLiveState = new HudMapLiveState(true, session);
+        log("map_live started session=" + session + " " + mapLiveSettings.diagnostics());
+        startManualOnWorker(mapLiveManualState, "map-live-start");
+        scheduleMapLiveTick(session);
+        MainActivity.publishSharedUiStateChange();
+    }
+
+    private String mapLiveStartGateFailure() {
+        if (!isRuntimeEnabled() || HudPrefs.isUserShutdownActive(context)) {
+            return "runtime-disabled";
+        }
+        if (ShanghaiOutputGate.isSuspended()) return "shanghai-active";
+        if (HudPrefs.mapSettings(context).mode != HudMapSettings.EXPERIMENTAL) {
+            return "map-mode-not-experimental";
+        }
+        return "";
+    }
+
+    private void refreshMapLiveSettingsOnWorker(long session, String reason) {
+        if (!isCurrentMapLiveSessionForTest(mapLiveState, session)) return;
+        String rejected = mapLiveStartGateFailure();
+        if (!rejected.isEmpty()) {
+            stopMapLiveOnWorker("settings-gate:" + rejected);
+            return;
+        }
+        HudMapSettings settings = HudPrefs.mapSettings(context);
+        if (!settings.equals(mapLiveSettings)) {
+            mapLiveSettings = settings;
+            log("map_live settings session=" + session + " reason=" + safeReason(reason)
+                    + " " + settings.diagnostics());
+        }
+        if (manualTbtActive) {
+            publishManualOnWorker(mapLiveManualState, "map-live-settings:" + safeReason(reason));
+        }
+    }
+
+    private void stopMapLiveOnWorker(String reason) {
+        ++mapLiveRequestGeneration;
+        mapLiveStartPending = false;
+        if (!mapLiveState.running) return;
+        long session = mapLiveState.session;
+        if (mapLiveTick != null) handler.removeCallbacks(mapLiveTick);
+        mapLiveTick = null;
+        mapLiveFrame = null;
+        mapLiveManualState = null;
+        mapLiveSettings = null;
+        mapLiveState = HudMapLiveState.STOPPED;
+        log("map_live stopped session=" + session + " reason=" + safeReason(reason));
+        hudOutput.endMapLiveSession(session, safeReason(reason));
+        stopManualOnWorker("map-live-stop:" + safeReason(reason), true);
+        MainActivity.publishSharedUiStateChange();
+    }
+
+    private void scheduleMapLiveTick(long session) {
+        mapLiveTick = () -> tickMapLive(session);
+        handler.postDelayed(mapLiveTick, SEND_INTERVAL_MS);
+    }
+
+    private void tickMapLive(long session) {
+        if (!isCurrentMapLiveSessionForTest(mapLiveState, session)) return;
+        String rejected = mapLiveStartGateFailure();
+        if (!manualTbtActive || !rejected.isEmpty()) {
+            stopMapLiveOnWorker(!rejected.isEmpty() ? "heartbeat-gate:" + rejected
+                    : "manual-owner-ended");
+            return;
+        }
+        if (latestManualTbtState != null) {
+            tbtPublisher.publishManualFrame(MANUAL_TBT_OWNER, manualTbtGeneration,
+                    latestManualTbtState, "map-live-hold");
+        }
+        scheduleMapLiveTick(session);
+    }
+
     private void tickHudCheck() {
         if (!hudCheckState.running || !manualTbtActive || !isRuntimeEnabled()) return;
         HudCheckState previous = hudCheckState;
@@ -539,7 +689,11 @@ final class NavHudLiveSender {
         tbtPublisher.publishManualFrame(
                 MANUAL_TBT_OWNER, manualTbtGeneration,
                 latestManualTbtState, "manual-frame:" + safeReason(reason));
-        hudOutput.publishManual(state, reason);
+        if (mapLiveState.running && mapLiveFrame != null) {
+            hudOutput.publishManualMapLive(state, mapLiveFrame, mapLiveState.session, reason);
+        } else {
+            hudOutput.publishManual(state, reason);
+        }
         log("manual tbt frame generation=" + manualTbtGeneration
                 + " native=" + latestManualTbtState.maneuverId
                 + " distanceM=" + latestManualTbtState.distanceToIntersection
@@ -640,6 +794,14 @@ final class NavHudLiveSender {
     private boolean manualTbtActive;
     private volatile HudCheckState hudCheckState = IDLE_HUD_CHECK;
     private final Runnable hudCheckTick = this::tickHudCheck;
+    private volatile HudMapLiveState mapLiveState = HudMapLiveState.STOPPED;
+    private DirectTbtFrame mapLiveFrame;
+    private HudState mapLiveManualState;
+    private HudMapSettings mapLiveSettings;
+    private boolean mapLiveStartPending;
+    private long mapLiveRequestGeneration;
+    private long mapLiveSessionCounter;
+    private Runnable mapLiveTick;
     private long manualTbtGeneration;
     private HudState latestManualSourceState;
     private HudState latestManualTbtState;
@@ -3965,6 +4127,10 @@ final class NavHudLiveSender {
 
     private void onOutputPreferenceChangedOnMain(String key) {
         logChangedOutputPreferences(key);
+        if (mapLiveState.running) {
+            refreshMapLiveSettingsOnWorker(mapLiveState.session, key);
+            return;
+        }
         if (!isRuntimeEnabled()) return;
         if (!HudPrefs.KEY_TEXT_TRANSLITERATION.equals(key)) return;
 

@@ -46,9 +46,10 @@ public final class HudExperimentalCompositor {
     public Result compose(Inputs supplied) {
         Inputs input = supplied == null ? Inputs.empty() : supplied;
         Inputs upper = new Inputs(input.arrival, input.duration, "", input.maneuverPng,
-                null, null, null, input.colors);
+                null, null, null, input.colors, input.mapSettings, input.mapCalibration);
         Inputs lower = new Inputs("", "", input.remaining, null,
-                input.lanePng, input.warningPng, input.warningDistance, input.colors);
+                input.lanePng, input.warningPng, input.warningDistance, input.colors,
+                input.mapSettings, input.mapCalibration);
         ContentKey upperKey = ContentKey.from(upper);
         ContentKey lowerKey = ContentKey.from(lower);
         synchronized (cacheLock) {
@@ -70,14 +71,15 @@ public final class HudExperimentalCompositor {
     public static boolean hasMeaningfulF8Content(Inputs input) {
         if (input == null) return false;
         return meaningful(input.arrival) || meaningful(input.duration)
-                || input.maneuverPng.length > 0;
+                || input.maneuverPng.length > 0 || calibrationMapEnabled(input);
     }
 
     /** Pure content predicate used by the sender before scheduling optional planes. */
     public static boolean hasMeaningfulF7Content(Inputs input) {
         if (input == null) return false;
         return meaningful(input.remaining) || input.lanePng.length > 0
-                || input.warningPng.length > 0 || meaningful(input.warningDistance);
+                || input.warningPng.length > 0 || meaningful(input.warningDistance)
+                || calibrationMapEnabled(input);
     }
 
     /**
@@ -121,9 +123,14 @@ public final class HudExperimentalCompositor {
                     HudExperimentalLayout.F8_HEIGHT_PX);
             if (plane == null) return null;
             Canvas canvas = new Canvas(plane);
+            if (calibrationMapEnabled(input)) {
+                drawn |= drawCalibrationMap(canvas, false, plane.getHeight(),
+                        input.mapSettings.geometry());
+            }
             maneuver = decodePng(input.maneuverPng);
             if (maneuver != null) {
-                drawn |= drawPrimaryArt(canvas, maneuver, plane.getWidth(), plane.getHeight(), false);
+                drawn |= drawPrimaryArt(canvas, maneuver, plane.getWidth(), plane.getHeight(), false,
+                        input.mapSettings);
             }
             if (eta != null) {
                 drawn |= drawEtaRows(canvas, eta, false, plane.getHeight(),
@@ -149,9 +156,14 @@ public final class HudExperimentalCompositor {
                     HudExperimentalLayout.F7_HEIGHT_PX);
             if (plane == null) return null;
             Canvas canvas = new Canvas(plane);
+            if (calibrationMapEnabled(input)) {
+                drawn |= drawCalibrationMap(canvas, true, plane.getHeight(),
+                        input.mapSettings.geometry());
+            }
             lane = decodePng(input.lanePng);
             if (lane != null) {
-                drawn |= drawPrimaryArt(canvas, lane, plane.getWidth(), plane.getHeight(), true);
+                drawn |= drawPrimaryArt(canvas, lane, plane.getWidth(), plane.getHeight(), true,
+                        input.mapSettings);
             }
             warning = decodePng(input.warningPng);
             drawn |= drawWarning(canvas, warning, input.warningDistance,
@@ -185,9 +197,9 @@ public final class HudExperimentalCompositor {
             for (char digit = '0'; digit <= '9'; digit++) {
                 widestDigit = Math.max(widestDigit, metricsPaint.measureText(String.valueOf(digit)));
             }
-            float durationCapacity = 4f * widestDigit + 3f * metricsPaint.measureText(" ")
+            float durationCapacity = 4f * widestDigit + metricsPaint.measureText(" ")
                     + Math.max(metricsPaint.measureText("г") + metricsPaint.measureText("хв"),
-                    metricsPaint.measureText("h") + metricsPaint.measureText("min"));
+                    metricsPaint.measureText("h") + metricsPaint.measureText("m"));
             durationCapacity = Math.max(durationCapacity, metricsPaint.measureText(input.duration));
             int rasterWidth = HudExperimentalLayout.valueRasterWidth(
                     outerRowsWidth, durationCapacity, referenceWidth);
@@ -264,8 +276,16 @@ public final class HudExperimentalCompositor {
     }
 
     private static boolean drawPrimaryArt(Canvas canvas, Bitmap artwork, int width, int height,
-                                          boolean lanes) {
+                                          boolean lanes, HudMapSettings mapSettings) {
         if (artwork.getWidth() <= 0 || artwork.getHeight() <= 0) return false;
+        if (lanes && mapSettings.mode == HudMapSettings.EXPERIMENTAL) {
+            HudMapGeometry.Bounds bounds = HudMapGeometry.laneBounds(width, height,
+                    artwork.getWidth(), artwork.getHeight(), mapSettings.geometry());
+            canvas.drawBitmap(artwork, null,
+                    new RectF(bounds.left, bounds.top, bounds.right, bounds.bottom),
+                    new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG));
+            return true;
+        }
         float top = HudExperimentalLayout.primaryArtTop(height);
         float bottom = HudExperimentalLayout.primaryArtBottom(height);
         float targetHeight = bottom - top;
@@ -283,6 +303,42 @@ public final class HudExperimentalCompositor {
         canvas.drawBitmap(artwork, null,
                 new RectF(left, top, left + targetWidth, top + targetHeight),
                 new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG));
+        return true;
+    }
+
+    private static boolean calibrationMapEnabled(Inputs input) {
+        return input.mapCalibration && input.mapSettings.mode == HudMapSettings.EXPERIMENTAL;
+    }
+
+    private static boolean drawCalibrationMap(Canvas canvas, boolean lower, int fieldHeight,
+                                             HudMapSettings.Geometry settings) {
+        HudMapGeometry map = new HudMapGeometry(settings);
+        int split = map.splitRow();
+        int sourceTop = lower ? split : 0;
+        int sourceBottom = lower ? HudMapGeometry.SOURCE_HEIGHT : split;
+        if (sourceTop == sourceBottom) return false;
+        RectF destination = new RectF(
+                map.x(lower, map.left(fieldHeight), fieldHeight),
+                map.y(lower, map.sourceY(sourceTop), fieldHeight),
+                map.x(lower, map.right(fieldHeight), fieldHeight),
+                map.y(lower, map.sourceY(sourceBottom), fieldHeight));
+        float border = Math.min(1f, Math.min(destination.width(), destination.height()) / 2f);
+        Paint edge = new Paint();
+        edge.setColor(Color.RED);
+        canvas.drawRect(destination.left, destination.top, destination.right,
+                destination.top + border, edge);
+        canvas.drawRect(destination.left, destination.bottom - border, destination.right,
+                destination.bottom, edge);
+        canvas.drawRect(destination.left, destination.top, destination.left + border,
+                destination.bottom, edge);
+        canvas.drawRect(destination.right - border, destination.top, destination.right,
+                destination.bottom, edge);
+        if (split > 0 && split < HudMapGeometry.SOURCE_HEIGHT) {
+            edge.setColor(Color.YELLOW);
+            float seamEdge = lower ? destination.top : destination.bottom - border;
+            canvas.drawRect(destination.left, seamEdge, destination.right,
+                    seamEdge + border, edge);
+        }
         return true;
     }
 
@@ -409,10 +465,20 @@ public final class HudExperimentalCompositor {
         public final byte[] warningPng;
         public final String warningDistance;
         public final Colors colors;
+        public final HudMapSettings mapSettings;
+        public final boolean mapCalibration;
 
         public Inputs(String arrival, String duration, String remaining,
                       byte[] maneuverPng, byte[] lanePng, byte[] warningPng,
                       String warningDistance, Colors colors) {
+            this(arrival, duration, remaining, maneuverPng, lanePng, warningPng,
+                    warningDistance, colors, HudMapSettings.defaults(), false);
+        }
+
+        public Inputs(String arrival, String duration, String remaining,
+                      byte[] maneuverPng, byte[] lanePng, byte[] warningPng,
+                      String warningDistance, Colors colors, HudMapSettings mapSettings,
+                      boolean mapCalibration) {
             this.arrival = safeText(arrival);
             this.duration = safeText(duration);
             this.remaining = safeText(remaining);
@@ -421,6 +487,8 @@ public final class HudExperimentalCompositor {
             this.warningPng = cloneBytes(warningPng);
             this.warningDistance = safeText(warningDistance);
             this.colors = colors == null ? Colors.defaults() : colors;
+            this.mapSettings = mapSettings == null ? HudMapSettings.defaults() : mapSettings;
+            this.mapCalibration = mapCalibration;
         }
 
         public Inputs(String arrival, String duration, String remaining,
@@ -503,6 +571,8 @@ public final class HudExperimentalCompositor {
         private final byte[] warningPng;
         private final String warningDistance;
         private final Colors colors;
+        private final HudMapSettings mapSettings;
+        private final boolean mapCalibration;
 
         private ContentKey(Inputs input) {
             arrival = input.arrival;
@@ -513,6 +583,8 @@ public final class HudExperimentalCompositor {
             warningPng = input.warningPng.clone();
             warningDistance = input.warningDistance;
             colors = input.colors;
+            mapSettings = input.mapSettings;
+            mapCalibration = input.mapCalibration;
         }
 
         private static ContentKey from(Inputs input) {
@@ -534,6 +606,8 @@ public final class HudExperimentalCompositor {
                     && Arrays.equals(maneuverPng, other.maneuverPng)
                     && Arrays.equals(lanePng, other.lanePng)
                     && Arrays.equals(warningPng, other.warningPng)
+                    && mapSettings.equals(other.mapSettings)
+                    && mapCalibration == other.mapCalibration
                     && (!arrivalColorRelevant || colors.arrival == other.colors.arrival)
                     && (!durationColorRelevant || colors.remainingTime == other.colors.remainingTime)
                     && (!remainingColorRelevant
@@ -551,6 +625,8 @@ public final class HudExperimentalCompositor {
             result = 31 * result + Arrays.hashCode(lanePng);
             result = 31 * result + Arrays.hashCode(warningPng);
             result = 31 * result + warningDistance.hashCode();
+            result = 31 * result + mapSettings.hashCode();
+            result = 31 * result + (mapCalibration ? 1 : 0);
             if (meaningful(arrival)) result = 31 * result + colors.arrival;
             if (meaningful(duration)) result = 31 * result + colors.remainingTime;
             if (meaningful(remaining)) result = 31 * result + colors.remainingDistance;

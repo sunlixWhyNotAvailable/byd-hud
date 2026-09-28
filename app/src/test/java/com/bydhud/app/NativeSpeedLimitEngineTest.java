@@ -150,6 +150,103 @@ public final class NativeSpeedLimitEngineTest {
                 "24000:1=7", "24100:2=60", "24200:1=6"), f.writes);
     }
 
+    @Test public void mapLiveAlreadyMatching75IsTerminalAfterLaterRawDrift() {
+        Fake f = new Fake();
+        f.raw = NativeSpeedLimitEngine.expectedRaw(75);
+        f.engine.configureMapLive("manual:map-live:1", 75);
+        f.raw--;
+        f.until(20_000);
+
+        assertTrue(f.writes.isEmpty());
+        assertTrue(f.fallback);
+    }
+
+    @Test public void mapLiveConfirmed75CancelsUnusedRetryAndNeverWritesAfterDrift() {
+        Fake f = new Fake();
+        f.apply = true;
+        f.engine.configureMapLive("manual:map-live:1", 75);
+        f.until(1_200);
+        assertEquals(List.of("1000:1=7", "1100:2=75", "1200:1=6"), f.writes);
+
+        f.at(1_400, () -> f.raw--);
+        f.until(20_000);
+        assertEquals(3, f.writes.size());
+        assertTrue(f.fallback);
+    }
+
+    @Test public void mapLiveSettingsAndPauseKeepOneTwoAttemptBudgetAndRetryDeadline() {
+        Fake f = new Fake();
+        f.failOperation = NativeSpeedLimitEngine.LIMIT;
+        String session = "manual:map-live:1";
+        f.engine.configureMapLive(session, 75);
+        f.until(2_000);
+        assertEquals(2, f.writes.size());
+
+        f.engine.pauseMapLive(session, "speed-limit-off");
+        f.until(8_000);
+        f.engine.configureMapLive(session, 75);
+        f.at(12_000, () -> f.raw = 5);
+        f.until(30_000);
+
+        assertEquals("retry retains its ten-second deadline", 4, f.writes.size());
+        assertEquals(1, countLogs(f, "outcome=exhausted"));
+    }
+
+    @Test public void mapLiveLateRoadCallbackPreservesDeadlineBeforeOrAfterResume() {
+        for (boolean resumeBeforeCallback : new boolean[] {false, true}) {
+            Fake f = new Fake();
+            f.deferOperation = NativeSpeedLimitEngine.ROAD;
+            String session = "manual:map-live:late-callback";
+            f.engine.configureMapLive(session, 75);
+            f.until(1_000);
+            Pending pending = f.pending;
+            assertNotNull(pending);
+            f.pending = null;
+            f.until(2_000);
+            f.engine.pauseMapLive(session, "speed-limit-off");
+            f.until(8_000);
+            if (resumeBeforeCallback) f.engine.configureMapLive(session, 75);
+            f.until(9_000);
+            assertFalse(pending.current.getAsBoolean());
+            pending.callback.accept(new NativeSpeedLimitEngine.Result(false, 0,
+                    1_500, 9_000, "unavailable"));
+            if (!resumeBeforeCallback) f.engine.configureMapLive(session, 75);
+            f.until(11_499);
+            assertEquals(1, countLogs(f, "attempt start"));
+            f.until(11_600);
+            assertEquals(2, countLogs(f, "attempt start"));
+            assertTrue(f.writes.contains("11600:1=7"));
+        }
+    }
+
+    @Test public void mapLivePauseKeepsRetryDeadlineFromActualRoadStartForEitherOutcome() {
+        for (boolean roadSucceeded : new boolean[] {false, true}) {
+            Fake f = new Fake();
+            f.deferOperation = NativeSpeedLimitEngine.ROAD;
+            String session = "manual:map-live:late-road";
+            f.engine.configureMapLive(session, 75);
+            f.until(1_000);
+            Pending pending = f.pending;
+            assertNotNull(pending);
+            f.pending = null;
+            f.until(2_000);
+            pending.callback.accept(new NativeSpeedLimitEngine.Result(
+                    roadSucceeded, 0, 1_500, 2_000, roadSucceeded ? "" : "unavailable"));
+            f.until(2_200);
+
+            f.engine.pauseMapLive(session, "speed-limit-off");
+            f.until(8_000);
+            f.engine.configureMapLive(session, 75);
+            f.until(11_499);
+            assertEquals("no early retry after ROAD success=" + roadSucceeded,
+                    1, countLogs(f, "attempt start"));
+            // The next 200ms read tick after the 11500 deadline is at 11600.
+            f.until(11_600);
+            assertEquals(2, countLogs(f, "attempt start"));
+            assertTrue(f.writes.contains("11600:1=7"));
+        }
+    }
+
     @Test public void unchangedRawFiveAndLaterRawChangeCannotExceedTheCycleBudget() {
         Fake f = new Fake();
         f.raw = 5;

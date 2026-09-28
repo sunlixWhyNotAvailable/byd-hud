@@ -27,6 +27,7 @@ final class HudOutputPreferenceSnapshot {
     final int speedLimitManeuverOverlaySize;
     final int speedLimitLaneOverlaySize;
     final String presentationKey;
+    final HudMapSettings mapSettings;
 
     private HudOutputPreferenceSnapshot(
             DirectTbtPayload.Options options, boolean wazeAlerts,
@@ -57,6 +58,7 @@ final class HudOutputPreferenceSnapshot {
         speedLimitManeuverOverlaySize = options.speedLimitManeuverOverlaySize;
         speedLimitLaneOverlaySize = options.speedLimitLaneOverlaySize;
         presentationKey = options.presentation.diagnostics();
+        mapSettings = options.mapSettings;
     }
 
     static HudOutputPreferenceSnapshot capture(Context context) {
@@ -106,7 +108,8 @@ final class HudOutputPreferenceSnapshot {
                 + " speedPlacement=" + speedLimitCompositePlacement
                 + " speedManeuverSize=" + speedLimitManeuverOverlaySize
                 + " speedLaneSize=" + speedLimitLaneOverlaySize
-                + " " + presentationKey;
+                + " " + presentationKey
+                + " " + mapSettings.diagnostics();
     }
 
     @Override
@@ -134,7 +137,8 @@ final class HudOutputPreferenceSnapshot {
                 && speedLimitCompositePlacement == other.speedLimitCompositePlacement
                 && speedLimitManeuverOverlaySize == other.speedLimitManeuverOverlaySize
                 && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
-                && presentationKey.equals(other.presentationKey);
+                && presentationKey.equals(other.presentationKey)
+                && mapSettings.equals(other.mapSettings);
     }
 
     @Override
@@ -145,7 +149,7 @@ final class HudOutputPreferenceSnapshot {
                 remainingTime, remainingDistance, speedLimitMode, nativeSpeedFallback,
                 speedLimitFreeFallback, speedLimitOverlaySeconds,
                 speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
-                speedLimitLaneOverlaySize, presentationKey);
+                speedLimitLaneOverlaySize, presentationKey, mapSettings);
     }
 
     private static int bit(boolean value) {

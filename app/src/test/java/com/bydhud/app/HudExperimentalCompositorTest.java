@@ -12,7 +12,8 @@ public final class HudExperimentalCompositorTest {
     public void usesApprovedZeroOffsetPlaneGeometry() {
         assertTrue(HudExperimentalLayout.isCanonicalF8(720, 48));
         assertTrue(HudExperimentalLayout.isCanonicalF7(960, 48));
-        assertEquals(1_350f, HudExperimentalLayout.etaCenterX(720, 48), 0.001f);
+        assertEquals(86.5f, HudExperimentalLayout.BASE_ETA_X, 0.001f);
+        assertEquals(1_297.5f, HudExperimentalLayout.etaCenterX(720, 48), 0.001f);
         assertEquals(-2f, HudExperimentalLayout.effectiveDurationY(), 0.001f);
         assertEquals(24.166666f, HudExperimentalLayout.rowCenter(0), 0.001f);
         assertEquals(72.5f, HudExperimentalLayout.rowCenter(1), 0.001f);
@@ -88,6 +89,66 @@ public final class HudExperimentalCompositorTest {
         assertEquals(0xff445566, colors.remainingTime);
         assertEquals(0xff778899, colors.remainingDistance);
         assertEquals(0xffaabbcc, colors.warningDistance);
+    }
+
+    @Test
+    public void mapCalibrationKeepsBaselineAnchorAndAppliesRebasedXOnce() {
+        HudMapSettings.Geometry baseline = new HudMapSettings.Geometry(0, -8, 85, 0, 30, 70);
+        HudMapGeometry map = new HudMapGeometry(baseline);
+        assertEquals(563f, map.centerX(48), 0.001f); // 480 * 85 / 48 - 200 - 87.
+        assertEquals(24f, map.x(false, 0f, 48), 0.001f); // UI zero maps to probe MapX 50 once.
+
+        HudMapGeometry moved = new HudMapGeometry(
+                new HudMapSettings.Geometry(10, -8, 85, 0, 30, 70));
+        assertEquals(4.8f, moved.x(false, 0f, 48) - map.x(false, 0f, 48), 0.001f);
+        HudMapGeometry laneMoved = new HudMapGeometry(
+                new HudMapSettings.Geometry(0, -8, 85, 50, 30, 70));
+        assertEquals(map.centerX(48), laneMoved.centerX(48), 0.001f);
+    }
+
+    @Test
+    public void mapSplitTracksScaleAndYWhileLaneBoundsStayInsideTheRow() {
+        for (int scale : new int[]{40, 85, 150}) {
+            for (int y : new int[]{-60, -8, 60}) {
+                HudMapGeometry map = new HudMapGeometry(
+                        new HudMapSettings.Geometry(0, y, scale, 50, 50, 100));
+                int split = map.splitRow();
+                assertTrue(split >= 0 && split <= HudMapGeometry.SOURCE_HEIGHT);
+                if (split > 0 && split < HudMapGeometry.SOURCE_HEIGHT) {
+                    assertEquals(HudMapGeometry.SEAM_Y, map.sourceY(split),
+                            map.height() / HudMapGeometry.SOURCE_HEIGHT + 0.001f);
+                }
+                HudMapGeometry.Bounds bounds = HudMapGeometry.laneBounds(960, 48,
+                        400, 120, new HudMapSettings.Geometry(0, y, scale, 50, 50, 100));
+                assertTrue(bounds.left >= 0f && bounds.top >= 0f);
+                assertTrue(bounds.right <= 960f && bounds.bottom <= 48f);
+            }
+        }
+    }
+
+    @Test
+    public void mapSettingsAndCalibrationIdentityInvalidateCache() {
+        final int[] renderCount = {0};
+        HudExperimentalCompositor compositor = new HudExperimentalCompositor(input -> {
+            renderCount[0]++;
+            return new HudExperimentalCompositor.Result(
+                    HudExperimentalCompositor.hasMeaningfulF8Content(input) ? new byte[]{8} : null,
+                    HudExperimentalCompositor.hasMeaningfulF7Content(input) ? new byte[]{7} : null);
+        });
+        HudMapSettings experimental = HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL);
+        HudExperimentalCompositor.Inputs first = mapInput(experimental, false);
+        compositor.compose(first);
+        compositor.compose(first);
+        assertEquals(1, renderCount[0]);
+
+        HudExperimentalCompositor.Inputs moved = mapInput(experimental.withValue(
+                HudMapSettings.CONTROL_MAP_X, 1), false);
+        compositor.compose(moved);
+        assertEquals(2, renderCount[0]);
+        compositor.compose(mapInput(experimental, true));
+        assertEquals(4, renderCount[0]); // Both map halves render after calibration is enabled.
+        compositor.compose(mapInput(experimental, true));
+        assertEquals(4, renderCount[0]);
     }
 
     @Test
@@ -197,5 +258,11 @@ public final class HudExperimentalCompositorTest {
             HudExperimentalCompositor.Colors colors) {
         return new HudExperimentalCompositor.Inputs(arrival, duration, remaining,
                 maneuver, lane, warning, warningDistance, colors);
+    }
+
+    private static HudExperimentalCompositor.Inputs mapInput(HudMapSettings settings,
+                                                              boolean calibration) {
+        return new HudExperimentalCompositor.Inputs("18:45", "99h 59m", "", null, null,
+                null, "", HudExperimentalCompositor.Colors.defaults(), settings, calibration);
     }
 }

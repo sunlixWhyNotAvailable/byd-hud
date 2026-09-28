@@ -31,6 +31,7 @@ final class HudOutputCoordinator {
     private static final String TAG = "BydHudOutput";
     private static final long DIRECT_INTERVAL_MS = 50L;
     private static final long DEFAULT_INTERVAL_MS = 1000L;
+    private static final long MAP_LIVE_COALESCE_MS = 32L;
     private static final long SOURCE_CLEAR_DELAY_MS = 120L;
     private static final int FINAL_CLEAR_COUNT = 5;
     private static final long FINAL_CLEAR_INTERVAL_MS = 120L;
@@ -89,6 +90,8 @@ final class HudOutputCoordinator {
                 .put("coherence", "existing_owner_thread")
                 .put("activeOwner", activeSource.name()).put("pendingOwner", pendingSource.name())
                 .put("manualEnabled", manualEnabled).put("directEnabled", directEnabled)
+                .put("manualMapLiveRunning", manualMapLiveSession != 0L)
+                .put("manualMapLiveSession", manualMapLiveSession)
                 .put("directOwnerPackage", directOwnerPackage)
                 .put("directOwnerSessionGeneration", directOwnerSessionGeneration)
                 .put("directFramePresent", directFrame != null)
@@ -121,6 +124,17 @@ final class HudOutputCoordinator {
     private boolean manualEnabled;
     private boolean directEnabled;
     private HudState manualState;
+    private DirectTbtFrame manualMapLiveFrame;
+    private long manualMapLiveSession;
+    private HudMapSettings manualMapLiveSettings;
+    private final Object mapLivePublishLock = new Object();
+    private HudState pendingMapLiveState;
+    private DirectTbtFrame pendingMapLiveFrame;
+    private long pendingMapLiveSession;
+    private String pendingMapLiveReason = "";
+    private volatile long closedMapLiveSession;
+    private long lastMapLivePublishSession;
+    private boolean mapLivePublishScheduled;
     private HudCheckState preparedHudCheck;
     private byte[] preparedHudCheckPayload;
     private List<HudCheckPayload.Packet> hudCheckPackets = Collections.emptyList();
@@ -235,7 +249,11 @@ final class HudOutputCoordinator {
                         && hasFrame(activeSource) && serviceStarted && clientBoundForNative(),
                 owner -> {
                     preparedDirectOptionsRevision = -1;
-                    NavHudLiveSender.onNativeSpeedBitmapChanged(owner);
+                    if ("manual".equals(owner) && manualMapLiveSession != 0L) {
+                        scheduleImmediate("map-live-native-speed-fallback");
+                    } else {
+                        NavHudLiveSender.onNativeSpeedBitmapChanged(owner);
+                    }
                 });
         txLog = SomeIpTxLog.get(context);
         client = new SomeIpHudClient(context, new SomeIpHudClient.Listener() {
@@ -308,6 +326,82 @@ final class HudOutputCoordinator {
         });
     }
 
+    void publishManualMapLive(HudState state, DirectTbtFrame frame,
+            long session, String reason) {
+        HudState copy = state == null ? null : state.copy();
+        if (copy == null || frame == null || session <= 0L) return;
+        boolean newSession;
+        synchronized (mapLivePublishLock) {
+            if (session <= closedMapLiveSession) return;
+            newSession = session > lastMapLivePublishSession;
+            lastMapLivePublishSession = Math.max(lastMapLivePublishSession, session);
+            pendingMapLiveState = copy;
+            pendingMapLiveFrame = frame;
+            pendingMapLiveSession = session;
+            pendingMapLiveReason = safe(reason);
+            if (mapLivePublishScheduled) return;
+            mapLivePublishScheduled = true;
+        }
+        if (!worker.postDelayed(this::drainManualMapLive,
+                newSession ? 0L : MAP_LIVE_COALESCE_MS)) {
+            synchronized (mapLivePublishLock) { mapLivePublishScheduled = false; }
+        }
+    }
+
+    void endMapLiveSession(long session, String reason) {
+        if (session <= 0L) return;
+        synchronized (mapLivePublishLock) {
+            closedMapLiveSession = Math.max(closedMapLiveSession, session);
+            if (pendingMapLiveSession == session) {
+                pendingMapLiveState = null;
+                pendingMapLiveFrame = null;
+                pendingMapLiveSession = 0L;
+                pendingMapLiveReason = "";
+            }
+        }
+        worker.post(() -> clearManualMapLive(session, reason));
+    }
+
+    private void drainManualMapLive() {
+        HudState state;
+        DirectTbtFrame frame;
+        long session;
+        String reason;
+        synchronized (mapLivePublishLock) {
+            state = pendingMapLiveState;
+            frame = pendingMapLiveFrame;
+            session = pendingMapLiveSession;
+            reason = pendingMapLiveReason;
+            pendingMapLiveState = null;
+            pendingMapLiveFrame = null;
+            pendingMapLiveSession = 0L;
+            pendingMapLiveReason = "";
+            mapLivePublishScheduled = false;
+            if (session <= closedMapLiveSession) return;
+        }
+        if (state == null || frame == null || session <= closedMapLiveSession
+                || session < manualMapLiveSession) return;
+        manualState = state;
+        manualMapLiveFrame = frame;
+        manualMapLiveSession = session;
+        HudMapSettings settings = HudPrefs.mapSettings(context);
+        if (!settings.equals(manualMapLiveSettings)) {
+            manualMapLiveSettings = settings;
+            log("map_live settings session=" + session + " reason=" + reason
+                    + " " + settings.diagnostics());
+        }
+        if (activeSource == Source.MANUAL) scheduleImmediate(reason);
+    }
+
+    private void clearManualMapLive(long session, String reason) {
+        if (manualMapLiveSession != session) return;
+        manualMapLiveSession = 0L;
+        manualMapLiveFrame = null;
+        manualMapLiveSettings = null;
+        nativeSpeed.endMapLiveSession(session, reason);
+        log("map_live ended session=" + session + " reason=" + safe(reason));
+    }
+
     void setManualEnabled(boolean enabled, String reason) {
         worker.post(() -> {
             boolean started = enabled && !manualEnabled;
@@ -334,6 +428,13 @@ final class HudOutputCoordinator {
 
     void stopManualOutput(String reason, Runnable completion) {
         worker.post(() -> {
+            if (manualMapLiveSession != 0L) {
+                long session = manualMapLiveSession;
+                synchronized (mapLivePublishLock) {
+                    closedMapLiveSession = Math.max(closedMapLiveSession, session);
+                }
+                clearManualMapLive(session, reason);
+            }
             manualEnabled = false;
             hudCheckDiagnostics.reset();
             reconcile(reason, SystemClock.elapsedRealtime(), () -> {
@@ -942,6 +1043,11 @@ final class HudOutputCoordinator {
         if (source == Source.NONE || source != desiredSource() || !hasFrame(source)) {
             return;
         }
+        if (source == Source.MANUAL && manualMapLiveSession != 0L
+                && !mapLiveOutputAllowed()) {
+            NavHudLiveSender.stopMapLiveIfRunning("output-gate");
+            return;
+        }
         if (!client.isBound()) {
             ensureBoundOnWorker("send-" + reason);
             return;
@@ -992,9 +1098,14 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
-            nativeSpeed.refresh(source == Source.DIRECT ? directOwnerPackage : "manual",
-                    source == Source.DIRECT ? directOwnerSessionGeneration : generation,
-                    source == Source.DIRECT ? DirectSpeedLimitStore.snapshot(directOwnerPackage).getKph() : 0);
+            if (source == Source.MANUAL && manualMapLiveSession != 0L) {
+                nativeSpeed.refreshMapLive(manualMapLiveSession,
+                        HudMapLiveFixture.SPEED_LIMIT_KPH);
+            } else {
+                nativeSpeed.refresh(source == Source.DIRECT ? directOwnerPackage : "manual",
+                        source == Source.DIRECT ? directOwnerSessionGeneration : generation,
+                        source == Source.DIRECT ? DirectSpeedLimitStore.snapshot(directOwnerPackage).getKph() : 0);
+            }
             if (source == Source.MANUAL && manualState.hudCheck != null) {
                 setHudCheckRoadResult(1, "sent");
                 publishHudCheckAuxiliary(reason);
@@ -1079,6 +1190,11 @@ final class HudOutputCoordinator {
                 preparedDirectSemanticPayload = preparedDirectPayload.build(0);
             }
             return preparedDirectPayload.build(directCounter);
+        }
+        if (manualMapLiveSession != 0L && manualMapLiveFrame != null) {
+            DirectTbtPayload.Options options = NativeSpeedLimitController.outputOptions(context, "manual")
+                    .withMapCalibration(true);
+            return DirectTbtPayload.prepare(manualMapLiveFrame, options).build(0);
         }
         HudState state = manualState.copy();
         if (state.hudCheck != null) {
@@ -1675,6 +1791,11 @@ final class HudOutputCoordinator {
         log("transport failure reason=" + reason
                 + (error == null ? "" : " error=" + error.getClass().getSimpleName()
                 + ":" + safe(error.getMessage())));
+        if (manualMapLiveSession != 0L) {
+            log("map_live transport_failure session=" + manualMapLiveSession
+                    + " reason=" + safe(reason)
+                    + (error == null ? "" : " error=" + error.getClass().getSimpleName()));
+        }
         if (desiredSource() != Source.NONE) {
             worker.postDelayed(transportRecovery, DEFAULT_INTERVAL_MS);
         }
@@ -1711,6 +1832,10 @@ final class HudOutputCoordinator {
         protocolRetryScheduled = true;
         worker.postDelayed(protocolRetry, delayMs);
         log("protocol backoff delayMs=" + delayMs + " " + detail);
+        if (manualMapLiveSession != 0L) {
+            log("map_live transport_failure session=" + manualMapLiveSession
+                    + " reason=" + safe(detail));
+        }
     }
 
     private void recordPayloadSuccess() {
@@ -2012,6 +2137,13 @@ final class HudOutputCoordinator {
     }
 
     private boolean clientBoundForNative() { return client != null && client.isBound(); }
+
+    private boolean mapLiveOutputAllowed() {
+        return manualMapLiveSession > closedMapLiveSession
+                && HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL
+                && !ShanghaiOutputGate.isSuspended()
+                && !HudPrefs.isUserShutdownActive(context);
+    }
 
     private void maybeLogStats(Source source, int payloadBytes, long lastSendMs) {
         long now = SystemClock.elapsedRealtime();

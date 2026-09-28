@@ -26,6 +26,7 @@ class HudHelpCatalogTest {
         val resources = listOf(File("src/main/res/drawable-nodpi"),
             File("app/src/main/res/drawable-nodpi")).first { it.isDirectory }
         val images = HudHelpCatalog.topics.flatMap { it.frames }.map { it.imageRes }.toMutableSet()
+        images += R.drawable.hud_help_map_denza // Shared frame drawn by the map help overlay.
         // The ETA help computes images from field selections, rather than only the topic frames.
         for (street in listOf(false, true)) for (mask in 0..7) {
             EtaStreetFormat.values().forEach { images += HudHelpCatalog.etaImage(street, mask, it) }

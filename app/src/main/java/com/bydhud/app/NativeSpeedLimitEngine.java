@@ -58,6 +58,12 @@ final class NativeSpeedLimitEngine {
     private boolean seriesInFlight;
     private boolean awaiting;
     private boolean exhaustedLogged;
+    private String mapLiveSession = "";
+    private int mapLiveAttempts;
+    private long mapLiveNextAttemptAt;
+    private boolean mapLiveConfirmed;
+    private boolean mapLiveExhaustedLogged;
+    private boolean mapLivePolicy;
     private long delayStartedAt;
     private long delayDueAt;
     private long nextAttemptAt;
@@ -101,7 +107,9 @@ final class NativeSpeedLimitEngine {
     }
 
     void configure(String session, int target) {
-        if (enabled && this.session.equals(session) && this.target == target) return;
+        if (enabled && !mapLivePolicy && this.session.equals(session) && this.target == target) return;
+        mapLivePolicy = false;
+        clearMapLiveQuota();
         long token = retire("superseded");
         if (epoch != token) return;
         if (!this.session.equals(session)) clearObservedState();
@@ -128,6 +136,54 @@ final class NativeSpeedLimitEngine {
         read(token);
     }
 
+    /** Map Live has one session-wide budget; configuration refreshes preserve it. */
+    void configureMapLive(String session, int target) {
+        if (!session.equals(mapLiveSession)) {
+            clearMapLiveQuota();
+            mapLiveSession = session;
+        }
+        if (enabled && mapLivePolicy && this.session.equals(session) && this.target == target) return;
+        mapLivePolicy = true;
+        long token = retire("map-live-refresh");
+        if (epoch != token) return;
+        if (!this.session.equals(session)) clearObservedState();
+        this.session = session;
+        this.target = target;
+        enabled = true;
+        cycle = 1;
+        attempt = mapLiveAttempts;
+        nextAttemptAt = mapLiveNextAttemptAt;
+        nextReadAt = 0L;
+        targetConfirmed = mapLiveConfirmed;
+        confirmAt = 0L;
+        delayStarted = false;
+        seriesInFlight = false;
+        awaiting = false;
+        exhaustedLogged = mapLiveExhaustedLogged;
+        lastReadLogKey = "";
+        lastReadIoError = "";
+        log("configure mapLiveAttempts=" + mapLiveAttempts
+                + " confirmed=" + mapLiveConfirmed + " target=" + target);
+        if (!supportedLimit(target)) {
+            setFallback(true, "unsupported-limit");
+            return;
+        }
+        read(token);
+    }
+
+    void pauseMapLive(String session, String reason) {
+        if (!session.equals(mapLiveSession)) return;
+        if (enabled) retire("map-live-pause:" + reason);
+        mapLivePolicy = true;
+    }
+
+    void endMapLiveSession(String session, String reason) {
+        if (!session.equals(mapLiveSession)) return;
+        if (enabled || fallback) retire("map-live-stop:" + reason);
+        mapLivePolicy = false;
+        clearMapLiveQuota();
+    }
+
     void stop(String reason) {
         clearObservedState();
         if (!enabled && !fallback) return;
@@ -146,6 +202,14 @@ final class NativeSpeedLimitEngine {
         writtenAt = -1L;
         confirmedRaw = 0;
         adasChangeDelay = false;
+    }
+
+    private void clearMapLiveQuota() {
+        mapLiveSession = "";
+        mapLiveAttempts = 0;
+        mapLiveNextAttemptAt = 0L;
+        mapLiveConfirmed = false;
+        mapLiveExhaustedLogged = false;
     }
 
     private long retire(String reason) {
@@ -217,6 +281,7 @@ final class NativeSpeedLimitEngine {
             }
             awaiting = false;
             targetConfirmed = true;
+            if (mapLivePolicy) mapLiveConfirmed = true;
             adasChangeDelay = false;
             if (delayStarted) {
                 delayStarted = false;
@@ -224,6 +289,13 @@ final class NativeSpeedLimitEngine {
             }
             setFallback(false, "target-match");
         } else {
+            if (mapLivePolicy && mapLiveConfirmed) {
+                targetConfirmed = true;
+                setFallback(true, "confirmed-session-drift");
+                lastRaw = raw;
+                hasLastRaw = true;
+                return;
+            }
             if (changed && confirmedRaw != 0) adasChangeDelay = raw != confirmedRaw;
             if (targetConfirmed) {
                 cycle++;
@@ -260,7 +332,8 @@ final class NativeSpeedLimitEngine {
 
     private boolean shouldStartAttempt(long now) {
         return enabled && !seriesInFlight && !awaiting && !targetConfirmed
-                && supportedLimit(target) && attempt < MAX_ATTEMPTS
+                && supportedLimit(target)
+                && (mapLivePolicy ? mapLiveAttempts < MAX_ATTEMPTS : attempt < MAX_ATTEMPTS)
                 && delayStarted && now >= delayDueAt && now >= nextAttemptAt;
     }
 
@@ -268,12 +341,15 @@ final class NativeSpeedLimitEngine {
         attempt++;
         long startedAt = port.now();
         nextAttemptAt = startedAt + RETRY_MS;
+        if (mapLivePolicy) {
+            mapLiveAttempts++;
+            mapLiveNextAttemptAt = nextAttemptAt;
+        }
         seriesInFlight = true;
         log("attempt start cycle=" + cycle + " attempt=" + attempt
                 + " startedAt=" + startedAt + " dueAt=" + delayDueAt
                 + " nextAttemptAt=" + nextAttemptAt + " roadX=7 roadY=6 gapMs=" + ROAD_GAP_MS);
         write(token, ROAD, 7, startedAt, x -> {
-            nextAttemptAt = x.startedAt + RETRY_MS;
             long s1At = x.startedAt + ROAD_GAP_MS;
             later(token, () -> write(token, LIMIT, target, s1At, s1 -> {
                 awaiting = true;
@@ -301,16 +377,17 @@ final class NativeSpeedLimitEngine {
     private void write(long token, int operation, int value, long plannedAt,
             Consumer<Result> continuation) {
         call(token, operation, value, plannedAt, result -> {
+            if (operation == ROAD && value == 7) {
+                nextAttemptAt = result.startedAt + RETRY_MS;
+                if (mapLivePolicy) mapLiveNextAttemptAt = nextAttemptAt;
+            }
             if (!result.success) {
-                if (operation == ROAD && value == 7) {
-                    nextAttemptAt = result.startedAt + RETRY_MS;
-                }
                 seriesInFlight = false;
                 log("outcome=io_error cycle=" + cycle + " attempt=" + attempt
                         + " operation=" + operation + " value=" + value
                         + " actualAt=" + result.startedAt + " error=" + result.error);
                 setFallback(true, "io-error-write-" + operation);
-                if (attempt >= MAX_ATTEMPTS) logExhausted("io-error");
+                if (attemptBudgetExhausted()) logExhausted("io-error");
                 later(token, () -> read(token), READ_MS);
             } else {
                 continuation.accept(result);
@@ -325,24 +402,42 @@ final class NativeSpeedLimitEngine {
                 + " reason=" + reason + " observedRaw=" + observedRaw
                 + " dueAt=" + dueAt + " actualAt=" + port.now());
         setFallback(true, reason);
-        if (attempt >= MAX_ATTEMPTS) logExhausted("unconfirmed");
+        if (attemptBudgetExhausted()) logExhausted("unconfirmed");
     }
 
     private void logExhausted(String reason) {
-        if (exhaustedLogged) return;
-        exhaustedLogged = true;
-        log("outcome=exhausted cycle=" + cycle + " attempts=" + attempt + " reason=" + reason);
+        if (mapLivePolicy) {
+            if (mapLiveExhaustedLogged) return;
+            mapLiveExhaustedLogged = true;
+        } else {
+            if (exhaustedLogged) return;
+            exhaustedLogged = true;
+        }
+        log("outcome=exhausted cycle=" + cycle + " attempts="
+                + (mapLivePolicy ? mapLiveAttempts : attempt) + " reason=" + reason);
+    }
+
+    private boolean attemptBudgetExhausted() {
+        return mapLivePolicy ? mapLiveAttempts >= MAX_ATTEMPTS : attempt >= MAX_ATTEMPTS;
     }
 
     private void call(long token, int operation, int value, long plannedAt,
             Consumer<Result> continuation) {
         if (!current(token)) return;
         String callSession = session;
+        boolean mapRoadWrite = mapLivePolicy && operation == ROAD && value == 7;
         long callObservationEpoch = observationEpoch;
         int callCycle = cycle;
         int callAttempt = attempt;
         port.call(operation, value, () -> current(token), result -> {
             boolean stale = !current(token);
+            // A paused session still owes its retry gap to an already-dispatched ROAD write.
+            if (stale && mapRoadWrite && callSession.equals(mapLiveSession)) {
+                mapLiveNextAttemptAt = Math.max(mapLiveNextAttemptAt, result.startedAt + RETRY_MS);
+                if (mapLivePolicy && session.equals(callSession)) {
+                    nextAttemptAt = Math.max(nextAttemptAt, mapLiveNextAttemptAt);
+                }
+            }
             // Dispatched writes can succeed after target replacement, without reviving that attempt.
             boolean trackedWrite = operation == LIMIT && result.success
                     && callObservationEpoch == observationEpoch && result.startedAt >= writtenAt;

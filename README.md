@@ -182,6 +182,35 @@ An alert in shared-field mode occupies the maneuver field with the same priority
 
 <p align="center"><img src="docs/screenshots/en/settings-speed-limit.png" alt="Speed limit output settings" width="100%"></p>
 
+### Map display and live calibration
+
+`Map display` offers Off (default), Native and Experimental. This iteration
+provides the layout editor and a real HUD calibration test; it does not acquire
+live map images from Google Maps, Waze or the stock navigator. Native retains
+its setting and Denza N9 help example without sending a substitute map.
+
+Experimental enables Custom, Larger on the right and Smaller in the center,
+plus six controls for map/lane horizontal position, vertical position and scale.
+MapX0 is the calibrated center; its range is-250..250 without tick dots.
+Minus moves left/up or makes the image smaller; plus moves right/down or makes
+it larger. Editing a preset switches to Custom without moving unchanged values.
+Saved custom values survive switching presets and restarting the app.
+
+Live display sends a red calibration frame with yellow split edges, navigation
+guidance, ETA and limit75 according to your current output settings. Changes
+apply during the same test. The two map parts move together; lanes stay within
+their own row. Guidance and alerts draw above the map. Experimental lane settings
+also apply to ordinary navigation. Separate experimental ETA uses compact total
+hours, such as `99h 59m`, with the calibrated block shifted slightly left.
+
+Start replaces a Basic/Extended HUD check and is unavailable during Shanghai.
+Stop, leaving this editor/Experimental, backgrounding or stopping runtime ends
+the test and allows current navigation to resume. Tests do not restart after
+process death. Native/ADAS75 allows one initial attempt and at most one retry
+for the entire test, with configured fallback; moving sliders cannot reset this
+budget. Stop does not clear the native sign. Settings and test outcomes are
+included in normal logs/configuration export; manual Logcat is not required.
+
 ### Additional navigation behavior
 
 | Setting | Default | Behavior |

@@ -24,7 +24,8 @@ public final class HudOutputPreferenceSnapshotTest {
                         + " speedManeuverSize=80 speedLaneSize=30"
                         + " etaField=0 warningField=0 etaStreetFormat=0 etaLanguage=en"
                         + " etaWaitForFullText=1"
-                        + " etaColors=FFFFFFFF/FFFFFFFF/FFFFFFFF warningColor=FFFFFF00",
+                        + " etaColors=FFFFFFFF/FFFFFFFF/FFFFFFFF warningColor=FFFFFF00"
+                        + " " + HudMapSettings.defaults().diagnostics(),
                 snapshot.compact());
     }
 
@@ -57,6 +58,22 @@ public final class HudOutputPreferenceSnapshotTest {
 
         assertNotEquals(HudOutputPreferenceSnapshot.from(enabled, true),
                 HudOutputPreferenceSnapshot.from(disabled, true));
+    }
+
+    @Test
+    public void mapGeometryAndStoredCustomArePartOfOutputDiagnostics() {
+        HudMapSettings custom = HudMapSettings.defaults()
+                .withMode(HudMapSettings.EXPERIMENTAL).withValue(0, -150);
+        HudOutputPreferenceSnapshot first = HudOutputPreferenceSnapshot.from(
+                options().withMapSettings(custom), true);
+        HudOutputPreferenceSnapshot preset = HudOutputPreferenceSnapshot.from(
+                options().withMapSettings(custom.withPreset(1)), true);
+        HudOutputPreferenceSnapshot changedCustom = HudOutputPreferenceSnapshot.from(
+                options().withMapSettings(custom.withValue(1, 20).withPreset(1)), true);
+        assertNotEquals(first, preset);
+        assertNotEquals(preset, changedCustom);
+        assertEquals(first, HudOutputPreferenceSnapshot.from(
+                options().withMapSettings(custom.withPreset(1).withPreset(0)), true));
     }
 
     private static DirectTbtPayload.Options options() {

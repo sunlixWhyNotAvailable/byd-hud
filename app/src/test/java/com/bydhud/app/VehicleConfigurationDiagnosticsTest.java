@@ -16,6 +16,21 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.*;
 
 public class VehicleConfigurationDiagnosticsTest {
+    @Test public void mapExportSeparatesPresetGeometryFromRememberedCustom() throws Exception {
+        HudMapSettings selected = HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL)
+                .withValue(0, -150).withValue(1, 20).withPreset(1);
+        JSONObject result = VehicleConfigurationDiagnostics.mapSettings(selected);
+        assertEquals(HudMapSettings.EXPERIMENTAL, result.getInt("mode"));
+        assertEquals(1, result.getInt("preset"));
+        assertEquals(145, result.getJSONObject("effective").getInt("mapX"));
+        assertEquals(12, result.getJSONObject("effective").getInt("mapY"));
+        assertEquals(-150, result.getJSONObject("custom").getInt("mapX"));
+        assertEquals(20, result.getJSONObject("custom").getInt("mapY"));
+        assertEquals(70, result.getJSONObject("effective").getInt("laneScale"));
+        assertEquals(6, result.getJSONObject("effective").length());
+        assertEquals(6, result.getJSONObject("custom").length());
+    }
+
     @Test public void activityRecordPatternUsesIcuCompatibleLiteralBraces() throws Exception {
         java.lang.reflect.Field field = VehicleConfigurationDiagnostics.class.getDeclaredField("ACTIVITY");
         field.setAccessible(true);

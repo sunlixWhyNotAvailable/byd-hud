@@ -92,6 +92,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -1149,6 +1150,13 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         previousTab = selectedTab
         val reason = "tab-${selectedTab.name.lowercase(Locale.ROOT)}"
         requestTabStateRefresh(selectedTab, reason)
+    }
+
+    LaunchedEffect(selectedTab, selectedOptionsSectionKey, snapshot.mapSettings.mode) {
+        val mapEditorVisible = selectedTab == RuntimeTab.Options
+                && selectedOptionsSectionKey == "map-display"
+                && snapshot.mapSettings.mode == HudMapSettings.EXPERIMENTAL
+        if (!mapEditorVisible) NavHudLiveSender.stopMapLiveIfRunning("map-editor-exit")
     }
 
     LaunchedEffect(snapshot.shareLaunchId, snapshot.shareLaunchDays) {
@@ -2547,6 +2555,183 @@ private fun OptionsTab(
                         onValueChange = { size -> runAction { activity.composeSetSpeedLimitLaneOverlaySize(size) } }
                     )
                 }
+            }
+        }
+        optionsSection("map-display", language.choose("Показ мапи", "Map display", "Показ карты"), R.drawable.ic_options_navigation) {
+            val mapSettings = snapshot.mapSettings
+            val mapTopic = HudHelpCatalog.topic(HudHelpTopicId.MapOutputMode)
+            val mapModes = mapTopic.frames.map { it.label(language) }
+            val mapEditorEnabled = mapSettings.mode == HudMapSettings.EXPERIMENTAL
+            val mapLiveRunning = snapshot.mapLive?.running == true
+            val shanghaiBusy = snapshot.shanghai.isBusy()
+            row("map-output-mode") {
+                SettingRow(
+                    mapTopic.title(language),
+                    language.choose("Виберіть спосіб показу мапи на HUD", "Choose how to display the map on the HUD", "Выберите способ показа карты на HUD"),
+                    palette,
+                    onHelp = { hudHelpRequest = dropdownHelp(
+                        HudHelpTopicId.MapOutputMode, mapTopic.title(language), mapSettings.mode, mapModes) }
+                ) {
+                    HudDropdown(
+                        selectedIndex = mapSettings.mode,
+                        options = mapModes,
+                        palette = palette,
+                        width = 190.dp,
+                        onSelected = { mode -> runAction { activity.composeSetMapMode(mode) } }
+                    )
+                }
+            }
+            row("map-layout-preset") {
+                SettingRow(
+                    language.choose("Розташування мапи", "Map layout", "Расположение карты"),
+                    language.choose(
+                        "Готове розташування або власні налаштування мапи та смуг",
+                        "A preset or your own map and lane settings",
+                        "Готовое расположение или свои настройки карты и полос"),
+                    palette,
+                    enabled = mapEditorEnabled
+                ) {
+                    HudDropdown(
+                        selectedIndex = mapSettings.preset,
+                        options = listOf(
+                            language.choose("Власний", "Custom", "Свой"),
+                            language.choose("Більша праворуч", "Larger on the right", "Больше справа"),
+                            language.choose("Менша по центру", "Smaller in the center", "Меньше по центру")),
+                        palette = palette,
+                        width = 220.dp,
+                        enabled = mapEditorEnabled,
+                        onSelected = { preset -> runAction { activity.composeSetMapPreset(preset) } }
+                    )
+                }
+            }
+            row("map-live-display") {
+                Column(Modifier.fillMaxWidth()) {
+                    SettingRow(
+                        language.choose("Живий показ", "Live display", "Живой показ"),
+                        language.choose(
+                            "Зміни мапи та смуг видно одразу під час тесту",
+                            "Map and lane changes appear immediately during the test",
+                            "Изменения карты и полос видны сразу во время теста"),
+                        palette,
+                        enabled = mapEditorEnabled
+                    ) {
+                        Pill(
+                            if (mapLiveRunning) copy.hudCheckRunning else copy.hudCheckStopped,
+                            if (mapLiveRunning) palette.green else palette.muted,
+                            if (mapLiveRunning) palette.greenSoft else palette.disabled
+                        )
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        HudButton(
+                            language.choose("Почати тест", "Start test", "Начать тест"),
+                            palette,
+                            primary = true,
+                            enabled = mapEditorEnabled && !mapLiveRunning && !shanghaiBusy,
+                            width = 0.dp,
+                            modifier = Modifier.weight(1f),
+                            onClick = { runAction { activity.composeStartMapLive() } }
+                        )
+                        HudButton(
+                            language.choose("Зупинити тест", "Stop test", "Остановить тест"),
+                            palette,
+                            enabled = mapLiveRunning,
+                            width = 0.dp,
+                            modifier = Modifier.weight(1f),
+                            onClick = { runAction { activity.composeStopMapLive() } }
+                        )
+                    }
+                    if (shanghaiBusy) {
+                        Text(
+                            language.choose(
+                                "Спочатку завершіть тест у Шанхаї.",
+                                "Finish the Shanghai test first.",
+                                "Сначала завершите тест в Шанхае."),
+                            color = palette.muted,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 4.dp)
+                        )
+                    } else {
+                        Text(
+                            language.choose(
+                                "Вивід використовує ваші налаштування HUD.",
+                                "Output follows your HUD settings.",
+                                "Вывод использует ваши настройки HUD."),
+                            color = palette.muted,
+                            fontSize = 13.sp,
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
+                        )
+                    }
+                }
+            }
+            val geometry = mapSettings.geometry()
+            row("map-layout-map-x") {
+                MapGeometryRow(
+                    title = language.choose("Мапа: вліво / вправо", "Map: left / right", "Карта: влево / вправо"),
+                    hint = language.choose("− — вліво, + — вправо", "− moves left, + moves right", "− — влево, + — вправо"),
+                    value = geometry.mapX, minimum = -250, maximum = 250, palette = palette,
+                    enabled = mapEditorEnabled, showTicks = false,
+                    onValueChange = { value -> runAction {
+                        activity.composeSetMapValue(HudMapSettings.CONTROL_MAP_X, value)
+                    } }
+                )
+            }
+            row("map-layout-map-y") {
+                MapGeometryRow(
+                    title = language.choose("Мапа: вгору / вниз", "Map: up / down", "Карта: вверх / вниз"),
+                    hint = language.choose("− — вгору, + — вниз", "− moves up, + moves down", "− — вверх, + — вниз"),
+                    value = geometry.mapY, minimum = -60, maximum = 60, palette = palette,
+                    enabled = mapEditorEnabled, showTicks = true,
+                    onValueChange = { value -> runAction {
+                        activity.composeSetMapValue(HudMapSettings.CONTROL_MAP_Y, value)
+                    } }
+                )
+            }
+            row("map-layout-map-scale") {
+                MapGeometryRow(
+                    title = language.choose("Масштаб мапи", "Map scale", "Масштаб карты"),
+                    hint = language.choose("− — менше, + — більше", "− makes smaller, + makes larger", "− — меньше, + — больше"),
+                    value = geometry.mapScale, minimum = 40, maximum = 150, suffix = "%", palette = palette,
+                    enabled = mapEditorEnabled, showTicks = true,
+                    onValueChange = { value -> runAction {
+                        activity.composeSetMapValue(HudMapSettings.CONTROL_MAP_SCALE, value)
+                    } }
+                )
+            }
+            row("map-layout-lane-x") {
+                MapGeometryRow(
+                    title = language.choose("Смуги: вліво / вправо", "Lanes: left / right", "Полосы: влево / вправо"),
+                    hint = language.choose("− — вліво, + — вправо; у межах рядка смуг", "− moves left, + moves right; within the lane row", "− — влево, + — вправо; в пределах строки полос"),
+                    value = geometry.laneX, minimum = -50, maximum = 50, palette = palette,
+                    enabled = mapEditorEnabled, showTicks = true,
+                    onValueChange = { value -> runAction {
+                        activity.composeSetMapValue(HudMapSettings.CONTROL_LANE_X, value)
+                    } }
+                )
+            }
+            row("map-layout-lane-y") {
+                MapGeometryRow(
+                    title = language.choose("Смуги: вгору / вниз", "Lanes: up / down", "Полосы: вверх / вниз"),
+                    hint = language.choose("− — вгору, + — вниз; у межах рядка смуг", "− moves up, + moves down; within the lane row", "− — вверх, + — вниз; в пределах строки полос"),
+                    value = geometry.laneY, minimum = -50, maximum = 50, palette = palette,
+                    enabled = mapEditorEnabled, showTicks = true,
+                    onValueChange = { value -> runAction {
+                        activity.composeSetMapValue(HudMapSettings.CONTROL_LANE_Y, value)
+                    } }
+                )
+            }
+            row("map-layout-lane-scale") {
+                MapGeometryRow(
+                    title = language.choose("Масштаб смуг", "Lane scale", "Масштаб полос"),
+                    hint = language.choose("− — менше, + — більше", "− makes smaller, + makes larger", "− — меньше, + — больше"),
+                    value = geometry.laneScale, minimum = 40, maximum = 100, suffix = "%", palette = palette,
+                    enabled = mapEditorEnabled, showTicks = true,
+                    onValueChange = { value -> runAction {
+                        activity.composeSetMapValue(HudMapSettings.CONTROL_LANE_SCALE, value)
+                    } }
+                )
             }
         }
         optionsSection("waze-features", copy.wazeFeatures, R.drawable.waze_app_icon) {
@@ -6513,6 +6698,24 @@ private fun DashboardPercentRow(
 }
 
 @Composable
+private fun MapGeometryRow(
+    title: String,
+    hint: String,
+    value: Int,
+    minimum: Int,
+    maximum: Int,
+    palette: Palette,
+    enabled: Boolean,
+    showTicks: Boolean,
+    suffix: String = "",
+    onValueChange: (Int) -> Unit
+) {
+    WidgetNumberLine(title, hint, value, minimum..maximum, suffix, palette, enabled, showTicks) {
+        onValueChange(it)
+    }
+}
+
+@Composable
 //renders this UI section here so screen structure stays traceable during preview and car testing.
 private fun StorageDayRow(
     day: MainActivity.ComposeStorageDay,
@@ -7529,6 +7732,25 @@ private fun Section(
 private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(".")
 
 @Composable
+private fun MapOutputHelpImage(baseline: ImageBitmap, showMap: Boolean) {
+    val stockMap = if (showMap) ImageBitmap.imageResource(R.drawable.hud_help_map_denza) else null
+    Canvas(Modifier.fillMaxSize()) {
+        withTransform({ scale(size.width / 2172f, size.height / 724f, Offset.Zero) }) {
+            // Approved N9 help layout; map pixels come from the owner's stock capture.
+            drawRect(Color(0xFF01060D), size = Size(2172f, 724f))
+            drawImage(baseline, IntOffset(335, 320), IntSize(440, 200), IntOffset(335, 320), IntSize(440, 200))
+            drawImage(baseline, IntOffset(810, 440), IntSize(700, 100), IntOffset(325, 535), IntSize(525, 75))
+            drawImage(baseline, IntOffset(940, 180), IntSize(330, 130), IntOffset(940, 180), IntSize(330, 130))
+            drawImage(baseline, IntOffset(1700, 330), IntSize(190, 230), IntOffset(985, 350), IntSize(190, 230))
+            if (stockMap != null) {
+                drawImage(stockMap, IntOffset.Zero, IntSize(stockMap.width, stockMap.height),
+                    IntOffset(1450, 300), IntSize(450, 270))
+            }
+        }
+    }
+}
+
+@Composable
 private fun HudHelpOverlay(
     request: HudHelpRequest,
     language: Language,
@@ -7555,6 +7777,7 @@ private fun HudHelpOverlay(
         HudHelpTopicId.WazeAlerts -> topic.frames
             .getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }.imageRes
         HudHelpTopicId.BasicTransliteration,
+        HudHelpTopicId.MapOutputMode,
         HudHelpTopicId.SpeedLimitNativeFallbackMode,
         HudHelpTopicId.SpeedLimitFallback,
         HudHelpTopicId.SpeedLimitCompositeField,
@@ -7648,7 +7871,16 @@ private fun HudHelpOverlay(
                     .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                Image(
+                if (request.topic == HudHelpTopicId.MapOutputMode && localIndex == 2) {
+                    Image(
+                        painter = painterResource(R.drawable.hud_help_map_denza),
+                        contentDescription = request.title,
+                        contentScale = ContentScale.Fit,
+                        modifier = Modifier.fillMaxSize().padding(12.dp)
+                    )
+                } else if (request.topic == HudHelpTopicId.MapOutputMode) {
+                    MapOutputHelpImage(coloredImage, showMap = localIndex == 1)
+                } else Image(
                     bitmap = coloredImage,
                     contentDescription = request.title,
                     contentScale = ContentScale.Fit,
@@ -7758,7 +7990,8 @@ private fun HudHelpOverlay(
                     }
                 }
             }
-            if (request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode) {
+            if (request.topic == HudHelpTopicId.SpeedLimitNativeFallbackMode
+                || request.topic == HudHelpTopicId.MapOutputMode) {
                 Text(
                     topic.frames.getOrElse(localIndex) { topic.frames.first() }.caption(language),
                     color = palette.muted,

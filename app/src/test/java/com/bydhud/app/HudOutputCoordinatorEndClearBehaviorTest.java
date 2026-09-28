@@ -149,6 +149,35 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
         assertFalse(NativeSpeedLimitTestSupport.EVENTS.contains("native:2=1"));
     }
 
+    @Test public void stopFencesQueuedMapLivePublishAndFreshSessionResumesManualOwner() {
+        HudPrefs.setMapSettings(context,
+                HudPrefs.mapSettings(context).withMode(HudMapSettings.EXPERIMENTAL));
+        HudPrefs.setSpeedLimitMode(context, HudPrefs.SPEED_LIMIT_OFF);
+        startManualOutput();
+
+        DirectTbtFrame frame = HudMapLiveFixture.frame(
+                System.currentTimeMillis(), SystemClock.elapsedRealtime());
+        coordinator.publishManualMapLive(new HudState(), frame, 41L, "old-map-session");
+        coordinator.endMapLiveSession(41L, "stop-before-drain");
+        NativeSpeedLimitTestSupport.idleMainLooper();
+
+        assertEquals(0L, (long) org.robolectric.util.ReflectionHelpers.getField(
+                coordinator, "manualMapLiveSession"));
+        assertTrue("manual owner remains available after the stopped publication",
+                NativeSpeedLimitTestSupport.EVENTS.contains("transport:send"));
+
+        int beforeFreshSession = packets("payload").size();
+        coordinator.publishManualMapLive(new HudState(), frame, 42L, "fresh-map-session");
+        NativeSpeedLimitTestSupport.idleMainLooper();
+
+        assertEquals(42L, (long) org.robolectric.util.ReflectionHelpers.getField(
+                coordinator, "manualMapLiveSession"));
+        assertTrue("fresh live session resumes output on the current manual owner",
+                packets("payload").size() > beforeFreshSession);
+        assertFalse(NativeSpeedLimitTestSupport.EVENTS.stream()
+                .anyMatch(event -> event.startsWith("native:")));
+    }
+
     private static List<NativeSpeedLimitTestSupport.Packet> packets(String kind) {
         return NativeSpeedLimitTestSupport.PACKETS.stream()
                 .filter(packet -> packet.kind.equals(kind)).collect(Collectors.toList());

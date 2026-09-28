@@ -373,6 +373,7 @@ public final class MainActivity extends ComponentActivity {
         super.onStop();
         if (!isChangingConfigurations()) {
             NavHudLiveSender.stopHudCheckIfRunning("hud-check-background");
+            NavHudLiveSender.stopMapLiveIfRunning("map-live-background");
         }
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
@@ -892,6 +893,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.speedLimitCompositePlacement(this),
                 HudPrefs.speedLimitManeuverOverlaySize(this),
                 HudPrefs.speedLimitLaneOverlaySize(this),
+                HudPrefs.mapSettings(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
                 dashboardScreenMode,
                 HudPrefs.dashboardFormatMethod(this, dashboardScreenMode),
@@ -923,6 +925,7 @@ public final class MainActivity extends ComponentActivity {
                 logPathsText(),
                 composeApplicationState(permissionStatus),
                 NavHudLiveSender.hudCheckSnapshot(),
+                NavHudLiveSender.mapLiveSnapshot(),
                 NavHudLiveSender.hudCheckStatus(uiLanguage),
                 appScan.lastScanText,
                 appScan.hasAuthoritativeTaskState(),
@@ -1544,6 +1547,28 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeSetSpeedLimitLaneOverlaySize(int size) {
         setSpeedLimitLaneOverlaySize(size);
+    }
+
+    public void composeSetMapMode(int mode) {
+        saveMapSettings(HudPrefs.mapSettings(this).withMode(mode), "map-mode-change");
+    }
+
+    public void composeSetMapPreset(int preset) {
+        saveMapSettings(HudPrefs.mapSettings(this).withPreset(preset), "map-preset-change");
+    }
+
+    public void composeSetMapValue(int control, int value) {
+        saveMapSettings(HudPrefs.mapSettings(this).withValue(control, value), "map-geometry-change");
+    }
+
+    public void composeStartMapLive() {
+        if (!activityResumed || destroyed || exitRequested
+                || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.startMapLive(this);
+    }
+
+    public void composeStopMapLive() {
+        NavHudLiveSender.stopMapLiveIfRunning("map-live-user-stop");
     }
 
     public void composeSetWazeCustomSurfaceEnabled(boolean enabled) {
@@ -2513,6 +2538,7 @@ public final class MainActivity extends ComponentActivity {
 
     //stops all active runtime work after explicit user shutdown so auto-start stays blocked until the next manual open.
     public void composeShutdownAndExit() {
+        NavHudLiveSender.stopMapLiveIfRunning("map-live-shutdown");
         shutdownAndExit("ui-shutdown");
     }
 
@@ -2532,6 +2558,10 @@ public final class MainActivity extends ComponentActivity {
         // A delayed visual click must not restart a test after the Activity left the foreground.
         if (!activityResumed || destroyed || exitRequested) return;
         if (!NavHudLiveSender.activateUserRuntime(this)) return;
+        HudCheckState current = NavHudLiveSender.hudCheckSnapshot();
+        if (current == null || !current.running) {
+            NavHudLiveSender.stopMapLiveIfRunning("hud-check-start");
+        }
         NavHudLiveSender.get(this).updateHudCheck(
                 HudCheckState::toggleRun, "hud-check-run");
     }
@@ -2567,6 +2597,7 @@ public final class MainActivity extends ComponentActivity {
 
     public void composeShanghaiStart() {
         if (!activityResumed || destroyed || exitRequested) return;
+        NavHudLiveSender.stopMapLiveIfRunning("shanghai-start");
         NavHudLiveSender.stopHudCheckIfRunning("shanghai-start");
         ShanghaiTestController.get(this).start();
     }
@@ -2656,6 +2687,7 @@ public final class MainActivity extends ComponentActivity {
         public final int speedLimitCompositePlacement;
         public final int speedLimitManeuverOverlaySize;
         public final int speedLimitLaneOverlaySize;
+        public final HudMapSettings mapSettings;
         public final boolean wazeCustomSurfaceEnabled;
         public final int dashboardScreenMode;
         public final int dashboardFormatMethod;
@@ -2687,6 +2719,7 @@ public final class MainActivity extends ComponentActivity {
         public final String logPaths;
         public final String applicationState;
         public final HudCheckState hudCheck;
+        public final HudMapLiveState mapLive;
         public final ShanghaiTestState shanghai;
         public final String hudCheckStatus;
         public final String lastScanText;
@@ -2730,7 +2763,7 @@ public final class MainActivity extends ComponentActivity {
                 int nativeSpeedLimitFallbackMode,
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
-                int speedLimitLaneOverlaySize,
+                int speedLimitLaneOverlaySize, HudMapSettings mapSettings,
                 boolean wazeCustomSurfaceEnabled,
                 int dashboardScreenMode,
                 int dashboardFormatMethod,
@@ -2750,6 +2783,7 @@ public final class MainActivity extends ComponentActivity {
                 String observedPackages, String activeDashboardPackage,
                 boolean dashboardMoveInProgress, boolean logcatRecording, String logcatStatus,
                 String logPaths, String applicationState, HudCheckState hudCheck,
+                HudMapLiveState mapLive,
                 String hudCheckStatus, String lastScanText, boolean appRuntimeStatusKnown,
                 boolean appScanInProgress, boolean appScanCacheAvailable, String appScanStatus,
                 int storageLimitGb, List<String> navCaptureFolderPaths, boolean storageCalculating,
@@ -2800,6 +2834,7 @@ public final class MainActivity extends ComponentActivity {
             this.speedLimitCompositePlacement = speedLimitCompositePlacement;
             this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
             this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
+            this.mapSettings = mapSettings == null ? HudMapSettings.defaults() : mapSettings;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
             this.dashboardFormatMethod = HudPrefs.normalizeDashboardFormatMethod(
@@ -2836,6 +2871,7 @@ public final class MainActivity extends ComponentActivity {
             this.logPaths = logPaths == null ? "" : logPaths;
             this.applicationState = applicationState == null ? "" : applicationState;
             this.hudCheck = hudCheck;
+            this.mapLive = mapLive;
             this.shanghai = ShanghaiTestController.snapshot();
             this.hudCheckStatus = hudCheckStatus;
             this.lastScanText = lastScanText == null ? "--:--:--" : lastScanText;
@@ -2913,6 +2949,8 @@ public final class MainActivity extends ComponentActivity {
                     && speedLimitCompositePlacement == other.speedLimitCompositePlacement
                     && speedLimitManeuverOverlaySize == other.speedLimitManeuverOverlaySize
                     && speedLimitLaneOverlaySize == other.speedLimitLaneOverlaySize
+                    && Objects.equals(mapSettings, other.mapSettings)
+                    && Objects.equals(mapLive, other.mapLive)
                     && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
                     && dashboardScreenMode == other.dashboardScreenMode
                     && dashboardFormatMethod == other.dashboardFormatMethod
@@ -2983,7 +3021,8 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitMode, nativeSpeedLimitDelayEnabled, nativeSpeedLimitFallbackMode,
                     speedLimitFreeFallback, speedLimitOverlaySeconds,
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
-                    speedLimitLaneOverlaySize, wazeCustomSurfaceEnabled, dashboardScreenMode,
+                    speedLimitLaneOverlaySize, mapSettings, mapLive, wazeCustomSurfaceEnabled,
+                    dashboardScreenMode,
                     dashboardFormatMethod, dashboardWidthPercent, dashboardHeightPercent,
                     dashboardOffsetPercent,
                     dashboardScalePercent, dashboardWidgetState, dashboardWidgetOverlayPermission,
@@ -4267,6 +4306,19 @@ public final class MainActivity extends ComponentActivity {
         int persisted = HudPrefs.speedLimitLaneOverlaySize(this);
         appendStatus("Speed limit lane overlay size " + persisted);
         AppEventLogger.event(this, "ui speed_limit_lane_overlay_size=" + persisted);
+        refreshControls();
+    }
+
+    private void saveMapSettings(HudMapSettings settings, String reason) {
+        HudMapSettings current = HudPrefs.mapSettings(this);
+        if (current.equals(settings)) return;
+        HudPrefs.setMapSettings(this, settings);
+        if (settings.mode == HudMapSettings.EXPERIMENTAL) {
+            NavHudLiveSender.refreshMapLiveSettings(reason);
+        } else {
+            NavHudLiveSender.stopMapLiveIfRunning(reason);
+        }
+        AppEventLogger.event(this, "ui " + settings.diagnostics());
         refreshControls();
     }
 

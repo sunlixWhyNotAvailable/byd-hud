@@ -130,6 +130,10 @@ public final class ComposeSnapshotEqualityTest {
                 arguments[index] = "value";
             } else if (type == HudCheckState.class) {
                 arguments[index] = new HudCheckState();
+            } else if (type == HudMapSettings.class) {
+                arguments[index] = HudMapSettings.defaults();
+            } else if (type == HudMapLiveState.class) {
+                arguments[index] = new HudMapLiveState(false, 0L);
             } else if (type == DashboardWidgetState.class) {
                 arguments[index] = new DashboardWidgetState();
             } else if (genericName.contains("ComposeStorageDay")) {

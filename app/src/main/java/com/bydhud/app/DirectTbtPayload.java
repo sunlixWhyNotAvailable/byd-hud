@@ -205,18 +205,27 @@ public final class DirectTbtPayload {
 
         // Only the compositor consumes these independent regions. Instrument/AMap
         // still receive the immutable semantic frame, never this combined artwork.
-        if (safeOptions.presentation.separateEta() || safeOptions.presentation.separateWarning()) {
+        boolean calibrationMap = safeOptions.mapCalibration
+                && safeOptions.mapSettings.mode == HudMapSettings.EXPERIMENTAL;
+        boolean compositeLaneGeometry = safeOptions.mapSettings.mode == HudMapSettings.EXPERIMENTAL
+                && lanePng.length > 0;
+        boolean compositePrimary = safeOptions.presentation.separateEta()
+                || safeOptions.presentation.separateWarning() || calibrationMap;
+        if (compositePrimary || compositeLaneGeometry) {
             HudEtaText separateEta = safeOptions.presentation.separateEta() ? metrics : HudEtaText.EMPTY;
             Presentation style = safeOptions.presentation;
             HudExperimentalCompositor.Result composed = compositor.compose(new HudExperimentalCompositor.Inputs(
-                    separateEta.arrival, separateEta.duration, separateEta.remainingDistance,
-                    maneuverPng, lanePng, separateWarning.getManeuverPng(),
+                    separateEta.arrival, separateEta.compactDuration, separateEta.remainingDistance,
+                    compositePrimary ? maneuverPng : new byte[0], lanePng,
+                    separateWarning.getManeuverPng(),
                     separateWarning.isActive() && separateWarning.isDistanceKnown()
                             ? HudEtaText.distance(separateWarning.getDistanceMeters(), style.ukrainian) : "",
-                    style.arrivalColor, style.durationColor, style.remainingColor, style.warningColor));
+                    new HudExperimentalCompositor.Colors(style.arrivalColor, style.durationColor,
+                            style.remainingColor, style.warningColor),
+                    safeOptions.mapSettings, safeOptions.mapCalibration));
             byte[] upper = composed.f8Png();
             byte[] lower = composed.f7Png();
-            maneuverPng = upper == null ? maneuverPng : upper;
+            if (compositePrimary) maneuverPng = upper == null ? maneuverPng : upper;
             lanePng = lower == null ? lanePng : lower;
         }
 
@@ -655,6 +664,8 @@ public final class DirectTbtPayload {
         public final int speedLimitCompositePlacement;
         public final int speedLimitManeuverOverlaySize;
         public final int speedLimitLaneOverlaySize;
+        public final HudMapSettings mapSettings;
+        public final boolean mapCalibration;
         final Presentation presentation;
         private final byte[] blankS72Png;
 
@@ -737,6 +748,23 @@ public final class DirectTbtPayload {
                 int speedLimitFreeFallback, int speedLimitOverlaySeconds,
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
                 int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, HudMapSettings.defaults(), false);
+        }
+
+        private Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, int routeMetricsMode,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation,
+                HudMapSettings mapSettings, boolean mapCalibration) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -755,6 +783,8 @@ public final class DirectTbtPayload {
             this.speedLimitCompositePlacement = speedLimitCompositePlacement;
             this.speedLimitManeuverOverlaySize = speedLimitManeuverOverlaySize;
             this.speedLimitLaneOverlaySize = speedLimitLaneOverlaySize;
+            this.mapSettings = mapSettings == null ? HudMapSettings.defaults() : mapSettings;
+            this.mapCalibration = mapCalibration;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
             this.presentation = presentation;
         }
@@ -764,7 +794,8 @@ public final class DirectTbtPayload {
                     clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
-                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, value);
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, value,
+                    mapSettings, mapCalibration);
         }
 
         Options withSpeedLimitMode(int mode) {
@@ -773,7 +804,29 @@ public final class DirectTbtPayload {
                     clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
                     showRemainingDistance, mode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
-                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, presentation);
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, mapSettings, mapCalibration);
+        }
+
+        public Options withMapSettings(HudMapSettings value) {
+            HudMapSettings settings = value == null ? HudMapSettings.defaults() : value;
+            if (mapSettings.equals(settings)) return this;
+            return new Options(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, settings, mapCalibration);
+        }
+
+        public Options withMapCalibration(boolean enabled) {
+            if (mapCalibration == enabled) return this;
+            return new Options(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, mapSettings, enabled);
         }
 
         public static Options from(Context context) {
@@ -818,7 +871,8 @@ public final class DirectTbtPayload {
                                 HudPrefs.getEtaDurationColor(safeContext),
                                 HudPrefs.getEtaRemainingDistanceColor(safeContext),
                                 HudPrefs.getWazeWarningDistanceColor(safeContext),
-                                HudPrefs.isEtaWaitForFullTextEnabled(safeContext))));
+                                HudPrefs.isEtaWaitForFullTextEnabled(safeContext)))
+                                .withMapSettings(HudPrefs.mapSettings(safeContext)));
                 synchronized (OPTIONS_LOCK) {
                     if (snapshot.revision != HudPrefs.outputOptionsRevision()) continue;
                     if (cachedOptions != null

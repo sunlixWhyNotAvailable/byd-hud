@@ -55,6 +55,17 @@ public class HudEtaTextTest {
         assertFalse(HudEtaText.duration(Long.MAX_VALUE, false).startsWith("-"));
     }
 
+    @Test public void compactSeparateDurationUsesTotalHoursAndKeepsStreetFormat() {
+        assertEquals("0m", HudEtaText.compactDuration(0, false));
+        assertEquals("25m", HudEtaText.compactDuration(1500, false));
+        assertEquals("99h 59m", HudEtaText.compactDuration(359_940, false));
+        assertEquals("100h 1m", HudEtaText.compactDuration(360_060, false));
+        assertEquals("99г 59хв", HudEtaText.compactDuration(359_940, true));
+        assertEquals("100г 1хв", HudEtaText.compactDuration(360_060, true));
+        assertEquals("100 h 1 min", HudEtaText.duration(360_060, false));
+        assertEquals("12 хв", HudExperimentalLayout.DURATION_EDGE_REFERENCE);
+    }
+
     @Test public void distancesAndMissingPartsKeepStableSeparators() {
         assertEquals("", HudEtaText.distance(-1, false));
         assertEquals("0 м", HudEtaText.distance(0, true));
