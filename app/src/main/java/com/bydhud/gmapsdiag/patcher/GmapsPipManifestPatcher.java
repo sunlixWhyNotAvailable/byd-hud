@@ -130,7 +130,7 @@ public final class GmapsPipManifestPatcher {
         }
     }
 
-    private static final class Attribute {
+    static final class Attribute {
         final String namespace;
         final String name;
         final int type;
@@ -149,7 +149,7 @@ public final class GmapsPipManifestPatcher {
         }
     }
 
-    private static final class Element {
+    static final class Element {
         final String name;
         final String parent;
         final List<Attribute> attributes;
@@ -161,7 +161,7 @@ public final class GmapsPipManifestPatcher {
         }
     }
 
-    private static final class BinaryXml {
+    static final class BinaryXml {
         final byte[] bytes;
         final StringPool strings;
         final List<Element> elements = new ArrayList<>();
@@ -273,7 +273,7 @@ public final class GmapsPipManifestPatcher {
             }
         }
 
-        private Chunk chunk(int offset) throws IOException {
+        Chunk chunk(int offset) throws IOException {
             if (offset < 0 || offset > bytes.length - 8) {
                 throw new IOException("Truncated binary XML chunk");
             }
@@ -297,16 +297,16 @@ public final class GmapsPipManifestPatcher {
             return new Chunk(type, headerSize, size);
         }
 
-        private int u16(int offset) {
+        int u16(int offset) {
             return ByteBuffer.wrap(bytes, offset, 2).order(ByteOrder.LITTLE_ENDIAN).getShort() & 0xffff;
         }
 
-        private int u32(int offset) {
+        int u32(int offset) {
             return ByteBuffer.wrap(bytes, offset, 4).order(ByteOrder.LITTLE_ENDIAN).getInt();
         }
     }
 
-    private static final class Chunk {
+    static final class Chunk {
         final int type;
         final int headerSize;
         final int size;
@@ -318,7 +318,7 @@ public final class GmapsPipManifestPatcher {
         }
     }
 
-    private static final class StringPool {
+    static final class StringPool {
         final byte[] bytes;
         final int offset;
         final int stringCount;

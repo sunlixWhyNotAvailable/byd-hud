@@ -231,10 +231,12 @@ final class InstrumentProxyManager {
                 return;
             }
             log("start requested generation=" + requestGeneration + " reason=" + safe(reason));
-            worker.execute(() -> launch(
-                    requestGeneration, requestNonce, requestLaunchToken));
-            worker.schedule(() -> handleStartTimeout(requestGeneration),
-                    START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            worker.execute(() -> {
+                launch(requestGeneration, requestNonce, requestLaunchToken);
+                // Give queued handoffs time to complete after the bounded shell operation.
+                worker.schedule(() -> handleStartTimeout(requestGeneration),
+                        START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            });
         }
     }
 
@@ -1174,14 +1176,27 @@ final class InstrumentProxyManager {
                 return;
             }
             if (!observeStartStage(requestGeneration, "launch-started")) return;
-            LocalAdbBridge.ShellResult result = LocalAdbBridge.launchInstrumentProxy(
-                    context,
-                    context.getApplicationInfo().sourceDir,
-                    requestGeneration,
-                    requestNonce,
-                    appUid,
-                    requestLaunchToken,
-                    BuildConfig.VERSION_CODE);
+            LocalAdbBridge.ShellResult result;
+            try {
+                result = LocalAdbBridge.launchInstrumentProxy(
+                        context,
+                        context.getApplicationInfo().sourceDir,
+                        requestGeneration,
+                        requestNonce,
+                        appUid,
+                        requestLaunchToken,
+                        BuildConfig.VERSION_CODE);
+            } catch (IOException error) {
+                // The child may already have handed off its Binder. Only the authenticated
+                // connect result can establish readiness; preserve the pending identity.
+                if (observeStartStage(requestGeneration, "launch-transport-uncertain")) {
+                    log("launch transport uncertain generation=" + requestGeneration
+                            + " error=" + error.getClass().getSimpleName()
+                            + " replay=false awaiting=authenticated-handoff timeoutMs="
+                            + START_TIMEOUT_MS);
+                }
+                return;
+            }
             if (!result.success()) {
                 failStart(requestGeneration,
                         "launch exit=" + result.exitCode, result.exitCode != 126);
@@ -1192,6 +1207,8 @@ final class InstrumentProxyManager {
                 failStart(requestGeneration, "launch pid persistence failed", true);
             } else {
                 observeStartStage(requestGeneration, "launch-complete");
+                log("launch confirmed generation=" + requestGeneration + " pid=" + launchedPid
+                        + " exit=" + result.exitCode);
             }
         } catch (IOException | RuntimeException error) {
             failStart(requestGeneration, error.getClass().getSimpleName(), true);

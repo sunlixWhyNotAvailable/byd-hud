@@ -14,7 +14,7 @@ import java.util.UUID;
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
     // Invalidate cached results whenever component structural classification changes.
-    private static final int SCAN_CACHE_REVISION = 10;
+    private static final int SCAN_CACHE_REVISION = 11;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";

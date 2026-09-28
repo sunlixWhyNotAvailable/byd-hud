@@ -37,7 +37,7 @@ public final class NavigatorPatchEligibilitySourceContractTest {
     public void componentSchemaScanCacheIsInvalidated() throws Exception {
         String store = source("NavigatorPatchStore.java");
 
-        assertTrue(store.contains("SCAN_CACHE_REVISION = 10"));
+        assertTrue(store.contains("SCAN_CACHE_REVISION = 11"));
     }
 
     @Test

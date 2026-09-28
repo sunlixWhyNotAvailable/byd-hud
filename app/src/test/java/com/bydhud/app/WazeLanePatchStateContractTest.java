@@ -40,7 +40,7 @@ public final class WazeLanePatchStateContractTest {
                 "NavigatorPatchStore.PATCHABLE.equals(input.gmsCoreState)"));
         assertTrue(pipeline.contains("Waze lanes post-verification failed"));
         assertTrue(store.contains("Waze\", \"Lanes\", \"Stable session"));
-        assertTrue(store.contains("SCAN_CACHE_REVISION = 10"));
+        assertTrue(store.contains("SCAN_CACHE_REVISION = 11"));
         assertTrue(compose.contains("language.choose(\"Смуги\", \"Lanes\", \"Полосы\")"));
     }
 

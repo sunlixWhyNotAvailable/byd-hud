@@ -1079,7 +1079,8 @@ final class LocalAdbBridge {
             throws IOException {
         String command = instrumentProxyLaunchCommand(
                 apkPath, generation, nonce, appUid, launchToken, appVersionCode);
-        return runTrustedRuntimeShellCommand(context, command);
+        // A transport timeout does not mean app_process failed to start. Never replay it.
+        return runTrustedRuntimeShellCommand(context, command, 4096, false, true);
     }
 
     static ShellResult captureGMapsIdentityEvidence(Context context) {
@@ -1456,6 +1457,13 @@ final class LocalAdbBridge {
     private static ShellResult runTrustedRuntimeShellCommand(
             Context context, String safeCommand, int maxOutputBytes,
             boolean retryTransportFailure) throws IOException {
+        return runTrustedRuntimeShellCommand(context, safeCommand, maxOutputBytes,
+                retryTransportFailure, false);
+    }
+
+    private static ShellResult runTrustedRuntimeShellCommand(
+            Context context, String safeCommand, int maxOutputBytes,
+            boolean retryTransportFailure, boolean finishOnExitMarker) throws IOException {
         Context appContext = context.getApplicationContext();
         synchronized (RUNTIME_CONNECTION_LOCK) {
             try {
@@ -1463,7 +1471,8 @@ final class LocalAdbBridge {
                 if (connection == null) {
                     return unauthorizedRuntimeShellResult();
                 }
-                ShellResult result = connection.shellWithExit(safeCommand, maxOutputBytes);
+                ShellResult result = connection.shellWithExit(
+                        safeCommand, maxOutputBytes, finishOnExitMarker);
                 runtimeLastUsedMs = android.os.SystemClock.elapsedRealtime();
                 return result;
             } catch (IOException e) {
@@ -1992,17 +2001,23 @@ final class LocalAdbBridge {
 
         //keeps diagnostic output bounded while retaining the shell exit marker at the tail.
         ShellResult shellWithExit(String command, int maxOutputBytes) throws IOException {
+            return shellWithExit(command, maxOutputBytes, false);
+        }
+
+        ShellResult shellWithExit(String command, int maxOutputBytes,
+                boolean finishOnExitMarker) throws IOException {
             String wrapped = command + "; echo " + EXIT_MARKER + "$?";
-            ShellCapture capture = shell(wrapped, maxOutputBytes);
+            ShellCapture capture = shell(wrapped, new OutputAccumulator(maxOutputBytes),
+                    finishOnExitMarker);
             return ShellResult.parse(capture.raw, capture.truncated, capture.droppedBytes);
         }
 
-        //keeps this step explicit so callers can rely on one documented behavior boundary.
-        private ShellCapture shell(String command, int maxOutputBytes) throws IOException {
-            return shell(command, new OutputAccumulator(maxOutputBytes));
+        private ShellCapture shell(String command, OutputAccumulator output) throws IOException {
+            return shell(command, output, false);
         }
 
-        private ShellCapture shell(String command, OutputAccumulator output) throws IOException {
+        private ShellCapture shell(String command, OutputAccumulator output,
+                boolean finishOnExitMarker) throws IOException {
             int localId = nextLocalId++;
             int remoteId = 0;
             AdbPacket.write(out, AdbPacket.A_OPEN, localId, 0, nulPayload("shell:" + command));
@@ -2020,6 +2035,14 @@ final class LocalAdbBridge {
                     }
                     output.append(packet.payload);
                     AdbPacket.write(out, AdbPacket.A_OKAY, localId, remoteId, new byte[0]);
+                    if (finishOnExitMarker) {
+                        ShellCapture captured = output.capture();
+                        // Require a complete line, including when ADB splits the status digits.
+                        if (captured.raw.matches("(?s)(?:.*\\n)?" + EXIT_MARKER + "[0-9]{1,3}\\r?\\n")) {
+                            AdbPacket.write(out, AdbPacket.A_CLSE, localId, remoteId, new byte[0]);
+                            return captured;
+                        }
+                    }
                 } else if (packet.command == AdbPacket.A_CLSE) {
                     if (remoteId == 0) {
                         remoteId = packet.arg0;

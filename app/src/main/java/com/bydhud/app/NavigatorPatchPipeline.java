@@ -13,6 +13,7 @@ import com.android.apksig.ApkVerifier;
 import com.android.zipflinger.BytesSource;
 import com.android.zipflinger.ZipArchive;
 import com.bydhud.gmapsdiag.patcher.GmapsDiagnosticPatcher;
+import com.bydhud.gmapsdiag.patcher.HudPackageVisibilityPatcher;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
@@ -730,6 +731,8 @@ final class NavigatorPatchPipeline {
 
     private static ScanResult inspectComponents(Context context,
         NavigatorApkSet.SetInfo set, ScanResult metadata) throws Exception {
+        boolean hudVisible = HudPackageVisibilityPatcher.hasQuery(
+                readManifest(baseMember(set).file));
         if (metadata.profile == NavigatorPatchStore.Profile.GMAPS) {
             List<GmapsDiagnosticPatcher.ComponentInspection> inspections = inspectGmapsSet(set);
             String validatedProfile = inspections.get(0).profile;
@@ -774,7 +777,8 @@ final class NavigatorPatchPipeline {
             }
             String directState = directTargets == 1
                     && (GMAPS_PATCHABLE.equals(direct)
-                    || GMAPS_DIRECT_UPGRADEABLE.equals(direct))
+                    || GMAPS_DIRECT_UPGRADEABLE.equals(direct)
+                    || (GMAPS_DIRECT.equals(direct) && !hudVisible))
                     ? NavigatorPatchStore.PATCHABLE
                     : directTargets == 1 && GMAPS_DIRECT.equals(direct)
                     ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.FAILED;
@@ -841,7 +845,7 @@ final class NavigatorPatchPipeline {
         }
         String directState = allowlistStock + allowlistPatched != 1
                 ? NavigatorPatchStore.FAILED
-                : allowlistPatched == 1
+                : allowlistPatched == 1 && hudVisible
                 ? NavigatorPatchStore.PATCHED : NavigatorPatchStore.PATCHABLE;
         String laneState = laneStock + lanePatched != 1
                 ? NavigatorPatchStore.FAILED
@@ -879,12 +883,43 @@ final class NavigatorPatchPipeline {
             ScanResult input, boolean reportProgress) throws Exception {
         File sourceDirectory = sourceSet.members.get(0).file.getParentFile().getParentFile();
         copySetDirectory(sourceDirectory, outputDirectory);
-        if (profile == NavigatorPatchStore.Profile.WAZE) {
-            return patchWazeSet(context, sourceSet, outputDirectory, transaction, input,
-                    reportProgress);
+        PatchOutcome outcome = profile == NavigatorPatchStore.Profile.WAZE
+                ? patchWazeSet(context, sourceSet, outputDirectory, transaction, input, reportProgress)
+                : patchGmapsSet(context, sourceSet, outputDirectory, transaction, input, reportProgress);
+        File base = outputMember(outputDirectory, baseMember(sourceSet).installName);
+        byte[] manifest = readManifest(base);
+        byte[] patched = HudPackageVisibilityPatcher.patch(manifest);
+        if (patched != manifest) {
+            File replacement = new File(transaction, "hud-query-manifest.xml");
+            Files.write(replacement.toPath(), patched);
+            File rewritten = new File(transaction, "hud-query-unsigned.apk");
+            repack(base, rewritten, Collections.singletonMap("AndroidManifest.xml", replacement),
+                    Collections.emptyMap());
+            replaceFile(rewritten, base);
         }
-        return patchGmapsSet(context, sourceSet, outputDirectory, transaction, input,
-                reportProgress);
+        if (!HudPackageVisibilityPatcher.hasQuery(readManifest(base))) {
+            throw new IOException("Output APK is missing the HUD package query");
+        }
+        AppEventLogger.event(context, "navigator_patch stage=package_visibility profile="
+                + profile.id + " hudQuery=present changed=" + (patched != manifest));
+        return outcome;
+    }
+
+    private static NavigatorApkSet.Member baseMember(NavigatorApkSet.SetInfo set) throws IOException {
+        NavigatorApkSet.Member base = null;
+        for (NavigatorApkSet.Member member : set.members) {
+            if (!member.base) continue;
+            if (base != null) throw new IOException("Multiple base APKs for HUD package query");
+            base = member;
+        }
+        if (base == null) throw new IOException("Base APK missing for HUD package query");
+        return base;
+    }
+
+    private static byte[] readManifest(File apk) throws IOException {
+        try (ZipFile zip = new ZipFile(apk)) {
+            return readEntry(zip, "AndroidManifest.xml", 8 * 1024 * 1024);
+        }
     }
 
     private static PatchOutcome patchGmapsSet(Context context, NavigatorApkSet.SetInfo sourceSet,
@@ -899,6 +934,7 @@ final class NavigatorPatchPipeline {
                 inspectGmapsSet(sourceSet);
         String validatedProfile = inspections.get(0).profile;
         File directMember = null;
+        int alreadyDirect = 0;
         File gmsCoreMember = null;
         File audioMember = null;
         File pipMember = null;
@@ -920,6 +956,7 @@ final class NavigatorPatchPipeline {
                 directMember = outputMember(outputDirectory, member.installName);
             } else if (GMAPS_DIRECT.equals(direct)) {
                 if (directMember != null) throw new IOException("Multiple Google Maps direct targets");
+                alreadyDirect++;
             }
             if (GMAPS_GMS_CORE_ACTIVE.equals(gmsCore)) {
                 if (gmsCoreMember != null) throw new IOException("Multiple Google Maps GmsCore targets");
@@ -935,7 +972,11 @@ final class NavigatorPatchPipeline {
             }
         }
         if (NavigatorPatchStore.PATCHABLE.equals(input.directState)) {
-            if (directMember == null) throw new IOException("Google Maps direct target member missing");
+            if ((directMember == null ? 0 : 1) + alreadyDirect != 1) {
+                throw new IOException("Google Maps direct target member is ambiguous");
+            }
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.directState) && directMember != null) {
             File rewritten = new File(transaction, "gmaps-direct-unsigned.apk");
             File loggerDex = new File(transaction, "gmaps-bridge.dex");
             File report = new File(transaction, "gmaps-direct-report.json");
@@ -1047,10 +1088,13 @@ final class NavigatorPatchPipeline {
             if (allowlistCount != 1 || allowlist == null) {
                 throw new IOException("Waze direct target member is ambiguous");
             }
-            if (!WazePatchEngine.PATCHABLE_STOCK.equals(
-                    allowlist.allowlistClassification)) {
+            if (!WazePatchEngine.PATCHABLE_STOCK.equals(allowlist.allowlistClassification)
+                    && !WazePatchEngine.ALREADY_PATCHED.equals(allowlist.allowlistClassification)) {
                 throw new IOException("Waze direct patch has no stock component");
             }
+        }
+        if (NavigatorPatchStore.PATCHABLE.equals(input.directState)
+                && WazePatchEngine.PATCHABLE_STOCK.equals(allowlist.allowlistClassification)) {
             File target = outputMember(outputDirectory, allowlist.fileName);
             File rewrittenDex = new File(transaction, "waze-direct.dex");
             WazePatchEngine.patchWazeAllowlist(

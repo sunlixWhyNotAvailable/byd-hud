@@ -33,6 +33,8 @@ public class InstrumentShanghaiBehaviorTest {
 
     @Before public void setUp() throws Exception {
         Adb.cleanups = 0;
+        Adb.uncertainLaunch = false;
+        Adb.launches = 0;
         manager = callConstructor(InstrumentProxyManager.class,
                 ClassParameter.from(Context.class, RuntimeEnvironment.getApplication()));
         stop(getField(manager, "worker"));
@@ -121,6 +123,47 @@ public class InstrumentShanghaiBehaviorTest {
         assertEquals(1, Adb.cleanups);
     }
 
+    @Test public void uncertainLaunchAllowsAuthenticatedHandoffWithoutReplay() throws Exception {
+        startWithLostShellReply();
+        assertEquals("STARTING", getField(manager, "state").toString());
+        assertEquals("launch-transport-uncertain", getField(manager, "startStage"));
+        InstrumentProxyStore.Identity pending = getField(manager, "helperIdentity");
+        assertEquals(-1, pending.pid);
+        manager.acceptHandoff(pending.generation, pending.nonce, proxy.asBinder());
+        Bundle result = InstrumentProxyContract.connectionResult(true, "", pending.generation,
+                pending.nonce, 14207, 2000, BuildConfig.VERSION_CODE, pending.token, 4242,
+                InstrumentProxyContract.CAP_SYSTEM_CONTEXT | InstrumentProxyContract.CAP_DIRECT_FID);
+        callInstanceMethod(manager, "completeConnect", ClassParameter.from(long.class, pending.generation),
+                ClassParameter.from(Bundle.class, result));
+        assertEquals("READY", getField(manager, "state").toString());
+        assertEquals(14207, ((InstrumentProxyStore.Identity) getField(manager, "helperIdentity")).pid);
+        callInstanceMethod(manager, "handleStartTimeout", ClassParameter.from(long.class, pending.generation));
+        assertEquals("READY", getField(manager, "state").toString());
+        assertEquals(1, Adb.launches);
+    }
+
+    @Test public void uncertainLaunchWithoutHandoffStillTimesOutAndCleansUp() throws Exception {
+        startWithLostShellReply();
+        long generation = getField(manager, "generation");
+        // Exhaust the existing immediate-retry budget to isolate this launch's deadline.
+        setField(manager, "rapidFailureCount", 1);
+        Task timeout = worker.tasks.stream().filter(t -> t.delay == 5000).findFirst().orElseThrow();
+        timeout.run();
+        assertEquals("IDLE", getField(manager, "state").toString());
+        assertEquals(1, Adb.launches);
+        assertEquals(2, Adb.cleanups); // Pre-launch stale cleanup and failed-launch cleanup.
+        manager.acceptHandoff(generation, getField(manager, "nonce"), proxy.asBinder());
+        assertTrue(proxy.events.isEmpty());
+    }
+
+    private void startWithLostShellReply() throws Exception {
+        Context context = RuntimeEnvironment.getApplication();
+        context.getApplicationInfo().uid = 10123;
+        assertTrue(InstrumentProxyStore.markLegacyMigrationComplete(context, 10123));
+        Adb.uncertainLaunch = true;
+        manager.ensureStarted("test-lost-launch-reply");
+    }
+
     private void ready() throws Exception {
         state("READY");
         setField(manager, "proxy", proxy);
@@ -160,6 +203,16 @@ public class InstrumentShanghaiBehaviorTest {
     @Implements(LocalAdbBridge.class)
     public static class Adb {
         static int cleanups;
+        static boolean uncertainLaunch;
+        static int launches;
+        @Implementation protected static LocalAdbBridge.ShellResult launchInstrumentProxy(
+                Context context, String apkPath, long generation, String nonce, int appUid,
+                String launchToken, int appVersionCode) throws java.io.IOException {
+            launches++;
+            throw new java.net.SocketTimeoutException("test lost shell reply");
+        }
+        @Implementation protected static String instrumentProxyStartupDiagnostic(
+                Context context, InstrumentProxyStore.Identity identity) { return "test diagnostic"; }
         @Implementation protected static void clearInstrumentProxyStartupDiagnostic(
                 Context context, InstrumentProxyStore.Identity identity) { }
         @Implementation protected static LocalAdbBridge.ShellResult stopInstrumentProxy(
@@ -170,6 +223,7 @@ public class InstrumentShanghaiBehaviorTest {
                     ClassParameter.from(String.class, ""));
         }
         @Implementation protected static boolean isCurrentKeyKnownAuthorized(Context context) {
+            if (uncertainLaunch) return true;
             throw new AssertionError("cancelled Shanghai launch reached ADB");
         }
     }
