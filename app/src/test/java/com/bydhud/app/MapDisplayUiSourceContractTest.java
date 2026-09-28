@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -20,6 +21,7 @@ public final class MapDisplayUiSourceContractTest {
         assertTrue(speedLimit >= 0 && speedLimit < mapDisplay && mapDisplay < wazeFeatures);
 
         String map = compose.substring(mapDisplay, wazeFeatures);
+        assertTrue(map.contains("R.drawable.ic_options_map"));
         assertTrue(map.contains("HudHelpTopicId.MapOutputMode"));
         assertTrue(map.contains("mapSettings.mode == HudMapSettings.EXPERIMENTAL"));
         assertTrue(map.contains("onClick = { runAction { activity.composeStartMapLive() } }"));
@@ -54,6 +56,24 @@ public final class MapDisplayUiSourceContractTest {
         assertTrue(prefs.contains("static HudMapSettings mapSettings(Context context)"));
         assertTrue(prefs.contains("static void setMapSettings(Context context, HudMapSettings settings)"));
         assertTrue(prefs.contains("markOutputOptionChanged(\"map_settings\")"));
+    }
+
+    @Test
+    public void experimentalHelpUsesSl07LayoutAndRetainedMapAsset() throws Exception {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String sl07 = between(compose, "private fun Sl07MapOutputHelpImage(", "private fun HudHelpOverlay(");
+        assertTrue(sl07.contains("R.drawable.hud_help_map_denza"));
+        assertTrue(sl07.contains("drawImage(baseline)"));
+        assertFalse(sl07.contains("IntSize(490, 71)"));
+        assertTrue(sl07.contains("IntOffset(1190, 320), IntSize(330, 198)"));
+        assertTrue(sl07.contains("Offset(810f, 438f), size = Size(700f, 102f)"));
+        String branch = between(compose,
+                "if (request.topic == HudHelpTopicId.MapOutputMode && localIndex == 2)",
+                "else if (request.topic == HudHelpTopicId.MapOutputMode)");
+        assertTrue(branch.contains("Sl07MapOutputHelpImage(coloredImage)"));
+        String help = source("HudHelpCatalog.kt");
+        assertTrue(help.contains("SL07 HUD example"));
+        assertTrue(help.contains("Example layout on Denza N9"));
     }
 
     private static String source(String name) throws Exception {

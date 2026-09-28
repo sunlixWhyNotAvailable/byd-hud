@@ -91,11 +91,20 @@ object AppUpdateManager {
     }
 
     //defines UpdateInfo UI/state support so Compose code can keep rendering intent explicit.
+    data class ReleaseNotesEntry(val version: String, val body: String)
+
     data class UpdateInfo(
         val version: String,
         val downloadUrl: String,
-        val releaseNotes: String
+        val releaseNotes: String,
+        val releaseHistory: List<ReleaseNotesEntry> = listOf(ReleaseNotesEntry(version, releaseNotes)),
+        val historyComplete: Boolean = true
     )
+
+    fun releaseNotesForLanguage(info: UpdateInfo, languageCode: String): String =
+        info.releaseHistory.joinToString("\n\n---\n\n") {
+            "## v${it.version}\n\n${releaseNotesForLanguage(it.body, languageCode)}"
+        }
 
     fun releaseNotesForLanguage(body: String, languageCode: String): String {
         val requested = when (languageCode.lowercase()) {
@@ -303,8 +312,9 @@ object AppUpdateManager {
     private suspend fun fetchUpdate(betaChannel: Boolean): CheckResult = withContext(Dispatchers.IO) {
         fetchMutex.withLock {
             currentCoroutineContext().ensureActive()
-            val release = if (betaChannel) {
-                selectLatestRelease(fetchReleaseListJson())
+            val firstPage = if (betaChannel) fetchReleaseListJson(1) else null
+            val release = if (firstPage != null) {
+                selectLatestRelease(firstPage)
             } else {
                 selectStableRelease(fetchLatestReleaseJson())
             }
@@ -313,12 +323,17 @@ object AppUpdateManager {
             if (!isNewerVersion(remoteVersion, BuildConfig.VERSION_NAME)) {
                 return@withLock CheckResult.UpToDate
             }
-            CheckResult.Available(
-                UpdateInfo(
+            val offered = UpdateInfo(
                     version = remoteVersion,
                     downloadUrl = findApkAssetUrl(release),
                     releaseNotes = release.optString("body", "")
                 )
+            CheckResult.Available(
+                loadReleaseHistory(BuildConfig.VERSION_NAME, offered, betaChannel, firstPage,
+                    onFailure = { page, error ->
+                        appContext?.let { AppEventLogger.event(it,
+                            "update_check history_incomplete page=$page error=${error.javaClass.simpleName}") }
+                    })
             )
         }
     }
@@ -674,8 +689,52 @@ object AppUpdateManager {
         return JSONObject(fetchReleaseJson(BuildConfig.UPDATE_RELEASE_API_URL))
     }
 
-    private fun fetchReleaseListJson(): JSONArray {
-        return JSONArray(fetchReleaseJson(BuildConfig.UPDATE_RELEASES_API_URL))
+    private fun fetchReleaseListJson(page: Int): JSONArray {
+        return JSONArray(fetchReleaseJson("${BuildConfig.UPDATE_RELEASES_API_URL}?per_page=100&page=$page"))
+    }
+
+    /** One fetch session owns the history; Compose only localizes these cached raw bodies. */
+    internal suspend fun loadReleaseHistory(
+        installed: String,
+        offered: UpdateInfo,
+        betaChannel: Boolean,
+        firstPage: JSONArray? = null,
+        fetchPage: suspend (Int) -> JSONArray = { fetchReleaseListJson(it) },
+        onFailure: (Int, Exception) -> Unit = { _, _ -> }
+    ): UpdateInfo {
+        val lower = parseAndroidVersion(installed)
+        val upper = parseAndroidVersion(offered.version)
+        // The validated offer owns its body even if the list contains a duplicate/stale entry.
+        val entries = linkedMapOf(upper to ReleaseNotesEntry(offered.version, offered.releaseNotes))
+        var complete = true
+        var page = 1
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val releases = try {
+                if (page == 1 && firstPage != null) firstPage else fetchPage(page)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                complete = false
+                onFailure(page, error)
+                break
+            }
+            currentCoroutineContext().ensureActive()
+            for (index in 0 until releases.length()) {
+                val release = releases.optJSONObject(index) ?: continue
+                if (release.optBoolean("draft", false)) continue
+                val version = parseGitTagOrNull(release.optString("tag_name", "")) ?: continue
+                if (!betaChannel && (version.beta != null || release.optBoolean("prerelease", false))) continue
+                if (version > lower && version <= upper) {
+                    entries.putIfAbsent(version, ReleaseNotesEntry(version.androidName(), release.optString("body", "")))
+                }
+            }
+            if (releases.length() < 100) break
+            page++
+        }
+        currentCoroutineContext().ensureActive()
+        return offered.copy(releaseHistory = entries.toSortedMap(reverseOrder()).values.toList(),
+            historyComplete = complete)
     }
 
     private fun fetchReleaseJson(url: String): String {

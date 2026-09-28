@@ -20,6 +20,27 @@ import java.util.List;
 import java.util.Set;
 
 public final class ShanghaiDiagnosticsJournalTest {
+    @Test public void bothFrameworkErrorsAreFailuresForEveryFidAndPreserveRaw() throws Exception {
+        for (int fid : ShanghaiAdasEntryPoint.FIDS) {
+            for (int raw : new int[]{-2147482648, -999999999}) {
+                JSONObject record = new JSONObject();
+                ShanghaiAdasEntryPoint.recordValue(record, fid, raw);
+                assertEquals(raw, record.getInt("raw"));
+                assertTrue(!record.getBoolean("success"));
+                assertTrue(record.getString("error").contains(Integer.toString(raw)));
+                assertTrue(record.isNull("decodedKmh"));
+            }
+        }
+        for (int raw : new int[]{0, 1, 2, 13, 51, 200}) {
+            JSONObject record = new JSONObject();
+            ShanghaiAdasEntryPoint.recordValue(record, ShanghaiAdasEntryPoint.FIDS[0], raw);
+            assertTrue(record.getBoolean("success"));
+            assertTrue(!record.has("error"));
+            if (raw >= 1 && raw <= 51) assertEquals((raw - 1) * 5, record.getInt("decodedKmh"));
+            else assertTrue(record.isNull("decodedKmh"));
+        }
+    }
+
     @Test public void topicCatalogExactlyMatchesSavedStockNavigationFixture() throws Exception {
         Set<Long> fixture = new LinkedHashSet<>();
         try (InputStream input = getClass().getResourceAsStream("/shanghai-stock-navigation-topics.txt");

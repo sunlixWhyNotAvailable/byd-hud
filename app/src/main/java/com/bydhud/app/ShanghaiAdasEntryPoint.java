@@ -74,12 +74,7 @@ public final class ShanghaiAdasEntryPoint {
                     Object event = get.invoke(device, new int[]{FIDS[index]}, int.class);
                     if (event == null) throw new UnsupportedOperationException("ADAS getter returned null");
                     int raw = event.getClass().getField("intValue").getInt(event);
-                    record.put("raw", raw).put("success", raw != -999999999);
-                    if (raw == -999999999) record.put("error", "ADAS framework no-value sentinel");
-                    if (index == 0) {
-                        record.put("decodedKmh", raw >= 1 && raw <= 51
-                                ? (raw - 1) * 5 : JSONObject.NULL);
-                    }
+                    recordValue(record, FIDS[index], raw);
                 } catch (Throwable error) {
                     Throwable cause = root(error);
                     record.put("success", false).put("errorClass", cause.getClass().getName())
@@ -92,6 +87,14 @@ public final class ShanghaiAdasEntryPoint {
                     - (android.os.SystemClock.elapsedRealtime() - sweepStarted);
             if (remaining > 0L) android.os.SystemClock.sleep(remaining);
         }
+    }
+
+    static void recordValue(JSONObject record, int fid, int raw) throws org.json.JSONException {
+        boolean sentinel = VehicleConfigurationReadback.isSentinel(raw);
+        record.put("raw", raw).put("success", !sentinel);
+        if (sentinel) record.put("error", "ADAS framework error sentinel: " + raw);
+        if (fid == FIDS[0]) record.put("decodedKmh", !sentinel && raw >= 1 && raw <= 51
+                ? (raw - 1) * 5 : JSONObject.NULL);
     }
 
     private static Context systemContext() throws Exception {

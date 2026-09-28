@@ -11,7 +11,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.HashSet;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 import org.junit.Test;
 
@@ -23,7 +27,7 @@ public final class RuntimeUiSessionTest {
         firstUi.select("Options", "dashboard-widget");
         String[] keys = {"apps", "storage", "storage-days", "patch", "hud-check", "options-categories",
                 "options:runtime-permissions", "options:basic-navigation", "options:route-eta",
-                "options:speed-limit", "options:waze-features", "options:extra-navigation",
+                "options:speed-limit", "options:map-display", "options:waze-features", "options:extra-navigation",
                 "options:dashboard-window-profile", "options:dashboard-widget", "options:dashboard-move"};
         for (int i = 0; i < keys.length; i++) {
             firstUi.recordViewport(keys[i], new RuntimeUiSession.Viewport(i + 1, i + 11));
@@ -41,6 +45,24 @@ public final class RuntimeUiSessionTest {
         recreatedUi.recordViewport("storage-days", RuntimeUiSession.Viewport.TOP);
         assertEquals(RuntimeUiSession.Viewport.TOP, recreatedUi.viewport("storage-days"));
         assertEquals(new RuntimeUiSession.Viewport(2, 12), recreatedUi.viewport("storage"));
+    }
+
+    @Test
+    public void everyOptionsSectionHasARegisteredViewportBeforeItCanOpen() throws IOException {
+        String compose = source("BydHudRuntimeCompose.kt");
+        String registry = between(compose, "private val runtimeViewportKeys = listOf(", "\n)");
+        Set<String> registered = new HashSet<>();
+        Matcher keys = Pattern.compile("\"options:([^\"]+)\"").matcher(registry);
+        while (keys.find()) registered.add(keys.group(1));
+
+        Matcher sections = Pattern.compile("optionsSection\\(\\s*\"([^\"]+)\"").matcher(compose);
+        int checked = 0;
+        while (sections.find()) {
+            String key = sections.group(1);
+            assertTrue("Opening options section has no viewport: " + key, registered.contains(key));
+            checked++;
+        }
+        assertTrue("No options sections were checked", checked > 0);
     }
 
     @Test

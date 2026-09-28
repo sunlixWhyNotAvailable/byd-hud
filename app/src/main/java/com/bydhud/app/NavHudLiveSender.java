@@ -532,12 +532,14 @@ final class NavHudLiveSender {
             return;
         }
         long session = ++mapLiveSessionCounter;
-        mapLiveFrame = HudMapLiveFixture.frame(
-                System.currentTimeMillis(), SystemClock.elapsedRealtime());
-        mapLiveManualState = HudMapLiveFixture.manualState();
+        mapLiveSourceFrame = HudMapLiveFixture.frame(
+                context, System.currentTimeMillis(), SystemClock.elapsedRealtime());
+        mapLiveFrame = HudMapLiveFixture.selectFrame(context, mapLiveSourceFrame, SystemClock.elapsedRealtime());
+        mapLiveManualState = HudMapLiveFixture.manualState(context, mapLiveFrame);
         mapLiveSettings = HudPrefs.mapSettings(context);
         mapLiveState = new HudMapLiveState(true, session);
         log("map_live started session=" + session + " " + mapLiveSettings.diagnostics());
+        logMapLiveSample();
         startManualOnWorker(mapLiveManualState, "map-live-start");
         scheduleMapLiveTick(session);
         MainActivity.publishSharedUiStateChange();
@@ -568,6 +570,9 @@ final class NavHudLiveSender {
                     + " " + settings.diagnostics());
         }
         if (manualTbtActive) {
+            mapLiveFrame = HudMapLiveFixture.selectFrame(context, mapLiveSourceFrame, SystemClock.elapsedRealtime());
+            mapLiveManualState = HudMapLiveFixture.manualState(context, mapLiveFrame);
+            logMapLiveSample();
             publishManualOnWorker(mapLiveManualState, "map-live-settings:" + safeReason(reason));
         }
     }
@@ -579,6 +584,7 @@ final class NavHudLiveSender {
         long session = mapLiveState.session;
         if (mapLiveTick != null) handler.removeCallbacks(mapLiveTick);
         mapLiveTick = null;
+        mapLiveSourceFrame = null;
         mapLiveFrame = null;
         mapLiveManualState = null;
         mapLiveSettings = null;
@@ -602,11 +608,29 @@ final class NavHudLiveSender {
                     : "manual-owner-ended");
             return;
         }
-        if (latestManualTbtState != null) {
+        DirectTbtFrame next = HudMapLiveFixture.selectFrame(context, mapLiveSourceFrame, SystemClock.elapsedRealtime());
+        if (next.getAlertOverlay().isActive() != mapLiveFrame.getAlertOverlay().isActive()) {
+            mapLiveFrame = next;
+            mapLiveManualState = HudMapLiveFixture.manualState(context, next);
+            logMapLiveSample();
+            publishManualOnWorker(mapLiveManualState, "map-live-sample");
+        } else if (latestManualTbtState != null) {
             tbtPublisher.publishManualFrame(MANUAL_TBT_OWNER, manualTbtGeneration,
                     latestManualTbtState, "map-live-hold");
         }
         scheduleMapLiveTick(session);
+    }
+
+    private void logMapLiveSample() {
+        log("map_live sample session=" + mapLiveState.session
+                + " warning=" + mapLiveFrame.getAlertOverlay().isActive()
+                + " warningField=" + HudPrefs.wazeAlertField(context)
+                + " maneuverPngBytes=" + mapLiveFrame.getManeuverPng().length
+                + " lanePngBytes=" + mapLiveFrame.getLanePng().length
+                + " warningPngBytes=" + mapLiveFrame.getAlertOverlay().getManeuverPng().length
+                + " nativeEnabled=" + HudPrefs.isNativeOutputEnabled(context)
+                + " pngEnabled=" + HudPrefs.isPngOutputEnabled(context)
+                + " lanesEnabled=" + HudPrefs.isLaneOutputEnabled(context));
     }
 
     private void tickHudCheck() {
@@ -795,6 +819,7 @@ final class NavHudLiveSender {
     private volatile HudCheckState hudCheckState = IDLE_HUD_CHECK;
     private final Runnable hudCheckTick = this::tickHudCheck;
     private volatile HudMapLiveState mapLiveState = HudMapLiveState.STOPPED;
+    private DirectTbtFrame mapLiveSourceFrame;
     private DirectTbtFrame mapLiveFrame;
     private HudState mapLiveManualState;
     private HudMapSettings mapLiveSettings;

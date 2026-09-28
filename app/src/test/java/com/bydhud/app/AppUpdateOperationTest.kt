@@ -18,7 +18,11 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppUpdateOperationTest {
-    private val first = AppUpdateManager.UpdateInfo("3.2.4", "https://example/first.apk", "first")
+    private val first = AppUpdateManager.UpdateInfo("3.2.4", "https://example/first.apk", "first",
+        releaseHistory = listOf(
+            AppUpdateManager.ReleaseNotesEntry("3.2.4", "first"),
+            AppUpdateManager.ReleaseNotesEntry("3.2.3", "earlier")
+        ), historyComplete = false)
     private val second = AppUpdateManager.UpdateInfo("3.2.5", "https://example/second.apk", "second")
 
     private class Driver : AppUpdateOperationDriver {
@@ -111,6 +115,7 @@ class AppUpdateOperationTest {
             driver.prepareGate.complete(AppUpdateReadyApk("ready.apk", 102L))
             val ready = controller.snapshot.value
             assertEquals(AppUpdateOperationPhase.READY, ready?.phase)
+            assertEquals(first, ready?.update)
             assertTrue(ready?.ready?.exposed == true)
             assertEquals(1, driver.handoffCalls)
             assertEquals(listOf("persisted", "uri"), driver.handoffOrder)

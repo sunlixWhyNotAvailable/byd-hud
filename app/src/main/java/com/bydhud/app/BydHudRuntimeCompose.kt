@@ -331,6 +331,7 @@ private data class Copy(
     val updateLatest: String,
     val updateDownloading: String,
     val updateInstallerError: String,
+    val updateHistoryIncomplete: String,
     val updateClose: String,
     val updateAction: String,
     val basicNavigationOutput: String,
@@ -733,7 +734,7 @@ private fun ModalInputBlocker() {
 private val runtimeViewportKeys = listOf(
     "apps", "storage", "storage-days", "patch", "hud-check", "options-categories",
     "options:runtime-permissions", "options:basic-navigation", "options:route-eta",
-    "options:speed-limit", "options:waze-features", "options:extra-navigation",
+    "options:speed-limit", "options:map-display", "options:waze-features", "options:extra-navigation",
     "options:dashboard-window-profile", "options:dashboard-widget", "options:dashboard-move"
 )
 
@@ -2557,7 +2558,7 @@ private fun OptionsTab(
                 }
             }
         }
-        optionsSection("map-display", language.choose("Показ мапи", "Map display", "Показ карты"), R.drawable.ic_options_navigation) {
+        optionsSection("map-display", language.choose("Показ мапи", "Map display", "Показ карты"), R.drawable.ic_options_map) {
             val mapSettings = snapshot.mapSettings
             val mapTopic = HudHelpCatalog.topic(HudHelpTopicId.MapOutputMode)
             val mapModes = mapTopic.frames.map { it.label(language) }
@@ -2656,9 +2657,9 @@ private fun OptionsTab(
                     } else {
                         Text(
                             language.choose(
-                                "Вивід використовує ваші налаштування HUD.",
-                                "Output follows your HUD settings.",
-                                "Вывод использует ваши настройки HUD."),
+                                "Вивід використовує ваші налаштування HUD. Маневр і попередження у спільному полі чергуються кожні 5 с.",
+                                "Output follows your HUD settings. A maneuver and warning sharing one field alternate every 5 s.",
+                                "Вывод использует ваши настройки HUD. Манёвр и предупреждение в общем поле чередуются каждые 5 с."),
                             color = palette.muted,
                             fontSize = 13.sp,
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp)
@@ -3884,8 +3885,9 @@ private fun UpdateCheckOverlay(
                             copy = copy,
                             palette = palette,
                             version = state.info.version,
+                            historyComplete = state.info.historyComplete,
                             notes = AppUpdateManager.releaseNotesForLanguage(
-                                state.info.releaseNotes,
+                                state.info,
                                 language.code
                             )
                         )
@@ -3902,8 +3904,9 @@ private fun UpdateCheckOverlay(
                                 copy = copy,
                                 palette = palette,
                                 version = state.info.version,
+                                historyComplete = state.info.historyComplete,
                                 notes = AppUpdateManager.releaseNotesForLanguage(
-                                    state.info.releaseNotes,
+                                    state.info,
                                     language.code
                                 )
                             )
@@ -3919,8 +3922,9 @@ private fun UpdateCheckOverlay(
                                 copy = copy,
                                 palette = palette,
                                 version = state.info.version,
+                                historyComplete = state.info.historyComplete,
                                 notes = AppUpdateManager.releaseNotesForLanguage(
-                                    state.info.releaseNotes,
+                                    state.info,
                                     language.code
                                 )
                             )
@@ -3958,7 +3962,7 @@ private fun UpdateCheckOverlay(
 
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
-private fun AvailableUpdateNotes(copy: Copy, palette: Palette, version: String, notes: String) {
+private fun AvailableUpdateNotes(copy: Copy, palette: Palette, version: String, notes: String, historyComplete: Boolean) {
     Column {
         Text(
             "${copy.updateAvailableVersion} v$version",
@@ -3967,6 +3971,10 @@ private fun AvailableUpdateNotes(copy: Copy, palette: Palette, version: String, 
             fontWeight = FontWeight.SemiBold
         )
         Spacer(Modifier.height(12.dp))
+        if (!historyComplete) {
+            Text(copy.updateHistoryIncomplete, color = palette.yellow, fontSize = 13.sp)
+            Spacer(Modifier.height(12.dp))
+        }
         MarkdownPatchNotesText(notes, palette)
     }
 }
@@ -5193,6 +5201,7 @@ private fun NavigatorAssetAction(
             && asset.state != NavigatorAssetManager.VERIFYING
             && asset.state != NavigatorAssetManager.INSTALL_REQUESTED
             && asset.state != NavigatorAssetManager.UNINSTALL_REQUESTED
+            && (!asset.recoveryOnly || asset.state == NavigatorAssetManager.RECOVERY_REQUIRED)
     val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     val renderedBackground = if (asset.state == NavigatorAssetManager.RECOVERY_REQUIRED && press.pressed) {
         palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)
@@ -7751,6 +7760,21 @@ private fun MapOutputHelpImage(baseline: ImageBitmap, showMap: Boolean) {
 }
 
 @Composable
+private fun Sl07MapOutputHelpImage(baseline: ImageBitmap) {
+    val stockMap = ImageBitmap.imageResource(R.drawable.hud_help_map_denza)
+    Canvas(Modifier.fillMaxSize()) {
+        withTransform({ scale(size.width / 2172f, size.height / 724f, Offset.Zero) }) {
+            // SL07 example, using existing compressed HUD art and the retained OEM map.
+            // This is a layout illustration, not a new map source or an OEM pixel projection.
+            drawImage(baseline)
+            drawRect(Color(0xFF01060D), topLeft = Offset(810f, 438f), size = Size(700f, 102f))
+            drawImage(stockMap, IntOffset.Zero, IntSize(stockMap.width, stockMap.height),
+                IntOffset(1190, 320), IntSize(330, 198))
+        }
+    }
+}
+
+@Composable
 private fun HudHelpOverlay(
     request: HudHelpRequest,
     language: Language,
@@ -7872,12 +7896,7 @@ private fun HudHelpOverlay(
                 contentAlignment = Alignment.Center
             ) {
                 if (request.topic == HudHelpTopicId.MapOutputMode && localIndex == 2) {
-                    Image(
-                        painter = painterResource(R.drawable.hud_help_map_denza),
-                        contentDescription = request.title,
-                        contentScale = ContentScale.Fit,
-                        modifier = Modifier.fillMaxSize().padding(12.dp)
-                    )
+                    Sl07MapOutputHelpImage(coloredImage)
                 } else if (request.topic == HudHelpTopicId.MapOutputMode) {
                     MapOutputHelpImage(coloredImage, showMap = localIndex == 1)
                 } else Image(
@@ -8753,8 +8772,11 @@ private fun HudIntegerStepper(
         BasicTextField(
             value = textValue,
             onValueChange = { rawValue ->
-                val candidate = rawValue.filter(Char::isDigit)
-                if (candidate.isEmpty() || isValidHudInteger(
+                val candidate = rawValue.filterIndexed { index, char ->
+                    char.isDigit() || (minValue < 0 && index == 0 && char == '-')
+                }
+                val signedDraft = minValue < 0 && candidate == "-"
+                if (signedDraft || candidate.isEmpty() || isValidHudInteger(
                         candidate.toIntOrNull(), minValue, maxValue
                     )) {
                     textValue = candidate
@@ -9666,6 +9688,7 @@ private fun enCopy() = Copy(
     updateTitle = "Update",
     updateCurrentVersion = "Current version:",
     updateAvailableVersion = "Available version:",
+    updateHistoryIncomplete = "Some release notes could not be loaded. Check for updates again to retry.",
     updateChecking = "Checking for update...",
     updateLatest = "This is the latest app version",
     updateDownloading = "Downloading update...",
@@ -9677,7 +9700,7 @@ private fun enCopy() = Copy(
     dashboardWindowSize = "Dashboard window profile",
     notice = "Notice",
     wazeDirectNotice = "Waze HUD output works best through the direct channel. Supported versions:",
-    wazeSupportedVersions = "stock 4.95.0.3 / patched 5.20.0.1",
+    wazeSupportedVersions = "patched 5.20.0.1",
     pngOutput = "PNG output",
     pngHint = "Send maneuver source image payload.",
     nativeOutput = "Native output",
@@ -9906,6 +9929,7 @@ private fun uaCopy() = enCopy().copy(
     updateTitle = "Оновлення",
     updateCurrentVersion = "Поточна версія:",
     updateAvailableVersion = "Доступна версія:",
+    updateHistoryIncomplete = "Частину описів змін не вдалося завантажити. Повторіть перевірку оновлень.",
     updateChecking = "Перевіряємо оновлення...",
     updateLatest = "Це остання версія застосунку",
     updateDownloading = "Завантажуємо оновлення...",
@@ -9917,7 +9941,7 @@ private fun uaCopy() = enCopy().copy(
     dashboardWindowSize = "Профіль вікна приборки",
     notice = "Примітка",
     wazeDirectNotice = "Вивід Waze на HUD найкраще працює через прямий канал. Підтримувані версії:",
-    wazeSupportedVersions = "стокова 4.95.0.3 / патчена 5.20.0.1",
+    wazeSupportedVersions = "патчена 5.20.0.1",
     pngOutput = "Вивід PNG",
     pngHint = "Надсилати зображення маневру.",
     nativeOutput = "Вивід штатного маневру",
@@ -10153,6 +10177,7 @@ private fun ruCopy() = enCopy().copy(
     updateTitle = "Обновление",
     updateCurrentVersion = "Текущая версия:",
     updateAvailableVersion = "Доступная версия:",
+    updateHistoryIncomplete = "Часть описаний изменений не удалось загрузить. Повторите проверку обновлений.",
     updateChecking = "Проверка обновления...",
     updateLatest = "Установлена последняя версия приложения",
     updateDownloading = "Загрузка обновления...",
@@ -10165,7 +10190,7 @@ private fun ruCopy() = enCopy().copy(
     logs = "Логи",
     notice = "Обратите внимание",
     wazeDirectNotice = "Вывод Waze на HUD лучше всего работает через прямой канал. Поддерживаемые версии:",
-    wazeSupportedVersions = "стоковая 4.95.0.3 / патченная 5.20.0.1",
+    wazeSupportedVersions = "патченная 5.20.0.1",
     pngOutput = "Вывод PNG",
     pngHint = "Передавать исходное изображение манёвра.",
     nativeOutput = "Штатный вывод",

@@ -156,7 +156,7 @@ public final class HudOutputCoordinatorEndClearBehaviorTest {
         startManualOutput();
 
         DirectTbtFrame frame = HudMapLiveFixture.frame(
-                System.currentTimeMillis(), SystemClock.elapsedRealtime());
+                context, System.currentTimeMillis(), SystemClock.elapsedRealtime());
         coordinator.publishManualMapLive(new HudState(), frame, 41L, "old-map-session");
         coordinator.endMapLiveSession(41L, "stop-before-drain");
         NativeSpeedLimitTestSupport.idleMainLooper();

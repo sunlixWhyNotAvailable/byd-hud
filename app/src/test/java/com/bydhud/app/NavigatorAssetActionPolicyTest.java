@@ -83,9 +83,29 @@ public final class NavigatorAssetActionPolicyTest {
     public void catalogLabelsFollowAllThreeApplicationLanguages() {
         NavigatorAssetManager.Asset asset = NavigatorAssetManager.catalog().get(0);
 
-        assertEquals("Waze original version", asset.label("en"));
-        assertEquals("Waze оригінальна версія", asset.label("uk"));
-        assertEquals("Waze оригинальная версия", asset.label("ru"));
-        assertEquals("Waze original version", asset.label("invalid"));
+        assertEquals("Waze patched version", asset.label("en"));
+        assertEquals("Waze патчена версія", asset.label("uk"));
+        assertEquals("Waze патченная версия", asset.label("ru"));
+        assertEquals("Waze patched version", asset.label("invalid"));
+    }
+
+    @Test public void retiredAssetCannotStartNewActionsButRemainsKnownToRecovery() throws Exception {
+        String id = "waze-stock-4.95.0.3";
+        assertEquals(2, NavigatorAssetManager.catalog().size());
+        NavigatorAssetManager.Asset retired = NavigatorAssetManager.findAsset(id);
+        assertFalse(retired.offered());
+        assertFalse(NavigatorAssetManager.catalog().contains(retired));
+        org.junit.Assert.assertThrows(java.io.IOException.class,
+                () -> NavigatorAssetManager.startDownload(null, id));
+        org.junit.Assert.assertThrows(java.io.IOException.class,
+                () -> NavigatorAssetManager.install(null, id, true));
+        NavigatorAssetManager.AssetSnapshot recovery = new NavigatorAssetManager.AssetSnapshot(
+                retired, false, NavigatorAssetManager.RECOVERY_REQUIRED, "0%", "", false, true);
+        assertTrue(recovery.recoveryOnly);
+        assertFalse(recovery.downloadable);
+        for (NavigatorAssetManager.Asset current : NavigatorAssetManager.catalog()) {
+            assertTrue(current.url.contains("/navigator-assets-v2/"));
+            assertTrue(current.fileName.endsWith("-v2.apk"));
+        }
     }
 }

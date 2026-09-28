@@ -104,6 +104,10 @@ final class NavigatorAssetManager {
             return ukrainian ? ukrainianLabel : englishLabel;
         }
 
+        boolean offered() {
+            return !"waze-stock-4.95.0.3".equals(id);
+        }
+
         String label(String language) {
             return "uk".equals(language) ? ukrainianLabel
                     : "ru".equals(language) ? russianLabel : englishLabel;
@@ -124,6 +128,7 @@ final class NavigatorAssetManager {
         public final boolean installed;
         public final boolean downloadReady;
         public final boolean downloadable;
+        public final boolean recoveryOnly;
 
         AssetSnapshot(Asset asset, boolean ukrainian, String state, String progress,
                 String error, boolean installed) {
@@ -158,9 +163,10 @@ final class NavigatorAssetManager {
             this.errorDetail = errorDetail == null ? "" : errorDetail;
             this.installed = installed;
             this.downloadReady = downloadReady;
-            this.downloadable = NOT_DOWNLOADED.equals(state) || ERROR.equals(state)
+            this.recoveryOnly = !asset.offered();
+            this.downloadable = asset.offered() && (NOT_DOWNLOADED.equals(state) || ERROR.equals(state)
                     || (!installed && !DOWNLOADING.equals(state)
-                    && !INSTALL_REQUESTED.equals(state) && !UNINSTALL_REQUESTED.equals(state));
+                    && !INSTALL_REQUESTED.equals(state) && !UNINSTALL_REQUESTED.equals(state)));
         }
 
         AssetSnapshot localized(boolean ukrainian) {
@@ -231,10 +237,10 @@ final class NavigatorAssetManager {
                 1030706L,
                 "com.waze",
                 NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
-                "5B34D0BF24A28FC3ACCF483E821070357206C88199A2AC56AD48D1D4AC03E424",
+                "CC2AFCB94C3D5CAE39FCFC3021D0CC2DDE82D3C6F97E968E2CA978659D582114",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
-                        + "navigator-assets-v1/waze-5.20.0.1-direct.apk",
-                "waze-5.20.0.1-direct.apk",
+                        + "navigator-assets-v2/waze-5.20.0.1-direct-v2.apk",
+                "waze-5.20.0.1-direct-v2.apk",
                 NavigatorPatchStore.Profile.WAZE));
         assets.add(new Asset(
                 "gmaps-direct-26.30.09.950492155",
@@ -245,10 +251,10 @@ final class NavigatorAssetManager {
                 1068694917L,
                 "app.revanced.android.apps.maps",
                 NavigatorAssetSignerCatalog.GMAPS_PROJECT_SIGNER,
-                "86EB9A465897F1C771E29C9250330862E0C1F777B93D21A743BF43791C0B2FA3",
+                "D2E9BFD812C1BE92F2A29E75DB746CE5FB966D4B3897C01CE2F8C71F644F4BFA",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
-                        + "navigator-assets-v1/google-maps-revanced-26.30.09.950492155-direct.apk",
-                "google-maps-revanced-26.30.09.950492155-direct.apk",
+                        + "navigator-assets-v2/google-maps-revanced-26.30.09.950492155-direct-v2.apk",
+                "google-maps-revanced-26.30.09.950492155-direct-v2.apk",
                 NavigatorPatchStore.Profile.GMAPS));
         ASSETS = Collections.unmodifiableList(assets);
     }
@@ -257,12 +263,19 @@ final class NavigatorAssetManager {
     }
 
     static List<Asset> catalog() {
-        return ASSETS;
+        List<Asset> offered = new ArrayList<>();
+        for (Asset asset : ASSETS) if (asset.offered()) offered.add(asset);
+        return Collections.unmodifiableList(offered);
     }
 
     static List<AssetSnapshot> snapshots(Context context, boolean ukrainian) {
         List<AssetSnapshot> result = new ArrayList<>();
-        for (Asset asset : ASSETS) result.add(snapshot(context, asset, ukrainian));
+        for (Asset asset : ASSETS) {
+            // Retired IDs remain reachable by recovery callbacks and backup protection.
+            if (asset.offered() || !string(context, asset, "transaction", "").isEmpty()) {
+                result.add(snapshot(context, asset, ukrainian));
+            }
+        }
         return Collections.unmodifiableList(result);
     }
 
@@ -276,6 +289,8 @@ final class NavigatorAssetManager {
                 installed,
                 downloadReady,
                 string(context, asset, "state", NOT_DOWNLOADED));
+        if (!asset.offered() && !INSTALL_REQUESTED.equals(state)
+                && !UNINSTALL_REQUESTED.equals(state)) state = RECOVERY_REQUIRED;
         String progress = string(context, asset, "progress", "0%");
         String error = string(context, asset, "error", "");
         String errorCategory = string(context, asset, "error_category", "");
@@ -334,7 +349,7 @@ final class NavigatorAssetManager {
     }
 
     static void startDownload(Context context, String assetId) throws IOException {
-        Asset asset = require(assetId);
+        Asset asset = requireOffered(assetId);
         NavigatorDownloadAttemptGuard.serialized(TRANSACTION_LOCK, () -> {
             startDownloadLocked(context, asset);
             return null;
@@ -399,7 +414,7 @@ final class NavigatorAssetManager {
 
     static boolean requiresDestructiveConfirmation(Context context, String assetId)
             throws Exception {
-        Asset asset = require(assetId);
+        Asset asset = requireOffered(assetId);
         File file = requireValidDownload(context, asset);
         PackageInfo installed = installedInfo(context, asset.packageName);
         if (installed == null || matchesInstalled(context, asset)) return false;
@@ -410,7 +425,7 @@ final class NavigatorAssetManager {
 
     static void install(Context context, String assetId, boolean destructiveApproved)
             throws Exception {
-        Asset asset = require(assetId);
+        Asset asset = requireOffered(assetId);
         File file = requireValidDownload(context, asset);
         PackageInfo installed = installedInfo(context, asset.packageName);
         boolean destructive = installed != null && requiresDestructiveConfirmation(context, assetId);
@@ -657,6 +672,11 @@ final class NavigatorAssetManager {
                     AppEventLogger.event(context,
                             "navigator_asset uninstall_cancelled id=" + asset.id);
                 }
+                return;
+            }
+            if (!asset.offered()) {
+                prefs(context).edit().putString(key(asset, "phase"), PHASE_NONE).commit();
+                setState(context, asset, RECOVERY_REQUIRED, "0%", "Retired navigator asset; restore backup");
                 return;
             }
             File staged = new File(new File(context.getFilesDir(), "updates"), asset.fileName);
@@ -1386,7 +1406,13 @@ final class NavigatorAssetManager {
         throw new IOException("Unknown navigator asset: " + id);
     }
 
-    private static Asset findAsset(String id) {
+    static Asset requireOffered(String id) throws IOException {
+        Asset asset = require(id);
+        if (!asset.offered()) throw new IOException("Navigator asset is retired: " + id);
+        return asset;
+    }
+
+    static Asset findAsset(String id) {
         for (Asset asset : ASSETS) if (asset.id.equals(id)) return asset;
         return null;
     }

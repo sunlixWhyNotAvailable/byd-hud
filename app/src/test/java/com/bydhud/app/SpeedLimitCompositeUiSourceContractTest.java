@@ -41,7 +41,9 @@ public final class SpeedLimitCompositeUiSourceContractTest {
         assertTrue(stepper.contains("minValue: Int = 1"));
         assertTrue(stepper.contains("maxValue: Int? = 10"));
         assertTrue(stepper.contains("fallbackValue: Int = 5"));
-        assertTrue(stepper.contains("rawValue.filter(Char::isDigit)"));
+        assertTrue(stepper.contains("rawValue.filterIndexed"));
+        assertTrue(stepper.contains("minValue < 0 && index == 0 && char == '-'"));
+        assertTrue(stepper.contains("minValue < 0 && candidate == \"-\""));
         assertTrue(stepper.contains("candidate.isEmpty() || isValidHudInteger("));
         assertTrue(stepper.contains("textValue = fallbackValue.toString()"));
         assertTrue(stepper.contains("onValueChange(fallbackValue)"));
