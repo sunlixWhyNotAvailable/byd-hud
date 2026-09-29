@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -127,6 +128,7 @@ public final class MainActivity extends ComponentActivity {
     private static volatile long lastPatchUiRefreshAtMs;
     private static volatile long lastAssetUiRefreshAtMs;
     private final Handler handler = new Handler(Looper.getMainLooper());
+    private final MainActivityDisplayGuard mainDisplayGuard = new MainActivityDisplayGuard();
     private final HudState state = new HudState();
     private final ArrayDeque<String> statusLines = new ArrayDeque<>();
     private volatile Runnable composeSnapshotInvalidationListener;
@@ -258,6 +260,7 @@ public final class MainActivity extends ComponentActivity {
     //initializes android lifecycle state here so services, UI, and logging start from a known baseline.
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mainDisplayGuard.check(this, "create");
         overlayPermissionFlow = savedInstanceState != null
                 && savedInstanceState.getBoolean("overlay-permission-flow", false);
         destroyed = false;
@@ -326,6 +329,7 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onResume() {
         super.onResume();
+        mainDisplayGuard.check(this, "resume");
         ShanghaiTestController.get(this).recoverOwned("activity-open");
         if (!exitRequested) {
             NavHudLiveSender.get(this).resumeUserRuntime("activity-resume");
@@ -341,6 +345,19 @@ public final class MainActivity extends ComponentActivity {
         requestRuntimeUiStateRefresh(this, true, "activity-resume");
         NavAccessibilityService.resumeSteeringRuntime(this, "activity-resume");
         notifyPendingShare();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        mainDisplayGuard.check(this, "new-intent");
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration configuration) {
+        super.onConfigurationChanged(configuration);
+        mainDisplayGuard.check(this, "configuration");
     }
 
     @Override

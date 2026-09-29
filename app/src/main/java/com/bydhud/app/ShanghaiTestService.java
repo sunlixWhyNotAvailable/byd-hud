@@ -37,7 +37,8 @@ public final class ShanghaiTestService extends Service {
         manager.createNotificationChannel(new NotificationChannel(
                 CHANNEL, title, NotificationManager.IMPORTANCE_LOW));
         PendingIntent open = PendingIntent.getActivity(this, NOTIFICATION_ID,
-                new Intent(this, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+                new Intent(this, MainActivity.class), PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE,
+                MainActivityDisplayGuard.tabletOptions());
         startForeground(NOTIFICATION_ID, new Notification.Builder(this, CHANNEL)
                 .setSmallIcon(R.drawable.ic_hud_notification).setContentTitle(title)
                 .setContentText(detail).setContentIntent(open).setOngoing(true).build());

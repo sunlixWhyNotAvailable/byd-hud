@@ -237,7 +237,8 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     private fun notification(): Notification {
         val language = DashboardWidgetController.uiLanguage
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java),
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+            MainActivityDisplayGuard.tabletOptions())
         return Notification.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_hud_notification)
             .setContentTitle(language.choose("Віджет приборки · BYD HUD", "Dashboard widget · BYD HUD", "Виджет приборки · BYD HUD"))

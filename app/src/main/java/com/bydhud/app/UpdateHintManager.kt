@@ -539,7 +539,7 @@ object UpdateHintManager : Application.ActivityLifecycleCallbacks {
         try {
             app.startActivity(Intent(app, MainActivity::class.java).addFlags(
                 Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            ))
+            ), MainActivityDisplayGuard.tabletOptions())
         } catch (error: RuntimeException) {
             pendingRoute.value = null
             Log.w(TAG, "open failed: ${error.javaClass.simpleName}")
