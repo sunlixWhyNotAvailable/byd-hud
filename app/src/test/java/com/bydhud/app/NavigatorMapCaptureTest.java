@@ -215,6 +215,51 @@ public final class NavigatorMapCaptureTest {
         assertTrue(received.await(5L, TimeUnit.SECONDS));
     }
 
+    @Test public void fullSourceMemoryKeepsPixelsAndRejectsInvalidDimensions() throws Exception {
+        Bitmap original = Bitmap.createBitmap(1500, 900, Bitmap.Config.ARGB_8888);
+        original.eraseColor(0xff123456);
+        android.os.SharedMemory shared = android.os.SharedMemory.create("test-map", original.getByteCount());
+        java.nio.ByteBuffer buffer = shared.mapReadWrite();
+        try { original.copyPixelsToBuffer(buffer); }
+        finally { android.os.SharedMemory.unmap(buffer); }
+        Bundle data = new Bundle();
+        data.putParcelable("sourceMemory", shared);
+        data.putInt("bitmapWidth", 1500);
+        data.putInt("bitmapHeight", 900);
+        Bitmap decoded = ReflectionHelpers.callStaticMethod(NavigatorMapCapture.class, "bitmap",
+                ReflectionHelpers.ClassParameter.from(Bundle.class, data));
+        try {
+            assertNotNull(decoded);
+            assertEquals(1500, decoded.getWidth());
+            assertEquals(0xff123456, decoded.getPixel(1499, 899));
+        } finally { if (decoded != null) decoded.recycle(); original.recycle(); shared.close(); }
+        android.os.SharedMemory invalid = android.os.SharedMemory.create("invalid-map", 4);
+        data.putParcelable("sourceMemory", invalid);
+        data.putInt("bitmapWidth", Integer.MAX_VALUE);
+        try {
+            assertNull(ReflectionHelpers.callStaticMethod(NavigatorMapCapture.class, "bitmap",
+                    ReflectionHelpers.ClassParameter.from(Bundle.class, data)));
+        } finally { invalid.close(); }
+    }
+
+    @Test public void mapArtifactsDoNotCompeteWithBlockedNavigationWriter() throws Exception {
+        CountDownLatch entered = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        CountDownLatch imageSaved = new CountDownLatch(1);
+        assertTrue(WazeCaptureDebugWriter.get().directEvent(() -> {
+            entered.countDown();
+            try { release.await(5, TimeUnit.SECONDS); }
+            catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); }
+        }));
+        try {
+            assertTrue(entered.await(5, TimeUnit.SECONDS));
+            for (int i = 0; i < 3; i++) assertTrue(WazeCaptureDebugWriter.get().directEvent(() -> {}));
+            assertTrue(WazeCaptureDebugWriter.mapFrames().directEvent(imageSaved::countDown));
+            assertTrue(imageSaved.await(5, TimeUnit.SECONDS));
+        } finally { release.countDown(); }
+        assertTrue(WazeCaptureDebugWriter.get().awaitIdle());
+    }
+
     @Test
     public void providerRejectsOversizedBitmapAndAcceptsBoundedFrameAsynchronously() throws Exception {
         AtomicInteger callbackCount = new AtomicInteger();
@@ -229,7 +274,7 @@ public final class NavigatorMapCaptureTest {
         long firstId = firstPoll.getLong("id");
 
         Bundle oversized = result(NavigatorMapCapture.MAPS_PACKAGE, session, firstId,
-                Bitmap.createBitmap(321, 1, Bitmap.Config.ARGB_8888));
+                Bitmap.createBitmap(1921, 1, Bitmap.Config.ARGB_8888));
         assertTrue(NavigatorMapCapture.providerCall(context, "result", oversized, MAPS_UID)
                 .getBoolean("accepted"));
         assertTrue(waitForNoPendingFrame());
@@ -259,14 +304,14 @@ public final class NavigatorMapCaptureTest {
         AtomicInteger callbacks = new AtomicInteger();
         NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 54L,
                 HudMapProfile.Source.GOOGLE_MAPS, callbacks::incrementAndGet);
-        Bitmap input = Bitmap.createBitmap(300, 180, Bitmap.Config.ARGB_8888);
+        Bitmap input = Bitmap.createBitmap(600, 360, Bitmap.Config.ARGB_8888);
         Canvas canvas = new Canvas(input);
         canvas.drawColor(Color.GREEN);
         Paint paint = new Paint();
         paint.setColor(Color.RED);
-        canvas.drawRect(0, 0, 100, 180, paint);
+        canvas.drawRect(0, 0, 250, 360, paint);
         paint.setColor(Color.BLUE);
-        canvas.drawRect(200, 0, 300, 180, paint);
+        canvas.drawRect(350, 0, 600, 360, paint);
         submitFrame(NavigatorMapCapture.MAPS_PACKAGE, MAPS_UID,
                 "com.google.maps.Renderer@1a2b", "", input);
 
@@ -288,7 +333,7 @@ public final class NavigatorMapCaptureTest {
         Bitmap finalCrop = decode(NavigatorMapCapture.snapshot().png());
         try {
             assertEquals(Color.RED, finalCrop.getPixel(0, 90));
-            assertEquals(Color.TRANSPARENT, finalCrop.getPixel(270, 90));
+            assertEquals(Color.BLUE, finalCrop.getPixel(270, 90));
         } finally {
             finalCrop.recycle();
         }

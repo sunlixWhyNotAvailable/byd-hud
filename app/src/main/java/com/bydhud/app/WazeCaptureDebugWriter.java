@@ -22,14 +22,15 @@ final class WazeCaptureDebugWriter {
     private static final Object INSTANCE_LOCK = new Object();
 
     private static WazeCaptureDebugWriter instance;
+    private static volatile WazeCaptureDebugWriter mapInstance;
 
     private final HandlerThread thread;
     private final Handler handler;
     private final AtomicInteger pendingTasks = new AtomicInteger();
     private final AtomicInteger pendingBitmaps = new AtomicInteger();
 
-    private WazeCaptureDebugWriter() {
-        thread = new HandlerThread("BydHudWazeDebugWriter", Process.THREAD_PRIORITY_BACKGROUND);
+    private WazeCaptureDebugWriter(String name) {
+        thread = new HandlerThread(name, Process.THREAD_PRIORITY_BACKGROUND);
         thread.start();
         handler = new Handler(thread.getLooper());
     }
@@ -37,9 +38,16 @@ final class WazeCaptureDebugWriter {
     static WazeCaptureDebugWriter get() {
         synchronized (INSTANCE_LOCK) {
             if (instance == null) {
-                instance = new WazeCaptureDebugWriter();
+                instance = new WazeCaptureDebugWriter("BydHudWazeDebugWriter");
             }
             return instance;
+        }
+    }
+
+    static WazeCaptureDebugWriter mapFrames() {
+        synchronized (INSTANCE_LOCK) {
+            if (mapInstance == null) mapInstance = new WazeCaptureDebugWriter("BydHudMapImages");
+            return mapInstance;
         }
     }
 
@@ -159,6 +167,8 @@ final class WazeCaptureDebugWriter {
         if (android.os.Looper.myLooper() == thread.getLooper()) {
             return true;
         }
+        WazeCaptureDebugWriter images = mapInstance;
+        if (this == instance && images != null && !images.awaitIdle()) return false;
         CountDownLatch idle = new CountDownLatch(1);
         if (!handler.post(idle::countDown)) {
             return false;
@@ -177,12 +187,16 @@ final class WazeCaptureDebugWriter {
         if (android.os.Looper.myLooper() == thread.getLooper()) {
             return true;
         }
+        long started = android.os.SystemClock.elapsedRealtime();
+        WazeCaptureDebugWriter images = mapInstance;
+        boolean imagesReady = this != instance || images == null || images.awaitCheckpoint(timeoutMs);
+        long remaining = Math.max(0L, timeoutMs - (android.os.SystemClock.elapsedRealtime() - started));
         CountDownLatch idle = new CountDownLatch(1);
         if (!handler.post(idle::countDown)) {
             return false;
         }
         try {
-            return idle.await(Math.max(0L, timeoutMs), TimeUnit.MILLISECONDS);
+            return idle.await(remaining, TimeUnit.MILLISECONDS) && imagesReady;
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             return false;

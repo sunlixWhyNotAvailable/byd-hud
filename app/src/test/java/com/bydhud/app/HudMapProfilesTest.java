@@ -52,7 +52,7 @@ public final class HudMapProfilesTest {
                 editedMaps.withSource(waze)));
         assertTrue(HudMapProfiles.save(context, maps, editedMaps.withX(-20)));
         assertEquals(3L, HudMapProfiles.revision(context));
-        assertEquals(-20, HudMapProfiles.resolve(context, maps).x);
+        assertEquals(-20f, HudMapProfiles.resolve(context, maps).x, 0.001f);
         assertEquals(HudMapProfile.defaults(waze), HudMapProfiles.resolve(context, waze));
 
         assertTrue(HudMapProfiles.delete(context, waze));
@@ -60,4 +60,10 @@ public final class HudMapProfilesTest {
         assertEquals(HudMapProfile.defaults(waze), HudMapProfiles.resolve(context, waze));
         assertFalse(HudMapProfiles.delete(context, waze));
     }
+    @Test public void profileFractionsAndTwentyPercentSurviveStorage() {
+        HudMapProfile profile = new HudMapProfile(HudMapProfile.Source.GOOGLE_MAPS, -3.5f, 1.2f, 20);
+        assertTrue(HudMapProfiles.save(context, null, profile));
+        assertEquals(profile, HudMapProfiles.resolve(context, profile.source));
+    }
+
 }

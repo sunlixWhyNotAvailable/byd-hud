@@ -64,6 +64,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.SliderState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -105,6 +106,7 @@ import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.imageResource
@@ -3539,6 +3541,141 @@ private fun WidgetNumberLine(
             },
             modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(48.dp)
         )
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun MapNumberLine(
+    title: String,
+    hint: String,
+    value: Float,
+    range: IntRange,
+    unit: String,
+    palette: Palette,
+    enabled: Boolean,
+    showTicks: Boolean = true,
+    onChange: (Float) -> Unit
+) {
+    val safeValue = value.coerceIn(range.first.toFloat(), range.last.toFloat())
+    val sliderInteraction = remember { MutableInteractionSource() }
+    val defaultSliderColors = SliderDefaults.colors(
+        thumbColor = if (palette.dark) Color(0xFFD9ECFF) else Color.White,
+        activeTrackColor = palette.accent,
+        inactiveTrackColor = palette.disabled,
+        disabledThumbColor = palette.muted.copy(alpha = 0.72f),
+        disabledActiveTrackColor = palette.borderStrong,
+        disabledInactiveTrackColor = palette.disabled.copy(alpha = 0.72f),
+        activeTickColor = palette.accent,
+        inactiveTickColor = palette.disabled,
+        disabledActiveTickColor = palette.borderStrong,
+        disabledInactiveTickColor = palette.disabled.copy(alpha = 0.72f)
+    )
+    val sliderColors = if (showTicks) defaultSliderColors else defaultSliderColors.copy(
+        activeTickColor = Color.Transparent,
+        inactiveTickColor = Color.Transparent,
+        disabledActiveTickColor = Color.Transparent,
+        disabledInactiveTickColor = Color.Transparent
+    )
+    Column {
+        ActionRow(title, hint, palette, enabled = enabled) {
+            Row(Modifier.width(190.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+                HudMapNumberStepper(
+                    value = safeValue,
+                    palette = palette,
+                    enabled = enabled,
+                    minValue = range.first,
+                    maxValue = range.last,
+                    fallbackValue = safeValue,
+                    onValueChange = onChange
+                )
+                Text(unit, color = palette.muted, fontSize = 13.sp, modifier = Modifier.width(30.dp), textAlign = TextAlign.End)
+            }
+        }
+        Slider(
+            value = safeValue.toFloat(),
+            onValueChange = { onChange((it * 10f).roundToInt() / 10f) },
+            enabled = enabled,
+            valueRange = range.first.toFloat()..range.last.toFloat(),
+            steps = 0,
+            colors = sliderColors,
+            interactionSource = sliderInteraction,
+            track = {
+                // Visual ticks keep their integer cadence; dragging still accepts tenths.
+                SliderDefaults.Track(
+                    sliderState = SliderState(safeValue,
+                        steps = if (showTicks) (range.last - range.first - 1).coerceAtLeast(0) else 0,
+                        valueRange = range.first.toFloat()..range.last.toFloat()),
+                    colors = sliderColors,
+                    enabled = enabled
+                )
+            },
+            thumb = {
+                SliderDefaults.Thumb(
+                    interactionSource = sliderInteraction,
+                    colors = sliderColors,
+                    enabled = enabled,
+                    thumbSize = DpSize(4.dp, 28.dp)
+                )
+            },
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp).height(48.dp)
+        )
+    }
+}
+
+private fun mapNumberText(value: Float): String =
+    java.math.BigDecimal(value.toString()).stripTrailingZeros().toPlainString()
+
+@Composable
+private fun HudMapNumberStepper(
+    value: Float, palette: Palette, enabled: Boolean, minValue: Int, maxValue: Int,
+    fallbackValue: Float, onValueChange: (Float) -> Unit
+) {
+    var editing by remember { mutableStateOf(false) }
+    var text by remember { mutableStateOf(mapNumberText(value)) }
+    LaunchedEffect(value, editing) {
+        val typed = text.replace(',', '.').toFloatOrNull()?.let { (it * 10f).roundToInt() / 10f }
+        if (!editing || typed != value) text = mapNumberText(value)
+    }
+    fun commit() {
+        val number = text.replace(',', '.').toFloatOrNull()?.takeIf { it.isFinite() }
+        val bounded = (number ?: fallbackValue).coerceIn(minValue.toFloat(), maxValue.toFloat())
+        val rounded = (bounded * 10f).roundToInt() / 10f
+        text = mapNumberText(rounded)
+        onValueChange(rounded)
+    }
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        HudButton("−", palette, width = 38.dp, enabled = enabled && value > minValue) {
+            onValueChange(((value * 10f).roundToInt() - 1) / 10f)
+        }
+        BasicTextField(
+            value = text,
+            onValueChange = { candidate ->
+                if (candidate.length <= 9 && candidate.matches(Regex("[+-]?[0-9]*([.,][0-9]?)?"))) {
+                    text = candidate
+                    candidate.replace(',', '.').toFloatOrNull()?.takeIf {
+                        it.isFinite() && it >= minValue && it <= maxValue
+                    }?.let { onValueChange((it * 10f).roundToInt() / 10f) }
+                }
+            },
+            enabled = enabled, singleLine = true,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            textStyle = TextStyle(color = if (enabled) palette.text else palette.muted,
+                fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center),
+            modifier = Modifier.width(70.dp).onFocusChanged {
+                if (editing && !it.isFocused) commit()
+                editing = it.isFocused
+            },
+            decorationBox = { field ->
+                Box(Modifier.fillMaxWidth().height(44.dp).clip(RoundedCornerShape(7.dp))
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
+                    .background(if (enabled) palette.field else palette.panelAlt),
+                    contentAlignment = Alignment.Center) { field() }
+            }
+        )
+        HudButton("+", palette, width = 38.dp, enabled = enabled && value < maxValue) {
+            onValueChange(((value * 10f).roundToInt() + 1) / 10f)
+        }
     }
 }
 
@@ -6996,16 +7133,16 @@ private fun DashboardPercentRow(
 private fun MapGeometryRow(
     title: String,
     hint: String,
-    value: Int,
+    value: Float,
     minimum: Int,
     maximum: Int,
     palette: Palette,
     enabled: Boolean,
     showTicks: Boolean,
     suffix: String = "",
-    onValueChange: (Int) -> Unit
+    onValueChange: (Float) -> Unit
 ) {
-    WidgetNumberLine(title, hint, value, minimum..maximum, suffix, palette, enabled, showTicks) {
+    MapNumberLine(title, hint, value, minimum..maximum, suffix, palette, enabled, showTicks) {
         onValueChange(it)
     }
 }
@@ -8503,57 +8640,8 @@ private fun mapProfileSourceTitle(source: HudMapProfile.Source, language: Langua
 }
 
 @Composable
-private fun MapProfileAddButton(
-    label: String,
-    palette: Palette,
-    enabled: Boolean,
-    onClick: () -> Unit
-) {
-    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
-    Box(
-        modifier = Modifier
-            .width(190.dp)
-            .height(44.dp)
-            .clip(RoundedCornerShape(7.dp))
-            .border(1.dp, palette.accent, RoundedCornerShape(7.dp))
-            .background(pressBackground(
-                if (enabled) palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
-                else palette.disabled,
-                palette,
-                press.pressed
-            ))
-            .then(press.modifier)
-            .clickable(
-                enabled = enabled,
-                interactionSource = press.interactionSource,
-                indication = null,
-                onClick = onClick
-            )
-            .semantics { contentDescription = label }
-            .padding(horizontal = 12.dp),
-        contentAlignment = Alignment.Center
-    ) {
-        Row(
-            horizontalArrangement = Arrangement.spacedBy(7.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                painter = painterResource(R.drawable.ic_add),
-                contentDescription = null,
-                tint = if (enabled) palette.accent else palette.muted.copy(alpha = 0.62f),
-                modifier = Modifier.size(18.dp)
-            )
-            Text(
-                label,
-                color = if (enabled && palette.dark) Color.White
-                    else if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
-                fontWeight = FontWeight.SemiBold,
-                fontSize = 14.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-    }
+private fun MapProfileAddButton(label: String, palette: Palette, enabled: Boolean, onClick: () -> Unit) {
+    HudButton("+ $label", palette, primary = true, width = 210.dp, enabled = enabled, onClick = onClick)
 }
 
 @Composable
@@ -8579,6 +8667,7 @@ private fun MapProfileEditorDialog(
 ) {
     val configuration = LocalConfiguration.current
     val density = LocalDensity.current
+    val focusManager = LocalFocusManager.current
     val frameWidth = with(density) { 300.toDp() }
     val frameHeight = with(density) { 180.toDp() }
     val compact = configuration.screenHeightDp < 720 || configuration.fontScale > 1.2f
@@ -8671,6 +8760,8 @@ private fun MapProfileEditorDialog(
                         palette,
                         enabled = !saving && sourceOptions.isNotEmpty()
                     ) {
+                        Row(verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         HudDropdown(
                             selectedIndex = sourceIndex,
                             options = sourceOptions.map { mapProfileSourceTitle(it, language) },
@@ -8684,6 +8775,16 @@ private fun MapProfileEditorDialog(
                                 }
                             }
                         )
+                        Pill(
+                            when {
+                                !profileRunning && !showRequested -> language.choose("Зупинено", "Stopped", "Остановлено")
+                                !frameMatches -> language.choose("Очікування кадру", "Waiting for a frame", "Ожидание кадра")
+                                else -> language.choose("Показ", "Showing", "Показ")
+                            },
+                            if (frameMatches) palette.green else palette.muted,
+                            if (frameMatches) palette.greenSoft else palette.disabled
+                        )
+                        }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),
@@ -8707,15 +8808,7 @@ private fun MapProfileEditorDialog(
                             modifier = Modifier.weight(1f),
                             onClick = onHide
                         )
-                        Pill(
-                            when {
-                                !profileRunning && !showRequested -> language.choose("Зупинено", "Stopped", "Остановлено")
-                                !frameMatches -> language.choose("Очікування кадру", "Waiting for a frame", "Ожидание кадра")
-                                else -> language.choose("Показ", "Showing", "Показ")
-                            },
-                            if (frameMatches) palette.green else palette.muted,
-                            if (frameMatches) palette.greenSoft else palette.disabled
-                        )
+
                     }
                     if (shanghaiBusy || error.isNotEmpty() || profileReason.isNotEmpty()) {
                         Text(
@@ -8766,7 +8859,7 @@ private fun MapProfileEditorDialog(
                             }
                         }
                         Column(Modifier.weight(1f)) {
-                            WidgetNumberLine(
+                            MapNumberLine(
                                 language.choose("Картинка вліво–вправо", "Image left–right", "Картинка влево–вправо"),
                                 language.choose("Мінус — вправо, плюс — вліво", "Minus — right, plus — left", "Минус — вправо, плюс — влево"),
                                 draft.x,
@@ -8783,11 +8876,11 @@ private fun MapProfileEditorDialog(
                         horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 18.dp)
                     ) {
                         Column(Modifier.weight(1f)) {
-                            WidgetNumberLine(
+                            MapNumberLine(
                                 language.choose("Масштаб картинки", "Image scale", "Масштаб картинки"),
                                 language.choose("Змінює картинку всередині області HUD", "Changes the image inside the HUD area", "Меняет картинку внутри области HUD"),
                                 draft.scale,
-                                50..300,
+                                20..300,
                                 "%",
                                 palette,
                                 enabled = !saving,
@@ -8795,7 +8888,7 @@ private fun MapProfileEditorDialog(
                             ) { onDraftChange(draft.withScale(it)) }
                         }
                         Column(Modifier.weight(1f)) {
-                            WidgetNumberLine(
+                            MapNumberLine(
                                 language.choose("Картинка вгору–вниз", "Image up–down", "Картинка вверх–вниз"),
                                 language.choose("Мінус — вгору, плюс — вниз", "Minus — up, plus — down", "Минус — вверх, плюс — вниз"),
                                 draft.y,
@@ -8817,7 +8910,7 @@ private fun MapProfileEditorDialog(
                         palette,
                         primary = true,
                         enabled = editor.canSave && !saving,
-                        onClick = onSave
+                        onClick = { focusManager.clearFocus(); onSave() }
                     )
                     HudButton(
                         language.choose("Закрити", "Close", "Закрыть"),

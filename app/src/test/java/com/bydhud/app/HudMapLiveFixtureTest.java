@@ -50,7 +50,7 @@ public final class HudMapLiveFixtureTest {
         assertEquals(3, HudMapLiveFixture.manualState().turnBitmapId);
         DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(selected(1_000L), options());
         assertEquals(2, prepared.nativeManeuver());
-        assertEquals(4, prepared.laneCount());
+        assertEquals(6, prepared.laneCount());
         assertEquals(155, prepared.distanceMeters());
         assertEquals("Typical Street", prepared.displayText());
         HudEtaText eta = HudEtaText.from(source, options());

@@ -1705,7 +1705,7 @@ public final class MainActivity extends ComponentActivity {
         saveMapSettings(HudPrefs.mapSettings(this).withPreset(preset), "map-preset-change");
     }
 
-    public void composeSetMapValue(int control, int value) {
+    public void composeSetMapValue(int control, float value) {
         saveMapSettings(HudPrefs.mapSettings(this).withValue(control, value), "map-geometry-change");
     }
 

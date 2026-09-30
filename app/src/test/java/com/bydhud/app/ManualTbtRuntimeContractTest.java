@@ -31,7 +31,7 @@ public final class ManualTbtRuntimeContractTest {
         String source = source("app/src/main/java/com/bydhud/app/NavHudLiveSender.java");
 
         assertTrue(source.contains("manualTbtGeneration++"));
-        assertTrue(source.contains("MANUAL_TBT_OWNER, generation, true, true"));
+        assertTrue(source.contains("!mapLiveState.running || HudPrefs.isSwitchToTbtOnHudStartEnabled(context)"));
         assertFalse(source.contains("manualTbtDashboardPending"));
         assertFalse(source.contains("manual-frame:dashboard-ready"));
         assertTrue(source.contains("pendingManualPublishState = copy"));

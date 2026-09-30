@@ -2,6 +2,7 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.os.SharedMemory;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -29,8 +30,10 @@ public final class NavigatorMapCapture {
     private static final Object LOCK = new Object();
     private static final long MIN_REQUEST_INTERVAL_MS = 1000L;
     private static final long POST_STOP_JOURNAL_MS = 10000L;
-    private static final long MAX_BITMAP_BYTES = 512L * 1024L;
-    private static final int MAX_BITMAP_SIDE = 320;
+    private static final long MAX_BITMAP_BYTES = 1920L * 1920L * 4L;
+    private static final int MAX_BITMAP_SIDE = 1920;
+    private static final java.util.Set<String> PENDING_ARTIFACTS =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<>());
     private static final byte[] EMPTY_PNG = new byte[0];
     private static final NavigatorMapSessionState FRAME = new NavigatorMapSessionState();
 
@@ -341,6 +344,7 @@ public final class NavigatorMapCapture {
     }
 
     static Bundle providerCall(Context context, String method, Bundle data, int callingUid) {
+        try {
         Bundle answer = new Bundle();
         if (context == null || data == null
                 || (!"poll".equals(method) && !"result".equals(method))) {
@@ -356,6 +360,13 @@ public final class NavigatorMapCapture {
             return poll(app, data, callerPackage, answer);
         }
         return receiveResult(app, data, callerPackage, answer);
+        } finally {
+            // Close the receiver's descriptor even for rejected/stale requests.
+            if (data != null) try {
+                SharedMemory memory = data.getParcelable("sourceMemory");
+                if (memory != null) memory.close();
+            } catch (RuntimeException ignored) { }
+        }
     }
 
     private static Bundle poll(Context app, Bundle data, String callerPackage, Bundle answer) {
@@ -371,6 +382,7 @@ public final class NavigatorMapCapture {
                     && callerPackage.equals(ownerPackage)
                     && FRAME.isCurrent(ownerPackage, ownerGeneration, session)) {
                 answer.putBoolean("active", true);
+                answer.putBoolean("fullSourceMemory", true);
                 answer.putString("session", session);
                 if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty()) {
                     answer.putBoolean("journalAccepted", true);
@@ -378,6 +390,7 @@ public final class NavigatorMapCapture {
                     lifeSession = session;
                 }
                 String producerState = "build=" + field(string(data, "build", ""), 96)
+                        + " fullSourceMemory=" + booleanValue(data, "fullSourceMemory", false)
                         + " revision=" + field(string(data, "revision", ""), 64)
                         + " pid=" + integer(data, "pid", 0)
                         + " controller=" + field(string(data, "controller", ""), 160)
@@ -672,7 +685,7 @@ public final class NavigatorMapCapture {
             Context app,
             HudMapProfile.Source source) {
         long savedRevision = HudMapProfiles.revision(app);
-        HudMapProfile saved = source == null ? null : HudMapProfiles.resolve(app, source);
+        HudMapProfile saved = source == null ? null : HudMapProfiles.profiles(app).get(source);
         synchronized (LOCK) {
             if (catalogRevision != savedRevision) {
                 catalogRevision = savedRevision;
@@ -1043,9 +1056,31 @@ public final class NavigatorMapCapture {
     private static Bitmap bitmap(Bundle data) {
         try {
             data.setClassLoader(Bitmap.class.getClassLoader());
+            SharedMemory shared = data.getParcelable("sourceMemory");
+            if (shared != null) {
+                Bitmap source = null;
+                try {
+                    int width = data.getInt("bitmapWidth"), height = data.getInt("bitmapHeight");
+                    long bytes = (long) width * height * 4;
+                    if (width < 1 || height < 1 || width > MAX_BITMAP_SIDE || height > MAX_BITMAP_SIDE
+                            || bytes != shared.getSize()) return null;
+                    source = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                    ByteBuffer pixels = shared.mapReadOnly();
+                    try { source.copyPixelsFromBuffer(pixels); }
+                    finally { SharedMemory.unmap(pixels); }
+                    Bitmap result = source;
+                    source = null;
+                    return result;
+                } catch (android.system.ErrnoException failed) {
+                    return null;
+                } finally {
+                    recycle(source);
+                    shared.close();
+                }
+            }
             Object value = data.getParcelable("bitmap");
             return value instanceof Bitmap ? (Bitmap) value : null;
-        } catch (RuntimeException ignored) {
+        } catch (RuntimeException | OutOfMemoryError ignored) {
             return null;
         }
     }
@@ -1127,6 +1162,10 @@ public final class NavigatorMapCapture {
             long id, Bitmap bitmap, byte[] croppedPng, String inputHash,
             HudMapProfile.Source source, ProfileSelection selection) {
         if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
+        String artifactKey;
+        try { artifactKey = NavCaptureStore.todayDir() + ":" + inputHash + ":" + sha256(croppedPng); }
+        catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
+        if (!PENDING_ARTIFACTS.add(artifactKey)) return; // The same PNG pair is already being saved.
         Bitmap copy = null;
         try {
             copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
@@ -1134,7 +1173,7 @@ public final class NavigatorMapCapture {
             Bitmap sourceImage = copy;
             byte[] crop = croppedPng.clone();
             String day = NavCaptureStore.todayDir();
-            boolean queued = WazeCaptureDebugWriter.get().directEvent(() -> {
+            boolean queued = WazeCaptureDebugWriter.mapFrames().directEvent(() -> {
                 try {
                     if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
                     NavigationLogStorage.withReadLock(() -> {
@@ -1164,6 +1203,7 @@ public final class NavigatorMapCapture {
                             + " reason=" + error.getClass().getSimpleName());
                 } finally {
                     recycle(sourceImage);
+                    PENDING_ARTIFACTS.remove(artifactKey);
                 }
             });
             if (queued) return; // The bounded writer now owns the bitmap copy.
@@ -1173,6 +1213,7 @@ public final class NavigatorMapCapture {
                     + " reason=" + error.getClass().getSimpleName());
         }
         recycle(copy);
+        PENDING_ARTIFACTS.remove(artifactKey);
     }
 
     private static void logResultError(

@@ -43,7 +43,7 @@ public final class MapProfileUiSourceContractTest {
         assertTrue(editor.contains("draft.scale,"));
         assertTrue(editor.contains("draft.y,"));
         assertTrue(editor.contains("-100..100"));
-        assertTrue(editor.contains("50..300"));
+        assertTrue(editor.contains("20..300"));
         assertTrue(editor.contains("Minus — right, plus — left"));
         assertTrue(editor.contains("Minus — up, plus — down"));
         assertTrue(editor.contains(".verticalScroll(rememberScrollState())"));

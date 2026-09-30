@@ -489,12 +489,19 @@ final class HudPrefs {
                 values.getInt(KEY_MAP_MODE, HudMapSettings.OFF),
                 values.getInt(KEY_MAP_PRESET, HudMapSettings.PRESET_CUSTOM),
                 new HudMapSettings.Geometry(
-                        values.getInt(KEY_MAP_CUSTOM_X, defaults.mapX),
-                        values.getInt(KEY_MAP_CUSTOM_Y, defaults.mapY),
-                        values.getInt(KEY_MAP_CUSTOM_SCALE, defaults.mapScale),
-                        values.getInt(KEY_MAP_CUSTOM_LANE_X, defaults.laneX),
-                        values.getInt(KEY_MAP_CUSTOM_LANE_Y, defaults.laneY),
-                        values.getInt(KEY_MAP_CUSTOM_LANE_SCALE, defaults.laneScale)));
+                        mapNumber(values, KEY_MAP_CUSTOM_X, defaults.mapX),
+                        mapNumber(values, KEY_MAP_CUSTOM_Y, defaults.mapY),
+                        mapNumber(values, KEY_MAP_CUSTOM_SCALE, defaults.mapScale),
+                        mapNumber(values, KEY_MAP_CUSTOM_LANE_X, defaults.laneX),
+                        mapNumber(values, KEY_MAP_CUSTOM_LANE_Y, defaults.laneY),
+                        mapNumber(values, KEY_MAP_CUSTOM_LANE_SCALE, defaults.laneScale)));
+    }
+
+    // Accept existing integer preferences as well as the new fractional values.
+    private static float mapNumber(SharedPreferences values, String key, float fallback) {
+        Object value = values.getAll().get(key);
+        float number = value instanceof Number ? ((Number) value).floatValue() : fallback;
+        return Float.isFinite(number) ? number : fallback;
     }
 
     static void setMapSettings(Context context, HudMapSettings settings) {
@@ -503,12 +510,12 @@ final class HudPrefs {
         prefs(context).edit()
                 .putInt(KEY_MAP_MODE, value.mode)
                 .putInt(KEY_MAP_PRESET, value.preset)
-                .putInt(KEY_MAP_CUSTOM_X, custom.mapX)
-                .putInt(KEY_MAP_CUSTOM_Y, custom.mapY)
-                .putInt(KEY_MAP_CUSTOM_SCALE, custom.mapScale)
-                .putInt(KEY_MAP_CUSTOM_LANE_X, custom.laneX)
-                .putInt(KEY_MAP_CUSTOM_LANE_Y, custom.laneY)
-                .putInt(KEY_MAP_CUSTOM_LANE_SCALE, custom.laneScale)
+                .putFloat(KEY_MAP_CUSTOM_X, custom.mapX)
+                .putFloat(KEY_MAP_CUSTOM_Y, custom.mapY)
+                .putFloat(KEY_MAP_CUSTOM_SCALE, custom.mapScale)
+                .putFloat(KEY_MAP_CUSTOM_LANE_X, custom.laneX)
+                .putFloat(KEY_MAP_CUSTOM_LANE_Y, custom.laneY)
+                .putFloat(KEY_MAP_CUSTOM_LANE_SCALE, custom.laneScale)
                 .apply();
         markOutputOptionChanged("map_settings");
     }

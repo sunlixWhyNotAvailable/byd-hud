@@ -53,7 +53,7 @@ public final class HudMapSettings {
     }
 
     /** Editing a preset first copies its visible geometry into Custom. */
-    public HudMapSettings withValue(int control, int value) {
+    public HudMapSettings withValue(int control, float value) {
         return new HudMapSettings(mode, PRESET_CUSTOM, geometry().withValue(control, value));
     }
 
@@ -83,14 +83,14 @@ public final class HudMapSettings {
     }
 
     public static final class Geometry {
-        public final int mapX;
-        public final int mapY;
-        public final int mapScale;
-        public final int laneX;
-        public final int laneY;
-        public final int laneScale;
+        public final float mapX;
+        public final float mapY;
+        public final float mapScale;
+        public final float laneX;
+        public final float laneY;
+        public final float laneScale;
 
-        public Geometry(int mapX, int mapY, int mapScale, int laneX, int laneY, int laneScale) {
+        public Geometry(float mapX, float mapY, float mapScale, float laneX, float laneY, float laneScale) {
             this.mapX = clamp(mapX, -250, 250);
             this.mapY = clamp(mapY, -60, 60);
             this.mapScale = clamp(mapScale, 40, 150);
@@ -103,7 +103,7 @@ public final class HudMapSettings {
             return new Geometry(0, -8, 85, 0, 30, 70);
         }
 
-        public int value(int control) {
+        public float value(int control) {
             switch (control) {
                 case CONTROL_MAP_X: return mapX;
                 case CONTROL_MAP_Y: return mapY;
@@ -115,7 +115,7 @@ public final class HudMapSettings {
             }
         }
 
-        Geometry withValue(int control, int value) {
+        Geometry withValue(int control, float value) {
             switch (control) {
                 case CONTROL_MAP_X: return new Geometry(value, mapY, mapScale, laneX, laneY, laneScale);
                 case CONTROL_MAP_Y: return new Geometry(mapX, value, mapScale, laneX, laneY, laneScale);
@@ -143,11 +143,17 @@ public final class HudMapSettings {
 
         @Override
         public String toString() {
-            return mapX + "," + mapY + "," + mapScale + "," + laneX + "," + laneY + "," + laneScale;
+            return number(mapX) + "," + number(mapY) + "," + number(mapScale) + ","
+                    + number(laneX) + "," + number(laneY) + "," + number(laneScale);
         }
 
-        private static int clamp(int value, int minimum, int maximum) {
-            return Math.max(minimum, Math.min(maximum, value));
+        private static String number(float value) {
+            return new java.math.BigDecimal(Float.toString(value)).stripTrailingZeros().toPlainString();
+        }
+
+        private static float clamp(float value, int minimum, int maximum) {
+            if (!Float.isFinite(value)) throw new IllegalArgumentException("Non-finite map geometry");
+            return Math.round(Math.max(minimum, Math.min(maximum, value)) * 10f) / 10f;
         }
     }
 }

@@ -938,7 +938,8 @@ final class NavHudLiveSender {
             long generation = manualTbtGeneration;
             ++tbtLifecycleToken;
             tbtPublisher.beginRoute(
-                    MANUAL_TBT_OWNER, generation, true, true,
+                    MANUAL_TBT_OWNER, generation,
+                    !mapLiveState.running || HudPrefs.isSwitchToTbtOnHudStartEnabled(context), true,
                     "manual-start:" + safeReason(reason));
             log("manual tbt start generation=" + manualTbtGeneration
                     + " reason=" + safeReason(reason));

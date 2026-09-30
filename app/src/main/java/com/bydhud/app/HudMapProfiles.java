@@ -80,7 +80,7 @@ public final class HudMapProfiles {
                     HudMapProfile.Source source = HudMapProfile.Source.valueOf(
                             value.optString("source", ""));
                     result.put(source, new HudMapProfile(source,
-                            value.getInt("x"), value.getInt("y"), value.getInt("scale")));
+                            (float) value.getDouble("x"), (float) value.getDouble("y"), (float) value.getDouble("scale")));
                 } catch (IllegalArgumentException | JSONException ignored) {
                     // Ignore corrupt/obsolete entries while keeping other saved sources usable.
                 }

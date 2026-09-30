@@ -19,31 +19,31 @@ public final class HudMapProfile {
     }
 
     public final Source source;
-    public final int x;
-    public final int y;
-    public final int scale;
+    public final float x;
+    public final float y;
+    public final float scale;
 
-    public HudMapProfile(Source source, int x, int y, int scale) {
+    public HudMapProfile(Source source, float x, float y, float scale) {
         if (source == null) throw new IllegalArgumentException("source is required");
         this.source = source;
         this.x = clamp(x, -100, 100);
         this.y = clamp(y, -100, 100);
-        this.scale = clamp(scale, 50, 300);
+        this.scale = clamp(scale, 20, 300);
     }
 
     public static HudMapProfile defaults(Source source) {
         return new HudMapProfile(source, 0, 0, 100);
     }
 
-    public HudMapProfile withX(int value) {
+    public HudMapProfile withX(float value) {
         return new HudMapProfile(source, value, y, scale);
     }
 
-    public HudMapProfile withY(int value) {
+    public HudMapProfile withY(float value) {
         return new HudMapProfile(source, x, value, scale);
     }
 
-    public HudMapProfile withScale(int value) {
+    public HudMapProfile withScale(float value) {
         return new HudMapProfile(source, x, y, value);
     }
 
@@ -62,12 +62,13 @@ public final class HudMapProfile {
     @Override
     public int hashCode() {
         int result = source.hashCode();
-        result = 31 * result + x;
-        result = 31 * result + y;
-        return 31 * result + scale;
+        result = 31 * result + Float.floatToIntBits(x);
+        result = 31 * result + Float.floatToIntBits(y);
+        return 31 * result + Float.floatToIntBits(scale);
     }
 
-    private static int clamp(int value, int minimum, int maximum) {
-        return Math.max(minimum, Math.min(maximum, value));
+    private static float clamp(float value, int minimum, int maximum) {
+        if (!Float.isFinite(value)) throw new IllegalArgumentException("Non-finite profile value");
+        return Math.round(Math.max(minimum, Math.min(maximum, value)) * 10f) / 10f;
     }
 }

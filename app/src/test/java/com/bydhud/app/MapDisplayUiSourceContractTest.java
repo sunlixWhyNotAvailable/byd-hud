@@ -42,7 +42,7 @@ public final class MapDisplayUiSourceContractTest {
     public void numberLineUsesExistingImmediateNumericAndSliderEditor() throws Exception {
         String compose = source("BydHudRuntimeCompose.kt");
         String mapRow = between(compose, "private fun MapGeometryRow(", "private fun StorageDayRow(");
-        assertTrue(mapRow.contains("WidgetNumberLine(title, hint, value, minimum..maximum, suffix"));
+        assertTrue(mapRow.contains("MapNumberLine(title, hint, value, minimum..maximum, suffix"));
         assertTrue(mapRow.contains("showTicks)"));
         assertTrue(mapRow.contains("onValueChange(it)"));
     }

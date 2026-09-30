@@ -4,6 +4,7 @@ import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Matrix;
 import android.graphics.RectF;
 
 import java.io.ByteArrayOutputStream;
@@ -20,18 +21,21 @@ public final class HudMapImage {
 
     /** Center-crops and scales a source image into the compositor's 300x180 PNG. */
     public static byte[] centerCropPng(Bitmap source) {
-        return framedPng(source, 0, 0, 100);
+        if (source == null || source.isRecycled()) return new byte[0];
+        float fitPercent = 100f * Math.max(WIDTH / (float) source.getWidth(),
+                HEIGHT / (float) source.getHeight());
+        return framedPng(source, 0, 0, fitPercent);
     }
 
     /** Applies source framing before producing the same 300x180 image used by HUD output. */
     public static byte[] profileCropPng(Bitmap source, HudMapProfile profile) {
-        if (profile == null || (profile.x == 0 && profile.y == 0 && profile.scale == 100)) {
+        if (profile == null) {
             return centerCropPng(source);
         }
         return framedPng(source, profile.x, profile.y, profile.scale);
     }
 
-    private static byte[] framedPng(Bitmap source, int x, int y, int scalePercent) {
+    private static byte[] framedPng(Bitmap source, float x, float y, float scalePercent) {
         if (source == null || source.isRecycled()) return new byte[0];
         Bitmap output = null;
         try {
@@ -40,21 +44,21 @@ public final class HudMapImage {
             if (sourceWidth <= 0 || sourceHeight <= 0) return new byte[0];
             output = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
             output.eraseColor(Color.TRANSPARENT);
-            float baseScale = Math.max(WIDTH / (float) sourceWidth,
-                    HEIGHT / (float) sourceHeight);
-            float drawWidth = sourceWidth * baseScale * scalePercent / 100f;
-            float drawHeight = sourceHeight * baseScale * scalePercent / 100f;
-            float shiftX = -x * WIDTH / 100f;
-            float shiftY = y * HEIGHT / 100f;
-            RectF destination = new RectF(
-                    (WIDTH - drawWidth) / 2f + shiftX,
-                    (HEIGHT - drawHeight) / 2f + shiftY,
-                    (WIDTH + drawWidth) / 2f + shiftX,
-                    (HEIGHT + drawHeight) / 2f + shiftY);
+            // 100% means one source pixel per HUD pixel; 20% selects five times
+            // as much map. Bound the source window instead of moving its outer edge.
+            float cropWidth = WIDTH * 100f / scalePercent;
+            float cropHeight = HEIGHT * 100f / scalePercent;
+            float fit = Math.min(1f, Math.min(sourceWidth / cropWidth, sourceHeight / cropHeight));
+            cropWidth *= fit;
+            cropHeight *= fit;
+            float left = (sourceWidth - cropWidth) * (1f + x / 100f) / 2f;
+            float top = (sourceHeight - cropHeight) * (1f - y / 100f) / 2f;
+            RectF window = new RectF(left, top, left + cropWidth, top + cropHeight);
+            Matrix transform = new Matrix();
+            transform.setRectToRect(window, new RectF(0, 0, WIDTH, HEIGHT), Matrix.ScaleToFit.FILL);
             Canvas canvas = new Canvas(output);
             canvas.clipRect(0, 0, WIDTH, HEIGHT);
-            canvas.drawBitmap(source, null, destination,
-                    new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG));
+            canvas.drawBitmap(source, transform, new Paint(Paint.FILTER_BITMAP_FLAG));
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();
             return output.compress(Bitmap.CompressFormat.PNG, 100, bytes)
                     ? bytes.toByteArray() : new byte[0];

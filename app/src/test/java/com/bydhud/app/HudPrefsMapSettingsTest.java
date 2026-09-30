@@ -66,4 +66,17 @@ public final class HudPrefsMapSettingsTest {
         HudPrefs.setMapSettings(context, restored.withPreset(HudMapSettings.PRESET_CUSTOM));
         assertEquals(custom.custom, HudPrefs.mapSettings(context).geometry());
     }
+    @Test public void readsLegacyIntegersAndPreservesFractionsAcrossSave() {
+        context = RuntimeEnvironment.getApplication();
+        context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit().clear()
+                .putInt("map_custom_x", 145).putInt("map_custom_lane_y", 30).commit();
+        assertEquals(145f, HudPrefs.mapSettings(context).custom.mapX, 0.001f);
+        HudMapSettings edited = HudPrefs.mapSettings(context)
+                .withValue(HudMapSettings.CONTROL_MAP_X, -3.5f)
+                .withValue(HudMapSettings.CONTROL_LANE_SCALE, 70.2f);
+        HudPrefs.setMapSettings(context, edited);
+        assertEquals(edited, HudPrefs.mapSettings(context));
+        assertEquals(70.2f, HudPrefs.mapSettings(context).custom.laneScale, 0.001f);
+    }
+
 }

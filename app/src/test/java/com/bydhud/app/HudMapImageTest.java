@@ -55,56 +55,64 @@ public final class HudMapImageTest {
     }
 
     @Test
-    public void profileShiftsAndScalesTheSourceInsideTheCanonicalCrop() {
-        Bitmap source = Bitmap.createBitmap(300, 180, Bitmap.Config.ARGB_8888);
+    public void noProfileKeepsFullCentralCropForLargeSource() {
+        Bitmap source = Bitmap.createBitmap(1500, 900, Bitmap.Config.ARGB_8888);
         try {
             Canvas canvas = new Canvas(source);
             canvas.drawColor(Color.GREEN);
             Paint paint = new Paint();
-            paint.setColor(Color.RED);
-            canvas.drawRect(0, 0, 100, 60, paint);
-            paint.setColor(Color.BLUE);
-            canvas.drawRect(200, 120, 300, 180, paint);
-
-            Bitmap xLeft = decode(HudMapImage.profileCropPng(source,
-                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withX(-10)));
+            paint.setColor(Color.RED); canvas.drawRect(0, 0, 300, 900, paint);
+            paint.setColor(Color.BLUE); canvas.drawRect(1200, 0, 1500, 900, paint);
+            Bitmap centered = decode(HudMapImage.centerCropPng(source));
+            Bitmap withoutProfile = decode(HudMapImage.profileCropPng(source, null));
+            Bitmap explicitProfile = decode(HudMapImage.profileCropPng(source,
+                    HudMapProfile.defaults(HudMapProfile.Source.WAZE)));
             try {
-                assertEquals(Color.TRANSPARENT, xLeft.getPixel(0, 90));
-                assertEquals(Color.RED, xLeft.getPixel(30, 20));
+                for (Bitmap result : new Bitmap[]{centered, withoutProfile}) {
+                    assertEquals(Color.RED, result.getPixel(20, 90));
+                    assertEquals(Color.BLUE, result.getPixel(280, 90));
+                }
+                assertEquals(Color.GREEN, explicitProfile.getPixel(20, 90));
+                assertEquals(Color.GREEN, explicitProfile.getPixel(280, 90));
             } finally {
-                xLeft.recycle();
+                centered.recycle(); withoutProfile.recycle(); explicitProfile.recycle();
             }
+        } finally { source.recycle(); }
+    }
 
-            Bitmap xRight = decode(HudMapImage.profileCropPng(source,
-                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withX(10)));
-            try {
-                assertEquals(Color.RED, xRight.getPixel(0, 20));
-                assertEquals(Color.TRANSPARENT, xRight.getPixel(270, 90));
-            } finally {
-                xRight.recycle();
+    @Test
+    public void profilesSelectOriginalMapAreaWithoutTransparentMargins() {
+        Bitmap source = Bitmap.createBitmap(1500, 900, Bitmap.Config.ARGB_8888);
+        try {
+            Canvas canvas = new Canvas(source);
+            canvas.drawColor(Color.GREEN);
+            Paint paint = new Paint();
+            paint.setColor(Color.RED); canvas.drawRect(0, 0, 300, 900, paint);
+            paint.setColor(Color.BLUE); canvas.drawRect(1200, 0, 1500, 900, paint);
+            paint.setColor(Color.YELLOW); canvas.drawRect(300, 0, 1200, 180, paint);
+            paint.setColor(Color.CYAN); canvas.drawRect(300, 720, 1200, 900, paint);
+            HudMapProfile profile = HudMapProfile.defaults(HudMapProfile.Source.WAZE);
+            int[] colors = {Color.RED, Color.BLUE, Color.YELLOW, Color.CYAN};
+            float[][] offsets = {{-100,0},{100,0},{0,100},{0,-100}};
+            for (int i = 0; i < offsets.length; i++) {
+                Bitmap result = decode(HudMapImage.profileCropPng(source,
+                        new HudMapProfile(profile.source, offsets[i][0], offsets[i][1], 100)));
+                try { assertEquals(colors[i], result.getPixel(150, 90)); }
+                finally { result.recycle(); }
             }
-
-            Bitmap yUp = decode(HudMapImage.profileCropPng(source,
-                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withY(-10)));
-            try {
-                assertEquals(Color.RED, yUp.getPixel(50, 0));
-                assertEquals(Color.TRANSPARENT, yUp.getPixel(50, 162));
-            } finally {
-                yUp.recycle();
+            for (float scale : new float[]{20, 50, 92, 100, 125.5f, 300}) {
+                Bitmap result = decode(HudMapImage.profileCropPng(source, profile.withScale(scale)));
+                try {
+                    for (int x : new int[]{0, 150, 299}) for (int y : new int[]{0, 90, 179})
+                        assertEquals(255, Color.alpha(result.getPixel(x, y)));
+                    if (scale == 20) {
+                        assertEquals(Color.RED, result.getPixel(20, 90));
+                        assertEquals(Color.BLUE, result.getPixel(280, 90));
+                    }
+                } finally { result.recycle(); }
             }
-
-            Bitmap zoomedOut = decode(HudMapImage.profileCropPng(source,
-                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withScale(50)));
-            try {
-                assertEquals(Color.TRANSPARENT, zoomedOut.getPixel(0, 0));
-                assertEquals(Color.RED, zoomedOut.getPixel(77, 47));
-                assertEquals(Color.GREEN, zoomedOut.getPixel(150, 90));
-            } finally {
-                zoomedOut.recycle();
-            }
-        } finally {
-            source.recycle();
-        }
+            assertFalse(source.isRecycled());
+        } finally { source.recycle(); }
     }
 
     @Test
