@@ -1,0 +1,166 @@
+package com.bydhud.app;
+
+import java.util.Arrays;
+
+/** Keeps the latest navigator map frame fenced to one owner session. */
+final class NavigatorMapSessionState {
+    static final long FRESHNESS_MS = 3500L;
+
+    enum FrameUpdate {
+        REJECTED,
+        SAME,
+        CHANGED
+    }
+
+    private String ownerPackage = "";
+    private long ownerGeneration = -1L;
+    private String session = "";
+    private String inputPixelHash = "";
+    private String outputPixelHash = "";
+    private byte[] png;
+    private long receivedAtElapsedMs;
+    private long revision;
+    private long frameSequence;
+
+    boolean activate(String nextOwnerPackage, long nextOwnerGeneration, String nextSession) {
+        if (nextSession.equals(session)
+                && nextOwnerGeneration == ownerGeneration
+                && nextOwnerPackage.equals(ownerPackage)) {
+            return false;
+        }
+        ownerPackage = nextOwnerPackage;
+        ownerGeneration = nextOwnerGeneration;
+        session = nextSession;
+        clearFrame();
+        revision++;
+        return true;
+    }
+
+    boolean stop() {
+        if (session.isEmpty()) {
+            return false;
+        }
+        ownerPackage = "";
+        ownerGeneration = -1L;
+        session = "";
+        clearFrame();
+        revision++;
+        return true;
+    }
+
+    boolean isCurrent(String owner, long generation, String expectedSession) {
+        return !session.isEmpty()
+                && ownerPackage.equals(owner)
+                && ownerGeneration == generation
+                && session.equals(expectedSession);
+    }
+
+    boolean hasSameInputPixels(
+            String owner,
+            long generation,
+            String expectedSession,
+            String nextInputPixelHash) {
+        return isCurrent(owner, generation, expectedSession)
+                && png != null
+                && inputPixelHash.equals(nextInputPixelHash);
+    }
+
+    FrameUpdate refreshSameInput(
+            String owner,
+            long generation,
+            String expectedSession,
+            String nextInputPixelHash,
+            long receivedAt,
+            long now) {
+        if (!isFreshReceipt(receivedAt, now)
+                || !hasSameInputPixels(owner, generation, expectedSession, nextInputPixelHash)) {
+            return FrameUpdate.REJECTED;
+        }
+        receivedAtElapsedMs = receivedAt;
+        frameSequence++;
+        return FrameUpdate.SAME;
+    }
+
+    FrameUpdate publish(
+            String owner,
+            long generation,
+            String expectedSession,
+            String nextInputPixelHash,
+            String nextOutputPixelHash,
+            byte[] nextPng,
+            long receivedAt,
+            long now) {
+        if (!isFreshReceipt(receivedAt, now)
+                || !isCurrent(owner, generation, expectedSession)
+                || nextPng == null || nextPng.length == 0) {
+            return FrameUpdate.REJECTED;
+        }
+        inputPixelHash = nextInputPixelHash;
+        receivedAtElapsedMs = receivedAt;
+        frameSequence++;
+        if (png != null && outputPixelHash.equals(nextOutputPixelHash)) {
+            return FrameUpdate.SAME;
+        }
+        png = Arrays.copyOf(nextPng, nextPng.length);
+        outputPixelHash = nextOutputPixelHash;
+        revision++;
+        return FrameUpdate.CHANGED;
+    }
+
+    boolean expireIfDue(String expectedSession, long expectedFrameSequence, long now) {
+        if (!session.equals(expectedSession)
+                || png == null
+                || frameSequence != expectedFrameSequence
+                || now - receivedAtElapsedMs < FRESHNESS_MS) {
+            return false;
+        }
+        clearFrame();
+        revision++;
+        return true;
+    }
+
+    boolean expireIfStale(long now) {
+        if (png == null || now - receivedAtElapsedMs < FRESHNESS_MS) {
+            return false;
+        }
+        clearFrame();
+        revision++;
+        return true;
+    }
+
+    byte[] pngCopy() {
+        return png == null ? null : Arrays.copyOf(png, png.length);
+    }
+
+    byte[] pngForSnapshot() {
+        return png;
+    }
+
+    boolean hasFrame() {
+        return png != null;
+    }
+
+    long revision() {
+        return revision;
+    }
+
+    long receivedAtElapsedMs() {
+        return png == null ? 0L : receivedAtElapsedMs;
+    }
+
+    long frameSequence() {
+        return frameSequence;
+    }
+
+    private static boolean isFreshReceipt(long receivedAt, long now) {
+        return receivedAt >= 0L && now >= receivedAt && now - receivedAt < FRESHNESS_MS;
+    }
+
+    private void clearFrame() {
+        png = null;
+        inputPixelHash = "";
+        outputPixelHash = "";
+        receivedAtElapsedMs = 0L;
+        frameSequence++;
+    }
+}

@@ -215,11 +215,13 @@ final class NativeSpeedLimitTestSupport {
         final long at = SystemClock.elapsedRealtime();
         final String kind;
         final byte[] payload, semantic;
+        final boolean retainPayload;
 
-        Packet(String kind, byte[] payload, byte[] semantic) {
+        Packet(String kind, byte[] payload, byte[] semantic, boolean retainPayload) {
             this.kind = kind;
             this.payload = payload.clone();
             this.semantic = semantic.clone();
+            this.retainPayload = retainPayload;
         }
     }
 
@@ -268,8 +270,14 @@ final class NativeSpeedLimitTestSupport {
         @Implementation protected void recordSend(String source, String channel, long topic,
                 String kind, String reason, byte[] payload, byte[] semanticPayload,
                 Integer result, String error, long durationMs) {
+            recordSend(source, channel, topic, kind, reason, payload, semanticPayload,
+                    result, error, durationMs, true);
+        }
+        @Implementation protected void recordSend(String source, String channel, long topic,
+                String kind, String reason, byte[] payload, byte[] semanticPayload,
+                Integer result, String error, long durationMs, boolean retainPayload) {
             EVENTS.add("tx:" + kind);
-            PACKETS.add(new Packet(kind, payload, semanticPayload));
+            PACKETS.add(new Packet(kind, payload, semanticPayload, retainPayload));
         }
         @Implementation protected void recordLifecycle(String kind, String source,
                 String channel, String reason, Integer result, String error,

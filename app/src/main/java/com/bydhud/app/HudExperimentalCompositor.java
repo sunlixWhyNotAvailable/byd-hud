@@ -13,7 +13,7 @@ import java.io.ByteArrayOutputStream;
 import java.util.Arrays;
 
 /**
- * Bounded live compositor for the approved experimental warning/ETA regions.
+ * Bounded live compositor for the experimental map and route content planes.
  *
  * <p>This class owns no navigation state, transport, preferences, timers, or
  * UI work. A caller supplies already-arbitrated content on its worker thread;
@@ -46,10 +46,11 @@ public final class HudExperimentalCompositor {
     public Result compose(Inputs supplied) {
         Inputs input = supplied == null ? Inputs.empty() : supplied;
         Inputs upper = new Inputs(input.arrival, input.duration, "", input.maneuverPng,
-                null, null, null, input.colors, input.mapSettings, input.mapCalibration);
+                null, null, null, input.colors, input.mapSettings, input.mapCalibration,
+                input.mapPng);
         Inputs lower = new Inputs("", "", input.remaining, null,
                 input.lanePng, input.warningPng, input.warningDistance, input.colors,
-                input.mapSettings, input.mapCalibration);
+                input.mapSettings, input.mapCalibration, input.mapPng);
         ContentKey upperKey = ContentKey.from(upper);
         ContentKey lowerKey = ContentKey.from(lower);
         synchronized (cacheLock) {
@@ -71,7 +72,7 @@ public final class HudExperimentalCompositor {
     public static boolean hasMeaningfulF8Content(Inputs input) {
         if (input == null) return false;
         return meaningful(input.arrival) || meaningful(input.duration)
-                || input.maneuverPng.length > 0 || calibrationMapEnabled(input);
+                || input.maneuverPng.length > 0 || hasMapSegment(input, false);
     }
 
     /** Pure content predicate used by the sender before scheduling optional planes. */
@@ -79,7 +80,7 @@ public final class HudExperimentalCompositor {
         if (input == null) return false;
         return meaningful(input.remaining) || input.lanePng.length > 0
                 || input.warningPng.length > 0 || meaningful(input.warningDistance)
-                || calibrationMapEnabled(input);
+                || hasMapSegment(input, true);
     }
 
     /**
@@ -117,6 +118,7 @@ public final class HudExperimentalCompositor {
         if (!hasMeaningfulF8Content(input)) return null;
         Bitmap plane = null;
         Bitmap maneuver = null;
+        Bitmap map = null;
         boolean drawn = false;
         try {
             plane = transparentBitmap(HudExperimentalLayout.F8_WIDTH_PX,
@@ -125,6 +127,10 @@ public final class HudExperimentalCompositor {
             Canvas canvas = new Canvas(plane);
             if (calibrationMapEnabled(input)) {
                 drawn |= drawCalibrationMap(canvas, false, plane.getHeight(),
+                        input.mapSettings.geometry());
+            } else if (liveMapEnabled(input)) {
+                map = decodePng(input.mapPng);
+                drawn |= drawLiveMap(canvas, map, false, plane.getHeight(),
                         input.mapSettings.geometry());
             }
             maneuver = decodePng(input.maneuverPng);
@@ -140,6 +146,7 @@ public final class HudExperimentalCompositor {
         } catch (RuntimeException | OutOfMemoryError ignored) {
             return null;
         } finally {
+            recycle(map);
             recycle(maneuver);
             recycle(plane);
         }
@@ -149,6 +156,7 @@ public final class HudExperimentalCompositor {
         if (!hasMeaningfulF7Content(input)) return null;
         Bitmap plane = null;
         Bitmap lane = null;
+        Bitmap map = null;
         Bitmap warning = null;
         boolean drawn = false;
         try {
@@ -158,6 +166,10 @@ public final class HudExperimentalCompositor {
             Canvas canvas = new Canvas(plane);
             if (calibrationMapEnabled(input)) {
                 drawn |= drawCalibrationMap(canvas, true, plane.getHeight(),
+                        input.mapSettings.geometry());
+            } else if (liveMapEnabled(input)) {
+                map = decodePng(input.mapPng);
+                drawn |= drawLiveMap(canvas, map, true, plane.getHeight(),
                         input.mapSettings.geometry());
             }
             lane = decodePng(input.lanePng);
@@ -177,6 +189,7 @@ public final class HudExperimentalCompositor {
             return null;
         } finally {
             recycle(warning);
+            recycle(map);
             recycle(lane);
             recycle(plane);
         }
@@ -308,6 +321,37 @@ public final class HudExperimentalCompositor {
 
     private static boolean calibrationMapEnabled(Inputs input) {
         return input.mapCalibration && input.mapSettings.mode == HudMapSettings.EXPERIMENTAL;
+    }
+
+    private static boolean liveMapEnabled(Inputs input) {
+        return !input.mapCalibration && input.mapSettings.mode == HudMapSettings.EXPERIMENTAL
+                && input.mapPng.length > 0;
+    }
+
+    private static boolean hasMapSegment(Inputs input, boolean lower) {
+        if (!calibrationMapEnabled(input) && !liveMapEnabled(input)) return false;
+        int split = new HudMapGeometry(input.mapSettings.geometry()).splitRow();
+        return lower ? split < HudMapGeometry.SOURCE_HEIGHT : split > 0;
+    }
+
+    private static boolean drawLiveMap(Canvas canvas, Bitmap image, boolean lower,
+                                       int fieldHeight, HudMapSettings.Geometry settings) {
+        if (image == null || image.getWidth() != HudMapGeometry.SOURCE_WIDTH
+                || image.getHeight() != HudMapGeometry.SOURCE_HEIGHT) return false;
+        HudMapGeometry map = new HudMapGeometry(settings);
+        int split = map.splitRow();
+        int sourceTop = lower ? split : 0;
+        int sourceBottom = lower ? HudMapGeometry.SOURCE_HEIGHT : split;
+        if (sourceTop == sourceBottom) return false;
+        Rect source = new Rect(0, sourceTop, HudMapGeometry.SOURCE_WIDTH, sourceBottom);
+        RectF destination = new RectF(
+                map.x(lower, map.left(fieldHeight), fieldHeight),
+                map.y(lower, map.sourceY(sourceTop), fieldHeight),
+                map.x(lower, map.right(fieldHeight), fieldHeight),
+                map.y(lower, map.sourceY(sourceBottom), fieldHeight));
+        canvas.drawBitmap(image, source, destination,
+                new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG));
+        return true;
     }
 
     private static boolean drawCalibrationMap(Canvas canvas, boolean lower, int fieldHeight,
@@ -455,7 +499,7 @@ public final class HudExperimentalCompositor {
         }
     }
 
-    /** Immutable render input; primary-art visibility is represented by empty PNGs. */
+    /** Immutable render input; absent artwork is represented by empty PNGs. */
     public static final class Inputs {
         public final String arrival;
         public final String duration;
@@ -467,18 +511,27 @@ public final class HudExperimentalCompositor {
         public final Colors colors;
         public final HudMapSettings mapSettings;
         public final boolean mapCalibration;
+        public final byte[] mapPng;
 
         public Inputs(String arrival, String duration, String remaining,
                       byte[] maneuverPng, byte[] lanePng, byte[] warningPng,
                       String warningDistance, Colors colors) {
             this(arrival, duration, remaining, maneuverPng, lanePng, warningPng,
-                    warningDistance, colors, HudMapSettings.defaults(), false);
+                    warningDistance, colors, HudMapSettings.defaults(), false, null);
         }
 
         public Inputs(String arrival, String duration, String remaining,
                       byte[] maneuverPng, byte[] lanePng, byte[] warningPng,
                       String warningDistance, Colors colors, HudMapSettings mapSettings,
                       boolean mapCalibration) {
+            this(arrival, duration, remaining, maneuverPng, lanePng, warningPng,
+                    warningDistance, colors, mapSettings, mapCalibration, null);
+        }
+
+        public Inputs(String arrival, String duration, String remaining,
+                      byte[] maneuverPng, byte[] lanePng, byte[] warningPng,
+                      String warningDistance, Colors colors, HudMapSettings mapSettings,
+                      boolean mapCalibration, byte[] mapPng) {
             this.arrival = safeText(arrival);
             this.duration = safeText(duration);
             this.remaining = safeText(remaining);
@@ -489,6 +542,7 @@ public final class HudExperimentalCompositor {
             this.colors = colors == null ? Colors.defaults() : colors;
             this.mapSettings = mapSettings == null ? HudMapSettings.defaults() : mapSettings;
             this.mapCalibration = mapCalibration;
+            this.mapPng = cloneBytes(mapPng);
         }
 
         public Inputs(String arrival, String duration, String remaining,
@@ -573,6 +627,7 @@ public final class HudExperimentalCompositor {
         private final Colors colors;
         private final HudMapSettings mapSettings;
         private final boolean mapCalibration;
+        private final byte[] mapPng;
 
         private ContentKey(Inputs input) {
             arrival = input.arrival;
@@ -585,6 +640,7 @@ public final class HudExperimentalCompositor {
             colors = input.colors;
             mapSettings = input.mapSettings;
             mapCalibration = input.mapCalibration;
+            mapPng = liveMapEnabled(input) ? input.mapPng.clone() : new byte[0];
         }
 
         private static ContentKey from(Inputs input) {
@@ -606,6 +662,7 @@ public final class HudExperimentalCompositor {
                     && Arrays.equals(maneuverPng, other.maneuverPng)
                     && Arrays.equals(lanePng, other.lanePng)
                     && Arrays.equals(warningPng, other.warningPng)
+                    && Arrays.equals(mapPng, other.mapPng)
                     && mapSettings.equals(other.mapSettings)
                     && mapCalibration == other.mapCalibration
                     && (!arrivalColorRelevant || colors.arrival == other.colors.arrival)
@@ -624,6 +681,7 @@ public final class HudExperimentalCompositor {
             result = 31 * result + Arrays.hashCode(maneuverPng);
             result = 31 * result + Arrays.hashCode(lanePng);
             result = 31 * result + Arrays.hashCode(warningPng);
+            result = 31 * result + Arrays.hashCode(mapPng);
             result = 31 * result + warningDistance.hashCode();
             result = 31 * result + mapSettings.hashCode();
             result = 31 * result + (mapCalibration ? 1 : 0);

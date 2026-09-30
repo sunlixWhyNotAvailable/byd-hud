@@ -54,6 +54,22 @@ final class SomeIpTxLog {
             Integer result,
             String error,
             long durationMs) {
+        recordSend(source, channel, topic, kind, reason, payload, semanticPayload,
+                result, error, durationMs, true);
+    }
+
+    synchronized void recordSend(
+            String source,
+            String channel,
+            long topic,
+            String kind,
+            String reason,
+            byte[] payload,
+            byte[] semanticPayload,
+            Integer result,
+            String error,
+            long durationMs,
+            boolean retainPayload) {
         if (!syncEnabled()) return;
         long wallMs = System.currentTimeMillis();
         long elapsedMs = SystemClock.elapsedRealtime();
@@ -63,13 +79,15 @@ final class SomeIpTxLog {
         byte[] semantic = semanticPayload == null ? exact : semanticPayload;
 
         boolean failed = result == null || result != 0 || (error != null && !error.isEmpty());
-        if (failed || !sameState(repeatedState, source, channel, topic, kind, result, semantic)) {
+        if (failed || !sameState(repeatedState, source, channel, topic, kind, result,
+                semantic, retainPayload)) {
             flushRepeated();
             queueSend(day, currentSequence, elapsedMs, wallMs, source, channel, topic,
-                    kind, reason, exact.clone(), semantic.clone(), result, error, durationMs);
+                    kind, reason, exact.clone(), semantic.clone(), result, error, durationMs,
+                    retainPayload);
             if (!failed) {
                 repeatedState = new RepeatedState(source, channel, topic, kind, result,
-                        semantic.clone(), currentSequence, elapsedMs, wallMs);
+                        semantic.clone(), currentSequence, elapsedMs, wallMs, retainPayload);
             }
             return;
         }
@@ -149,10 +167,11 @@ final class SomeIpTxLog {
             byte[] semanticPayload,
             Integer result,
             String error,
-            long durationMs) {
+            long durationMs,
+            boolean retainPayload) {
         WazeCaptureDebugWriter.get().someIpTx(() -> writeSend(targetDay,
                 currentSequence, elapsedMs, wallMs, source, channel, topic, kind,
-                reason, payload, semanticPayload, result, error, durationMs));
+                reason, payload, semanticPayload, result, error, durationMs, retainPayload));
     }
 
     private void writeSend(
@@ -169,13 +188,14 @@ final class SomeIpTxLog {
             byte[] semanticPayload,
             Integer result,
             String error,
-            long durationMs) {
+            long durationMs,
+            boolean retainPayload) {
         prepareWriterDay(targetDay);
         String payloadHash = sha256(payload);
         String semanticHash = sha256(semanticPayload);
-        writerPayloadHashBySequence.put(currentSequence, payloadHash);
+        if (retainPayload) writerPayloadHashBySequence.put(currentSequence, payloadHash);
         writerSemanticHashBySequence.put(currentSequence, semanticHash);
-        boolean includePayload = writerPayloadHashes.add(payloadHash);
+        boolean includePayload = retainPayload && writerPayloadHashes.add(payloadHash);
         StringBuilder line = new StringBuilder("{")
                 .append(NavCaptureStore.timeFields(elapsedMs, wallMs))
                 .append(",\"sequence\":").append(currentSequence)
@@ -193,7 +213,9 @@ final class SomeIpTxLog {
         if (error != null && !error.isEmpty()) {
             line.append(",\"error\":\"").append(esc(error)).append('"');
         }
-        if (includePayload) {
+        if (!retainPayload) {
+            line.append(",\"payloadOmitted\":\"live_map\"");
+        } else if (includePayload) {
             line.append(",\"payloadBase64\":\"")
                     .append(Base64.encodeToString(payload, Base64.NO_WRAP)).append('"');
         } else {
@@ -221,7 +243,9 @@ final class SomeIpTxLog {
                 + ",\"lastT\":" + state.lastElapsedMs
                 + ",\"firstTs\":" + state.firstWallMs
                 + ",\"lastTs\":" + state.lastWallMs
-                + ",\"payloadRefSha256\":\"" + payloadHash + "\""
+                + (state.retainPayload
+                    ? ",\"payloadRefSha256\":\"" + payloadHash + "\""
+                    : ",\"payloadOmitted\":\"live_map\"")
                 + ",\"semanticSha256\":\"" + semanticHash + "\""
                 + ",\"result\":" + state.result
                 + ",\"totalDurationMs\":" + state.totalDurationMs
@@ -275,12 +299,25 @@ final class SomeIpTxLog {
             String kind,
             Integer result,
             byte[] semanticPayload) {
+        return sameState(state, source, channel, topic, kind, result, semanticPayload, true);
+    }
+
+    static boolean sameState(
+            RepeatedState state,
+            String source,
+            String channel,
+            long topic,
+            String kind,
+            Integer result,
+            byte[] semanticPayload,
+            boolean retainPayload) {
         return state != null
                 && state.topic == topic
                 && state.result.equals(result)
                 && state.source.equals(safe(source))
                 && state.channel.equals(safe(channel))
                 && state.kind.equals(safe(kind))
+                && state.retainPayload == retainPayload
                 && Arrays.equals(state.semanticPayload,
                 semanticPayload == null ? new byte[0] : semanticPayload);
     }
@@ -319,6 +356,7 @@ final class SomeIpTxLog {
         final String kind;
         final Integer result;
         final byte[] semanticPayload;
+        final boolean retainPayload;
         final long firstSequence;
         final long firstElapsedMs;
         final long firstWallMs;
@@ -338,12 +376,28 @@ final class SomeIpTxLog {
                 long firstSequence,
                 long firstElapsedMs,
                 long firstWallMs) {
+            this(source, channel, topic, kind, result, semanticPayload, firstSequence,
+                    firstElapsedMs, firstWallMs, true);
+        }
+
+        RepeatedState(
+                String source,
+                String channel,
+                long topic,
+                String kind,
+                Integer result,
+                byte[] semanticPayload,
+                long firstSequence,
+                long firstElapsedMs,
+                long firstWallMs,
+                boolean retainPayload) {
             this.source = safe(source);
             this.channel = safe(channel);
             this.topic = topic;
             this.kind = safe(kind);
             this.result = result;
             this.semanticPayload = semanticPayload == null ? new byte[0] : semanticPayload;
+            this.retainPayload = retainPayload;
             this.firstSequence = firstSequence;
             this.firstElapsedMs = firstElapsedMs;
             this.firstWallMs = firstWallMs;

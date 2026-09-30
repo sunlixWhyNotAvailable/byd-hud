@@ -275,12 +275,7 @@ public final class HudCheckPayload {
     }
 
     private static byte[] buildNavigationMapPayload(byte[] png) {
-        ByteArrayOutputStream packed = new ByteArrayOutputStream();
-        String encoded = Base64.getEncoder().encodeToString(png);
-        for (int i = 0; i < encoded.length(); i++) writeVarint(packed, encoded.charAt(i));
-        ByteArrayOutputStream fields = new ByteArrayOutputStream();
-        writeBytesField(fields, 1, packed.toByteArray());
-        return fields.toByteArray();
+        return HudMapImage.nativePayload(png);
     }
 
     private static byte[] buildTrafficInfoPayload(int roadSpeed, int cameraSpeed,

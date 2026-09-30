@@ -209,8 +209,10 @@ public final class DirectTbtPayload {
                 && safeOptions.mapSettings.mode == HudMapSettings.EXPERIMENTAL;
         boolean compositeLaneGeometry = safeOptions.mapSettings.mode == HudMapSettings.EXPERIMENTAL
                 && lanePng.length > 0;
+        boolean liveMap = safeOptions.mapSettings.mode == HudMapSettings.EXPERIMENTAL
+                && !safeOptions.mapCalibration && safeOptions.mapPng.length > 0;
         boolean compositePrimary = safeOptions.presentation.separateEta()
-                || safeOptions.presentation.separateWarning() || calibrationMap;
+                || safeOptions.presentation.separateWarning() || calibrationMap || liveMap;
         if (compositePrimary || compositeLaneGeometry) {
             HudEtaText separateEta = safeOptions.presentation.separateEta() ? metrics : HudEtaText.EMPTY;
             Presentation style = safeOptions.presentation;
@@ -222,7 +224,7 @@ public final class DirectTbtPayload {
                             ? HudEtaText.distance(separateWarning.getDistanceMeters(), style.ukrainian) : "",
                     new HudExperimentalCompositor.Colors(style.arrivalColor, style.durationColor,
                             style.remainingColor, style.warningColor),
-                    safeOptions.mapSettings, safeOptions.mapCalibration));
+                    safeOptions.mapSettings, safeOptions.mapCalibration, safeOptions.mapPng));
             byte[] upper = composed.f8Png();
             byte[] lower = composed.f7Png();
             if (compositePrimary) maneuverPng = upper == null ? maneuverPng : upper;
@@ -668,6 +670,7 @@ public final class DirectTbtPayload {
         public final boolean mapCalibration;
         final Presentation presentation;
         private final byte[] blankS72Png;
+        private final byte[] mapPng;
 
         public Options(boolean png, boolean nativeManeuver, boolean lanes,
                        boolean distance, boolean street) {
@@ -765,6 +768,23 @@ public final class DirectTbtPayload {
                 int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
                 int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation,
                 HudMapSettings mapSettings, boolean mapCalibration) {
+            this(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, mapSettings, mapCalibration, null);
+        }
+
+        private Options(boolean png, boolean nativeManeuver, boolean lanes,
+                boolean distance, boolean street, boolean textDirection,
+                boolean clampSmallDistance, int routeMetricsMode,
+                boolean showEta, boolean showRemainingTime,
+                boolean showRemainingDistance, int speedLimitMode,
+                int speedLimitFreeFallback, int speedLimitOverlaySeconds,
+                int speedLimitCompositePlacement, int speedLimitManeuverOverlaySize,
+                int speedLimitLaneOverlaySize, byte[] blankS72Png, Presentation presentation,
+                HudMapSettings mapSettings, boolean mapCalibration, byte[] mapPng) {
             this.png = png;
             this.nativeManeuver = nativeManeuver;
             this.lanes = lanes;
@@ -786,6 +806,7 @@ public final class DirectTbtPayload {
             this.mapSettings = mapSettings == null ? HudMapSettings.defaults() : mapSettings;
             this.mapCalibration = mapCalibration;
             this.blankS72Png = blankS72Png == null ? new byte[0] : blankS72Png.clone();
+            this.mapPng = mapPng == null ? new byte[0] : mapPng.clone();
             this.presentation = presentation;
         }
 
@@ -795,7 +816,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png, value,
-                    mapSettings, mapCalibration);
+                    mapSettings, mapCalibration, mapPng);
         }
 
         Options withSpeedLimitMode(int mode) {
@@ -805,7 +826,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, mode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, mapSettings, mapCalibration);
+                    presentation, mapSettings, mapCalibration, mapPng);
         }
 
         public Options withMapSettings(HudMapSettings value) {
@@ -816,7 +837,7 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, settings, mapCalibration);
+                    presentation, settings, mapCalibration, mapPng);
         }
 
         public Options withMapCalibration(boolean enabled) {
@@ -826,7 +847,17 @@ public final class DirectTbtPayload {
                     showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
                     speedLimitOverlaySeconds, speedLimitCompositePlacement,
                     speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
-                    presentation, mapSettings, enabled);
+                    presentation, mapSettings, enabled, mapPng);
+        }
+
+        /** Returns a new option snapshot with independent live map image content. */
+        public Options withMapPng(byte[] value) {
+            return new Options(png, nativeManeuver, lanes, distance, street, textDirection,
+                    clampSmallDistance, routeMetricsMode, showEta, showRemainingTime,
+                    showRemainingDistance, speedLimitMode, speedLimitFreeFallback,
+                    speedLimitOverlaySeconds, speedLimitCompositePlacement,
+                    speedLimitManeuverOverlaySize, speedLimitLaneOverlaySize, blankS72Png,
+                    presentation, mapSettings, mapCalibration, value);
         }
 
         public static Options from(Context context) {

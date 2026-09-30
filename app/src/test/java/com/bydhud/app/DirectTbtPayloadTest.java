@@ -13,6 +13,7 @@ import java.util.Collections;
 import java.util.Calendar;
 import java.util.Arrays;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class DirectTbtPayloadTest {
     @Test
@@ -104,6 +105,38 @@ public final class DirectTbtPayloadTest {
         assertEquals(prepared.maneuverPngSha(), updated.maneuverPngSha());
         assertEquals(prepared.maneuverPngBytes(), updated.maneuverPngBytes());
         assertEquals(prepared.lanePngBytes(), updated.lanePngBytes());
+    }
+
+    @Test
+    public void liveMapOptionCopiesBytesAndSurvivesOtherOptionCopies() {
+        byte[] source = new byte[]{3, 5, 7};
+        HudMapSettings experimental = HudMapSettings.defaults()
+                .withMode(HudMapSettings.EXPERIMENTAL);
+        DirectTbtPayload.Options options = DirectTbtPayload.Options.ALL
+                .withMapPng(source)
+                .withPresentation(DirectTbtPayload.Presentation.DEFAULT)
+                .withSpeedLimitMode(HudPrefs.SPEED_LIMIT_COMPOSITE)
+                .withMapSettings(experimental.withValue(HudMapSettings.CONTROL_MAP_X, 1))
+                .withMapCalibration(true)
+                .withMapCalibration(false);
+        source[0] = 99;
+
+        AtomicReference<byte[]> received = new AtomicReference<>();
+        AtomicInteger renders = new AtomicInteger();
+        HudExperimentalCompositor.Renderer renderer = input -> {
+            renders.incrementAndGet();
+            received.set(input.mapPng.clone());
+            return new HudExperimentalCompositor.Result(new byte[]{8}, new byte[]{7});
+        };
+        HudExperimentalCompositor compositor = new HudExperimentalCompositor(renderer);
+
+        DirectTbtPayload.prepare(DirectTbtFrame.empty(), options, compositor);
+        assertArrayEquals(new byte[]{3, 5, 7}, received.get());
+        assertEquals(2, renders.get()); // A map alone schedules both planes.
+        received.get()[0] = 0;
+        DirectTbtPayload.prepare(DirectTbtFrame.empty(), options,
+                new HudExperimentalCompositor(renderer));
+        assertArrayEquals(new byte[]{3, 5, 7}, received.get());
     }
 
     @Test

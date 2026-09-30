@@ -184,10 +184,21 @@ An alert in shared-field mode occupies the maneuver field with the same priority
 
 ### Map display and live calibration
 
-`Map display` offers Off (default), Native and Experimental. This iteration
-provides the layout editor and a real HUD calibration test; it does not acquire
-live map images from Google Maps, Waze or the stock navigator. Native retains
-its setting and Denza N9 help example without sending a substitute map.
+`Map display` offers Off (default), Native and Experimental. Compatible
+map-capture builds of Google Maps and Waze supply a map image once per second
+while their navigation is being shown on the HUD. This requires the separately
+provided navigator APKs; the current download catalog and in-app patcher do not
+add map capture. Native sends the image to the vehicle's separate map field,
+illustrated by Denza N9. Experimental stitches it into the calibrated bitmap
+fields. Native field availability depends on the vehicle.
+
+The first implementation crops the image centrally to 300×180 without stretching;
+it does not locate the vehicle marker. If no valid new image arrives for 3.5 s,
+only the map is removed; guidance continues and the map returns with a new frame.
+Identical fresh images remain valid. Off, navigation/HUD stop and diagnostic
+tests end live capture and release its background rendering resources. Capture
+events and failures use the normal app journals without requiring manual Logcat.
+Live map sends retain metadata and hashes, without saving the image bytes.
 
 Experimental enables Custom, Larger on the right and Smaller in the center,
 plus six controls for map/lane horizontal position, vertical position and scale.

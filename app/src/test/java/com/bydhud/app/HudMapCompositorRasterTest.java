@@ -69,11 +69,67 @@ public final class HudMapCompositorRasterTest {
                 null, null, experimental, false)));
     }
 
+    @Test
+    public void liveMapUsesSharedSeamAndLaneArtStaysAboveIt() throws Exception {
+        HudMapSettings experimental = HudMapSettings.defaults()
+                .withMode(HudMapSettings.EXPERIMENTAL);
+        int split = new HudMapGeometry(experimental.geometry()).splitRow();
+        byte[] mapPng = twoToneMap(split);
+        HudExperimentalCompositor compositor = new HudExperimentalCompositor();
+
+        HudExperimentalCompositor.Result mapOnly = compositor.compose(input(
+                null, null, experimental, false, mapPng));
+        Bitmap upper = decode(mapOnly.f8Png());
+        Bitmap lower = decode(mapOnly.f7Png());
+        assertTrue(countColor(upper, Color.RED) > 0);
+        assertEquals(0, countColor(upper, Color.BLUE));
+        assertTrue(countColor(lower, Color.BLUE) > 0);
+        assertEquals(0, countColor(lower, Color.RED));
+
+        HudMapSettings laneOverMap = experimental.withValue(
+                HudMapSettings.CONTROL_LANE_Y, -50);
+        HudExperimentalCompositor.Result layered = new HudExperimentalCompositor().compose(input(
+                solidPng(100, 10, Color.GREEN), solidPng(100, 10, Color.GREEN),
+                laneOverMap, false, mapPng));
+        Bitmap layeredLower = decode(layered.f7Png());
+        assertEquals(Color.GREEN, layeredLower.getPixel(480, 15));
+
+        HudExperimentalCompositor.Result calibration = new HudExperimentalCompositor().compose(input(
+                null, null, experimental, true, solidPng(300, 180, Color.GREEN)));
+        assertEquals(0, countColor(decode(calibration.f8Png()), Color.GREEN));
+        assertEquals(0, countColor(decode(calibration.f7Png()), Color.GREEN));
+    }
+
     private static HudExperimentalCompositor.Inputs input(byte[] maneuver, byte[] lanes,
                                                            HudMapSettings settings,
                                                            boolean calibration) {
+        return input(maneuver, lanes, settings, calibration, null);
+    }
+
+    private static HudExperimentalCompositor.Inputs input(byte[] maneuver, byte[] lanes,
+                                                           HudMapSettings settings,
+                                                           boolean calibration, byte[] mapPng) {
         return new HudExperimentalCompositor.Inputs("", "", "", maneuver, lanes,
-                null, "", HudExperimentalCompositor.Colors.defaults(), settings, calibration);
+                null, "", HudExperimentalCompositor.Colors.defaults(), settings, calibration,
+                mapPng);
+    }
+
+    private static byte[] twoToneMap(int split) throws Exception {
+        Bitmap bitmap = Bitmap.createBitmap(300, 180, Bitmap.Config.ARGB_8888);
+        try {
+            Canvas canvas = new Canvas(bitmap);
+            canvas.drawColor(Color.BLACK);
+            Paint paint = new Paint();
+            paint.setColor(Color.RED);
+            canvas.drawRect(0, 0, 300, split - 2, paint);
+            paint.setColor(Color.BLUE);
+            canvas.drawRect(0, split + 2, 300, 180, paint);
+            ByteArrayOutputStream output = new ByteArrayOutputStream();
+            bitmap.compress(Bitmap.CompressFormat.PNG, 100, output);
+            return output.toByteArray();
+        } finally {
+            bitmap.recycle();
+        }
     }
 
     private static byte[] solidPng(int width, int height, int color) throws Exception {

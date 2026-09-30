@@ -94,6 +94,11 @@ final class HudOutputCoordinator {
                 .put("manualMapLiveSession", manualMapLiveSession)
                 .put("directOwnerPackage", directOwnerPackage)
                 .put("directOwnerSessionGeneration", directOwnerSessionGeneration)
+                .put("navigatorMapOwner", mapOwnerPackage)
+                .put("navigatorMapMode", navigatorMapMode)
+                .put("navigatorMapRevision", mapRevision)
+                .put("navigatorMapPngBytes", navigatorMapPng.length)
+                .put("nativeMapClearPending", nativeMapClearPending)
                 .put("directFramePresent", directFrame != null)
                 .put("boundReferencePresent", client.isBound()).put("bindingPresent", client.hasBinding())
                 .put("serviceStarted", serviceStarted).put("generation", generation)
@@ -120,6 +125,15 @@ final class HudOutputCoordinator {
     private final SomeIpTxLog txLog;
     private final NativeSpeedLimitController nativeSpeed;
     private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
+    private String mapOwnerPackage = "";
+    private long mapOwnerGeneration = Long.MIN_VALUE;
+    private int navigatorMapMode = HudMapSettings.OFF;
+    private long mapRevision = -1L;
+    private byte[] navigatorMapPng = new byte[0];
+    private byte[] nativeMapPayload = new byte[0];
+    private boolean nativeMapMayBeVisible;
+    private boolean nativeMapClearPending;
+    private long nativeMapAttemptAtMs = -1L;
 
     private boolean manualEnabled;
     private boolean directEnabled;
@@ -1036,11 +1050,13 @@ final class HudOutputCoordinator {
     private void sendActive(String reason) {
         if (ShanghaiOutputGate.isSuspended()) {
             nativeSpeed.stop("shanghai");
+            stopNavigatorMap("shanghai");
             scheduleSend(1000L);
             return;
         }
         Source source = activeSource;
         if (source == Source.NONE || source != desiredSource() || !hasFrame(source)) {
+            stopNavigatorMap("no-active-output");
             return;
         }
         if (source == Source.MANUAL && manualMapLiveSession != 0L
@@ -1066,6 +1082,8 @@ final class HudOutputCoordinator {
                 }
                 log("service ready source=" + source + " result=" + startResult);
             }
+            refreshNavigatorMap(source);
+            flushNativeMapClear(reason, false);
             if (source == Source.DIRECT && directLossClearPending) {
                 if (!sendRequiredClear("direct producer loss", source, "direct_loss_clear")) {
                     return;
@@ -1098,6 +1116,7 @@ final class HudOutputCoordinator {
                 return;
             }
             recordPayloadSuccess();
+            publishNativeMap(reason);
             if (source == Source.MANUAL && manualMapLiveSession != 0L) {
                 nativeSpeed.refreshMapLive(manualMapLiveSession,
                         HudMapLiveFixture.SPEED_LIMIT_KPH);
@@ -1150,6 +1169,119 @@ final class HudOutputCoordinator {
         }
     }
 
+    private void refreshNavigatorMap(Source source) {
+        int mode = preparedDirectOptions != null
+                && preparedDirectOptionsRevision == HudPrefs.outputOptionsRevision()
+                ? preparedDirectOptions.mapSettings.mode : HudPrefs.mapSettings(context).mode;
+        boolean eligible = source == Source.DIRECT && source == desiredSource()
+                && directFrame != null && !HudPrefs.isUserShutdownActive(context)
+                && !ShanghaiOutputGate.isSuspended()
+                && (mode == HudMapSettings.NATIVE || mode == HudMapSettings.EXPERIMENTAL)
+                && ("com.waze".equals(directOwnerPackage)
+                    || GMapsDirectChannel.PACKAGE_NAME.equals(directOwnerPackage));
+        if (!eligible) {
+            stopNavigatorMap("output-gate");
+            return;
+        }
+        if (!mapOwnerPackage.equals(directOwnerPackage)
+                || mapOwnerGeneration != directOwnerSessionGeneration) {
+            stopNavigatorMap("owner-change");
+            mapOwnerPackage = directOwnerPackage;
+            mapOwnerGeneration = directOwnerSessionGeneration;
+            String owner = mapOwnerPackage;
+            long session = mapOwnerGeneration;
+            NavigatorMapCapture.activate(context, owner, session, () -> worker.post(() -> {
+                if (!owner.equals(mapOwnerPackage) || session != mapOwnerGeneration) return;
+                scheduleImmediate("navigator-map-frame");
+            }));
+            log("navigator_map started owner=" + owner + " session=" + session);
+        }
+        if (navigatorMapMode != mode) {
+            if (navigatorMapMode == HudMapSettings.NATIVE && nativeMapMayBeVisible) {
+                nativeMapClearPending = true;
+                nativeMapAttemptAtMs = -1L;
+            }
+            navigatorMapMode = mode;
+            preparedDirectOptionsRevision = -1;
+        }
+        NavigatorMapCapture.Snapshot snapshot = NavigatorMapCapture.snapshot();
+        if (mapRevision != snapshot.revision()) {
+            mapRevision = snapshot.revision();
+            navigatorMapPng = snapshot.png();
+            nativeMapPayload = navigatorMapPng.length == 0 ? new byte[0]
+                    : HudMapImage.nativePayload(navigatorMapPng);
+            preparedDirectOptionsRevision = -1;
+            if (navigatorMapPng.length == 0 && nativeMapMayBeVisible) {
+                nativeMapClearPending = true;
+                nativeMapAttemptAtMs = -1L;
+            }
+            log("navigator_map content revision=" + mapRevision + " bytes="
+                    + navigatorMapPng.length + " mode=" + mode);
+        }
+    }
+
+    private void stopNavigatorMap(String reason) {
+        if (!mapOwnerPackage.isEmpty()) {
+            NavigatorMapCapture.stop(reason);
+            log("navigator_map stopped owner=" + mapOwnerPackage + " reason=" + safe(reason));
+            mapOwnerPackage = "";
+            mapOwnerGeneration = Long.MIN_VALUE;
+            mapRevision = -1L;
+            navigatorMapPng = new byte[0];
+            nativeMapPayload = new byte[0];
+            preparedDirectOptionsRevision = -1;
+        }
+        navigatorMapMode = HudMapSettings.OFF;
+        if (nativeMapMayBeVisible && !nativeMapClearPending) {
+            nativeMapClearPending = true;
+            nativeMapAttemptAtMs = -1L;
+        }
+        flushNativeMapClear(reason, false);
+    }
+
+    private void publishNativeMap(String reason) {
+        if (activeSource != Source.DIRECT || navigatorMapMode != HudMapSettings.NATIVE
+                || nativeMapPayload.length == 0 || nativeMapClearPending) return;
+        long now = SystemClock.elapsedRealtime();
+        if (nativeMapAttemptAtMs >= 0L && now - nativeMapAttemptAtMs < DEFAULT_INTERVAL_MS) return;
+        nativeMapAttemptAtMs = now;
+        // An uncertain write may have reached the receiver; retain ownership for cleanup.
+        nativeMapMayBeVisible = true;
+        sendNativeMap(nativeMapPayload, "map_frame", reason);
+    }
+
+    private void flushNativeMapClear(String reason, boolean force) {
+        if (!nativeMapClearPending || !serviceStarted || !client.isBound()
+                || ShanghaiOutputGate.isSuspended()) return;
+        long now = SystemClock.elapsedRealtime();
+        if (!force && nativeMapAttemptAtMs >= 0L
+                && now - nativeMapAttemptAtMs < DEFAULT_INTERVAL_MS) return;
+        nativeMapAttemptAtMs = now;
+        if (sendNativeMap(HudMapImage.nativePayload(null), "map_clear", reason)) {
+            nativeMapClearPending = false;
+            nativeMapMayBeVisible = false;
+        }
+    }
+
+    private boolean sendNativeMap(byte[] payload, String kind, String reason) {
+        long startedAt = SystemClock.elapsedRealtime();
+        Integer result = null;
+        String error = "";
+        try {
+            result = client.sendToTopic(SomeIpHudClient.HUD_TOPIC_8003, payload);
+            return isPayloadSuccessResult(result);
+        } catch (RemoteException | RuntimeException failure) {
+            error = failure.getClass().getSimpleName() + ":" + safe(failure.getMessage());
+            return false;
+        } finally {
+            txLog.recordSend("direct", "navigator_map", SomeIpHudClient.HUD_TOPIC_8003,
+                    kind, reason, payload, payload, result, error,
+                    SystemClock.elapsedRealtime() - startedAt, !"map_frame".equals(kind));
+            log("navigator_map " + kind + " result=" + result + " bytes=" + payload.length
+                    + " error=" + error + " reason=" + safe(reason));
+        }
+    }
+
     private byte[] buildPayload(Source source) {
         if (source == Source.DIRECT) {
             int optionsRevision = HudPrefs.outputOptionsRevision();
@@ -1161,7 +1293,9 @@ final class HudOutputCoordinator {
             if (sourceChanged) {
                 preparedDirectFrame = directFrame;
                 preparedDirectOptionsRevision = optionsRevision;
-                preparedDirectOptions = NativeSpeedLimitController.outputOptions(context, directOwnerPackage);
+                preparedDirectOptions = NativeSpeedLimitController.outputOptions(context, directOwnerPackage)
+                        .withMapPng(navigatorMapMode == HudMapSettings.EXPERIMENTAL
+                                ? navigatorMapPng : null);
                 preparedEtaContext = etaStreetContext(preparedDirectOptions,
                         HudPrefs.transliterationMode(context));
             }
@@ -1308,6 +1442,11 @@ final class HudOutputCoordinator {
             String reason) {
         long startedAt = SystemClock.elapsedRealtime();
         try {
+            if (packet.topicId == SomeIpHudClient.HUD_TOPIC_8003) {
+                // The diagnostic now owns this plane, including uncertain writes.
+                nativeMapMayBeVisible = false;
+                nativeMapClearPending = false;
+            }
             int result = client.sendToTopic(packet.topicId, packet.payload);
             recordHudCheck("aux-topic-" + Long.toHexString(packet.topicId) + ":" + kind,
                     isPayloadSuccessResult(result) ? 1 : -1, "send-result:" + result);
@@ -1642,6 +1781,7 @@ final class HudOutputCoordinator {
 
     private boolean sendRequiredClear(String reason, Source source, String kind)
             throws RemoteException {
+        flushNativeMapClear(reason, true);
         resetEtaStreetText("clear:" + kind);
         if (!manualEnabled) releaseHudCheckAuxiliary(reason);
         byte[] payload = DirectTbtPayload.buildClear();
@@ -1660,6 +1800,7 @@ final class HudOutputCoordinator {
             return -1L;
         }
         try {
+            flushNativeMapClear(reason, true);
             if (!manualEnabled) releaseHudCheckAuxiliary(reason);
             byte[] payload = DirectTbtPayload.buildClear();
             int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
@@ -1673,6 +1814,8 @@ final class HudOutputCoordinator {
     }
 
     private void stopServiceAndUnbind(String reason) {
+        stopNavigatorMap("transport-stop:" + reason);
+        flushNativeMapClear(reason, true);
         nativeSpeed.stop("transport-stop:" + reason);
         resetEtaStreetText("transport-stop:" + reason);
         releaseHudCheckAuxiliary(reason);
@@ -1734,17 +1877,19 @@ final class HudOutputCoordinator {
         long startedAtMs = SystemClock.elapsedRealtime();
         lastTransportSource = source;
         lastTransportChannel = channel;
+        boolean retainPayload = !(source == Source.DIRECT && "payload".equals(kind)
+                && navigatorMapMode == HudMapSettings.EXPERIMENTAL && navigatorMapPng.length > 0);
         try {
             int result = client.send(payload);
             txLog.recordSend(sourceName(source), channel, SomeIpHudClient.HUD_ROAD_INFO_TOPIC,
                     kind, reason, payload, semanticPayload, result, "",
-                    SystemClock.elapsedRealtime() - startedAtMs);
+                    SystemClock.elapsedRealtime() - startedAtMs, retainPayload);
             return result;
         } catch (RemoteException | RuntimeException e) {
             txLog.recordSend(sourceName(source), channel, SomeIpHudClient.HUD_ROAD_INFO_TOPIC,
                     kind, reason, payload, semanticPayload, null,
                     e.getClass().getSimpleName() + ":" + safe(e.getMessage()),
-                    SystemClock.elapsedRealtime() - startedAtMs);
+                    SystemClock.elapsedRealtime() - startedAtMs, retainPayload);
             throw e;
         }
     }
@@ -1762,6 +1907,7 @@ final class HudOutputCoordinator {
     }
 
     private void handleTransportFailure(String reason, Throwable error) {
+        stopNavigatorMap("transport-failure:" + reason);
         nativeSpeed.stop("transport-failure:" + reason);
         resetEtaStreetText("transport-failure:" + reason);
         HudDeliveryStatus.recordFailure();
@@ -1878,6 +2024,7 @@ final class HudOutputCoordinator {
             return false;
         }
         if (decision == DirectOwnerDecision.ADVANCE) {
+            stopNavigatorMap("direct-session-advanced");
             nativeSpeed.stop("direct-session-advanced");
             boolean preservePendingLossClear = shouldPreservePendingLossClearOnAdvance(
                     directLossClearPending, directOwnerPackage,
@@ -2024,6 +2171,7 @@ final class HudOutputCoordinator {
         }
         if (!shouldQueueDirectLossClear(
                 true, true, directLossClearSent, directLossClearPending)) return;
+        stopNavigatorMap("producer-loss:" + reason);
         nativeSpeed.stop("producer-loss:" + reason);
         resetEtaStreetText("producer-loss:" + reason);
         directFrame = null;
@@ -2098,6 +2246,7 @@ final class HudOutputCoordinator {
     }
 
     private void invalidateDirectOwnerOnWorker(String reason) {
+        stopNavigatorMap("owner-invalidated:" + reason);
         nativeSpeed.stop("owner-invalidated:" + reason);
         worker.removeCallbacks(directLeaseExpiry);
         directLeaseDeadlineMs = 0L;
@@ -2125,6 +2274,7 @@ final class HudOutputCoordinator {
     }
 
     private void cancelScheduledWork() {
+        stopNavigatorMap("hud-work-cancelled");
         nativeSpeed.stop("hud-work-cancelled");
         worker.removeCallbacks(sendLoop);
         ++bindGeneration;

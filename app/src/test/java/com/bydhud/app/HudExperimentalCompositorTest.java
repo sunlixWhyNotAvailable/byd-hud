@@ -152,6 +152,36 @@ public final class HudExperimentalCompositorTest {
     }
 
     @Test
+    public void liveMapIsPlaneContentAndCalibrationIgnoresItsPixels() {
+        HudMapSettings experimental = HudMapSettings.defaults()
+                .withMode(HudMapSettings.EXPERIMENTAL);
+        HudExperimentalCompositor.Inputs first = mapInput(experimental, false, new byte[]{1, 2});
+        HudExperimentalCompositor.Inputs changed = mapInput(experimental, false, new byte[]{1, 3});
+        HudExperimentalCompositor.Inputs calibrated = mapInput(experimental, true, new byte[]{9});
+
+        assertTrue(HudExperimentalCompositor.hasMeaningfulF8Content(first));
+        assertTrue(HudExperimentalCompositor.hasMeaningfulF7Content(first));
+        assertFalse(HudExperimentalCompositor.sameContent(first, changed));
+        assertTrue(HudExperimentalCompositor.sameContent(calibrated,
+                mapInput(experimental, true, new byte[]{8})));
+        assertFalse(HudExperimentalCompositor.hasMeaningfulF8Content(
+                mapInput(experimental.withMode(HudMapSettings.OFF), false, new byte[]{1})));
+
+        final int[] renders = {0};
+        HudExperimentalCompositor compositor = new HudExperimentalCompositor(input -> {
+            renders[0]++;
+            return new HudExperimentalCompositor.Result(
+                    HudExperimentalCompositor.hasMeaningfulF8Content(input) ? new byte[]{8} : null,
+                    HudExperimentalCompositor.hasMeaningfulF7Content(input) ? new byte[]{7} : null);
+        });
+        compositor.compose(first);
+        compositor.compose(first);
+        assertEquals(2, renders[0]);
+        compositor.compose(changed);
+        assertEquals(4, renders[0]);
+    }
+
+    @Test
     public void cacheRendersOnlyWhenMeaningfulContentChanges() {
         final int[] renderCount = new int[]{0};
         HudExperimentalCompositor compositor = new HudExperimentalCompositor(input -> {
@@ -264,5 +294,12 @@ public final class HudExperimentalCompositorTest {
                                                               boolean calibration) {
         return new HudExperimentalCompositor.Inputs("18:45", "99h 59m", "", null, null,
                 null, "", HudExperimentalCompositor.Colors.defaults(), settings, calibration);
+    }
+
+    private static HudExperimentalCompositor.Inputs mapInput(HudMapSettings settings,
+                                                              boolean calibration,
+                                                              byte[] mapPng) {
+        return new HudExperimentalCompositor.Inputs("", "", "", null, null, null, "",
+                HudExperimentalCompositor.Colors.defaults(), settings, calibration, mapPng);
     }
 }
