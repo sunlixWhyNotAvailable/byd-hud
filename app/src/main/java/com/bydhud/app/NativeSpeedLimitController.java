@@ -24,6 +24,7 @@ final class NativeSpeedLimitController {
     private int mode, limit;
     private boolean fallback;
     private long mapLiveSession;
+    private boolean mapProfileCalibration;
 
     NativeSpeedLimitController(Context context, Handler worker, BooleanSupplier outputActive,
             Consumer<String> bitmapChanged) {
@@ -78,9 +79,14 @@ final class NativeSpeedLimitController {
     }
 
     void refreshMapLive(long session, int limit) {
+        refreshMapLive(session, limit, false);
+    }
+
+    void refreshMapLive(long session, int limit, boolean profileCalibration) {
         if (session <= 0L) return;
         owner = "manual";
         mapLiveSession = session;
+        mapProfileCalibration = profileCalibration;
         mode = HudPrefs.speedLimitMode(context);
         this.limit = limit;
         String engineSession = mapLiveEngineSession(session);
@@ -102,6 +108,7 @@ final class NativeSpeedLimitController {
         if (session <= 0L || mapLiveSession != session) return;
         engine.endMapLiveSession(mapLiveEngineSession(session), reason);
         mapLiveSession = 0L;
+        mapProfileCalibration = false;
         fallback = false;
         publishBitmap();
     }
@@ -119,8 +126,10 @@ final class NativeSpeedLimitController {
     }
 
     private boolean mapLiveModeAllowed() {
+        int mapMode = HudPrefs.mapSettings(context).mode;
         return mapLiveSession == 0L
-                || HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL;
+                || mapMode == HudMapSettings.EXPERIMENTAL
+                || (mapProfileCalibration && mapMode == HudMapSettings.NATIVE);
     }
 
     private static String mapLiveEngineSession(long session) {

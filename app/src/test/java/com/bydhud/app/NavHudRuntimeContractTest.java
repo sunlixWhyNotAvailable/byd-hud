@@ -15,6 +15,35 @@ import java.nio.file.Paths;
 /** Behavioral guards for route ownership, observer lifecycle and teardown tokens. */
 public final class NavHudRuntimeContractTest {
     @Test
+    public void mapCalibrationModeUsesActualChannelAndSurfaceWithoutRouteOrFrame() throws IOException {
+        assertEquals(HudMapProfile.Source.WAZE,
+                NavHudLiveSender.wazeMapSourceMode(true, true, false, false, false));
+        assertEquals(HudMapProfile.Source.WAZE_SURFACE,
+                NavHudLiveSender.wazeMapSourceMode(true, true, true, true, true));
+        assertEquals(null, NavHudLiveSender.wazeMapSourceMode(true, true, true, false, true));
+        // A backgrounded Activity can retain a valid Surface after cluster fallback.
+        assertEquals(null, NavHudLiveSender.wazeMapSourceMode(true, true, true, true, false));
+        // A recreated valid window is not owned until the channel accepts its epoch.
+        assertEquals(null, NavHudLiveSender.wazeMapSourceMode(true, true, true,
+                NavHudLiveSender.isCurrentWazeSurfaceWindowIdentity(7L, 1L, 7L, 2L, true), true));
+        assertEquals(null, NavHudLiveSender.wazeMapSourceMode(true, false, false, false, false));
+        assertEquals(null, NavHudLiveSender.wazeMapSourceMode(false, true, true, true, true));
+        String sender = source("NavHudLiveSender.java");
+        int from = sender.indexOf("private void refreshActiveWazeMapSourceMode()");
+        int to = sender.indexOf("private void enqueueWazeListenerFrame(", from);
+        String mode = sender.substring(from, to);
+        assertFalse(mode.contains("wazeDirectNavigating"));
+        assertFalse(mode.contains("latestWazeClusterFrame"));
+        assertFalse(mode.contains("mapProfileCalibrationState.draft"));
+        assertTrue(mode.contains("WazeSurfaceActivity.isVisible()"));
+        assertTrue(mode.contains("wazeSurfaceReadyInstanceId, wazeSurfaceReadyEpoch"));
+        assertTrue(mode.contains("WazeSurfaceActivity.activeDisplayId() == wazeSurfaceReadyDisplayId"));
+        int tick = sender.indexOf("private void tickMapLive(long session)");
+        assertTrue(sender.substring(tick, sender.indexOf("private void logMapLiveSample()", tick))
+                .contains("if (profileSession) refreshActiveWazeMapSourceMode();"));
+    }
+
+    @Test
     public void GmapsProtocolRequiresExactNonEmptyChannelToken() {
         assertFalse(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "new", ""));
         assertFalse(GMapsDirectChannel.acceptsProtocolMessageForTest(3, "", ""));
@@ -294,6 +323,30 @@ public final class NavHudRuntimeContractTest {
                 true, false, false, true, false));
         assertFalse(HudRuntimeSupervisor.shouldKeepTbtRuntimeForTest(
                 true, true, true, false, false));
+    }
+
+    @Test
+    public void mapProfileCalibrationKeepsRuntimeAliveWithoutNavigationRoute() {
+        assertTrue(HudRuntimeSupervisor.hasActiveRuntimeWorkForTest(
+                false, false, false, false, true));
+        assertFalse(HudRuntimeSupervisor.hasActiveRuntimeWorkForTest(
+                false, false, false, false, false));
+    }
+
+    @Test
+    public void mapProfileCalibrationAllowsOnlyInstalledSourcesOutsideShanghaiInSupportedModes() {
+        assertTrue(NavHudLiveSender.mapProfileStartAllowedForTest(
+                true, false, false, HudMapSettings.NATIVE, true));
+        assertTrue(NavHudLiveSender.mapProfileStartAllowedForTest(
+                true, false, false, HudMapSettings.EXPERIMENTAL, true));
+        assertFalse(NavHudLiveSender.mapProfileStartAllowedForTest(
+                true, false, false, HudMapSettings.OFF, true));
+        assertFalse(NavHudLiveSender.mapProfileStartAllowedForTest(
+                true, false, true, HudMapSettings.NATIVE, true));
+        assertFalse(NavHudLiveSender.mapProfileStartAllowedForTest(
+                true, true, false, HudMapSettings.NATIVE, true));
+        assertFalse(NavHudLiveSender.mapProfileStartAllowedForTest(
+                true, false, false, HudMapSettings.NATIVE, false));
     }
 
     @Test

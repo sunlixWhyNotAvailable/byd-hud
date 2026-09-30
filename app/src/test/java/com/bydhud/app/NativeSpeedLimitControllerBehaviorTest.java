@@ -77,6 +77,34 @@ public final class NativeSpeedLimitControllerBehaviorTest {
         assertTrue(bitmapChanges.contains(WAZE));
     }
 
+    @Test public void nativeMapCalibrationKeepsTwoAttemptsAcrossRefreshesAndModeChanges() {
+        HudPrefs.setMapSettings(context, HudMapSettings.defaults().withMode(HudMapSettings.NATIVE));
+        HudPrefs.setNativeSpeedLimitDelayEnabled(context, false);
+        NativeSpeedLimitTestSupport.raw = 12;
+        NativeSpeedLimitTestSupport.failOperation = NativeSpeedLimitEngine.LIMIT;
+
+        controller.refreshMapLive(42L, 75, true);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(25_000L);
+        assertEquals(2, NativeSpeedLimitTestSupport.countEvents("native:2=75"));
+
+        HudPrefs.setMapSettings(context, HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL));
+        controller.refreshMapLive(42L, 75, true);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(25_000L);
+        assertEquals(2, NativeSpeedLimitTestSupport.countEvents("native:2=75"));
+
+        controller.endMapLiveSession(42L, "closed");
+        controller.refreshMapLive(43L, 75, true);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(1_200L);
+        assertEquals(3, NativeSpeedLimitTestSupport.countEvents("native:2=75"));
+    }
+
+    @Test public void ordinaryMapLayoutTestCannotWriteNativeLimitInNativeMapMode() {
+        HudPrefs.setMapSettings(context, HudMapSettings.defaults().withMode(HudMapSettings.NATIVE));
+        controller.refreshMapLive(42L, 75);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(25_000L);
+        assertEquals(0, NativeSpeedLimitTestSupport.countEvents("native:2=75"));
+    }
+
     @Test public void ownerLimitChangeBeforeNextWriteFencesTheOldNativeTarget() {
         NativeSpeedLimitTestSupport.raw = 12;
         NativeSpeedLimitTestSupport.deferNextOperation = NativeSpeedLimitEngine.ROAD;

@@ -55,6 +55,59 @@ public final class HudMapImageTest {
     }
 
     @Test
+    public void profileShiftsAndScalesTheSourceInsideTheCanonicalCrop() {
+        Bitmap source = Bitmap.createBitmap(300, 180, Bitmap.Config.ARGB_8888);
+        try {
+            Canvas canvas = new Canvas(source);
+            canvas.drawColor(Color.GREEN);
+            Paint paint = new Paint();
+            paint.setColor(Color.RED);
+            canvas.drawRect(0, 0, 100, 60, paint);
+            paint.setColor(Color.BLUE);
+            canvas.drawRect(200, 120, 300, 180, paint);
+
+            Bitmap xLeft = decode(HudMapImage.profileCropPng(source,
+                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withX(-10)));
+            try {
+                assertEquals(Color.TRANSPARENT, xLeft.getPixel(0, 90));
+                assertEquals(Color.RED, xLeft.getPixel(30, 20));
+            } finally {
+                xLeft.recycle();
+            }
+
+            Bitmap xRight = decode(HudMapImage.profileCropPng(source,
+                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withX(10)));
+            try {
+                assertEquals(Color.RED, xRight.getPixel(0, 20));
+                assertEquals(Color.TRANSPARENT, xRight.getPixel(270, 90));
+            } finally {
+                xRight.recycle();
+            }
+
+            Bitmap yUp = decode(HudMapImage.profileCropPng(source,
+                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withY(-10)));
+            try {
+                assertEquals(Color.RED, yUp.getPixel(50, 0));
+                assertEquals(Color.TRANSPARENT, yUp.getPixel(50, 162));
+            } finally {
+                yUp.recycle();
+            }
+
+            Bitmap zoomedOut = decode(HudMapImage.profileCropPng(source,
+                    HudMapProfile.defaults(HudMapProfile.Source.WAZE).withScale(50)));
+            try {
+                assertEquals(Color.TRANSPARENT, zoomedOut.getPixel(0, 0));
+                assertEquals(Color.RED, zoomedOut.getPixel(77, 47));
+                assertEquals(Color.GREEN, zoomedOut.getPixel(150, 90));
+            } finally {
+                zoomedOut.recycle();
+            }
+        } finally {
+            source.recycle();
+        }
+    }
+
+    @Test
     public void nativePayloadIsLengthDelimitedBase64AndEmptyPayloadClears() {
         byte[] png = new byte[]{0, 1, 2};
         assertArrayEquals(new byte[]{0x0a, 0x04, 'A', 'A', 'E', 'C'},
@@ -67,5 +120,11 @@ public final class HudMapImageTest {
         int encodedLength = (largePayload[1] & 0x7f) | ((largePayload[2] & 0x7f) << 7);
         assertEquals(Base64.getEncoder().encodeToString(new byte[256]),
                 new String(largePayload, 3, encodedLength, StandardCharsets.US_ASCII));
+    }
+
+    private static Bitmap decode(byte[] png) {
+        Bitmap bitmap = BitmapFactory.decodeByteArray(png, 0, png.length);
+        assertNotNull(bitmap);
+        return bitmap;
     }
 }

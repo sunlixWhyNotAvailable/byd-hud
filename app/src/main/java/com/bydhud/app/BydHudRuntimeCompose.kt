@@ -3,6 +3,7 @@ package com.bydhud.app
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
 import android.os.SystemClock
+import android.graphics.BitmapFactory
 import android.view.MotionEvent
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -43,6 +44,7 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
@@ -101,6 +103,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.painterResource
@@ -795,6 +798,20 @@ private fun rememberSessionViewport(
     return viewport
 }
 
+private data class MapProfileEditorDraft(
+    val originalSource: HudMapProfile.Source?,
+    val original: HudMapProfile?,
+    val draft: HudMapProfile
+) {
+    val canSave: Boolean get() = originalSource == null || original != draft
+}
+
+private data class DecodedMapProfileFrame(
+    val session: Long,
+    val revision: Long,
+    val image: ImageBitmap
+)
+
 @Composable
 //keeps this HUD step isolated so cluster payload behavior stays predictable.
 private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Session) {
@@ -874,6 +891,16 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     var navigatorAssetErrorId by rememberSaveable { mutableStateOf("") }
     var navigatorAssetActionPending by remember { mutableStateOf(false) }
     var appInForeground by remember { mutableStateOf(false) }
+    var mapProfileEditor by remember(uiSession) { mutableStateOf<MapProfileEditorDraft?>(null) }
+    var mapProfileDeleteTarget by remember { mutableStateOf<HudMapProfile.Source?>(null) }
+    var mapProfileSaving by remember { mutableStateOf(false) }
+    var mapProfileDeleting by remember { mutableStateOf(false) }
+    var mapProfileError by remember { mutableStateOf("") }
+    var mapProfileShowRequested by remember { mutableStateOf(false) }
+    var activeMapProfileSession by remember { mutableLongStateOf(0L) }
+    var decodedMapProfileFrame by remember(uiSession) {
+        mutableStateOf<DecodedMapProfileFrame?>(null)
+    }
     val updateScope = rememberCoroutineScope()
     val latestSelectedTab by rememberUpdatedState(selectedTab)
     val palette = remember(snapshot.darkTheme) {
@@ -927,6 +954,139 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     fun runAction(action: () -> Unit) {
         action()
         refresh()
+    }
+
+    fun openMapProfileEditor(source: HudMapProfile.Source) {
+        val original = snapshot.mapProfiles[source]
+        mapProfileError = ""
+        mapProfileShowRequested = false
+        mapProfileEditor = MapProfileEditorDraft(
+            originalSource = original?.source,
+            original = original,
+            draft = original ?: HudMapProfile.defaults(source)
+        )
+    }
+
+    fun closeMapProfileEditor() {
+        activity.composeStopMapProfile("editor-close")
+        mapProfileShowRequested = false
+        mapProfileEditor = null
+        mapProfileError = ""
+        refresh()
+    }
+
+    fun changeMapProfileDraft(profile: HudMapProfile) {
+        val editor = mapProfileEditor ?: return
+        mapProfileEditor = editor.copy(draft = profile)
+        if (snapshot.mapProfileCalibration.running || mapProfileShowRequested) {
+            activity.composeUpdateMapProfile(profile)
+            refresh()
+        }
+    }
+
+    fun saveMapProfile() {
+        val editor = mapProfileEditor ?: return
+        if (mapProfileSaving || !editor.canSave) return
+        mapProfileSaving = true
+        mapProfileError = ""
+        updateScope.launch {
+            val saved = try {
+                withContext(Dispatchers.IO) {
+                    activity.composeSaveMapProfile(editor.originalSource, editor.draft)
+                }
+            } catch (_: Exception) {
+                false
+            }
+            mapProfileSaving = false
+            val currentEditor = mapProfileEditor
+            if (currentEditor != null
+                && currentEditor.originalSource == editor.originalSource
+                && currentEditor.draft == editor.draft) {
+                if (saved) {
+                    mapProfileEditor = currentEditor.copy(
+                        originalSource = currentEditor.draft.source,
+                        original = currentEditor.draft
+                    )
+                } else {
+                    mapProfileError = language.choose(
+                        "Не вдалося зберегти профіль мапи.",
+                        "Could not save the map profile.",
+                        "Не удалось сохранить профиль карты.")
+                }
+            }
+            refresh()
+        }
+    }
+
+    fun deleteMapProfile(source: HudMapProfile.Source) {
+        if (mapProfileDeleting) return
+        mapProfileDeleting = true
+        updateScope.launch {
+            val deleted = try {
+                withContext(Dispatchers.IO) { activity.composeDeleteMapProfile(source) }
+            } catch (_: Exception) {
+                false
+            }
+            mapProfileDeleting = false
+            mapProfileDeleteTarget = null
+            if (!deleted) {
+                mapProfileError = language.choose(
+                    "Не вдалося видалити профіль мапи.",
+                    "Could not delete the map profile.",
+                    "Не удалось удалить профиль карты.")
+            } else {
+                mapProfileError = ""
+            }
+            refresh()
+        }
+    }
+
+    LaunchedEffect(
+        snapshot.mapProfileCalibration.running,
+        snapshot.mapProfileCalibration.session,
+        snapshot.mapProfileCalibration.reason,
+        activeMapProfileSession
+    ) {
+        val calibration = snapshot.mapProfileCalibration
+        if (calibration.running) {
+            activeMapProfileSession = calibration.session
+            mapProfileShowRequested = true
+        } else if (activeMapProfileSession != 0L) {
+            activeMapProfileSession = 0L
+            mapProfileShowRequested = false
+        } else if (mapProfileShowRequested && calibration.reason != "stopped") {
+            mapProfileShowRequested = false
+        }
+    }
+
+    LaunchedEffect(
+        snapshot.mapProfileCalibration.running,
+        snapshot.mapProfileCalibration.session,
+        snapshot.mapProfileCalibration.frameReady,
+        snapshot.mapProfileCalibration.frameRevision
+    ) {
+        val calibration = snapshot.mapProfileCalibration
+        if (!calibration.running) {
+            decodedMapProfileFrame = null
+            return@LaunchedEffect
+        }
+        if (!calibration.frameReady || calibration.frameRevision < 0L) return@LaunchedEffect
+        val session = calibration.session
+        val revision = calibration.frameRevision
+        val png = calibration.png()
+        if (png.isEmpty()) return@LaunchedEffect
+        val decoded = withContext(Dispatchers.Default) {
+            val bitmap = BitmapFactory.decodeByteArray(png, 0, png.size) ?: return@withContext null
+            if (bitmap.width != 300 || bitmap.height != 180) {
+                bitmap.recycle()
+                null
+            } else {
+                bitmap.asImageBitmap()
+            }
+        }
+        if (decoded != null) {
+            decodedMapProfileFrame = DecodedMapProfileFrame(session, revision, decoded)
+        }
     }
 
     fun startNavigatorAssetDownload(assetId: String) {
@@ -1153,11 +1313,31 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         requestTabStateRefresh(selectedTab, reason)
     }
 
-    LaunchedEffect(selectedTab, selectedOptionsSectionKey, snapshot.mapSettings.mode) {
+    LaunchedEffect(selectedTab, selectedOptionsSectionKey, snapshot.mapSettings.mode,
+        snapshot.mapProfileCalibration.running) {
         val mapEditorVisible = selectedTab == RuntimeTab.Options
                 && selectedOptionsSectionKey == "map-display"
                 && snapshot.mapSettings.mode == HudMapSettings.EXPERIMENTAL
-        if (!mapEditorVisible) NavHudLiveSender.stopMapLiveIfRunning("map-editor-exit")
+        if (!mapEditorVisible && !snapshot.mapProfileCalibration.running) {
+            NavHudLiveSender.stopMapLiveIfRunning("map-editor-exit")
+        }
+    }
+
+    LaunchedEffect(selectedTab, selectedOptionsSectionKey, snapshot.mapSettings.mode) {
+        val profileEditorVisible = selectedTab == RuntimeTab.Options
+                && selectedOptionsSectionKey == "map-display"
+                && snapshot.mapSettings.mode != HudMapSettings.OFF
+        if (!profileEditorVisible) {
+            if (snapshot.mapProfileCalibration.running) {
+                activity.composeStopMapProfile("map-profile-exit")
+            }
+            mapProfileShowRequested = false
+            mapProfileDeleteTarget = null
+            if (mapProfileEditor != null) {
+                mapProfileEditor = null
+                mapProfileError = ""
+            }
+        }
     }
 
     LaunchedEffect(snapshot.shareLaunchId, snapshot.shareLaunchDays) {
@@ -1372,7 +1552,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                         },
                         onWidgetPermissionRequest = {
                             runAction { activity.composeRequestDashboardWidgetPermission() }
-                        }
+                        },
+                        onOpenMapProfile = ::openMapProfileEditor,
+                        onDeleteMapProfile = { source -> mapProfileDeleteTarget = source }
                     )
                     RuntimeTab.Apps -> AppsTab(
                         copy = copy,
@@ -1835,6 +2017,53 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 total = storageDeleteTotal.coerceAtLeast(1)
             )
         }
+
+        mapProfileEditor?.let { editor ->
+            val sourceOptions = (snapshot.installedMapProfileSources +
+                listOfNotNull(editor.originalSource, editor.draft.source))
+                .distinct()
+                .sortedBy { it.ordinal }
+            MapProfileEditorDialog(
+                editor = editor,
+                sourceOptions = sourceOptions,
+                occupiedSources = snapshot.mapProfiles.keys -
+                    listOfNotNull(editor.originalSource).toSet(),
+                calibration = snapshot.mapProfileCalibration,
+                decodedFrame = decodedMapProfileFrame,
+                installedSources = snapshot.installedMapProfileSources,
+                mapMode = snapshot.mapSettings.mode,
+                shanghaiBusy = snapshot.shanghai.isBusy(),
+                showRequested = mapProfileShowRequested,
+                saving = mapProfileSaving,
+                error = mapProfileError,
+                language = language,
+                palette = palette,
+                onDraftChange = ::changeMapProfileDraft,
+                onShow = {
+                    if (!mapProfileShowRequested && !snapshot.mapProfileCalibration.running) {
+                        mapProfileShowRequested = true
+                        activity.composeStartMapProfile(editor.draft)
+                        refresh()
+                    }
+                },
+                onHide = {
+                    mapProfileShowRequested = false
+                    activity.composeStopMapProfile("editor-hide")
+                    refresh()
+                },
+                onSave = ::saveMapProfile,
+                onClose = ::closeMapProfileEditor
+            )
+        }
+        mapProfileDeleteTarget?.let { source ->
+            TransferProfileDeleteConfirmDialog(
+                summary = mapProfileSourceTitle(source, language),
+                language = language,
+                palette = palette,
+                onNo = { mapProfileDeleteTarget = null },
+                onYes = { deleteMapProfile(source) }
+            )
+        }
     }
 }
 
@@ -1923,7 +2152,9 @@ private fun OptionsTab(
     dashboardWidget: DashboardWidgetState,
     widgetOverlayPermission: Boolean,
     onDashboardWidgetChange: (DashboardWidgetState) -> Unit,
-    onWidgetPermissionRequest: () -> Unit
+    onWidgetPermissionRequest: () -> Unit,
+    onOpenMapProfile: (HudMapProfile.Source) -> Unit,
+    onDeleteMapProfile: (HudMapProfile.Source) -> Unit
 ) {
     val language = copy.language
     var widgetColorTarget by remember { mutableStateOf<Boolean?>(null) }
@@ -2563,7 +2794,14 @@ private fun OptionsTab(
             val mapTopic = HudHelpCatalog.topic(HudHelpTopicId.MapOutputMode)
             val mapModes = mapTopic.frames.map { it.label(language) }
             val mapEditorEnabled = mapSettings.mode == HudMapSettings.EXPERIMENTAL
-            val mapLiveRunning = snapshot.mapLive?.running == true
+            val mapProfilesEnabled = mapSettings.mode != HudMapSettings.OFF
+            val nextMapProfileSource = snapshot.installedMapProfileSources
+                .asSequence()
+                .sortedBy { it.ordinal }
+                .firstOrNull { it !in snapshot.mapProfiles }
+            val mapProfileRunning = snapshot.mapProfileCalibration.running
+            val mapLiveSessionRunning = snapshot.mapLive?.running == true
+            val mapLiveRunning = mapLiveSessionRunning && !mapProfileRunning
             val shanghaiBusy = snapshot.shanghai.isBusy()
             row("map-output-mode") {
                 SettingRow(
@@ -2579,6 +2817,53 @@ private fun OptionsTab(
                         palette = palette,
                         width = 190.dp,
                         onSelected = { mode -> runAction { activity.composeSetMapMode(mode) } }
+                    )
+                }
+            }
+            row("map-source-profiles") {
+                val title = language.choose("Профілі мапи", "Map profiles", "Профили карты")
+                SettingRow(
+                    title,
+                    language.choose(
+                        "Окреме кадрування картинки для кожного навігатора та режиму",
+                        "Image framing for each navigator and mode",
+                        "Отдельное кадрирование картинки для каждого навигатора и режима"),
+                    palette,
+                    enabled = mapProfilesEnabled
+                ) {
+                    MapProfileAddButton(
+                        label = language.choose("Додати профіль", "Add profile", "Добавить профиль"),
+                        palette = palette,
+                        enabled = mapProfilesEnabled && nextMapProfileSource != null,
+                        onClick = { nextMapProfileSource?.let(onOpenMapProfile) }
+                    )
+                }
+            }
+            if (snapshot.mapProfiles.isEmpty()) {
+                row("map-profiles-empty") {
+                    Text(
+                        language.choose(
+                            "Збережених профілів ще немає",
+                            "No saved profiles yet",
+                            "Сохранённых профилей пока нет"),
+                        color = if (mapProfilesEnabled) palette.muted else palette.muted.copy(alpha = 0.62f),
+                        fontSize = 13.sp,
+                        modifier = Modifier.padding(14.dp)
+                    )
+                }
+            }
+            snapshot.mapProfiles.values.sortedBy { it.source.ordinal }.forEach { profile ->
+                row("map-profile-${profile.source.name.lowercase(Locale.ROOT)}") {
+                    val installed = profile.source in snapshot.installedMapProfileSources
+                    val status = if (installed) "" else language.choose(
+                        " · Не встановлено", " · Not installed", " · Не установлено")
+                    TransferProfileRow(
+                        summary = "${mapProfileSourceTitle(profile.source, language)} · X ${profile.x}% · Y ${profile.y}% · ${profile.scale}%$status",
+                        language = language,
+                        palette = palette,
+                        enabled = mapProfilesEnabled,
+                        onEdit = { onOpenMapProfile(profile.source) },
+                        onDelete = { onDeleteMapProfile(profile.source) }
                     )
                 }
             }
@@ -2630,7 +2915,8 @@ private fun OptionsTab(
                             language.choose("Почати тест", "Start test", "Начать тест"),
                             palette,
                             primary = true,
-                            enabled = mapEditorEnabled && !mapLiveRunning && !shanghaiBusy,
+                            enabled = mapEditorEnabled && !mapLiveSessionRunning
+                                && !mapProfileRunning && !shanghaiBusy,
                             width = 0.dp,
                             modifier = Modifier.weight(1f),
                             onClick = { runAction { activity.composeStartMapLive() } }
@@ -8145,6 +8431,7 @@ private fun TransferProfileRow(
     summary: String,
     language: Language,
     palette: Palette,
+    enabled: Boolean = true,
     onEdit: () -> Unit,
     onDelete: () -> Unit
 ) {
@@ -8155,7 +8442,7 @@ private fun TransferProfileRow(
     ) {
         Text(
             summary,
-            color = palette.text,
+            color = if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
             fontSize = 14.sp,
             fontFamily = FontFamily.Monospace,
             maxLines = 1,
@@ -8163,9 +8450,9 @@ private fun TransferProfileRow(
             modifier = Modifier.weight(1f)
         )
         TransferProfileIconButton(false, language.choose("Редагувати профіль", "Edit profile", "Редактировать профиль"),
-            palette, onEdit)
+            palette, enabled, onEdit)
         TransferProfileIconButton(true, language.choose("Видалити профіль", "Delete profile", "Удалить профиль"),
-            palette, onDelete)
+            palette, enabled, onDelete)
     }
 }
 
@@ -8174,10 +8461,15 @@ private fun TransferProfileIconButton(
     delete: Boolean,
     description: String,
     palette: Palette,
+    enabled: Boolean = true,
     onClick: () -> Unit
 ) {
-    val tint = if (delete) palette.red else palette.accent
-    val press = rememberPressFeedback(true, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
+    val tint = when {
+        !enabled -> palette.muted
+        delete -> palette.red
+        else -> palette.accent
+    }
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = Modifier
             .size(42.dp)
@@ -8186,6 +8478,7 @@ private fun TransferProfileIconButton(
             .background(tint.copy(alpha = if (press.pressed) 0.55f else 0.16f))
             .then(press.modifier)
             .clickable(
+                enabled = enabled,
                 interactionSource = press.interactionSource,
                 indication = null,
                 onClick = onClick
@@ -8200,6 +8493,340 @@ private fun TransferProfileIconButton(
             tint = tint,
             modifier = Modifier.fillMaxSize()
         )
+    }
+}
+
+private fun mapProfileSourceTitle(source: HudMapProfile.Source, language: Language): String = when (source) {
+    HudMapProfile.Source.GOOGLE_MAPS -> "Google Maps"
+    HudMapProfile.Source.WAZE -> language.choose("Waze без Surface", "Waze without Surface", "Waze без Surface")
+    HudMapProfile.Source.WAZE_SURFACE -> language.choose("Waze із Surface", "Waze with Surface", "Waze с Surface")
+}
+
+@Composable
+private fun MapProfileAddButton(
+    label: String,
+    palette: Palette,
+    enabled: Boolean,
+    onClick: () -> Unit
+) {
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
+    Box(
+        modifier = Modifier
+            .width(190.dp)
+            .height(44.dp)
+            .clip(RoundedCornerShape(7.dp))
+            .border(1.dp, palette.accent, RoundedCornerShape(7.dp))
+            .background(pressBackground(
+                if (enabled) palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
+                else palette.disabled,
+                palette,
+                press.pressed
+            ))
+            .then(press.modifier)
+            .clickable(
+                enabled = enabled,
+                interactionSource = press.interactionSource,
+                indication = null,
+                onClick = onClick
+            )
+            .semantics { contentDescription = label }
+            .padding(horizontal = 12.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(7.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                painter = painterResource(R.drawable.ic_add),
+                contentDescription = null,
+                tint = if (enabled) palette.accent else palette.muted.copy(alpha = 0.62f),
+                modifier = Modifier.size(18.dp)
+            )
+            Text(
+                label,
+                color = if (enabled && palette.dark) Color.White
+                    else if (enabled) palette.text else palette.muted.copy(alpha = 0.62f),
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 14.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+private fun MapProfileEditorDialog(
+    editor: MapProfileEditorDraft,
+    sourceOptions: List<HudMapProfile.Source>,
+    occupiedSources: Set<HudMapProfile.Source>,
+    calibration: HudMapProfileCalibrationState,
+    decodedFrame: DecodedMapProfileFrame?,
+    installedSources: Set<HudMapProfile.Source>,
+    mapMode: Int,
+    shanghaiBusy: Boolean,
+    showRequested: Boolean,
+    saving: Boolean,
+    error: String,
+    language: Language,
+    palette: Palette,
+    onDraftChange: (HudMapProfile) -> Unit,
+    onShow: () -> Unit,
+    onHide: () -> Unit,
+    onSave: () -> Unit,
+    onClose: () -> Unit
+) {
+    val configuration = LocalConfiguration.current
+    val density = LocalDensity.current
+    val frameWidth = with(density) { 300.toDp() }
+    val frameHeight = with(density) { 180.toDp() }
+    val compact = configuration.screenHeightDp < 720 || configuration.fontScale > 1.2f
+    val maxDialogHeight = (configuration.screenHeightDp - 28).coerceAtLeast(260).dp
+    val draft = editor.draft
+    val sourceIndex = sourceOptions.indexOf(draft.source).coerceAtLeast(0)
+    val disabledSourceOptions = sourceOptions.mapIndexedNotNull { index, source ->
+        index.takeIf { source in occupiedSources }
+    }.toSet()
+    val profileRunning = calibration.running
+    val frameMatches = profileRunning && calibration.frameReady
+        && calibration.draft?.source == draft.source
+        && decodedFrame != null
+        && decodedFrame.session == calibration.session
+        && decodedFrame.revision == calibration.frameRevision
+    val availableToShow = mapMode != HudMapSettings.OFF
+        && !shanghaiBusy && draft.source in installedSources
+        && draft.source !in occupiedSources
+    val profileReason = when (calibration.reason) {
+        "missing-profile" -> language.choose(
+            "Виберіть профіль мапи.",
+            "Select a map profile.",
+            "Выберите профиль карты.")
+        "user-shutdown" -> language.choose(
+            "BYD HUD вимкнено.",
+            "BYD HUD is shut down.",
+            "BYD HUD выключен.")
+        "source-unavailable" -> language.choose(
+            "Вибраний навігатор недоступний.",
+            "The selected navigator is unavailable.",
+            "Выбранный навигатор недоступен.")
+        "map-mode-off" -> language.choose(
+            "Увімкніть Native або Experimental для показу профілю.",
+            "Enable Native or Experimental mode to show this profile.",
+            "Включите Native или Experimental для показа профиля.")
+        "shanghai-active" -> language.choose(
+            "Спочатку завершіть тест у Шанхаї.",
+            "Finish the Shanghai test first.",
+            "Сначала завершите тест в Шанхае.")
+        "runtime-disabled" -> language.choose(
+            "Службу BYD HUD вимкнено.",
+            "The BYD HUD service is disabled.",
+            "Служба BYD HUD отключена.")
+        else -> ""
+    }
+    val languageTitle = if (editor.originalSource == null) {
+        language.choose("Створити профіль мапи", "Create map profile", "Создать профиль карты")
+    } else {
+        language.choose("Профіль мапи", "Map profile", "Профиль карты")
+    }
+    Dialog(
+        onDismissRequest = onClose,
+        properties = DialogProperties(usePlatformDefaultWidth = false)
+    ) {
+        Box(
+            modifier = Modifier.fillMaxSize().padding(14.dp),
+            contentAlignment = Alignment.Center
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.96f)
+                    .widthIn(max = 960.dp)
+                    .fillMaxHeight(0.94f)
+                    .heightIn(max = maxDialogHeight)
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(palette.surface)
+                    .border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+                    .padding(if (compact) 12.dp else 18.dp),
+                verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)
+            ) {
+                Text(
+                    languageTitle,
+                    color = palette.text,
+                    fontSize = if (compact) 19.sp else 22.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .weight(1f)
+                        .verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)
+                ) {
+                    SettingRow(
+                        language.choose("Навігатор", "Navigator", "Навигатор"),
+                        language.choose(
+                            "Окремий профіль для кожного джерела картинки",
+                            "A separate profile for each image source",
+                            "Отдельный профиль для каждого источника картинки"),
+                        palette,
+                        enabled = !saving && sourceOptions.isNotEmpty()
+                    ) {
+                        HudDropdown(
+                            selectedIndex = sourceIndex,
+                            options = sourceOptions.map { mapProfileSourceTitle(it, language) },
+                            palette = palette,
+                            width = 260.dp,
+                            enabled = !saving && sourceOptions.isNotEmpty(),
+                            disabledOptions = disabledSourceOptions,
+                            onSelected = { index ->
+                                sourceOptions.getOrNull(index)?.let { source ->
+                                    onDraftChange(draft.withSource(source))
+                                }
+                            }
+                        )
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        HudButton(
+                            language.choose("Показати мапу", "Show map", "Показать карту"),
+                            palette,
+                            primary = true,
+                            enabled = availableToShow && !profileRunning && !showRequested && !saving,
+                            width = 0.dp,
+                            modifier = Modifier.weight(1f),
+                            onClick = onShow
+                        )
+                        HudButton(
+                            language.choose("Прибрати мапу", "Hide map", "Убрать карту"),
+                            palette,
+                            enabled = (profileRunning || showRequested) && !saving,
+                            width = 0.dp,
+                            modifier = Modifier.weight(1f),
+                            onClick = onHide
+                        )
+                        Pill(
+                            when {
+                                !profileRunning && !showRequested -> language.choose("Зупинено", "Stopped", "Остановлено")
+                                !frameMatches -> language.choose("Очікування кадру", "Waiting for a frame", "Ожидание кадра")
+                                else -> language.choose("Показ", "Showing", "Показ")
+                            },
+                            if (frameMatches) palette.green else palette.muted,
+                            if (frameMatches) palette.greenSoft else palette.disabled
+                        )
+                    }
+                    if (shanghaiBusy || error.isNotEmpty() || profileReason.isNotEmpty()) {
+                        Text(
+                            when {
+                                error.isNotEmpty() -> error
+                                shanghaiBusy -> language.choose(
+                                    "Спочатку завершіть тест у Шанхаї.",
+                                    "Finish the Shanghai test first.",
+                                    "Сначала завершите тест в Шанхае.")
+                                else -> profileReason
+                            },
+                            color = if (error.isNotEmpty()) palette.red else palette.muted,
+                            fontSize = 13.sp
+                        )
+                    }
+                    Text(
+                        language.choose(
+                            "Кадрування змінює лише картинку в області HUD, не розташування мапи та смуг.",
+                            "Cropping changes only the image inside the HUD region, not map or lane layout.",
+                            "Кадрирование меняет только картинку в области HUD, не расположение карты и полос."),
+                        color = palette.muted,
+                        fontSize = if (compact) 12.sp else 13.sp
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 18.dp),
+                        verticalAlignment = Alignment.Bottom
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            Box(
+                                modifier = Modifier
+                                    .size(frameWidth, frameHeight)
+                                    .clip(RoundedCornerShape(4.dp))
+                                    .background(Color.Black),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                decodedFrame?.takeIf { frameMatches }?.let { frame ->
+                                    Image(
+                                        bitmap = frame.image,
+                                        contentDescription = language.choose(
+                                            "Кадр мапи для профілю",
+                                            "Map profile frame",
+                                            "Кадр карты для профиля"),
+                                        contentScale = ContentScale.FillBounds,
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                }
+                            }
+                        }
+                        Column(Modifier.weight(1f)) {
+                            WidgetNumberLine(
+                                language.choose("Картинка вліво–вправо", "Image left–right", "Картинка влево–вправо"),
+                                language.choose("Мінус — вправо, плюс — вліво", "Minus — right, plus — left", "Минус — вправо, плюс — влево"),
+                                draft.x,
+                                -100..100,
+                                "%",
+                                palette,
+                                enabled = !saving,
+                                showTicks = false
+                            ) { onDraftChange(draft.withX(it)) }
+                        }
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(if (compact) 10.dp else 18.dp)
+                    ) {
+                        Column(Modifier.weight(1f)) {
+                            WidgetNumberLine(
+                                language.choose("Масштаб картинки", "Image scale", "Масштаб картинки"),
+                                language.choose("Змінює картинку всередині області HUD", "Changes the image inside the HUD area", "Меняет картинку внутри области HUD"),
+                                draft.scale,
+                                50..300,
+                                "%",
+                                palette,
+                                enabled = !saving,
+                                showTicks = false
+                            ) { onDraftChange(draft.withScale(it)) }
+                        }
+                        Column(Modifier.weight(1f)) {
+                            WidgetNumberLine(
+                                language.choose("Картинка вгору–вниз", "Image up–down", "Картинка вверх–вниз"),
+                                language.choose("Мінус — вгору, плюс — вниз", "Minus — up, plus — down", "Минус — вверх, плюс — вниз"),
+                                draft.y,
+                                -100..100,
+                                "%",
+                                palette,
+                                enabled = !saving,
+                                showTicks = false
+                            ) { onDraftChange(draft.withY(it)) }
+                        }
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp, Alignment.End)
+                ) {
+                    HudButton(
+                        language.choose("Зберегти", "Save", "Сохранить"),
+                        palette,
+                        primary = true,
+                        enabled = editor.canSave && !saving,
+                        onClick = onSave
+                    )
+                    HudButton(
+                        language.choose("Закрити", "Close", "Закрыть"),
+                        palette,
+                        onClick = onClose
+                    )
+                }
+            }
+        }
     }
 }
 

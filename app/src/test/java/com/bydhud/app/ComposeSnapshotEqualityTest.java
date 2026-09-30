@@ -10,7 +10,11 @@ import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Type;
 import java.util.Collections;
+import java.util.EnumMap;
+import java.util.EnumSet;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 
 public final class ComposeSnapshotEqualityTest {
     @Test
@@ -40,6 +44,18 @@ public final class ComposeSnapshotEqualityTest {
     @Test
     public void nestedValueChangeMakesSnapshotsUnequal() throws Exception {
         assertFalse(snapshot("1.0").equals(snapshot("2.0")));
+    }
+
+    @Test
+    public void savedMapProfileChangeMakesSnapshotsUnequal() throws Exception {
+        assertFalse(snapshot("1.0", true, 4, 4, 41L)
+                .equals(snapshot("1.0", true, 5, 4, 41L)));
+    }
+
+    @Test
+    public void mapProfileCalibrationSessionChangeMakesSnapshotsUnequal() throws Exception {
+        assertFalse(snapshot("1.0", true, 4, 4, 41L)
+                .equals(snapshot("1.0", true, 4, 4, 42L)));
     }
 
     @Test
@@ -112,6 +128,15 @@ public final class ComposeSnapshotEqualityTest {
 
     private static MainActivity.ComposeSnapshot snapshot(
             String nestedVersion, boolean nativeDelayEnabled) throws Exception {
+        return snapshot(nestedVersion, nativeDelayEnabled, 4, 4, 41L);
+    }
+
+    private static MainActivity.ComposeSnapshot snapshot(
+            String nestedVersion,
+            boolean nativeDelayEnabled,
+            int savedMapProfileX,
+            int calibrationMapProfileX,
+            long calibrationSession) throws Exception {
         Constructor<?> constructor = MainActivity.ComposeSnapshot.class.getDeclaredConstructors()[0];
         constructor.setAccessible(true);
         Class<?>[] parameterTypes = constructor.getParameterTypes();
@@ -134,8 +159,24 @@ public final class ComposeSnapshotEqualityTest {
                 arguments[index] = HudMapSettings.defaults();
             } else if (type == HudMapLiveState.class) {
                 arguments[index] = new HudMapLiveState(false, 0L);
+            } else if (type == HudMapProfileCalibrationState.class) {
+                HudMapProfile draft = new HudMapProfile(
+                        HudMapProfile.Source.WAZE, calibrationMapProfileX, -3, 125);
+                arguments[index] = new HudMapProfileCalibrationState(
+                        true, calibrationSession, draft, false, -1L,
+                        "waiting_for_source", null);
             } else if (type == DashboardWidgetState.class) {
                 arguments[index] = new DashboardWidgetState();
+            } else if (Map.class.isAssignableFrom(type)
+                    && genericName.contains("HudMapProfile")) {
+                Map<HudMapProfile.Source, HudMapProfile> profiles =
+                        new EnumMap<>(HudMapProfile.Source.class);
+                profiles.put(HudMapProfile.Source.WAZE,
+                        new HudMapProfile(HudMapProfile.Source.WAZE, savedMapProfileX, 2, 100));
+                arguments[index] = profiles;
+            } else if (Set.class.isAssignableFrom(type)
+                    && genericName.contains("HudMapProfile")) {
+                arguments[index] = EnumSet.allOf(HudMapProfile.Source.class);
             } else if (genericName.contains("ComposeStorageDay")) {
                 arguments[index] = Collections.singletonList(new MainActivity.ComposeStorageDay(
                         "20260810", "2026-08-10", 2, 42L, true, true, false));

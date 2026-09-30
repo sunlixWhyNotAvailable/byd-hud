@@ -192,15 +192,36 @@ add map capture. Native sends the image to the vehicle's separate map field,
 illustrated by Denza N9. Experimental stitches it into the calibrated bitmap
 fields. Native field availability depends on the vehicle.
 
-The first implementation crops the image centrally to 300×180 without stretching;
-it does not locate the vehicle marker. If no valid new image arrives for 3.5 s,
+Without a saved image profile, the image is cropped centrally to 300×180 without
+stretching; the vehicle marker is not located automatically. If no valid new image arrives for 3.5 s,
 only the map is removed; guidance continues and the map returns with a new frame.
-Identical fresh images remain valid. Off, navigation/HUD stop and diagnostic
-tests end live capture and release its background rendering resources. Capture
+Identical fresh images remain valid. Off, navigation/HUD stop and other diagnostic
+tests end ordinary live capture and release its background rendering resources. Capture
 events and failures use the normal app journals without requiring manual Logcat.
 Live map sends retain metadata and hashes. When detailed logs are enabled, the
 received image before cropping and the 300×180 HUD image are also saved as PNGs
 in the day's `logs/map-frames` folder. Identical images reuse the same files.
+
+Map image profiles adjust the navigator image inside this 300×180 region,
+independently of its HUD position and size. Add one profile for Google Maps,
+Waze without Surface or Waze with Surface; available choices follow installed
+navigators. Saved profiles are selected automatically for a matching source.
+Horizontal/vertical offsets range from −100% to 100%, scale from 50% to 300%.
+For image framing, horizontal minus moves the image right and plus left;
+vertical minus moves up and plus down. Without a matching profile, the central
+crop is retained. A fixed profile does not normalize different renderer zoom
+levels between foreground and background.
+
+Show map starts calibration with your configured guidance fields and waits for
+a real image from the selected navigator. The editor displays the same 300×180
+image used on the HUD. You can open the navigator while BYD HUD is in the
+background; profile calibration continues. Missing or expired images leave the
+editor black and remove only the HUD map. Changes reframe the latest valid
+image immediately without extending its age. Save keeps the editor open;
+Close discards unsaved changes. Hide, Close, leaving the map section, map Off
+or runtime shutdown end calibration and restore current normal navigation.
+Saved profiles remain available if a navigator is uninstalled, but its
+calibration cannot start until it is installed again.
 
 Experimental enables Custom, Larger on the right and Smaller in the center,
 plus six controls for map/lane horizontal position, vertical position and scale.

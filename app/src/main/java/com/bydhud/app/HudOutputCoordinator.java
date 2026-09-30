@@ -96,6 +96,7 @@ final class HudOutputCoordinator {
                 .put("directOwnerSessionGeneration", directOwnerSessionGeneration)
                 .put("navigatorMapOwner", mapOwnerPackage)
                 .put("navigatorMapMode", navigatorMapMode)
+                .put("mapProfileCalibrationSession", mapProfileCalibrationSession)
                 .put("navigatorMapRevision", mapRevision)
                 .put("navigatorMapPngBytes", navigatorMapPng.length)
                 .put("nativeMapClearPending", nativeMapClearPending)
@@ -127,6 +128,10 @@ final class HudOutputCoordinator {
     private final HudCheckDiagnostics hudCheckDiagnostics = new HudCheckDiagnostics();
     private String mapOwnerPackage = "";
     private long mapOwnerGeneration = Long.MIN_VALUE;
+    private HudMapProfile.Source mapOwnerExpectedSource;
+    private long mapProfileCalibrationSession;
+    private HudMapProfile mapProfileCalibrationDraft;
+    private Runnable mapProfileCalibrationChanged;
     private int navigatorMapMode = HudMapSettings.OFF;
     private long mapRevision = -1L;
     private byte[] navigatorMapPng = new byte[0];
@@ -374,6 +379,85 @@ final class HudOutputCoordinator {
             }
         }
         worker.post(() -> clearManualMapLive(session, reason));
+    }
+
+    void startMapProfileCalibration(long session, HudMapProfile profile,
+            Runnable frameChanged) {
+        worker.post(() -> configureMapProfileCalibration(session, profile, frameChanged));
+    }
+
+    void updateMapProfileCalibration(long session, HudMapProfile profile,
+            Runnable frameChanged) {
+        worker.post(() -> {
+            if (mapProfileCalibrationSession == session) {
+                configureMapProfileCalibration(session, profile, frameChanged);
+            }
+        });
+    }
+
+    private void configureMapProfileCalibration(long session, HudMapProfile profile,
+            Runnable frameChanged) {
+        if (session <= 0L || profile == null) return;
+        boolean sameCapture = mapProfileCalibrationSession == session
+                && mapProfileCalibrationDraft != null
+                && mapProfileCalibrationDraft.source == profile.source
+                && mapOwnerPackage.equals(profile.source.packageName())
+                && mapOwnerGeneration == session
+                && mapOwnerExpectedSource == profile.source;
+        if (!sameCapture && !mapOwnerPackage.isEmpty()) {
+            stopNavigatorMap("map-profile-source-change");
+        }
+        mapProfileCalibrationSession = session;
+        mapProfileCalibrationDraft = profile;
+        mapProfileCalibrationChanged = frameChanged;
+        if (!sameCapture) {
+            mapOwnerPackage = profile.source.packageName();
+            mapOwnerGeneration = session;
+            mapOwnerExpectedSource = profile.source;
+            mapRevision = -1L;
+            navigatorMapMode = HudPrefs.mapSettings(context).mode;
+            String owner = mapOwnerPackage;
+            HudMapProfile.Source expectedSource = profile.source;
+            NavigatorMapCapture.activate(context, owner, session, expectedSource, () -> {
+                Runnable changed = mapProfileCalibrationChanged;
+                if (mapProfileCalibrationSession == session
+                        && mapProfileCalibrationDraft != null
+                        && mapProfileCalibrationDraft.source == expectedSource
+                        && changed != null) changed.run();
+                worker.post(() -> {
+                    if (mapProfileCalibrationSession == session
+                            && mapProfileCalibrationDraft != null
+                            && mapProfileCalibrationDraft.source == expectedSource) {
+                        scheduleImmediate("map-profile-frame");
+                    }
+                });
+            });
+            NavigatorMapCapture.refreshProfiles();
+            log("map_profile capture started session=" + session + " source=" + profile.source);
+        }
+        // activate() and refreshProfiles() both clear transient overrides. Apply the draft
+        // last so the next source frame and any retained-frame recrop use the visible values.
+        NavigatorMapCapture.setProfileOverride(profile);
+        if (sameCapture && frameChanged != null) {
+            frameChanged.run();
+        }
+        preparedDirectOptionsRevision = -1;
+        scheduleImmediate("map-profile-update");
+    }
+
+    void endMapProfileCalibration(long session, String reason) {
+        if (session <= 0L) return;
+        worker.post(() -> {
+            if (mapProfileCalibrationSession != session) return;
+            mapProfileCalibrationSession = 0L;
+            mapProfileCalibrationDraft = null;
+            mapProfileCalibrationChanged = null;
+            NavigatorMapCapture.setProfileOverride(null);
+            NavigatorMapCapture.refreshProfiles();
+            if (mapOwnerGeneration == session) stopNavigatorMap("map-profile-end:" + reason);
+            preparedDirectOptionsRevision = -1;
+            log("map_profile capture ended session=" + session + " reason=" + safe(reason));
+        });
     }
 
     private void drainManualMapLive() {
@@ -1051,6 +1135,9 @@ final class HudOutputCoordinator {
         if (ShanghaiOutputGate.isSuspended()) {
             nativeSpeed.stop("shanghai");
             stopNavigatorMap("shanghai");
+            if (mapProfileCalibrationSession != 0L) {
+                NavHudLiveSender.stopMapProfile("shanghai-active");
+            }
             scheduleSend(1000L);
             return;
         }
@@ -1060,8 +1147,12 @@ final class HudOutputCoordinator {
             return;
         }
         if (source == Source.MANUAL && manualMapLiveSession != 0L
-                && !mapLiveOutputAllowed()) {
-            NavHudLiveSender.stopMapLiveIfRunning("output-gate");
+                && !mapLiveOutputAllowed(manualMapLiveSession)) {
+            if (manualMapLiveSession == mapProfileCalibrationSession) {
+                NavHudLiveSender.stopMapProfile("output-gate");
+            } else {
+                NavHudLiveSender.stopMapLiveIfRunning("output-gate");
+            }
             return;
         }
         if (!client.isBound()) {
@@ -1119,7 +1210,8 @@ final class HudOutputCoordinator {
             publishNativeMap(reason);
             if (source == Source.MANUAL && manualMapLiveSession != 0L) {
                 nativeSpeed.refreshMapLive(manualMapLiveSession,
-                        HudMapLiveFixture.SPEED_LIMIT_KPH);
+                        HudMapLiveFixture.SPEED_LIMIT_KPH,
+                        mapProfileCalibrationSession == manualMapLiveSession);
             } else {
                 nativeSpeed.refresh(source == Source.DIRECT ? directOwnerPackage : "manual",
                         source == Source.DIRECT ? directOwnerSessionGeneration : generation,
@@ -1173,28 +1265,61 @@ final class HudOutputCoordinator {
         int mode = preparedDirectOptions != null
                 && preparedDirectOptionsRevision == HudPrefs.outputOptionsRevision()
                 ? preparedDirectOptions.mapSettings.mode : HudPrefs.mapSettings(context).mode;
-        boolean eligible = source == Source.DIRECT && source == desiredSource()
+        boolean profileCalibration = source == Source.MANUAL
+                && manualMapLiveSession > 0L
+                && manualMapLiveSession == mapProfileCalibrationSession
+                && mapProfileCalibrationDraft != null;
+        String owner = profileCalibration ? mapProfileCalibrationDraft.source.packageName()
+                : directOwnerPackage;
+        long ownerGeneration = profileCalibration ? mapProfileCalibrationSession
+                : directOwnerSessionGeneration;
+        HudMapProfile.Source expectedSource = profileCalibration
+                ? mapProfileCalibrationDraft.source : null;
+        boolean eligible = profileCalibration
+                ? source == desiredSource() && mapLiveOutputAllowed(manualMapLiveSession)
+                : source == Source.DIRECT && source == desiredSource()
                 && directFrame != null && !HudPrefs.isUserShutdownActive(context)
                 && !ShanghaiOutputGate.isSuspended()
                 && (mode == HudMapSettings.NATIVE || mode == HudMapSettings.EXPERIMENTAL)
-                && ("com.waze".equals(directOwnerPackage)
-                    || GMapsDirectChannel.PACKAGE_NAME.equals(directOwnerPackage));
+                && ("com.waze".equals(owner)
+                    || GMapsDirectChannel.PACKAGE_NAME.equals(owner));
+        eligible &= mode == HudMapSettings.NATIVE || mode == HudMapSettings.EXPERIMENTAL;
         if (!eligible) {
             stopNavigatorMap("output-gate");
             return;
         }
-        if (!mapOwnerPackage.equals(directOwnerPackage)
-                || mapOwnerGeneration != directOwnerSessionGeneration) {
+        if (!mapOwnerPackage.equals(owner) || mapOwnerGeneration != ownerGeneration
+                || mapOwnerExpectedSource != expectedSource) {
             stopNavigatorMap("owner-change");
-            mapOwnerPackage = directOwnerPackage;
-            mapOwnerGeneration = directOwnerSessionGeneration;
-            String owner = mapOwnerPackage;
+            mapOwnerPackage = owner;
+            mapOwnerGeneration = ownerGeneration;
+            mapOwnerExpectedSource = expectedSource;
+            String activeOwner = mapOwnerPackage;
             long session = mapOwnerGeneration;
-            NavigatorMapCapture.activate(context, owner, session, () -> worker.post(() -> {
-                if (!owner.equals(mapOwnerPackage) || session != mapOwnerGeneration) return;
-                scheduleImmediate("navigator-map-frame");
-            }));
-            log("navigator_map started owner=" + owner + " session=" + session);
+            NavigatorMapCapture.activate(context, activeOwner, session, expectedSource, () ->
+                    worker.post(() -> {
+                        if (!activeOwner.equals(mapOwnerPackage)
+                                || session != mapOwnerGeneration
+                                || mapOwnerExpectedSource != expectedSource) return;
+                        if (profileCalibration
+                                && mapProfileCalibrationSession == session
+                                && mapProfileCalibrationDraft != null
+                                && mapProfileCalibrationDraft.source == expectedSource) {
+                            Runnable changed = mapProfileCalibrationChanged;
+                            if (changed != null) changed.run();
+                        }
+                        scheduleImmediate("navigator-map-frame");
+                    }));
+            if (profileCalibration
+                    && mapProfileCalibrationSession == session
+                    && mapProfileCalibrationDraft != null
+                    && mapProfileCalibrationDraft.source == expectedSource) {
+                // Output-source handoffs stop NavigatorMapCapture. Reapply the current
+                // unsaved calibration draft whenever the manual owner reacquires it.
+                NavigatorMapCapture.setProfileOverride(mapProfileCalibrationDraft);
+            }
+            log("navigator_map started owner=" + activeOwner + " session=" + session
+                    + " expectedSource=" + expectedSource);
         }
         if (navigatorMapMode != mode) {
             if (navigatorMapMode == HudMapSettings.NATIVE && nativeMapMayBeVisible) {
@@ -1207,7 +1332,9 @@ final class HudOutputCoordinator {
         NavigatorMapCapture.Snapshot snapshot = NavigatorMapCapture.snapshot();
         if (mapRevision != snapshot.revision()) {
             mapRevision = snapshot.revision();
-            navigatorMapPng = snapshot.png();
+            byte[] frame = snapshot.png();
+            navigatorMapPng = expectedSource == null || snapshot.source() == expectedSource
+                    ? frame : new byte[0];
             nativeMapPayload = navigatorMapPng.length == 0 ? new byte[0]
                     : HudMapImage.nativePayload(navigatorMapPng);
             preparedDirectOptionsRevision = -1;
@@ -1226,6 +1353,7 @@ final class HudOutputCoordinator {
             log("navigator_map stopped owner=" + mapOwnerPackage + " reason=" + safe(reason));
             mapOwnerPackage = "";
             mapOwnerGeneration = Long.MIN_VALUE;
+            mapOwnerExpectedSource = null;
             mapRevision = -1L;
             navigatorMapPng = new byte[0];
             nativeMapPayload = new byte[0];
@@ -1240,7 +1368,11 @@ final class HudOutputCoordinator {
     }
 
     private void publishNativeMap(String reason) {
-        if (activeSource != Source.DIRECT || navigatorMapMode != HudMapSettings.NATIVE
+        boolean manualCalibration = activeSource == Source.MANUAL
+                && manualMapLiveSession != 0L
+                && manualMapLiveSession == mapProfileCalibrationSession;
+        if ((activeSource != Source.DIRECT && !manualCalibration)
+                || navigatorMapMode != HudMapSettings.NATIVE
                 || nativeMapPayload.length == 0 || nativeMapClearPending) return;
         long now = SystemClock.elapsedRealtime();
         if (nativeMapAttemptAtMs >= 0L && now - nativeMapAttemptAtMs < DEFAULT_INTERVAL_MS) return;
@@ -1327,7 +1459,10 @@ final class HudOutputCoordinator {
         }
         if (manualMapLiveSession != 0L && manualMapLiveFrame != null) {
             DirectTbtPayload.Options options = NativeSpeedLimitController.outputOptions(context, "manual")
-                    .withMapCalibration(true);
+                    .withMapCalibration(mapProfileCalibrationSession != manualMapLiveSession)
+                    .withMapPng(mapProfileCalibrationSession == manualMapLiveSession
+                            && HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL
+                            ? navigatorMapPng : null);
             return DirectTbtPayload.prepare(manualMapLiveFrame, options).build(0);
         }
         HudState state = manualState.copy();
@@ -2288,9 +2423,12 @@ final class HudOutputCoordinator {
 
     private boolean clientBoundForNative() { return client != null && client.isBound(); }
 
-    private boolean mapLiveOutputAllowed() {
-        return manualMapLiveSession > closedMapLiveSession
-                && HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL
+    private boolean mapLiveOutputAllowed(long session) {
+        int mode = HudPrefs.mapSettings(context).mode;
+        boolean supportedMode = mapProfileCalibrationSession == session
+                ? mode == HudMapSettings.NATIVE || mode == HudMapSettings.EXPERIMENTAL
+                : mode == HudMapSettings.EXPERIMENTAL;
+        return session > closedMapLiveSession && supportedMode
                 && !ShanghaiOutputGate.isSuspended()
                 && !HudPrefs.isUserShutdownActive(context);
     }

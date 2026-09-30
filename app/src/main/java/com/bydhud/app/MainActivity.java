@@ -45,6 +45,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.Date;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -103,16 +104,22 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicBoolean ASSET_REFRESH_IN_PROGRESS = new AtomicBoolean(false);
     private static final AtomicBoolean ASSET_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
+    private static final AtomicBoolean MAP_PROFILE_CACHE_REFRESHING = new AtomicBoolean(false);
     private static final AtomicLong UI_STATE_REVISION = new AtomicLong();
     private static final Object PATCH_REFRESH_GATE_LOCK = new Object();
     private static final Object PACKAGE_METADATA_CACHE_LOCK = new Object();
     private static final Map<String, String> APP_LABEL_CACHE = new HashMap<>();
     private static final Map<String, Boolean> INSTALLED_PACKAGE_CACHE = new HashMap<>();
     private static final Object NAV_RUNTIME_PERMISSION_CACHE_LOCK = new Object();
+    private static final Object MAP_PROFILE_CACHE_LOCK = new Object();
     private static volatile StorageCacheState storageCacheState = StorageCacheState.empty();
     private static volatile Map<String, String> appVersionNames = Collections.emptyMap();
     private static volatile List<ComposeNavigatorPatchRow> navigatorPatchRows =
             Collections.emptyList();
+    private static volatile Map<HudMapProfile.Source, HudMapProfile> mapProfileCache =
+            Collections.emptyMap();
+    private static volatile long mapProfileCacheRevision;
+    private static volatile boolean mapProfileCacheReady;
     private static volatile List<NavigatorAssetManager.AssetSnapshot> navigatorAssetSnapshots =
             Collections.emptyList();
     private static volatile List<InstalledTransferAppCatalog.Entry> installedTransferApps =
@@ -390,7 +397,9 @@ public final class MainActivity extends ComponentActivity {
         super.onStop();
         if (!isChangingConfigurations()) {
             NavHudLiveSender.stopHudCheckIfRunning("hud-check-background");
-            NavHudLiveSender.stopMapLiveIfRunning("map-live-background");
+            if (!NavHudLiveSender.mapProfileSnapshot().running) {
+                NavHudLiveSender.stopMapLiveIfRunning("map-live-background");
+            }
         }
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
@@ -863,6 +872,8 @@ public final class MainActivity extends ComponentActivity {
         List<ComposeAppRow> supportedRows = composeRows(
                 supportedApps, hudPackage, logOnlyPackages, observedPackages, true);
         List<ComposeNavigatorPatchRow> patchRows = composeNavigatorPatchRows();
+        Set<HudMapProfile.Source> installedMapProfileSources =
+                installedMapProfileSources(patchRows);
         List<ComposeAppRow> allRows = new ArrayList<>();
         for (ActiveAppRow app : rawApps) {
             if (!NavAppFilter.isCuratedNavigationPackage(app.packageName)) {
@@ -871,6 +882,12 @@ public final class MainActivity extends ComponentActivity {
         }
         StorageCacheState storage = storageCacheState;
         ShareLaunchEvent shareLaunchEvent = SHARE_LAUNCH_EVENT.get();
+        Map<HudMapProfile.Source, HudMapProfile> mapProfiles;
+        long mapProfilesRevision;
+        synchronized (MAP_PROFILE_CACHE_LOCK) {
+            mapProfiles = mapProfileCache;
+            mapProfilesRevision = mapProfileCacheRevision;
+        }
         int dashboardScreenMode = HudPrefs.dashboardScreenMode(this);
         DashboardProjectionPolicy.Profile dashboardProfile =
                 HudPrefs.dashboardProjectionProfile(this, dashboardScreenMode);
@@ -963,7 +980,121 @@ public final class MainActivity extends ComponentActivity {
                 localizedNavigatorAssetSnapshots(uiLanguage),
                 composePatchOperations(),
                 shareLaunchEvent.id,
-                shareLaunchEvent.storageDays);
+                shareLaunchEvent.storageDays,
+                mapProfiles,
+                mapProfilesRevision,
+                installedMapProfileSources,
+                NavHudLiveSender.mapProfileSnapshot());
+    }
+
+    private static void requestMapProfileCacheRefresh(Context context) {
+        if (mapProfileCacheReady
+                || !MAP_PROFILE_CACHE_REFRESHING.compareAndSet(false, true)) return;
+        Context appContext = context.getApplicationContext();
+        new Thread(() -> {
+            try {
+                synchronized (MAP_PROFILE_CACHE_LOCK) {
+                    if (!mapProfileCacheReady) reloadMapProfileCacheLocked(appContext);
+                }
+            } finally {
+                MAP_PROFILE_CACHE_REFRESHING.set(false);
+                publishSharedUiStateChange();
+            }
+        }, "BydHudMapProfileCache").start();
+    }
+
+    private static void reloadMapProfileCacheLocked(Context context) {
+        mapProfileCache = HudMapProfiles.profiles(context);
+        mapProfileCacheRevision = HudMapProfiles.revision(context);
+        mapProfileCacheReady = true;
+    }
+
+    private static Set<HudMapProfile.Source> installedMapProfileSources(
+            List<ComposeNavigatorPatchRow> rows) {
+        Set<HudMapProfile.Source> result = EnumSet.noneOf(HudMapProfile.Source.class);
+        for (HudMapProfile.Source source : HudMapProfile.Source.values()) {
+            String packageName = source.packageName();
+            for (ComposeNavigatorPatchRow row : rows) {
+                if (!row.installed) continue;
+                // Availability follows the package the live receiver can actually target.
+                if (packageName.equals(normalizePackage(row.packageName))) {
+                    result.add(source);
+                    break;
+                }
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    public boolean composeSaveMapProfile(
+            HudMapProfile.Source originalSource, HudMapProfile profile) {
+        Context appContext = getApplicationContext();
+        if (profile == null) {
+            AppEventLogger.event(appContext, "map_profile save failed reason=missing-profile");
+            return false;
+        }
+        try {
+            synchronized (MAP_PROFILE_CACHE_LOCK) {
+                if (!HudMapProfiles.save(appContext, originalSource, profile)) {
+                    AppEventLogger.event(appContext, "map_profile save rejected source="
+                            + profile.source + " reason=store-rejected");
+                    return false;
+                }
+                reloadMapProfileCacheLocked(appContext);
+            }
+        } catch (RuntimeException error) {
+            AppEventLogger.event(appContext, "map_profile save failed source=" + profile.source
+                    + " reason=" + error.getClass().getSimpleName());
+            return false;
+        }
+        NavigatorMapCapture.refreshProfiles();
+        AppEventLogger.event(appContext, "map_profile saved source=" + profile.source
+                + " x=" + profile.x + " y=" + profile.y + " scale=" + profile.scale
+                + " revision=" + mapProfileCacheRevision);
+        publishSharedUiStateChange();
+        return true;
+    }
+
+    public boolean composeDeleteMapProfile(HudMapProfile.Source source) {
+        Context appContext = getApplicationContext();
+        if (source == null) {
+            AppEventLogger.event(appContext, "map_profile delete failed reason=missing-source");
+            return false;
+        }
+        try {
+            synchronized (MAP_PROFILE_CACHE_LOCK) {
+                if (!HudMapProfiles.delete(appContext, source)) {
+                    AppEventLogger.event(appContext, "map_profile delete rejected source="
+                            + source + " reason=store-rejected");
+                    return false;
+                }
+                reloadMapProfileCacheLocked(appContext);
+            }
+        } catch (RuntimeException error) {
+            AppEventLogger.event(appContext, "map_profile delete failed source=" + source
+                    + " reason=" + error.getClass().getSimpleName());
+            return false;
+        }
+        NavigatorMapCapture.refreshProfiles();
+        AppEventLogger.event(appContext, "map_profile deleted source=" + source
+                + " revision=" + mapProfileCacheRevision);
+        publishSharedUiStateChange();
+        return true;
+    }
+
+    public void composeStartMapProfile(HudMapProfile profile) {
+        if (!activityResumed || destroyed || exitRequested
+                || HudPrefs.mapSettings(this).mode == HudMapSettings.OFF
+                || ShanghaiTestController.snapshot().isBusy()) return;
+        NavHudLiveSender.startMapProfile(getApplicationContext(), profile);
+    }
+
+    public void composeUpdateMapProfile(HudMapProfile profile) {
+        NavHudLiveSender.updateMapProfile(profile);
+    }
+
+    public void composeStopMapProfile(String reason) {
+        NavHudLiveSender.stopMapProfile(reason == null ? "ui-stop" : reason);
     }
 
     private static List<NavigatorAssetManager.AssetSnapshot> localizedNavigatorAssetSnapshots(
@@ -1981,6 +2112,7 @@ public final class MainActivity extends ComponentActivity {
     }
 
     static void requestInitialUiStateRefresh(Context context, String reason) {
+        requestMapProfileCacheRefresh(context);
         requestStorageRefresh(context, false, reason + "-storage");
         requestRuntimeStatusRefresh(context, false, reason + "-status");
         requestRuntimeUiStateRefresh(context, false, reason + "-runtime");
@@ -2760,6 +2892,10 @@ public final class MainActivity extends ComponentActivity {
         public final ComposePatchOperation patchOperation;
         public final long shareLaunchId;
         public final List<String> shareLaunchDays;
+        public final Map<HudMapProfile.Source, HudMapProfile> mapProfiles;
+        public final long mapProfileRevision;
+        public final Set<HudMapProfile.Source> installedMapProfileSources;
+        public final HudMapProfileCalibrationState mapProfileCalibration;
 
         ComposeSnapshot(String uiLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
@@ -2810,7 +2946,11 @@ public final class MainActivity extends ComponentActivity {
                 List<ComposeNavigatorPatchRow> patchRows,
                 List<NavigatorAssetManager.AssetSnapshot> navigatorAssets,
                 List<ComposePatchOperation> patchOperations,
-                long shareLaunchId, List<String> shareLaunchDays) {
+                long shareLaunchId, List<String> shareLaunchDays,
+                Map<HudMapProfile.Source, HudMapProfile> mapProfiles,
+                long mapProfileRevision,
+                Set<HudMapProfile.Source> installedMapProfileSources,
+                HudMapProfileCalibrationState mapProfileCalibration) {
             this.uiLanguage = uiLanguage == null ? "uk" : uiLanguage;
             this.uaLanguage = "uk".equals(this.uiLanguage);
             this.darkTheme = darkTheme;
@@ -2923,6 +3063,14 @@ public final class MainActivity extends ComponentActivity {
             this.shareLaunchId = Math.max(0L, shareLaunchId);
             this.shareLaunchDays = shareLaunchDays == null ? Collections.emptyList()
                     : Collections.unmodifiableList(new ArrayList<>(shareLaunchDays));
+            this.mapProfiles = mapProfiles == null ? Collections.emptyMap()
+                    : Collections.unmodifiableMap(new HashMap<>(mapProfiles));
+            this.mapProfileRevision = Math.max(0L, mapProfileRevision);
+            this.installedMapProfileSources = installedMapProfileSources == null
+                    || installedMapProfileSources.isEmpty()
+                    ? Collections.emptySet()
+                    : Collections.unmodifiableSet(new HashSet<>(installedMapProfileSources));
+            this.mapProfileCalibration = mapProfileCalibration;
         }
 
         @Override
@@ -3019,7 +3167,11 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(navigatorAssets, other.navigatorAssets)
                     && Objects.equals(patchOperations, other.patchOperations)
                     && shareLaunchId == other.shareLaunchId
-                    && Objects.equals(shareLaunchDays, other.shareLaunchDays);
+                    && Objects.equals(shareLaunchDays, other.shareLaunchDays)
+                    && mapProfileRevision == other.mapProfileRevision
+                    && Objects.equals(mapProfiles, other.mapProfiles)
+                    && Objects.equals(installedMapProfileSources, other.installedMapProfileSources)
+                    && Objects.equals(mapProfileCalibration, other.mapProfileCalibration);
         }
 
         @Override
@@ -3056,7 +3208,8 @@ public final class MainActivity extends ComponentActivity {
                     navCaptureFolderPaths, storageCalculating, storageCacheAvailable,
                     storageScanError, storageSessionCount, navCaptureFolderBytes, storageDays,
                     supportedApps, allApps, patchRows, navigatorAssets, patchOperations,
-                    shareLaunchId, shareLaunchDays);
+                    shareLaunchId, shareLaunchDays, mapProfiles, mapProfileRevision,
+                    installedMapProfileSources, mapProfileCalibration);
         }
     }
 
@@ -4048,6 +4201,7 @@ public final class MainActivity extends ComponentActivity {
         }
         String safeReason = reason == null ? "shutdown" : reason;
         appendStatus("shutdown requested reason=" + safeReason);
+        NavHudLiveSender.stopMapProfile("shutdown");
         exitRequested = true;
         RuntimeUiSession.PROCESS.clear();
         UserRuntimeSession.PROCESS.shutdown();

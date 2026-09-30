@@ -53,6 +53,8 @@ final class HudPrefs {
     private static final String KEY_MAP_CUSTOM_LANE_X = "map_custom_lane_x";
     private static final String KEY_MAP_CUSTOM_LANE_Y = "map_custom_lane_y";
     private static final String KEY_MAP_CUSTOM_LANE_SCALE = "map_custom_lane_scale";
+    private static final String KEY_MAP_PROFILES = "map_profiles";
+    private static final String KEY_MAP_PROFILES_REVISION = "map_profiles_revision";
     private static final String KEY_WAZE_CUSTOM_SURFACE = "waze_custom_surface";
     //keeps the legacy boolean only as a migration input for the mode selector.
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
@@ -509,6 +511,21 @@ final class HudPrefs {
                 .putInt(KEY_MAP_CUSTOM_LANE_SCALE, custom.laneScale)
                 .apply();
         markOutputOptionChanged("map_settings");
+    }
+
+    static String mapProfilesJson(Context context) {
+        return prefs(context).getString(KEY_MAP_PROFILES, "");
+    }
+
+    static long mapProfilesRevision(Context context) {
+        return prefs(context).getLong(KEY_MAP_PROFILES_REVISION, 0L);
+    }
+
+    static void setMapProfiles(Context context, String profiles, long revision) {
+        prefs(context).edit()
+                .putString(KEY_MAP_PROFILES, profiles == null ? "" : profiles)
+                .putLong(KEY_MAP_PROFILES_REVISION, Math.max(0L, revision))
+                .apply();
     }
 
     static int normalizeSpeedLimitMode(int mode) {

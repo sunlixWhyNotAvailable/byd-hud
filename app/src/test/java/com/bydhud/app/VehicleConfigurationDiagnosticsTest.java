@@ -16,6 +16,22 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.junit.Assert.*;
 
 public class VehicleConfigurationDiagnosticsTest {
+    @Test public void mapProfileExportKeepsSourcesAndSignedFramingSeparateFromLayout() throws Exception {
+        JSONArray result = VehicleConfigurationDiagnostics.mapImageProfiles(java.util.Arrays.asList(
+                HudMapProfile.defaults(HudMapProfile.Source.GOOGLE_MAPS).withX(-20).withScale(150),
+                HudMapProfile.defaults(HudMapProfile.Source.WAZE_SURFACE).withY(35)));
+        assertEquals(2, result.length());
+        JSONObject maps = result.getJSONObject(0);
+        assertEquals("GOOGLE_MAPS", maps.getString("source"));
+        assertEquals(-20, maps.getInt("x"));
+        assertEquals(0, maps.getInt("y"));
+        assertEquals(150, maps.getInt("scale"));
+        assertEquals(4, maps.length());
+        assertEquals("WAZE_SURFACE", result.getJSONObject(1).getString("source"));
+        assertEquals(35, result.getJSONObject(1).getInt("y"));
+        assertEquals(0, VehicleConfigurationDiagnostics.mapImageProfiles(java.util.Collections.emptyList()).length());
+    }
+
     @Test public void mapExportSeparatesPresetGeometryFromRememberedCustom() throws Exception {
         HudMapSettings selected = HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL)
                 .withValue(0, -150).withValue(1, 20).withPreset(1);

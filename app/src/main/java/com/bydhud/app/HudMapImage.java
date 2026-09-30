@@ -20,23 +20,39 @@ public final class HudMapImage {
 
     /** Center-crops and scales a source image into the compositor's 300x180 PNG. */
     public static byte[] centerCropPng(Bitmap source) {
-        if (source == null) return new byte[0];
+        return framedPng(source, 0, 0, 100);
+    }
+
+    /** Applies source framing before producing the same 300x180 image used by HUD output. */
+    public static byte[] profileCropPng(Bitmap source, HudMapProfile profile) {
+        if (profile == null || (profile.x == 0 && profile.y == 0 && profile.scale == 100)) {
+            return centerCropPng(source);
+        }
+        return framedPng(source, profile.x, profile.y, profile.scale);
+    }
+
+    private static byte[] framedPng(Bitmap source, int x, int y, int scalePercent) {
+        if (source == null || source.isRecycled()) return new byte[0];
         Bitmap output = null;
         try {
-            if (source.isRecycled()) return new byte[0];
             int sourceWidth = source.getWidth();
             int sourceHeight = source.getHeight();
             if (sourceWidth <= 0 || sourceHeight <= 0) return new byte[0];
             output = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
             output.eraseColor(Color.TRANSPARENT);
-            float scale = Math.max(WIDTH / (float) sourceWidth,
+            float baseScale = Math.max(WIDTH / (float) sourceWidth,
                     HEIGHT / (float) sourceHeight);
-            float drawWidth = sourceWidth * scale;
-            float drawHeight = sourceHeight * scale;
-            RectF destination = new RectF((WIDTH - drawWidth) / 2f,
-                    (HEIGHT - drawHeight) / 2f,
-                    (WIDTH + drawWidth) / 2f, (HEIGHT + drawHeight) / 2f);
+            float drawWidth = sourceWidth * baseScale * scalePercent / 100f;
+            float drawHeight = sourceHeight * baseScale * scalePercent / 100f;
+            float shiftX = -x * WIDTH / 100f;
+            float shiftY = y * HEIGHT / 100f;
+            RectF destination = new RectF(
+                    (WIDTH - drawWidth) / 2f + shiftX,
+                    (HEIGHT - drawHeight) / 2f + shiftY,
+                    (WIDTH + drawWidth) / 2f + shiftX,
+                    (HEIGHT + drawHeight) / 2f + shiftY);
             Canvas canvas = new Canvas(output);
+            canvas.clipRect(0, 0, WIDTH, HEIGHT);
             canvas.drawBitmap(source, null, destination,
                     new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG));
             ByteArrayOutputStream bytes = new ByteArrayOutputStream();

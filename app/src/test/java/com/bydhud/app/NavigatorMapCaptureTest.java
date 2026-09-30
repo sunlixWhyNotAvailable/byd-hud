@@ -4,6 +4,7 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
@@ -12,6 +13,9 @@ import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Canvas;
+import android.graphics.Color;
+import android.graphics.Paint;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.SystemClock;
@@ -24,6 +28,7 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
 import org.robolectric.Shadows;
 import org.robolectric.annotation.Config;
+import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.LooperMode;
 import org.robolectric.util.ReflectionHelpers;
 
@@ -34,6 +39,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 29, application = Application.class)
+@GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class NavigatorMapCaptureTest {
     private static final int WAZE_UID = 23001;
@@ -46,6 +52,11 @@ public final class NavigatorMapCaptureTest {
     public void setUp() {
         context = RuntimeEnvironment.getApplication();
         NavigatorMapCapture.stop("test_reset");
+        NavigatorMapCapture.setActiveSourceMode(null);
+        context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit()
+                .remove("map_profiles")
+                .remove("map_profiles_revision")
+                .apply();
         installPackage(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID);
         installPackage(NavigatorMapCapture.MAPS_PACKAGE, MAPS_UID);
     }
@@ -53,6 +64,11 @@ public final class NavigatorMapCaptureTest {
     @After
     public void tearDown() {
         NavigatorMapCapture.stop("test_cleanup");
+        NavigatorMapCapture.setActiveSourceMode(null);
+        context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit()
+                .remove("map_profiles")
+                .remove("map_profiles_revision")
+                .apply();
         Shadows.shadowOf(context.getPackageManager()).removePackage(NavigatorMapCapture.WAZE_PACKAGE);
         Shadows.shadowOf(context.getPackageManager()).removePackage(NavigatorMapCapture.MAPS_PACKAGE);
     }
@@ -166,13 +182,37 @@ public final class NavigatorMapCaptureTest {
         bitmap.eraseColor(color);
         Bundle result = result(NavigatorMapCapture.MAPS_PACKAGE, poll.getString("session"),
                 poll.getLong("id"), bitmap);
+        result.putString("source", "com.google.maps.Renderer@1a2b");
         assertTrue(NavigatorMapCapture.providerCall(context, "result", result, MAPS_UID)
                 .getBoolean("accepted"));
+        drainReceiver();
+        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(5000L));
+    }
+
+    private void submitFrame(String packageName, int ownerUid, String source,
+                             String backgroundState, Bitmap bitmap) throws Exception {
+        SystemClock.sleep(1010L);
+        Bundle poll = poll(packageName, "", false);
+        assertTrue(poll.getLong("id") > 0L);
+        Bundle frame = result(packageName, poll.getString("session"), poll.getLong("id"), bitmap);
+        frame.putString("source", source);
+        frame.putString("backgroundState", backgroundState);
+        assertTrue(NavigatorMapCapture.providerCall(context, "result", frame, ownerUid)
+                .getBoolean("accepted"));
+        drainReceiver();
+    }
+
+    private static Bitmap decode(byte[] png) {
+        Bitmap image = BitmapFactory.decodeByteArray(png, 0, png.length);
+        assertNotNull(image);
+        return image;
+    }
+
+    private static void drainReceiver() throws InterruptedException {
         Handler receiver = ReflectionHelpers.getStaticField(NavigatorMapCapture.class, "worker");
         CountDownLatch received = new CountDownLatch(1);
         receiver.post(received::countDown);
         assertTrue(received.await(5L, TimeUnit.SECONDS));
-        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(5000L));
     }
 
     @Test
@@ -212,6 +252,115 @@ public final class NavigatorMapCaptureTest {
         assertEquals(180, BitmapFactory.decodeByteArray(
                 snapshot.png(), 0, snapshot.png().length).getHeight());
         assertTrue(snapshot.receivedAtElapsedMs() > 0L);
+    }
+
+    @Test
+    public void calibrationRecropsCoalescedEditsWithoutExtendingFrameExpiry() throws Exception {
+        AtomicInteger callbacks = new AtomicInteger();
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 54L,
+                HudMapProfile.Source.GOOGLE_MAPS, callbacks::incrementAndGet);
+        Bitmap input = Bitmap.createBitmap(300, 180, Bitmap.Config.ARGB_8888);
+        Canvas canvas = new Canvas(input);
+        canvas.drawColor(Color.GREEN);
+        Paint paint = new Paint();
+        paint.setColor(Color.RED);
+        canvas.drawRect(0, 0, 100, 180, paint);
+        paint.setColor(Color.BLUE);
+        canvas.drawRect(200, 0, 300, 180, paint);
+        submitFrame(NavigatorMapCapture.MAPS_PACKAGE, MAPS_UID,
+                "com.google.maps.Renderer@1a2b", "", input);
+
+        NavigatorMapCapture.Snapshot initial = NavigatorMapCapture.snapshot();
+        assertEquals(HudMapProfile.Source.GOOGLE_MAPS, initial.source());
+        Bitmap initialCrop = decode(initial.png());
+        try {
+            assertEquals(Color.RED, initialCrop.getPixel(0, 90));
+        } finally {
+            initialCrop.recycle();
+        }
+
+        NavigatorMapCapture.setProfileOverride(
+                HudMapProfile.defaults(HudMapProfile.Source.GOOGLE_MAPS).withX(-10));
+        NavigatorMapCapture.setProfileOverride(
+                HudMapProfile.defaults(HudMapProfile.Source.GOOGLE_MAPS).withX(10));
+        drainReceiver();
+        assertTrue("a changed preview recrop notifies the consumer", callbacks.get() >= 3);
+        Bitmap finalCrop = decode(NavigatorMapCapture.snapshot().png());
+        try {
+            assertEquals(Color.RED, finalCrop.getPixel(0, 90));
+            assertEquals(Color.TRANSPARENT, finalCrop.getPixel(270, 90));
+        } finally {
+            finalCrop.recycle();
+        }
+        Bitmap retained = ReflectionHelpers.getStaticField(NavigatorMapCapture.class, "rawBitmap");
+        assertNotNull(retained);
+        assertFalse(retained.isRecycled());
+
+        SystemClock.sleep(2600L);
+        NavigatorMapCapture.setProfileOverride(
+                HudMapProfile.defaults(HudMapProfile.Source.GOOGLE_MAPS).withX(-5));
+        drainReceiver();
+        int callbacksBeforeExpiry = callbacks.get();
+        SystemClock.sleep(1100L);
+        assertEquals(0, NavigatorMapCapture.snapshot().png().length);
+        assertNull(ReflectionHelpers.getStaticField(NavigatorMapCapture.class, "rawBitmap"));
+        assertTrue("expiry notifies the consumer", callbacks.get() > callbacksBeforeExpiry);
+        assertTrue("the detached raw image is recycled", retained.isRecycled());
+    }
+
+    @Test
+    public void unknownWazeModeUsesTheUnmodifiedCenterCropOutsideCalibration() throws Exception {
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.WAZE_PACKAGE, 56L, null);
+        Bitmap input = Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888);
+        input.eraseColor(Color.MAGENTA);
+        submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                "com.waze.map.opengl.w@ab12", "waze_resume", input);
+
+        NavigatorMapCapture.Snapshot snapshot = NavigatorMapCapture.snapshot();
+        assertNull(snapshot.source());
+        Bitmap output = decode(snapshot.png());
+        try {
+            assertEquals(300, output.getWidth());
+            assertEquals(180, output.getHeight());
+            assertEquals(Color.MAGENTA, output.getPixel(150, 90));
+        } finally {
+            output.recycle();
+        }
+    }
+
+    @Test
+    public void firstForegroundWazeFrameUsesKnownRuntimeModeBeforeAnyResume() throws Exception {
+        NavigatorMapCapture.setActiveSourceMode(HudMapProfile.Source.WAZE);
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.WAZE_PACKAGE, 57L,
+                HudMapProfile.Source.WAZE, null);
+        submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                "com.waze.map.opengl.w@ab12", "idle",
+                Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
+        assertEquals(HudMapProfile.Source.WAZE, NavigatorMapCapture.snapshot().source());
+        assertTrue(NavigatorMapCapture.snapshot().png().length > 0);
+    }
+
+    @Test
+    public void explicitCalibrationRejectsUnknownAndWrongWazeFrameModes() throws Exception {
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.WAZE_PACKAGE, 55L,
+                HudMapProfile.Source.WAZE_SURFACE, null);
+        submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                "com.waze.map.opengl.w@ab12", "waze_resume",
+                Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
+        assertEquals(0, NavigatorMapCapture.snapshot().png().length);
+
+        NavigatorMapCapture.setActiveSourceMode(HudMapProfile.Source.WAZE);
+        submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                "com.waze.map.opengl.w@ab12", "waze_frame_received",
+                Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
+        assertEquals(0, NavigatorMapCapture.snapshot().png().length);
+
+        NavigatorMapCapture.setActiveSourceMode(HudMapProfile.Source.WAZE_SURFACE);
+        submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                "com.waze.map.opengl.w@ab12", "waze_resume",
+                Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
+        assertEquals(HudMapProfile.Source.WAZE_SURFACE,
+                NavigatorMapCapture.snapshot().source());
     }
 
     private Bundle poll(String packageName, String captureSession, boolean busy) {

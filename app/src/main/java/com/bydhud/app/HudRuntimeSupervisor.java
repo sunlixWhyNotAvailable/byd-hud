@@ -77,10 +77,17 @@ final class HudRuntimeSupervisor {
     //keeps watchdog and permission repair active only when HUD/log/dashboard/update work exists.
     static boolean hasActiveRuntimeWork(Context context) {
         Context appContext = context.getApplicationContext();
-        return HudRuntimeUpgradeGuard.isPendingReinit(appContext)
-                || !NavCapturePrefs.getCapturePackages(appContext).isEmpty()
-                || !NavAppDisplayController.get(appContext).persistedDashboardPackage().isEmpty()
-                || hasTbtRuntimeWork(appContext);
+        return hasActiveRuntimeWorkForTest(
+                HudRuntimeUpgradeGuard.isPendingReinit(appContext),
+                !NavCapturePrefs.getCapturePackages(appContext).isEmpty(),
+                !NavAppDisplayController.get(appContext).persistedDashboardPackage().isEmpty(),
+                hasTbtRuntimeWork(appContext),
+                NavHudLiveSender.mapProfileSnapshot().running);
+    }
+
+    static boolean hasActiveRuntimeWorkForTest(boolean reinit, boolean capture,
+            boolean dashboard, boolean tbt, boolean mapProfileCalibration) {
+        return reinit || capture || dashboard || tbt || mapProfileCalibration;
     }
 
     static boolean shouldKeepTbtRuntimeForTest(

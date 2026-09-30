@@ -17,6 +17,8 @@ final class NavigatorMapSessionState {
     private String session = "";
     private String inputPixelHash = "";
     private String outputPixelHash = "";
+    private HudMapProfile.Source source;
+    private long profileRevision = -1L;
     private byte[] png;
     private long receivedAtElapsedMs;
     private long revision;
@@ -60,9 +62,22 @@ final class NavigatorMapSessionState {
             long generation,
             String expectedSession,
             String nextInputPixelHash) {
+        return hasSameInputPixels(owner, generation, expectedSession, nextInputPixelHash,
+                null, -1L);
+    }
+
+    boolean hasSameInputPixels(
+            String owner,
+            long generation,
+            String expectedSession,
+            String nextInputPixelHash,
+            HudMapProfile.Source nextSource,
+            long nextProfileRevision) {
         return isCurrent(owner, generation, expectedSession)
                 && png != null
-                && inputPixelHash.equals(nextInputPixelHash);
+                && inputPixelHash.equals(nextInputPixelHash)
+                && source == nextSource
+                && profileRevision == nextProfileRevision;
     }
 
     FrameUpdate refreshSameInput(
@@ -72,8 +87,22 @@ final class NavigatorMapSessionState {
             String nextInputPixelHash,
             long receivedAt,
             long now) {
+        return refreshSameInput(owner, generation, expectedSession, nextInputPixelHash,
+                null, -1L, receivedAt, now);
+    }
+
+    FrameUpdate refreshSameInput(
+            String owner,
+            long generation,
+            String expectedSession,
+            String nextInputPixelHash,
+            HudMapProfile.Source nextSource,
+            long nextProfileRevision,
+            long receivedAt,
+            long now) {
         if (!isFreshReceipt(receivedAt, now)
-                || !hasSameInputPixels(owner, generation, expectedSession, nextInputPixelHash)) {
+                || !hasSameInputPixels(owner, generation, expectedSession, nextInputPixelHash,
+                        nextSource, nextProfileRevision)) {
             return FrameUpdate.REJECTED;
         }
         receivedAtElapsedMs = receivedAt;
@@ -90,6 +119,21 @@ final class NavigatorMapSessionState {
             byte[] nextPng,
             long receivedAt,
             long now) {
+        return publish(owner, generation, expectedSession, nextInputPixelHash,
+                nextOutputPixelHash, nextPng, null, -1L, receivedAt, now);
+    }
+
+    FrameUpdate publish(
+            String owner,
+            long generation,
+            String expectedSession,
+            String nextInputPixelHash,
+            String nextOutputPixelHash,
+            byte[] nextPng,
+            HudMapProfile.Source nextSource,
+            long nextProfileRevision,
+            long receivedAt,
+            long now) {
         if (!isFreshReceipt(receivedAt, now)
                 || !isCurrent(owner, generation, expectedSession)
                 || nextPng == null || nextPng.length == 0) {
@@ -98,7 +142,13 @@ final class NavigatorMapSessionState {
         inputPixelHash = nextInputPixelHash;
         receivedAtElapsedMs = receivedAt;
         frameSequence++;
-        if (png != null && outputPixelHash.equals(nextOutputPixelHash)) {
+        boolean sameOutput = png != null
+                && outputPixelHash.equals(nextOutputPixelHash)
+                && source == nextSource
+                && profileRevision == nextProfileRevision;
+        source = nextSource;
+        profileRevision = nextProfileRevision;
+        if (sameOutput) {
             return FrameUpdate.SAME;
         }
         png = Arrays.copyOf(nextPng, nextPng.length);
@@ -152,6 +202,14 @@ final class NavigatorMapSessionState {
         return frameSequence;
     }
 
+    HudMapProfile.Source source() {
+        return png == null ? null : source;
+    }
+
+    long profileRevision() {
+        return png == null ? -1L : profileRevision;
+    }
+
     private static boolean isFreshReceipt(long receivedAt, long now) {
         return receivedAt >= 0L && now >= receivedAt && now - receivedAt < FRESHNESS_MS;
     }
@@ -160,6 +218,8 @@ final class NavigatorMapSessionState {
         png = null;
         inputPixelHash = "";
         outputPixelHash = "";
+        source = null;
+        profileRevision = -1L;
         receivedAtElapsedMs = 0L;
         frameSequence++;
     }

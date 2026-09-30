@@ -143,6 +143,39 @@ final class NavHudLiveSender {
         return current == null ? HudMapLiveState.STOPPED : current.mapLiveState;
     }
 
+    public static HudMapProfileCalibrationState mapProfileSnapshot() {
+        NavHudLiveSender current = instance;
+        return current == null ? HudMapProfileCalibrationState.STOPPED
+                : current.mapProfileCalibrationState;
+    }
+
+    public static void startMapProfile(Context context, HudMapProfile profile) {
+        NavHudLiveSender current = get(context);
+        if (profile == null) {
+            current.handler.post(() -> current.rejectMapProfileStart("missing-profile"));
+            return;
+        }
+        if (!activateUserRuntime(context)) {
+            current.handler.post(() -> current.rejectMapProfileStart("user-shutdown"));
+            return;
+        }
+        current.handler.post(() -> current.requestMapProfileStartOnWorker(profile));
+    }
+
+    public static void updateMapProfile(HudMapProfile profile) {
+        NavHudLiveSender current = instance;
+        if (current != null && profile != null) {
+            current.handler.post(() -> current.updateMapProfileOnWorker(profile));
+        }
+    }
+
+    public static void stopMapProfile(String reason) {
+        NavHudLiveSender current = instance;
+        if (current != null) {
+            current.handler.post(() -> current.stopMapProfileOnWorker(reason));
+        }
+    }
+
     static void startMapLive(Context context) {
         NavHudLiveSender current = get(context);
         if (HudPrefs.isUserShutdownActive(context)) {
@@ -479,6 +512,21 @@ final class NavHudLiveSender {
             HudCheckState next = action.apply(previous);
             if (next.running && !isRuntimeEnabled()) return;
             if (next.equals(previous)) return;
+            if (next.running && mapProfileCalibrationState.running) {
+                stopMapProfileOnWorker("hud-check-start:" + safeReason(reason),
+                        () -> updateHudCheck(action, reason));
+                return;
+            }
+            if (next.running && mapProfileStartPending) {
+                stopMapProfileOnWorker("hud-check-replaces-pending-map-profile");
+                Runnable startHudCheck = () -> updateHudCheck(action, reason);
+                if (mapLiveState.running) {
+                    stopMapLiveOnWorker("hud-check-replaces-map-live", true, startHudCheck);
+                } else {
+                    stopManualOnWorker("hud-check-replaces-map-profile", true, startHudCheck);
+                }
+                return;
+            }
             handler.removeCallbacks(hudCheckTick);
             hudCheckState = next;
             if (next.running) {
@@ -523,6 +571,173 @@ final class NavHudLiveSender {
                 () -> acceptMapLiveStart(request));
     }
 
+    private void requestMapProfileStartOnWorker(HudMapProfile profile) {
+        if (mapProfileCalibrationState.running) {
+            updateMapProfileOnWorker(profile);
+            return;
+        }
+        if (mapProfileStartPending) return;
+        String rejected = mapProfileStartGateFailure(profile);
+        if (!rejected.isEmpty()) {
+            rejectMapProfileStart(rejected);
+            return;
+        }
+        long request = ++mapProfileRequestGeneration;
+        mapProfileStartPending = true;
+        pendingMapProfileDraft = null;
+        stopHudCheckForMapProfileOnWorker();
+        Runnable begin = () -> acceptMapProfileStart(request, profile);
+        if (mapLiveState.running) {
+            stopMapLiveOnWorker("map-profile-replaces-layout-test", false, begin);
+        } else if (manualTbtActive) {
+            stopManualOnWorker("map-profile-replaces-manual-test", false, begin);
+        } else {
+            begin.run();
+        }
+    }
+
+    private void acceptMapProfileStart(long request, HudMapProfile profile) {
+        if (!mapProfileStartPending || request != mapProfileRequestGeneration) return;
+        mapProfileStartPending = false;
+        HudMapProfile acceptedProfile = pendingMapProfileDraft == null
+                ? profile : pendingMapProfileDraft;
+        pendingMapProfileDraft = null;
+        String rejected = mapProfileStartGateFailure(acceptedProfile);
+        if (!rejected.isEmpty()) {
+            rejectMapProfileStart(rejected);
+            return;
+        }
+        mapProfileDraft = acceptedProfile;
+        beginMapLiveFixtureSession("map-profile-start", acceptedProfile);
+    }
+
+    private void stopHudCheckForMapProfileOnWorker() {
+        if (!hudCheckState.running) return;
+        handler.removeCallbacks(hudCheckTick);
+        hudCheckState = hudCheckState.stop();
+        MainActivity.publishSharedUiStateChange();
+    }
+
+    private void rejectMapProfileStart(String reason) {
+        if (!mapProfileCalibrationState.running) {
+            mapProfileCalibrationState = HudMapProfileCalibrationState.stopped(safeReason(reason));
+            MainActivity.publishSharedUiStateChange();
+        }
+        log("map_profile start rejected reason=" + safeReason(reason));
+    }
+
+    private void updateMapProfileOnWorker(HudMapProfile profile) {
+        if (profile == null) return;
+        if (mapProfileStartPending) {
+            String pendingRejected = mapProfileStartGateFailure(profile);
+            if (!pendingRejected.isEmpty()) {
+                log("map_profile pending update rejected reason=" + pendingRejected);
+                return;
+            }
+            pendingMapProfileDraft = profile;
+            return;
+        }
+        if (!mapProfileCalibrationState.running) return;
+        boolean sourceChanged = mapProfileDraft == null
+                || mapProfileDraft.source != profile.source;
+        String rejected = mapProfileGateFailure(profile, sourceChanged);
+        if (!rejected.isEmpty()) {
+            log("map_profile update rejected session=" + mapProfileCalibrationState.session
+                    + " reason=" + rejected);
+            return;
+        }
+        if (profile.equals(mapProfileDraft)) return;
+        HudMapProfileCalibrationState previous = mapProfileCalibrationState;
+        boolean sameSource = previous.draft != null
+                && previous.draft.source == profile.source;
+        mapProfileDraft = profile;
+        long session = previous.session;
+        mapProfileCalibrationState = new HudMapProfileCalibrationState(
+                true, session, profile, sameSource && previous.frameReady,
+                sameSource ? previous.frameRevision : -1L,
+                sameSource && previous.frameReady ? "" : "waiting_for_source",
+                sameSource && previous.frameReady ? previous.png() : null);
+        hudOutput.updateMapProfileCalibration(session, profile,
+                () -> onMapProfileCaptureChanged(session, profile.source));
+        MainActivity.publishSharedUiStateChange();
+        log("map_profile updated session=" + session + " source=" + profile.source);
+    }
+
+    private void stopMapProfileOnWorker(String reason) {
+        stopMapProfileOnWorker(reason, null);
+    }
+
+    private void stopMapProfileOnWorker(String reason, Runnable completion) {
+        ++mapProfileRequestGeneration;
+        mapProfileStartPending = false;
+        pendingMapProfileDraft = null;
+        if (!mapProfileCalibrationState.running) {
+            if (completion != null) completion.run();
+            return;
+        }
+        long session = mapProfileCalibrationState.session;
+        mapProfileDraft = null;
+        mapProfileCalibrationState = HudMapProfileCalibrationState.STOPPED;
+        hudOutput.endMapProfileCalibration(session, safeReason(reason));
+        MainActivity.publishSharedUiStateChange();
+        stopMapLiveOnWorker("map-profile-stop:" + safeReason(reason), true, completion);
+    }
+
+    private void onMapProfileCaptureChanged(long session, HudMapProfile.Source source) {
+        handler.post(() -> {
+            HudMapProfileCalibrationState current = mapProfileCalibrationState;
+            if (!isCurrentMapProfileSession(current, session)
+                    || current.draft.source != source) return;
+            NavigatorMapCapture.Snapshot snapshot = NavigatorMapCapture.snapshot();
+            byte[] png = snapshot.png();
+            HudMapProfile.Source frameSource = snapshot.source();
+            boolean ready = png.length > 0 && frameSource == source;
+            String reason = ready ? "" : png.length == 0
+                    ? "waiting_for_source" : "source_mismatch";
+            HudMapProfileCalibrationState next = new HudMapProfileCalibrationState(
+                    true, session, current.draft, ready, snapshot.revision(), reason, png);
+            if (!next.equals(current)) {
+                mapProfileCalibrationState = next;
+                MainActivity.publishSharedUiStateChange();
+            }
+        });
+    }
+
+    static boolean isCurrentMapProfileSession(
+            HudMapProfileCalibrationState state, long session) {
+        return state != null && state.running && session > 0L && state.session == session;
+    }
+
+    static boolean mapProfileStartAllowedForTest(boolean runtimeEnabled,
+            boolean shutdown, boolean shanghai, int mapMode, boolean sourceInstalled) {
+        return runtimeEnabled && !shutdown && !shanghai && sourceInstalled
+                && (mapMode == HudMapSettings.NATIVE || mapMode == HudMapSettings.EXPERIMENTAL);
+    }
+
+    private void beginMapLiveFixtureSession(String reason, HudMapProfile profile) {
+        long session = ++mapLiveSessionCounter;
+        mapLiveSourceFrame = HudMapLiveFixture.frame(
+                context, System.currentTimeMillis(), SystemClock.elapsedRealtime());
+        mapLiveFrame = HudMapLiveFixture.selectFrame(context, mapLiveSourceFrame,
+                SystemClock.elapsedRealtime());
+        mapLiveManualState = HudMapLiveFixture.manualState(context, mapLiveFrame);
+        mapLiveSettings = HudPrefs.mapSettings(context);
+        mapLiveState = new HudMapLiveState(true, session);
+        if (profile != null) {
+            refreshActiveWazeMapSourceMode();
+            mapProfileCalibrationState = new HudMapProfileCalibrationState(
+                    true, session, profile, false, -1L, "waiting_for_source", null);
+            hudOutput.startMapProfileCalibration(session, profile,
+                    () -> onMapProfileCaptureChanged(session, profile.source));
+        }
+        log("map_live started session=" + session + " " + mapLiveSettings.diagnostics()
+                + (profile == null ? "" : " mapProfile=" + profile.source));
+        logMapLiveSample();
+        startManualOnWorker(mapLiveManualState, reason);
+        scheduleMapLiveTick(session);
+        MainActivity.publishSharedUiStateChange();
+    }
+
     private void acceptMapLiveStart(long request) {
         if (!mapLiveStartPending || request != mapLiveRequestGeneration) return;
         mapLiveStartPending = false;
@@ -531,18 +746,7 @@ final class NavHudLiveSender {
             log("map_live start rejected reason=" + rejected);
             return;
         }
-        long session = ++mapLiveSessionCounter;
-        mapLiveSourceFrame = HudMapLiveFixture.frame(
-                context, System.currentTimeMillis(), SystemClock.elapsedRealtime());
-        mapLiveFrame = HudMapLiveFixture.selectFrame(context, mapLiveSourceFrame, SystemClock.elapsedRealtime());
-        mapLiveManualState = HudMapLiveFixture.manualState(context, mapLiveFrame);
-        mapLiveSettings = HudPrefs.mapSettings(context);
-        mapLiveState = new HudMapLiveState(true, session);
-        log("map_live started session=" + session + " " + mapLiveSettings.diagnostics());
-        logMapLiveSample();
-        startManualOnWorker(mapLiveManualState, "map-live-start");
-        scheduleMapLiveTick(session);
-        MainActivity.publishSharedUiStateChange();
+        beginMapLiveFixtureSession("map-live-start", null);
     }
 
     private String mapLiveStartGateFailure() {
@@ -556,11 +760,36 @@ final class NavHudLiveSender {
         return "";
     }
 
+    private String mapProfileStartGateFailure(HudMapProfile profile) {
+        return mapProfileGateFailure(profile, true);
+    }
+
+    private String mapProfileGateFailure(HudMapProfile profile, boolean validateSourceInstalled) {
+        boolean runtimeEnabled = isRuntimeEnabled();
+        boolean shutdown = HudPrefs.isUserShutdownActive(context);
+        boolean shanghai = ShanghaiOutputGate.isSuspended();
+        int mode = HudPrefs.mapSettings(context).mode;
+        boolean sourceInstalled = profile != null && (!validateSourceInstalled
+                || isInstalledPackage(context, profile.source.packageName()));
+        if (mapProfileStartAllowedForTest(
+                runtimeEnabled, shutdown, shanghai, mode, sourceInstalled)) return "";
+        if (!runtimeEnabled || shutdown) return "runtime-disabled";
+        if (shanghai) return "shanghai-active";
+        if (mode != HudMapSettings.NATIVE && mode != HudMapSettings.EXPERIMENTAL) {
+            return "map-mode-off";
+        }
+        return "source-unavailable";
+    }
+
     private void refreshMapLiveSettingsOnWorker(long session, String reason) {
         if (!isCurrentMapLiveSessionForTest(mapLiveState, session)) return;
-        String rejected = mapLiveStartGateFailure();
+        boolean profileSession = isCurrentMapProfileSession(mapProfileCalibrationState, session);
+        String rejected = profileSession
+                ? mapProfileGateFailure(mapProfileCalibrationState.draft, false)
+                : mapLiveStartGateFailure();
         if (!rejected.isEmpty()) {
-            stopMapLiveOnWorker("settings-gate:" + rejected);
+            if (profileSession) stopMapProfileOnWorker("settings-gate:" + rejected);
+            else stopMapLiveOnWorker("settings-gate:" + rejected);
             return;
         }
         HudMapSettings settings = HudPrefs.mapSettings(context);
@@ -578,9 +807,16 @@ final class NavHudLiveSender {
     }
 
     private void stopMapLiveOnWorker(String reason) {
+        stopMapLiveOnWorker(reason, true, null);
+    }
+
+    private void stopMapLiveOnWorker(String reason, boolean restoreDirect, Runnable completion) {
         ++mapLiveRequestGeneration;
         mapLiveStartPending = false;
-        if (!mapLiveState.running) return;
+        if (!mapLiveState.running) {
+            if (completion != null) completion.run();
+            return;
+        }
         long session = mapLiveState.session;
         if (mapLiveTick != null) handler.removeCallbacks(mapLiveTick);
         mapLiveTick = null;
@@ -589,9 +825,14 @@ final class NavHudLiveSender {
         mapLiveManualState = null;
         mapLiveSettings = null;
         mapLiveState = HudMapLiveState.STOPPED;
+        if (mapProfileCalibrationState.session == session) {
+            mapProfileCalibrationState = HudMapProfileCalibrationState.STOPPED;
+            mapProfileDraft = null;
+            hudOutput.endMapProfileCalibration(session, safeReason(reason));
+        }
         log("map_live stopped session=" + session + " reason=" + safeReason(reason));
         hudOutput.endMapLiveSession(session, safeReason(reason));
-        stopManualOnWorker("map-live-stop:" + safeReason(reason), true);
+        stopManualOnWorker("map-live-stop:" + safeReason(reason), restoreDirect, completion);
         MainActivity.publishSharedUiStateChange();
     }
 
@@ -602,10 +843,16 @@ final class NavHudLiveSender {
 
     private void tickMapLive(long session) {
         if (!isCurrentMapLiveSessionForTest(mapLiveState, session)) return;
-        String rejected = mapLiveStartGateFailure();
+        boolean profileSession = isCurrentMapProfileSession(mapProfileCalibrationState, session);
+        if (profileSession) refreshActiveWazeMapSourceMode();
+        String rejected = profileSession
+                ? mapProfileGateFailure(mapProfileCalibrationState.draft, false)
+                : mapLiveStartGateFailure();
         if (!manualTbtActive || !rejected.isEmpty()) {
-            stopMapLiveOnWorker(!rejected.isEmpty() ? "heartbeat-gate:" + rejected
-                    : "manual-owner-ended");
+            String reason = !rejected.isEmpty() ? "heartbeat-gate:" + rejected
+                    : "manual-owner-ended";
+            if (profileSession) stopMapProfileOnWorker(reason);
+            else stopMapLiveOnWorker(reason);
             return;
         }
         DirectTbtFrame next = HudMapLiveFixture.selectFrame(context, mapLiveSourceFrame, SystemClock.elapsedRealtime());
@@ -819,6 +1066,12 @@ final class NavHudLiveSender {
     private volatile HudCheckState hudCheckState = IDLE_HUD_CHECK;
     private final Runnable hudCheckTick = this::tickHudCheck;
     private volatile HudMapLiveState mapLiveState = HudMapLiveState.STOPPED;
+    private volatile HudMapProfileCalibrationState mapProfileCalibrationState =
+            HudMapProfileCalibrationState.STOPPED;
+    private HudMapProfile mapProfileDraft;
+    private HudMapProfile pendingMapProfileDraft;
+    private boolean mapProfileStartPending;
+    private long mapProfileRequestGeneration;
     private DirectTbtFrame mapLiveSourceFrame;
     private DirectTbtFrame mapLiveFrame;
     private HudState mapLiveManualState;
@@ -1811,6 +2064,7 @@ final class NavHudLiveSender {
             if (wazeSurfaceDirectChannel.isActive()) {
                 wazeSurfaceDirectChannel.stop("legacy-session-restart");
             }
+            refreshActiveWazeMapSourceMode();
             wazeDirectChannel.openAcceptedFreshRoute(
                     "legacy-session-start:" + safeReason(reason), 0L);
             wazeSurfaceDirectChannel.openAcceptedFreshRoute(
@@ -1831,6 +2085,7 @@ final class NavHudLiveSender {
         resetWazeDirectSessionState();
         wazeDirectChannel.stop("wait-route:" + safeReason(reason));
         wazeSurfaceDirectChannel.stop("wait-route:" + safeReason(reason));
+        refreshActiveWazeMapSourceMode();
         hudOutput.selectNavigationSource(
                 HudOutputCoordinator.Source.NONE,
                 "waze-wait-route:" + safeReason(reason));
@@ -2145,6 +2400,7 @@ final class NavHudLiveSender {
         boolean previous = wazeSurfaceSourceSelected;
         invalidatePendingWazeDirectOutputFrames();
         wazeSurfaceSourceSelected = selected;
+        refreshActiveWazeMapSourceMode();
         String detail = "waze data source switch previous="
                 + (previous ? "surface" : "cluster")
                 + " next=" + (selected ? "surface" : "cluster")
@@ -2155,6 +2411,29 @@ final class NavHudLiveSender {
                 + " reason=" + safeReason(reason);
         log(detail);
         eventWazeDirectSession("data_source_switch", detail);
+    }
+
+    private void refreshActiveWazeMapSourceMode() {
+        boolean ownedSurface = isCurrentWazeSurfaceWindow(
+                wazeSurfaceReadyInstanceId, wazeSurfaceReadyEpoch)
+                && wazeSurfaceReadyInstanceId == wazeSurfaceInstanceId
+                && WazeSurfaceActivity.activeDisplayId() == wazeSurfaceReadyDisplayId;
+        NavigatorMapCapture.setActiveSourceMode(wazeMapSourceMode(
+                isRuntimeEnabled() && !HudPrefs.isUserShutdownActive(context),
+                wazeDirectChannel.isActive(), wazeSurfaceDirectChannel.isActive(),
+                ownedSurface, WazeSurfaceActivity.isVisible()));
+    }
+
+    static HudMapProfile.Source wazeMapSourceMode(boolean runtimeEnabled,
+            boolean clusterChannelActive, boolean surfaceChannelActive,
+            boolean ownedSurface, boolean surfaceVisible) {
+        if (!runtimeEnabled) return null;
+        // Rendering ownership exists before a route/TBT frame. An unready Surface
+        // channel is ambiguous; never substitute the selected profile or cluster mode.
+        if (surfaceChannelActive) {
+            return ownedSurface && surfaceVisible ? HudMapProfile.Source.WAZE_SURFACE : null;
+        }
+        return clusterChannelActive ? HudMapProfile.Source.WAZE : null;
     }
 
     private void enqueueWazeListenerFrame(String ownerPackage, int sessionGeneration,
@@ -2246,6 +2525,7 @@ final class NavHudLiveSender {
             latestWazeClusterFrameSessionGeneration = pending.sessionGeneration;
             latestWazeClusterFrame = pending.frame;
         }
+        refreshActiveWazeMapSourceMode();
         if (!wazeSurfaceSourceSelected) {
             enqueueLatestWazeDirectFrame(pending.ownerPackage, pending.sessionGeneration,
                     pending.frame, pending.reason, false, pending.timing,
@@ -3905,6 +4185,7 @@ final class NavHudLiveSender {
         wazeDirectRouteEnded = true;
         wazeTbtRouteStartedAtMs = 0L;
         wazeRouteGeneration++;
+        refreshActiveWazeMapSourceMode();
         if (hudOwner) resetLatestPayload();
         long now = SystemClock.elapsedRealtime();
         NavRouteStateStore.get(context).markRouteEnded(
@@ -3948,6 +4229,7 @@ final class NavHudLiveSender {
         wazeDirectNavigating = false;
         wazeDirectFrameReceived = false;
         wazeRouteGeneration++;
+        refreshActiveWazeMapSourceMode();
         clearDirectSpeedLimit(WAZE_PACKAGE);
         long now = SystemClock.elapsedRealtime();
         NavRouteStateStore.get(context).markRouteEnded(WAZE_PACKAGE, reason, now);
@@ -3958,6 +4240,7 @@ final class NavHudLiveSender {
         wazeSurfaceDirectChannel.noteRouteTerminalGeneration(
                 reason, wazeDirectTerminalBridgeGeneration);
         wazeSurfaceDirectChannel.stop(reason);
+        refreshActiveWazeMapSourceMode();
         log("waze inactive newer-generation snapshot closed owner reason="
                 + safeReason(reason));
     }
@@ -4007,6 +4290,7 @@ final class NavHudLiveSender {
             closeWazeSurface("route-lifecycle-end:" + safeReason(reason));
             wazeSurfaceDirectChannel.stop(
                     "route-lifecycle-end:" + safeReason(reason));
+            refreshActiveWazeMapSourceMode();
             if (!result.changed && !wazeDirectChannel.isActive()) {
                 log("waze route lifecycle terminal ignored; state already inactive reason="
                         + safeReason(reason));
@@ -4112,6 +4396,7 @@ final class NavHudLiveSender {
         latestWazeSurfaceFrameDeliveryGeneration = 0L;
         latestWazeSurfaceFrameInstanceId = 0L;
         latestWazeSurfaceFrameEpoch = 0L;
+        refreshActiveWazeMapSourceMode();
     }
 
     private void eventWazeDirectSession(String event, String detail) {
@@ -4459,6 +4744,7 @@ final class NavHudLiveSender {
                     packageName, wazeDirectChannel.sessionGeneration());
             tbtWazeObserver = false;
             wazeDirectChannel.stop(reason);
+            refreshActiveWazeMapSourceMode();
             handoffOrEndDirectRoute(
                     packageName, generation, reason, !explicitTeardown);
             stopped = true;
@@ -4755,6 +5041,7 @@ final class NavHudLiveSender {
             cancelWazeDirectColdTimeout();
             closeWazeSurface("source-switch:" + next);
             wazeSurfaceDirectChannel.stop("source-switch:" + next);
+            refreshActiveWazeMapSourceMode();
         } else if (GMapsDirectChannel.PACKAGE_NAME.equals(previous)) {
             tbtGMapsObserver = retainRoute;
             cancelGMapsDirectTimeout();
@@ -4928,6 +5215,7 @@ final class NavHudLiveSender {
             resetWazeDirectSessionState();
             wazeDirectChannel.stop(reason);
             wazeSurfaceDirectChannel.stop(reason);
+            refreshActiveWazeMapSourceMode();
         } else if (GMapsDirectChannel.PACKAGE_NAME.equals(packageName)) {
             tbtGMapsObserver = false;
             endGMapsDirectSession(reason);

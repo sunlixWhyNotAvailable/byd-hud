@@ -17,8 +17,10 @@ import org.robolectric.annotation.LooperMode;
 import org.robolectric.util.ReflectionHelpers;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.Assert.*;
 
@@ -44,6 +46,8 @@ public final class HudNavigatorMapIntegrationTest {
         Capture.owner = "";
         Capture.callback = null;
         Capture.image = new NavigatorMapCapture.Snapshot(new byte[0], 0, 0);
+        Capture.expectedSource = null;
+        Capture.profileOverride = null;
         context = RuntimeEnvironment.getApplication();
         NativeSpeedLimitTestSupport.resetPreferences(context);
         HudPrefs.setSpeedLimitMode(context, HudPrefs.SPEED_LIMIT_OFF);
@@ -148,6 +152,97 @@ public final class HudNavigatorMapIntegrationTest {
         assertTrue(guidance.get(guidance.size() - 1).retainPayload);
     }
 
+    @Test public void profileDraftSwitchKeepsOneManualSessionAndRestoresLatestDirectOwner() {
+        start("com.waze", 1);
+        DirectTbtFrame oldDirect = directFrame("Old Road");
+        output.publishDirect(oldDirect, "old-direct", SystemClock.elapsedRealtime(),
+                "com.waze", 1);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+
+        HudMapProfile firstDraft = new HudMapProfile(
+                HudMapProfile.Source.GOOGLE_MAPS, 0, 0, 100);
+        AtomicInteger frameCallbacks = new AtomicInteger();
+        output.startMapProfileCalibration(77L, firstDraft, frameCallbacks::incrementAndGet);
+        output.publishManualMapLive(new HudState(), DirectTbtFrame.empty(), 77L,
+                "profile-calibration");
+        output.setManualEnabled(true, "profile-calibration");
+        NativeSpeedLimitTestSupport.idleMainLooperFor(250);
+
+        assertEquals(GMapsDirectChannel.PACKAGE_NAME, Capture.owner);
+        assertEquals(HudMapProfile.Source.GOOGLE_MAPS, Capture.expectedSource);
+        assertEquals(firstDraft, Capture.profileOverride);
+        assertEquals(77L, (long) ReflectionHelpers.getField(output, "manualMapLiveSession"));
+        assertEquals(77L, (long) ReflectionHelpers.getField(output,
+                "mapProfileCalibrationSession"));
+        NativeSpeedLimitController speed = ReflectionHelpers.getField(output, "nativeSpeed");
+        assertEquals(77L, (long) ReflectionHelpers.getField(speed, "mapLiveSession"));
+        assertTrue((boolean) ReflectionHelpers.getField(speed, "mapProfileCalibration"));
+        Capture.image = new NavigatorMapCapture.Snapshot(
+                new byte[]{1, 2, 3}, 1L, SystemClock.elapsedRealtime(),
+                HudMapProfile.Source.GOOGLE_MAPS);
+        Capture.callback.run();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        assertEquals(1, frameCallbacks.get());
+        assertArrayEquals(new byte[]{1, 2, 3},
+                (byte[]) ReflectionHelpers.getField(output, "navigatorMapPng"));
+
+        HudMapProfile nextDraft = new HudMapProfile(
+                HudMapProfile.Source.WAZE_SURFACE, 15, -4, 125);
+        output.updateMapProfileCalibration(
+                77L, nextDraft, frameCallbacks::incrementAndGet);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(100);
+        assertEquals("com.waze", Capture.owner);
+        assertEquals(HudMapProfile.Source.WAZE_SURFACE, Capture.expectedSource);
+        assertEquals(nextDraft, Capture.profileOverride);
+        assertEquals(77L, (long) ReflectionHelpers.getField(output, "manualMapLiveSession"));
+        assertEquals(77L, (long) ReflectionHelpers.getField(output,
+                "mapProfileCalibrationSession"));
+        assertEquals(77L, (long) ReflectionHelpers.getField(speed, "mapLiveSession"));
+        assertTrue((boolean) ReflectionHelpers.getField(speed, "mapProfileCalibration"));
+        Capture.image = new NavigatorMapCapture.Snapshot(
+                // Capture.stop() advances the global frame revision to 2 when changing source.
+                new byte[]{4, 5, 6}, 3L, SystemClock.elapsedRealtime(),
+                HudMapProfile.Source.WAZE_SURFACE);
+        Capture.callback.run();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        assertEquals(2, frameCallbacks.get());
+        assertArrayEquals(new byte[]{4, 5, 6},
+                (byte[]) ReflectionHelpers.getField(output, "navigatorMapPng"));
+
+        DirectTbtFrame latestDirect = directFrame("Latest Road");
+        output.publishDirect(latestDirect, "latest-direct", SystemClock.elapsedRealtime(),
+                "com.waze", 1);
+        NativeSpeedLimitTestSupport.idleMainLooper();
+        assertSame(latestDirect, ReflectionHelpers.getField(output, "directFrame"));
+        assertEquals(HudOutputCoordinator.Source.MANUAL,
+                ReflectionHelpers.getField(output, "activeSource"));
+
+        output.endMapProfileCalibration(77L, "profile-hide");
+        output.endMapLiveSession(77L, "profile-hide");
+        output.stopManualOutput("profile-hide", null);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(250);
+        assertEquals(HudOutputCoordinator.Source.DIRECT,
+                ReflectionHelpers.getField(output, "activeSource"));
+        assertSame(latestDirect, ReflectionHelpers.getField(output, "directFrame"));
+        assertEquals("com.waze", Capture.owner);
+        assertNull(Capture.expectedSource);
+
+        Capture.image = new NavigatorMapCapture.Snapshot(
+                new byte[]{9, 8, 7}, 9L, SystemClock.elapsedRealtime(),
+                HudMapProfile.Source.WAZE);
+        Capture.callback.run();
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        assertArrayEquals(new byte[]{9, 8, 7},
+                (byte[]) ReflectionHelpers.getField(output, "navigatorMapPng"));
+        assertEquals(0L, (long) ReflectionHelpers.getField(speed, "mapLiveSession"));
+        assertFalse((boolean) ReflectionHelpers.getField(speed, "mapProfileCalibration"));
+    }
+
+    private static DirectTbtFrame directFrame(String road) {
+        return new DirectTbtFrame(1, 2, 3, 420, road, "Turn", road,
+                null, null, Collections.emptyList(), DirectTbtFrame.AlertOverlay.inactive());
+    }
+
     private void mode(int mode) {
         HudPrefs.setMapSettings(context, HudPrefs.mapSettings(context).withMode(mode));
     }
@@ -172,11 +267,34 @@ public final class HudNavigatorMapIntegrationTest {
         static long generation;
         static Runnable callback;
         static NavigatorMapCapture.Snapshot image;
+        static HudMapProfile.Source expectedSource;
+        static HudMapProfile profileOverride;
         @Implementation protected static void activate(Context context, String pkg, long session, Runnable changed) {
-            owner = pkg; generation = session; callback = changed;
+            activateCapture(pkg, session, null, changed);
+        }
+        @Implementation protected static void activate(Context context, String pkg, long session,
+                HudMapProfile.Source source, Runnable changed) {
+            activateCapture(pkg, session, source, changed);
+        }
+        private static void activateCapture(String pkg, long session,
+                HudMapProfile.Source source, Runnable changed) {
+            owner = pkg;
+            generation = session;
+            expectedSource = source;
+            callback = changed;
+        }
+        @Implementation protected static void setProfileOverride(HudMapProfile profile) {
+            profileOverride = profile;
+        }
+        @Implementation protected static void refreshProfiles() {
+            profileOverride = null;
+        }
+        @Implementation protected static void setActiveSourceMode(HudMapProfile.Source source) {
         }
         @Implementation protected static void stop(String reason) {
             owner = "";
+            expectedSource = null;
+            profileOverride = null;
             image = new NavigatorMapCapture.Snapshot(new byte[0], image.revision() + 1, 0);
         }
         @Implementation protected static NavigatorMapCapture.Snapshot snapshot() { return image; }

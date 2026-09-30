@@ -214,6 +214,8 @@ final class VehicleConfigurationDiagnostics {
                 .put("speedLimitManeuverSize", HudPrefs.speedLimitManeuverOverlaySize(context))
                 .put("speedLimitLaneSize", HudPrefs.speedLimitLaneOverlaySize(context))
                 .put("mapLayout", mapSettings(HudPrefs.mapSettings(context)))
+                .put("mapImageProfiles", mapImageProfiles(HudMapProfiles.profiles(context).values()))
+                .put("mapImageProfilesRevision", HudMapProfiles.revision(context))
                 .put("tbtWithoutHud", HudPrefs.isTbtWithoutHudOutputEnabled(context))
                 .put("switchToTbtOnStart", HudPrefs.isSwitchToTbtOnHudStartEnabled(context))
                 .put("steeringTransferProfiles", steeringTransfers)
@@ -224,6 +226,15 @@ final class VehicleConfigurationDiagnostics {
                         context, HudPrefs.DASHBOARD_MODE_FULL))
                 .put("miniProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_PARTIAL)))
                 .put("fullProfile", profile(HudPrefs.dashboardProjectionProfile(context, HudPrefs.DASHBOARD_MODE_FULL)));
+    }
+
+    static JSONArray mapImageProfiles(Iterable<HudMapProfile> profiles) throws Exception {
+        JSONArray result = new JSONArray();
+        for (HudMapProfile profile : profiles) {
+            result.put(new JSONObject().put("source", profile.source.name())
+                    .put("x", profile.x).put("y", profile.y).put("scale", profile.scale));
+        }
+        return result;
     }
 
     static JSONObject mapSettings(HudMapSettings settings) throws Exception {
