@@ -13,6 +13,7 @@ import android.content.pm.PackageInfo;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
+import android.os.Handler;
 import android.os.SystemClock;
 
 import org.junit.After;
@@ -27,6 +28,7 @@ import org.robolectric.annotation.LooperMode;
 import org.robolectric.util.ReflectionHelpers;
 
 import java.util.concurrent.CountDownLatch;
+import java.io.File;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -127,6 +129,50 @@ public final class NavigatorMapCaptureTest {
         SystemClock.sleep(10_000L);
         assertFalse(poll(NavigatorMapCapture.WAZE_PACKAGE, session, false)
                 .getBoolean("journalAccepted"));
+    }
+
+    @Test
+    public void detailedLogsSaveSourceAndCropEvenWhenEnabledOnAnUnchangedFrame() throws Exception {
+        HudPrefs.setDetailedDebugArtifactsEnabled(context, false);
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 53L, null);
+        File artifacts = new File(NavCaptureStore.logDir(context), "map-frames");
+        submitMapFrame(0xff123456);
+        assertFalse(artifacts.exists());
+
+        HudPrefs.setDetailedDebugArtifactsEnabled(context, true);
+        submitMapFrame(0xff123456);
+        File[] files = artifacts.listFiles();
+        assertNotNull(files);
+        assertEquals(2, files.length);
+        for (File file : files) {
+            Bitmap image = BitmapFactory.decodeFile(file.getAbsolutePath());
+            assertNotNull(image);
+            assertEquals(file.getName().startsWith("map-source-") ? 320 : 300, image.getWidth());
+            assertEquals(file.getName().startsWith("map-source-") ? 165 : 180, image.getHeight());
+            image.recycle();
+        }
+        submitMapFrame(0xff123456);
+        assertEquals("unchanged pixels reuse the pair", 2, artifacts.listFiles().length);
+        HudPrefs.setDetailedDebugArtifactsEnabled(context, false);
+        submitMapFrame(0xff654321);
+        assertEquals("disabled diagnostics add no images", 2, artifacts.listFiles().length);
+    }
+
+    private void submitMapFrame(int color) throws Exception {
+        SystemClock.sleep(1010L);
+        Bundle poll = poll(NavigatorMapCapture.MAPS_PACKAGE, "", false);
+        assertTrue(poll.getLong("id") > 0L);
+        Bitmap bitmap = Bitmap.createBitmap(320, 165, Bitmap.Config.ARGB_8888);
+        bitmap.eraseColor(color);
+        Bundle result = result(NavigatorMapCapture.MAPS_PACKAGE, poll.getString("session"),
+                poll.getLong("id"), bitmap);
+        assertTrue(NavigatorMapCapture.providerCall(context, "result", result, MAPS_UID)
+                .getBoolean("accepted"));
+        Handler receiver = ReflectionHelpers.getStaticField(NavigatorMapCapture.class, "worker");
+        CountDownLatch received = new CountDownLatch(1);
+        receiver.post(received::countDown);
+        assertTrue(received.await(5L, TimeUnit.SECONDS));
+        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(5000L));
     }
 
     @Test

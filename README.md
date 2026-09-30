@@ -198,7 +198,9 @@ only the map is removed; guidance continues and the map returns with a new frame
 Identical fresh images remain valid. Off, navigation/HUD stop and diagnostic
 tests end live capture and release its background rendering resources. Capture
 events and failures use the normal app journals without requiring manual Logcat.
-Live map sends retain metadata and hashes, without saving the image bytes.
+Live map sends retain metadata and hashes. When detailed logs are enabled, the
+received image before cropping and the 300×180 HUD image are also saved as PNGs
+in the day's `logs/map-frames` folder. Identical images reuse the same files.
 
 Experimental enables Custom, Larger on the right and Smaller in the center,
 plus six controls for map/lane horizontal position, vertical position and scale.

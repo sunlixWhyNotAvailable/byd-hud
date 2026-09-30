@@ -12,6 +12,8 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -385,6 +387,7 @@ public final class NavigatorMapCapture {
             long revision = 0L;
             Runnable notify = null;
             boolean sameInput = false;
+            byte[] samePng = EMPTY_PNG;
             synchronized (LOCK) {
                 if (processingId == id
                         && FRAME.isCurrent(callerPackage, generation, resultSession)
@@ -395,6 +398,7 @@ public final class NavigatorMapCapture {
                     sameInput = update == NavigatorMapSessionState.FrameUpdate.SAME;
                 }
                 if (sameInput) {
+                    samePng = FRAME.pngForSnapshot();
                     processingId = 0L;
                     sequence = FRAME.frameSequence();
                     revision = FRAME.revision();
@@ -402,7 +406,8 @@ public final class NavigatorMapCapture {
                 }
             }
             if (sameInput) {
-                logFrame(app, callerPackage, resultSession, id, status, "same", bitmap, receivedAt, data);
+                logFrame(app, callerPackage, resultSession, id, status, "same", bitmap,
+                        receivedAt, data, inputHash, samePng);
                 return;
             }
 
@@ -437,7 +442,7 @@ public final class NavigatorMapCapture {
             }
             logFrame(app, callerPackage, resultSession, id, status,
                     update == NavigatorMapSessionState.FrameUpdate.SAME ? "same_crop" : "changed",
-                    bitmap, receivedAt, data);
+                    bitmap, receivedAt, data, inputHash, png);
             runCallback(notify, app);
         } catch (RuntimeException | NoSuchAlgorithmException error) {
             finishProcessing(resultSession, id);
@@ -619,14 +624,65 @@ public final class NavigatorMapCapture {
             String pixelChange,
             Bitmap bitmap,
             long receivedAt,
-            Bundle data) {
+            Bundle data,
+            String inputHash,
+            byte[] png) {
         long age = Math.max(0L, SystemClock.elapsedRealtime() - receivedAt);
         log(app, "navigator_map_capture frame owner=" + field(callerPackage, 96)
                 + " session=" + frameSession + " id=" + id
                 + " status=" + field(status, 64) + " source=" + field(string(data, "source", ""), 96)
                 + " size=" + bitmap.getWidth() + "x" + bitmap.getHeight()
                 + " receivedAgeMs=" + age + " pixels=" + pixelChange
+                + " inputHash=" + inputHash
                 + timing(data));
+        saveFrameArtifacts(app, callerPackage, frameSession, id, bitmap, png, inputHash);
+    }
+
+    private static void saveFrameArtifacts(Context app, String owner, String frameSession,
+            long id, Bitmap bitmap, byte[] croppedPng, String inputHash) {
+        if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
+        Bitmap copy = null;
+        try {
+            copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
+            if (copy == null) throw new IllegalStateException("bitmap_copy_failed");
+            Bitmap source = copy;
+            byte[] crop = croppedPng.clone();
+            String day = NavCaptureStore.todayDir();
+            boolean queued = WazeCaptureDebugWriter.get().directEvent(() -> {
+                try {
+                    if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
+                    NavigationLogStorage.withReadLock(() -> {
+                        File dir = new File(NavigationLogStorage.logsDir(app, day), "map-frames");
+                        // The source filename uses its pixel hash; unchanged frames reuse the file.
+                        String sourceName = "map-source-" + inputHash + ".png";
+                        if (!new File(dir, sourceName).isFile()) {
+                            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+                            if (!source.compress(Bitmap.CompressFormat.PNG, 100, bytes)) {
+                                throw new IllegalStateException("source_png_failed");
+                            }
+                            sourceName = NavCaptureStore.writeDirectArtifactFileIfAbsent(
+                                    dir, sourceName, bytes.toByteArray());
+                        }
+                        String cropName = NavCaptureStore.writeDirectArtifactIfAbsent(dir, "map-hud", crop);
+                        log(app, "navigator_map_capture artifacts owner=" + field(owner, 96)
+                                + " session=" + frameSession + " id=" + id + " day=" + day
+                                + " source=" + sourceName + " hud=" + cropName
+                                + " result=" + (sourceName.isEmpty() || cropName.isEmpty() ? "write_failed" : "saved"));
+                    });
+                } catch (RuntimeException | OutOfMemoryError error) {
+                    log(app, "navigator_map_capture artifacts_error id=" + id
+                            + " reason=" + error.getClass().getSimpleName());
+                } finally {
+                    recycle(source);
+                }
+            });
+            if (queued) return; // The bounded writer now owns the bitmap copy.
+            log(app, "navigator_map_capture artifacts_dropped id=" + id + " reason=writer_queue_full");
+        } catch (RuntimeException | OutOfMemoryError error) {
+            log(app, "navigator_map_capture artifacts_error id=" + id
+                    + " reason=" + error.getClass().getSimpleName());
+        }
+        recycle(copy);
     }
 
     private static void logResultError(
