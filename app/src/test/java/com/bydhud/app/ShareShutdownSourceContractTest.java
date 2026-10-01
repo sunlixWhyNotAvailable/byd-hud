@@ -20,7 +20,8 @@ public final class ShareShutdownSourceContractTest {
                 "static synchronized Result create(");
 
         assertFalse(method.contains("lockTopologyRead"));
-        assertFalse(method.contains("lockTopologyWrite"));
+        assertFalse(method.contains("NavigationLogStorage.lockTopologyWrite("));
+        assertTrue(method.contains("tryLockTopologyWrite(WRITER_CHECKPOINT_TIMEOUT_MS)"));
     }
 
     @Test

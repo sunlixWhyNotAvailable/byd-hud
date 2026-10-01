@@ -127,6 +127,10 @@ final class NavigationLogStorage {
         TOPOLOGY_GATE.writeLock().lock();
     }
 
+    static boolean tryLockTopologyWrite(long timeoutMs) throws InterruptedException {
+        return TOPOLOGY_GATE.writeLock().tryLock(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+    }
+
     static void unlockTopologyWrite() {
         TOPOLOGY_GATE.writeLock().unlock();
     }

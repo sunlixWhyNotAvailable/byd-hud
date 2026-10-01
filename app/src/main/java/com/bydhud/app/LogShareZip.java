@@ -2,6 +2,8 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.util.Log;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 import java.io.EOFException;
 import java.io.File;
@@ -9,6 +11,8 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InterruptedIOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -107,7 +111,11 @@ final class LogShareZip {
         } catch (IOException error) {
             return new SelectionSummary(false, 0, 0, 0L, error.getMessage());
         }
+        boolean locked = false;
         try {
+            locked = NavigationLogStorage.tryLockTopologyWrite(WRITER_CHECKPOINT_TIMEOUT_MS);
+            if (!locked) return new SelectionSummary(true, days.size(), 1, 0L,
+                    "storage busy; diagnostic status only");
             List<SnapshotFile> files = snapshotFiles(context.getApplicationContext(), days);
             long bytes = 0L;
             for (SnapshotFile file : files) {
@@ -117,6 +125,11 @@ final class LogShareZip {
                     files.isEmpty() ? "no readable files" : "ready");
         } catch (IOException | RuntimeException error) {
             return new SelectionSummary(false, days.size(), 0, 0L, error.getMessage());
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return new SelectionSummary(false, days.size(), 0, 0L, "cancelled");
+        } finally {
+            if (locked) NavigationLogStorage.unlockTopologyWrite();
         }
     }
 
@@ -169,18 +182,20 @@ final class LogShareZip {
 
             phase(Phase.COPYING, WazeCaptureDebugWriter.get().pendingTasks());
             long copyStarted = System.currentTimeMillis();
-            NavigationLogStorage.lockTopologyWrite();
-            writeHeld = true;
-            List<SnapshotFile> sources = snapshotFiles(app, days);
-            if (sources.isEmpty()) {
-                throw new IOException("no readable files");
-            }
             if (!staging.mkdirs()) {
                 throw new IOException("cannot create staging directory");
             }
-            List<SnapshotFile> snapshot = copySnapshotToStaging(staging, sources);
-            NavigationLogStorage.unlockTopologyWrite();
-            writeHeld = false;
+            writeHeld = NavigationLogStorage.tryLockTopologyWrite(WRITER_CHECKPOINT_TIMEOUT_MS);
+            boolean storageReady = writeHeld;
+            List<SnapshotFile> snapshot = new ArrayList<>();
+            if (writeHeld) {
+                List<SnapshotFile> sources = snapshotFiles(app, days);
+                if (sources.isEmpty()) throw new IOException("no readable files");
+                snapshot = copySnapshotToStaging(staging, sources);
+                NavigationLogStorage.unlockTopologyWrite();
+                writeHeld = false;
+            }
+            boolean incomplete = addWriterStatus(staging, snapshot, days, checkpoint, storageReady);
             Log.i(TAG, "share_phase phase=COPYING duration_ms="
                     + (System.currentTimeMillis() - copyStarted)
                     + " files=" + snapshot.size()
@@ -198,8 +213,10 @@ final class LogShareZip {
                     + " bytes=" + output.length()
                     + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
             return new Result(true, output,
-                    "files=" + snapshot.size() + " bytes=" + output.length());
-        } catch (IOException | RuntimeException e) {
+                    "files=" + snapshot.size() + " bytes=" + output.length()
+                            + " recording=" + (incomplete ? "INCOMPLETE" : "snapshot_ready"));
+        } catch (IOException | RuntimeException | InterruptedException e) {
+            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             deleteArtifact(part);
             deleteArtifact(output);
             return failure(e.getMessage());
@@ -209,6 +226,36 @@ final class LogShareZip {
             }
             deleteTree(staging);
         }
+    }
+
+    private static boolean addWriterStatus(File staging, List<SnapshotFile> files,
+            List<String> days, boolean checkpoint, boolean storageReady) throws IOException {
+        try {
+            JSONObject health = WazeCaptureDebugWriter.healthSnapshot();
+            boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved");
+            health.put("selectedDays", new org.json.JSONArray(days))
+                    .put("writerCheckpointReady", checkpoint).put("storageSnapshotReady", storageReady)
+                    .put("recordingStatus", incomplete ? "INCOMPLETE" : "snapshot_ready")
+                    .put("note", "Writer counters cover this process only; this is not a guarantee of historical coverage.");
+            addStatusFile(staging, files, "recording-status.json", health.toString(2));
+            if (incomplete) addStatusFile(staging, files, "INCOMPLETE-RECORDING.txt",
+                    "This archive may be missing diagnostic records.\n"
+                    + "writerCheckpointReady=" + checkpoint + "\n"
+                    + "storageSnapshotReady=" + storageReady + "\n"
+                    + "lossObservedInCurrentProcess=" + health.getBoolean("lossObserved") + "\n"
+                    + (storageReady ? "Available files were copied.\n" : "Storage lock timed out; diagnostic status only, no log files copied.\n")
+                    + "See recording-status.json for writer progress, pending work and errors.\n");
+            return incomplete;
+        } catch (JSONException error) {
+            throw new IOException("cannot serialize recording status", error);
+        }
+    }
+
+    private static void addStatusFile(File staging, List<SnapshotFile> files, String name,
+            String text) throws IOException {
+        File file = new File(staging, name);
+        Files.write(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
+        files.add(new SnapshotFile(file, name, file.length()));
     }
 
     //Removes completed and partial archives left by the previous app process.

@@ -432,6 +432,9 @@ public final class NavigatorMapCaptureTest {
                         Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
                 assertEquals("explicit unknown/wrong renderer is never relabelled", revision,
                         NavigatorMapCapture.snapshot().revision());
+                assertTrue(org.robolectric.shadows.ShadowLog.getLogsForTag("BydHudEventLog").stream()
+                        .anyMatch(log -> log.msg.contains("reason=wrong_source")
+                                && log.msg.contains("frameSourceMode=" + wrong)));
             }
             NavigatorMapCapture.stop("mode-test-switch");
         }

@@ -65,10 +65,12 @@ final class AppEventLogger {
                     writer.write(text);
                     return target;
                 } catch (IOException e) {
+                    WazeCaptureDebugWriter.recordWriteFailure("events append: " + e);
                     Log.e(TAG, "write failed: " + target.getAbsolutePath(), e);
                     return null;
                 }
             });
+            if (file != null) WazeCaptureDebugWriter.recordWriteSuccess();
             if (file != null
                     && file.length() > MAX_FILE_BYTES
                     && !NavigationLogStorage.holdsTopologyRead()) {
@@ -87,9 +89,11 @@ final class AppEventLogger {
         }
         File rotated = new File(file.getParentFile(), name + ".1");
         if (rotated.exists() && !rotated.delete()) {
+            WazeCaptureDebugWriter.recordWriteFailure("events rotated delete failed");
             Log.w(TAG, "delete rotated failed: " + rotated.getAbsolutePath());
         }
         if (!file.renameTo(rotated)) {
+            WazeCaptureDebugWriter.recordWriteFailure("events rotate failed");
             Log.w(TAG, "rotate failed: " + file.getAbsolutePath());
         }
     }

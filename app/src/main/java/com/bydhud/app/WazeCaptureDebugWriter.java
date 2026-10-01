@@ -14,6 +14,8 @@ import java.io.IOException;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 final class WazeCaptureDebugWriter {
     private static final String TAG = "BydHudWazeDebugWriter";
@@ -23,11 +25,61 @@ final class WazeCaptureDebugWriter {
 
     private static WazeCaptureDebugWriter instance;
     private static volatile WazeCaptureDebugWriter mapInstance;
+    private static final ThreadLocal<WazeCaptureDebugWriter> CURRENT = new ThreadLocal<>();
 
     private final HandlerThread thread;
     private final Handler handler;
     private final AtomicInteger pendingTasks = new AtomicInteger();
     private final AtomicInteger pendingBitmaps = new AtomicInteger();
+    private final AtomicInteger droppedBitmaps = new AtomicInteger();
+    private final AtomicInteger failures = new AtomicInteger();
+    private final long startedAt = System.currentTimeMillis();
+    private volatile long lastSuccessfulWriteAt;
+    private volatile long lastCompletedTaskAt;
+    private volatile long taskStartedAt;
+    private volatile String currentTask = "";
+    private volatile String lastError = "";
+
+    static void recordWriteSuccess() {
+        WazeCaptureDebugWriter writer = CURRENT.get();
+        if (writer != null) writer.lastSuccessfulWriteAt = System.currentTimeMillis();
+    }
+
+    static void recordWriteFailure(String error) {
+        WazeCaptureDebugWriter writer = CURRENT.get();
+        if (writer != null) writer.failed(error);
+    }
+
+    static void recordMapArtifactFailure(String error) {
+        // Bitmap copying can fail on the capture thread, before a writer task exists.
+        mapFrames().failed(error);
+    }
+
+    private void failed(String error) {
+        failures.incrementAndGet();
+        lastError = error == null ? "unknown" : error.substring(0, Math.min(error.length(), 512));
+    }
+
+    private JSONObject health() throws JSONException {
+        return new JSONObject().put("writer", thread.getName()).put("startedAtWallMs", startedAt)
+                .put("alive", thread.isAlive()).put("pendingTasks", pendingTasks.get())
+                .put("pendingBitmaps", pendingBitmaps.get()).put("droppedBitmaps", droppedBitmaps.get())
+                .put("failures", failures.get()).put("lastError", lastError)
+                .put("lastSuccessfulWriteAtWallMs", lastSuccessfulWriteAt)
+                .put("lastCompletedTaskAtWallMs", lastCompletedTaskAt)
+                .put("currentTask", currentTask).put("taskStartedAtWallMs", taskStartedAt);
+    }
+
+    // Called directly by the export worker, never queued behind a stalled writer.
+    static JSONObject healthSnapshot() throws JSONException {
+        WazeCaptureDebugWriter journal = get(), images = mapInstance;
+        boolean loss = journal.failures.get() > 0 || journal.droppedBitmaps.get() > 0
+                || (images != null && (images.failures.get() > 0 || images.droppedBitmaps.get() > 0));
+        return new JSONObject().put("scope", "current_process")
+                .put("sampledAtWallMs", System.currentTimeMillis()).put("lossObserved", loss)
+                .put("journal", journal.health())
+                .put("mapImages", images == null ? JSONObject.NULL : images.health());
+    }
 
     private WazeCaptureDebugWriter(String name) {
         thread = new HandlerThread(name, Process.THREAD_PRIORITY_BACKGROUND);
@@ -132,7 +184,9 @@ final class WazeCaptureDebugWriter {
     }
 
     boolean directEvent(Runnable work) {
-        if (work == null || !tryReserveBitmap()) {
+        if (work == null) return false;
+        if (!tryReserveBitmap()) {
+            droppedBitmaps.incrementAndGet();
             Log.w(TAG, "debug_writer_drop type=direct_event reason=bitmap_queue_full");
             return false;
         }
@@ -218,15 +272,24 @@ final class WazeCaptureDebugWriter {
     private boolean post(String type, Runnable work) {
         pendingTasks.incrementAndGet();
         boolean posted = handler.post(() -> {
+            CURRENT.set(this);
+            currentTask = type;
+            taskStartedAt = System.currentTimeMillis();
             try {
                 work.run();
             } catch (RuntimeException e) {
+                failed(type + ": " + e);
                 Log.w(TAG, "debug_writer_failed type=" + type, e);
             } finally {
+                lastCompletedTaskAt = System.currentTimeMillis();
+                currentTask = "";
+                taskStartedAt = 0L;
+                CURRENT.remove();
                 pendingTasks.decrementAndGet();
             }
         });
         if (!posted) {
+            failed(type + ": handler_stopped");
             pendingTasks.decrementAndGet();
             Log.w(TAG, "debug_writer_drop type=" + type + " reason=handler_stopped");
         }
@@ -246,15 +309,18 @@ final class WazeCaptureDebugWriter {
             return;
         }
         if (!dir.exists() && !dir.mkdirs()) {
+            recordWriteFailure("session directory unavailable: " + dir);
             return;
         }
         File file = new File(dir, fileName);
         try (FileWriter writer = new FileWriter(file, true)) {
             writer.write(line);
             writer.write('\n');
-        } catch (IOException ignored) {
-            //debug evidence must never block live navigation.
+        } catch (IOException error) {
+            recordWriteFailure("session append: " + error);
+            return;
         }
+        recordWriteSuccess();
     }
 
 }

@@ -110,20 +110,26 @@ final class NavCaptureStore {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static synchronized void append(
+    private static void append(
             Context context,
             String targetDay,
             String fileName,
             String line) {
         File file = NavigationLogStorage.withReadLock(() -> {
-            File target = new File(NavigationLogStorage.logsDir(context, targetDay), fileName);
-            try (FileWriter writer = new FileWriter(target, true)) {
-                writer.write(line);
-                writer.write('\n');
+            // Images also acquire topology before the file monitor. Never rotate
+            // while holding this monitor: rotation waits for all image readers.
+            synchronized (NavCaptureStore.class) {
+                File target = new File(NavigationLogStorage.logsDir(context, targetDay), fileName);
+                try (FileWriter writer = new FileWriter(target, true)) {
+                    writer.write(line);
+                    writer.write('\n');
+                } catch (IOException e) {
+                    WazeCaptureDebugWriter.recordWriteFailure("append: " + e);
+                    Log.e(TAG, "append failed " + target.getAbsolutePath(), e);
+                    return null;
+                }
+                WazeCaptureDebugWriter.recordWriteSuccess();
                 return target;
-            } catch (IOException e) {
-                Log.e(TAG, "append failed " + target.getAbsolutePath(), e);
-                return null;
             }
         });
         if (file == null) {
@@ -165,8 +171,11 @@ final class NavCaptureStore {
             File dir, String fileName, byte[] bytes) {
         if (dir == null || fileName == null
                 || !fileName.matches("[A-Za-z0-9_-]+-[0-9a-f]{64}\\.png")
-                || bytes == null || bytes.length == 0
-                || (!dir.isDirectory() && !dir.mkdirs())) {
+                || bytes == null || bytes.length == 0) {
+            return "";
+        }
+        if (!dir.isDirectory() && !dir.mkdirs()) {
+            WazeCaptureDebugWriter.recordWriteFailure("artifact directory unavailable: " + dir);
             return "";
         }
         File file = new File(dir, fileName);
@@ -180,8 +189,10 @@ final class NavCaptureStore {
             try (FileOutputStream out = new FileOutputStream(file)) {
                 out.write(bytes);
             }
+            WazeCaptureDebugWriter.recordWriteSuccess();
             return fileName;
         } catch (IOException e) {
+            WazeCaptureDebugWriter.recordWriteFailure("artifact: " + e);
             file.delete();
             Log.e(TAG, "direct artifact failed " + file.getAbsolutePath(), e);
             return "";
@@ -212,6 +223,7 @@ final class NavCaptureStore {
         }
         int highestSuffix = highestRotatedSuffix(file);
         if (highestSuffix == Integer.MAX_VALUE) {
+            WazeCaptureDebugWriter.recordWriteFailure("rotate suffix exhausted");
             Log.w(TAG, "rotate suffix exhausted: " + file.getAbsolutePath());
             return false;
         }
@@ -222,6 +234,7 @@ final class NavCaptureStore {
             }
             File target = rotatedFile(file, suffix + 1);
             if (target.exists() || !source.renameTo(target)) {
+                WazeCaptureDebugWriter.recordWriteFailure("rotate shard failed: " + source.getName());
                 Log.w(TAG, "rotate shard failed: " + source.getAbsolutePath()
                         + " -> " + target.getAbsolutePath());
                 return false;
@@ -230,15 +243,18 @@ final class NavCaptureStore {
 
         File rotated = rotatedFile(file, 1);
         if (!file.renameTo(rotated)) {
+            WazeCaptureDebugWriter.recordWriteFailure("rotate active failed: " + file.getName());
             Log.w(TAG, "rotate active failed: " + file.getAbsolutePath()
                     + " -> " + rotated.getAbsolutePath());
             return false;
         }
         try {
             if (!file.createNewFile() && !file.exists()) {
+                WazeCaptureDebugWriter.recordWriteFailure("create active log failed");
                 Log.w(TAG, "create active log failed: " + file.getAbsolutePath());
             }
         } catch (IOException e) {
+            WazeCaptureDebugWriter.recordWriteFailure("create active log: " + e);
             Log.e(TAG, "create active log failed " + file.getAbsolutePath(), e);
         }
         return true;

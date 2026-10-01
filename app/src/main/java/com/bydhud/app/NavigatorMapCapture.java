@@ -539,6 +539,7 @@ public final class NavigatorMapCapture {
                         + field(callerPackage, 96) + " id=" + id + " reason=wrong_source"
                         + " expectedSource=" + sourceName(expectedAtRequest)
                         + " actualSource=" + sourceName(frameSource)
+                        + " frameSourceMode=" + field(string(data, "frameSourceMode", ""), 64)
                         + " sourceMetadata=" + field(sourceMetadata, 160)
                         + " backgroundState=" + field(backgroundState, 96));
                 return;
@@ -1207,6 +1208,7 @@ public final class NavigatorMapCapture {
                                 + " result=" + (sourceName.isEmpty() || cropName.isEmpty() ? "write_failed" : "saved"));
                     });
                 } catch (RuntimeException | OutOfMemoryError error) {
+                    WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact encode: " + error);
                     log(app, "navigator_map_capture artifacts_error id=" + id
                             + " reason=" + error.getClass().getSimpleName());
                 } finally {
@@ -1217,6 +1219,7 @@ public final class NavigatorMapCapture {
             if (queued) return; // The bounded writer now owns the bitmap copy.
             log(app, "navigator_map_capture artifacts_dropped id=" + id + " reason=writer_queue_full");
         } catch (RuntimeException | OutOfMemoryError error) {
+            WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact copy: " + error);
             log(app, "navigator_map_capture artifacts_error id=" + id
                     + " reason=" + error.getClass().getSimpleName());
         }
