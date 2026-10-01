@@ -9,6 +9,14 @@ logging is enabled. Otherwise, no map image files are created. Full map frames
 are used in memory for cropping/calibration and are not saved by the current
 capture path. Previously recorded files are not removed by this change.
 
+Navigator compatibility checks and patch attempts retain separate local reports
+containing package/version identifiers, APK hashes, signing-certificate hashes,
+component results, stages and error details. These reports have no automatic
+expiry and are separate from navigation-log cleanup. Every user-requested log or
+configuration ZIP includes all retained patch reports, regardless of selected
+dates or logging switches, with the existing configuration-export sanitization.
+They are not uploaded automatically.
+
 ## Navigation log upload
 
 Navigation logs are uploaded only when the user selects one or more stored days, presses Share, reviews the warning, chooses `Send to developer`, and confirms `OK` in the optional-comment dialog.

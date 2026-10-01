@@ -15,6 +15,8 @@ import com.android.zipflinger.ZipArchive;
 import com.bydhud.gmapsdiag.patcher.GmapsDiagnosticPatcher;
 import com.bydhud.gmapsdiag.patcher.HudPackageVisibilityPatcher;
 
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -35,6 +37,8 @@ import java.util.zip.ZipEntry;
 import java.util.zip.ZipFile;
 
 final class NavigatorPatchPipeline {
+    private static final ThreadLocal<String> REPORT_ID = new ThreadLocal<>();
+    private static final ThreadLocal<String> REPORT_STAGE = new ThreadLocal<>();
     private static final ConcurrentHashMap<NavigatorPatchStore.Profile, Thread> ACTIVE =
             new ConcurrentHashMap<>();
 
@@ -66,11 +70,24 @@ final class NavigatorPatchPipeline {
         final String optionalState;
         final String alertState;
         final String reason;
+        final String mapState;
+        final String mapReason;
+        final String mapRevision;
 
         ScanResult(NavigatorPatchStore.Profile profile, String sha256,
                 String versionName, long versionCode, String signerSha256,
                 String directState, String gmsCoreState, String optionalState,
                 String alertState, String reason) {
+            this(profile, sha256, versionName, versionCode, signerSha256, directState,
+                    gmsCoreState, optionalState, alertState, reason,
+                    NavigatorPatchStore.NOT_CHECKED, "", "");
+        }
+
+        ScanResult(NavigatorPatchStore.Profile profile, String sha256,
+                String versionName, long versionCode, String signerSha256,
+                String directState, String gmsCoreState, String optionalState,
+                String alertState, String reason, String mapState, String mapReason,
+                String mapRevision) {
             this.profile = profile;
             this.sha256 = sha256;
             this.versionName = versionName;
@@ -81,6 +98,9 @@ final class NavigatorPatchPipeline {
             this.optionalState = optionalState;
             this.alertState = alertState;
             this.reason = reason;
+            this.mapState = mapState;
+            this.mapReason = mapReason;
+            this.mapRevision = mapRevision;
         }
 
         ScanResult(NavigatorPatchStore.Profile profile, String sha256,
@@ -170,6 +190,106 @@ final class NavigatorPatchPipeline {
         return workerPrepare(context, profile, selectedSource, transaction, expected);
     }
 
+    static WorkerPatchResult workerPrepare(Context context, String profileId,
+            File selectedSource, File transaction, ScanResult expected, String operationId)
+            throws Exception {
+        REPORT_ID.set(operationId);
+        REPORT_STAGE.set("MATERIALIZE");
+        Exception failure = null;
+        try {
+            reportStage(context, "MATERIALIZE", "IN_PROGRESS", "");
+            WorkerPatchResult result = workerPrepare(context, profileId, selectedSource,
+                    transaction, expected);
+            reportScan(context, operationId, "OUTPUT_VERIFIED", result.output);
+            return result;
+        } catch (Exception error) {
+            failure = error;
+            // Cancellation interrupts the worker; still retain its last reached stage.
+            boolean interrupted = Thread.interrupted();
+            try {
+                reportStage(context, REPORT_STAGE.get(),
+                        error instanceof OperationCancelledException || interrupted
+                                ? "CANCELLED" : "FAILED", clean(error.getMessage()));
+            } catch (Exception reportError) {
+                error.addSuppressed(reportError);
+            } finally {
+                if (interrupted) Thread.currentThread().interrupt();
+            }
+            throw error;
+        } finally {
+            boolean interrupted = Thread.interrupted();
+            try {
+                importComponentReports(context, operationId, transaction);
+            } catch (Exception reportError) {
+                if (failure != null) failure.addSuppressed(reportError);
+                else throw reportError;
+            } finally {
+                REPORT_ID.remove();
+                REPORT_STAGE.remove();
+                if (interrupted) Thread.currentThread().interrupt();
+            }
+        }
+    }
+
+    static JSONObject reportMetadata(Context context, NavigatorPatchStore.Profile profile)
+            throws IOException {
+        try {
+            return new JSONObject().put("hudVersion", BuildConfig.VERSION_NAME)
+                    .put("hudVersionCode", BuildConfig.VERSION_CODE)
+                    .put("patcherRevision", "navigator-map-v1")
+                    .put("packageName", profile.packageName)
+                    .put("source", NavigatorPatchStore.selectedUri(context, profile).isEmpty()
+                            ? "installed" : "selected_file");
+        } catch (org.json.JSONException error) {
+            throw new IOException(error);
+        }
+    }
+
+    static void reportScan(Context context, String id, String stage, ScanResult result)
+            throws IOException {
+        if (id == null || id.isEmpty()) return;
+        try {
+            JSONObject identity = new JSONObject().put("packageName", result.profile.packageName)
+                    .put("sha256", result.sha256).put("versionName", result.versionName)
+                    .put("versionCode", result.versionCode).put("signerSha256", result.signerSha256)
+                    .put("mapRevision", result.mapRevision);
+            NavigatorPatchReportStore.recordStage(context, id, stage, "SUCCESS", result.reason,
+                    new JSONObject().put("output", identity));
+            String[] names = result.profile == NavigatorPatchStore.Profile.WAZE
+                    ? new String[]{"direct", "lanes", "stable_session", "alerts", "map"}
+                    : new String[]{"direct", "gms_core", "audio", "pip", "map"};
+            String[] states = {result.directState, result.gmsCoreState, result.optionalState,
+                    result.alertState, result.mapState};
+            for (int i = 0; i < names.length; i++) {
+                NavigatorPatchReportStore.recordComponent(context, id, names[i], states[i],
+                        stage, states[i], i == 4 ? result.mapReason : result.reason, identity);
+            }
+        } catch (org.json.JSONException error) {
+            throw new IOException(error);
+        }
+    }
+
+    private static void reportStage(Context context, String stage, String outcome, String reason)
+            throws IOException {
+        String id = REPORT_ID.get();
+        if (id == null || id.isEmpty()) return;
+        REPORT_STAGE.set(stage);
+        NavigatorPatchReportStore.recordStage(context, id, stage, outcome, reason, null);
+    }
+
+    private static void importComponentReports(Context context, String id, File transaction)
+            throws Exception {
+        if (id == null || id.isEmpty() || transaction == null) return;
+        File[] reports = transaction.listFiles((dir, name) -> name.endsWith("-report.json"));
+        if (reports == null) return;
+        java.util.Arrays.sort(reports);
+        for (File file : reports) {
+            JSONObject report = new JSONObject(new String(Files.readAllBytes(file.toPath()), java.nio.charset.StandardCharsets.UTF_8));
+            NavigatorPatchReportStore.recordStage(context, id, "ENGINE_REPORT", "SUCCESS",
+                    file.getName(), report);
+        }
+    }
+
     static ScanResult workerInspectDirectory(Context context, String profileId,
             File directory) throws Exception {
         NavigatorPatchStore.Profile profile = profileFromId(profileId);
@@ -189,6 +309,9 @@ final class NavigatorPatchPipeline {
         data.putString("optional", result.optionalState);
         data.putString("alert", result.alertState);
         data.putString("reason", result.reason);
+        data.putString("map", result.mapState);
+        data.putString("map_reason", result.mapReason);
+        data.putString("map_revision", result.mapRevision);
         return data;
     }
 
@@ -203,7 +326,9 @@ final class NavigatorPatchPipeline {
                 data.getString("gms_core", NavigatorPatchStore.NOT_CHECKED),
                 data.getString("optional", NavigatorPatchStore.NOT_CHECKED),
                 data.getString("alert", NavigatorPatchStore.NOT_CHECKED),
-                data.getString("reason", ""));
+                data.getString("reason", ""),
+                data.getString("map", NavigatorPatchStore.NOT_CHECKED),
+                data.getString("map_reason", ""), data.getString("map_revision", ""));
     }
 
     /**
@@ -258,7 +383,8 @@ final class NavigatorPatchPipeline {
                 ? prefs.getString(profile.id + "_selected_signer", "")
                 : NavigatorSigningKey.installedCertificateSha256(context, profile.packageName),
                 snapshot.directState, snapshot.gmsCoreState, snapshot.optionalState,
-                snapshot.alertState, snapshot.reason);
+                snapshot.alertState, snapshot.reason, snapshot.mapState, snapshot.mapReason,
+                prefs.getString(profile.id + "_scan_map_revision", ""));
     }
 
     static ScanResult scanViaWorker(Context context, NavigatorPatchStore.Profile profile)
@@ -280,6 +406,7 @@ final class NavigatorPatchPipeline {
             ScanResult result = NavigatorPatchWorkerClient.scan(
                     context, profile, operation, source, output);
             checkCancelled(context, profile);
+            reportScan(context, operation, "CHECK_COMPLETE", result);
             if (!NavigatorPatchStore.completeScanUnlessCancelled(
                     context, result, NavigatorPatchStore.VERIFIED,
                     "Compatibility check completed")) {
@@ -340,10 +467,13 @@ final class NavigatorPatchPipeline {
             checkCancelled(context, profile);
             boolean destructive = initialInstalled != null
                     && !NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName);
+            reportScan(context, operation, "PREPARED", result.output);
+            NavigatorPatchReportStore.requirePrepared(context, operation);
             if (!NavigatorPatchStore.setTransaction(context, profile, transaction, destructive,
                     result.output, initialUpdateTime, initialVersionCode, initialSigner,
                     initialFingerprint,
-                    destructive ? "Replacement requires data removal" : "Ready to install")) {
+                    preparedDetail(result.output,
+                            destructive ? "Replacement requires data removal" : "Ready to install"))) {
                 throw new OperationCancelledException();
             }
             transaction = null;
@@ -406,22 +536,35 @@ final class NavigatorPatchPipeline {
         checkWorkerInterrupted();
         ensureWorkingSpace(context, sourceSet);
         ScanResult input = inspectComponents(context, sourceSet, metadata(sourceSet, profile));
+        reportScan(context, REPORT_ID.get(), "INPUT_INSPECTED", input);
+        String inputReportId = REPORT_ID.get();
+        if (inputReportId != null && !inputReportId.isEmpty()) {
+            JSONObject memberIdentity = new JSONObject(new String(Files.readAllBytes(
+                    new File(source, "manifest.json").toPath()), java.nio.charset.StandardCharsets.UTF_8));
+            NavigatorPatchReportStore.recordStage(context, inputReportId, "INPUT_SET",
+                    "SUCCESS", "Validated APK-set members", memberIdentity);
+        }
         if (expected != null && !expected.sha256.equals(input.sha256)) {
             throw new IOException("APK changed after compatibility check");
         }
         if (!NavigatorPatchStore.isPatchEnabled(profile, input.directState, input.gmsCoreState,
-                input.optionalState, input.alertState)) {
+                input.optionalState, input.alertState, input.mapState)) {
             throw new IOException("No compatible patch is available: " + input.reason);
         }
         checkWorkerInterrupted();
         PatchOutcome outcome = buildUnsignedSet(
                 context, profile, sourceSet, patched, transaction, input, false);
         checkWorkerInterrupted();
+        reportStage(context, "SIGN_BASELINE", "IN_PROGRESS", "");
         signSet(patched);
         checkWorkerInterrupted();
         NavigatorApkSet.SetInfo outputSet = NavigatorApkSet.readDirectory(context, profile, patched);
         ScanResult output = inspectComponents(context, outputSet, metadata(outputSet, profile));
         validateWorkerOutput(profile, input, output, outcome);
+        reportScan(context, REPORT_ID.get(), "BASELINE_VERIFIED", output);
+        boolean mapAttempted = NavigatorPatchStore.PATCHABLE.equals(output.mapState)
+                && NavigatorPatchStore.PATCHED.equals(output.directState);
+        output = applyOptionalMap(context, profile, patched, transaction, output);
         if (outcome.optionalFailed) {
             output = copyStates(output, output.directState, output.gmsCoreState,
                     NavigatorPatchStore.FAILED, output.alertState,
@@ -445,10 +588,96 @@ final class NavigatorPatchPipeline {
                 && NavigatorPatchStore.PATCHED.equals(output.alertState));
         boolean directApplied = NavigatorPatchStore.PATCHABLE.equals(input.directState)
                 && NavigatorPatchStore.PATCHED.equals(output.directState);
-        if (!directApplied && !optionalApplied) {
+        optionalApplied |= mapAttempted && NavigatorPatchStore.PATCHED.equals(output.mapState);
+        if (!directApplied && !optionalApplied && !mapAttempted) {
             throw new IOException("No patch component was applied");
         }
         return new WorkerPatchResult(input, output, transaction, optionalApplied);
+    }
+
+    /** The signed baseline is retained until the complete optional stage verifies. */
+    private static ScanResult applyOptionalMap(Context context,
+            NavigatorPatchStore.Profile profile, File patched, File transaction,
+            ScanResult baseline) throws Exception {
+        if (!NavigatorPatchStore.PATCHABLE.equals(baseline.mapState)) return baseline;
+        if (!NavigatorPatchStore.PATCHED.equals(baseline.directState)) {
+            return withMap(baseline, NavigatorPatchStore.UNSUPPORTED,
+                    "Map capture requires a verified Direct channel", baseline.mapRevision);
+        }
+        File candidate = new File(transaction, "map-candidate-set");
+        File retained = new File(transaction, "map-baseline-set");
+        boolean accepted = false;
+        try {
+            checkWorkerInterrupted();
+            reportStage(context, "MAP", "IN_PROGRESS", baseline.mapRevision);
+            File payload = new File(transaction, "map-capture-payload.dex");
+            PatchPayloadDex.extract(context, "Lcom/bydhud/mapcapture/", payload);
+            NavigatorMapPatcher.Inspection patchedMap = NavigatorMapPatcher.patch(
+                    NavigatorApkSet.memberFiles(patched), new File(candidate, "members"),
+                    payload, profile.id, baseline.versionName);
+            if (!NavigatorPatchStore.PATCHED.equals(patchedMap.state)) {
+                throw new IOException(patchedMap.reason);
+            }
+            checkWorkerInterrupted();
+            signSet(candidate);
+            NavigatorApkSet.SetInfo set = NavigatorApkSet.readDirectory(context, profile, candidate);
+            ScanResult output = inspectComponents(context, set, metadata(set, profile));
+            if (!NavigatorPatchStore.PATCHED.equals(output.mapState)
+                    || !navigationComponentsUnchanged(baseline, output)
+                    || !baseline.versionName.equals(output.versionName)
+                    || baseline.versionCode != output.versionCode
+                    || !baseline.signerSha256.equals(output.signerSha256)) {
+                throw new IOException("Map stage verification failed or changed navigation components");
+            }
+            checkWorkerInterrupted();
+            acceptMapCandidate(patched, candidate, retained);
+            accepted = true;
+            deleteTree(retained);
+            reportStage(context, "MAP", "SUCCESS", output.mapRevision);
+            return output;
+        } catch (OperationCancelledException cancelled) {
+            throw cancelled;
+        } catch (Exception | OutOfMemoryError error) {
+            if (Thread.currentThread().isInterrupted()) throw new OperationCancelledException();
+            if (accepted || !patched.isDirectory()) throw error;
+            reportStage(context, "MAP", "OPTIONAL_FAILED", clean(error.getMessage()));
+            AppEventLogger.event(context, "navigator_patch stage=map profile=" + profile.id
+                    + " code=MAP_PATCH_FAILED detail=" + clean(error.getMessage()));
+            return withMap(baseline, NavigatorPatchStore.FAILED,
+                    clean(error.getMessage()), baseline.mapRevision);
+        } finally {
+            deleteTree(candidate);
+        }
+    }
+
+    static void acceptMapCandidate(File baseline, File candidate, File retained) throws IOException {
+        if (!baseline.renameTo(retained)) throw new IOException("Cannot retain map baseline");
+        if (!candidate.renameTo(baseline)) {
+            if (!retained.renameTo(baseline)) {
+                throw new IOException("Cannot restore verified map baseline");
+            }
+            throw new IOException("Cannot accept verified map stage");
+        }
+    }
+
+    static boolean navigationComponentsUnchanged(ScanResult before, ScanResult after) {
+        return before.directState.equals(after.directState)
+                && before.gmsCoreState.equals(after.gmsCoreState)
+                && before.optionalState.equals(after.optionalState)
+                && before.alertState.equals(after.alertState);
+    }
+
+    static ScanResult withMap(ScanResult source, String state, String reason, String revision) {
+        return new ScanResult(source.profile, source.sha256, source.versionName,
+                source.versionCode, source.signerSha256, source.directState, source.gmsCoreState,
+                source.optionalState, source.alertState, source.reason, state, reason, revision);
+    }
+
+    static String preparedDetail(ScanResult output, String otherwise) {
+        return NavigatorPatchStore.PATCHED.equals(output.directState)
+                && !NavigatorPatchStore.PATCHED.equals(output.mapState)
+                && !NavigatorPatchStore.NOT_CHECKED.equals(output.mapState)
+                ? "PARTIAL_MAP: " + output.mapReason : otherwise;
     }
 
     private static void checkWorkerInterrupted() throws OperationCancelledException {
@@ -564,6 +793,15 @@ final class NavigatorPatchPipeline {
                 throw new IOException("Queued APK-set no longer matches verified output");
             }
             checkCancelled(context, profile);
+            String reportId = NavigatorPatchStore.reportId(context, profile);
+            if (!NavigatorPatchReportStore.requirePrepared(context, reportId).equalsIgnoreCase(output.sha256)) {
+                throw new IOException("Prepared report does not match queued APK-set");
+            }
+            if (NavigatorPatchStore.FAILED.equals(NavigatorPatchStore.expectedMap(context, profile))) {
+                output = withMap(output, NavigatorPatchStore.FAILED,
+                        NavigatorPatchStore.expectedMapReason(context, profile),
+                        NavigatorPatchStore.expectedMapRevision(context, profile));
+            }
             boolean optionalApplied = NavigatorPatchStore.PATCHED.equals(output.directState)
                     || NavigatorPatchStore.PATCHED.equals(output.gmsCoreState)
                     || NavigatorPatchStore.PATCHED.equals(output.optionalState)
@@ -730,6 +968,25 @@ final class NavigatorPatchPipeline {
     }
 
     private static ScanResult inspectComponents(Context context,
+            NavigatorApkSet.SetInfo set, ScanResult metadata) throws Exception {
+        ScanResult navigation = inspectNavigationComponents(context, set, metadata);
+        checkWorkerInterrupted();
+        List<File> members = new ArrayList<>();
+        for (NavigatorApkSet.Member member : set.members) members.add(member.file);
+        try {
+            NavigatorMapPatcher.Inspection map = NavigatorMapPatcher.inspect(
+                    members, metadata.profile.id, metadata.versionName);
+            checkWorkerInterrupted();
+            return withMap(navigation, map.state, map.reason, map.revision);
+        } catch (IOException | OutOfMemoryError error) {
+            checkWorkerInterrupted();
+            return withMap(navigation, error instanceof OutOfMemoryError
+                            ? NavigatorPatchStore.FAILED : NavigatorPatchStore.UNSUPPORTED,
+                    "Map inspection: " + clean(error.getMessage()), "");
+        }
+    }
+
+    private static ScanResult inspectNavigationComponents(Context context,
         NavigatorApkSet.SetInfo set, ScanResult metadata) throws Exception {
         boolean hudVisible = HudPackageVisibilityPatcher.hasQuery(
                 readManifest(baseMember(set).file));
@@ -886,6 +1143,7 @@ final class NavigatorPatchPipeline {
         PatchOutcome outcome = profile == NavigatorPatchStore.Profile.WAZE
                 ? patchWazeSet(context, sourceSet, outputDirectory, transaction, input, reportProgress)
                 : patchGmapsSet(context, sourceSet, outputDirectory, transaction, input, reportProgress);
+        reportStage(context, "HUD_PACKAGE_QUERY", "IN_PROGRESS", "");
         File base = outputMember(outputDirectory, baseMember(sourceSet).installName);
         byte[] manifest = readManifest(base);
         byte[] patched = HudPackageVisibilityPatcher.patch(manifest);
@@ -900,6 +1158,7 @@ final class NavigatorPatchPipeline {
         if (!HudPackageVisibilityPatcher.hasQuery(readManifest(base))) {
             throw new IOException("Output APK is missing the HUD package query");
         }
+        reportStage(context, "HUD_PACKAGE_QUERY", "SUCCESS", "com.bydhud.app query present");
         AppEventLogger.event(context, "navigator_patch stage=package_visibility profile="
                 + profile.id + " hudQuery=present changed=" + (patched != manifest));
         return outcome;
@@ -982,6 +1241,7 @@ final class NavigatorPatchPipeline {
             File report = new File(transaction, "gmaps-direct-report.json");
             PatchPayloadDex.extract(
                     context, "Lcom/bydhud/gmapsdiag/NavInfoLogger", loggerDex);
+            reportStage(context, "DIRECT", "IN_PROGRESS", "");
             GmapsDiagnosticPatcher.patchDirect(directMember, rewritten, loggerDex, report);
             replaceFile(rewritten, directMember);
         }
@@ -997,12 +1257,14 @@ final class NavigatorPatchPipeline {
                     if (reportProgress) NavigatorPatchStore.transition(context,
                             NavigatorPatchStore.Profile.GMAPS,
                             NavigatorPatchStore.PATCHING, "Patching GmsCore");
+                    reportStage(context, "GMS_CORE", "IN_PROGRESS", "");
                     GmapsDiagnosticPatcher.patchGmsCore(
                             gmsCoreMember, gmsCore,
                             new File(transaction, "gmaps-gms-core-report.json"));
                     replaceFile(gmsCore, gmsCoreMember);
                     GmapsDiagnosticPatcher.verifyGmsCore(gmsCoreMember);
                 } catch (Exception gmsCoreError) {
+                    reportStage(context, "GMS_CORE", "OPTIONAL_FAILED", clean(gmsCoreError.getMessage()));
                     AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
                             + " stage=gms_core code=GMS_CORE_PATCH_FAILED detail="
                             + clean(gmsCoreError.getMessage()));
@@ -1021,10 +1283,12 @@ final class NavigatorPatchPipeline {
                     if (reportProgress) NavigatorPatchStore.transition(context,
                             NavigatorPatchStore.Profile.GMAPS,
                             NavigatorPatchStore.PATCHING, "Patching audio channel");
+                    reportStage(context, "AUDIO", "IN_PROGRESS", "");
                     GmapsDiagnosticPatcher.patchNavigationAudio(
                             audioMember, optional, new File(transaction, "gmaps-audio-report.json"));
                     replaceFile(optional, audioMember);
                 } catch (Exception optionalError) {
+                    reportStage(context, "AUDIO", "OPTIONAL_FAILED", clean(optionalError.getMessage()));
                     AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
                             + " stage=optional code=OPTIONAL_PATCH_FAILED detail="
                             + clean(optionalError.getMessage()));
@@ -1043,11 +1307,13 @@ final class NavigatorPatchPipeline {
                     if (reportProgress) NavigatorPatchStore.transition(context,
                             NavigatorPatchStore.Profile.GMAPS,
                             NavigatorPatchStore.PATCHING, "Patching PiP");
+                    reportStage(context, "PIP", "IN_PROGRESS", "");
                     GmapsDiagnosticPatcher.patchPictureInPicture(
                             pipMember, pip, new File(transaction, "gmaps-pip-report.json"),
                             validatedProfile);
                     replaceFile(pip, pipMember);
                 } catch (Exception pipError) {
+                    reportStage(context, "PIP", "OPTIONAL_FAILED", clean(pipError.getMessage()));
                     AppEventLogger.event(context, "navigator_patch operation=patch profile=gmaps"
                             + " stage=pip code=PIP_PATCH_FAILED detail="
                             + clean(pipError.getMessage()));
@@ -1097,6 +1363,7 @@ final class NavigatorPatchPipeline {
                 && WazePatchEngine.PATCHABLE_STOCK.equals(allowlist.allowlistClassification)) {
             File target = outputMember(outputDirectory, allowlist.fileName);
             File rewrittenDex = new File(transaction, "waze-direct.dex");
+            reportStage(context, "DIRECT", "IN_PROGRESS", "");
             WazePatchEngine.patchWazeAllowlist(
                     readEntry(target, allowlist.allowlistDex), rewrittenDex);
             File rewrittenApk = new File(transaction, "waze-direct-unsigned.apk");
@@ -1114,6 +1381,7 @@ final class NavigatorPatchPipeline {
             }
             File target = outputMember(outputDirectory, lanes.fileName);
             File rewrittenDex = new File(transaction, "waze-lanes.dex");
+            reportStage(context, "LANES", "IN_PROGRESS", "");
             WazePatchEngine.patchLanes(readEntry(target, lanes.laneDex), rewrittenDex);
             File rewrittenApk = new File(transaction, "waze-lanes-unsigned.apk");
             Map<String, File> replacements = new HashMap<>();
@@ -1149,6 +1417,7 @@ final class NavigatorPatchPipeline {
                 File rewritten = new File(transaction,
                         "lifecycle-" + lifecycleOwner.fileName + "-"
                                 + dexEntry.replace('/', '_'));
+                reportStage(context, "STABLE_SESSION", "IN_PROGRESS", "");
                 WazePatchEngine.patchLifecycle(readEntry(target, dexEntry), rewritten);
                 replacements.put(dexEntry, rewritten);
             }
@@ -1190,6 +1459,7 @@ final class NavigatorPatchPipeline {
                 throw new IOException("Waze alert-hook stock target missing");
             }
             File rewritten = new File(transaction, "waze-alert-hook.dex");
+            reportStage(context, "ALERTS", "IN_PROGRESS", "");
             WazePatchEngine.patchAlertHook(inputDex, rewritten);
             Map<String, File> replacements = new HashMap<>();
             replacements.put(dexEntry, rewritten);
@@ -1269,7 +1539,8 @@ final class NavigatorPatchPipeline {
     private static ScanResult copyStates(ScanResult source, String direct,
             String gmsCore, String optional, String alert, String reason) {
         return new ScanResult(source.profile, source.sha256, source.versionName,
-                source.versionCode, source.signerSha256, direct, gmsCore, optional, alert, reason);
+                source.versionCode, source.signerSha256, direct, gmsCore, optional, alert, reason,
+                source.mapState, source.mapReason, source.mapRevision);
     }
 
     private static WazeApkInspection inspectWaze(File apk) throws IOException {

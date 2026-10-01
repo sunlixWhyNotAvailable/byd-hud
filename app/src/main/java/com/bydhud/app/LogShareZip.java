@@ -19,6 +19,7 @@ import java.util.Collections;
 import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -116,13 +117,20 @@ final class LogShareZip {
             locked = NavigationLogStorage.tryLockTopologyWrite(WRITER_CHECKPOINT_TIMEOUT_MS);
             if (!locked) return new SelectionSummary(true, days.size(), 1, 0L,
                     "storage busy; diagnostic status only");
-            List<SnapshotFile> files = snapshotFiles(context.getApplicationContext(), days);
+            NavigatorPatchReportStore.CachedSummary reports =
+                    NavigatorPatchReportStore.cachedSummary();
+            List<SnapshotFile> files = snapshotFiles(
+                    context.getApplicationContext(), days, reports.days);
             long bytes = 0L;
             for (SnapshotFile file : files) {
                 bytes += file.length;
             }
-            return new SelectionSummary(!files.isEmpty(), days.size(), files.size(), bytes,
-                    files.isEmpty() ? "no readable files" : "ready");
+            bytes += reports.reportBytes;
+            int count = files.size() + 1;
+            boolean ready = !files.isEmpty() || reports.reportCount > 0;
+            String detail = !ready ? "no readable files or patch reports"
+                    : "ready; navigator patch report history will be included";
+            return new SelectionSummary(ready, days.size(), count, bytes, detail);
         } catch (IOException | RuntimeException error) {
             return new SelectionSummary(false, days.size(), 0, 0L, error.getMessage());
         } catch (InterruptedException error) {
@@ -170,6 +178,7 @@ final class LogShareZip {
 
         boolean writeHeld = false;
         try {
+            JSONObject reportSnapshot = NavigatorPatchReportStore.exportSnapshot(app);
             phase(Phase.WAITING_FOR_WRITES, WazeCaptureDebugWriter.get().pendingTasks());
             long waitStarted = System.currentTimeMillis();
             boolean checkpoint = WazeCaptureDebugWriter.get()
@@ -190,12 +199,15 @@ final class LogShareZip {
             List<SnapshotFile> snapshot = new ArrayList<>();
             if (writeHeld) {
                 List<SnapshotFile> sources = snapshotFiles(app, days);
-                if (sources.isEmpty()) throw new IOException("no readable files");
+                if (sources.isEmpty() && reportSnapshot.optInt("reportCount") == 0) {
+                    throw new IOException("no readable files or patch reports");
+                }
                 snapshot = copySnapshotToStaging(staging, sources);
                 NavigationLogStorage.unlockTopologyWrite();
                 writeHeld = false;
             }
-            boolean incomplete = addWriterStatus(staging, snapshot, days, checkpoint, storageReady);
+            boolean incomplete = addWriterStatus(staging, snapshot, days,
+                    checkpoint, storageReady, reportSnapshot);
             Log.i(TAG, "share_phase phase=COPYING duration_ms="
                     + (System.currentTimeMillis() - copyStarted)
                     + " files=" + snapshot.size()
@@ -203,7 +215,8 @@ final class LogShareZip {
 
             phase(Phase.ARCHIVING, WazeCaptureDebugWriter.get().pendingTasks());
             long archiveStarted = System.currentTimeMillis();
-            writeZip(part, snapshot);
+            NavigatorPatchReportStore.ExportResult reportStatus = writeZip(
+                    part, snapshot, app, reportSnapshot);
             checkCancelled();
             if (!part.renameTo(output)) {
                 throw new IOException("final rename failed");
@@ -213,8 +226,11 @@ final class LogShareZip {
                     + " bytes=" + output.length()
                     + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
             return new Result(true, output,
-                    "files=" + snapshot.size() + " bytes=" + output.length()
-                            + " recording=" + (incomplete ? "INCOMPLETE" : "snapshot_ready"));
+                    "files=" + (snapshot.size() + 1 + (reportStatus.incomplete ? 1 : 0))
+                            + " bytes=" + output.length()
+                            + " reports=" + reportStatus.reportCount
+                            + " recording=" + (incomplete || reportStatus.incomplete
+                                    ? "INCOMPLETE" : "snapshot_ready"));
         } catch (IOException | RuntimeException | InterruptedException e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             deleteArtifact(part);
@@ -229,12 +245,18 @@ final class LogShareZip {
     }
 
     private static boolean addWriterStatus(File staging, List<SnapshotFile> files,
-            List<String> days, boolean checkpoint, boolean storageReady) throws IOException {
+            List<String> days, boolean checkpoint, boolean storageReady,
+            JSONObject reportSnapshot) throws IOException {
         try {
             JSONObject health = WazeCaptureDebugWriter.healthSnapshot();
-            boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved");
+            boolean reportsIncomplete = reportSnapshot.optBoolean("incompleteReports");
+            boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved")
+                    || reportsIncomplete;
             health.put("selectedDays", new org.json.JSONArray(days))
                     .put("writerCheckpointReady", checkpoint).put("storageSnapshotReady", storageReady)
+                    .put("navigatorPatchReportCount", reportSnapshot.optInt("reportCount"))
+                    .put("navigatorPatchReportsIncluded", true)
+                    .put("navigatorPatchReportsIncomplete", reportsIncomplete)
                     .put("recordingStatus", incomplete ? "INCOMPLETE" : "snapshot_ready")
                     .put("note", "Writer counters cover this process only; this is not a guarantee of historical coverage.");
             addStatusFile(staging, files, "recording-status.json", health.toString(2));
@@ -243,6 +265,7 @@ final class LogShareZip {
                     + "writerCheckpointReady=" + checkpoint + "\n"
                     + "storageSnapshotReady=" + storageReady + "\n"
                     + "lossObservedInCurrentProcess=" + health.getBoolean("lossObserved") + "\n"
+                    + "navigatorPatchReportsIncomplete=" + reportsIncomplete + "\n"
                     + (storageReady ? "Available files were copied.\n" : "Storage lock timed out; diagnostic status only, no log files copied.\n")
                     + "See recording-status.json for writer progress, pending work and errors.\n");
             return incomplete;
@@ -326,6 +349,11 @@ final class LogShareZip {
 
     private static List<SnapshotFile> snapshotFiles(Context context, List<String> days)
             throws IOException {
+        return snapshotFiles(context, days, NavigatorPatchReportStore.reportDays(context));
+    }
+
+    private static List<SnapshotFile> snapshotFiles(Context context, List<String> days,
+            Map<String, Long> reportDays) throws IOException {
         List<NavigationLogStorage.StorageRoot> roots =
                 NavigationLogStorage.accessibleRoots(context);
         rejectDuplicateRoots(roots);
@@ -346,6 +374,7 @@ final class LogShareZip {
                 fragments.add(root);
             }
             if (fragments.isEmpty()) {
+                if (reportDays.containsKey(day)) continue;
                 throw new IOException("selected day missing: " + day);
             }
             boolean split = fragments.size() > 1;
@@ -485,7 +514,9 @@ final class LogShareZip {
         }
     }
 
-    private static void writeZip(File part, List<SnapshotFile> files) throws IOException {
+    private static NavigatorPatchReportStore.ExportResult writeZip(
+            File part, List<SnapshotFile> files, Context context, JSONObject reportSnapshot)
+            throws IOException {
         byte[] buffer = new byte[BUFFER_BYTES];
         try (FileOutputStream fileOut = new FileOutputStream(part, false);
              ZipOutputStream zip = new ZipOutputStream(fileOut)) {
@@ -509,6 +540,7 @@ final class LogShareZip {
                 }
                 zip.closeEntry();
             }
+            return NavigatorPatchReportStore.writeReports(context, zip, reportSnapshot);
         }
     }
 

@@ -237,7 +237,7 @@ final class NavigatorAssetManager {
                 1030706L,
                 "com.waze",
                 NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER,
-                "CC2AFCB94C3D5CAE39FCFC3021D0CC2DDE82D3C6F97E968E2CA978659D582114",
+                "B29E876C5F1CD7A15BD50CEEC536D15BF81F9B61CE9D2B5BB8BAE20DCC9F81EE",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v2/waze-5.20.0.1-direct-v2.apk",
                 "waze-5.20.0.1-direct-v2.apk",
@@ -251,7 +251,7 @@ final class NavigatorAssetManager {
                 1068694917L,
                 "app.revanced.android.apps.maps",
                 NavigatorAssetSignerCatalog.GMAPS_PROJECT_SIGNER,
-                "D2E9BFD812C1BE92F2A29E75DB746CE5FB966D4B3897C01CE2F8C71F644F4BFA",
+                "D33640F9AB4F72BD226F2DA824596437A274E2951D792E320C91BAA5EFE28B3A",
                 "https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
                         + "navigator-assets-v2/google-maps-revanced-26.30.09.950492155-direct-v2.apk",
                 "google-maps-revanced-26.30.09.950492155-direct-v2.apk",
@@ -417,10 +417,20 @@ final class NavigatorAssetManager {
         Asset asset = requireOffered(assetId);
         File file = requireValidDownload(context, asset);
         PackageInfo installed = installedInfo(context, asset.packageName);
-        if (installed == null || matchesInstalled(context, asset)) return false;
+        if (installed == null) return false;
+        boolean exactMatch = matchesInstalled(context, asset);
+        if (exactMatch) return false;
         String signer = installedSigner(context, asset.packageName);
-        return !asset.signerSha256.equals(signer)
-                || installed.getLongVersionCode() > asset.versionCode;
+        return requiresDestructiveConfirmationForIdentity(
+                true, exactMatch, asset.signerSha256.equals(signer),
+                installed.getLongVersionCode(), asset.versionCode);
+    }
+
+    static boolean requiresDestructiveConfirmationForIdentity(boolean installed,
+            boolean exactMatch, boolean signerMatches, long installedVersionCode,
+            long targetVersionCode) {
+        return installed && !exactMatch
+                && (!signerMatches || installedVersionCode > targetVersionCode);
     }
 
     static void install(Context context, String assetId, boolean destructiveApproved)

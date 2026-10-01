@@ -39,8 +39,9 @@ public final class ShareShutdownSourceContractTest {
         assertTrue(create.contains("awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS)"));
         assertTrue(create.contains("copySnapshotToStaging"));
         assertFalse(create.contains("lockTopologyRead"));
-        assertTrue(create.indexOf("unlockTopologyWrite")
-                < create.indexOf("writeZip(part, snapshot)"));
+        int archive = create.indexOf("= writeZip(");
+        assertTrue(archive >= 0);
+        assertTrue(create.indexOf("unlockTopologyWrite") < archive);
         assertTrue(create.contains("deleteTree(staging)"));
         assertTrue(source.contains("checkCancelled();"));
     }

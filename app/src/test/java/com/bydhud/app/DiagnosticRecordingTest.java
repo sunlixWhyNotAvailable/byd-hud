@@ -108,7 +108,8 @@ public final class DiagnosticRecordingTest {
             assertTrue("summary and export bounded", System.nanoTime() - started < TimeUnit.SECONDS.toNanos(7));
             try (ZipFile zip = new ZipFile(result.file)) {
                 assertFalse(status(zip).getBoolean("storageSnapshotReady"));
-                assertEquals(2, zip.size());
+                assertEquals(3, zip.size());
+                assertNotNull(zip.getEntry("navigator-patch-reports.json"));
                 assertNotNull(zip.getEntry("INCOMPLETE-RECORDING.txt"));
             }
         } finally { release.countDown(); reader.join(2000); }

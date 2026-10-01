@@ -40,8 +40,9 @@ public final class WazeLanePatchStateContractTest {
                 "NavigatorPatchStore.PATCHABLE.equals(input.gmsCoreState)"));
         assertTrue(pipeline.contains("Waze lanes post-verification failed"));
         assertTrue(store.contains("Waze\", \"Lanes\", \"Stable session"));
-        assertTrue(store.contains("SCAN_CACHE_REVISION = 11"));
+        assertTrue(store.contains("SCAN_CACHE_REVISION = 12"));
         assertTrue(compose.contains("language.choose(\"Смуги\", \"Lanes\", \"Полосы\")"));
+        assertTrue(compose.contains("add(copy.patchMap to row.mapState)"));
     }
 
     private static String source(String fileName) throws IOException {

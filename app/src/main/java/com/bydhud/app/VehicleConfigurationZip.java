@@ -1305,6 +1305,18 @@ final class VehicleConfigurationZip {
                     progress.changed("COPYING", "", copied, total, copiedFiles, count,
                             collector.unavailableFileCount());
                 }
+                NavigatorPatchReportStore.ExportResult patchReports =
+                        NavigatorPatchReportStore.writeReports(collector.context, zip);
+                JSONObject patchReportStatus = new JSONObject();
+                patchReportStatus.put("entry", "navigator-patch-reports.json")
+                        .put("reportCount", patchReports.reportCount)
+                        .put("status", !patchReports.error.isEmpty() ? "ERROR"
+                                : patchReports.incomplete ? "INCOMPLETE" : "COMPLETE")
+                        .put("bytes", patchReports.bytes);
+                if (!patchReports.error.isEmpty()) {
+                    patchReportStatus.put("error", patchReports.error);
+                }
+                manifest.put("navigatorPatchReports", patchReportStatus);
                 manifest.put("schemaVersion", 3);
                 JSONObject policy = manifest.getJSONObject("policy");
                 policy.put("apksIncluded", containsCategory(rawEntries, "apk"));
@@ -1315,7 +1327,8 @@ final class VehicleConfigurationZip {
                 policy.put("textConfigurationRedaction", "selected text files redacted; source size and modification time retained");
                 manifest.put("rawFiles", rawEntries);
                 manifest.put("unavailable", collector.unavailable);
-                manifest.put("status", collector.unavailable.length() == 0 ? "complete" : "partial");
+                manifest.put("status", collector.unavailable.length() == 0
+                        && !patchReports.incomplete ? "complete" : "partial");
                 manifest.put("inventoryFiles", count);
                 manifest.put("unavailableFiles", collector.unavailableFileCount());
                 manifest.put("inventorySourceBytes", total);
@@ -1557,6 +1570,18 @@ final class VehicleConfigurationZip {
 
     private static void checkCancelled() throws InterruptedIOException {
         if (Thread.currentThread().isInterrupted()) throw new InterruptedIOException("export cancelled");
+    }
+
+    /** Applies this archive's established sensitive-value and network-address redaction to reports. */
+    static JSONObject sanitizeJsonForExport(Context context, JSONObject value, String path)
+            throws IOException {
+        try (Collector collector = new Collector(context)) {
+            return (JSONObject) collector.sanitizeJson(value, path, "");
+        } catch (InterruptedIOException cancelled) {
+            throw cancelled;
+        } catch (Exception error) {
+            throw new IOException("navigator patch report privacy sanitization failed", error);
+        }
     }
 
     static List<String> filteredPaths(String output, boolean configs, int limit) {

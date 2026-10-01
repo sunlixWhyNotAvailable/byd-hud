@@ -52,6 +52,77 @@ public final class NavigatorPatchTransactionSourceContractTest {
         assertTrue("retry must issue its new token after cleanup", newToken > delete);
     }
 
+    @Test
+    public void installRequiresPreparedReportBeforeCreatingAnInstallSession() throws IOException {
+        String source = source("NavigatorPackageInstaller.java");
+        String begin = between(source,
+                "static void begin(Context context, NavigatorPatchPipeline.PreparedPatch prepared)",
+                "static void drainInstallQueue(Context context)");
+
+        int requirePrepared = begin.indexOf("NavigatorPatchReportStore.requirePrepared(context, reportId)");
+        int compareFingerprint = begin.indexOf("reportedSha.equalsIgnoreCase(prepared.output.sha256)");
+        int claim = begin.indexOf("NavigatorPatchStore.claimInstall(context, prepared.profile)");
+        int prepare = begin.indexOf("prepareSession(context, prepared.profile, patched)");
+        int uninstall = begin.indexOf("getPackageInstaller().uninstall(");
+
+        assertTrue("durable PREPARED report is required", requirePrepared >= 0);
+        assertTrue("prepared report fingerprint is checked", compareFingerprint > requirePrepared);
+        assertTrue("report check precedes install ownership", claim > compareFingerprint);
+        assertTrue("report check precedes session creation", prepare > compareFingerprint);
+        assertTrue("report check precedes package uninstall", uninstall > compareFingerprint);
+    }
+
+    @Test
+    public void installedAndRecoveryResultsAreReportedBeforeTransactionCleanup()
+            throws IOException {
+        String source = source("NavigatorPackageInstaller.java");
+        String installed = between(source,
+                "static void verifyInstalledAsync(Context context, NavigatorPatchStore.Profile profile)",
+                "static void verifyRestoredAsync(Context context, NavigatorPatchStore.Profile profile)");
+        String recovery = between(source,
+                "private static void completeRestore(Context context, NavigatorPatchStore.Profile profile,",
+                "private static boolean initialInstalledTargetUnchanged(Context context,");
+
+        int installedScan = installed.indexOf("reportScan(");
+        int installedFinish = installed.indexOf("NavigatorPatchReportStore.finish(");
+        int installedSuccess = installed.indexOf("NavigatorPatchStore.VERIFIED, detail");
+        int installedCleanup = installed.indexOf("clearTransactionMetadata(appContext, profile)");
+        int recoveryScan = recovery.indexOf("reportScan(");
+        int recoveryFinish = recovery.indexOf("NavigatorPatchReportStore.finish(");
+        int recoveryCleanup = recovery.indexOf("completeRestoreTransaction(context, profile, detail)");
+
+        assertTrue("installed result is saved before report completion",
+                installedScan >= 0 && installedFinish > installedScan);
+        assertTrue("installed report is complete before transaction cleanup",
+                installedCleanup > installedFinish);
+        assertTrue("success is published only after its durable report succeeds",
+                installedSuccess > installedFinish && installedCleanup > installedSuccess);
+        assertTrue("recovery result is saved before report completion",
+                recoveryScan >= 0 && recoveryFinish > recoveryScan);
+        assertTrue("recovery report is complete before transaction cleanup",
+                recoveryCleanup > recoveryFinish);
+    }
+
+    @Test
+    public void installedVerificationPreservesMapOutcomeAndReason() throws IOException {
+        String source = source("NavigatorPackageInstaller.java");
+        String verify = between(source,
+                "private static void verifyExpected(Context context, NavigatorPatchStore.Profile profile,",
+                "private static boolean sameArtifact(");
+        String mapCopy = between(source,
+                "private static NavigatorPatchPipeline.ScanResult withExpectedOptionalFailure(",
+                "private static boolean sameArtifact(");
+
+        assertTrue("verification compares the persisted map component", verify.contains("expectedMap")
+                && verify.contains("actual.mapState"));
+        assertTrue("map failure can match the inspectable patchable baseline",
+                verify.contains("NavigatorPatchStore.FAILED.equals(expectedMap)"));
+        assertTrue("map failure, reason, and revision survive visible-result reconstruction",
+                mapCopy.contains("expectedMapReason(context, profile)")
+                        && mapCopy.contains("expectedMapRevision(context, profile)")
+                        && mapCopy.contains("mapState, mapReason, mapRevision"));
+    }
+
     private static String source(String fileName) throws IOException {
         Path root = Paths.get(System.getProperty("user.dir"));
         Path file = root.resolve("app/src/main/java/com/bydhud/app/" + fileName);

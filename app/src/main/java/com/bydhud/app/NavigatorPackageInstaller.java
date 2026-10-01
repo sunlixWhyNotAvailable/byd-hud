@@ -41,6 +41,14 @@ final class NavigatorPackageInstaller {
 
     static void begin(Context context, NavigatorPatchPipeline.PreparedPatch prepared)
             throws Exception {
+        if (prepared == null || prepared.profile == null || prepared.output == null) {
+            throw new IOException("Prepared patch is missing");
+        }
+        String reportId = NavigatorPatchStore.reportId(context, prepared.profile);
+        String reportedSha = NavigatorPatchReportStore.requirePrepared(context, reportId);
+        if (!reportedSha.equalsIgnoreCase(prepared.output.sha256)) {
+            throw new IOException("Prepared report does not match verified output");
+        }
         if (!canInstall(context)) throw new IOException("APK install permission is not granted");
         if (!NavigatorPatchStore.claimInstall(context, prepared.profile)) {
             NavigatorPatchStore.transition(context, prepared.profile,
@@ -250,8 +258,19 @@ final class NavigatorPackageInstaller {
                         visibleResult.sha256, visibleResult.directState,
                         visibleResult.gmsCoreState,
                         visibleResult.optionalState, visibleResult.alertState);
+                String reportId = NavigatorPatchStore.reportId(appContext, profile);
+                String detail = NavigatorPatchPipeline.preparedDetail(
+                        visibleResult, "Installed and verified");
+                if (!reportId.isEmpty()) {
+                    NavigatorPatchPipeline.reportScan(
+                            appContext, reportId, "INSTALLED_VERIFY", visibleResult);
+                }
+                if (!reportId.isEmpty()) {
+                    NavigatorPatchReportStore.finish(
+                            appContext, reportId, "SUCCESS", detail);
+                }
                 NavigatorPatchStore.transition(
-                        appContext, profile, NavigatorPatchStore.VERIFIED, "Installed and verified");
+                        appContext, profile, NavigatorPatchStore.VERIFIED, detail);
                 NavigatorPatchStore.clearTransactionMetadata(appContext, profile);
                 NavigatorPatchStore.releaseInstall(appContext, profile);
                 NavigatorPatchPipeline.deleteTree(transaction);
@@ -597,6 +616,7 @@ final class NavigatorPackageInstaller {
         String expectedOptional = NavigatorPatchStore.expectedOptional(context, profile);
         String expectedGmsCore = NavigatorPatchStore.expectedGmsCore(context, profile);
         String expectedAlert = NavigatorPatchStore.expectedAlert(context, profile);
+        String expectedMap = NavigatorPatchStore.expectedMap(context, profile);
         boolean gmsCoreMatches = expectedGmsCore.equals(actual.gmsCoreState)
                 || (NavigatorPatchStore.FAILED.equals(expectedGmsCore)
                 && NavigatorPatchStore.PATCHABLE.equals(actual.gmsCoreState));
@@ -606,9 +626,12 @@ final class NavigatorPackageInstaller {
         boolean auxiliaryMatches = expectedAlert.equals(actual.alertState)
                 || (NavigatorPatchStore.FAILED.equals(expectedAlert)
                 && NavigatorPatchStore.PATCHABLE.equals(actual.alertState));
+        boolean mapMatches = expectedMap.isEmpty() || expectedMap.equals(actual.mapState)
+                || (NavigatorPatchStore.FAILED.equals(expectedMap)
+                && NavigatorPatchStore.PATCHABLE.equals(actual.mapState));
         if (includeComponents
                 && (!NavigatorPatchStore.expectedDirect(context, profile).equals(actual.directState)
-                || !gmsCoreMatches
+                || !gmsCoreMatches || !mapMatches
                 || !optionalMatches || !auxiliaryMatches)) {
             throw new IOException("Installed patch components do not match staged output");
         }
@@ -626,16 +649,26 @@ final class NavigatorPackageInstaller {
         boolean auxiliaryFailed = NavigatorPatchStore.FAILED.equals(
                 NavigatorPatchStore.expectedAlert(context, profile))
                 && NavigatorPatchStore.PATCHABLE.equals(actual.alertState);
-        if (!gmsCoreFailed && !optionalFailed && !auxiliaryFailed) {
+        boolean mapFailed = NavigatorPatchStore.FAILED.equals(
+                NavigatorPatchStore.expectedMap(context, profile))
+                && NavigatorPatchStore.PATCHABLE.equals(actual.mapState);
+        if (!gmsCoreFailed && !optionalFailed && !auxiliaryFailed && !mapFailed) {
             return actual;
         }
+        String mapState = mapFailed ? NavigatorPatchStore.FAILED : actual.mapState;
+        String mapReason = mapFailed
+                ? NavigatorPatchStore.expectedMapReason(context, profile) : actual.mapReason;
+        String mapRevision = mapFailed
+                ? NavigatorPatchStore.expectedMapRevision(context, profile) : actual.mapRevision;
         return new NavigatorPatchPipeline.ScanResult(
                 actual.profile, actual.sha256, actual.versionName, actual.versionCode,
                 actual.signerSha256, actual.directState,
                 gmsCoreFailed ? NavigatorPatchStore.FAILED : actual.gmsCoreState,
                 optionalFailed ? NavigatorPatchStore.FAILED : actual.optionalState,
                 auxiliaryFailed ? NavigatorPatchStore.FAILED : actual.alertState,
-                "Optional patch attempt failed");
+                gmsCoreFailed || optionalFailed || auxiliaryFailed
+                        ? "Optional patch attempt failed" : actual.reason,
+                mapState, mapReason, mapRevision);
     }
 
     private static boolean sameArtifact(NavigatorPatchPipeline.ScanResult first,
@@ -666,6 +699,11 @@ final class NavigatorPackageInstaller {
         }
         NavigatorPatchStore.clearExternal(context, profile);
         NavigatorPatchStore.saveScan(context, result);
+        String reportId = NavigatorPatchStore.reportId(context, profile);
+        if (!reportId.isEmpty()) {
+            NavigatorPatchPipeline.reportScan(context, reportId, "RECOVERY_VERIFY", result);
+            NavigatorPatchReportStore.finish(context, reportId, "RECOVERED", detail);
+        }
         NavigatorPatchStore.completeRestoreTransaction(context, profile, detail);
         if (!NavigatorAssetManager.finishAuthoritativeRestoreVerified(
                 context, profile, recoveryOwner, transactionName, expectedFingerprint)) {

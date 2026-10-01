@@ -2480,7 +2480,7 @@ public final class MainActivity extends ComponentActivity {
                     value.directState, value.gmsCoreState, profile.gmsCoreLabel,
                     value.optionalState, profile.optionalLabel,
                     value.alertState, profile.alertLabel,
-                    value.reason, value.patchEnabled));
+                    value.reason, value.patchEnabled, value.mapState, value.mapReason));
         }
         return Collections.unmodifiableList(rows);
     }
@@ -3341,6 +3341,8 @@ public final class MainActivity extends ComponentActivity {
         public final String alertState;
         public final String alertLabel;
         public final String reason;
+        public final String mapState;
+        public final String mapReason;
         public final boolean patchEnabled;
 
         ComposeNavigatorPatchRow(String profileId, String label, String packageName,
@@ -3351,7 +3353,7 @@ public final class MainActivity extends ComponentActivity {
             this(profileId, label, packageName, installedVersion, installed, externalSource,
                     sourceName, sourceVersion, directState, NavigatorPatchStore.NOT_CHECKED,
                     "", optionalState, optionalLabel, alertState, alertLabel, reason,
-                    patchEnabled);
+                    patchEnabled, NavigatorPatchStore.NOT_CHECKED, "");
         }
 
         ComposeNavigatorPatchRow(String profileId, String label, String packageName,
@@ -3361,6 +3363,19 @@ public final class MainActivity extends ComponentActivity {
                 String optionalState, String optionalLabel, String alertState,
                 String alertLabel, String reason,
                 boolean patchEnabled) {
+            this(profileId, label, packageName, installedVersion, installed, externalSource,
+                    sourceName, sourceVersion, directState, gmsCoreState, gmsCoreLabel,
+                    optionalState, optionalLabel, alertState, alertLabel, reason,
+                    patchEnabled, NavigatorPatchStore.NOT_CHECKED, "");
+        }
+
+        ComposeNavigatorPatchRow(String profileId, String label, String packageName,
+                String installedVersion, boolean installed, boolean externalSource,
+                String sourceName, String sourceVersion, String directState,
+                String gmsCoreState, String gmsCoreLabel,
+                String optionalState, String optionalLabel, String alertState,
+                String alertLabel, String reason, boolean patchEnabled,
+                String mapState, String mapReason) {
             this.profileId = profileId == null ? "" : profileId;
             this.label = label == null ? "" : label;
             this.packageName = packageName == null ? "" : packageName;
@@ -3377,6 +3392,8 @@ public final class MainActivity extends ComponentActivity {
             this.alertState = alertState == null ? NavigatorPatchStore.NOT_CHECKED : alertState;
             this.alertLabel = alertLabel == null ? "" : alertLabel;
             this.reason = reason == null ? "" : reason;
+            this.mapState = mapState == null ? NavigatorPatchStore.NOT_CHECKED : mapState;
+            this.mapReason = mapReason == null ? "" : mapReason;
             this.patchEnabled = patchEnabled;
         }
 
@@ -3400,7 +3417,9 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(optionalLabel, other.optionalLabel)
                     && Objects.equals(alertState, other.alertState)
                     && Objects.equals(alertLabel, other.alertLabel)
-                    && Objects.equals(reason, other.reason);
+                    && Objects.equals(reason, other.reason)
+                    && Objects.equals(mapState, other.mapState)
+                    && Objects.equals(mapReason, other.mapReason);
         }
 
         @Override
@@ -3408,7 +3427,7 @@ public final class MainActivity extends ComponentActivity {
             return Objects.hash(profileId, label, packageName, installedVersion, installed,
                     externalSource, sourceName, sourceVersion, directState, gmsCoreState,
                     gmsCoreLabel, optionalState, optionalLabel, alertState, alertLabel,
-                    reason, patchEnabled);
+                    reason, mapState, mapReason, patchEnabled);
         }
     }
 

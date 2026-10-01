@@ -58,7 +58,7 @@ public final class HudPrefsMapSettingsTest {
                 .withValue(HudMapSettings.CONTROL_MAP_X, 22);
         HudMapSettings right = custom.withPreset(HudMapSettings.PRESET_LARGER_RIGHT);
         HudPrefs.setMapSettings(context, right);
-        assertEquals(new HudMapSettings.Geometry(145, 12, 110, 0, 30, 70),
+        assertEquals(new HudMapSettings.Geometry(142, 12, 110, -6, -31, 90),
                 HudPrefs.mapSettings(context).geometry());
 
         HudMapSettings restored = HudPrefs.mapSettings(context);

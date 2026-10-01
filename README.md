@@ -376,6 +376,10 @@ Official Google Maps package `com.google.android.apps.maps`, bundles with OBB ex
 
 For Waze, the direct channel and lanes are mandatory; stability and alert support remain optional. Google Maps Direct, Google services dialog handling, Audio, and PiP can be selected separately. PiP disables navigation picture-in-picture without disabling dashboard resizing. Waze alert support is currently limited to the compatible Waze 5.20.0.1 build.
 
+Map capture has its own status and is attempted automatically for compatible Waze `5.20.0.1` and Google Maps ReVanced `26.30.09.950492155` inputs with a ready Direct channel. No separate checkbox is needed. Existing current capture builds are recognized. If the map component cannot be applied completely, its changes are discarded and the verified Direct package remains available; the result explains the partial success. Older supported navigator versions retain their existing navigation patches without map capture.
+
+Every compatibility check and patch attempt keeps a separate diagnostic report, including component results, APK identities, stages, failures, cancellation and installation/recovery outcomes. Reports survive closing the card, restarting the app and normal log cleanup, with no automatic expiry. Log sharing and configuration export include the entire report history regardless of selected dates or Logcat/detailed logging settings; report-only days can also be shared.
+
 `Check` and `Patch` use persistent progress cards that stay visible while you switch tabs. Waze and Google Maps can be checked or prepared at the same time, while Android installation remains one-at-a-time. Patch cards stack with archive/share progress instead of covering one another. `Stop` is available only while the current operation can still be cancelled safely; use `Close` to dismiss a finished, cancelled, or failed card.
 
 ### Signing and app data

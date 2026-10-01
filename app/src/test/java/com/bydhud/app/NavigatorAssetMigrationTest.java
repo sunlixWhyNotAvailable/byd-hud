@@ -70,4 +70,26 @@ public final class NavigatorAssetMigrationTest {
             assertEquals("retained-fingerprint", prefs.getString(key + "backup_fingerprint", ""));
         }
     }
+
+    @Test public void revisedCatalogOffersRedownloadInsteadOfStaleReadyApk() {
+        Context context = RuntimeEnvironment.getApplication();
+        SharedPreferences prefs = context.getSharedPreferences("navigator_asset_manager", 0);
+        prefs.edit().clear().commit();
+        for (NavigatorAssetManager.Asset asset : NavigatorAssetManager.catalog()) {
+            String key = asset.id + "_";
+            prefs.edit().putString(key + "catalog_sha", "previous-digest")
+                    .putBoolean(key + "download_ready", true)
+                    .putString(key + "state", NavigatorAssetManager.READY)
+                    .putString(key + "phase", "NONE").commit();
+
+            NavigatorAssetManager.AssetSnapshot row =
+                    NavigatorAssetManager.snapshot(context, asset, false);
+
+            assertEquals(asset.id, row.id);
+            assertFalse(row.downloadReady);
+            assertTrue(row.downloadable);
+            assertEquals(NavigatorAssetManager.NOT_DOWNLOADED, row.state);
+            assertEquals(asset.sha256, prefs.getString(key + "catalog_sha", ""));
+        }
+    }
 }

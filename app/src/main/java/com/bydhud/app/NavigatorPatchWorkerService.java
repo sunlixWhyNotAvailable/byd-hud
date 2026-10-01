@@ -169,7 +169,7 @@ public final class NavigatorPatchWorkerService extends Service {
                         request.getBundle(KEY_EXPECTED));
                 NavigatorPatchPipeline.WorkerPatchResult result =
                         NavigatorPatchPipeline.workerPrepare(
-                                this, profile, source, transaction, expected);
+                                this, profile, source, transaction, expected, operation);
                 checkCancelled(task);
                 Bundle payload = new Bundle();
                 payload.putBundle(KEY_INPUT, NavigatorPatchPipeline.workerBundle(result.input));

@@ -37,14 +37,14 @@ public final class NavigatorPatchEligibilitySourceContractTest {
     public void componentSchemaScanCacheIsInvalidated() throws Exception {
         String store = source("NavigatorPatchStore.java");
 
-        assertTrue(store.contains("SCAN_CACHE_REVISION = 11"));
+        assertTrue(store.contains("SCAN_CACHE_REVISION = 12"));
     }
 
     @Test
-    public void unchangedOutputCannotBecomeInstallReady() throws Exception {
+    public void noWorkCannotBecomeReadyButAttemptedOptionalMapRetainsVerifiedBaseline() throws Exception {
         String pipeline = source("NavigatorPatchPipeline.java");
 
-        assertTrue(pipeline.contains("if (!directApplied && !optionalApplied)"));
+        assertTrue(pipeline.contains("if (!directApplied && !optionalApplied && !mapAttempted)"));
         assertTrue(pipeline.contains("No patch component was applied"));
     }
 

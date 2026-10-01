@@ -55,6 +55,25 @@ public final class PatchOperationUiSourceContractTest {
     }
 
     @Test
+    public void mapStatusAndPartialResultHaveLocalizedUiCopy() throws IOException {
+        String source = source("app/src/main/java/com/bydhud/app/BydHudRuntimeCompose.kt");
+        String activity = source("app/src/main/java/com/bydhud/app/MainActivity.java");
+
+        assertTrue(source.contains("add(copy.patchMap to row.mapState)"));
+        assertTrue(source.contains("\"UNSUPPORTED\" -> copy.patchUnsupported"));
+        assertTrue(source.contains("patchMap = \"Map\""));
+        assertTrue(source.contains("patchMap = \"Мапа\""));
+        assertTrue(source.contains("patchMap = \"Карта\""));
+        assertTrue(source.contains("patchPartialMap = \"Partial · Direct ready · Map unavailable\""));
+        assertTrue(source.contains("patchOperationDisplayDetail("));
+        assertTrue(source.contains("PARTIAL_MAP_DETAIL_PREFIX = \"PARTIAL_MAP:\""));
+        assertTrue(activity.contains("public final String mapState"));
+        assertTrue(activity.contains("public final String mapReason"));
+        assertTrue(activity.contains("Objects.equals(mapState, other.mapState)"));
+        assertTrue(activity.contains("Objects.equals(mapReason, other.mapReason)"));
+    }
+
+    @Test
     public void backendKeepsPerProfileOwnershipAndResumesThePersistedFifo() throws IOException {
         String store = source("app/src/main/java/com/bydhud/app/NavigatorPatchStore.java");
         String pipeline = source("app/src/main/java/com/bydhud/app/NavigatorPatchPipeline.java");

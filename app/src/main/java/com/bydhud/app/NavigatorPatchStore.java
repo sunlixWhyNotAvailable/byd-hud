@@ -14,11 +14,12 @@ import java.util.UUID;
 @android.annotation.SuppressLint("ApplySharedPref")
 final class NavigatorPatchStore {
     // Invalidate cached results whenever component structural classification changes.
-    private static final int SCAN_CACHE_REVISION = 11;
+    private static final int SCAN_CACHE_REVISION = 12;
     static final String NOT_CHECKED = "NOT_CHECKED";
     static final String PATCHABLE = "PATCHABLE";
     static final String PATCHED = "PATCHED";
     static final String FAILED = "FAILED";
+    static final String UNSUPPORTED = "UNSUPPORTED";
 
     static final String IDLE = "IDLE";
     static final String COPYING = "COPYING";
@@ -51,6 +52,7 @@ final class NavigatorPatchStore {
     private static final String KEY_OPERATION_DETAIL = "operation_detail";
     private static final String KEY_OPERATION_KIND = "operation_kind";
     private static final String KEY_OPERATION_TOKEN = "operation_token";
+    private static final String KEY_REPORT_ID = "report_id";
     private static final String KEY_OPERATION_PROGRESS = "operation_progress";
     private static final String KEY_OPERATION_ERROR = "operation_error";
     private static final String KEY_OPERATION_STARTED_AT = "operation_started_at";
@@ -69,6 +71,9 @@ final class NavigatorPatchStore {
     private static final String KEY_EXPECTED_GMS_CORE = "expected_gms_core";
     private static final String KEY_EXPECTED_OPTIONAL = "expected_optional";
     private static final String KEY_EXPECTED_ALERT = "expected_alert";
+    private static final String KEY_EXPECTED_MAP_REVISION = "key_expected_map_revision";
+    private static final String KEY_EXPECTED_MAP_REASON = "key_expected_map_reason";
+    private static final String KEY_EXPECTED_MAP = "key_expected_map";
     private static final String KEY_INITIAL_UPDATE_TIME = "initial_update_time";
     private static final String KEY_INITIAL_VERSION_CODE = "initial_version_code";
     private static final String KEY_INITIAL_SIGNER = "initial_signer";
@@ -125,6 +130,8 @@ final class NavigatorPatchStore {
         final String optionalState;
         final String alertState;
         final String reason;
+        final String mapState;
+        final String mapReason;
         final boolean patchEnabled;
 
         ProfileSnapshot(Profile profile, boolean installed, String label,
@@ -133,6 +140,18 @@ final class NavigatorPatchStore {
                 long sourceVersionCode, String directState, String gmsCoreState,
                 String optionalState, String alertState,
                 String reason, boolean patchEnabled) {
+            this(profile, installed, label, installedVersion, installedVersionCode,
+                    externalSource, sourceName, sourceVersion, sourceVersionCode,
+                    directState, gmsCoreState, optionalState, alertState, reason,
+                    patchEnabled, NOT_CHECKED, "");
+        }
+
+        ProfileSnapshot(Profile profile, boolean installed, String label,
+                String installedVersion, long installedVersionCode,
+                boolean externalSource, String sourceName, String sourceVersion,
+                long sourceVersionCode, String directState, String gmsCoreState,
+                String optionalState, String alertState, String reason,
+                boolean patchEnabled, String mapState, String mapReason) {
             this.profile = profile;
             this.installed = installed;
             this.label = label;
@@ -148,6 +167,8 @@ final class NavigatorPatchStore {
             this.alertState = alertState;
             this.reason = reason;
             this.patchEnabled = patchEnabled;
+            this.mapState = mapState;
+            this.mapReason = mapReason;
         }
     }
 
@@ -262,6 +283,9 @@ final class NavigatorPatchStore {
                 .remove(profile.id + "_scan_optional")
                 .remove(profile.id + "_scan_alert")
                 .remove(profile.id + "_scan_reason")
+                .remove(profile.id + "_scan_map")
+                .remove(profile.id + "_scan_map_reason")
+                .remove(profile.id + "_scan_map_revision")
                 .remove(profile.id + "_scan_source_uri")
                 .remove(profile.id + "_scan_installed_update")
                 .remove(profile.id + "_scan_revision")
@@ -292,6 +316,9 @@ final class NavigatorPatchStore {
                 .putString(profile.id + "_scan_optional", result.optionalState)
                 .putString(profile.id + "_scan_alert", result.alertState)
                 .putString(profile.id + "_scan_reason", result.reason)
+                .putString(profile.id + "_scan_map", result.mapState)
+                .putString(profile.id + "_scan_map_reason", result.mapReason)
+                .putString(profile.id + "_scan_map_revision", result.mapRevision)
                 .putString(profile.id + "_scan_source_uri", sourceUri == null ? "" : sourceUri)
                 .putLong(profile.id + "_scan_installed_update",
                         installed == null ? -1L : installed.lastUpdateTime)
@@ -325,9 +352,16 @@ final class NavigatorPatchStore {
             clearTransactionMetadata(context, profile);
             deleteTreeQuietly(previousTransaction);
             long startedAt = nextStartedAt(context);
+            String operationId = UUID.randomUUID().toString();
+            String reportId = OP_SELECT.equals(kind) ? "" : operationId;
+            if (!reportId.isEmpty()) {
+                NavigatorPatchReportStore.begin(context, reportId, profile.id, kind, startedAt,
+                        NavigatorPatchPipeline.reportMetadata(context, profile));
+            }
             prefs(context).edit()
                     .putString(profileKey(profile, KEY_OPERATION_KIND), kind)
-                    .putString(profileKey(profile, KEY_OPERATION_TOKEN), UUID.randomUUID().toString())
+                    .putString(profileKey(profile, KEY_OPERATION_TOKEN), operationId)
+                    .putString(profileKey(profile, KEY_REPORT_ID), reportId)
                     .putLong(profileKey(profile, KEY_OPERATION_STARTED_AT), startedAt)
                     .putInt(profileKey(profile, KEY_OPERATION_PROGRESS), 0)
                     .putString(profileKey(profile, KEY_OPERATION_ERROR), "")
@@ -375,6 +409,7 @@ final class NavigatorPatchStore {
         SharedPreferences preferences = prefs(context);
         preferences.edit()
                 .putString(KEY_OPERATION_KIND, OP_RECOVERY)
+                .putString(KEY_REPORT_ID, reportId(context, profile))
                 .putString(KEY_OPERATION_PROFILE, profile.id)
                 .putString(KEY_OPERATION_PHASE, RECOVERY_REQUIRED)
                 .putString(KEY_OPERATION_DETAIL, local.error)
@@ -400,6 +435,12 @@ final class NavigatorPatchStore {
                         preferences.getString(profileKey(profile, KEY_EXPECTED_OPTIONAL), ""))
                 .putString(KEY_EXPECTED_ALERT,
                         preferences.getString(profileKey(profile, KEY_EXPECTED_ALERT), ""))
+                .putString(KEY_EXPECTED_MAP_REVISION,
+                        preferences.getString(profileKey(profile, KEY_EXPECTED_MAP_REVISION), ""))
+                .putString(KEY_EXPECTED_MAP_REASON,
+                        preferences.getString(profileKey(profile, KEY_EXPECTED_MAP_REASON), ""))
+                .putString(KEY_EXPECTED_MAP,
+                        preferences.getString(profileKey(profile, KEY_EXPECTED_MAP), ""))
                 .putLong(KEY_INITIAL_UPDATE_TIME,
                         preferences.getLong(profileKey(profile, KEY_INITIAL_UPDATE_TIME), -1L))
                 .putLong(KEY_INITIAL_VERSION_CODE,
@@ -435,6 +476,7 @@ final class NavigatorPatchStore {
         }
         boolean committed = preferences.edit()
                 .putString(KEY_OPERATION_KIND, OP_RECOVERY)
+                .remove(KEY_REPORT_ID)
                 .putString(KEY_OPERATION_PROFILE, profile.id)
                 .putString(KEY_OPERATION_PHASE, RECOVERY_REQUIRED)
                 .putString(KEY_OPERATION_DETAIL, detail == null ? "" : detail)
@@ -453,6 +495,9 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_GMS_CORE, expected.gmsCoreState)
                 .putString(KEY_EXPECTED_OPTIONAL, expected.optionalState)
                 .putString(KEY_EXPECTED_ALERT, expected.alertState)
+                .putString(KEY_EXPECTED_MAP_REVISION, expected.mapRevision)
+                .putString(KEY_EXPECTED_MAP_REASON, expected.mapReason)
+                .putString(KEY_EXPECTED_MAP, expected.mapState)
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
@@ -503,6 +548,7 @@ final class NavigatorPatchStore {
                 + " profile=" + (profile == null ? "" : profile.id)
                 + " stage=" + phase + " code=" + eventCode(operation, phase, detail)
                 + " detail=" + clean(detail));
+        recordReportTransition(context, profile, phase, detail);
         MainActivity.publishSharedUiStateChange();
     }
 
@@ -541,10 +587,34 @@ final class NavigatorPatchStore {
                 + " profile=" + profile.id + " stage=" + phase
                 + " code=" + eventCode(operation, phase, detail)
                 + " detail=" + clean(detail));
+        recordReportTransition(context, profile, phase, detail);
         MainActivity.publishSharedUiStateChange();
         if (FAILED.equals(phase) || CANCELLED.equals(phase)
                 || RECOVERY_REQUIRED.equals(phase)) {
             requestInstallDrain(context);
+        }
+    }
+
+    static String reportId(Context context, Profile profile) {
+        if (profile != null && localOperation(context, profile)) {
+            return prefs(context).getString(profileKey(profile, KEY_REPORT_ID), "");
+        }
+        return prefs(context).getString(KEY_REPORT_ID, "");
+    }
+
+    private static void recordReportTransition(Context context, Profile profile,
+            String phase, String detail) {
+        String id = reportId(context, profile);
+        if (id.isEmpty()) return;
+        try {
+            String outcome = FAILED.equals(phase) && detail != null && detail.startsWith("Interrupted")
+                    ? "INTERRUPTED" : VERIFIED.equals(phase) ? "SUCCESS"
+                    : FAILED.equals(phase) || CANCELLED.equals(phase)
+                    || RECOVERY_REQUIRED.equals(phase) ? phase : "IN_PROGRESS";
+            NavigatorPatchReportStore.recordStageAsync(context, id,
+                    VERIFIED.equals(phase) ? "TERMINAL" : phase, outcome, detail, null);
+        } catch (IOException error) {
+            AppEventLogger.event(context, "navigator_patch report_error=" + clean(error.getMessage()));
         }
     }
 
@@ -663,6 +733,9 @@ final class NavigatorPatchStore {
                 .putString(profileKey(profile, KEY_EXPECTED_GMS_CORE), expected.gmsCoreState)
                 .putString(profileKey(profile, KEY_EXPECTED_OPTIONAL), expected.optionalState)
                 .putString(profileKey(profile, KEY_EXPECTED_ALERT), expected.alertState)
+                .putString(profileKey(profile, KEY_EXPECTED_MAP_REVISION), expected.mapRevision)
+                .putString(profileKey(profile, KEY_EXPECTED_MAP_REASON), expected.mapReason)
+                .putString(profileKey(profile, KEY_EXPECTED_MAP), expected.mapState)
                 .putLong(profileKey(profile, KEY_INITIAL_UPDATE_TIME), initialUpdateTime)
                 .putLong(profileKey(profile, KEY_INITIAL_VERSION_CODE), initialVersionCode)
                 .putString(profileKey(profile, KEY_INITIAL_SIGNER), initialSigner == null ? "" : initialSigner)
@@ -703,6 +776,9 @@ final class NavigatorPatchStore {
                 .putString(KEY_EXPECTED_GMS_CORE, "")
                 .putString(KEY_EXPECTED_OPTIONAL, "")
                 .putString(KEY_EXPECTED_ALERT, "")
+                .putString(KEY_EXPECTED_MAP_REVISION, "")
+                .putString(KEY_EXPECTED_MAP_REASON, "")
+                .putString(KEY_EXPECTED_MAP, "")
                 .putLong(KEY_INITIAL_UPDATE_TIME, initialUpdateTime)
                 .putLong(KEY_INITIAL_VERSION_CODE, initialVersionCode)
                 .putString(KEY_INITIAL_SIGNER, initialSigner == null ? "" : initialSigner)
@@ -794,6 +870,21 @@ final class NavigatorPatchStore {
     static String expectedOptional(Context context, Profile profile) {
         return profile == null || !localOperation(context, profile) ? expectedOptional(context)
                 : prefs(context).getString(profileKey(profile, KEY_EXPECTED_OPTIONAL), "");
+    }
+
+    static String expectedMap(Context context, Profile profile) {
+        String key = localOperation(context, profile) ? profileKey(profile, KEY_EXPECTED_MAP) : KEY_EXPECTED_MAP;
+        return prefs(context).getString(key, "");
+    }
+
+    static String expectedMapReason(Context context, Profile profile) {
+        String key = localOperation(context, profile) ? profileKey(profile, KEY_EXPECTED_MAP_REASON) : KEY_EXPECTED_MAP_REASON;
+        return prefs(context).getString(key, "");
+    }
+
+    static String expectedMapRevision(Context context, Profile profile) {
+        String key = localOperation(context, profile) ? profileKey(profile, KEY_EXPECTED_MAP_REVISION) : KEY_EXPECTED_MAP_REVISION;
+        return prefs(context).getString(key, "");
     }
 
     static String expectedAlert(Context context) {
@@ -989,6 +1080,7 @@ final class NavigatorPatchStore {
         AppEventLogger.event(context, "navigator_patch operation=" + current.kind
                 + " profile=" + profile.id + " stage=" + CANCEL_REQUESTED
                 + " code=CANCEL_REQUESTED detail=Cancellation requested");
+        recordReportTransition(context, profile, CANCEL_REQUESTED, "Cancellation requested");
         MainActivity.publishSharedUiStateChange();
         return true;
     }
@@ -1169,6 +1261,7 @@ final class NavigatorPatchStore {
     private static SharedPreferences.Editor removeGlobalTransactionMetadata(
             SharedPreferences.Editor editor) {
         return editor
+                .remove(KEY_REPORT_ID)
                 .remove(KEY_TRANSACTION_DIR)
                 .remove(KEY_DESTRUCTIVE)
                 .remove(KEY_SESSION_ID)
@@ -1181,6 +1274,9 @@ final class NavigatorPatchStore {
                 .remove(KEY_EXPECTED_GMS_CORE)
                 .remove(KEY_EXPECTED_OPTIONAL)
                 .remove(KEY_EXPECTED_ALERT)
+                .remove(KEY_EXPECTED_MAP_REVISION)
+                .remove(KEY_EXPECTED_MAP_REASON)
+                .remove(KEY_EXPECTED_MAP)
                 .remove(KEY_INITIAL_UPDATE_TIME)
                 .remove(KEY_INITIAL_VERSION_CODE)
                 .remove(KEY_INITIAL_SIGNER)
@@ -1224,6 +1320,9 @@ final class NavigatorPatchStore {
                 .remove(profileKey(profile, KEY_EXPECTED_GMS_CORE))
                 .remove(profileKey(profile, KEY_EXPECTED_OPTIONAL))
                 .remove(profileKey(profile, KEY_EXPECTED_ALERT))
+                .remove(profileKey(profile, KEY_EXPECTED_MAP_REVISION))
+                .remove(profileKey(profile, KEY_EXPECTED_MAP_REASON))
+                .remove(profileKey(profile, KEY_EXPECTED_MAP))
                 .remove(profileKey(profile, KEY_INITIAL_UPDATE_TIME))
                 .remove(profileKey(profile, KEY_INITIAL_VERSION_CODE))
                 .remove(profileKey(profile, KEY_INITIAL_SIGNER))
@@ -1242,6 +1341,8 @@ final class NavigatorPatchStore {
                 .putString(KEY_OPERATION_PHASE, IDLE)
                 .putString(KEY_OPERATION_DETAIL, detail == null ? "" : detail)
                 .putLong(KEY_STATE_AT, System.currentTimeMillis())
+                .remove(KEY_REPORT_ID)
+                .remove(profileKey(profile, KEY_REPORT_ID))
                 .remove(KEY_TRANSACTION_DIR)
                 .remove(KEY_DESTRUCTIVE)
                 .remove(KEY_SESSION_ID)
@@ -1254,6 +1355,9 @@ final class NavigatorPatchStore {
                 .remove(KEY_EXPECTED_GMS_CORE)
                 .remove(KEY_EXPECTED_OPTIONAL)
                 .remove(KEY_EXPECTED_ALERT)
+                .remove(KEY_EXPECTED_MAP_REVISION)
+                .remove(KEY_EXPECTED_MAP_REASON)
+                .remove(KEY_EXPECTED_MAP)
                 .remove(KEY_INITIAL_UPDATE_TIME)
                 .remove(KEY_INITIAL_VERSION_CODE)
                 .remove(KEY_INITIAL_SIGNER)
@@ -1335,6 +1439,8 @@ final class NavigatorPatchStore {
         String optional = preferences.getString(profile.id + "_scan_optional", NOT_CHECKED);
         String alert = preferences.getString(profile.id + "_scan_alert", NOT_CHECKED);
         String reason = preferences.getString(profile.id + "_scan_reason", "");
+        String map = preferences.getString(profile.id + "_scan_map", NOT_CHECKED);
+        String mapReason = preferences.getString(profile.id + "_scan_map_reason", "");
         String scannedUri = preferences.getString(profile.id + "_scan_source_uri", "");
         long scannedInstalledUpdate = preferences.getLong(
                 profile.id + "_scan_installed_update", -1L);
@@ -1352,6 +1458,8 @@ final class NavigatorPatchStore {
             optional = NOT_CHECKED;
             alert = NOT_CHECKED;
             reason = "";
+            map = NOT_CHECKED;
+            mapReason = "";
         }
         if (!external && !isInstalled) {
             direct = NOT_CHECKED;
@@ -1359,12 +1467,15 @@ final class NavigatorPatchStore {
             optional = NOT_CHECKED;
             alert = NOT_CHECKED;
             reason = "";
+            map = NOT_CHECKED;
+            mapReason = "";
         }
-        boolean patchEnabled = isPatchEnabled(profile, direct, gmsCore, optional, alert);
+        boolean patchEnabled = isPatchEnabled(profile, direct, gmsCore, optional, alert, map);
         return new ProfileSnapshot(profile, isInstalled, label, installedVersion, installedCode,
                 external, sourceName == null ? "" : sourceName,
                 sourceVersion == null ? "" : sourceVersion, sourceCode,
-                direct, gmsCore, optional, alert, reason == null ? "" : reason, patchEnabled);
+                direct, gmsCore, optional, alert, reason == null ? "" : reason, patchEnabled,
+                map, mapReason);
     }
 
     static boolean isPatchEnabled(Profile profile, String direct, String optional,
@@ -1374,16 +1485,23 @@ final class NavigatorPatchStore {
 
     static boolean isPatchEnabled(Profile profile, String direct, String gmsCore,
             String optional, String auxiliary) {
+        return isPatchEnabled(profile, direct, gmsCore, optional, auxiliary, NOT_CHECKED);
+    }
+
+    static boolean isPatchEnabled(Profile profile, String direct, String gmsCore,
+            String optional, String auxiliary, String map) {
         if (profile == Profile.WAZE) {
             boolean coreCompatible = (PATCHABLE.equals(direct) || PATCHED.equals(direct))
                     && (PATCHABLE.equals(gmsCore) || PATCHED.equals(gmsCore));
             return coreCompatible && (PATCHABLE.equals(direct) || PATCHABLE.equals(gmsCore)
-                    || PATCHABLE.equals(optional) || PATCHABLE.equals(auxiliary));
+                    || PATCHABLE.equals(optional) || PATCHABLE.equals(auxiliary)
+                    || PATCHABLE.equals(map));
         }
         return PATCHABLE.equals(direct)
                 || PATCHABLE.equals(gmsCore)
                 || PATCHABLE.equals(optional)
-                || PATCHABLE.equals(auxiliary);
+                || PATCHABLE.equals(auxiliary)
+                || (PATCHED.equals(direct) && PATCHABLE.equals(map));
     }
 
     private static PackageInfo installedInfo(Context context, String packageName) {

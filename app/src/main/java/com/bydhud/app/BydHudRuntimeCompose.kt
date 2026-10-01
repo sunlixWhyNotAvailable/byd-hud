@@ -486,6 +486,7 @@ private data class Copy(
     val appVersion: String,
     val patchNotChecked: String,
     val patchDirectChannel: String,
+    val patchMap: String,
     val patchWazeAlerts: String,
     val patchClearSelection: String,
     val patchSelectFile: String,
@@ -496,6 +497,8 @@ private data class Copy(
     val patchPatchable: String,
     val patchPatched: String,
     val patchFailed: String,
+    val patchUnsupported: String,
+    val patchPartialMap: String,
     val patchSource: String,
     val patchInstalledSource: String,
     val patchProgress: String,
@@ -5048,16 +5051,21 @@ private fun OperationProgressStack(
             val phase = patchStepLabel(operation, copy.language).let { label ->
                 if (operation.progress in 1..99) "$label · ${operation.progress}%" else label
             }
+            val rawDetail = operation.detail.takeIf {
+                it.startsWith(PARTIAL_MAP_DETAIL_PREFIX)
+            } ?: operation.error.ifEmpty { operation.detail }
+            val (detail, details) = patchOperationDisplayDetail(rawDetail, copy)
             add(OperationCardSpec(
                 key = "patch-${operation.profileId}",
                 title = "$navigator · ${patchProgressTitle(operation, copy)}",
                 phase = phase,
-                detail = operation.error.ifEmpty { operation.detail },
+                detail = detail,
                 startedAt = operation.startedAt,
                 busy = operation.busy,
                 stopEnabled = operation.cancelAllowed,
                 closeEnabled = operation.phase == "FAILED" || operation.phase == "CANCELLED"
                         || operation.recoveryRequired,
+                details = details,
                 failed = operation.phase == "FAILED" || operation.recoveryRequired,
                 success = operation.phase == "VERIFIED",
                 onStop = { onCancelPatch(operation.profileId) },
@@ -6560,20 +6568,27 @@ private fun PatchTab(
                                 if (row.alertLabel.isNotEmpty()) {
                                     add(patchAlertLabel(row, copy.language, copy) to row.alertState)
                                 }
+                                add(copy.patchMap to row.mapState)
                             }
                             Row(
                                 modifier = Modifier.weight(1f),
                                 horizontalArrangement = Arrangement.spacedBy(8.dp),
                                 verticalAlignment = Alignment.Top
                             ) {
-                                componentStates.chunked(2).forEach { columnStates ->
-                                    Column(
-                                        modifier = Modifier.weight(1f),
-                                        verticalArrangement = Arrangement.spacedBy(6.dp),
-                                        horizontalAlignment = Alignment.Start
-                                    ) {
-                                        columnStates.forEach { (label, state) ->
-                                            PatchComponentChip(label, state, copy, palette)
+                                BoxWithConstraints(modifier = Modifier.weight(1f)) {
+                                    val chipWidth = minOf(
+                                        240.dp,
+                                        (maxWidth - 8.dp).coerceAtLeast(1.dp) / 2f
+                                    )
+                                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                                        componentStates.chunked(2).forEach { rowStates ->
+                                            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                                rowStates.forEach { (label, state) ->
+                                                    PatchComponentChip(
+                                                        label, state, copy, palette, chipWidth
+                                                    )
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -6695,21 +6710,35 @@ private fun PatchComponentChip(
     label: String,
     state: String,
     copy: Copy,
-    palette: Palette
+    palette: Palette,
+    width: Dp
 ) {
     val stateCopy = when (state) {
         "PATCHABLE" -> copy.patchPatchable
         "PATCHED" -> copy.patchPatched
         "FAILED" -> copy.patchFailed
+        "UNSUPPORTED" -> copy.patchUnsupported
         else -> copy.patchNotChecked
     }
     val kind = when (state) {
         "PATCHABLE" -> ChipKind.Yellow
         "PATCHED" -> ChipKind.Green
-        "FAILED" -> ChipKind.Red
+        "FAILED", "UNSUPPORTED" -> ChipKind.Red
         else -> ChipKind.Neutral
     }
-    StatusChip("$label: $stateCopy", kind, palette, width = 240.dp)
+    StatusChip("$label: $stateCopy", kind, palette, width = width)
+}
+
+private const val PARTIAL_MAP_DETAIL_PREFIX = "PARTIAL_MAP:"
+
+private fun patchOperationDisplayDetail(detail: String, copy: Copy): Pair<String, String> {
+    if (!detail.startsWith(PARTIAL_MAP_DETAIL_PREFIX)) return detail to ""
+    val reason = detail.removePrefix(PARTIAL_MAP_DETAIL_PREFIX).trim()
+    val summary = if (reason.isEmpty()) copy.patchPartialMap
+    else "${copy.patchPartialMap}: $reason"
+    val details = if (reason.isEmpty()) copy.patchPartialMap
+    else "${copy.patchPartialMap}\n\n${copy.patchMap}: $reason"
+    return summary to details
 }
 
 @Composable
@@ -10698,6 +10727,7 @@ private fun enCopy() = Copy(
     appVersion = "Version",
     patchNotChecked = "check",
     patchDirectChannel = "Direct channel",
+    patchMap = "Map",
     patchWazeAlerts = "Alerts",
     patchClearSelection = "Clear selected file",
     patchSelectFile = "Optionally select file",
@@ -10708,6 +10738,8 @@ private fun enCopy() = Copy(
     patchPatchable = "patch",
     patchPatched = "ready",
     patchFailed = "failed",
+    patchUnsupported = "unsupported",
+    patchPartialMap = "Partial · Direct ready · Map unavailable",
     patchSource = "Source",
     patchInstalledSource = "installed app",
     patchProgress = "Applying navigator patch",
@@ -10941,6 +10973,7 @@ private fun uaCopy() = enCopy().copy(
     appVersion = "Версія",
     patchNotChecked = "перевір",
     patchDirectChannel = "Прямий канал",
+    patchMap = "Мапа",
     patchWazeAlerts = "Попередження",
     patchClearSelection = "Скасувати вибір файла",
     patchSelectFile = "Опційно обрати файл",
@@ -10951,6 +10984,8 @@ private fun uaCopy() = enCopy().copy(
     patchPatchable = "патчити",
     patchPatched = "готово",
     patchFailed = "помилка",
+    patchUnsupported = "не підтримується",
+    patchPartialMap = "Частково · Прямий канал готовий · Мапа недоступна",
     patchSource = "Джерело",
     patchInstalledSource = "установлений застосунок",
     patchProgress = "Застосування патчу навігатора",
@@ -11185,6 +11220,7 @@ private fun ruCopy() = enCopy().copy(
     appVersion = "Версия",
     patchNotChecked = "проверить",
     patchDirectChannel = "Прямой канал",
+    patchMap = "Карта",
     patchWazeAlerts = "Предупреждения",
     patchClearSelection = "Отменить выбор файла",
     patchSelectFile = "Можно выбрать файл",
@@ -11195,6 +11231,8 @@ private fun ruCopy() = enCopy().copy(
     patchPatchable = "патч",
     patchPatched = "готово",
     patchFailed = "ошибка",
+    patchUnsupported = "не поддерживается",
+    patchPartialMap = "Частично · Прямой канал готов · Карта недоступна",
     patchSource = "Источник",
     patchInstalledSource = "установленное приложение",
     patchProgress = "Применение патча навигатора",

@@ -91,6 +91,14 @@ public class VehicleConfigurationFullArchiveTest {
             assertEquals(1, manifest.getJSONArray("unavailable").length());
             assertFalse(manifest.toString().contains("192.168.1.10"));
             assertTrue(manifest.getJSONArray("unavailable").getJSONObject(0).getString("path").contains("<IP_1>"));
+            assertEquals("ERROR", manifest.getJSONObject("navigatorPatchReports")
+                    .getString("status"));
+            assertNotNull(zip.getEntry("navigator-patch-reports.json"));
+            assertNotNull(zip.getEntry("INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt"));
+            JSONObject reports = new JSONObject(new String(zip.getInputStream(zip.getEntry(
+                    "navigator-patch-reports.json")).readAllBytes(),
+                    java.nio.charset.StandardCharsets.UTF_8));
+            assertEquals("ERROR", reports.getString("status"));
             assertFalse(manifest.has("maxTotalBytes"));
         }
         assertFalse(new File(output.getPath() + ".part").exists());

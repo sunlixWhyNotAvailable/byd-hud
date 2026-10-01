@@ -31,6 +31,23 @@ public final class ComposeSnapshotEqualityTest {
     }
 
     @Test
+    public void mapPatchStateAndReasonParticipateInRowEquality() {
+        assertEquals(NavigatorPatchStore.NOT_CHECKED, patchRow().mapState);
+        assertEquals("", patchRow().mapReason);
+        MainActivity.ComposeNavigatorPatchRow ready = patchRow(
+                NavigatorPatchStore.PATCHED, "");
+        MainActivity.ComposeNavigatorPatchRow unsupported = patchRow(
+                NavigatorPatchStore.UNSUPPORTED, "Map hooks are unavailable");
+        MainActivity.ComposeNavigatorPatchRow otherReason = patchRow(
+                NavigatorPatchStore.UNSUPPORTED, "Missing map asset");
+
+        assertFalse(ready.equals(unsupported));
+        assertFalse(unsupported.equals(otherReason));
+        assertValue(unsupported, patchRow(
+                NavigatorPatchStore.UNSUPPORTED, "Map hooks are unavailable"));
+    }
+
+    @Test
     public void independentlyAllocatedEquivalentSnapshotsAreEqualAndShareHashCodes()
             throws Exception {
         MainActivity.ComposeSnapshot first = snapshot("1.0");
@@ -99,11 +116,18 @@ public final class ComposeSnapshotEqualityTest {
     }
 
     private static MainActivity.ComposeNavigatorPatchRow patchRow() {
+        return patchRow(NavigatorPatchStore.NOT_CHECKED, "");
+    }
+
+    private static MainActivity.ComposeNavigatorPatchRow patchRow(
+            String mapState, String mapReason) {
         return new MainActivity.ComposeNavigatorPatchRow(
                 "waze", "Waze", "com.waze", "5.20.0.1", true, false,
                 "installed", "5.20.0.1", NavigatorPatchStore.PATCHED,
+                NavigatorPatchStore.PATCHABLE, "GmsCore",
                 NavigatorPatchStore.PATCHABLE, "Stable session",
-                NavigatorPatchStore.NOT_CHECKED, "Waze alerts", "", true);
+                NavigatorPatchStore.NOT_CHECKED, "Waze alerts", "", true,
+                mapState, mapReason);
     }
 
     private static MainActivity.ComposePatchOperation patchOperation() {

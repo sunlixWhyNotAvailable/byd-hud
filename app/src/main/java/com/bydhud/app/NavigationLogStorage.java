@@ -334,12 +334,18 @@ final class NavigationLogStorage {
             return new StorageSnapshot(
                     Collections.emptyList(), Collections.emptyList(), 0L, 0);
         }
+        Map<String, Long> reportDays;
+        try {
+            reportDays = NavigatorPatchReportStore.reportDays(context.getApplicationContext());
+        } catch (IOException error) {
+            throw new IllegalStateException("navigator patch report days unavailable", error);
+        }
         String activeDay = activeNavCaptureDay();
         String activeLogcatDay = LogcatRecorder.activeStartDay();
         Context app = context.getApplicationContext();
         List<StorageRoot> roots = withWriteLock(() -> accessibleRootsLocked(app));
         return withReadLock(() -> snapshotAccessibleStorageLocked(
-                roots, activeDay, activeLogcatDay));
+                roots, activeDay, activeLogcatDay, reportDays));
     }
 
     //Atomically disconnects every accessible fragment before any recursive deletion begins.
@@ -1225,7 +1231,8 @@ final class NavigationLogStorage {
     private static StorageSnapshot snapshotAccessibleStorageLocked(
             List<StorageRoot> roots,
             String activeDay,
-            String activeLogcatDay) {
+            String activeLogcatDay,
+            Map<String, Long> reportDays) {
         Set<String> activeDirectSessions = activeDirectSessionsSnapshot();
         Map<String, MutableStorageDay> merged = new LinkedHashMap<>();
         long totalBytes = 0L;
@@ -1257,6 +1264,17 @@ final class NavigationLogStorage {
                 totalBytes = saturatedAdd(totalBytes, bytes);
                 totalSessions += sessions;
             }
+        }
+        for (Map.Entry<String, Long> reportDay : reportDays.entrySet()) {
+            String name = reportDay.getKey();
+            if (!name.matches("\\d{8}")) continue;
+            MutableStorageDay day = merged.get(name);
+            if (day == null) {
+                day = new MutableStorageDay(name);
+                merged.put(name, day);
+            }
+            day.lastModified = Math.max(day.lastModified, reportDay.getValue());
+            day.hasPrivateStorage = true;
         }
         List<StorageDay> days = new ArrayList<>();
         for (MutableStorageDay day : merged.values()) {

@@ -89,6 +89,43 @@ public final class NavigatorAssetActionPolicyTest {
         assertEquals("Waze patched version", asset.label("invalid"));
     }
 
+    @Test
+    public void replacementAssetsKeepStableIdentityAndPermitSameVersionUpdates() {
+        NavigatorAssetManager.Asset waze = NavigatorAssetManager.findAsset("waze-direct-5.20.0.1");
+        assertEquals("B29E876C5F1CD7A15BD50CEEC536D15BF81F9B61CE9D2B5BB8BAE20DCC9F81EE",
+                waze.sha256);
+        assertEquals("5.20.0.1", waze.versionName);
+        assertEquals(1030706L, waze.versionCode);
+        assertEquals("com.waze", waze.packageName);
+        assertEquals(NavigatorAssetSignerCatalog.WAZE_PROJECT_SIGNER, waze.signerSha256);
+        assertEquals("https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
+                + "navigator-assets-v2/waze-5.20.0.1-direct-v2.apk", waze.url);
+        assertEquals("waze-5.20.0.1-direct-v2.apk", waze.fileName);
+        assertTrue(NavigatorAssetManager.installIdentityChanged(
+                "CC2AFCB94C3D5CAE39FCFC3021D0CC2DDE82D3C6F97E968E2CA978659D582114|same-package",
+                waze.sha256 + "|same-package"));
+
+        NavigatorAssetManager.Asset maps = NavigatorAssetManager.findAsset(
+                "gmaps-direct-26.30.09.950492155");
+        assertEquals("D33640F9AB4F72BD226F2DA824596437A274E2951D792E320C91BAA5EFE28B3A",
+                maps.sha256);
+        assertEquals("26.30.09.950492155", maps.versionName);
+        assertEquals(1068694917L, maps.versionCode);
+        assertEquals("app.revanced.android.apps.maps", maps.packageName);
+        assertEquals(NavigatorAssetSignerCatalog.GMAPS_PROJECT_SIGNER, maps.signerSha256);
+        assertEquals("https://github.com/sunlixWhyNotAvailable/byd-hud/releases/download/"
+                + "navigator-assets-v2/google-maps-revanced-26.30.09.950492155-direct-v2.apk",
+                maps.url);
+        assertEquals("google-maps-revanced-26.30.09.950492155-direct-v2.apk", maps.fileName);
+
+        assertFalse(NavigatorAssetManager.requiresDestructiveConfirmationForIdentity(
+                true, false, true, waze.versionCode, waze.versionCode));
+        assertTrue(NavigatorAssetManager.requiresDestructiveConfirmationForIdentity(
+                true, false, false, waze.versionCode, waze.versionCode));
+        assertTrue(NavigatorAssetManager.requiresDestructiveConfirmationForIdentity(
+                true, false, true, waze.versionCode + 1, waze.versionCode));
+    }
+
     @Test public void retiredAssetCannotStartNewActionsButRemainsKnownToRecovery() throws Exception {
         String id = "waze-stock-4.95.0.3";
         assertEquals(2, NavigatorAssetManager.catalog().size());
