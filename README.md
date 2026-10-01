@@ -201,8 +201,8 @@ add map capture. Native sends the image to the vehicle's separate map field,
 illustrated by Denza N9. Experimental stitches it into the calibrated bitmap
 fields. Native field availability depends on the vehicle.
 
-Without a saved image profile, the image is cropped centrally to 300×180 without
-stretching; the vehicle marker is not located automatically. If no valid new image arrives for 3.5 s,
+Without a saved image profile, the calibrated source defaults below frame the
+300×180 image without stretching; the vehicle marker is not located automatically. If no valid new image arrives for 3.5 s,
 only the map is removed; guidance continues and the map returns with a new frame.
 Identical fresh images remain valid. Off, navigation/HUD stop and other diagnostic
 tests end ordinary live capture and release its background rendering resources. Capture
@@ -216,11 +216,12 @@ Map image profiles adjust the navigator image inside this 300×180 region,
 independently of its HUD position and size. Add one profile for Google Maps,
 Waze without Surface or Waze with Surface; available choices follow installed
 navigators. Saved profiles are selected automatically for a matching source.
-Horizontal/vertical offsets range from −100% to 100%, scale from 50% to 300%.
+Horizontal/vertical offsets range from −100% to 100%, scale from 20% to 300%.
 For image framing, horizontal minus moves the image right and plus left;
-vertical minus moves up and plus down. Without a matching profile, the central
-crop is retained. A fixed profile does not normalize different renderer zoom
-levels between foreground and background.
+vertical minus moves up and plus down. New or missing profiles use these defaults
+(X / Y / scale): Google Maps75 / −100 /35%; Waze85 / −35 /35%; Waze Surface0 / −80 /35%.
+Saved calibrations take precedence and are not overwritten. A fixed profile does
+not normalize different renderer zoom levels between foreground and background.
 
 Show map starts calibration with your configured guidance fields and waits for
 a real image from the selected navigator. The editor displays the same 300×180
@@ -233,12 +234,13 @@ or runtime shutdown end calibration and restore current normal navigation.
 Saved profiles remain available if a navigator is uninstalled, but its
 calibration cannot start until it is installed again.
 
-Experimental enables Custom, Larger on the right and Smaller in the center,
-plus six controls for map/lane horizontal position, vertical position and scale.
+Experimental enables Custom and Larger on the right, plus six controls for map/lane horizontal position, vertical position and scale.
 MapX0 is the calibrated center; its range is-250..250 without tick dots.
 Minus moves left/up or makes the image smaller; plus moves right/down or makes
 it larger. Editing a preset switches to Custom without moving unchanged values.
 Saved custom values survive switching presets and restarting the app.
+Larger on the right uses map X142/Y12/scale110% and lanes X−6/Y−31/scale90%.
+The removed centered preset becomes Custom with its previous visible geometry.
 
 Live display sends a red calibration frame with yellow split edges, navigation
 guidance, ETA and limit75 according to your current output settings. Changes

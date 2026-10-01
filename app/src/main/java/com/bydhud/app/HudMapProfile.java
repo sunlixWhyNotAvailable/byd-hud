@@ -32,7 +32,12 @@ public final class HudMapProfile {
     }
 
     public static HudMapProfile defaults(Source source) {
-        return new HudMapProfile(source, 0, 0, 100);
+        switch (source) {
+            case GOOGLE_MAPS: return new HudMapProfile(source, 75, -100, 35);
+            case WAZE: return new HudMapProfile(source, 85, -35, 35);
+            case WAZE_SURFACE: return new HudMapProfile(source, 0, -80, 35);
+            default: throw new IllegalArgumentException("Unknown map source: " + source);
+        }
     }
 
     public HudMapProfile withX(float value) {

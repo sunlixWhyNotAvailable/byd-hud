@@ -8,12 +8,17 @@ public final class HudMapProfileTest {
     @Test
     public void defaultsAndEditsStayWithinTheFramingContract() {
         HudMapProfile defaults = HudMapProfile.defaults(HudMapProfile.Source.GOOGLE_MAPS);
-        assertEquals(0f, defaults.x, 0.001f);
-        assertEquals(0f, defaults.y, 0.001f);
-        assertEquals(100f, defaults.scale, 0.001f);
+        assertEquals(75f, defaults.x, 0.001f);
+        assertEquals(-100f, defaults.y, 0.001f);
+        assertEquals(35f, defaults.scale, 0.001f);
         assertEquals("app.revanced.android.apps.maps",
                 HudMapProfile.Source.GOOGLE_MAPS.packageName());
         assertEquals("com.waze", HudMapProfile.Source.WAZE_SURFACE.packageName());
+
+        assertEquals(new HudMapProfile(HudMapProfile.Source.WAZE, 85, -35, 35),
+                HudMapProfile.defaults(HudMapProfile.Source.WAZE));
+        assertEquals(new HudMapProfile(HudMapProfile.Source.WAZE_SURFACE, 0, -80, 35),
+                HudMapProfile.defaults(HudMapProfile.Source.WAZE_SURFACE));
 
         HudMapProfile clamped = new HudMapProfile(
                 HudMapProfile.Source.WAZE, -101, 101, 301);

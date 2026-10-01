@@ -2996,8 +2996,7 @@ private fun OptionsTab(
                         selectedIndex = mapSettings.preset,
                         options = listOf(
                             language.choose("Власний", "Custom", "Свой"),
-                            language.choose("Більша праворуч", "Larger on the right", "Больше справа"),
-                            language.choose("Менша по центру", "Smaller in the center", "Меньше по центру")),
+                            language.choose("Більша праворуч", "Larger on the right", "Больше справа")),
                         palette = palette,
                         width = 220.dp,
                         enabled = mapEditorEnabled,
@@ -8923,7 +8922,11 @@ private fun MapProfileEditorDialog(
                             disabledOptions = disabledSourceOptions,
                             onSelected = { index ->
                                 sourceOptions.getOrNull(index)?.let { source ->
-                                    onDraftChange(draft.withSource(source))
+                                    onDraftChange(
+                                        if (draft == HudMapProfile.defaults(draft.source))
+                                            HudMapProfile.defaults(source)
+                                        else draft.withSource(source)
+                                    )
                                 }
                             }
                         )

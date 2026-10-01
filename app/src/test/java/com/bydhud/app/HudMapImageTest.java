@@ -66,7 +66,7 @@ public final class HudMapImageTest {
             Bitmap centered = decode(HudMapImage.centerCropPng(source));
             Bitmap withoutProfile = decode(HudMapImage.profileCropPng(source, null));
             Bitmap explicitProfile = decode(HudMapImage.profileCropPng(source,
-                    HudMapProfile.defaults(HudMapProfile.Source.WAZE)));
+                    new HudMapProfile(HudMapProfile.Source.WAZE, 0, 0, 100)));
             try {
                 for (Bitmap result : new Bitmap[]{centered, withoutProfile}) {
                     assertEquals(Color.RED, result.getPixel(20, 90));

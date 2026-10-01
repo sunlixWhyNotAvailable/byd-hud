@@ -20,17 +20,25 @@ public final class HudMapSettingsTest {
         HudMapSettings custom = HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL)
                 .withValue(HudMapSettings.CONTROL_MAP_X, -25);
         HudMapSettings right = custom.withPreset(HudMapSettings.PRESET_LARGER_RIGHT);
-        assertEquals(new HudMapSettings.Geometry(145, 12, 110, 0, 30, 70), right.geometry());
+        assertEquals(new HudMapSettings.Geometry(142, 12, 110, -6, -31, 90), right.geometry());
         assertEquals(custom.custom, right.custom);
 
         HudMapSettings edited = right.withValue(HudMapSettings.CONTROL_LANE_Y, 35);
         assertEquals(HudMapSettings.PRESET_CUSTOM, edited.preset);
-        assertEquals(new HudMapSettings.Geometry(145, 12, 110, 0, 35, 70), edited.geometry());
+        assertEquals(new HudMapSettings.Geometry(142, 12, 110, -6, 35, 90), edited.geometry());
         assertNotEquals(right.geometry(), edited.geometry());
 
         HudMapSettings switchedBack = edited.withPreset(HudMapSettings.PRESET_LARGER_RIGHT)
                 .withPreset(HudMapSettings.PRESET_CUSTOM);
         assertEquals(edited.custom, switchedBack.geometry());
+    }
+
+    @Test
+    public void removedCenterPresetKeepsItsVisibleGeometryAsCustom() {
+        HudMapSettings previous = new HudMapSettings(HudMapSettings.EXPERIMENTAL, 2,
+                new HudMapSettings.Geometry(99, 10, 110, 8, 12, 80));
+        assertEquals(HudMapSettings.PRESET_CUSTOM, previous.preset);
+        assertEquals(new HudMapSettings.Geometry(0, -8, 85, 0, 30, 70), previous.geometry());
     }
 
     @Test

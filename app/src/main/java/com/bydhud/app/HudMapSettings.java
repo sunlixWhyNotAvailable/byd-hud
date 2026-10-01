@@ -10,7 +10,7 @@ public final class HudMapSettings {
 
     public static final int PRESET_CUSTOM = 0;
     public static final int PRESET_LARGER_RIGHT = 1;
-    public static final int PRESET_SMALLER_CENTER = 2;
+    private static final int LEGACY_PRESET_SMALLER_CENTER = 2;
 
     public static final int CONTROL_MAP_X = 0;
     public static final int CONTROL_MAP_Y = 1;
@@ -26,7 +26,9 @@ public final class HudMapSettings {
     public HudMapSettings(int mode, int preset, Geometry custom) {
         this.mode = normalizeMode(mode);
         this.preset = normalizePreset(preset);
-        this.custom = custom == null ? Geometry.defaults() : custom;
+        // Preserve the removed preset's visible geometry as Custom on upgrade.
+        this.custom = preset == LEGACY_PRESET_SMALLER_CENTER || custom == null
+                ? Geometry.defaults() : custom;
     }
 
     public static HudMapSettings defaults() {
@@ -36,9 +38,7 @@ public final class HudMapSettings {
     public Geometry geometry() {
         switch (preset) {
             case PRESET_LARGER_RIGHT:
-                return new Geometry(145, 12, 110, 0, 30, 70);
-            case PRESET_SMALLER_CENTER:
-                return Geometry.defaults();
+                return new Geometry(142, 12, 110, -6, -31, 90);
             default:
                 return custom;
         }
@@ -79,7 +79,7 @@ public final class HudMapSettings {
     }
 
     private static int normalizePreset(int value) {
-        return Math.max(PRESET_CUSTOM, Math.min(PRESET_SMALLER_CENTER, value));
+        return value == PRESET_LARGER_RIGHT ? PRESET_LARGER_RIGHT : PRESET_CUSTOM;
     }
 
     public static final class Geometry {

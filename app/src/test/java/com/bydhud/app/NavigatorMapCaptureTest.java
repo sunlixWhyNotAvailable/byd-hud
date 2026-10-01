@@ -393,6 +393,7 @@ public final class NavigatorMapCaptureTest {
         int callbacksBeforeExpiry = callbacks.get();
         SystemClock.sleep(1100L);
         assertEquals(0, NavigatorMapCapture.snapshot().png().length);
+        drainReceiver(); // snapshot() queues recycling after pending image work.
         assertNull(ReflectionHelpers.getStaticField(NavigatorMapCapture.class, "rawBitmap"));
         assertTrue("expiry notifies the consumer", callbacks.get() > callbacksBeforeExpiry);
         assertTrue("the detached raw image is recycled", retained.isRecycled());

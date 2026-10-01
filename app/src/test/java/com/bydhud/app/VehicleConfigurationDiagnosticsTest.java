@@ -24,7 +24,7 @@ public class VehicleConfigurationDiagnosticsTest {
         JSONObject maps = result.getJSONObject(0);
         assertEquals("GOOGLE_MAPS", maps.getString("source"));
         assertEquals(-20, maps.getInt("x"));
-        assertEquals(0, maps.getInt("y"));
+        assertEquals(-100, maps.getInt("y"));
         assertEquals(150, maps.getInt("scale"));
         assertEquals(4, maps.length());
         assertEquals("WAZE_SURFACE", result.getJSONObject(1).getString("source"));
@@ -38,11 +38,11 @@ public class VehicleConfigurationDiagnosticsTest {
         JSONObject result = VehicleConfigurationDiagnostics.mapSettings(selected);
         assertEquals(HudMapSettings.EXPERIMENTAL, result.getInt("mode"));
         assertEquals(1, result.getInt("preset"));
-        assertEquals(145, result.getJSONObject("effective").getInt("mapX"));
+        assertEquals(142, result.getJSONObject("effective").getInt("mapX"));
         assertEquals(12, result.getJSONObject("effective").getInt("mapY"));
         assertEquals(-150, result.getJSONObject("custom").getInt("mapX"));
         assertEquals(20, result.getJSONObject("custom").getInt("mapY"));
-        assertEquals(70, result.getJSONObject("effective").getInt("laneScale"));
+        assertEquals(90, result.getJSONObject("effective").getInt("laneScale"));
         assertEquals(6, result.getJSONObject("effective").length());
         assertEquals(6, result.getJSONObject("custom").length());
     }
