@@ -45,6 +45,16 @@ public final class MapDisplayUiSourceContractTest {
         assertTrue(mapRow.contains("MapNumberLine(title, hint, value, minimum..maximum, suffix"));
         assertTrue(mapRow.contains("showTicks)"));
         assertTrue(mapRow.contains("onValueChange(it)"));
+        String number = between(compose, "private fun MapNumberLine(", "private fun WidgetColorLine(");
+        assertTrue(number.contains("sliderState = measuredState"));
+        assertFalse(number.contains("SliderState("));
+        assertTrue(number.contains("steps = 0"));
+        assertTrue(number.contains("HudButton(\"--\""));
+        assertTrue(number.contains("HudButton(\"++\""));
+        assertTrue(number.contains("imeAction = ImeAction.Done"));
+        assertTrue(number.contains("KeyboardActions(onDone"));
+        assertTrue(number.contains("focusManager.clearFocus()"));
+        assertTrue(number.contains("keyboard?.hide()"));
     }
 
     @Test

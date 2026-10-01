@@ -186,6 +186,24 @@ public final class HudNavigatorMapIntegrationTest {
         assertArrayEquals(new byte[]{1, 2, 3},
                 (byte[]) ReflectionHelpers.getField(output, "navigatorMapPng"));
 
+        Runnable calibrationCallback = Capture.callback;
+        int stops = Capture.stops;
+        int clears = packets("direct_loss_clear").size();
+        output.selectNavigationSource(HudOutputCoordinator.Source.NONE, "waze-resume");
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        output.publishDirect(directFrame("New Road"), "new-direct", SystemClock.elapsedRealtime(),
+                "com.waze", 2);
+        output.selectNavigationSource(HudOutputCoordinator.Source.DIRECT, "waze-start", "com.waze", 2);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        output.clearDirectFrameForLoss("com.waze", 2, "waze-loss", SystemClock.elapsedRealtime());
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        assertEquals("direct lifecycle must not stop calibration", stops, Capture.stops);
+        assertEquals(clears, packets("direct_loss_clear").size());
+        assertSame(calibrationCallback, Capture.callback);
+        assertEquals(firstDraft, Capture.profileOverride);
+        assertArrayEquals(new byte[]{1, 2, 3},
+                (byte[]) ReflectionHelpers.getField(output, "navigatorMapPng"));
+
         HudMapProfile nextDraft = new HudMapProfile(
                 HudMapProfile.Source.WAZE_SURFACE, 15, -4, 125);
         output.updateMapProfileCalibration(
@@ -211,7 +229,7 @@ public final class HudNavigatorMapIntegrationTest {
 
         DirectTbtFrame latestDirect = directFrame("Latest Road");
         output.publishDirect(latestDirect, "latest-direct", SystemClock.elapsedRealtime(),
-                "com.waze", 1);
+                "com.waze", 2);
         NativeSpeedLimitTestSupport.idleMainLooper();
         assertSame(latestDirect, ReflectionHelpers.getField(output, "directFrame"));
         assertEquals(HudOutputCoordinator.Source.MANUAL,
@@ -263,6 +281,7 @@ public final class HudNavigatorMapIntegrationTest {
 
     @Implements(NavigatorMapCapture.class)
     public static final class Capture {
+        static int stops;
         static String owner;
         static long generation;
         static Runnable callback;
@@ -292,6 +311,7 @@ public final class HudNavigatorMapIntegrationTest {
         @Implementation protected static void setActiveSourceMode(HudMapProfile.Source source) {
         }
         @Implementation protected static void stop(String reason) {
+            stops++;
             owner = "";
             expectedSource = null;
             profileOverride = null;

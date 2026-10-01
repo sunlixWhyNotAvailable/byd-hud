@@ -57,6 +57,7 @@ import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Icon
@@ -64,7 +65,6 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
-import androidx.compose.material3.SliderState
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
@@ -88,6 +88,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Size
@@ -107,6 +108,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.imageResource
@@ -811,6 +814,7 @@ private data class MapProfileEditorDraft(
 private data class DecodedMapProfileFrame(
     val session: Long,
     val revision: Long,
+    val source: HudMapProfile.Source,
     val image: ImageBitmap
 )
 
@@ -1075,6 +1079,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         if (!calibration.frameReady || calibration.frameRevision < 0L) return@LaunchedEffect
         val session = calibration.session
         val revision = calibration.frameRevision
+        val source = calibration.draft?.source ?: return@LaunchedEffect
         val png = calibration.png()
         if (png.isEmpty()) return@LaunchedEffect
         val decoded = withContext(Dispatchers.Default) {
@@ -1087,7 +1092,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             }
         }
         if (decoded != null) {
-            decodedMapProfileFrame = DecodedMapProfileFrame(session, revision, decoded)
+            decodedMapProfileFrame = DecodedMapProfileFrame(session, revision, source, decoded)
         }
     }
 
@@ -1313,16 +1318,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         previousTab = selectedTab
         val reason = "tab-${selectedTab.name.lowercase(Locale.ROOT)}"
         requestTabStateRefresh(selectedTab, reason)
-    }
-
-    LaunchedEffect(selectedTab, selectedOptionsSectionKey, snapshot.mapSettings.mode,
-        snapshot.mapProfileCalibration.running) {
-        val mapEditorVisible = selectedTab == RuntimeTab.Options
-                && selectedOptionsSectionKey == "map-display"
-                && snapshot.mapSettings.mode == HudMapSettings.EXPERIMENTAL
-        if (!mapEditorVisible && !snapshot.mapProfileCalibration.running) {
-            NavHudLiveSender.stopMapLiveIfRunning("map-editor-exit")
-        }
     }
 
     LaunchedEffect(selectedTab, selectedOptionsSectionKey, snapshot.mapSettings.mode) {
@@ -3579,7 +3574,7 @@ private fun MapNumberLine(
     )
     Column {
         ActionRow(title, hint, palette, enabled = enabled) {
-            Row(Modifier.width(190.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
+            Row(Modifier.width(290.dp), horizontalArrangement = Arrangement.End, verticalAlignment = Alignment.CenterVertically) {
                 HudMapNumberStepper(
                     value = safeValue,
                     palette = palette,
@@ -3600,14 +3595,28 @@ private fun MapNumberLine(
             steps = 0,
             colors = sliderColors,
             interactionSource = sliderInteraction,
-            track = {
-                // Visual ticks keep their integer cadence; dragging still accepts tenths.
+            track = { measuredState ->
                 SliderDefaults.Track(
-                    sliderState = SliderState(safeValue,
-                        steps = if (showTicks) (range.last - range.first - 1).coerceAtLeast(0) else 0,
-                        valueRange = range.first.toFloat()..range.last.toFloat()),
+                    sliderState = measuredState,
                     colors = sliderColors,
-                    enabled = enabled
+                    enabled = enabled,
+                    modifier = Modifier.drawWithContent {
+                        drawContent()
+                        // Decorative integer ticks do not quantize the fractional value.
+                        if (showTicks) {
+                            val radius = size.height / 2f
+                            val span = range.last - range.first
+                            val thumb = radius + (size.width - 2 * radius) *
+                                (safeValue - range.first) / span
+                            for (tick in 0..span) {
+                                val x = radius + (size.width - 2 * radius) * tick / span
+                                if (kotlin.math.abs(x - thumb) > 8.dp.toPx()) {
+                                    drawCircle(palette.muted.copy(alpha = if (enabled) 0.8f else 0.4f),
+                                        1.dp.toPx(), Offset(x, size.height / 2f))
+                                }
+                            }
+                        }
+                    }
                 )
             },
             thumb = {
@@ -3631,6 +3640,8 @@ private fun HudMapNumberStepper(
     value: Float, palette: Palette, enabled: Boolean, minValue: Int, maxValue: Int,
     fallbackValue: Float, onValueChange: (Float) -> Unit
 ) {
+    val focusManager = LocalFocusManager.current
+    val keyboard = LocalSoftwareKeyboardController.current
     var editing by remember { mutableStateOf(false) }
     var text by remember { mutableStateOf(mapNumberText(value)) }
     LaunchedEffect(value, editing) {
@@ -3645,6 +3656,9 @@ private fun HudMapNumberStepper(
         onValueChange(rounded)
     }
     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        HudButton("--", palette, width = 48.dp, enabled = enabled && value > minValue) {
+            onValueChange((((value * 10f).roundToInt() - 10) / 10f).coerceAtLeast(minValue.toFloat()))
+        }
         HudButton("−", palette, width = 38.dp, enabled = enabled && value > minValue) {
             onValueChange(((value * 10f).roundToInt() - 1) / 10f)
         }
@@ -3659,7 +3673,13 @@ private fun HudMapNumberStepper(
                 }
             },
             enabled = enabled, singleLine = true,
-            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal),
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Decimal, imeAction = ImeAction.Done),
+            keyboardActions = KeyboardActions(onDone = {
+                commit()
+                editing = false
+                focusManager.clearFocus()
+                keyboard?.hide()
+            }),
             textStyle = TextStyle(color = if (enabled) palette.text else palette.muted,
                 fontSize = 14.sp, fontWeight = FontWeight.SemiBold, textAlign = TextAlign.Center),
             modifier = Modifier.width(70.dp).onFocusChanged {
@@ -3675,6 +3695,9 @@ private fun HudMapNumberStepper(
         )
         HudButton("+", palette, width = 38.dp, enabled = enabled && value < maxValue) {
             onValueChange(((value * 10f).roundToInt() + 1) / 10f)
+        }
+        HudButton("++", palette, width = 48.dp, enabled = enabled && value < maxValue) {
+            onValueChange((((value * 10f).roundToInt() + 10) / 10f).coerceAtMost(maxValue.toFloat()))
         }
     }
 }
@@ -8678,11 +8701,13 @@ private fun MapProfileEditorDialog(
         index.takeIf { source in occupiedSources }
     }.toSet()
     val profileRunning = calibration.running
-    val frameMatches = profileRunning && calibration.frameReady
+    val frameReady = profileRunning && calibration.frameReady
         && calibration.draft?.source == draft.source
+    val frameMatches = frameReady
         && decodedFrame != null
         && decodedFrame.session == calibration.session
-        && decodedFrame.revision == calibration.frameRevision
+        && decodedFrame.source == draft.source
+        && decodedFrame.revision <= calibration.frameRevision
     val availableToShow = mapMode != HudMapSettings.OFF
         && !shanghaiBusy && draft.source in installedSources
         && draft.source !in occupiedSources
@@ -8738,12 +8763,23 @@ private fun MapProfileEditorDialog(
                     .padding(if (compact) 12.dp else 18.dp),
                 verticalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp)
             ) {
-                Text(
-                    languageTitle,
-                    color = palette.text,
-                    fontSize = if (compact) 19.sp else 22.sp,
-                    fontWeight = FontWeight.SemiBold
-                )
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(languageTitle, color = palette.text,
+                        fontSize = if (compact) 19.sp else 22.sp,
+                        fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    Box(Modifier.width(180.dp), contentAlignment = Alignment.CenterEnd) {
+                        Pill(
+                            when {
+                                !profileRunning && !showRequested -> language.choose("Зупинено", "Stopped", "Остановлено")
+                                !frameReady -> language.choose("Очікування кадру", "Waiting for a frame", "Ожидание кадра")
+                                else -> language.choose("Показ", "Showing", "Показ")
+                            },
+                            if (frameReady) palette.green else palette.muted,
+                            if (frameReady) palette.greenSoft else palette.disabled
+                        )
+                    }
+                }
                 Column(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -8760,8 +8796,6 @@ private fun MapProfileEditorDialog(
                         palette,
                         enabled = !saving && sourceOptions.isNotEmpty()
                     ) {
-                        Row(verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         HudDropdown(
                             selectedIndex = sourceIndex,
                             options = sourceOptions.map { mapProfileSourceTitle(it, language) },
@@ -8775,16 +8809,6 @@ private fun MapProfileEditorDialog(
                                 }
                             }
                         )
-                        Pill(
-                            when {
-                                !profileRunning && !showRequested -> language.choose("Зупинено", "Stopped", "Остановлено")
-                                !frameMatches -> language.choose("Очікування кадру", "Waiting for a frame", "Ожидание кадра")
-                                else -> language.choose("Показ", "Showing", "Показ")
-                            },
-                            if (frameMatches) palette.green else palette.muted,
-                            if (frameMatches) palette.greenSoft else palette.disabled
-                        )
-                        }
                     }
                     Row(
                         modifier = Modifier.fillMaxWidth(),

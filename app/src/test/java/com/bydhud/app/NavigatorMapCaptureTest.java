@@ -191,12 +191,18 @@ public final class NavigatorMapCaptureTest {
 
     private void submitFrame(String packageName, int ownerUid, String source,
                              String backgroundState, Bitmap bitmap) throws Exception {
+        submitFrame(packageName, ownerUid, source, backgroundState, "", bitmap);
+    }
+
+    private void submitFrame(String packageName, int ownerUid, String source,
+                             String backgroundState, String sourceMode, Bitmap bitmap) throws Exception {
         SystemClock.sleep(1010L);
         Bundle poll = poll(packageName, "", false);
         assertTrue(poll.getLong("id") > 0L);
         Bundle frame = result(packageName, poll.getString("session"), poll.getLong("id"), bitmap);
         frame.putString("source", source);
         frame.putString("backgroundState", backgroundState);
+        frame.putString("frameSourceMode", sourceMode);
         assertTrue(NavigatorMapCapture.providerCall(context, "result", frame, ownerUid)
                 .getBoolean("accepted"));
         drainReceiver();
@@ -406,6 +412,29 @@ public final class NavigatorMapCaptureTest {
                 Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
         assertEquals(HudMapProfile.Source.WAZE_SURFACE,
                 NavigatorMapCapture.snapshot().source());
+    }
+
+    @Test public void rendererModeSurvivesResumeAndOverridesUnrelatedDirectMode() throws Exception {
+        for (HudMapProfile.Source expected : new HudMapProfile.Source[]{
+                HudMapProfile.Source.WAZE, HudMapProfile.Source.WAZE_SURFACE}) {
+            NavigatorMapCapture.activate(context, NavigatorMapCapture.WAZE_PACKAGE, 56L, expected, null);
+            NavigatorMapCapture.setActiveSourceMode(null);
+            String explicit = expected == HudMapProfile.Source.WAZE ? "waze" : "waze_surface";
+            submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                    "com.waze.map.opengl.w@cd34", "waze_resume", explicit,
+                    Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
+            assertEquals(expected, NavigatorMapCapture.snapshot().source());
+            long revision = NavigatorMapCapture.snapshot().revision();
+            NavigatorMapCapture.setActiveSourceMode(expected);
+            for (String wrong : new String[]{"unknown", expected == HudMapProfile.Source.WAZE ? "waze_surface" : "waze"}) {
+                submitFrame(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID,
+                        "com.waze.map.opengl.w@ef56", "waze_frame_received", wrong,
+                        Bitmap.createBitmap(80, 48, Bitmap.Config.ARGB_8888));
+                assertEquals("explicit unknown/wrong renderer is never relabelled", revision,
+                        NavigatorMapCapture.snapshot().revision());
+            }
+            NavigatorMapCapture.stop("mode-test-switch");
+        }
     }
 
     private Bundle poll(String packageName, String captureSession, boolean busy) {

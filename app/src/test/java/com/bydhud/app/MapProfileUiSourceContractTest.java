@@ -38,7 +38,12 @@ public final class MapProfileUiSourceContractTest {
         assertTrue(compose.contains("bitmap.width != 300 || bitmap.height != 180"));
         assertTrue(editor.contains("background(Color.Black)"));
         assertTrue(editor.contains("decodedFrame.session == calibration.session"));
-        assertTrue(editor.contains("decodedFrame.revision == calibration.frameRevision"));
+        assertTrue(editor.contains("decodedFrame.revision <= calibration.frameRevision"));
+        assertTrue(editor.contains("decodedFrame.source == draft.source"));
+        String header = between(editor, "Text(languageTitle", "SettingRow(");
+        assertTrue(header.contains("Pill("));
+        assertTrue(header.contains("!frameReady"));
+        assertFalse(header.contains("!frameMatches"));
         assertTrue(editor.contains("draft.x,"));
         assertTrue(editor.contains("draft.scale,"));
         assertTrue(editor.contains("draft.y,"));
@@ -75,7 +80,8 @@ public final class MapProfileUiSourceContractTest {
         assertTrue(activity.contains("requestMapProfileCacheRefresh(context)"));
         assertTrue(activity.contains("new Thread(() -> {"));
         String onStop = between(activity, "protected void onStop()", "protected void onDestroy()");
-        assertTrue(onStop.contains("if (!NavHudLiveSender.mapProfileSnapshot().running)"));
+        assertFalse(onStop.contains("stopMapLiveIfRunning"));
+        assertFalse(source("BydHudRuntimeCompose.kt").contains("map-editor-exit"));
         assertTrue(activity.contains("NavHudLiveSender.stopMapProfile(\"shutdown\")"));
         assertTrue(activity.contains("NavigatorMapCapture.refreshProfiles()"));
         assertTrue(activity.contains("map_profile saved source="));

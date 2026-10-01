@@ -533,7 +533,7 @@ public final class NavigatorMapCapture {
             String sourceMetadata = string(data, "source", "");
             String backgroundState = string(data, "backgroundState", "");
             HudMapProfile.Source frameSource = classifySource(
-                    callerPackage, sourceMetadata, backgroundState, modeAtRequest);
+                    callerPackage, sourceMetadata, string(data, "frameSourceMode", ""), backgroundState, modeAtRequest);
             if (expectedAtRequest != null && frameSource != expectedAtRequest) {
                 log(app, "navigator_map_capture result_rejected owner="
                         + field(callerPackage, 96) + " id=" + id + " reason=wrong_source"
@@ -700,6 +700,7 @@ public final class NavigatorMapCapture {
     private static HudMapProfile.Source classifySource(
             String owner,
             String sourceMetadata,
+            String producerMode,
             String backgroundState,
             HudMapProfile.Source activeMode) {
         String className = rendererClassName(sourceMetadata);
@@ -707,6 +708,13 @@ public final class NavigatorMapCapture {
             return className.isEmpty() ? null : HudMapProfile.Source.GOOGLE_MAPS;
         }
         if (!WAZE_PACKAGE.equals(owner) || !"com.waze.map.opengl.w".equals(className)) {
+            return null;
+        }
+        // New producers identify the exact renderer at capture time, independently
+        // of direct navigation or lifecycle metadata sampled later on another thread.
+        if (!producerMode.isEmpty()) {
+            if ("waze".equals(producerMode)) return HudMapProfile.Source.WAZE;
+            if ("waze_surface".equals(producerMode)) return HudMapProfile.Source.WAZE_SURFACE;
             return null;
         }
         if ("waze_car_frame_received".equals(backgroundState)) {

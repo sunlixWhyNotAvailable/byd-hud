@@ -2159,8 +2159,7 @@ final class HudOutputCoordinator {
             return false;
         }
         if (decision == DirectOwnerDecision.ADVANCE) {
-            stopNavigatorMap("direct-session-advanced");
-            nativeSpeed.stop("direct-session-advanced");
+            stopDirectPresentation("direct-session-advanced");
             boolean preservePendingLossClear = shouldPreservePendingLossClearOnAdvance(
                     directLossClearPending, directOwnerPackage,
                     directOwnerSessionGeneration, owner, ownerSessionGeneration);
@@ -2306,8 +2305,7 @@ final class HudOutputCoordinator {
         }
         if (!shouldQueueDirectLossClear(
                 true, true, directLossClearSent, directLossClearPending)) return;
-        stopNavigatorMap("producer-loss:" + reason);
-        nativeSpeed.stop("producer-loss:" + reason);
+        stopDirectPresentation("producer-loss:" + reason);
         resetEtaStreetText("producer-loss:" + reason);
         directFrame = null;
         preparedDirectFrame = null;
@@ -2354,7 +2352,7 @@ final class HudOutputCoordinator {
     }
 
     private boolean flushPendingDirectLossClear() {
-        if (!directLossClearPending || !directSelectedOnWorker() || !client.isBound()) {
+        if (!directLossClearPending || desiredSource() != Source.DIRECT || !client.isBound()) {
             return false;
         }
         try {
@@ -2380,9 +2378,15 @@ final class HudOutputCoordinator {
         }
     }
 
+    private void stopDirectPresentation(String reason) {
+        // Direct lifecycle events can arrive while manual calibration owns the HUD.
+        if (desiredSource() == Source.MANUAL) return;
+        stopNavigatorMap(reason);
+        nativeSpeed.stop(reason);
+    }
+
     private void invalidateDirectOwnerOnWorker(String reason) {
-        stopNavigatorMap("owner-invalidated:" + reason);
-        nativeSpeed.stop("owner-invalidated:" + reason);
+        stopDirectPresentation("owner-invalidated:" + reason);
         worker.removeCallbacks(directLeaseExpiry);
         directLeaseDeadlineMs = 0L;
         directOwnerPackage = "";

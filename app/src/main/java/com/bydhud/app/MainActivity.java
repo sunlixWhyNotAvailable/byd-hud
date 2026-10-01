@@ -397,9 +397,6 @@ public final class MainActivity extends ComponentActivity {
         super.onStop();
         if (!isChangingConfigurations()) {
             NavHudLiveSender.stopHudCheckIfRunning("hud-check-background");
-            if (!NavHudLiveSender.mapProfileSnapshot().running) {
-                NavHudLiveSender.stopMapLiveIfRunning("map-live-background");
-            }
         }
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
