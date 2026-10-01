@@ -57,6 +57,24 @@ public final class HudNavigatorMapIntegrationTest {
 
     @After public void cleanup() { NativeSpeedLimitTestSupport.stopCoordinator(output); }
 
+    @Test public void changedNativeFramesAreCappedAtFiveHzAndOnlyLatestIsSent() {
+        start("com.waze", 1);
+        frame(new byte[]{1}, 1);
+        assertEquals(1, packets("map_frame").size());
+        frame(new byte[]{2}, 2);
+        frame(new byte[]{3}, 3);
+        assertEquals(1, packets("map_frame").size());
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        assertEquals(2, packets("map_frame").size());
+        assertArrayEquals(HudMapImage.nativePayload(new byte[]{3}), packets("map_frame").get(1).payload);
+        // A profile revision with identical PNG bytes is still just a cached repeat.
+        frame(new byte[]{3}, 4);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(900);
+        assertEquals(2, packets("map_frame").size());
+        NativeSpeedLimitTestSupport.idleMainLooperFor(50);
+        assertEquals(3, packets("map_frame").size());
+    }
+
     @Test public void nativeMapUsesSeparateTopicAtOneHzAndExpiryDoesNotClearGuidance() {
         start("com.waze", 1);
         assertEquals("com.waze", Capture.owner);

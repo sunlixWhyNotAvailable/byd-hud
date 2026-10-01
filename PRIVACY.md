@@ -4,6 +4,11 @@
 
 BYD HUD does not automatically send crash reports, analytics, navigation data, screenshots, logs, or usage telemetry.
 
+Live navigator-map diagnostics save only unique cropped HUD images when detailed
+logging is enabled. Otherwise, no map image files are created. Full map frames
+are used in memory for cropping/calibration and are not saved by the current
+capture path. Previously recorded files are not removed by this change.
+
 ## Navigation log upload
 
 Navigation logs are uploaded only when the user selects one or more stored days, presses Share, reviews the warning, chooses `Send to developer`, and confirms `OK` in the optional-comment dialog.

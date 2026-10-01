@@ -182,11 +182,20 @@ An alert in shared-field mode occupies the maneuver field with the same priority
 
 <p align="center"><img src="docs/screenshots/en/settings-speed-limit.png" alt="Speed limit output settings" width="100%"></p>
 
+### Support development
+
+The header's `Support` button opens the approved monobank Jar details and QR.
+Open or copy the link, copy the card number, or share the details as text through
+Android's chooser. Sharing keeps the dialog open and attaches no image.
+
 ### Map display and live calibration
 
 `Map display` offers Off (default), Native and Experimental. Compatible
-map-capture builds of Google Maps and Waze supply a map image once per second
-while their navigation is being shown on the HUD. This requires the separately
+map-capture builds of Google Maps and Waze supply map images at up to 5 Hz
+while their navigation is being shown on the HUD. After two seconds of unchanged
+cropped images, requests slow to 1 Hz; a changed crop or profile restores 5 Hz.
+At 1 Hz, resumed movement can take about a second plus processing to appear.
+Older capture builds remain at 1 Hz. This requires the separately
 provided navigator APKs; the current download catalog and in-app patcher do not
 add map capture. Native sends the image to the vehicle's separate map field,
 illustrated by Denza N9. Experimental stitches it into the calibrated bitmap
@@ -198,9 +207,10 @@ only the map is removed; guidance continues and the map returns with a new frame
 Identical fresh images remain valid. Off, navigation/HUD stop and other diagnostic
 tests end ordinary live capture and release its background rendering resources. Capture
 events and failures use the normal app journals without requiring manual Logcat.
-Live map sends retain metadata and hashes. When detailed logs are enabled, the
-received image before cropping and the 300×180 HUD image are also saved as PNGs
-in the day's `logs/map-frames` folder. Identical images reuse the same files.
+Live map sends retain metadata and hashes. Detailed logs save only unique 300×180
+cropped HUD PNGs in the day's `logs/map-frames` folder. With detailed logs off,
+no map images are saved. Full source frames stay in memory for calibration and
+are never saved by the current capture path. Historical logs remain unchanged.
 
 Map image profiles adjust the navigator image inside this 300×180 region,
 independently of its HUD position and size. Add one profile for Google Maps,

@@ -13,7 +13,6 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
@@ -28,7 +27,6 @@ public final class NavigatorMapCapture {
     static final String MAPS_PACKAGE = GMapsDirectChannel.PACKAGE_NAME;
 
     private static final Object LOCK = new Object();
-    private static final long MIN_REQUEST_INTERVAL_MS = 1000L;
     private static final long POST_STOP_JOURNAL_MS = 10000L;
     private static final long MAX_BITMAP_BYTES = 1920L * 1920L * 4L;
     private static final int MAX_BITMAP_SIDE = 1920;
@@ -69,7 +67,8 @@ public final class NavigatorMapCapture {
     private static long requestSerial;
     private static long pendingId;
     private static long pendingAtElapsedMs;
-    private static long nextRequestAtElapsedMs;
+    private static long lastRequestAtElapsedMs = -1L;
+    private static long lastPollIntervalMs = -1L;
     private static long processingId;
     private static long lastRejectedLogAtElapsedMs;
     private static String lastProducerState = "";
@@ -172,7 +171,8 @@ public final class NavigatorMapCapture {
             pendingAtElapsedMs = 0L;
             requestSourceMode = null;
             requestSourceModeRevision = -1L;
-            nextRequestAtElapsedMs = 0L;
+            lastRequestAtElapsedMs = -1L;
+            lastPollIntervalMs = -1L;
             processingId = 0L;
             lastProducerState = "";
             overrideProfile = null;
@@ -207,6 +207,7 @@ public final class NavigatorMapCapture {
             if (activeSourceMode == source) return;
             activeSourceMode = source;
             activeSourceModeRevision++;
+            FRAME.resetCadence();
         }
     }
 
@@ -218,6 +219,7 @@ public final class NavigatorMapCapture {
             if (profile == null ? overrideProfile == null : profile.equals(overrideProfile)) return;
             overrideProfile = profile;
             profileEpoch++;
+            FRAME.resetCadence();
             app = appContext;
             scheduleRecropLocked();
         }
@@ -240,6 +242,7 @@ public final class NavigatorMapCapture {
             }
             overrideProfile = null;
             profileEpoch++;
+            FRAME.resetCadence();
             scheduleRecropLocked();
         }
     }
@@ -274,7 +277,8 @@ public final class NavigatorMapCapture {
             pendingAtElapsedMs = 0L;
             requestSourceMode = null;
             requestSourceModeRevision = -1L;
-            nextRequestAtElapsedMs = 0L;
+            lastRequestAtElapsedMs = -1L;
+            lastPollIntervalMs = -1L;
             processingId = 0L;
             lastProducerState = "";
             notify = changed ? onFrameChanged : null;
@@ -374,6 +378,7 @@ public final class NavigatorMapCapture {
         String lifeEvents = string(data, "lifecycleEvents", "[]");
         String logRequest = null;
         String timeoutLog = null;
+        String cadenceLog = null;
         String producerStateLog = null;
         String lifeSession = "";
         boolean acceptLifecycle = false;
@@ -409,19 +414,32 @@ public final class NavigatorMapCapture {
                     pendingAtElapsedMs = 0L;
                     requestSourceMode = null;
                     requestSourceModeRevision = -1L;
+                    FRAME.resetCadence();
+                }
+                long producerMinimum = longValue(data, "minPollIntervalMs", 0L);
+                long interval = Math.max(FRAME.requestIntervalMs(), producerMinimum > 0L
+                        ? producerMinimum : NavigatorMapSessionState.IDLE_INTERVAL_MS);
+                answer.putLong("pollIntervalMs", interval);
+                if (interval != lastPollIntervalMs) {
+                    cadenceLog = "navigator_map_capture cadence owner=" + field(ownerPackage, 96)
+                            + " session=" + session + " pollIntervalMs=" + interval
+                            + " cropIntervalMs=" + FRAME.requestIntervalMs()
+                            + " producerMinMs=" + producerMinimum;
+                    lastPollIntervalMs = interval;
                 }
                 boolean busy = booleanValue(data, "busy", false);
                 if (pendingId == 0L && processingId == 0L && !busy
-                        && now >= nextRequestAtElapsedMs) {
+                        && (lastRequestAtElapsedMs < 0L || now - lastRequestAtElapsedMs >= interval)) {
                     pendingId = nextRequestIdLocked();
                     pendingAtElapsedMs = now;
                     requestSourceMode = activeSourceMode;
                     requestSourceModeRevision = activeSourceModeRevision;
-                    nextRequestAtElapsedMs = now + MIN_REQUEST_INTERVAL_MS;
+                    lastRequestAtElapsedMs = now;
                     answer.putLong("id", pendingId);
                     answer.putLong("requestNs", SystemClock.elapsedRealtimeNanos());
                     logRequest = "navigator_map_capture request owner="
-                            + field(ownerPackage, 96) + " session=" + session + " id=" + pendingId;
+                            + field(ownerPackage, 96) + " session=" + session + " id=" + pendingId
+                            + " pollIntervalMs=" + interval;
                 }
             } else if (callerPackage.equals(stoppedOwnerPackage)
                     && string(data, "captureSession", "").equals(stoppedSession)
@@ -435,6 +453,7 @@ public final class NavigatorMapCapture {
         if (timeoutLog != null) {
             log(app, timeoutLog);
         }
+        if (cadenceLog != null) log(app, cadenceLog);
         if (producerStateLog != null) {
             log(app, producerStateLog);
         }
@@ -535,6 +554,9 @@ public final class NavigatorMapCapture {
             HudMapProfile.Source frameSource = classifySource(
                     callerPackage, sourceMetadata, string(data, "frameSourceMode", ""), backgroundState, modeAtRequest);
             if (expectedAtRequest != null && frameSource != expectedAtRequest) {
+                synchronized (LOCK) {
+                    if (session.equals(resultSession)) FRAME.resetCadence();
+                }
                 log(app, "navigator_map_capture result_rejected owner="
                         + field(callerPackage, 96) + " id=" + id + " reason=wrong_source"
                         + " expectedSource=" + sourceName(expectedAtRequest)
@@ -691,6 +713,7 @@ public final class NavigatorMapCapture {
             if (catalogRevision != savedRevision) {
                 catalogRevision = savedRevision;
                 profileEpoch++;
+                FRAME.resetCadence();
             }
             HudMapProfile selected = source != null && overrideProfile != null
                     && overrideProfile.source == source ? overrideProfile : saved;
@@ -879,7 +902,7 @@ public final class NavigatorMapCapture {
                 + " result=" + update.name().toLowerCase());
         if (update != NavigatorMapSessionState.FrameUpdate.REJECTED) {
             saveFrameArtifacts(app, expectedOwner, expectedSession, sequence,
-                    sourceBitmap, png, inputHash, source, selection);
+                    png, source, selection);
         }
         runCallback(notify, app);
     }
@@ -1163,70 +1186,63 @@ public final class NavigatorMapCapture {
                 + " receivedAgeMs=" + age + " pixels=" + pixelChange
                 + " inputHash=" + inputHash
                 + timing(data));
-        saveFrameArtifacts(app, callerPackage, frameSession, id, bitmap, png, inputHash,
+        saveFrameArtifacts(app, callerPackage, frameSession, id, png,
                 source, selection);
     }
 
     private static void saveFrameArtifacts(Context app, String owner, String frameSession,
-            long id, Bitmap bitmap, byte[] croppedPng, String inputHash,
+            long id, byte[] croppedPng,
             HudMapProfile.Source source, ProfileSelection selection) {
-        if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
-        String artifactKey;
-        try { artifactKey = NavCaptureStore.todayDir() + ":" + inputHash + ":" + sha256(croppedPng); }
+        if (!HudPrefs.isDetailedDebugArtifactsEnabled(app) || croppedPng.length == 0) return;
+        String day = NavCaptureStore.todayDir();
+        String cropHash;
+        try { cropHash = sha256(croppedPng); }
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
-        if (!PENDING_ARTIFACTS.add(artifactKey)) return; // The same PNG pair is already being saved.
-        Bitmap copy = null;
+        String artifactKey = day + ":" + cropHash;
+        if (!PENDING_ARTIFACTS.add(artifactKey)) return;
         try {
-            copy = bitmap.copy(Bitmap.Config.ARGB_8888, false);
-            if (copy == null) throw new IllegalStateException("bitmap_copy_failed");
-            Bitmap sourceImage = copy;
-            byte[] crop = croppedPng.clone();
-            String day = NavCaptureStore.todayDir();
+            String fileName = "map-hud-" + cropHash + ".png";
+            boolean exists = NavigationLogStorage.withReadLock(() -> new File(
+                    new File(NavigationLogStorage.logsDir(app, day), "map-frames"), fileName).isFile());
+            if (exists) {
+                PENDING_ARTIFACTS.remove(artifactKey);
+                log(app, "navigator_map_capture artifacts id=" + id + " session=" + frameSession
+                        + " day=" + day + " hud=" + fileName + " result=reused");
+                return;
+            }
+            // Reuse the immutable crop already encoded for HUD. No diagnostic bitmap copy.
             boolean queued = WazeCaptureDebugWriter.mapFrames().directEvent(() -> {
                 try {
                     if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
                     NavigationLogStorage.withReadLock(() -> {
                         File dir = new File(NavigationLogStorage.logsDir(app, day), "map-frames");
-                        // The source filename uses its pixel hash; unchanged frames reuse the file.
-                        String sourceName = "map-source-" + inputHash + ".png";
-                        if (!new File(dir, sourceName).isFile()) {
-                            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-                            if (!sourceImage.compress(Bitmap.CompressFormat.PNG, 100, bytes)) {
-                                throw new IllegalStateException("source_png_failed");
-                            }
-                            sourceName = NavCaptureStore.writeDirectArtifactFileIfAbsent(
-                                    dir, sourceName, bytes.toByteArray());
-                        }
-                        String cropName = NavCaptureStore.writeDirectArtifactIfAbsent(dir, "map-hud", crop);
+                        String cropName = NavCaptureStore.writeDirectArtifactIfAbsent(dir, "map-hud", croppedPng);
                         log(app, "navigator_map_capture artifacts owner=" + field(owner, 96)
                                 + " session=" + frameSession + " id=" + id + " day=" + day
-                                + " source=" + sourceName + " hud=" + cropName
+                                + " hud=" + cropName + " cropHash=" + cropHash
                                 + " frameSource=" + NavigatorMapCapture.sourceName(source)
                                 + " profile=" + profileName(selection.profile)
                                 + " profileRevision=" + selection.catalogRevision
                                 + " profileEpoch=" + selection.epoch
-                                + " result=" + (sourceName.isEmpty() || cropName.isEmpty() ? "write_failed" : "saved"));
+                                + " result=" + (cropName.isEmpty() ? "write_failed" : "saved"));
                     });
                 } catch (RuntimeException | OutOfMemoryError error) {
-                    WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact encode: " + error);
+                    WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact write: " + error);
                     log(app, "navigator_map_capture artifacts_error id=" + id
                             + " reason=" + error.getClass().getSimpleName());
                 } finally {
-                    recycle(sourceImage);
                     PENDING_ARTIFACTS.remove(artifactKey);
                 }
             });
-            if (queued) return; // The bounded writer now owns the bitmap copy.
+            if (queued) return;
             log(app, "navigator_map_capture artifacts_dropped id=" + id + " reason=writer_queue_full");
         } catch (RuntimeException | OutOfMemoryError error) {
-            WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact copy: " + error);
+            WazeCaptureDebugWriter.recordMapArtifactFailure("map artifact queue: " + error);
             log(app, "navigator_map_capture artifacts_error id=" + id
                     + " reason=" + error.getClass().getSimpleName());
         }
-        recycle(copy);
         PENDING_ARTIFACTS.remove(artifactKey);
     }
-
     private static void logResultError(
             Context app,
             String callerPackage,
@@ -1235,6 +1251,9 @@ public final class NavigatorMapCapture {
             String status,
             String reason,
             Bundle data) {
+        synchronized (LOCK) {
+            if (session.equals(frameSession)) FRAME.resetCadence();
+        }
         log(app, "navigator_map_capture result_error owner=" + field(callerPackage, 96)
                 + " session=" + field(frameSession, 96) + " id=" + id
                 + " status=" + field(status, 96) + " reason=" + field(reason, 96)

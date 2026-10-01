@@ -132,15 +132,19 @@ public final class DiagnosticRecordingTest {
     @Test
     @Config(sdk = 29, application = Application.class)
     @org.robolectric.annotation.GraphicsMode(org.robolectric.annotation.GraphicsMode.Mode.NATIVE)
-    public void bitmapCopyFailureOutsideWriterMarksArchiveIncomplete() throws Exception {
+    public void croppedMapWriteFailureMarksArchiveIncomplete() throws Exception {
         HudPrefs.setDetailedDebugArtifactsEnabled(context, true);
-        Bitmap recycled = Bitmap.createBitmap(2, 2, Bitmap.Config.ARGB_8888);
-        recycled.recycle();
+        File invalid = new File(NavigationLogStorage.logsDir(context, day), "map-frames");
+        Files.write(invalid.toPath(), new byte[]{1});
+        Class<?> selectionType = Class.forName("com.bydhud.app.NavigatorMapCapture$ProfileSelection");
+        java.lang.reflect.Constructor<?> constructor = selectionType.getDeclaredConstructors()[0];
+        constructor.setAccessible(true);
+        Object selection = constructor.newInstance(null, 0L, 0L);
         java.lang.reflect.Method save = java.util.Arrays.stream(NavigatorMapCapture.class.getDeclaredMethods())
                 .filter(method -> method.getName().equals("saveFrameArtifacts")).findFirst().get();
         save.setAccessible(true);
-        save.invoke(null, context, NavigatorMapCapture.MAPS_PACKAGE, "failed-copy", 1L,
-                recycled, new byte[]{1,2,3}, "a".repeat(64), HudMapProfile.Source.GOOGLE_MAPS, null);
+        save.invoke(null, context, NavigatorMapCapture.MAPS_PACKAGE, "failed-write", 1L,
+                new byte[]{1,2,3}, HudMapProfile.Source.GOOGLE_MAPS, selection);
         assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
         LogShareZip.Result result = LogShareZip.create(context, Collections.singletonList(day));
         assertTrue(result.detail, result.ok);
@@ -148,7 +152,7 @@ public final class DiagnosticRecordingTest {
             JSONObject status = status(zip);
             assertTrue(status.getBoolean("lossObserved"));
             assertTrue(status.getJSONObject("mapImages").getInt("failures") > 0);
-            assertTrue(status.getJSONObject("mapImages").getString("lastError").contains("map artifact copy"));
+            assertTrue(status.getJSONObject("mapImages").getString("lastError").contains("artifact directory"));
             assertNotNull(zip.getEntry("INCOMPLETE-RECORDING.txt"));
         }
     }

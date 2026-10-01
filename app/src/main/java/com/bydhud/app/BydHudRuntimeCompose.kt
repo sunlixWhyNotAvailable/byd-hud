@@ -3,6 +3,13 @@ package com.bydhud.app
 //builds the runtime UI so operators can control capture, permissions, logs, and updates in one place.
 
 import android.os.SystemClock
+import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.widget.Toast
 import android.graphics.BitmapFactory
 import android.view.MotionEvent
 import androidx.activity.compose.BackHandler
@@ -886,6 +893,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     val updateOperation by AppUpdateManager.operationSnapshot.collectAsState()
     val pendingHintRouteResultId by UpdateHintManager.pendingRouteResultId.collectAsState()
     var showUpdateDialog by remember { mutableStateOf(false) }
+    var showSupportDialog by rememberSaveable { mutableStateOf(false) }
     val updateState = updateCheckStateFor(updateSnapshot, updateOperation)
     var pendingPatchProfile by rememberSaveable { mutableStateOf("") }
     var pendingPatchDestructive by rememberSaveable { mutableStateOf(false) }
@@ -918,6 +926,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
     }
     val shareCopy = remember(copy.language) { shareCopy(copy.language) }
     val blockingUiFlow = when {
+        showSupportDialog -> "support"
         showSetupDialog -> "setup"
         storageShareSummaryVisible || sentryCommentVisible -> "storage-share-consent"
         showUpdateHintSettings -> "update-hint-settings"
@@ -1495,7 +1504,8 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 snapshot = snapshot,
                 hudStatus = liveHudStatus,
                 onLanguage = { selected -> runAction { activity.composeSetUiLanguage(selected.code) } },
-                onTheme = { dark -> runAction { activity.composeSetDarkTheme(dark) } }
+                onTheme = { dark -> runAction { activity.composeSetDarkTheme(dark) } },
+                onSupportClick = { showSupportDialog = true }
             )
 
             Box(
@@ -1712,6 +1722,9 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
             }
         )
 
+        if (showSupportDialog) {
+            SupportDialog(language, palette) { showSupportDialog = false }
+        }
         if (showSetupDialog) {
             SetupReminderOverlay(
                 copy = copy,
@@ -2072,8 +2085,10 @@ private fun Header(
     snapshot: MainActivity.ComposeSnapshot,
     hudStatus: String,
     onLanguage: (Language) -> Unit,
-    onTheme: (Boolean) -> Unit
+    onTheme: (Boolean) -> Unit,
+    onSupportClick: () -> Unit
 ) {
+    val supportPress = rememberPressFeedback(releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -2093,7 +2108,17 @@ private fun Header(
         )
         Spacer(Modifier.width(14.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(copy.title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 23.sp)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                Text(copy.title, color = palette.text, fontWeight = FontWeight.Bold, fontSize = 23.sp)
+                Text(copy.language.choose("Підтримати", "Support", "Поддержать"),
+                    color = palette.accent, fontSize = 14.sp, fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier.clip(RoundedCornerShape(5.dp))
+                        .background(if (supportPress.pressed) palette.active else Color.Transparent)
+                        .then(supportPress.modifier)
+                        .clickable(role = Role.Button, interactionSource = supportPress.interactionSource,
+                            indication = null, onClick = onSupportClick)
+                        .padding(horizontal = 6.dp, vertical = 8.dp))
+            }
             Text(
                 copy.subtitle,
                 color = palette.muted,
@@ -2120,6 +2145,99 @@ private fun Header(
             Segmented(copy.dark, copy.light, snapshot.darkTheme, palette,
                 onLeft = { onTheme(true) },
                 onRight = { onTheme(false) })
+        }
+    }
+}
+
+private const val SUPPORT_JAR_URL = "https://send.monobank.ua/jar/bKFV15i9e"
+private const val SUPPORT_JAR_CARD = "4874 1000 3354 3078"
+
+@Composable
+private fun SupportDialog(language: Language, palette: Palette, onClose: () -> Unit) {
+    val context = LocalContext.current
+    val description = language.choose(
+        "Добровільна підтримка розробки та вдосконалення застосунків для автомобілів BYD",
+        "Voluntary support for the development and improvement of apps for BYD cars",
+        "Добровольная поддержка разработки и улучшения приложений для автомобилей BYD")
+    val cardLabel = language.choose("Номер картки Банки", "Jar card number", "Номер карты Банки")
+    val shareLabel = language.choose("Поділитися", "Share", "Поделиться")
+    fun openIntent(intent: Intent) {
+        try {
+            context.startActivity(intent)
+        } catch (_: ActivityNotFoundException) {
+            Toast.makeText(context, language.choose("Немає застосунку для цієї дії",
+                "No app can handle this action", "Нет приложения для этого действия"), Toast.LENGTH_SHORT).show()
+        }
+    }
+    Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Column(Modifier.width(820.dp).fillMaxHeight(0.9f).clip(RoundedCornerShape(8.dp))
+            .background(palette.surface).border(1.dp, palette.borderStrong, RoundedCornerShape(8.dp))
+            .padding(18.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+            Text(language.choose("Підтримати розробку", "Support development", "Поддержать разработку"),
+                color = palette.text, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+            Row(Modifier.fillMaxWidth().weight(1f), horizontalArrangement = Arrangement.spacedBy(22.dp),
+                verticalAlignment = Alignment.CenterVertically) {
+                Image(painterResource(R.drawable.mono_support_qr),
+                    contentDescription = language.choose("QR-код Банки для поповнення",
+                        "Scan to support via monobank", "QR-код Банки для пополнения"),
+                    contentScale = ContentScale.Fit,
+                    modifier = Modifier.weight(0.42f).fillMaxHeight())
+                Column(Modifier.weight(0.58f).verticalScroll(rememberScrollState()),
+                    verticalArrangement = Arrangement.spacedBy(14.dp)) {
+                    Text("Support BYD app", color = palette.text, fontSize = 20.sp, fontWeight = FontWeight.SemiBold)
+                    Text(description, color = palette.text, fontSize = 16.sp)
+                    Text(language.choose("Відскануйте QR-код телефоном або відкрийте посилання на Банку.",
+                        "Scan the QR code with your phone or open the Jar link.",
+                        "Отсканируйте QR-код телефоном или откройте ссылку на Банку."),
+                        color = palette.muted, fontSize = 14.sp)
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                        Text(SUPPORT_JAR_URL, color = palette.accent, fontSize = 15.sp,
+                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(4.dp))
+                                .clickable(role = Role.Button) { openIntent(Intent(Intent.ACTION_VIEW, Uri.parse(SUPPORT_JAR_URL))) }
+                                .padding(vertical = 8.dp))
+                        Text(language.choose("Копіювати", "Copy", "Копировать"),
+                            color = palette.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold,
+                            modifier = Modifier.clip(RoundedCornerShape(4.dp))
+                                .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати посилання",
+                                    "Copy link", "Копировать ссылку")) {
+                                    val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                                    clipboard.setPrimaryClip(ClipData.newPlainText("Support BYD app", SUPPORT_JAR_URL))
+                                    Toast.makeText(context, language.choose("Посилання скопійовано",
+                                        "Link copied", "Ссылка скопирована"), Toast.LENGTH_SHORT).show()
+                                }.padding(horizontal = 6.dp, vertical = 10.dp))
+                    }
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(7.dp)).background(palette.field)
+                        .border(1.dp, palette.border, RoundedCornerShape(7.dp))
+                        .clickable(role = Role.Button, onClickLabel = language.choose("Копіювати номер картки",
+                            "Copy card number", "Копировать номер карты")) {
+                            val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                            clipboard.setPrimaryClip(ClipData.newPlainText(cardLabel, SUPPORT_JAR_CARD))
+                            Toast.makeText(context, language.choose("Номер картки скопійовано",
+                                "Card number copied", "Номер карты скопирован"), Toast.LENGTH_SHORT).show()
+                        }.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+                        Text(cardLabel, color = palette.muted, fontSize = 13.sp)
+                        Text(SUPPORT_JAR_CARD, color = palette.text, fontFamily = FontFamily.Monospace,
+                            fontSize = 19.sp, fontWeight = FontWeight.SemiBold)
+                        Text(language.choose("Натисніть, щоб скопіювати", "Tap to copy", "Нажмите, чтобы скопировать"),
+                            color = palette.accent, fontSize = 12.sp)
+                    }
+                }
+            }
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                ShareIconLabelButton(shareLabel, palette, enabled = true, primary = true,
+                    width = 170.dp, onClick = {
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_SUBJECT, "Support BYD app")
+                            putExtra(Intent.EXTRA_TEXT, "Support BYD app\n\n$description\n\n$SUPPORT_JAR_URL\n\n$cardLabel: $SUPPORT_JAR_CARD")
+                        }
+                        openIntent(Intent.createChooser(intent, shareLabel))
+                    })
+                Spacer(Modifier.width(10.dp))
+                HudButton(language.choose("Закрити", "Close", "Закрыть"), palette, primary = false,
+                    width = 138.dp, highlightOnPress = false, onClick = onClose)
+            }
         }
     }
 }
@@ -2812,7 +2930,7 @@ private fun OptionsTab(
                         selectedIndex = mapSettings.mode,
                         options = mapModes,
                         palette = palette,
-                        width = 190.dp,
+                        width = 210.dp,
                         onSelected = { mode -> runAction { activity.composeSetMapMode(mode) } }
                     )
                 }
@@ -9761,6 +9879,7 @@ private fun HudButton(
     destructive: Boolean = false,
     width: Dp = 150.dp,
     modifier: Modifier = Modifier,
+    highlightOnPress: Boolean = true,
     onClick: () -> Unit
 ) {
     val base = if (width == 0.dp) modifier.height(44.dp) else modifier.width(width).height(44.dp)
@@ -9771,7 +9890,7 @@ private fun HudButton(
         primary -> palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f)
         else -> palette.panelAlt
     }
-    val renderedBackground = if (destructive && press.pressed) {
+    val renderedBackground = if (!highlightOnPress) baseBackground else if (destructive && press.pressed) {
         palette.red.copy(alpha = if (palette.dark) 0.30f else 0.18f)
     } else {
         pressBackground(baseBackground, palette, press.pressed)
@@ -9883,14 +10002,15 @@ private fun ShareIconLabelButton(
     palette: Palette,
     enabled: Boolean,
     width: Dp,
+    primary: Boolean = false,
     onClick: () -> Unit
 ) {
     val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Row(
         modifier = Modifier.width(width).height(44.dp)
             .clip(RoundedCornerShape(7.dp))
-            .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-            .background(pressBackground(if (enabled) palette.panelAlt else palette.disabled, palette, press.pressed))
+            .border(1.dp, if (primary) palette.accent else palette.borderStrong, RoundedCornerShape(7.dp))
+            .background(pressBackground(if (!enabled) palette.disabled else if (primary) palette.accent.copy(alpha = if (palette.dark) 0.82f else 0.08f) else palette.panelAlt, palette, press.pressed))
             .then(press.modifier)
             .clickable(enabled = enabled, interactionSource = press.interactionSource, indication = null, onClick = onClick)
             .padding(horizontal = 12.dp),
@@ -9900,13 +10020,13 @@ private fun ShareIconLabelButton(
         Icon(
             painter = painterResource(R.drawable.ic_share),
             contentDescription = null,
-            tint = if (enabled) palette.accent else palette.muted.copy(alpha = 0.55f),
+            tint = if (enabled && primary && palette.dark) Color.White else if (enabled) palette.accent else palette.muted.copy(alpha = 0.55f),
             modifier = Modifier.size(20.dp)
         )
         Spacer(Modifier.width(8.dp))
         Text(
             label,
-            color = if (enabled) palette.text else palette.muted.copy(alpha = 0.55f),
+            color = if (enabled && primary && palette.dark) Color.White else if (enabled) palette.text else palette.muted.copy(alpha = 0.55f),
             fontWeight = FontWeight.SemiBold,
             fontSize = 14.sp,
             maxLines = 1,

@@ -5,6 +5,9 @@ import java.util.Arrays;
 /** Keeps the latest navigator map frame fenced to one owner session. */
 final class NavigatorMapSessionState {
     static final long FRESHNESS_MS = 3500L;
+    static final long FAST_INTERVAL_MS = 200L;
+    static final long IDLE_INTERVAL_MS = 1000L;
+    private static final long STABLE_CROP_MS = 2000L;
 
     enum FrameUpdate {
         REJECTED,
@@ -23,6 +26,28 @@ final class NavigatorMapSessionState {
     private long receivedAtElapsedMs;
     private long revision;
     private long frameSequence;
+    private long stableSinceMs = -1L;
+    private long lastCadenceReceiptMs = -1L;
+    private long requestIntervalMs = FAST_INTERVAL_MS;
+
+    long requestIntervalMs() { return requestIntervalMs; }
+
+    void resetCadence() {
+        stableSinceMs = -1L;
+        lastCadenceReceiptMs = -1L;
+        requestIntervalMs = FAST_INTERVAL_MS;
+    }
+
+    private void recordFreshCrop(boolean same, long receivedAt) {
+        if (!same || stableSinceMs < 0L || receivedAt < lastCadenceReceiptMs
+                || receivedAt - lastCadenceReceiptMs >= FRESHNESS_MS) {
+            stableSinceMs = receivedAt;
+            requestIntervalMs = FAST_INTERVAL_MS;
+        } else if (receivedAt - stableSinceMs >= STABLE_CROP_MS) {
+            requestIntervalMs = IDLE_INTERVAL_MS;
+        }
+        lastCadenceReceiptMs = receivedAt;
+    }
 
     boolean activate(String nextOwnerPackage, long nextOwnerGeneration, String nextSession) {
         if (nextSession.equals(session)
@@ -106,6 +131,7 @@ final class NavigatorMapSessionState {
             return FrameUpdate.REJECTED;
         }
         receivedAtElapsedMs = receivedAt;
+        recordFreshCrop(true, receivedAt);
         frameSequence++;
         return FrameUpdate.SAME;
     }
@@ -148,6 +174,7 @@ final class NavigatorMapSessionState {
                 && profileRevision == nextProfileRevision;
         source = nextSource;
         profileRevision = nextProfileRevision;
+        recordFreshCrop(sameOutput, receivedAt);
         if (sameOutput) {
             return FrameUpdate.SAME;
         }
@@ -215,6 +242,7 @@ final class NavigatorMapSessionState {
     }
 
     private void clearFrame() {
+        resetCadence();
         png = null;
         inputPixelHash = "";
         outputPixelHash = "";

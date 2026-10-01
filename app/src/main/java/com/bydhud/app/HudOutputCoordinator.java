@@ -139,6 +139,7 @@ final class HudOutputCoordinator {
     private boolean nativeMapMayBeVisible;
     private boolean nativeMapClearPending;
     private long nativeMapAttemptAtMs = -1L;
+    private byte[] lastNativeMapPayload = new byte[0];
 
     private boolean manualEnabled;
     private boolean directEnabled;
@@ -1308,7 +1309,10 @@ final class HudOutputCoordinator {
                             Runnable changed = mapProfileCalibrationChanged;
                             if (changed != null) changed.run();
                         }
-                        scheduleImmediate("navigator-map-frame");
+                        // Map callbacks must not accelerate or restart the RoadInfo loop.
+                        refreshNavigatorMap(activeSource);
+                        flushNativeMapClear("navigator-map-frame", false);
+                        publishNativeMap("navigator-map-frame");
                     }));
             if (profileCalibration
                     && mapProfileCalibrationSession == session
@@ -1368,6 +1372,7 @@ final class HudOutputCoordinator {
     }
 
     private void publishNativeMap(String reason) {
+        if (!serviceStarted || !client.isBound() || ShanghaiOutputGate.isSuspended()) return;
         boolean manualCalibration = activeSource == Source.MANUAL
                 && manualMapLiveSession != 0L
                 && manualMapLiveSession == mapProfileCalibrationSession;
@@ -1375,8 +1380,11 @@ final class HudOutputCoordinator {
                 || navigatorMapMode != HudMapSettings.NATIVE
                 || nativeMapPayload.length == 0 || nativeMapClearPending) return;
         long now = SystemClock.elapsedRealtime();
-        if (nativeMapAttemptAtMs >= 0L && now - nativeMapAttemptAtMs < DEFAULT_INTERVAL_MS) return;
+        long interval = java.util.Arrays.equals(lastNativeMapPayload, nativeMapPayload)
+                ? NavigatorMapSessionState.IDLE_INTERVAL_MS : NavigatorMapSessionState.FAST_INTERVAL_MS;
+        if (nativeMapAttemptAtMs >= 0L && now - nativeMapAttemptAtMs < interval) return;
         nativeMapAttemptAtMs = now;
+        lastNativeMapPayload = nativeMapPayload;
         // An uncertain write may have reached the receiver; retain ownership for cleanup.
         nativeMapMayBeVisible = true;
         sendNativeMap(nativeMapPayload, "map_frame", reason);
@@ -1392,6 +1400,7 @@ final class HudOutputCoordinator {
         if (sendNativeMap(HudMapImage.nativePayload(null), "map_clear", reason)) {
             nativeMapClearPending = false;
             nativeMapMayBeVisible = false;
+            lastNativeMapPayload = new byte[0];
         }
     }
 

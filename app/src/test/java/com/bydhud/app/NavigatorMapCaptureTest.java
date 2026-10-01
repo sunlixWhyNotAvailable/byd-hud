@@ -148,7 +148,7 @@ public final class NavigatorMapCaptureTest {
     }
 
     @Test
-    public void detailedLogsSaveSourceAndCropEvenWhenEnabledOnAnUnchangedFrame() throws Exception {
+    public void detailedLogsSaveOnlyUniqueCropsEvenWhenEnabledOnAnUnchangedFrame() throws Exception {
         HudPrefs.setDetailedDebugArtifactsEnabled(context, false);
         NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 53L, null);
         File artifacts = new File(NavCaptureStore.logDir(context), "map-frames");
@@ -159,18 +159,22 @@ public final class NavigatorMapCaptureTest {
         submitMapFrame(0xff123456);
         File[] files = artifacts.listFiles();
         assertNotNull(files);
-        assertEquals(2, files.length);
+        assertEquals(1, files.length);
         for (File file : files) {
             Bitmap image = BitmapFactory.decodeFile(file.getAbsolutePath());
             assertNotNull(image);
-            assertEquals(file.getName().startsWith("map-source-") ? 320 : 300, image.getWidth());
-            assertEquals(file.getName().startsWith("map-source-") ? 165 : 180, image.getHeight());
+            assertTrue(file.getName().startsWith("map-hud-"));
+            assertEquals(300, image.getWidth());
+            assertEquals(180, image.getHeight());
             image.recycle();
         }
         submitMapFrame(0xff123456);
-        assertEquals("unchanged pixels reuse the pair", 2, artifacts.listFiles().length);
-        HudPrefs.setDetailedDebugArtifactsEnabled(context, false);
+        assertEquals("unchanged pixels reuse the crop", 1, artifacts.listFiles().length);
         submitMapFrame(0xff654321);
+        submitMapFrame(0xff123456);
+        assertEquals("A-B-A reuses the original crop", 2, artifacts.listFiles().length);
+        HudPrefs.setDetailedDebugArtifactsEnabled(context, false);
+        submitMapFrame(0xffabcdef);
         assertEquals("disabled diagnostics add no images", 2, artifacts.listFiles().length);
     }
 
@@ -192,6 +196,41 @@ public final class NavigatorMapCaptureTest {
     private void submitFrame(String packageName, int ownerUid, String source,
                              String backgroundState, Bitmap bitmap) throws Exception {
         submitFrame(packageName, ownerUid, source, backgroundState, "", bitmap);
+    }
+
+    @Test public void capableProducerUsesAdaptiveHintsWithSingleFlightAndErrorReset() throws Exception {
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 61L, null);
+        Bundle hello = request(NavigatorMapCapture.MAPS_PACKAGE, "", false);
+        hello.putLong("minPollIntervalMs", 1L);
+        long firstId = 0L;
+        for (int i = 0; i <= 10; i++) {
+            Bundle request = NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID);
+            assertEquals(200L, request.getLong("pollIntervalMs"));
+            assertTrue(request.getLong("id") > firstId);
+            firstId = request.getLong("id");
+            assertEquals(0L, NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID).getLong("id"));
+            Bitmap bitmap = Bitmap.createBitmap(320, 165, Bitmap.Config.ARGB_8888);
+            bitmap.eraseColor(Color.BLUE);
+            Bundle result = result(NavigatorMapCapture.MAPS_PACKAGE, request.getString("session"), firstId, bitmap);
+            result.putString("source", "com.google.maps.Renderer@1a2b");
+            NavigatorMapCapture.providerCall(context, "result", result, MAPS_UID);
+            drainReceiver();
+            SystemClock.sleep(200L);
+        }
+        Bundle slow = NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID);
+        assertEquals(1000L, slow.getLong("pollIntervalMs"));
+        assertEquals(0L, slow.getLong("id"));
+        SystemClock.sleep(800L);
+        slow = NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID);
+        Bundle failed = new Bundle();
+        failed.putString("package", NavigatorMapCapture.MAPS_PACKAGE);
+        failed.putString("session", slow.getString("session"));
+        failed.putLong("id", slow.getLong("id"));
+        failed.putString("status", "no_gl_frame");
+        NavigatorMapCapture.providerCall(context, "result", failed, MAPS_UID);
+        assertEquals(200L, NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID).getLong("pollIntervalMs"));
+        Bundle legacy = poll(NavigatorMapCapture.MAPS_PACKAGE, "", false);
+        assertEquals(1000L, legacy.getLong("pollIntervalMs"));
     }
 
     private void submitFrame(String packageName, int ownerUid, String source,
