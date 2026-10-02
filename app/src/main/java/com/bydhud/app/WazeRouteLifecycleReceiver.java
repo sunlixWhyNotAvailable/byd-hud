@@ -268,8 +268,7 @@ public final class WazeRouteLifecycleReceiver extends BroadcastReceiver {
             WazeRouteLifecycleStore.RecordResult result) {
         NavHudLiveSender.onWazeRouteLifecycleEvent(eventElapsedMs, result);
         if (result.snapshot.active
-                && HudPrefs.isBootEnabled(context)
-                && !HudPrefs.isUserShutdownActive(context)
+                && UserRuntimeSession.allowsRuntime(context)
                 && (NavCapturePrefs.isHudEnabled(
                 context, WazeRouteLifecycleStore.WAZE_PACKAGE)
                 || NavHudLiveSender.shouldObserveTbtWithoutHud(

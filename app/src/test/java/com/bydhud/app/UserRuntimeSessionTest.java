@@ -216,18 +216,23 @@ public final class UserRuntimeSessionTest {
     }
 
     @Test
-    public void autoStartDefaultAndColdServiceWatchdogGuardsRemainUnchanged() throws IOException {
+    public void autoStartGatesColdBootButNotTheActiveSession() throws IOException {
         assertTrue(body(source("HudPrefs.java"), "static boolean isBootEnabled(")
                 .contains("getBoolean(KEY_BOOT_ENABLED, true)"));
         String main = source("MainActivity.java");
         assertFalse(body(main, "protected void onCreate(").contains("setBootEnabled"));
         assertFalse(body(main, "protected void onResume()").contains("setBootEnabled"));
-        for (String file : new String[]{"BootReceiver.java", "HudRuntimeService.java",
-                "HudRuntimeSupervisor.java", "HudRuntimeWatchdogReceiver.java"}) {
-            String cold = source(file);
-            assertTrue(file, cold.contains("!HudPrefs.isBootEnabled("));
-            assertFalse(file, cold.contains("UserRuntimeSession.PROCESS.activate()"));
+        String boot = source("BootReceiver.java");
+        assertTrue(boot.contains("!HudPrefs.isBootEnabled("));
+        assertFalse(boot.contains("UserRuntimeSession.PROCESS.activate()"));
+        for (String file : new String[]{"HudRuntimeService.java", "HudRuntimeSupervisor.java",
+                "HudRuntimeWatchdog.java", "HudRuntimeWatchdogReceiver.java"}) {
+            assertTrue(file, source(file).contains("UserRuntimeSession.allowsRuntime("));
         }
+        String toggle = body(main, "private void setBootMode(");
+        assertFalse(toggle.contains("stopPersistent"));
+        assertFalse(toggle.contains("HudRuntimeWatchdog.cancel"));
+        assertTrue(toggle.contains("HudRuntimeSupervisor.ensureStarted"));
     }
 
     private static String source(String file) throws IOException {

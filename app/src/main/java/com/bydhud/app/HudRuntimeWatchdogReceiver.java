@@ -25,7 +25,11 @@ public final class HudRuntimeWatchdogReceiver extends BroadcastReceiver {
             AppEventLogger.event(context, "runtime_watchdog_receiver shutdown_active");
             return;
         }
-        if (!HudPrefs.isBootEnabled(context)) {
+        if (intent.getBooleanExtra(HudRuntimeWatchdog.EXTRA_RESUME_SESSION, false)) {
+            UserRuntimeSession.PROCESS.activate();
+            AppEventLogger.event(context, "runtime_watchdog_receiver session_restored");
+        }
+        if (!UserRuntimeSession.allowsRuntime(context)) {
             HudRuntimeWatchdog.cancel(context);
             return;
         }

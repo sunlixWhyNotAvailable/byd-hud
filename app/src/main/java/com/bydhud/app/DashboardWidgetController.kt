@@ -67,7 +67,7 @@ internal object DashboardWidgetController {
     }
 
     @JvmStatic fun onRuntimeStart(context: Context) {
-        if (HudPrefs.isBootEnabled(context) && !HudPrefs.isUserShutdownActive(context)) refresh(context)
+        if (UserRuntimeSession.allowsRuntime(context)) refresh(context)
     }
 
     @JvmStatic fun updateSettings(context: Context, requested: DashboardWidgetState) {

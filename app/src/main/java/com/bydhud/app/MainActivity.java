@@ -285,12 +285,8 @@ public final class MainActivity extends ComponentActivity {
             AppEventLogger.event(this, "storage_share_cleanup files=" + staleShareArtifacts);
         }
         NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
-        if (HudPrefs.isBootEnabled(this)) {
-            BootCleanupGate.runWhenReady(this,
-                    () -> HudRuntimeSupervisor.ensureStarted(this, "activity-create"));
-        } else {
-            HudRuntimeWatchdog.cancel(this);
-        }
+        BootCleanupGate.runWhenReady(this,
+                () -> HudRuntimeSupervisor.ensureStarted(this, "activity-create"));
         hudOutput = HudOutputCoordinator.get(this);
         NavAppDisplayController displayController = NavAppDisplayController.get(this);
         dashboardMoveInProgress = displayController.setListener(moveInProgress -> runOnUiThread(() -> {
@@ -311,7 +307,7 @@ public final class MainActivity extends ComponentActivity {
         requestInitialUiStateRefresh(this, "activity-create");
         BydHudRuntimeCompose.install(this);
         appendStatus(buildSafetyBanner());
-        appendStatus("idle: Boot controls runtime; Apps tab controls Start HUD / Start only log");
+        appendStatus("idle: Boot controls automatic startup; Apps tab controls Start HUD / Start only log");
         refreshStateView();
         refreshControls();
         refreshLogcatControls();
@@ -324,10 +320,8 @@ public final class MainActivity extends ComponentActivity {
     protected void onStart() {
         super.onStart();
         DashboardWidgetController.onAppOpened(this);
-        if (HudPrefs.isBootEnabled(this)) {
-            BootCleanupGate.runWhenReady(this,
-                    () -> HudRuntimeSupervisor.ensureStarted(this, "activity-start"));
-        }
+        BootCleanupGate.runWhenReady(this,
+                () -> HudRuntimeSupervisor.ensureStarted(this, "activity-start"));
         maybeStartPendingAdbAuthorization();
         refreshControls();
     }
@@ -4296,13 +4290,8 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setBootEnabled(this, enabled);
         appendStatus("Boot " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui boot=" + enabled);
-        if (enabled) {
-            BootCleanupGate.runWhenReady(this,
-                    () -> HudRuntimeSupervisor.ensureStarted(this, "boot-on"));
-        } else {
-            HudRuntimeWatchdog.cancel(this);
-            HudRuntimeService.stopPersistent(this, "boot-off");
-        }
+        BootCleanupGate.runWhenReady(this,
+                () -> HudRuntimeSupervisor.ensureStarted(this, enabled ? "boot-on" : "boot-off"));
         refreshControls();
     }
 

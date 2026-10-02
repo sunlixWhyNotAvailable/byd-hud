@@ -1,6 +1,8 @@
 package com.bydhud.app;
 
-/** Process-local user intent; saved output choices alone never enable a cold runtime. */
+import android.content.Context;
+
+/** User intent or recovery of an existing session; saved output choices do not start one. */
 final class UserRuntimeSession {
     static final UserRuntimeSession PROCESS = new UserRuntimeSession();
 
@@ -27,5 +29,10 @@ final class UserRuntimeSession {
 
     boolean allowsRuntime(boolean bootEnabled, boolean userShutdown) {
         return !userShutdown && (active || bootEnabled);
+    }
+
+    static boolean allowsRuntime(Context context) {
+        return PROCESS.allowsRuntime(
+                HudPrefs.isBootEnabled(context), HudPrefs.isUserShutdownActive(context));
     }
 }

@@ -73,13 +73,13 @@ public final class HudRuntimeService extends Service {
                     "runtime startPersistent skipped shutdown_active reason=" + safeReason);
             return;
         }
-        boolean bootEnabled = HudPrefs.isBootEnabled(appContext);
-        if (!bootEnabled) {
+        boolean runtimeAllowed = UserRuntimeSession.allowsRuntime(appContext);
+        if (!runtimeAllowed) {
             HudRuntimeWatchdog.cancel(appContext);
             HudRuntimeState.clearServicePresent(appContext,
-                    "start-rejected:boot-disabled:" + safeReason);
+                    "start-rejected:runtime-disabled:" + safeReason);
             AppEventLogger.event(appContext,
-                    "runtime startPersistent skipped boot_disabled reason=" + safeReason);
+                    "runtime startPersistent skipped runtime_disabled reason=" + safeReason);
             return;
         }
         boolean hardResetPending = HudRuntimeUpgradeGuard.hasPendingHardReset(appContext);
@@ -138,24 +138,24 @@ public final class HudRuntimeService extends Service {
 
     enum StartDecision {
         SHUTDOWN,
-        BOOT_DISABLED,
+        RUNTIME_DISABLED,
         ALREADY_ALIVE,
         IN_FLIGHT,
         REQUEST
     }
 
     //Keeps the executable admission policy shared by production and focused JVM tests.
-    static StartDecision startDecision(boolean shutdown, boolean bootEnabled,
+    static StartDecision startDecision(boolean shutdown, boolean runtimeAllowed,
             boolean servicePresent, boolean inFlight, boolean hardResetPending) {
         if (shutdown) return StartDecision.SHUTDOWN;
-        if (!bootEnabled) return StartDecision.BOOT_DISABLED;
+        if (!runtimeAllowed) return StartDecision.RUNTIME_DISABLED;
         if (servicePresent && !hardResetPending) return StartDecision.ALREADY_ALIVE;
         return inFlight ? StartDecision.IN_FLIGHT : StartDecision.REQUEST;
     }
 
-    static StartDecision startDecisionForTest(boolean shutdown, boolean bootEnabled,
+    static StartDecision startDecisionForTest(boolean shutdown, boolean runtimeAllowed,
             boolean servicePresent, boolean inFlight, boolean hardResetPending) {
-        return startDecision(shutdown, bootEnabled, servicePresent, inFlight, hardResetPending);
+        return startDecision(shutdown, runtimeAllowed, servicePresent, inFlight, hardResetPending);
     }
 
     //Acquires the one startup gate used by all production start callers.
@@ -236,9 +236,14 @@ public final class HudRuntimeService extends Service {
             stopSelf(startId);
             return START_NOT_STICKY;
         }
-        if (!HudPrefs.isBootEnabled(this)) {
+        // A null intent is Android restarting this previously started sticky service.
+        if (intent == null) {
+            UserRuntimeSession.PROCESS.activate();
+            log("session restored reason=sticky-restart");
+        }
+        if (!UserRuntimeSession.allowsRuntime(this)) {
             HudRuntimeWatchdog.cancel(this);
-            HudRuntimeState.markStopped(this, "boot-disabled:" + reason);
+            HudRuntimeState.markStopped(this, "runtime-disabled:" + reason);
             stopForegroundCompat();
             stopSelf(startId);
             return START_NOT_STICKY;
@@ -254,8 +259,7 @@ public final class HudRuntimeService extends Service {
 
     private void completeStartAfterBootGate(String reason) {
         if (runtimeDestroyed
-                || HudPrefs.isUserShutdownActive(this)
-                || !HudPrefs.isBootEnabled(this)) return;
+                || !UserRuntimeSession.allowsRuntime(this)) return;
         AppUpdateManager.onSessionEntry(this);
         HudRuntimeState.publishServicePresent(this, "onStartCommand");
         clearStartRequestGate();
@@ -298,12 +302,12 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onTaskRemoved(Intent rootIntent) {
         log("runtime task removed boot=" + HudPrefs.isBootEnabled(this)
-                + " shutdown=" + HudPrefs.isUserShutdownActive(this));
+                + " shutdown=" + HudPrefs.isUserShutdownActive(this)
+                + " runtimeAllowed=" + UserRuntimeSession.allowsRuntime(this));
         HudRuntimeState.recordLifecycleHook(this, "task-removed",
                 "boot=" + HudPrefs.isBootEnabled(this)
                         + " shutdown=" + HudPrefs.isUserShutdownActive(this));
-        if (HudPrefs.isBootEnabled(this)
-                && !HudPrefs.isUserShutdownActive(this)
+        if (UserRuntimeSession.allowsRuntime(this)
                 && HudRuntimeSupervisor.hasActiveRuntimeWork(this)) {
             HudRuntimeWatchdog.schedule(this, "task-removed");
             startPersistent(this, "task-removed");

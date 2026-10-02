@@ -30,10 +30,10 @@ final class HudRuntimeSupervisor {
                     "runtime_supervisor shutdown_active reason=" + safeReason);
             return;
         }
-        if (!HudPrefs.isBootEnabled(appContext)) {
+        if (!UserRuntimeSession.allowsRuntime(appContext)) {
             HudRuntimeWatchdog.cancel(appContext);
             HudRuntimeState.clearServicePresent(appContext,
-                    "supervisor-rejected:boot-disabled:" + safeReason);
+                    "supervisor-rejected:runtime-disabled:" + safeReason);
             HudRuntimeState.recordLifecycleHook(appContext, "supervisor-disabled", safeReason);
             AppEventLogger.event(appContext,
                     "runtime_supervisor disabled reason=" + safeReason);

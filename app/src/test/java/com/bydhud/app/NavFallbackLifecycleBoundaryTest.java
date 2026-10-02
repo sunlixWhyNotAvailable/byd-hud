@@ -139,7 +139,7 @@ public final class NavFallbackLifecycleBoundaryTest {
         HudRuntimeState.publishServicePresent(null, "onCreate");
         HudRuntimeState.clearServicePresent(null, "stop:explicit");
         assertFalse(HudRuntimeState.isServicePresent());
-        assertEquals(HudRuntimeService.StartDecision.BOOT_DISABLED,
+        assertEquals(HudRuntimeService.StartDecision.RUNTIME_DISABLED,
                 HudRuntimeService.startDecision(false, false, true, false, false));
         assertEquals(HudRuntimeService.StartDecision.SHUTDOWN,
                 HudRuntimeService.startDecision(true, true, true, false, false));
@@ -150,13 +150,13 @@ public final class NavFallbackLifecycleBoundaryTest {
         assertTrue(state.contains("clearServicePresent(context, reason)"));
         assertTrue(state.contains("clearServicePresent(context, \"package-replace-hard-reset:"));
         assertTrue(service.contains("start-rejected:shutdown-active:"));
-        assertTrue(service.contains("start-rejected:boot-disabled:"));
+        assertTrue(service.contains("start-rejected:runtime-disabled:"));
         assertTrue(service.contains("HudRuntimeState.clearServicePresent(appContext, \"stop:\" + reason)"));
         assertTrue(service.contains("HudRuntimeState.markStopped(appContext, \"stop:\" + reason)"));
         assertTrue(service.contains("HudRuntimeState.clearServicePresent(this, \"destroyed\")"));
         assertTrue(service.contains("already_present_after_gate"));
         assertTrue(supervisor.contains("supervisor-rejected:shutdown-active:"));
-        assertTrue(supervisor.contains("supervisor-rejected:boot-disabled:"));
+        assertTrue(supervisor.contains("supervisor-rejected:runtime-disabled:"));
         assertTrue(supervisor.contains("package-replace-hard-reset:"));
         assertTrue(supervisor.contains("HudRuntimeState.clearServicePresent(appContext"));
     }

@@ -54,7 +54,6 @@ public final class BootReceiver extends BroadcastReceiver {
                 return;
             }
             if (!HudPrefs.isBootEnabled(context)) {
-                HudRuntimeWatchdog.cancel(context);
                 return;
             }
             HudRuntimeService.startPersistent(context, "package-replaced");
@@ -72,7 +71,7 @@ public final class BootReceiver extends BroadcastReceiver {
             return;
         }
         if (!HudPrefs.isBootEnabled(context)) {
-            HudRuntimeWatchdog.cancel(context);
+            // Auto-start OFF must not cancel recovery of a manually opened session.
             return;
         }
         AppUpdateManager.onRuntimeWake(context, action);

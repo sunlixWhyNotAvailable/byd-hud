@@ -62,7 +62,7 @@ public final class DashboardWidgetLifecycleContractTest {
     @Test public void onlyExplicitModeTapDispatchesAndShutdownInvalidatesPendingCallback() throws Exception {
         String controller = source("DashboardWidgetController.kt");
         assertEquals(1, controller.split("\\.requestWidgetMode\\(", -1).length - 1);
-        assertTrue(controller.contains("HudPrefs.isBootEnabled(context) && !HudPrefs.isUserShutdownActive(context)"));
+        assertTrue(controller.contains("UserRuntimeSession.allowsRuntime(context)"));
         assertTrue(controller.contains("state = state.onAppOpened()"));
         assertTrue(controller.contains("generation != commandGeneration"));
         assertTrue(controller.contains("private fun stop(context: Context)"));

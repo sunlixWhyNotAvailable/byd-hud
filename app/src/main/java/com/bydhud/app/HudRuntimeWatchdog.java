@@ -13,6 +13,7 @@ import android.util.Log;
 final class HudRuntimeWatchdog {
     static final String ACTION_RUNTIME_WATCHDOG =
             "com.bydhud.app.action.RUNTIME_WATCHDOG";
+    static final String EXTRA_RESUME_SESSION = "resume_active_session";
 
     private static final String TAG = "BydHudRuntimeWatchdog";
     private static final int REQUEST_CODE = 4303;
@@ -35,7 +36,7 @@ final class HudRuntimeWatchdog {
     //keeps watchdog alarm setup in one place so normal and urgent recovery use identical intents.
     private static void scheduleInternal(Context context, String reason, long delayMs) {
         Context appContext = context.getApplicationContext();
-        if (!HudPrefs.isBootEnabled(appContext) || HudPrefs.isUserShutdownActive(appContext)) {
+        if (!UserRuntimeSession.allowsRuntime(appContext)) {
             cancel(appContext);
             return;
         }
@@ -75,6 +76,9 @@ final class HudRuntimeWatchdog {
     private static PendingIntent pendingIntent(Context context) {
         Intent intent = new Intent(context, HudRuntimeWatchdogReceiver.class);
         intent.setAction(ACTION_RUNTIME_WATCHDOG);
+        // Alarms survive process death, not reboot. Carry only an already-active session.
+        intent.putExtra(EXTRA_RESUME_SESSION,
+                UserRuntimeSession.PROCESS.allowsRuntime(false, false));
         return PendingIntent.getBroadcast(
                 context,
                 REQUEST_CODE,
