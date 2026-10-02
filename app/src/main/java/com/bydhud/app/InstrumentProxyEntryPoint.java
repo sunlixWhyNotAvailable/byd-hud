@@ -95,7 +95,16 @@ public final class InstrumentProxyEntryPoint {
         Method systemMain = activityThread.getMethod("systemMain");
         Object thread = systemMain.invoke(null);
         Method getSystemContext = activityThread.getMethod("getSystemContext");
-        return (Context) getSystemContext.invoke(thread);
+        Context system = (Context) getSystemContext.invoke(thread);
+        // createPackageContext inherits the system context's "android" AppOps identity.
+        // A fresh app context supplies the package and attribution of the actual shell UID.
+        Context shell = system.createPackageContext("com.android.shell", Context.CONTEXT_IGNORE_SECURITY);
+        java.lang.reflect.Field packageInfo = shell.getClass().getDeclaredField("mPackageInfo");
+        packageInfo.setAccessible(true);
+        Object loaded = packageInfo.get(shell);
+        Method create = shell.getClass().getDeclaredMethod("createAppContext", activityThread, loaded.getClass());
+        create.setAccessible(true);
+        return (Context) create.invoke(null, thread, loaded);
     }
 
     private static final class Args {

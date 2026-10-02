@@ -23,9 +23,18 @@ final class ShellWorkFiles {
     }
 
     static File root(Context context) throws IOException {
-        File external = context.getExternalFilesDir(null);
+        File external = externalFiles(context);
         if (external == null) throw new IOException("Shared runtime storage unavailable");
         return directory(new File(external, "shell-work"));
+    }
+
+    static File externalFiles(Context context) {
+        if (android.os.Process.myUid() != 2000) return context.getExternalFilesDir(null);
+        // app_process has no app attribution: ContextImpl's storage lookup rejects its shell UID.
+        // Resolve the same primary emulated-volume path without impersonating the app in Binder calls.
+        int user = context.getApplicationInfo().uid / 100000;
+        return new File("/storage/emulated/" + user + "/Android/data/"
+                + context.getPackageName() + "/files");
     }
 
     static File directory(File file) throws IOException {

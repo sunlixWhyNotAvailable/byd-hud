@@ -23,6 +23,10 @@ final class ShellWorkContext extends ContextWrapper {
     @Override public File getFilesDir() { return new File(job, "files"); }
     @Override public File getCacheDir() { return new File(job, "cache"); }
     @Override public File getExternalCacheDir() { return getCacheDir(); }
+    @Override public File getExternalFilesDir(String type) {
+        File root = ShellWorkFiles.externalFiles(getBaseContext());
+        return type == null ? root : new File(root, type);
+    }
     @Override public SharedPreferences getSharedPreferences(String name, int mode) {
         if (!name.matches("[A-Za-z0-9_.-]+")) throw new IllegalArgumentException("Invalid preference name");
         try {

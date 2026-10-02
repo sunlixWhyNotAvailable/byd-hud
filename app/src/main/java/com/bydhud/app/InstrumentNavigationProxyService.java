@@ -937,10 +937,11 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             }
         }
         Log.i(TAG, "stopping generation=" + generation + " reason=" + reason);
-        Looper.getMainLooper().quitSafely();
         InstrumentProxyStartupLog.record(generation,
                 InstrumentProxyStartupLog.Stage.STOPPED,
                 InstrumentProxyStartupLog.Outcome.OK);
+        // Android's main looper cannot quit; this standalone shell process has finished cleanup.
+        System.exit(0);
     }
 
     private boolean clearTrafficLightOutputs() {

@@ -37,8 +37,7 @@ public final class ShellWorkEntryPoint {
                 if (request.optInt("uid") != app.getApplicationInfo().uid
                         || !request.optString("apk").equals(app.getApplicationInfo().sourceDir)
                         || request.optInt("version") != BuildConfig.VERSION_CODE
-                        || request.optInt("boot", -1) != android.provider.Settings.Global.getInt(
-                                system.getContentResolver(), android.provider.Settings.Global.BOOT_COUNT, -2))
+                        || request.optInt("boot", -1) != bootCount())
                     throw new IOException("Stale shell job identity");
                 ShellWorkContext context = new ShellWorkContext(app, system, job);
                 Thread ownerThread = Thread.currentThread();
@@ -111,6 +110,14 @@ public final class ShellWorkEntryPoint {
         List<String> values = new ArrayList<>();
         for (int i = 0; i < array.length(); i++) values.add(array.getString(i));
         return values;
+    }
+
+    private static int bootCount() throws IOException {
+        // app_process is not registered with ActivityManager as a content-provider client.
+        LocalAdbBridge.ShellResult result = command("settings get global boot_count", 128, 5_000);
+        if (result.exitCode != 0) throw new IOException("Cannot read shell job boot identity");
+        try { return Integer.parseInt(result.output.trim()); }
+        catch (NumberFormatException error) { throw new IOException("Invalid shell job boot identity", error); }
     }
 
     static void progress(JSONObject value) throws IOException {

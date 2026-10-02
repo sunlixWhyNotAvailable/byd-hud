@@ -31,7 +31,8 @@ public final class LogcatCaptureFileTest {
             restored.resumeExternal();
             survivor.write(utf8("after app loss\n"));
             survivor.flush();
-            assertEquals("before app loss\nafter app loss\n", new String(Files.readAllBytes(restored.file().toPath()), StandardCharsets.UTF_8));
+            restored.append(utf8("restored metadata\n"));
+            assertEquals("before app loss\nafter app loss\nrestored metadata\n", new String(Files.readAllBytes(restored.file().toPath()), StandardCharsets.UTF_8));
         }
         restored.finish();
         assertEquals("logcat.log", restored.file().getName());
