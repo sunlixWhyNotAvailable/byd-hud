@@ -86,6 +86,8 @@ public final class DiagnosticRecordingTest {
                 assertEquals("someip_tx", status.getJSONObject("journal").getString("currentTask"));
                 assertTrue(status.getJSONObject("journal").getInt("pendingTasks") > 0);
                 assertNotNull(zip.getEntry("INCOMPLETE-RECORDING.txt"));
+                assertTrue(new String(zip.getInputStream(zip.getEntry("INCOMPLETE-RECORDING.txt"))
+                        .readAllBytes(), StandardCharsets.UTF_8).contains("See diagnostics/recording-status.json"));
                 assertTrue(Collections.list(zip.entries()).stream().anyMatch(e -> e.getName().endsWith("someip_tx.jsonl")));
             }
         } finally { release.countDown(); assertTrue(writer.awaitCheckpoint(2000)); }
@@ -158,8 +160,29 @@ public final class DiagnosticRecordingTest {
         }
     }
 
+    @Test public void multipleDaysShareOneRecordingStatusInDiagnostics() throws Exception {
+        String earlierDay = "20200101";
+        NavCaptureStore.writeSomeIpTx(context, earlierDay, "earlier");
+        NavCaptureStore.writeSomeIpTx(context, day, "current");
+        LogShareZip.Result result = LogShareZip.create(context, java.util.Arrays.asList(earlierDay, day));
+        assertTrue(result.detail, result.ok);
+        try (ZipFile zip = new ZipFile(result.file)) {
+            JSONObject status = status(zip);
+            assertEquals(2, status.getJSONArray("selectedDays").length());
+            assertEquals(1L, Collections.list(zip.entries()).stream()
+                    .filter(entry -> entry.getName().endsWith("recording-status.json")).count());
+            assertTrue(Collections.list(zip.entries()).stream()
+                    .anyMatch(entry -> entry.getName().endsWith(earlierDay + "/logs/someip_tx.jsonl")));
+            assertTrue(Collections.list(zip.entries()).stream()
+                    .anyMatch(entry -> entry.getName().endsWith(day + "/logs/someip_tx.jsonl")));
+        }
+    }
+
     private static JSONObject status(ZipFile zip) throws Exception {
-        return new JSONObject(new String(zip.getInputStream(zip.getEntry("recording-status.json")).readAllBytes(), StandardCharsets.UTF_8));
+        assertNull("recording status must not remain at archive root", zip.getEntry("recording-status.json"));
+        var entry = zip.getEntry("diagnostics/recording-status.json");
+        assertNotNull("recording status must be in diagnostics", entry);
+        return new JSONObject(new String(zip.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8));
     }
     private static String read(File file) throws Exception {
         return new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);

@@ -259,7 +259,7 @@ final class LogShareZip {
                     .put("navigatorPatchReportsIncomplete", reportsIncomplete)
                     .put("recordingStatus", incomplete ? "INCOMPLETE" : "snapshot_ready")
                     .put("note", "Writer counters cover this process only; this is not a guarantee of historical coverage.");
-            addStatusFile(staging, files, "recording-status.json", health.toString(2));
+            addStatusFile(staging, files, "diagnostics/recording-status.json", health.toString(2));
             if (incomplete) addStatusFile(staging, files, "INCOMPLETE-RECORDING.txt",
                     "This archive may be missing diagnostic records.\n"
                     + "writerCheckpointReady=" + checkpoint + "\n"
@@ -267,7 +267,7 @@ final class LogShareZip {
                     + "lossObservedInCurrentProcess=" + health.getBoolean("lossObserved") + "\n"
                     + "navigatorPatchReportsIncomplete=" + reportsIncomplete + "\n"
                     + (storageReady ? "Available files were copied.\n" : "Storage lock timed out; diagnostic status only, no log files copied.\n")
-                    + "See recording-status.json for writer progress, pending work and errors.\n");
+                    + "See diagnostics/recording-status.json for writer progress, pending work and errors.\n");
             return incomplete;
         } catch (JSONException error) {
             throw new IOException("cannot serialize recording status", error);
@@ -277,6 +277,7 @@ final class LogShareZip {
     private static void addStatusFile(File staging, List<SnapshotFile> files, String name,
             String text) throws IOException {
         File file = new File(staging, name);
+        Files.createDirectories(file.toPath().getParent());
         Files.write(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
         files.add(new SnapshotFile(file, name, file.length()));
     }
