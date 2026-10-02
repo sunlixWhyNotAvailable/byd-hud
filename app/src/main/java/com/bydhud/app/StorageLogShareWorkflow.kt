@@ -31,7 +31,9 @@ data class StorageLogShareSnapshot(
     val detail: String = "",
     val eventId: String = "",
     val reportTitle: String = "",
-    val dismissed: Boolean = false
+    val dismissed: Boolean = false,
+    val collectionOutcome: String = "",
+    val patchReportsIncomplete: Boolean = false
 )
 
 internal fun storageLogShareElapsedSeconds(
@@ -172,6 +174,10 @@ object StorageLogShareWorkflow {
             }
             val archive = LogShareZip.create(
                 app, submittedDays, if (toDeveloper) control.operationId else "")
+            update(control.operationId) { it.copy(
+                collectionOutcome = archive.outcome.name,
+                patchReportsIncomplete = archive.patchReportsIncomplete
+            ) }
             control.archive = archive.file
             if (control.cancelled || Thread.currentThread().isInterrupted) {
                 LogShareZip.deleteArtifact(archive.file)

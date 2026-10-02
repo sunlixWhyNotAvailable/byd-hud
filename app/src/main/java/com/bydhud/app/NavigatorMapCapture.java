@@ -389,6 +389,9 @@ public final class NavigatorMapCapture {
                     && FRAME.isCurrent(ownerPackage, ownerGeneration, session)) {
                 answer.putBoolean("active", true);
                 answer.putBoolean("fullSourceMemory", true);
+                answer.putInt("outputMaxEdge", MAX_BITMAP_SIDE);
+                answer.putLong("frameTimeoutMs", 2500L);
+                answer.putLong("leaseMs", 6000L);
                 answer.putString("session", session);
                 if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty()) {
                     answer.putBoolean("journalAccepted", true);
@@ -516,7 +519,9 @@ public final class NavigatorMapCapture {
         }
 
         String status = string(data, "status", "missing_status");
+        long copyStarted = SystemClock.elapsedRealtimeNanos();
         Bitmap bitmap = bitmap(data);
+        data.putLong("receiverCopyNs", SystemClock.elapsedRealtimeNanos() - copyStarted);
         String invalidReason = validateBitmap(bitmap, status);
         answer.putBoolean("accepted", true);
         if (invalidReason != null) {
@@ -524,6 +529,24 @@ public final class NavigatorMapCapture {
             finishProcessing(resultSession, id);
             logResultError(app, callerPackage, resultSession, id, status, invalidReason, data);
             return answer;
+        }
+        HudMapProfile.Source validatedSource = classifySource(callerPackage, string(data, "source", ""),
+                string(data, "frameSourceMode", ""), string(data, "backgroundState", ""), modeAtRequest,
+                longValue(data, "captureProtocol", 0L));
+        synchronized (LOCK) {
+            if ((expectedAtRequest != null && validatedSource != expectedAtRequest)
+                    || (WAZE_PACKAGE.equals(callerPackage) && activeSourceModeRevision != modeRevision)
+                    || !FRAME.acceptReceipt(callerPackage, generation, resultSession, receivedAt,
+                            SystemClock.elapsedRealtime())) {
+                recycle(bitmap);
+                finishProcessing(resultSession, id);
+                FRAME.resetCadence();
+                log(app, "navigator_map_capture result_rejected owner=" + field(callerPackage, 96)
+                        + " id=" + id + " reason=wrong_source_or_stale_receipt"
+                        + " frameSourceMode=" + field(string(data, "frameSourceMode", ""), 64));
+                return answer;
+            }
+            scheduleExpiryLocked(callerPackage, generation, resultSession, FRAME.frameSequence(), receivedAt);
         }
         Bitmap acceptedBitmap = bitmap;
         if (receiverWorker == null || !receiverWorker.post(() -> processFrame(
@@ -551,11 +574,12 @@ public final class NavigatorMapCapture {
             Bundle data,
             Bitmap bitmap) {
         boolean retained = false;
+        Bitmap crop = null;
         try {
             String sourceMetadata = string(data, "source", "");
             String backgroundState = string(data, "backgroundState", "");
             HudMapProfile.Source frameSource = classifySource(
-                    callerPackage, sourceMetadata, string(data, "frameSourceMode", ""), backgroundState, modeAtRequest);
+                    callerPackage, sourceMetadata, string(data, "frameSourceMode", ""), backgroundState, modeAtRequest, longValue(data, "captureProtocol", 0L));
             if (expectedAtRequest != null && frameSource != expectedAtRequest) {
                 synchronized (LOCK) {
                     if (session.equals(resultSession)) FRAME.resetCadence();
@@ -580,7 +604,13 @@ public final class NavigatorMapCapture {
             }
 
             ProfileSelection selection = profileSelection(app, frameSource);
-            String inputHash = pixelHash(bitmap);
+            long cropStart = SystemClock.elapsedRealtimeNanos();
+            crop = HudMapImage.profileCrop(bitmap, selection.profile);
+            if (crop == null) throw new IllegalStateException("empty_crop");
+            data.putLong("cropNs", SystemClock.elapsedRealtimeNanos() - cropStart);
+            long compareStart = SystemClock.elapsedRealtimeNanos();
+            String inputHash = pixelHash(crop);
+            data.putLong("cropHashNs", SystemClock.elapsedRealtimeNanos() - compareStart);
             NavigatorMapSessionState.FrameUpdate update = NavigatorMapSessionState.FrameUpdate.REJECTED;
             long sequence = 0L;
             long revision = 0L;
@@ -622,7 +652,9 @@ public final class NavigatorMapCapture {
                 return;
             }
 
-            byte[] png = HudMapImage.profileCropPng(bitmap, selection.profile);
+            long encodeStart = SystemClock.elapsedRealtimeNanos();
+            byte[] png = HudMapImage.encodePng(crop);
+            data.putLong("pngEncodeNs", SystemClock.elapsedRealtimeNanos() - encodeStart);
             if (png == null || png.length == 0) {
                 finishProcessing(resultSession, id);
                 logResultError(app, callerPackage, resultSession, id, status, "empty_cropped_png", data);
@@ -702,6 +734,7 @@ public final class NavigatorMapCapture {
             logResultError(app, callerPackage, resultSession, id, status,
                     "processing_" + error.getClass().getSimpleName(), data);
         } finally {
+            recycle(crop);
             if (!retained) recycle(bitmap);
             finishProcessing(resultSession, id);
         }
@@ -729,12 +762,12 @@ public final class NavigatorMapCapture {
             String sourceMetadata,
             String producerMode,
             String backgroundState,
-            HudMapProfile.Source activeMode) {
+            HudMapProfile.Source activeMode, long protocol) {
         String className = rendererClassName(sourceMetadata);
         if (MAPS_PACKAGE.equals(owner)) {
             return className.isEmpty() ? null : HudMapProfile.Source.GOOGLE_MAPS;
         }
-        if (!WAZE_PACKAGE.equals(owner) || !"com.waze.map.opengl.w".equals(className)) {
+        if (!WAZE_PACKAGE.equals(owner) || (protocol < 2L && !"com.waze.map.opengl.w".equals(className))) {
             return null;
         }
         // New producers identify the exact renderer at capture time, independently
@@ -839,14 +872,18 @@ public final class NavigatorMapCapture {
             return;
         }
         ProfileSelection selection = profileSelection(app, source);
-        byte[] png = HudMapImage.profileCropPng(sourceBitmap, selection.profile);
-        if (png.length == 0) return;
+        Bitmap crop = HudMapImage.profileCrop(sourceBitmap, selection.profile);
+        if (crop == null) return;
+        byte[] png;
         String outputHash;
         try {
+            inputHash = pixelHash(crop);
+            png = HudMapImage.encodePng(crop);
+            if (png.length == 0) return;
             outputHash = sha256(png);
         } catch (NoSuchAlgorithmException impossible) {
             return;
-        }
+        } finally { recycle(crop); }
         long latestCatalogRevision = HudMapProfiles.revision(app);
         Runnable notify = null;
         long revision = 0L;
@@ -1181,6 +1218,12 @@ public final class NavigatorMapCapture {
         log(app, "navigator_map_capture frame owner=" + field(callerPackage, 96)
                 + " session=" + frameSession + " id=" + id
                 + " status=" + field(status, 64) + " source=" + field(string(data, "source", ""), 96)
+                + " receiverCopyNs=" + longValue(data, "receiverCopyNs", 0L)
+                + " cropNs=" + longValue(data, "cropNs", 0L)
+                + " cropHashNs=" + longValue(data, "cropHashNs", 0L)
+                + " pngEncodeNs=" + longValue(data, "pngEncodeNs", 0L)
+                + " conversionNs=" + longValue(data, "conversionNs", 0L)
+                + " sharedCopyNs=" + longValue(data, "sharedCopyNs", 0L)
                 + " frameSource=" + sourceName(source)
                 + " profile=" + profileName(selection.profile)
                 + " profileRevision=" + selection.catalogRevision

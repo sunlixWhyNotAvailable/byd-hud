@@ -225,6 +225,21 @@ public final class NavigatorMapPatcher {
             Analysis source = analyze(sourceApks, family);
             PayloadInfo suppliedPayload = inspectPayloadFile(payloadDex);
             verifyPayload(suppliedPayload, family);
+            if (source.payload != null) {
+                // Verified legacy hooks stay in place; replace only their standalone payload DEX.
+                verifyCaptured(source, family);
+                if (!currentPayload(suppliedPayload)) throw new UnsupportedPatchException("capture upgrade requires current capabilities");
+                if (!outputDir.isDirectory() && !outputDir.mkdirs()) throw new IOException("cannot create candidate directory");
+                DexUnit previous = source.payloadDex.get(0);
+                for (File apk : sourceApks) {
+                    File output = new File(outputDir, apk.getName());
+                    if (apk.getCanonicalFile().equals(previous.apk.getCanonicalFile())) {
+                        repack(apk, output, Collections.singletonMap(previous.name, payloadDex), Collections.emptyMap());
+                    } else Files.copy(apk.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                }
+                Inspection upgraded = inspectInternal(outputMembers(sourceApks, outputDir), family, version);
+                return PATCHED.equals(upgraded.state) ? upgraded : result(FAILED, "capture upgrade failed: " + upgraded.reason);
+            }
             requireSupportedTargets(source, family);
 
             File parent = outputDir.getAbsoluteFile().getParentFile();
@@ -350,10 +365,16 @@ public final class NavigatorMapPatcher {
 
         try {
             verifyCaptured(analysis, family);
-            return result(PATCHED, "complete " + family + " map-capture payload and hooks verified");
+            return currentPayload(analysis.payload)
+                    ? result(PATCHED, "complete " + family + " map-capture payload and hooks verified")
+                    : result(PATCHABLE, "verified legacy capture payload; policy/bulk upgrade available");
         } catch (UnsupportedPatchException error) {
             return result(UNSUPPORTED, message(error));
         }
+    }
+
+    private static boolean currentPayload(PayloadInfo payload) {
+        return payload != null && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease");
     }
 
     private static Analysis analyze(List<File> apks, String family) throws IOException {
@@ -939,7 +960,8 @@ public final class NavigatorMapPatcher {
         String wazeBuild = "map-probe-r8-adaptive-poll-hud-consumer-v1";
         if (!payload.bridgeStrings.contains(endpoint)
                 || payload.bridgeStrings.contains("content://com.bydhud.mapcaptureprobe.frames")
-                || !payload.bridgeStrings.contains("gmaps".equals(family) ? mapsBuild : wazeBuild)
+                || !(payload.bridgeStrings.contains("gmaps".equals(family) ? mapsBuild : wazeBuild)
+                    || payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease"))
                 || !payload.bridgeStrings.contains("pollIntervalMs")
                 || !payload.bridgeStrings.contains("minPollIntervalMs")) {
             throw new UnsupportedPatchException("map-capture payload protocol markers or provider authority are incomplete");

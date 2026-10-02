@@ -111,6 +111,19 @@ public final class NavigatorMapPatcherTest {
                 mapsPayload = extractPayload(capturedMaps, new File(outputRoot, "maps-payload.dex"));
                 wazePayload = extractPayload(capturedWaze, new File(outputRoot, "waze-payload.dex"));
             }
+            File released = new File(workspace, "direct-apks/release-assets/navigator-assets-v2-update-20261001");
+            for (String family : new String[]{"gmaps", "waze"}) {
+                File legacy = new File(released, family.equals("gmaps") ? directMaps.getName() : directWaze.getName());
+                if (!legacy.isFile()) continue;
+                String version = family.equals("gmaps") ? MAPS_VERSION : WAZE_VERSION;
+                NavigatorMapPatcher.Inspection before = NavigatorMapPatcher.inspect(Collections.singletonList(legacy), family, version);
+                assertEquals(before.reason, NavigatorMapPatcher.PATCHABLE, before.state);
+                File upgradedDir = new File(outputRoot, family + "-upgrade");
+                NavigatorMapPatcher.Inspection upgraded = NavigatorMapPatcher.patch(Collections.singletonList(legacy), upgradedDir,
+                        family.equals("gmaps") ? mapsPayload : wazePayload, family, version);
+                assertEquals(upgraded.reason, NavigatorMapPatcher.PATCHED, upgraded.state);
+                assertOutputRetainsMembersAndNativeLibraries(legacy, new File(upgradedDir, legacy.getName()));
+            }
             File mapsOutput = new File(outputRoot, "maps-members");
             File wazeOutput = new File(outputRoot, "waze-members");
 

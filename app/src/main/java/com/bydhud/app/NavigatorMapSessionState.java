@@ -82,6 +82,14 @@ final class NavigatorMapSessionState {
                 && session.equals(expectedSession);
     }
 
+    // A validated receipt keeps the stream alive while its crop is being prepared.
+    boolean acceptReceipt(String owner, long generation, String expectedSession, long receivedAt, long now) {
+        if (!isCurrent(owner, generation, expectedSession) || !isFreshReceipt(receivedAt, now)) return false;
+        receivedAtElapsedMs = Math.max(receivedAtElapsedMs, receivedAt);
+        frameSequence++;
+        return true;
+    }
+
     boolean hasSameInputPixels(
             String owner,
             long generation,
@@ -130,7 +138,7 @@ final class NavigatorMapSessionState {
                         nextSource, nextProfileRevision)) {
             return FrameUpdate.REJECTED;
         }
-        receivedAtElapsedMs = receivedAt;
+        receivedAtElapsedMs = Math.max(receivedAtElapsedMs, receivedAt);
         recordFreshCrop(true, receivedAt);
         frameSequence++;
         return FrameUpdate.SAME;
@@ -166,7 +174,7 @@ final class NavigatorMapSessionState {
             return FrameUpdate.REJECTED;
         }
         inputPixelHash = nextInputPixelHash;
-        receivedAtElapsedMs = receivedAt;
+        receivedAtElapsedMs = Math.max(receivedAtElapsedMs, receivedAt);
         frameSequence++;
         boolean sameOutput = png != null
                 && outputPixelHash.equals(nextOutputPixelHash)

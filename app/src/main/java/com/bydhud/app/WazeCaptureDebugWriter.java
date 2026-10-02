@@ -32,6 +32,8 @@ final class WazeCaptureDebugWriter {
     private final AtomicInteger pendingTasks = new AtomicInteger();
     private final AtomicInteger pendingBitmaps = new AtomicInteger();
     private final AtomicInteger droppedBitmaps = new AtomicInteger();
+    private final java.util.concurrent.atomic.AtomicLong completedTasks = new java.util.concurrent.atomic.AtomicLong();
+    private final java.util.concurrent.ConcurrentLinkedQueue<Long> queuedAt = new java.util.concurrent.ConcurrentLinkedQueue<>();
     private final AtomicInteger failures = new AtomicInteger();
     private final long startedAt = System.currentTimeMillis();
     private volatile long lastSuccessfulWriteAt;
@@ -39,6 +41,11 @@ final class WazeCaptureDebugWriter {
     private volatile long taskStartedAt;
     private volatile String currentTask = "";
     private volatile String lastError = "";
+
+    static String currentOperation() {
+        WazeCaptureDebugWriter writer = CURRENT.get();
+        return writer == null ? Thread.currentThread().getName() : writer.currentTask;
+    }
 
     static void recordWriteSuccess() {
         WazeCaptureDebugWriter writer = CURRENT.get();
@@ -61,7 +68,10 @@ final class WazeCaptureDebugWriter {
     }
 
     private JSONObject health() throws JSONException {
+        Long oldest = queuedAt.peek();
         return new JSONObject().put("writer", thread.getName()).put("startedAtWallMs", startedAt)
+                .put("completedTasks", completedTasks.get())
+                .put("oldestQueuedAgeMs", oldest == null ? 0 : Math.max(0L, System.currentTimeMillis() - oldest))
                 .put("alive", thread.isAlive()).put("pendingTasks", pendingTasks.get())
                 .put("pendingBitmaps", pendingBitmaps.get()).put("droppedBitmaps", droppedBitmaps.get())
                 .put("failures", failures.get()).put("lastError", lastError)
@@ -78,7 +88,9 @@ final class WazeCaptureDebugWriter {
         return new JSONObject().put("scope", "current_process")
                 .put("sampledAtWallMs", System.currentTimeMillis()).put("lossObserved", loss)
                 .put("journal", journal.health())
-                .put("mapImages", images == null ? JSONObject.NULL : images.health());
+                .put("mapImages", images == null ? JSONObject.NULL : images.health())
+                .put("storageLockOwners", NavigationLogStorage.lockDiagnostics())
+                .put("completedStorageOperations", NavigationLogStorage.completedOperations());
     }
 
     private WazeCaptureDebugWriter(String name) {
@@ -243,18 +255,17 @@ final class WazeCaptureDebugWriter {
         }
         long started = android.os.SystemClock.elapsedRealtime();
         WazeCaptureDebugWriter images = mapInstance;
-        boolean imagesReady = this != instance || images == null || images.awaitCheckpoint(timeoutMs);
-        long remaining = Math.max(0L, timeoutMs - (android.os.SystemClock.elapsedRealtime() - started));
-        CountDownLatch idle = new CountDownLatch(1);
-        if (!handler.post(idle::countDown)) {
-            return false;
-        }
-        try {
-            return idle.await(remaining, TimeUnit.MILLISECONDS) && imagesReady;
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            return false;
-        }
+        CountDownLatch idle = new CountDownLatch(this == instance && images != null ? 2 : 1);
+        // Enqueue BOTH markers now: new work arriving during the wait is not part of this checkpoint.
+        if (!handler.post(idle::countDown)) return false;
+        if (this == instance && images != null && !images.handler.post(idle::countDown)) return false;
+        try { return idle.await(Math.max(0L, timeoutMs - (android.os.SystemClock.elapsedRealtime() - started)), TimeUnit.MILLISECONDS); }
+        catch (InterruptedException e) { Thread.currentThread().interrupt(); return false; }
+    }
+
+    static long completedTaskCount() {
+        WazeCaptureDebugWriter images = mapInstance;
+        return get().completedTasks.get() + (images == null ? 0 : images.completedTasks.get());
     }
 
     private boolean tryReserveBitmap() {
@@ -270,6 +281,8 @@ final class WazeCaptureDebugWriter {
     }
 
     private boolean post(String type, Runnable work) {
+        Long enqueuedAt = System.currentTimeMillis();
+        queuedAt.add(enqueuedAt);
         pendingTasks.incrementAndGet();
         boolean posted = handler.post(() -> {
             CURRENT.set(this);
@@ -286,9 +299,12 @@ final class WazeCaptureDebugWriter {
                 taskStartedAt = 0L;
                 CURRENT.remove();
                 pendingTasks.decrementAndGet();
+                queuedAt.remove(enqueuedAt);
+                completedTasks.incrementAndGet();
             }
         });
         if (!posted) {
+            queuedAt.remove(enqueuedAt);
             failed(type + ": handler_stopped");
             pendingTasks.decrementAndGet();
             Log.w(TAG, "debug_writer_drop type=" + type + " reason=handler_stopped");

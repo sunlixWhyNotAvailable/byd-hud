@@ -61,7 +61,7 @@ public final class BackgroundCapture {
     }
 
     public static void lease(boolean active) {
-        LEASE.update(active, SystemClock.elapsedRealtime());
+        LEASE.update(active, SystemClock.elapsedRealtime(), CaptureBridge.leaseMs());
         MAIN.post(() -> { drive(); if (!ticking && LEASE.active(SystemClock.elapsedRealtime())) {
             ticking = true; MAIN.postDelayed(BackgroundCapture::tick, 500);
         }});
@@ -81,6 +81,16 @@ public final class BackgroundCapture {
             if (target.view != null && !target.view.isAttachedToWindow()) { failed=target.owner; release("window_detached",false); }
             return;
         }
+        // A valid visible host outranks draw silence, including a static cluster map.
+        if (waze.get() != null && !wazeStopped) return;
+        for (WeakReference<Object> ref : cars) {
+            Object owner = ref.get();
+            if (owner == null) continue;
+            try {
+                Surface visible = carSurface(get(owner, null, "a"));
+                if (visible != null && visible.isValid()) return;
+            } catch (Throwable ignored) { /* Existing readiness checks handle unavailable hosts. */ }
+        }
         // Resume the renderer that actually supplied the visible map. A Car App
         // can remain RESUMED without ever owning a visible Surface.
         if ("waze".equals(lastVisibleWazeSource) && wazeStopped && waze.get()!=null
@@ -88,8 +98,7 @@ public final class BackgroundCapture {
             startWaze(waze.get());
             if (target!=null) return;
         }
-        // ponytail: recent frames identify another active host; add host-lifecycle hooks
-        // if a static cluster renderer's >1.5s draw silence causes false fallback.
+        // Silence only delays takeover after visible ownership has ended.
         if (SystemClock.elapsedRealtime()-lastVisibleWazeFrame>1500) {
             StringBuilder readiness = new StringBuilder();
             for (int i=cars.size()-1;i>=0;i--) {
@@ -667,7 +676,7 @@ public final class BackgroundCapture {
     }
     private static void createReader(Target t, int width, int height) {
         if (width<1 || height<1) throw new IllegalStateException("target_size_unavailable");
-        int[] size = PixelMath.size(width,height,CaptureBridge.fullSource() ? 1920 : 320);
+        int[] size = PixelMath.size(width,height,CaptureBridge.outputEdge());
         t.width = size[0]; t.height = size[1];
         // Pixels come from the navigator snapshot/GL hook; this consumer only drains buffers.
         // PRIVATE accepts the producer's EGL format (Maps emits RGBX, Waze RGBA).

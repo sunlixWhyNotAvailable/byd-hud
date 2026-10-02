@@ -42,6 +42,18 @@ import java.util.concurrent.atomic.AtomicInteger;
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class NavigatorMapCaptureTest {
+    @Test public void protocolSourceDoesNotDependOnObfuscatedRendererClass() throws Exception {
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.WAZE_PACKAGE, 99L, HudMapProfile.Source.WAZE, null);
+        Bundle poll = poll(NavigatorMapCapture.WAZE_PACKAGE, "", false);
+        Bundle frame = result(NavigatorMapCapture.WAZE_PACKAGE, poll.getString("session"), poll.getLong("id"), Bitmap.createBitmap(80,48,Bitmap.Config.ARGB_8888));
+        frame.putString("source", "renamed.renderer@12");
+        frame.putLong("captureProtocol", 2);
+        frame.putString("frameSourceMode", "waze");
+        NavigatorMapCapture.providerCall(context, "result", frame, WAZE_UID);
+        drainReceiver();
+        assertEquals(HudMapProfile.Source.WAZE, NavigatorMapCapture.snapshot().source());
+    }
+
     private static final int WAZE_UID = 23001;
     private static final int MAPS_UID = 23002;
     private static final int FORGED_UID = 23003;

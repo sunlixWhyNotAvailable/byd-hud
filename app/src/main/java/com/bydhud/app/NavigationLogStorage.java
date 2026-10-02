@@ -46,6 +46,72 @@ final class NavigationLogStorage {
     private static final Set<String> ACTIVE_DIRECT_SESSIONS = new HashSet<>();
     private static final ReentrantReadWriteLock TOPOLOGY_GATE =
             new ReentrantReadWriteLock(true);
+    private static final Map<String, Integer> EXPORT_PINS = new HashMap<>();
+    private static final Map<File, Runnable> DEFERRED_ROTATIONS = new LinkedHashMap<>();
+    private static final Map<Thread, LockHold> LOCK_OWNERS = new LinkedHashMap<>();
+    private static final class LockHold {
+        final long started = System.nanoTime();
+        final String operation = WazeCaptureDebugWriter.currentOperation();
+        int depth = 1;
+    }
+    private static final java.util.concurrent.atomic.AtomicLong COMPLETED_OPERATIONS = new java.util.concurrent.atomic.AtomicLong();
+
+    // Call under the topology writer lock; appends remain free after the inventory snapshot.
+    static void pinExportDays(List<String> days) {
+        for (String day : days) EXPORT_PINS.put(day, EXPORT_PINS.getOrDefault(day, 0) + 1);
+    }
+    static void unpinExportDays(List<String> days) {
+        withWriteLock(() -> {
+            for (String day : days) {
+                int count = EXPORT_PINS.getOrDefault(day, 0);
+                if (count <= 1) EXPORT_PINS.remove(day); else EXPORT_PINS.put(day, count - 1);
+            }
+            List<Runnable> ready = new ArrayList<>();
+            java.util.Iterator<Map.Entry<File, Runnable>> it = DEFERRED_ROTATIONS.entrySet().iterator();
+            while (it.hasNext()) {
+                Map.Entry<File, Runnable> item = it.next();
+                if (!pinnedFile(item.getKey())) { ready.add(item.getValue()); it.remove(); }
+            }
+            for (Runnable rotation : ready) rotation.run();
+        });
+    }
+    private static boolean pinnedFile(File file) {
+        for (File part = file; part != null; part = part.getParentFile())
+            if (EXPORT_PINS.containsKey(part.getName())) return true;
+        return false;
+    }
+    static boolean deferExportRotation(File file, Runnable rotation) {
+        if (!pinnedFile(file)) return false;
+        DEFERRED_ROTATIONS.put(file, rotation);
+        return true;
+    }
+    private static void trackLock() {
+        synchronized (LOCK_OWNERS) {
+            LockHold owner = LOCK_OWNERS.get(Thread.currentThread());
+            if (owner == null) LOCK_OWNERS.put(Thread.currentThread(), new LockHold());
+            else owner.depth++;
+        }
+    }
+    private static void trackUnlock() {
+        synchronized (LOCK_OWNERS) {
+            LockHold owner = LOCK_OWNERS.get(Thread.currentThread());
+            if (owner != null && --owner.depth == 0) {
+                LOCK_OWNERS.remove(Thread.currentThread()); COMPLETED_OPERATIONS.incrementAndGet();
+            }
+        }
+    }
+    static long completedOperations() { return COMPLETED_OPERATIONS.get(); }
+    static org.json.JSONArray lockDiagnostics() throws org.json.JSONException {
+        org.json.JSONArray owners = new org.json.JSONArray();
+        synchronized (LOCK_OWNERS) {
+            for (Map.Entry<Thread, LockHold> owner : LOCK_OWNERS.entrySet()) {
+                owners.put(new org.json.JSONObject().put("thread", owner.getKey().getName())
+                        .put("heldMs", (System.nanoTime() - owner.getValue().started) / 1000000)
+                        .put("depth", owner.getValue().depth).put("operation", owner.getValue().operation));
+            }
+        }
+        return owners;
+    }
     private static final long BYTES_PER_GB = 1024L * 1024L * 1024L;
     private static final long RETENTION_MIN_INTERVAL_MS = 30000L;
     private static final long RETENTION_BATCH_FILE_LIMIT = 64L;
@@ -84,11 +150,11 @@ final class NavigationLogStorage {
     }
 
     static <T> T withReadLock(LockedSupplier<T> work) {
-        TOPOLOGY_GATE.readLock().lock();
+        lockTopologyRead();
         try {
             return work.get();
         } finally {
-            TOPOLOGY_GATE.readLock().unlock();
+            unlockTopologyRead();
         }
     }
 
@@ -100,11 +166,11 @@ final class NavigationLogStorage {
     }
 
     static <T> T withWriteLock(LockedSupplier<T> work) {
-        TOPOLOGY_GATE.writeLock().lock();
+        lockTopologyWrite();
         try {
             return work.get();
         } finally {
-            TOPOLOGY_GATE.writeLock().unlock();
+            unlockTopologyWrite();
         }
     }
 
@@ -117,21 +183,27 @@ final class NavigationLogStorage {
 
     static void lockTopologyRead() {
         TOPOLOGY_GATE.readLock().lock();
+        trackLock();
     }
 
     static void unlockTopologyRead() {
+        trackUnlock();
         TOPOLOGY_GATE.readLock().unlock();
     }
 
     static void lockTopologyWrite() {
         TOPOLOGY_GATE.writeLock().lock();
+        trackLock();
     }
 
     static boolean tryLockTopologyWrite(long timeoutMs) throws InterruptedException {
-        return TOPOLOGY_GATE.writeLock().tryLock(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        boolean acquired = TOPOLOGY_GATE.writeLock().tryLock(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS);
+        if (acquired) trackLock();
+        return acquired;
     }
 
     static void unlockTopologyWrite() {
+        trackUnlock();
         TOPOLOGY_GATE.writeLock().unlock();
     }
 
@@ -1005,7 +1077,7 @@ final class NavigationLogStorage {
         }
         return withWriteLock(() -> {
             ActiveRetentionState active = currentActiveRetentionState();
-            if (isProtectedRetentionCandidate(candidate, active)) {
+            if (EXPORT_PINS.containsKey(candidate.day) || isProtectedRetentionCandidate(candidate, active)) {
                 return null;
             }
             List<RenamedFragment> renamed = new ArrayList<>();
@@ -1325,6 +1397,8 @@ final class NavigationLogStorage {
             Context context,
             String day,
             boolean active) {
+        if (EXPORT_PINS.containsKey(day)) return new DayRetirement(false, day, active,
+                Collections.emptyList(), "log export is using this day");
         if (ShanghaiTestController.protectsStorageDay(day)) {
             return new DayRetirement(false, day, active,
                     Collections.emptyList(), "Shanghai capture is using this day");

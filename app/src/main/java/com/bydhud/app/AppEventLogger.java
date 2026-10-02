@@ -84,6 +84,7 @@ final class AppEventLogger {
     }
 
     private static void rotate(File file, String name) {
+        if (NavigationLogStorage.deferExportRotation(file, () -> rotate(file, name))) return;
         if (!file.exists() || file.length() <= MAX_FILE_BYTES) {
             return;
         }

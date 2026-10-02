@@ -854,6 +854,7 @@ final class LogcatRecorder {
     }
 
     private static void writeManifest(Session session) throws IOException {
+        NavigationLogStorage.lockTopologyRead();
         try {
             session.manifest.put("mode", session.mode);
             session.manifest.put("buffers",
@@ -887,7 +888,7 @@ final class LogcatRecorder {
         } catch (Exception error) {
             if (error instanceof IOException) throw (IOException) error;
             throw new IOException("Manifest write failed", error);
-        }
+        } finally { NavigationLogStorage.unlockTopologyRead(); }
     }
 
     private static void writeFile(File file, byte[] bytes) throws IOException {

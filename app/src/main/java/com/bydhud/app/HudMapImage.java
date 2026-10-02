@@ -24,7 +24,7 @@ public final class HudMapImage {
         if (source == null || source.isRecycled()) return new byte[0];
         float fitPercent = 100f * Math.max(WIDTH / (float) source.getWidth(),
                 HEIGHT / (float) source.getHeight());
-        return framedPng(source, 0, 0, fitPercent);
+        return encodeAndRecycle(framedBitmap(source, 0, 0, fitPercent));
     }
 
     /** Applies source framing before producing the same 300x180 image used by HUD output. */
@@ -32,16 +32,38 @@ public final class HudMapImage {
         if (profile == null) {
             return centerCropPng(source);
         }
-        return framedPng(source, profile.x, profile.y, profile.scale);
+        return encodeAndRecycle(profileCrop(source, profile));
     }
 
-    private static byte[] framedPng(Bitmap source, float x, float y, float scalePercent) {
-        if (source == null || source.isRecycled()) return new byte[0];
+    static Bitmap profileCrop(Bitmap source, HudMapProfile profile) {
+        if (source == null || source.isRecycled()) return null;
+        if (profile != null) return framedBitmap(source, profile.x, profile.y, profile.scale);
+        float fit = 100f * Math.max(WIDTH / (float) source.getWidth(), HEIGHT / (float) source.getHeight());
+        return framedBitmap(source, 0, 0, fit);
+    }
+
+    static byte[] encodePng(Bitmap bitmap) {
+        if (bitmap == null) return new byte[0];
+        try {
+            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+            return bitmap.compress(Bitmap.CompressFormat.PNG, 100, bytes) ? bytes.toByteArray() : new byte[0];
+        } catch (RuntimeException | OutOfMemoryError ignored) {
+            return new byte[0];
+        }
+    }
+
+    private static byte[] encodeAndRecycle(Bitmap bitmap) {
+        try { return encodePng(bitmap); }
+        finally { if (bitmap != null) bitmap.recycle(); }
+    }
+
+    private static Bitmap framedBitmap(Bitmap source, float x, float y, float scalePercent) {
+        if (source == null || source.isRecycled()) return null;
         Bitmap output = null;
         try {
             int sourceWidth = source.getWidth();
             int sourceHeight = source.getHeight();
-            if (sourceWidth <= 0 || sourceHeight <= 0) return new byte[0];
+            if (sourceWidth <= 0 || sourceHeight <= 0) return null;
             output = Bitmap.createBitmap(WIDTH, HEIGHT, Bitmap.Config.ARGB_8888);
             output.eraseColor(Color.TRANSPARENT);
             // 100% means one source pixel per HUD pixel; 20% selects five times
@@ -59,13 +81,10 @@ public final class HudMapImage {
             Canvas canvas = new Canvas(output);
             canvas.clipRect(0, 0, WIDTH, HEIGHT);
             canvas.drawBitmap(source, transform, new Paint(Paint.FILTER_BITMAP_FLAG));
-            ByteArrayOutputStream bytes = new ByteArrayOutputStream();
-            return output.compress(Bitmap.CompressFormat.PNG, 100, bytes)
-                    ? bytes.toByteArray() : new byte[0];
+            return output;
         } catch (RuntimeException | OutOfMemoryError ignored) {
-            return new byte[0];
-        } finally {
             if (output != null && !output.isRecycled()) output.recycle();
+            return null;
         }
     }
 

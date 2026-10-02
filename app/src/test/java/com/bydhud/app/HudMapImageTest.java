@@ -25,6 +25,12 @@ import static org.junit.Assert.assertNotNull;
 @Config(sdk = 29, application = Application.class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class HudMapImageTest {
+    @Test public void encodingFailureReturnsEmptyOutput() {
+        Bitmap source = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888);
+        source.recycle();
+        assertArrayEquals(new byte[0], HudMapImage.encodePng(source));
+    }
+
     @Test
     public void centerCropProducesCanonicalAspectWithoutRecyclingSource() {
         Bitmap wide = Bitmap.createBitmap(360, 180, Bitmap.Config.ARGB_8888);

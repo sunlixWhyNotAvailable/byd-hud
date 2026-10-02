@@ -93,7 +93,7 @@ public final class DiagnosticRecordingTest {
         } finally { release.countDown(); assertTrue(writer.awaitCheckpoint(2000)); }
     }
 
-    @Test public void busyStorageExportsDiagnosticStatusWithoutWaitingForever() throws Exception {
+    @Test public void busyStorageFailsWithoutPretendingStatusesAreLogs() throws Exception {
         NavCaptureStore.writeSomeIpTx(context, day, "preserve-me");
         CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
         Thread reader = daemon(() -> NavigationLogStorage.withReadLock(() -> {
@@ -102,20 +102,89 @@ public final class DiagnosticRecordingTest {
         assertTrue(entered.await(2, TimeUnit.SECONDS));
         try {
             long started = System.nanoTime();
-            LogShareZip.SelectionSummary summary = LogShareZip.summarize(context, Collections.singletonList(day));
-            assertTrue(summary.detail, summary.ok);
-            assertTrue(summary.detail.contains("diagnostic status only"));
             LogShareZip.Result result = LogShareZip.create(context, Collections.singletonList(day));
-            assertTrue(result.detail, result.ok);
-            assertTrue("summary and export bounded", System.nanoTime() - started < TimeUnit.SECONDS.toNanos(7));
-            try (ZipFile zip = new ZipFile(result.file)) {
-                assertFalse(status(zip).getBoolean("storageSnapshotReady"));
-                assertEquals(3, zip.size());
-                assertNotNull(zip.getEntry(day + "/diagnostics/navigator-patch-reports.json"));
-                assertNotNull(zip.getEntry(day + "/diagnostics/INCOMPLETE-RECORDING.txt"));
-            }
+            assertFalse(result.detail, result.ok);
+            assertEquals(LogShareZip.CollectionOutcome.FAILED, result.outcome);
+            assertNull(result.file);
+            assertTrue(System.nanoTime() - started < TimeUnit.SECONDS.toNanos(8));
         } finally { release.countDown(); reader.join(2000); }
         assertEquals("preserve-me\n", read(new File(NavigationLogStorage.logsDir(context, day), "someip_tx.jsonl")));
+    }
+
+    @Test public void exportPinDefersRotationWhileAppendRemainsAvailable() throws Exception {
+        File log = new File(NavigationLogStorage.logsDir(context, day), "someip_tx.jsonl");
+        NavCaptureStore.writeSomeIpTx(context, day, "before");
+        NavigationLogStorage.withWriteLock(() -> NavigationLogStorage.pinExportDays(Collections.singletonList(day)));
+        try {
+            assertFalse(NavCaptureStore.rotate(log));
+            NavCaptureStore.writeSomeIpTx(context, day, "during");
+            assertEquals("before\nduring\n", read(log));
+            assertFalse(new File(log.getPath() + ".1").exists());
+            assertFalse(NavigationLogStorage.retireStorageDay(context, day).ok);
+        } finally { NavigationLogStorage.unpinExportDays(Collections.singletonList(day)); }
+        assertEquals("before\nduring\n", read(new File(log.getPath() + ".1")));
+    }
+
+    @Test public void exportTrimsOnlyIncompleteTailAndReportsPartial() throws Exception {
+        File log = new File(NavigationLogStorage.logsDir(context, day), "events.log");
+        Files.write(log.toPath(), "complete\nincomplete".getBytes(StandardCharsets.UTF_8));
+        LogShareZip.Result result = LogShareZip.create(context, Collections.singletonList(day));
+        assertTrue(result.detail, result.ok);
+        assertEquals(LogShareZip.CollectionOutcome.PARTIAL, result.outcome);
+        try (ZipFile zip = new ZipFile(result.file)) {
+            assertEquals("complete\n", new String(zip.getInputStream(zip.getEntry(day + "/logs/events.log")).readAllBytes(), StandardCharsets.UTF_8));
+            assertEquals(1, status(zip).getJSONArray("omittedOrTruncatedFiles").length());
+        }
+        assertEquals("complete\nincomplete", read(log));
+    }
+
+    @Test public void activeLogcatJournalIsIncludedAndOrdinaryTextIsNotTrimmed() throws Exception {
+        File dir = NavigationLogStorage.logsDir(context, day);
+        Files.write(new File(dir,"logcat.log.part").toPath(), "live\npartial".getBytes(StandardCharsets.UTF_8));
+        Files.write(new File(dir,"after.txt").toPath(), "complete snapshot without newline".getBytes(StandardCharsets.UTF_8));
+        Files.write(new File(dir,"manifest.json.tmp").toPath(), "unfinished".getBytes(StandardCharsets.UTF_8));
+        LogShareZip.Result result = LogShareZip.create(context, Collections.singletonList(day));
+        assertTrue(result.detail, result.ok);
+        try (ZipFile zip = new ZipFile(result.file)) {
+            assertEquals("live\n", new String(zip.getInputStream(zip.getEntry(day+"/logs/logcat.log.part")).readAllBytes(),StandardCharsets.UTF_8));
+            assertEquals("complete snapshot without newline", new String(zip.getInputStream(zip.getEntry(day+"/logs/after.txt")).readAllBytes(),StandardCharsets.UTF_8));
+            assertNull(zip.getEntry(day+"/logs/manifest.json.tmp"));
+        }
+    }
+
+    @Test public void cancelDuringStorageWaitPreservesFilesAndLeavesNoPin() throws Exception {
+        NavCaptureStore.writeSomeIpTx(context, day, "keep");
+        CountDownLatch held = new CountDownLatch(1), release = new CountDownLatch(1), copying = new CountDownLatch(1);
+        AtomicReference<Throwable> error = new AtomicReference<>();
+        Thread reader = daemon(() -> NavigationLogStorage.withReadLock(() -> { held.countDown(); await(release); }), error);
+        assertTrue(held.await(2, TimeUnit.SECONDS));
+        AtomicReference<LogShareZip.Result> result = new AtomicReference<>();
+        Thread exporter = daemon(() -> {
+            LogShareZip.attachProgressListener(phase -> { if (phase == LogShareZip.Phase.COPYING) copying.countDown(); });
+            try { result.set(LogShareZip.create(context, Collections.singletonList(day))); }
+            finally { LogShareZip.clearProgressListener(); }
+        }, error);
+        try {
+            assertTrue(copying.await(3, TimeUnit.SECONDS));
+            exporter.interrupt(); exporter.join(2000);
+            assertFalse(exporter.isAlive()); assertNull(error.get());
+            assertNotNull(result.get()); assertFalse(result.get().ok); assertNull(result.get().file);
+        } finally { release.countDown(); reader.join(2000); }
+        File log = new File(NavigationLogStorage.logsDir(context, day), "someip_tx.jsonl");
+        assertEquals("keep\n", read(log));
+        assertTrue(NavCaptureStore.rotate(log));
+    }
+
+    @Test public void unavailableMetadataDoesNotHideAvailableJournal() throws Exception {
+        NavCaptureStore.writeSomeIpTx(context, day, "keep");
+        Files.write(new File(NavigationLogStorage.logsDir(context, day), "large.json").toPath(), new byte[1024*1024+1]);
+        LogShareZip.Result result = LogShareZip.create(context, Collections.singletonList(day));
+        assertEquals(LogShareZip.CollectionOutcome.PARTIAL, result.outcome);
+        try (ZipFile zip = new ZipFile(result.file)) {
+            assertNotNull(zip.getEntry(day+"/logs/someip_tx.jsonl"));
+            assertNull(zip.getEntry(day+"/logs/large.json"));
+            assertTrue(status(zip).getJSONArray("omittedOrTruncatedFiles").toString().contains("large.json"));
+        }
     }
 
     @Test public void ioFailureIsReportedAndLaterSuccessfulWriteHasTimestamp() throws Exception {

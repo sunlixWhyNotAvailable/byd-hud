@@ -4979,6 +4979,10 @@ private fun OperationProgressStack(
                 StorageLogSharePhase.CANCELLED -> language.choose("Скасовано", "Cancelled", "Отменено")
             }
             val summary = buildString {
+                if (state.collectionOutcome == "PARTIAL") append(language.choose(
+                    "Журнали зібрано частково · ", "Logs collected partially · ", "Журналы собраны частично · "))
+                if (state.patchReportsIncomplete) append(language.choose(
+                    "Є незавершені звіти патчера · ", "Patch reports pending · ", "Есть незавершённые отчёты патчера · "))
                 if (state.foundFiles > 0) append("${state.foundFiles} ${language.choose("файлів", "files", "файлов")}")
                 if (state.knownBytes > 0) {
                     if (isNotEmpty()) append(" · ")
@@ -5010,7 +5014,8 @@ private fun OperationProgressStack(
                     reportTitle = state.reportTitle
                 ),
                 failed = state.phase == StorageLogSharePhase.FAILED,
-                success = state.phase == StorageLogSharePhase.SENT || state.phase == StorageLogSharePhase.READY,
+                success = state.collectionOutcome == "FULL" &&
+                    (state.phase == StorageLogSharePhase.SENT || state.phase == StorageLogSharePhase.READY),
                 onStop = { onCancelShare(state.operationId) },
                 onClose = { onCloseShare(state.operationId) }
             ))

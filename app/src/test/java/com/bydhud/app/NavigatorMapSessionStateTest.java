@@ -9,6 +9,20 @@ import static org.junit.Assert.assertTrue;
 import org.junit.Test;
 
 public final class NavigatorMapSessionStateTest {
+    @Test public void receiptKeepsOutputDuringProcessingButStopAndSilenceClearIt() {
+        NavigatorMapSessionState state = new NavigatorMapSessionState();
+        state.activate("com.waze", 1, "s");
+        state.publish("com.waze", 1, "s", "a", "a", new byte[]{1}, 0, 0);
+        assertTrue(state.acceptReceipt("com.waze", 1, "s", 3000, 3000));
+        assertFalse(state.expireIfStale(4000));
+        assertFalse(state.acceptReceipt("com.waze", 0, "old", 6000, 6000));
+        assertTrue(state.expireIfStale(6500));
+        state.publish("com.waze", 1, "s", "b", "b", new byte[]{2}, 6600, 6600);
+        state.acceptReceipt("com.waze", 1, "s", 6800, 6800);
+        state.stop();
+        assertNull(state.pngCopy());
+    }
+
     @Test public void cadenceUsesFreshCropsAndResetsOnChangeErrorsProfilesAndExpiry() {
         NavigatorMapSessionState state = new NavigatorMapSessionState();
         state.activate("com.waze", 1, "s");

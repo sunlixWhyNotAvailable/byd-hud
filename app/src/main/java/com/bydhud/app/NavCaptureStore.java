@@ -218,6 +218,7 @@ final class NavCaptureStore {
     }
 
     private static boolean rotateLocked(File file) {
+        if (NavigationLogStorage.deferExportRotation(file, () -> rotate(file))) return false;
         if (file == null || !file.exists() || file.getParentFile() == null) {
             return false;
         }

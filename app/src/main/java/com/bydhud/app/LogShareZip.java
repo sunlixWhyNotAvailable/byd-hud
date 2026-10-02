@@ -60,15 +60,24 @@ final class LogShareZip {
         PROGRESS_LISTENER.remove();
     }
 
+    enum CollectionOutcome { FULL, PARTIAL, FAILED }
+
     static final class Result {
         final boolean ok;
         final File file;
         final String detail;
+        final CollectionOutcome outcome;
+        final boolean patchReportsIncomplete;
 
         Result(boolean ok, File file, String detail) {
-            this.ok = ok;
+            this(ok ? CollectionOutcome.FULL : CollectionOutcome.FAILED, file, detail, false);
+        }
+        Result(CollectionOutcome outcome, File file, String detail, boolean patchReportsIncomplete) {
+            this.outcome = outcome;
+            this.ok = outcome != CollectionOutcome.FAILED;
             this.file = file;
             this.detail = detail == null ? "" : detail;
+            this.patchReportsIncomplete = patchReportsIncomplete;
         }
     }
 
@@ -93,6 +102,7 @@ final class LogShareZip {
         final File file;
         final String entryName;
         final long length;
+        byte[] captured;
 
         SnapshotFile(File file, String entryName, long length) {
             this.file = file;
@@ -114,9 +124,9 @@ final class LogShareZip {
         }
         boolean locked = false;
         try {
-            locked = NavigationLogStorage.tryLockTopologyWrite(WRITER_CHECKPOINT_TIMEOUT_MS);
-            if (!locked) return new SelectionSummary(true, days.size(), 1, 0L,
-                    "storage busy; diagnostic status only");
+            locked = awaitStorageLock();
+            if (!locked) return new SelectionSummary(false, days.size(), 0, 0L,
+                    "storage busy; retry export when the current operation completes");
             NavigatorPatchReportStore.CachedSummary reports =
                     NavigatorPatchReportStore.cachedSummary();
             List<SnapshotFile> files = snapshotFiles(
@@ -127,7 +137,7 @@ final class LogShareZip {
             }
             bytes += reports.reportBytes;
             int count = files.size() + 1;
-            boolean ready = !files.isEmpty() || reports.reportCount > 0;
+            boolean ready = !files.isEmpty();
             String detail = !ready ? "no readable files or patch reports"
                     : "ready; navigator patch report history will be included";
             return new SelectionSummary(ready, days.size(), count, bytes, detail);
@@ -141,7 +151,7 @@ final class LogShareZip {
         }
     }
 
-    //Background-callable; copies a stable snapshot before releasing the topology writer lock.
+    // Freeze topology/lengths briefly, then let journal appends continue during copying.
     static synchronized Result create(Context context, List<String> selectedDays) {
         return create(context, selectedDays, "");
     }
@@ -177,6 +187,7 @@ final class LogShareZip {
         }
 
         boolean writeHeld = false;
+        boolean pinned = false;
         try {
             JSONObject reportSnapshot = NavigatorPatchReportStore.exportSnapshot(app);
             phase(Phase.WAITING_FOR_WRITES, WazeCaptureDebugWriter.get().pendingTasks());
@@ -194,20 +205,35 @@ final class LogShareZip {
             if (!staging.mkdirs()) {
                 throw new IOException("cannot create staging directory");
             }
-            writeHeld = NavigationLogStorage.tryLockTopologyWrite(WRITER_CHECKPOINT_TIMEOUT_MS);
-            boolean storageReady = writeHeld;
-            List<SnapshotFile> snapshot = new ArrayList<>();
-            if (writeHeld) {
-                List<SnapshotFile> sources = snapshotFiles(app, days);
-                if (sources.isEmpty() && reportSnapshot.optInt("reportCount") == 0) {
-                    throw new IOException("no readable files or patch reports");
+            writeHeld = awaitStorageLock();
+            if (!writeHeld) throw new IOException("storage busy: no log snapshot obtained; existing files preserved");
+            NavigationLogStorage.pinExportDays(days);
+            pinned = true;
+            List<SnapshotFile> sources = snapshotFiles(app, days);
+            if (sources.isEmpty()) throw new IOException("no readable recording files");
+            List<String> omissions = new ArrayList<>();
+            // Small replace-in-place metadata must be frozen while its writers are excluded.
+            java.util.Iterator<SnapshotFile> metadata = sources.iterator();
+            while (metadata.hasNext()) {
+                SnapshotFile source = metadata.next();
+                if (source.file.getName().endsWith(".json")) {
+                    try {
+                        if (source.length > 1024 * 1024) throw new IOException("oversized mutable metadata");
+                        source.captured = Files.readAllBytes(source.file.toPath());
+                    } catch (IOException failed) {
+                        omissions.add(source.entryName + ": " + failed.getMessage());
+                        metadata.remove();
+                    }
                 }
-                snapshot = copySnapshotToStaging(staging, sources);
-                NavigationLogStorage.unlockTopologyWrite();
-                writeHeld = false;
             }
+            NavigationLogStorage.unlockTopologyWrite();
+            writeHeld = false;
+            List<SnapshotFile> snapshot = copySnapshotToStaging(staging, sources, omissions);
+            NavigationLogStorage.unpinExportDays(days);
+            pinned = false;
+            if (snapshot.isEmpty()) throw new IOException("no recording files copied: " + omissions);
             boolean incomplete = addWriterStatus(staging, snapshot, days,
-                    checkpoint, storageReady, reportSnapshot);
+                    checkpoint, true, reportSnapshot, omissions);
             Log.i(TAG, "share_phase phase=COPYING duration_ms="
                     + (System.currentTimeMillis() - copyStarted)
                     + " files=" + snapshot.size()
@@ -225,34 +251,57 @@ final class LogShareZip {
                     + (System.currentTimeMillis() - archiveStarted)
                     + " bytes=" + output.length()
                     + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
-            return new Result(true, output,
+            return new Result(incomplete ? CollectionOutcome.PARTIAL : CollectionOutcome.FULL, output,
                     "files=" + (snapshot.size() + 1 + (reportStatus.incomplete ? 1 : 0))
                             + " bytes=" + output.length()
                             + " reports=" + reportStatus.reportCount
-                            + " recording=" + (incomplete || reportStatus.incomplete
-                                    ? "INCOMPLETE" : "snapshot_ready"));
+                            + " recording=" + (incomplete ? "PARTIAL" : "FULL")
+                            + " patchReports=" + (reportStatus.incomplete ? "INCOMPLETE" : "complete"),
+                    reportStatus.incomplete);
         } catch (IOException | RuntimeException | InterruptedException e) {
             if (e instanceof InterruptedException) Thread.currentThread().interrupt();
             deleteArtifact(part);
             deleteArtifact(output);
+            try {
+                String failure = "log_export_failed reason=" + e.getMessage()
+                        + " health=" + WazeCaptureDebugWriter.healthSnapshot();
+                Log.w(TAG, failure);
+                AppEventLogger.event(app, failure);
+            } catch (JSONException ignored) { Log.w(TAG, "log_export_failed", e); }
             return failure(e.getMessage());
         } finally {
             if (writeHeld) {
                 NavigationLogStorage.unlockTopologyWrite();
             }
+            if (pinned) NavigationLogStorage.unpinExportDays(days);
             deleteTree(staging);
         }
     }
 
+    private static boolean awaitStorageLock() throws InterruptedException, IOException {
+        long start = System.nanoTime(), lastProgressAt = start;
+        long completed = WazeCaptureDebugWriter.completedTaskCount() + NavigationLogStorage.completedOperations();
+        while (System.nanoTime() - start < java.util.concurrent.TimeUnit.SECONDS.toNanos(30)) {
+            checkCancelled();
+            if (NavigationLogStorage.tryLockTopologyWrite(100)) return true;
+            long progress = WazeCaptureDebugWriter.completedTaskCount() + NavigationLogStorage.completedOperations();
+            if (progress != completed) { completed = progress; lastProgressAt = System.nanoTime(); }
+            if (System.nanoTime() - lastProgressAt >= java.util.concurrent.TimeUnit.SECONDS.toNanos(5)) return false;
+        }
+        return false;
+    }
+
     private static boolean addWriterStatus(File staging, List<SnapshotFile> files,
             List<String> days, boolean checkpoint, boolean storageReady,
-            JSONObject reportSnapshot) throws IOException {
+            JSONObject reportSnapshot, List<String> omissions) throws IOException {
         try {
             JSONObject health = WazeCaptureDebugWriter.healthSnapshot();
             boolean reportsIncomplete = reportSnapshot.optBoolean("incompleteReports");
             boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved")
-                    || reportsIncomplete;
+                    || !omissions.isEmpty();
             health.put("selectedDays", new org.json.JSONArray(days))
+                    .put("omittedOrTruncatedFiles", new org.json.JSONArray(omissions))
+                    .put("collectionOutcome", incomplete ? "PARTIAL" : "FULL")
                     .put("writerCheckpointReady", checkpoint).put("storageSnapshotReady", storageReady)
                     .put("navigatorPatchReportCount", reportSnapshot.optInt("reportCount"))
                     .put("navigatorPatchReportsIncluded", true)
@@ -267,7 +316,7 @@ final class LogShareZip {
                     + "writerCheckpointReady=" + checkpoint + "\n"
                     + "storageSnapshotReady=" + storageReady + "\n"
                     + "lossObservedInCurrentProcess=" + health.getBoolean("lossObserved") + "\n"
-                    + "navigatorPatchReportsIncomplete=" + reportsIncomplete + "\n"
+                    + "omittedOrTruncatedFiles=" + omissions + "\n"
                     + (storageReady ? "Available files were copied.\n" : "Storage lock timed out; diagnostic status only, no log files copied.\n")
                     + "See " + statusEntry + " for writer progress, pending work and errors.\n");
             return incomplete;
@@ -413,9 +462,8 @@ final class LogShareZip {
             if (!current.isFile()) {
                 throw new IOException("non-regular file");
             }
-            if (!current.canRead()) {
-                continue;
-            }
+            if (current.getName().startsWith(".") || current.getName().endsWith(".tmp")
+                    || (current.getName().endsWith(".part") && !current.getName().equals("logcat.log.part"))) continue;
             String canonical = current.getCanonicalPath();
             if (!canonicalFiles.add(canonical)) {
                 throw new IOException("duplicate source file");
@@ -482,7 +530,7 @@ final class LogShareZip {
     }
 
     private static List<SnapshotFile> copySnapshotToStaging(
-            File staging, List<SnapshotFile> sources) throws IOException {
+            File staging, List<SnapshotFile> sources, List<String> omissions) throws IOException {
         List<SnapshotFile> copied = new ArrayList<>(sources.size());
         for (SnapshotFile source : sources) {
             checkCancelled();
@@ -492,16 +540,24 @@ final class LogShareZip {
             if (parent == null || (!parent.isDirectory() && !parent.mkdirs())) {
                 throw new IOException("cannot create staging path");
             }
-            copyFile(source, target);
-            target.setLastModified(source.file.lastModified());
-            copied.add(new SnapshotFile(target, source.entryName, source.length));
+            try {
+                copyFile(source, target);
+                if (appendLog(source.file)) trimIncompleteLine(target, source.entryName, omissions);
+                target.setLastModified(source.file.lastModified());
+                copied.add(new SnapshotFile(target, source.entryName, target.length()));
+            } catch (InterruptedIOException cancelled) { throw cancelled; }
+            catch (IOException failed) {
+                deleteArtifact(target);
+                omissions.add(source.entryName + ": " + failed.getMessage());
+            }
         }
         return copied;
     }
 
     private static void copyFile(SnapshotFile source, File target) throws IOException {
+        if (source.captured != null) { Files.write(target.toPath(), source.captured); return; }
         byte[] buffer = new byte[BUFFER_BYTES];
-        try (FileInputStream input = new FileInputStream(source.file);
+        try (FileInputStream input = openSnapshotSource(source.file);
              FileOutputStream output = new FileOutputStream(target, false)) {
             long remaining = source.length;
             while (remaining > 0L) {
@@ -514,6 +570,38 @@ final class LogShareZip {
                 output.write(buffer, 0, read);
                 remaining -= read;
             }
+        }
+    }
+
+    private static FileInputStream openSnapshotSource(File file) throws IOException {
+        try { return new FileInputStream(file); }
+        catch (java.io.FileNotFoundException error) {
+            // The live logcat journal can finalize after the inventory snapshot. It is
+            // append-only, and finish only renames this same file (never overwrites).
+            if (!file.getName().equals("logcat.log.part")) throw error;
+            return new FileInputStream(new File(file.getParentFile(), "logcat.log"));
+        }
+    }
+    private static boolean appendLog(File file) {
+        return file.getName().matches("(?i).+\\.(log|jsonl)(\\.\\d+)?")
+                || file.getName().equals("logcat.log.part") || file.getName().equals("logcat.txt");
+    }
+    private static void trimIncompleteLine(File file, String name, List<String> omissions) throws IOException {
+        try (java.io.RandomAccessFile input = new java.io.RandomAccessFile(file, "rw")) {
+            long length = input.length(), position = length;
+            if (length == 0) return;
+            byte[] tail = new byte[BUFFER_BYTES];
+            while (position > 0) {
+                checkCancelled();
+                int count = (int) Math.min(position, tail.length);
+                position -= count; input.seek(position); input.readFully(tail, 0, count);
+                for (int i = count - 1; i >= 0; i--) if (tail[i] == '\n') {
+                    long complete = position + i + 1;
+                    if (complete != length) { input.setLength(complete); omissions.add(name + ": incomplete trailing record omitted"); }
+                    return;
+                }
+            }
+            input.setLength(0); omissions.add(name + ": no complete record at snapshot boundary");
         }
     }
 
