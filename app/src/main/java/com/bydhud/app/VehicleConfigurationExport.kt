@@ -60,13 +60,16 @@ object VehicleConfigurationExport {
 
     @JvmStatic
     @Synchronized
-    fun start(context: Context): Boolean {
+    @JvmOverloads
+    fun start(context: Context, restoredId: String? = null): Boolean {
         if (active != null || !MainActivity.claimShareOperation()) return false
         val control = VehicleConfigurationZip.Control()
         val app = context.applicationContext
-        val operationId = UUID.randomUUID().toString()
-        val startedElapsedMs = SystemClock.elapsedRealtime()
-        val startedEpochMs = System.currentTimeMillis()
+        val operationId = restoredId ?: UUID.randomUUID().toString()
+        val restored = if (restoredId == null) null else ShellRuntimeSession.prefs(app)
+            .getString("configuration_work", "")?.takeIf { it.isNotEmpty() }?.let { org.json.JSONObject(it) }
+        val startedElapsedMs = restored?.optLong("elapsed") ?: SystemClock.elapsedRealtime()
+        val startedEpochMs = restored?.optLong("started") ?: System.currentTimeMillis()
         StorageLogShareWorkflow.replaceCompletedForNewOperation()
         active = control
         archives = emptyList()
@@ -74,18 +77,23 @@ object VehicleConfigurationExport {
         loggedPhases.clear()
         state.value = ConfigurationExportSnapshot(
             operationId = operationId,
-            phase = ConfigurationExportPhase.INVENTORY,
+            phase = restored?.optString("phase")?.let { ConfigurationExportPhase.valueOf(it) } ?: ConfigurationExportPhase.INVENTORY,
             startedAtEpochMs = startedEpochMs,
             startedAtElapsedMs = startedElapsedMs
         )
+        persist()
         logEvent("started")
         try {
             worker.execute {
                 control.worker = Thread.currentThread()
+                if (restored?.optString("phase") == ConfigurationExportPhase.CANCELLING.name) {
+                    runCatching { ShellWorkClient.cancel(ShellWorkClient.job(app, "configuration", operationId)) }
+                    control.cancel()
+                }
                 try {
                     ConfigurationExportArtifacts.checkBeforeExport(app)
                     control.check()
-                    val result = VehicleConfigurationZip.createFull(app, control) {
+                    val result = ShellWorkExports.configuration(app, operationId, control) {
                             phase, file, bytes, total, files, count, unavailable ->
                         synchronized(this) {
                             if (active === control && !control.isCancelled) {
@@ -115,6 +123,7 @@ object VehicleConfigurationExport {
                             return@synchronized
                         }
                         archives = if (result.ok) result.volumes else emptyList()
+                        ConfigurationExportArtifacts.checkAsync(app)
                         state.value = state.value!!.copy(
                             phase = if (result.ok) ConfigurationExportPhase.READY else ConfigurationExportPhase.FAILED,
                             unavailableFiles = result.unavailableFiles,
@@ -263,6 +272,7 @@ object VehicleConfigurationExport {
     @Synchronized
     fun replaceCompletedForNewOperation() {
         if (active != null) return
+        eventContext?.let { ShellRuntimeSession.prefs(it).edit().remove("configuration_work").commit() }
         state.value = null
         archives = emptyList()
         eventContext = null
@@ -271,10 +281,48 @@ object VehicleConfigurationExport {
     @JvmStatic
     @Synchronized
     fun shutdown() {
+        eventContext?.let { ShellRuntimeSession.prefs(it).edit().remove("configuration_work").commit() }
         active?.cancel()
         state.value = null
         archives = emptyList()
         eventContext = null
+    }
+
+    @JvmStatic
+    fun restore(context: Context) {
+        val saved = ShellRuntimeSession.prefs(context).getString("configuration_work", "") ?: ""
+        if (saved.isEmpty()) return
+        try {
+            val value = org.json.JSONObject(saved)
+            val phase = ConfigurationExportPhase.valueOf(value.getString("phase"))
+            if (phase in setOf(ConfigurationExportPhase.INVENTORY, ConfigurationExportPhase.DIAGNOSTICS,
+                    ConfigurationExportPhase.COPYING, ConfigurationExportPhase.ARCHIVING, ConfigurationExportPhase.CANCELLING)) {
+                start(context, value.getString("id"))
+            } else {
+                eventContext = context.applicationContext
+                archives = ShellWorkEntryPoint.strings(value.getJSONArray("archives")).map(::File)
+                state.value = ConfigurationExportSnapshot(value.getString("id"), phase,
+                    value.getLong("started"), value.getLong("elapsed"), value.optLong("ended"),
+                    archiveAvailable = value.optBoolean("available") && archives.all { it.isFile },
+                    archiveName = archives.firstOrNull()?.name.orEmpty(),
+                    archiveBytes = archives.sumOf { it.length() }, volumeSizes = archives.map { it.length() },
+                    completedAtEpochMs = value.optLong("completed"), expiresAtEpochMs = value.optLong("expires"),
+                    detail = value.optString("detail"), dismissed = value.optBoolean("dismissed"))
+                artifactsChecked(System.currentTimeMillis())
+            }
+        } catch (error: Exception) { AppEventLogger.event(context, "configuration_restore_failed ${error.javaClass.simpleName}") }
+    }
+
+    private fun persist() {
+        val app = eventContext ?: return
+        val current = state.value ?: return
+        val value = org.json.JSONObject().put("id", current.operationId).put("phase", current.phase.name)
+            .put("started", current.startedAtEpochMs).put("elapsed", current.startedAtElapsedMs)
+            .put("ended", current.endedAtElapsedMs).put("available", current.archiveAvailable)
+            .put("completed", current.completedAtEpochMs).put("expires", current.expiresAtEpochMs)
+            .put("detail", current.detail).put("dismissed", current.dismissed)
+            .put("archives", org.json.JSONArray(archives.map { it.path }))
+        ShellRuntimeSession.prefs(app).edit().putString("configuration_work", value.toString()).commit()
     }
 
     private fun logProgress(snapshot: ConfigurationExportSnapshot) {
@@ -286,6 +334,7 @@ object VehicleConfigurationExport {
     }
 
     private fun logEvent(detail: String) {
+        persist()
         val snapshot = state.value ?: return
         eventContext?.let {
             AppEventLogger.event(it, "configuration_export operation_id=${snapshot.operationId} $detail")

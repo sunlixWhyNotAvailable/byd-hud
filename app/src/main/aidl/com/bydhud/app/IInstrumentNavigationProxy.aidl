@@ -1,6 +1,7 @@
 package com.bydhud.app;
 
 import android.os.Bundle;
+import android.os.ParcelFileDescriptor;
 import com.bydhud.app.IInstrumentNavigationClient;
 
 interface IInstrumentNavigationProxy {
@@ -14,4 +15,9 @@ interface IInstrumentNavigationProxy {
     Bundle suspendOutput(long generation);
     Bundle resumeOutput(long generation);
     Bundle nativeSpeedOperation(long generation, int operation, int value);
+    void setRecoveryEnabled(long generation, boolean enabled);
+    Bundle startSystemCapture(long generation, String id, String cursor, in ParcelFileDescriptor destination);
+    Bundle systemCaptureState(long generation, String id, boolean stop);
+    void launchWork(long generation, String directory);
+    boolean cancelWork(long generation, String directory);
 }

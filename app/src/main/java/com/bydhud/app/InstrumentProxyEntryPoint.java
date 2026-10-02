@@ -90,7 +90,7 @@ public final class InstrumentProxyEntryPoint {
     }
 
     @SuppressLint("PrivateApi")
-    private static Context systemContext() throws Exception {
+    static Context systemContext() throws Exception {
         Class<?> activityThread = Class.forName("android.app.ActivityThread");
         Method systemMain = activityThread.getMethod("systemMain");
         Object thread = systemMain.invoke(null);

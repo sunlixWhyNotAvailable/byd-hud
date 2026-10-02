@@ -278,6 +278,90 @@ final class LogShareZip {
         }
     }
 
+    static Result createIndependent(Context context, List<String> days, String uploadId, String operationId) {
+        File job = null;
+        boolean pinned = false;
+        try {
+            job = ShellWorkClient.job(context, "log", operationId);
+            File requestFile = new File(job, "request.json");
+            if (!requestFile.exists()) {
+                checkedDays(days);
+                JSONObject reports = NavigatorPatchReportStore.exportSnapshot(context);
+                boolean checkpoint = WazeCaptureDebugWriter.get().awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS);
+                JSONObject health = WazeCaptureDebugWriter.healthSnapshot();
+                if (!awaitStorageLock()) throw new IOException("storage busy: existing files preserved");
+                try {
+                    NavigationLogStorage.pinExportDays(days);
+                    pinned = true;
+                    org.json.JSONArray sources = new org.json.JSONArray();
+                    for (SnapshotFile file : snapshotFiles(context, days)) {
+                        JSONObject source = new JSONObject().put("path", file.file.getCanonicalPath())
+                                .put("entry", file.entryName).put("length", file.length);
+                        if (file.file.getName().endsWith(".json")) {
+                            if (file.length > 1024 * 1024) throw new IOException("oversized mutable metadata");
+                            File frozen = new File(ShellWorkFiles.directory(new File(job, "metadata")), sources.length() + ".json");
+                            Files.copy(file.file.toPath(), frozen.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                            source.put("path", frozen.getPath()).put("length", frozen.length());
+                        }
+                        sources.put(source);
+                    }
+                    ShellWorkClient.prepare(context, "log", operationId, new JSONObject()
+                            .put("sources", sources).put("reports", reports).put("health", health)
+                            .put("checkpoint", checkpoint).put("days", new org.json.JSONArray(days))
+                            .put("uploadId", uploadId));
+                } finally { NavigationLogStorage.unlockTopologyWrite(); }
+            } else {
+                NavigationLogStorage.withWriteLock(() -> NavigationLogStorage.pinExportDays(days));
+                pinned = true;
+            }
+            JSONObject result = ShellWorkClient.await(context, job, current -> {
+                String stage = current.optString("phase");
+                if ("COPYING".equals(stage) || "ARCHIVING".equals(stage)) phase(Phase.valueOf(stage), 0);
+            });
+            return new Result(CollectionOutcome.valueOf(result.getString("outcome")),
+                    new File(result.getString("file")), result.optString("detail"), result.optBoolean("incompleteReports"));
+        } catch (Exception error) {
+            if (error instanceof InterruptedException) Thread.currentThread().interrupt();
+            return failure(error.toString());
+        } finally {
+            // The persistent job also pins its sources across application death.
+            if (pinned) NavigationLogStorage.unpinExportDays(days);
+        }
+    }
+
+    static JSONObject runInShell(Context context, JSONObject input) throws Exception {
+        List<SnapshotFile> sources = new ArrayList<>();
+        org.json.JSONArray values = input.getJSONArray("sources");
+        for (int i = 0; i < values.length(); i++) {
+            JSONObject value = values.getJSONObject(i);
+            SnapshotFile file = new SnapshotFile(new File(value.getString("path")),
+                    zipRelative(value.getString("entry")), value.getLong("length"));
+            if (value.has("captured")) file.captured = android.util.Base64.decode(value.getString("captured"), android.util.Base64.DEFAULT);
+            sources.add(file);
+        }
+        File shares = writableShareDir(context);
+        if (shares == null) throw new IOException("Share cache unavailable");
+        File output = new File(shares, ZIP_PREFIX + ShellWorkEntryPoint.request.getString("id") + ".zip");
+        File part = new File(shares, output.getName() + ".part");
+        File staging = new File(shares, output.getName() + ".staging");
+        List<String> omissions = new ArrayList<>();
+        try {
+            ShellWorkFiles.directory(staging);
+            ShellWorkEntryPoint.progress(new JSONObject().put("phase", "COPYING"));
+            List<SnapshotFile> files = copySnapshotToStaging(staging, sources, omissions);
+            if (files.isEmpty()) throw new IOException("No recording files copied: " + omissions);
+            JSONObject reports = input.getJSONObject("reports");
+            boolean incomplete = addWriterStatus(staging, files, ShellWorkEntryPoint.strings(input.getJSONArray("days")),
+                    input.getBoolean("checkpoint"), true, reports, omissions, input.getJSONObject("health"));
+            ShellWorkEntryPoint.progress(new JSONObject().put("phase", "ARCHIVING"));
+            NavigatorPatchReportStore.ExportResult exported = writeZip(part, files, context, reports);
+            checkCancelled();
+            if (!part.renameTo(output)) throw new IOException("Final archive rename failed");
+            return new JSONObject().put("file", output.getPath()).put("outcome", incomplete ? "PARTIAL" : "FULL")
+                    .put("incompleteReports", exported.incomplete).put("detail", "files=" + files.size() + " bytes=" + output.length());
+        } finally { deleteTree(staging); deleteArtifact(part); }
+    }
+
     private static boolean awaitStorageLock() throws InterruptedException, IOException {
         long start = System.nanoTime(), lastProgressAt = start;
         long completed = WazeCaptureDebugWriter.completedTaskCount() + NavigationLogStorage.completedOperations();
@@ -294,8 +378,15 @@ final class LogShareZip {
     private static boolean addWriterStatus(File staging, List<SnapshotFile> files,
             List<String> days, boolean checkpoint, boolean storageReady,
             JSONObject reportSnapshot, List<String> omissions) throws IOException {
+        try { return addWriterStatus(staging, files, days, checkpoint, storageReady, reportSnapshot,
+                omissions, WazeCaptureDebugWriter.healthSnapshot()); }
+        catch (JSONException error) { throw new IOException(error); }
+    }
+
+    private static boolean addWriterStatus(File staging, List<SnapshotFile> files,
+            List<String> days, boolean checkpoint, boolean storageReady,
+            JSONObject reportSnapshot, List<String> omissions, JSONObject health) throws IOException {
         try {
-            JSONObject health = WazeCaptureDebugWriter.healthSnapshot();
             boolean reportsIncomplete = reportSnapshot.optBoolean("incompleteReports");
             boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved")
                     || !omissions.isEmpty();
@@ -345,6 +436,24 @@ final class LogShareZip {
             parents.add(new File(external, SHARE_DIR));
         }
         parents.add(new File(app.getCacheDir(), SHARE_DIR));
+        Set<String> retained = new HashSet<>();
+        try {
+            File[] jobs = ShellWorkFiles.root(app).listFiles();
+            if (jobs != null) for (File job : jobs) {
+                if (job.getName().startsWith("upload-") && !ShellWorkFiles.settled(job)) {
+                    JSONObject input = ShellWorkFiles.read(new File(job, "request.json")).optJSONObject("input");
+                    if (input != null) retained.add(input.optString("archive"));
+                }
+                if (job.getName().startsWith("log-") && ShellWorkFiles.settled(job))
+                    parents.add(new File(job, "cache/log-shares"));
+            }
+            for (java.util.Map.Entry<String, ?> entry : ShellRuntimeSession.prefs(app).getAll().entrySet()) {
+                if (!entry.getKey().startsWith("share_work_")) continue;
+                JSONObject saved = new JSONObject(String.valueOf(entry.getValue()));
+                if ("WAITING_FOR_SHARE".equals(saved.optString("phase")) || "OVERSIZED".equals(saved.optString("phase")))
+                    retained.add(saved.optString("file"));
+            }
+        } catch (Exception error) { AppEventLogger.event(app, "shell_share_retention_failed " + error); }
         Set<String> visited = new HashSet<>();
         int deleted = 0;
         long now = System.currentTimeMillis();
@@ -363,7 +472,7 @@ final class LogShareZip {
                 continue;
             }
             for (File file : files) {
-                if (file == null || !isShareArtifact(file.getName())) {
+                if (file == null || retained.contains(file.getAbsolutePath()) || !isShareArtifact(file.getName())) {
                     continue;
                 }
                 boolean partial = file.isDirectory() || file.getName().endsWith(".part");

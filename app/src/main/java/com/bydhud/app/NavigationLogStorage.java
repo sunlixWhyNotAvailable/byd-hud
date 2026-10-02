@@ -77,7 +77,7 @@ final class NavigationLogStorage {
     }
     private static boolean pinnedFile(File file) {
         for (File part = file; part != null; part = part.getParentFile())
-            if (EXPORT_PINS.containsKey(part.getName())) return true;
+            if (EXPORT_PINS.containsKey(part.getName()) || ShellWorkClient.pinsDay(part.getName())) return true;
         return false;
     }
     static boolean deferExportRotation(File file, Runnable rotation) {
@@ -1077,7 +1077,7 @@ final class NavigationLogStorage {
         }
         return withWriteLock(() -> {
             ActiveRetentionState active = currentActiveRetentionState();
-            if (EXPORT_PINS.containsKey(candidate.day) || isProtectedRetentionCandidate(candidate, active)) {
+            if (EXPORT_PINS.containsKey(candidate.day) || ShellWorkClient.pinsDay(candidate.day) || isProtectedRetentionCandidate(candidate, active)) {
                 return null;
             }
             List<RenamedFragment> renamed = new ArrayList<>();
@@ -1397,7 +1397,7 @@ final class NavigationLogStorage {
             Context context,
             String day,
             boolean active) {
-        if (EXPORT_PINS.containsKey(day)) return new DayRetirement(false, day, active,
+        if (EXPORT_PINS.containsKey(day) || ShellWorkClient.pinsDay(day)) return new DayRetirement(false, day, active,
                 Collections.emptyList(), "log export is using this day");
         if (ShanghaiTestController.protectsStorageDay(day)) {
             return new DayRetirement(false, day, active,

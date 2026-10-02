@@ -46,6 +46,7 @@ internal data class AppUpdateOperationSnapshot(
 /** Injectable boundary around DownloadManager, APK validation, persistence, and installer launch. */
 internal interface AppUpdateOperationDriver {
     suspend fun recover(): AppUpdateOperationSnapshot?
+    suspend fun recover(onProgress: (AppUpdateOperationSnapshot) -> Unit): AppUpdateOperationSnapshot? = recover()
     suspend fun prepare(
         operationId: Long,
         update: AppUpdateManager.UpdateInfo,
@@ -100,7 +101,11 @@ internal class AppUpdateOperationController(
         }
         val launched = scope.launch(start = CoroutineStart.LAZY) {
             val recovered = try {
-                driver.recover()
+                driver.recover { observed ->
+                    synchronized(lock) {
+                        if (generation == ticket && recovering) mutableSnapshot.value = observed
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -109,6 +114,8 @@ internal class AppUpdateOperationController(
                     recovering = false
                     val pending = pendingStart
                     pendingStart = null
+                    if (pending == null) mutableSnapshot.value = mutableSnapshot.value?.copy(
+                        phase = AppUpdateOperationPhase.FAILED, error = error.message ?: "Update recovery failed")
                     if (pending != null) {
                         mutableSnapshot.value = AppUpdateOperationSnapshot(
                             id = pending.first,

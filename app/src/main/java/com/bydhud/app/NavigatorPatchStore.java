@@ -1005,17 +1005,24 @@ final class NavigatorPatchStore {
         return true;
     }
 
+    static File sharedRoot(Context context) {
+        try { return ShellWorkFiles.directory(new File(ShellWorkFiles.root(context), "transactions")); }
+        catch (IOException error) { throw new IllegalStateException(error); }
+    }
+
     static File transactionDirectory(Context context) {
         String name = prefs(context).getString(KEY_TRANSACTION_DIR, "");
-        return new File(new File(context.getFilesDir(), "navigator-patcher"),
+        File legacy = new File(new File(context.getFilesDir(), "navigator-patcher"),
                 name == null || name.isEmpty() ? "unset" : name);
+        return legacy.exists() ? legacy : new File(sharedRoot(context), name == null || name.isEmpty() ? "unset" : name);
     }
 
     static File transactionDirectory(Context context, Profile profile) {
         if (profile == null || !localOperation(context, profile)) return transactionDirectory(context);
         String name = prefs(context).getString(profileKey(profile, KEY_TRANSACTION_DIR), "");
-        return new File(new File(context.getFilesDir(), "navigator-patcher"),
+        File legacy = new File(new File(context.getFilesDir(), "navigator-patcher"),
                 name == null || name.isEmpty() ? "unset" : name);
+        return legacy.exists() ? legacy : new File(sharedRoot(context), name == null || name.isEmpty() ? "unset" : name);
     }
 
     static String recoveryOwner(Context context) {

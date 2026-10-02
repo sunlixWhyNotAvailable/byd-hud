@@ -6,4 +6,5 @@
     <cache-path
         name="bydhud-log-shares-internal"
         path="log-shares/" />
+    <external-files-path name="bydhud-shell-artifacts" path="shell-work/" />
 </paths>

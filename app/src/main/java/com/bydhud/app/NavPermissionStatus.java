@@ -98,6 +98,19 @@ final class NavPermissionStatus {
                 && storageWriteEnabled;
     }
 
+    org.json.JSONObject checkpoint() throws org.json.JSONException {
+        return new org.json.JSONObject().put("notification", notificationListenerEnabled)
+                .put("accessibility", accessibilityServiceEnabled).put("master", accessibilityMasterEnabled)
+                .put("overlay", dashboardOverlayEnabled).put("read", storageReadEnabled).put("write", storageWriteEnabled)
+                .put("notificationRaw", notificationListenersRaw).put("accessibilityRaw", accessibilityServicesRaw);
+    }
+
+    static NavPermissionStatus restore(org.json.JSONObject state) {
+        return new NavPermissionStatus(state.optBoolean("notification"), state.optBoolean("accessibility"),
+                state.optBoolean("master"), state.optBoolean("overlay"), state.optBoolean("read"),
+                state.optBoolean("write"), state.optString("notificationRaw"), state.optString("accessibilityRaw"));
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     String summary() {
         if (captureGranted()) {

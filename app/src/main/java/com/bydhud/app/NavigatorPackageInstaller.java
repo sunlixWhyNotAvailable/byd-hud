@@ -401,6 +401,7 @@ final class NavigatorPackageInstaller {
                 || NavigatorPatchStore.RECOVERY_REQUIRED.equals(operation.phase)) {
             return;
         }
+        if (NavigatorPatchWorkerClient.pending(context, profile)) return;
         boolean installed = isInstalled(context, profile.packageName);
         if ((NavigatorPatchStore.INSTALLED_VERIFY.equals(operation.phase)
                 || NavigatorPatchStore.OUTPUT_VERIFY.equals(operation.phase))
@@ -466,6 +467,7 @@ final class NavigatorPackageInstaller {
     }
 
     private static void reconcileLocal(Context context, NavigatorPatchStore.Profile profile) {
+        if (NavigatorPatchWorkerClient.pending(context, profile)) return;
         //A same-process worker owns this operation; only an absent worker is a restart orphan.
         if (NavigatorPatchPipeline.hasActiveWorker(profile)) return;
         NavigatorPatchStore.OperationSnapshot operation =

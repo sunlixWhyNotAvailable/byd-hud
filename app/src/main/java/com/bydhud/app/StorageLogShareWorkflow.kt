@@ -100,10 +100,12 @@ object StorageLogShareWorkflow {
     private val uploadWorkers = Executors.newCachedThreadPool { task ->
         Thread(task, "sentry-log-upload").apply { isDaemon = true }
     }
-    private var activePreparation: StorageLogShareControl? = null
+    @Volatile private var activePreparation: StorageLogShareControl? = null
+    private val restorationWorker = Executors.newSingleThreadExecutor { task -> Thread(task, "share-reattach") }
     private val activeUploads = mutableMapOf<String, StorageLogShareControl>()
     private var generation = 0L
     private var eventContext: Context? = null
+    private val reports = mutableMapOf<String, SentryLogReport>()
 
     @JvmStatic
     @Synchronized
@@ -115,27 +117,33 @@ object StorageLogShareWorkflow {
         selectedFileCount: Int,
         selectedBytes: Long,
         report: SentryLogReport? = null,
-        selectionRevision: Int = 0
+        selectionRevision: Int = 0,
+        restoredId: String? = null
     ): Boolean {
         if (toDeveloper && report == null) return false
         if (activePreparation != null || !MainActivity.claimShareOperation()) return false
         val app = context.applicationContext
         val submittedDays = days.toList()
-        val operationId = if (toDeveloper) SentryLogUploader.newUploadId()
+        val restored = restoredId?.let { ShellRuntimeSession.prefs(app).getString("share_work_" + it, "") }
+            ?.takeIf { it.isNotEmpty() }?.let { org.json.JSONObject(it) }
+        val operationId = restoredId ?: if (toDeveloper) SentryLogUploader.newUploadId()
             else UUID.randomUUID().toString()
         val control = StorageLogShareControl(operationId)
         VehicleConfigurationExport.replaceCompletedForNewOperation()
         removeCompletedRegularShares()
         activePreparation = control
         eventContext = app
+        if (report != null) reports[operationId] = report
         addSnapshot(StorageLogShareSnapshot(
             operationId = operationId,
-            phase = StorageLogSharePhase.WAITING_FOR_WRITES,
-            startedAtEpochMs = System.currentTimeMillis(),
-            startedAtElapsedMs = SystemClock.elapsedRealtime(),
+            phase = restored?.optString("phase")?.let { StorageLogSharePhase.valueOf(it) } ?: StorageLogSharePhase.WAITING_FOR_WRITES,
+            startedAtEpochMs = restored?.optLong("started") ?: System.currentTimeMillis(),
+            startedAtElapsedMs = restored?.optLong("elapsed") ?: SystemClock.elapsedRealtime(),
             foundFiles = selectedFileCount.coerceAtLeast(0),
             knownBytes = selectedBytes.coerceAtLeast(0L),
             inventoryComplete = true,
+            currentFile = restored?.optString("file").orEmpty(),
+            archiveBytes = restored?.optLong("archiveBytes") ?: 0L,
             selectedDays = submittedDays,
             selectionRevision = selectionRevision,
             toDeveloper = toDeveloper,
@@ -172,8 +180,34 @@ object StorageLogShareWorkflow {
                     LogShareZip.Phase.ARCHIVING -> StorageLogSharePhase.ARCHIVING
                 })
             }
-            val archive = LogShareZip.create(
-                app, submittedDays, if (toDeveloper) control.operationId else "")
+            val restored = find(control.operationId)
+            if (restored?.phase == StorageLogSharePhase.CANCELLING) {
+                control.cancelled = true
+                if (ShellWorkClient.hasRequest(app, "log", control.operationId)) {
+                    val job = ShellWorkClient.job(app, "log", control.operationId)
+                    ShellWorkClient.cancel(job)
+                    ShellWorkClient.await(app, job, null)
+                }
+                return
+            }
+            if (restored?.phase == StorageLogSharePhase.WAITING_FOR_SHARE && restored.currentFile.isNotEmpty()) {
+                val file = File(restored.currentFile)
+                if (!file.isFile) throw java.io.IOException("Retained archive is missing")
+                control.archive = file
+                MainActivity.queueStorageShare(file, submittedDays, control.operationId)
+                return
+            }
+            if (toDeveloper && ShellWorkClient.hasRequest(app, "upload", control.operationId)) {
+                val job = ShellWorkClient.job(app, "upload", control.operationId)
+                val input = ShellWorkFiles.read(File(job, "request.json")).getJSONObject("input")
+                val result = ShellWorkExports.upload(app, File(input.getString("archive")),
+                    submittedDays, control.operationId, report!!)
+                finish(control.operationId, if (result.ok) StorageLogSharePhase.SENT else StorageLogSharePhase.FAILED,
+                    result.detail, result.eventId)
+                return
+            }
+            val archive = LogShareZip.createIndependent(
+                app, submittedDays, if (toDeveloper) control.operationId else "", control.operationId)
             update(control.operationId) { it.copy(
                 collectionOutcome = archive.outcome.name,
                 patchReportsIncomplete = archive.patchReportsIncomplete
@@ -223,10 +257,13 @@ object StorageLogShareWorkflow {
                             LogShareZip.deleteArtifact(archive.file)
                             return@execute
                         }
-                        val upload = SentryLogUploader.upload(
+                        val upload = ShellWorkExports.upload(
                             app, archive.file, submittedDays, control.operationId, report!!)
                         publishUploadResultIfOwned(
                             uploadControl, uploadGeneration, upload, app)
+                    } catch (error: Exception) {
+                        publishUploadResultIfOwned(uploadControl, uploadGeneration,
+                            SentryLogUploader.Result(false, "", error.toString()), app)
                     } finally {
                         synchronized(this) {
                             if (activeUploads[uploadControl.operationId] === uploadControl) {
@@ -351,14 +388,19 @@ object StorageLogShareWorkflow {
         generation += 1L
         activePreparation?.let {
             it.cancelWorker()
-            LogShareZip.deleteArtifact(it.archive)
             releasePreparation(it)
         }
         activeUploads.values.toList().forEach {
             it.cancelWorker()
-            LogShareZip.deleteArtifact(it.archive)
         }
         activeUploads.clear()
+        eventContext?.let { app ->
+            val prefs = ShellRuntimeSession.prefs(app)
+            val editor = prefs.edit()
+            prefs.all.keys.filter { it.startsWith("share_work_") }.forEach { editor.remove(it) }
+            editor.commit()
+        }
+        reports.clear()
         state.value = emptyList()
         latestState.value = null
         eventContext = null
@@ -450,8 +492,9 @@ object StorageLogShareWorkflow {
 
     @Synchronized
     private fun addSnapshot(snapshot: StorageLogShareSnapshot) {
-        state.value = state.value + snapshot
+        state.value = state.value.filterNot { it.operationId == snapshot.operationId } + snapshot
         latestState.value = snapshot
+        persist(snapshot)
     }
 
     @Synchronized
@@ -495,6 +538,7 @@ object StorageLogShareWorkflow {
         if (changed == null) return null
         state.value = updated
         if (latestState.value?.operationId == operationId) latestState.value = changed
+        persist(changed)
         return changed
     }
 
@@ -504,6 +548,7 @@ object StorageLogShareWorkflow {
 
     @Synchronized
     private fun removeCompletedRegularShares() {
+        val before = state.value
         state.value = state.value.filter { snapshot ->
             snapshot.toDeveloper || snapshot.phase in setOf(
                 StorageLogSharePhase.WAITING_FOR_WRITES,
@@ -512,7 +557,64 @@ object StorageLogShareWorkflow {
                 StorageLogSharePhase.WAITING_FOR_SHARE
             )
         }
+        for (old in before) if (state.value.none { it.operationId == old.operationId })
+            eventContext?.let { ShellRuntimeSession.prefs(it).edit().remove("share_work_" + old.operationId).commit() }
         latestState.value = state.value.lastOrNull()
+    }
+
+    @JvmStatic
+    fun restore(context: Context) {
+        eventContext = context.applicationContext
+        val saved = ShellRuntimeSession.prefs(context).all.filterKeys { it.startsWith("share_work_") }
+        for ((_, raw) in saved) try {
+            val value = org.json.JSONObject(raw.toString())
+            val phase = StorageLogSharePhase.valueOf(value.getString("phase"))
+            val id = value.getString("id")
+            val days = ShellWorkEntryPoint.strings(value.getJSONArray("days"))
+            val developer = value.optBoolean("developer")
+            val report = if (developer) SentryLogReport(value.optString("comment"), value.optString("title")) else null
+            if (phase in setOf(StorageLogSharePhase.WAITING_FOR_WRITES, StorageLogSharePhase.COPYING,
+                    StorageLogSharePhase.ARCHIVING, StorageLogSharePhase.UPLOADING, StorageLogSharePhase.CANCELLING,
+                    StorageLogSharePhase.OVERSIZED, StorageLogSharePhase.WAITING_FOR_SHARE)) {
+                if (report != null) reports[id] = report
+                addSnapshot(StorageLogShareSnapshot(id, phase, value.getLong("started"), value.getLong("elapsed"),
+                    selectedDays = days, toDeveloper = developer, currentFile = value.optString("file"),
+                    archiveBytes = value.optLong("archiveBytes"), reportTitle = value.optString("title"),
+                    foundFiles = value.optInt("count"), knownBytes = value.optLong("bytes"),
+                    selectionRevision = value.optInt("revision"), inventoryComplete = true))
+                // A single preparation queue resumes the same retained jobs, never a new upload.
+                restorationWorker.execute {
+                    while (!HudPrefs.isUserShutdownActive(context)) {
+                        if (start(context, days, developer, value.optInt("count"), value.optLong("bytes"),
+                                report, value.optInt("revision"), id)) break
+                        Thread.sleep(100)
+                    }
+                }
+            } else {
+                val snapshot = StorageLogShareSnapshot(id, phase, value.getLong("started"), value.getLong("elapsed"),
+                    value.optLong("ended"), selectedDays = days, toDeveloper = developer,
+                    currentFile = value.optString("file"), archiveBytes = value.optLong("archiveBytes"),
+                    detail = value.optString("detail"), eventId = value.optString("event"),
+                    dismissed = value.optBoolean("dismissed"), reportTitle = value.optString("title"),
+                    selectionRevision = value.optInt("revision"), foundFiles = value.optInt("count"),
+                    knownBytes = value.optLong("bytes"), inventoryComplete = true)
+                if (report != null) reports[id] = report
+                addSnapshot(snapshot)
+            }
+        } catch (error: Exception) { AppEventLogger.event(context, "log_share_restore_failed ${error.javaClass.simpleName}") }
+    }
+
+    private fun persist(current: StorageLogShareSnapshot) {
+        val app = eventContext ?: return
+        val value = org.json.JSONObject().put("id", current.operationId).put("phase", current.phase.name)
+            .put("days", org.json.JSONArray(current.selectedDays)).put("developer", current.toDeveloper)
+            .put("title", current.reportTitle).put("comment", reports[current.operationId]?.comment.orEmpty())
+            .put("started", current.startedAtEpochMs).put("elapsed", current.startedAtElapsedMs)
+            .put("ended", current.endedAtElapsedMs).put("count", current.foundFiles).put("bytes", current.knownBytes)
+            .put("revision", current.selectionRevision).put("file", current.currentFile)
+            .put("archiveBytes", current.archiveBytes).put("detail", current.detail).put("event", current.eventId)
+            .put("dismissed", current.dismissed)
+        ShellRuntimeSession.prefs(app).edit().putString("share_work_" + current.operationId, value.toString()).commit()
     }
 
     private fun log(operationId: String, detail: String) {

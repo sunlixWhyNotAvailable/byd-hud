@@ -204,7 +204,7 @@ object AppUpdateManager {
     internal val operationSnapshot: StateFlow<AppUpdateOperationSnapshot?>
         get() = checkNotNull(operationController) { "AppUpdateManager.initialize must run first" }.snapshot
 
-    /** Main-process startup hook: recover only updater-owned work and never resume a download. */
+    /** Reattach updater-owned work without re-enqueueing an existing system download. */
     @JvmStatic
     fun initialize(context: Context) {
         appContext = context.applicationContext
@@ -562,9 +562,32 @@ object AppUpdateManager {
             downloadService = { context.getSystemService(Context.DOWNLOAD_SERVICE) as? DownloadManager }
         )
 
-        override suspend fun recover(): AppUpdateOperationSnapshot? = withContext(Dispatchers.IO) {
+        override suspend fun recover(): AppUpdateOperationSnapshot? = recover { }
+
+        override suspend fun recover(onProgress: (AppUpdateOperationSnapshot) -> Unit): AppUpdateOperationSnapshot? = withContext(Dispatchers.IO) {
             val environment = environment.resolve()
             val store = store(environment)
+            val active = if (ShellRuntimeSession.mayRestore(context)) store.readAll()
+                .filter { it.phase == AppUpdateOwnershipPhase.ACTIVE && it.downloadId >= 0 }
+                .maxByOrNull { it.operationId } else null
+            if (active != null) {
+                val observed = AppUpdateOperationSnapshot(active.operationId, UpdateInfo(active.version, "", ""),
+                    AppUpdateOperationPhase.DOWNLOADING)
+                try {
+                    onProgress(observed)
+                    pollDownload(environment.downloadService, active.downloadId) { onProgress(observed.copy(progress = it)) }
+                    onProgress(observed.copy(phase = AppUpdateOperationPhase.PREPARING, progress = "100%"))
+                    val prepared = prepareUpdateApk(store.downloadFile(active), store.partFile(active), store.readyFile(active)) {
+                        validateDownloadedApk(context, it)
+                    }
+                    store.write(active.copy(targetVersionCode = prepared.targetVersionCode, phase = AppUpdateOwnershipPhase.READY))
+                    removeDownload(environment.downloadService, active.downloadId)
+                    return@withContext observed.copy(phase = AppUpdateOperationPhase.READY, progress = "100%", ready = prepared)
+                } catch (error: Exception) {
+                    recovery(environment, store).cancelUnexposed(active.operationId)
+                    throw error
+                }
+            }
             val recovery = recovery(environment, store)
             val record = recovery.recover() ?: return@withContext null
             val readyFile = store.readyFile(record)

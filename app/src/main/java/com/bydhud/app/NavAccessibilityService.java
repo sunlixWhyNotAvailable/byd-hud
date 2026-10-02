@@ -233,6 +233,7 @@ public final class NavAccessibilityService extends AccessibilityService {
         runtimeCrashed = false;
         lastConnectedElapsedMs = SystemClock.elapsedRealtime();
         lastRuntimeDetail = "connected";
+        ShellRuntimeSession.captureServiceConnected(this);
         AppEventLogger.event(this, "accessibility_service connected");
         NavCaptureIngressPolicy.refreshPreferencesAsync(this);
         WazeStartCoordinator.requestLegacyReconcile(this, "accessibility-connected");

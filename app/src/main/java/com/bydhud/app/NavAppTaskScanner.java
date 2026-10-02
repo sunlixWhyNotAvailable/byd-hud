@@ -66,6 +66,12 @@ final class NavAppTaskScanner {
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
     private NavAppTaskScanner(Context context) {
         this.context = context.getApplicationContext();
+        if (ShellRuntimeSession.mayRestore(context)) {
+            try {
+                String saved = ShellRuntimeSession.prefs(context).getString("apps", "");
+                if (!saved.isEmpty()) snapshot = Snapshot.restore(new org.json.JSONObject(saved));
+            } catch (org.json.JSONException ignored) { }
+        }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -96,6 +102,9 @@ final class NavAppTaskScanner {
             Snapshot scanned = scanWithTasks();
             synchronized (lock) {
                 snapshot = preferredSnapshot(snapshot, scanned);
+                try {
+                    ShellRuntimeSession.prefs(context).edit().putString("apps", snapshot.checkpoint().toString()).apply();
+                } catch (org.json.JSONException ignored) { }
                 revision = Math.max(revision + 1L, System.currentTimeMillis());
                 scanInProgress.set(false);
                 completed = true;
@@ -466,6 +475,26 @@ final class NavAppTaskScanner {
 
         boolean hasAuthoritativeTaskState() {
             return "task".equals(source) && "ok".equals(status);
+        }
+
+        org.json.JSONObject checkpoint() throws org.json.JSONException {
+            org.json.JSONArray items = new org.json.JSONArray();
+            for (Row row : rows) items.put(new org.json.JSONArray().put(row.packageName).put(row.processName)
+                    .put(row.importance).put(row.hasProcess).put(row.hasTask).put(row.taskId).put(row.displayId).put(row.visible));
+            return new org.json.JSONObject().put("rows", items).put("time", scannedAtMs)
+                    .put("text", lastScanText).put("status", status);
+        }
+
+        static Snapshot restore(org.json.JSONObject saved) throws org.json.JSONException {
+            List<Row> rows = new ArrayList<>();
+            org.json.JSONArray items = saved.getJSONArray("rows");
+            for (int i = 0; i < items.length(); i++) {
+                org.json.JSONArray row = items.getJSONArray(i);
+                rows.add(new Row(row.getString(0), row.getString(1), row.getInt(2), row.getBoolean(3),
+                        row.getBoolean(4), row.getInt(5), row.getInt(6), row.getBoolean(7)));
+            }
+            // Last observation for immediate UI display, never fresh task authority.
+            return new Snapshot(rows, saved.getLong("time"), saved.getString("text"), "cached", saved.getString("status"));
         }
     }
 

@@ -36,6 +36,7 @@ final class NavigatorSigningKey {
     }
 
     static String localCertificateSha256() throws Exception {
+        if (ShellWorkEntryPoint.request != null) return ShellWorkEntryPoint.request.getJSONObject("input").getString("certificate");
         KeyStore store = store();
         ensure(store);
         X509Certificate certificate = (X509Certificate) store.getCertificate(ALIAS);
@@ -75,6 +76,7 @@ final class NavigatorSigningKey {
 
     static boolean certificateMatchesLocalIfPresent(String certificateSha256) {
         try {
+            if (ShellWorkEntryPoint.request != null) return localCertificateSha256().equals(certificateSha256);
             KeyStore store = store();
             if (!store.containsAlias(ALIAS)) return false;
             X509Certificate certificate = (X509Certificate) store.getCertificate(ALIAS);

@@ -148,6 +148,7 @@ public final class NavNotificationListenerService extends NotificationListenerSe
                 return;
             }
             lastRuntimeDetail = "connected";
+            ShellRuntimeSession.captureServiceConnected(this);
             AppEventLogger.event(this, "notification_listener connected");
             processActiveNotifications("listener-connected");
         });

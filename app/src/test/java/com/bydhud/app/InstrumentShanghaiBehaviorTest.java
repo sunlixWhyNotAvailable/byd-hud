@@ -125,6 +125,7 @@ public class InstrumentShanghaiBehaviorTest {
 
     @Test public void uncertainLaunchAllowsAuthenticatedHandoffWithoutReplay() throws Exception {
         startWithLostShellReply();
+        proxy.onResume = () -> assertEquals("READY", getField(manager, "state").toString());
         assertEquals("STARTING", getField(manager, "state").toString());
         assertEquals("launch-transport-uncertain", getField(manager, "startStage"));
         InstrumentProxyStore.Identity pending = getField(manager, "helperIdentity");
@@ -136,6 +137,8 @@ public class InstrumentShanghaiBehaviorTest {
         callInstanceMethod(manager, "completeConnect", ClassParameter.from(long.class, pending.generation),
                 ClassParameter.from(Bundle.class, result));
         assertEquals("READY", getField(manager, "state").toString());
+        assertTrue("authenticated reattachment must release an ownerless suspension",
+                proxy.events.contains("resume:" + pending.generation));
         assertEquals(14207, ((InstrumentProxyStore.Identity) getField(manager, "helperIdentity")).pid);
         callInstanceMethod(manager, "handleStartTimeout", ClassParameter.from(long.class, pending.generation));
         assertEquals("READY", getField(manager, "state").toString());
@@ -183,13 +186,17 @@ public class InstrumentShanghaiBehaviorTest {
     }
 
     private static class Proxy extends IInstrumentNavigationProxy.Stub {
+        @Override public void launchWork(long generation, String directory) { }
+        @Override public boolean cancelWork(long generation, String directory) { return true; }
         final List<String> events = new CopyOnWriteArrayList<>();
         boolean failResume;
+        Runnable onResume;
         public void connect(long g, String n, IInstrumentNavigationClient c) { events.add("connect:" + g); }
         public void ping(long g, long token) { events.add("ping:" + g); }
         public void shutdown(long g) { events.add("shutdown:" + g); }
         public Bundle suspendOutput(long g) { events.add("suspend:" + g); return new Bundle(); }
         public Bundle resumeOutput(long g) throws android.os.RemoteException {
+            if (onResume != null) onResume.run();
             events.add("resume:" + g);
             if (failResume) throw new android.os.RemoteException("test failure");
             return new Bundle();
@@ -198,6 +205,9 @@ public class InstrumentShanghaiBehaviorTest {
         public Bundle sendGuidance(long g, int i, int d, String r, int[] l, int[] a) { return new Bundle(); }
         public Bundle sendHudCheckTrafficLight(long g, int s) { return new Bundle(); }
         public Bundle nativeSpeedOperation(long g, int o, int v) { return new Bundle(); }
+        public void setRecoveryEnabled(long g, boolean enabled) { }
+        public Bundle startSystemCapture(long g, String id, String cursor, android.os.ParcelFileDescriptor file) { return new Bundle(); }
+        public Bundle systemCaptureState(long g, String id, boolean stop) { return new Bundle(); }
     }
 
     @Implements(LocalAdbBridge.class)

@@ -13,26 +13,16 @@ import java.nio.file.Paths;
 
 public final class NavigatorPatchWorkerSourceContractTest {
     @Test
-    public void workerIsPrivateAndUsesOneFifoExecutor() throws IOException {
+    public void workerSurvivesApplicationBinderLoss() throws IOException {
         String manifest = source("app/src/main/AndroidManifest.xml");
-        String worker = source("app/src/main/java/com/bydhud/app/NavigatorPatchWorkerService.java");
-        assertTrue(manifest.contains("android:name=\".NavigatorPatchWorkerService\""));
-        assertTrue(manifest.contains("android:exported=\"false\""));
-        assertTrue(manifest.contains("android:process=\":navigator_patcher\""));
-        assertTrue(worker.contains("Executors.newSingleThreadExecutor"));
-        assertTrue(worker.contains("FutureTask"));
-        assertTrue(worker.contains("Future<?> future"));
-        assertTrue(worker.contains("volatile boolean cancelled"));
-        assertTrue(worker.contains("future.cancel(true)"));
-        assertTrue(worker.contains("checkCancelled(task);"));
-        assertTrue(worker.contains("final int command = message.what;"));
-        assertTrue(worker.contains("run(command, request, task);"));
-        assertFalse(worker.contains("run(message.what, request, task);"));
-        assertTrue(worker.contains("linkToDeath(task.replyDeath, 0)"));
-        assertTrue(worker.contains("unlinkReplyDeath(task)"));
-        assertTrue(worker.contains("Process.killProcess(android.os.Process.myPid())"));
-        assertFalse(worker.contains("NavigatorPackageInstaller"));
-        assertFalse(worker.contains("NavigatorPatchStore"));
+        String worker = source("app/src/main/java/com/bydhud/app/ShellWorkEntryPoint.java");
+        String client = source("app/src/main/java/com/bydhud/app/ShellWorkClient.java");
+        assertFalse(manifest.contains("android:process=\":navigator_patcher\""));
+        assertTrue(worker.contains("Process.myUid() != 2000"));
+        assertTrue(worker.contains("owner.getChannel().tryLock()"));
+        assertTrue(worker.contains("NavigatorPatchWorkerClient.runInShell"));
+        assertFalse(worker.contains("linkToDeath"));
+        assertTrue(client.contains("ShellWorkFiles.settled(directory)"));
     }
 
     @Test
@@ -64,9 +54,7 @@ public final class NavigatorPatchWorkerSourceContractTest {
         assertTrue(gmaps.contains("scanCandidates(apk, PROFILES)"));
         assertFalse(pipeline.contains("validatedGmapsProfile"));
         assertFalse(pipeline.contains("inspectProfileIdIfPresent(member.file)"));
-        assertTrue(client.contains("Looper.myLooper() == Looper.getMainLooper()"));
-        assertTrue(client.contains("cancelAndFence(remote.get(), completed, operation)"));
-        assertTrue(client.contains("NavigatorPatchWorkerService.MSG_ABORT_PROCESS"));
+        assertTrue(client.contains("ShellWorkClient.await(context, job, null)"));
         assertTrue(installer.contains("Executors.newSingleThreadExecutor"));
         assertTrue(installer.contains("INSTALL_QUEUE.execute(() -> drainInstallQueueNow(appContext))"));
         assertTrue(installer.contains("error instanceof NavigatorPatchPipeline.OperationCancelledException"));

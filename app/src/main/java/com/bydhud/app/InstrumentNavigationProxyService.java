@@ -7,6 +7,9 @@ import android.content.pm.PackageManager;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Handler;
+import android.content.Intent;
+import android.content.ComponentName;
 import android.os.Looper;
 import android.os.Process;
 import android.os.RemoteException;
@@ -85,6 +88,14 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private volatile int activeCapabilities;
     private final HudCheckTrafficLight.Output trafficLightOutput = new HudCheckTrafficLight.Output();
     private boolean outputSuspended;
+    private final Handler recoveryHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean recoveryEnabled;
+    private volatile boolean stopped;
+    private IBinder.DeathRecipient clientDeath;
+    private final Runnable recoverClient = this::recoverClient;
+    private final ShellLogcatCapture logcatCapture = new ShellLogcatCapture();
+    private java.lang.Process recoveryCommand;
+    private final java.util.Map<String, java.lang.Process> workProcesses = new java.util.HashMap<>();
 
     InstrumentNavigationProxyService(
             Context systemContext, long generation, String nonce, int allowedUid,
@@ -108,7 +119,6 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             InstrumentProxyStartupLog.record(generation,
                     InstrumentProxyStartupLog.Stage.CONNECT_REJECTED,
                     InstrumentProxyStartupLog.Outcome.MISSING_CLIENT);
-            stop("missing client");
             return;
         }
         Bundle result;
@@ -119,7 +129,15 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             result = connectionResult(false, "handoff rejected");
         } else {
             try {
-                requestClient.asBinder().linkToDeath(this::onClientDied, 0);
+                synchronized (operationLock) {
+                    if (stopped) return;
+                    if (client != null && clientDeath != null) {
+                        client.asBinder().unlinkToDeath(clientDeath, 0);
+                    }
+                    client = requestClient;
+                    clientDeath = () -> onClientDied(requestClient);
+                    requestClient.asBinder().linkToDeath(clientDeath, 0);
+                }
                 InstrumentProxyStartupLog.record(generation,
                         InstrumentProxyStartupLog.Stage.OEM_INSTRUMENT,
                         InstrumentProxyStartupLog.Outcome.STARTED);
@@ -128,7 +146,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                         InstrumentProxyStartupLog.Stage.OEM_INSTRUMENT,
                         current == null ? InstrumentProxyStartupLog.Outcome.UNAVAILABLE
                                 : InstrumentProxyStartupLog.Outcome.AVAILABLE);
-                int capabilities = InstrumentProxyContract.CAP_SYSTEM_CONTEXT;
+                int capabilities = InstrumentProxyContract.CAP_SYSTEM_CONTEXT | InstrumentProxyContract.CAP_SHELL_RUNTIME;
                 Readiness fidReadiness = current == null
                         ? new Readiness(false, "Instrument API unavailable")
                         : current.probeFidReadiness();
@@ -162,7 +180,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                         InstrumentProxyStartupLog.Stage.OEM_NATIVE_SPEED,
                         InstrumentProxyStartupLog.Outcome.STARTED);
                 try {
-                    nativeSpeed = NativeSpeedApi.open(systemContext);
+                    if (nativeSpeed == null) nativeSpeed = NativeSpeedApi.open(systemContext);
                 } finally {
                     Binder.restoreCallingIdentity(nativeIdentity);
                 }
@@ -175,8 +193,10 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 activeCapabilities = capabilities;
                 boolean ready = InstrumentProxyContract.hasUsableCapability(capabilities);
                 if (ready) {
-                    client = requestClient;
-                    connected = true;
+                    synchronized (operationLock) {
+                        connected = client == requestClient && requestClient.asBinder().isBinderAlive();
+                    }
+                    if (connected) recoveryHandler.removeCallbacks(recoverClient);
                 } else {
                     InstrumentProxyStartupLog.record(generation,
                             InstrumentProxyStartupLog.Stage.CONNECT_REJECTED,
@@ -199,7 +219,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 InstrumentProxyStartupLog.record(generation,
                         InstrumentProxyStartupLog.Stage.CALLBACK_FAILED,
                         InstrumentProxyStartupLog.Outcome.BINDER_REMOTE_EXCEPTION);
-                connected = false;
+                onClientDied(requestClient);
             }
         } finally {
             Binder.restoreCallingIdentity(identity);
@@ -210,7 +230,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     InstrumentProxyStartupLog.Outcome.OK);
         }
         if (!InstrumentProxyContract.isReady(result) || !connected) {
-            stop("handoff rejected");
+            if (!recoveryEnabled) stop("handoff rejected");
         }
     }
 
@@ -231,7 +251,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 try {
                     current.onProxyPong(generation, token);
                 } catch (RemoteException error) {
-                    stop("ping callback failed");
+                    onClientDied(current);
                 }
             } finally {
                 Binder.restoreCallingIdentity(identity);
@@ -454,8 +474,79 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
 
     @Override
     public void shutdown(long requestGeneration) {
-        enforceSession(requestGeneration);
+        enforceCaller();
+        if (requestGeneration != generation) throw new SecurityException("stale runtime shutdown");
         stop("app shutdown");
+    }
+
+    @Override public void setRecoveryEnabled(long requestGeneration, boolean enabled) {
+        enforceSession(requestGeneration);
+        recoveryEnabled = enabled;
+    }
+
+    @Override public Bundle startSystemCapture(long requestGeneration, String id, String cursor,
+            android.os.ParcelFileDescriptor destination) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try { return logcatCapture.start(id, cursor, destination); }
+        finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public Bundle systemCaptureState(long requestGeneration, String id, boolean stop) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try { return stop ? logcatCapture.stop(id) : logcatCapture.state(); }
+        finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public synchronized void launchWork(long requestGeneration, String directory) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try {
+            Context app = systemContext.createPackageContext("com.bydhud.app", Context.CONTEXT_IGNORE_SECURITY);
+            java.io.File job = ShellWorkFiles.inside(ShellWorkFiles.root(app), directory);
+            if (!job.getParentFile().equals(ShellWorkFiles.root(app).getCanonicalFile())
+                    || !job.getName().matches("[A-Za-z0-9_-]{1,100}"))
+                throw new SecurityException("Invalid shell job directory");
+            org.json.JSONObject request = ShellWorkFiles.read(new java.io.File(job, "request.json"));
+            if (request.optInt("uid") != allowedUid || request.optInt("version") != appVersionCode)
+                throw new SecurityException("Shell job owner changed");
+            workProcesses.entrySet().removeIf(entry -> !entry.getValue().isAlive());
+            java.lang.Process existing = workProcesses.get(directory);
+            if (existing != null && existing.isAlive()) return;
+            if (new java.io.File(job, "result.json").exists()) return;
+            if (ShellWorkFiles.running(job)) return;
+            if (new java.io.File(job, "started.json").exists()) {
+                ShellWorkFiles.write(new java.io.File(job, "result.json"), new org.json.JSONObject()
+                        .put("ok", false).put("cleanupPending", "shanghai".equals(request.optString("type")))
+                        .put("error", "Shell worker exited without a result; operation was not replayed"));
+                return;
+            }
+            ProcessBuilder builder = new ProcessBuilder("/system/bin/app_process", "/system/bin",
+                    ShellWorkEntryPoint.class.getName(), job.getAbsolutePath());
+            builder.environment().put("CLASSPATH", app.getApplicationInfo().sourceDir);
+            builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(
+                    new java.io.File(job, "worker.log")));
+            workProcesses.put(directory, builder.start());
+        } catch (Exception error) { throw new IllegalStateException("Cannot launch shell work", error); }
+        finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public synchronized boolean cancelWork(long requestGeneration, String directory) {
+        enforceSession(requestGeneration);
+        java.lang.Process process = workProcesses.get(directory);
+        if (process == null) return false;
+        if (new java.io.File(directory).getName().startsWith("shanghai-")) return false;
+        long identity = Binder.clearCallingIdentity();
+        try {
+            process.destroyForcibly();
+            if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) return false;
+            java.io.File result = new java.io.File(directory, "result.json");
+            if (!result.exists()) ShellWorkFiles.write(result, new org.json.JSONObject()
+                    .put("ok", false).put("cancelled", true).put("error", "Cancelled by owner"));
+            return true;
+        } catch (Exception error) { return false; }
+        finally { Binder.restoreCallingIdentity(identity); }
     }
 
     private static Bundle outputSuspendedResult() {
@@ -753,8 +844,51 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         }
     }
 
-    private void onClientDied() {
-        stop("client died");
+    private void onClientDied(IInstrumentNavigationClient expected) {
+        synchronized (operationLock) {
+            if (client != expected || stopped) return;
+            connected = false;
+            client = null;
+            clientDeath = null;
+        }
+        if (!recoveryEnabled) { stop("client died"); return; }
+        // The shell runtime and its owned outputs survive. Only Android bindings reattach.
+        Log.i(TAG, "client detached; retaining runtime generation=" + generation);
+        recoveryHandler.removeCallbacks(recoverClient);
+        recoveryHandler.post(recoverClient);
+    }
+
+    private void recoverClient() {
+        if (stopped || connected || !recoveryEnabled) return;
+        try {
+            // An explicit shell start also clears the OEM package-stopped state. No Activity.
+            android.content.pm.ApplicationInfo owner = systemContext.getPackageManager()
+                    .getApplicationInfo("com.bydhud.app", 0);
+            String classPath = System.getProperty("java.class.path", "");
+            if (owner.uid != allowedUid || !(classPath.equals(owner.sourceDir)
+                    || classPath.endsWith(":" + owner.sourceDir))) {
+                stop("owner installation changed");
+                return;
+            }
+            if (recoveryCommand == null || !recoveryCommand.isAlive()) recoveryCommand =
+                    new ProcessBuilder("/system/bin/am", "start-foreground-service", "--user", "current",
+                    "-n", "com.bydhud.app/.HudRuntimeService", "-a",
+                    "com.bydhud.app.action.RECOVER_SHELL_RUNTIME")
+                    .redirectErrorStream(true).redirectOutput(new java.io.File("/dev/null")).start();
+            Intent handoff = new Intent(InstrumentProxyContract.ACTION_CONNECTED)
+                    .setComponent(new ComponentName("com.bydhud.app", "com.bydhud.app.InstrumentProxyReceiver"))
+                    .addFlags(Intent.FLAG_INCLUDE_STOPPED_PACKAGES | Intent.FLAG_RECEIVER_FOREGROUND)
+                    .putExtra("recover_runtime", true)
+                    .putExtra(InstrumentProxyContract.EXTRA_GENERATION, generation)
+                    .putExtra(InstrumentProxyContract.EXTRA_NONCE, nonce)
+                    .putExtra(InstrumentProxyContract.EXTRA_BINDER, new InstrumentProxyBinder(asBinder()));
+            systemContext.sendBroadcast(handoff);
+            Log.i(TAG, "background recovery requested generation=" + generation);
+        } catch (Exception error) {
+            Log.w(TAG, "background recovery failed", error);
+            if (error instanceof PackageManager.NameNotFoundException) { stop("owner removed"); return; }
+        }
+        if (!stopped && !connected && recoveryEnabled) recoveryHandler.postDelayed(recoverClient, 2_000L);
     }
 
     boolean isConnected() {
@@ -762,7 +896,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     void stopIfUnconnected() {
-        if (!connected) stop("handoff timeout");
+        if (!connected && !recoveryEnabled) stop("handoff timeout");
     }
 
     private static long currentProcessStartTimeTicks() {
@@ -775,6 +909,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private void stop(String reason) {
+        stopped = true;
+        recoveryEnabled = false;
+        recoveryHandler.removeCallbacks(recoverClient);
+        if (recoveryCommand != null) recoveryCommand.destroy();
+        Bundle capture = logcatCapture.state();
+        if (capture.getBoolean("running")) logcatCapture.stop(capture.getString("id", ""));
         InstrumentProxyStartupLog.record(generation,
                 InstrumentProxyStartupLog.Stage.STOP_REQUESTED,
                 InstrumentProxyStartupLog.stopOutcome(reason));

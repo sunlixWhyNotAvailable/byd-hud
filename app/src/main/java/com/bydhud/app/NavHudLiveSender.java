@@ -134,6 +134,7 @@ final class NavHudLiveSender {
     static boolean activateUserRuntime(Context context) {
         if (HudPrefs.isUserShutdownActive(context)) return false;
         UserRuntimeSession.PROCESS.activate();
+        ShellRuntimeSession.arm(context);
         ShanghaiTestController.get(context).recoverOwned("runtime-enable");
         return true;
     }
@@ -245,6 +246,40 @@ final class NavHudLiveSender {
     private boolean isRuntimeEnabled() {
         return UserRuntimeSession.PROCESS.allowsRuntime(
                 HudPrefs.isBootEnabled(context), HudPrefs.isUserShutdownActive(context));
+    }
+
+    private void checkpointOutput() {
+        try {
+            JSONObject state = new JSONObject().put("check", hudCheckState.checkpoint())
+                    .put("mapLive", mapLiveState.running);
+            HudMapProfile draft = mapProfileCalibrationState.running ? mapProfileCalibrationState.draft : null;
+            if (draft != null) state.put("profile", new JSONObject().put("source", draft.source.name())
+                    .put("x", draft.x).put("y", draft.y).put("scale", draft.scale));
+            ShellRuntimeSession.prefs(context).edit().putString("output", state.toString()).commit();
+        } catch (Exception error) { log("runtime output checkpoint failed " + error.getClass().getSimpleName()); }
+    }
+
+    void restoreOutputSession() {
+        String checkpoint = ShellRuntimeSession.prefs(context).getString("output", "");
+        if (checkpoint.isEmpty()) return;
+        handler.post(() -> {
+            if (!isRuntimeEnabled() || hudCheckState.running || mapLiveState.running
+                    || mapLiveStartPending || mapProfileStartPending) return;
+            try {
+                JSONObject state = new JSONObject(checkpoint);
+                JSONObject profile = state.optJSONObject("profile");
+                if (profile != null) {
+                    startMapProfile(context, new HudMapProfile(HudMapProfile.Source.valueOf(profile.getString("source")),
+                            (float) profile.getDouble("x"), (float) profile.getDouble("y"),
+                            (float) profile.getDouble("scale")));
+                } else if (state.optBoolean("mapLive")) {
+                    startMapLive(context);
+                } else if (state.has("check")) {
+                    HudCheckState restored = HudCheckState.restore(state.getJSONObject("check"));
+                    updateHudCheck(previous -> restored, "shell-session-recovery");
+                }
+            } catch (Exception error) { log("runtime output restore failed " + error.getClass().getSimpleName()); }
+        });
     }
 
     static void onOutputPreferenceChanged(String key) {
@@ -529,6 +564,7 @@ final class NavHudLiveSender {
             }
             handler.removeCallbacks(hudCheckTick);
             hudCheckState = next;
+            checkpointOutput();
             if (next.running) {
                 if (previous.running) publishManualOnWorker(next.toHudState(), reason);
                 else startManualOnWorker(next.toHudState(), reason);
@@ -615,6 +651,7 @@ final class NavHudLiveSender {
         if (!hudCheckState.running) return;
         handler.removeCallbacks(hudCheckTick);
         hudCheckState = hudCheckState.stop();
+        checkpointOutput();
         MainActivity.publishSharedUiStateChange();
     }
 
@@ -659,6 +696,7 @@ final class NavHudLiveSender {
                 sameSource && previous.frameReady ? previous.png() : null);
         hudOutput.updateMapProfileCalibration(session, profile,
                 () -> onMapProfileCaptureChanged(session, profile.source));
+        checkpointOutput();
         MainActivity.publishSharedUiStateChange();
         log("map_profile updated session=" + session + " source=" + profile.source);
     }
@@ -678,6 +716,7 @@ final class NavHudLiveSender {
         long session = mapProfileCalibrationState.session;
         mapProfileDraft = null;
         mapProfileCalibrationState = HudMapProfileCalibrationState.STOPPED;
+        checkpointOutput();
         hudOutput.endMapProfileCalibration(session, safeReason(reason));
         MainActivity.publishSharedUiStateChange();
         stopMapLiveOnWorker("map-profile-stop:" + safeReason(reason), true, completion);
@@ -733,6 +772,7 @@ final class NavHudLiveSender {
         log("map_live started session=" + session + " " + mapLiveSettings.diagnostics()
                 + (profile == null ? "" : " mapProfile=" + profile.source));
         logMapLiveSample();
+        checkpointOutput();
         startManualOnWorker(mapLiveManualState, reason);
         scheduleMapLiveTick(session);
         MainActivity.publishSharedUiStateChange();
@@ -831,6 +871,7 @@ final class NavHudLiveSender {
             hudOutput.endMapProfileCalibration(session, safeReason(reason));
         }
         log("map_live stopped session=" + session + " reason=" + safeReason(reason));
+        checkpointOutput();
         hudOutput.endMapLiveSession(session, safeReason(reason));
         stopManualOnWorker("map-live-stop:" + safeReason(reason), restoreDirect, completion);
         MainActivity.publishSharedUiStateChange();

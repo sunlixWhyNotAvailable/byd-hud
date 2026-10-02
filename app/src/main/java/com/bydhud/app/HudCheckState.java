@@ -136,6 +136,22 @@ public final class HudCheckState {
                         laneBitmap, transliterate, extendedIndex);
     }
 
+    org.json.JSONObject checkpoint() throws org.json.JSONException {
+        return new org.json.JSONObject().put("mode", mode.name()).put("running", running)
+                .put("automatic", automatic).put("maneuver", maneuverIndex).put("lane", laneIndex)
+                .put("distance", distanceIndex).put("street", streetIndex).put("light", trafficLightIndex)
+                .put("maneuverBitmap", maneuverBitmap).put("laneBitmap", laneBitmap)
+                .put("transliterate", transliterate).put("extended", extendedIndex);
+    }
+
+    static HudCheckState restore(org.json.JSONObject state) {
+        return new HudCheckState(Mode.valueOf(state.optString("mode", "BASIC")),
+                state.optBoolean("running"), state.optBoolean("automatic", true),
+                state.optInt("maneuver"), state.optInt("lane"), state.optInt("distance"),
+                state.optInt("street"), state.optInt("light"), state.optBoolean("maneuverBitmap"),
+                state.optBoolean("laneBitmap"), state.optBoolean("transliterate"), state.optInt("extended"));
+    }
+
     public HudCheckState toggleRun() {
         if (mode == Mode.SHANGHAI) return this;
         return new HudCheckState(mode, !running, automatic, maneuverIndex, laneIndex,

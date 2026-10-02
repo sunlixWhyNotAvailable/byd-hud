@@ -85,9 +85,7 @@ final class ShanghaiDiagnostics {
             if (stopRequested.get()) return;
             String token = token(safeSessionId);
 
-            adb = new ShanghaiDiagnosticAdb(context, directory, token);
-            adb.start();
-            record("snapshot_before", adb.coverageJson().optString("beforeSnapshot"));
+            record("shell_diagnostics", "ADAS, pcap and snapshots are retained in shell-runtime/");
             if (stopRequested.get()) return;
 
             someIpJournal = new ShanghaiEventJournal(
@@ -101,7 +99,7 @@ final class ShanghaiDiagnostics {
             if (!bound) record("someip_unavailable", "bind failed or timed out");
             else record("someip_subscriptions", someIp.subscriptionResults().toString());
             if (stopRequested.get()) return;
-            adb.resolveReadiness(5_000L);
+            if (adb != null) adb.resolveReadiness(5_000L);
 
             ready = true;
             state = hasLiveChannel() ? State.CAPTURING : State.PARTIAL;

@@ -60,6 +60,19 @@ final class NavRuntimePermissionStatus {
         return settings != null && settings.captureGranted();
     }
 
+    org.json.JSONObject checkpoint() throws org.json.JSONException {
+        return new org.json.JSONObject().put("settings", settings.checkpoint())
+                .put("notification", notificationListenerConnected).put("accessibility", accessibilityServiceConnected)
+                .put("crashed", accessibilityServiceCrashed).put("notificationDetail", notificationDetail)
+                .put("accessibilityDetail", accessibilityDetail);
+    }
+
+    static NavRuntimePermissionStatus restore(org.json.JSONObject state) throws org.json.JSONException {
+        return new NavRuntimePermissionStatus(NavPermissionStatus.restore(state.getJSONObject("settings")),
+                state.optBoolean("notification"), state.optBoolean("accessibility"), state.optBoolean("crashed"),
+                state.optString("notificationDetail"), state.optString("accessibilityDetail"));
+    }
+
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean readyForCapture() {
         return settingsGranted()

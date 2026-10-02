@@ -1,26 +1,12 @@
 package com.bydhud.app;
 
-import android.content.ComponentName;
 import android.content.Context;
-import android.content.Intent;
-import android.content.ServiceConnection;
 import android.os.Bundle;
-import android.os.Handler;
-import android.os.Looper;
-import android.os.Message;
-import android.os.Messenger;
-import android.os.RemoteException;
-
 import java.io.File;
 import java.io.IOException;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicReference;
 
-/** Synchronous IO-thread client for the isolated patcher process. */
+/** IO-thread observer of a durable shell patch operation. */
 final class NavigatorPatchWorkerClient {
-    private static final long BIND_TIMEOUT_MS = 10_000L;
-    private static final long OPERATION_TIMEOUT_MS = 20 * 60_000L;
 
     private NavigatorPatchWorkerClient() {
     }
@@ -72,18 +58,25 @@ final class NavigatorPatchWorkerClient {
     private static Bundle request(Context context, int command, String operation,
             NavigatorPatchStore.Profile profile, File source, File output, File transaction,
             NavigatorPatchPipeline.ScanResult expected, boolean directory) throws Exception {
-        Bundle request = call(context, command, operation, data -> {
-            data.putString(NavigatorPatchWorkerService.KEY_PROFILE, profile.id);
-            data.putString(NavigatorPatchWorkerService.KEY_SOURCE,
-                    source == null ? "" : source.getAbsolutePath());
-            data.putString(NavigatorPatchWorkerService.KEY_OUTPUT,
-                    output == null ? "" : output.getAbsolutePath());
-            data.putString(NavigatorPatchWorkerService.KEY_TRANSACTION,
-                    transaction == null ? "" : transaction.getAbsolutePath());
-            data.putBoolean(NavigatorPatchWorkerService.KEY_DIRECTORY, directory);
-            if (expected != null) data.putBundle(NavigatorPatchWorkerService.KEY_EXPECTED,
-                    NavigatorPatchPipeline.workerBundle(expected));
-        }, true);
+        org.json.JSONObject input = new org.json.JSONObject().put("command", command)
+                .put("operation", operation).put("profile", profile.id)
+                .put("source", source == null ? "" : source.getAbsolutePath())
+                .put("output", output == null ? "" : output.getAbsolutePath())
+                .put("transaction", transaction == null ? "" : transaction.getAbsolutePath())
+                .put("directory", directory)
+                .put("certificate", NavigatorSigningKey.localCertificateSha256())
+                .put("expected", ShellWorkFiles.json(expected == null ? null : NavigatorPatchPipeline.workerBundle(expected)));
+        String id = operation + "-" + command + "-" + Integer.toHexString(
+                (String.valueOf(source) + "|" + output + "|" + transaction).hashCode());
+        File job = ShellWorkClient.prepare(context, "patch", id, input);
+        boolean primary = !directory && (transaction != null || output != null && output.getName().contains("-worker-scan-"));
+        if (primary) ShellRuntimeSession.prefs(context).edit().putString("patch_" + profile.id, job.getPath()).commit();
+        org.json.JSONObject completed = ShellWorkClient.await(context, job, null);
+        if (completed.has("report")) NavigatorPatchReportStore.recordStage(context, operation,
+                "SHELL_REPORT", "SUCCESS", "Retained shell worker report", completed.getJSONObject("report"));
+        Bundle request = new Bundle();
+        request.putString(NavigatorPatchWorkerService.KEY_STATUS, NavigatorPatchWorkerService.STATUS_OK);
+        request.putBundle(NavigatorPatchWorkerService.KEY_SCAN, ShellWorkFiles.bundle(completed.getJSONObject("payload")));
         String status = request.getString(NavigatorPatchWorkerService.KEY_STATUS, "");
         if (NavigatorPatchWorkerService.STATUS_CANCELLED.equals(status)) {
             throw new NavigatorPatchPipeline.OperationCancelledException();
@@ -95,132 +88,54 @@ final class NavigatorPatchWorkerClient {
         return request;
     }
 
-    private interface RequestBuilder {
-        void apply(Bundle request);
+    static boolean retained(Context context, NavigatorPatchStore.Profile profile) {
+        String path = ShellRuntimeSession.prefs(context).getString("patch_" + profile.id, "");
+        return !path.isEmpty() && !ShellWorkFiles.settled(new File(path));
     }
 
-    private static Bundle call(Context context, int command, String operation,
-            RequestBuilder builder, boolean awaitResult) throws Exception {
-        if (Looper.myLooper() == Looper.getMainLooper()) {
-            throw new IOException("Navigator patcher request cannot block the main thread");
-        }
-        CountDownLatch connected = new CountDownLatch(1);
-        CountDownLatch completed = new CountDownLatch(1);
-        AtomicReference<Messenger> remote = new AtomicReference<>();
-        AtomicReference<Throwable> failure = new AtomicReference<>();
-        AtomicReference<Bundle> response = new AtomicReference<>();
-        Messenger callback = new Messenger(new Handler(Looper.getMainLooper(), message -> {
-            if (message.what == NavigatorPatchWorkerService.MSG_RESULT) {
-                response.set(message.getData());
-                completed.countDown();
-            }
-            return true;
-        }));
-        ServiceConnection connection = new ServiceConnection() {
-            @Override
-            public void onServiceConnected(ComponentName name, android.os.IBinder binder) {
-                remote.set(new Messenger(binder));
-                connected.countDown();
-            }
-
-            @Override
-            public void onServiceDisconnected(ComponentName name) {
-                failure.compareAndSet(null, new IOException("Navigator patcher process died"));
-                connected.countDown();
-                completed.countDown();
-            }
-
-            @Override
-            public void onBindingDied(ComponentName name) {
-                failure.compareAndSet(null, new IOException("Navigator patcher binding died"));
-                connected.countDown();
-                completed.countDown();
-            }
-        };
-        Intent intent = new Intent(context, NavigatorPatchWorkerService.class);
-        if (!context.bindService(intent, connection, Context.BIND_AUTO_CREATE)) {
-            throw new IOException("Cannot bind navigator patcher");
-        }
-        boolean requestSent = false;
+    static boolean pending(Context context, NavigatorPatchStore.Profile profile) {
+        String path = ShellRuntimeSession.prefs(context).getString("patch_" + profile.id, "");
+        if (path.isEmpty()) return false;
         try {
-            if (!connected.await(BIND_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                throw new IOException("Navigator patcher bind timeout");
-            }
-            Throwable bindFailure = failure.get();
-            if (bindFailure != null) throw asException(bindFailure);
-            Message request = Message.obtain(null, command);
-            Bundle data = new Bundle();
-            data.putString(NavigatorPatchWorkerService.KEY_OPERATION, operation);
-            if (builder != null) builder.apply(data);
-            request.setData(data);
-            if (awaitResult) request.replyTo = callback;
-            remote.get().send(request);
-            requestSent = true;
-            if (!awaitResult) return new Bundle();
-            if (!completed.await(OPERATION_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
-                cancelAndFence(remote.get(), completed, operation);
-                throw new IOException("Navigator patcher operation timeout");
-            }
-            Throwable processFailure = failure.get();
-            if (processFailure != null) throw asException(processFailure);
-            Bundle result = response.get();
-            if (result == null) throw new IOException("Navigator patcher returned no result");
-            return result;
-        } catch (InterruptedException cancelled) {
-            if (requestSent) cancelAndFence(remote.get(), completed, operation);
-            throw new NavigatorPatchPipeline.OperationCancelledException();
-        } catch (RemoteException error) {
-            throw new IOException("Navigator patcher process died", error);
-        } finally {
-            try {
-                context.unbindService(connection);
-            } catch (IllegalArgumentException ignored) {
-                // Bind failed or was already torn down by the system.
-            }
+            org.json.JSONObject input = ShellWorkFiles.read(new File(path, "request.json")).getJSONObject("input");
+            NavigatorPatchStore.OperationSnapshot state = NavigatorPatchStore.operation(context, profile);
+            return input.getString("operation").equals(state.operationToken)
+                    && !NavigatorPatchStore.READY_TO_INSTALL.equals(state.phase)
+                    && (state.busy() || retained(context, profile));
+        } catch (Exception ignored) { return false; }
+    }
+
+    static void restore(Context context) {
+        for (NavigatorPatchStore.Profile profile : NavigatorPatchStore.Profile.values()) {
+            if (!pending(context, profile)) continue;
+            File job = new File(ShellRuntimeSession.prefs(context).getString("patch_" + profile.id, ""));
+            new Thread(() -> NavigatorPatchPipeline.recoverShellWork(context, profile, job),
+                    "patch-shell-reattach-" + profile.id).start();
         }
     }
 
-    private static Exception asException(Throwable error) {
-        return error instanceof Exception
-                ? (Exception) error : new IOException(error.getMessage(), error);
-    }
-
-    private static void sendCancel(Messenger remote, String operation) {
-        if (remote == null || operation == null || operation.isEmpty()) return;
-        try {
-            Message cancel = Message.obtain(null, NavigatorPatchWorkerService.MSG_CANCEL);
-            Bundle data = new Bundle();
-            data.putString(NavigatorPatchWorkerService.KEY_OPERATION, operation);
-            cancel.setData(data);
-            remote.send(cancel);
-        } catch (RemoteException ignored) {
+    static org.json.JSONObject runInShell(Context context, org.json.JSONObject input) throws Exception {
+        String profile = input.getString("profile");
+        String operation = input.getString("operation");
+        File source = input.optString("source").isEmpty() ? null : new File(input.getString("source"));
+        NavigatorPatchReportStore.begin(context, operation, profile, "SHELL", System.currentTimeMillis(), new org.json.JSONObject());
+        Bundle payload;
+        if (input.getInt("command") == NavigatorPatchWorkerService.MSG_PREPARE) {
+            NavigatorPatchPipeline.WorkerPatchResult result = NavigatorPatchPipeline.workerPrepare(context, profile,
+                    source, new File(input.getString("transaction")), NavigatorPatchPipeline.workerUnbundle(
+                    ShellWorkFiles.bundle(input.getJSONObject("expected"))), operation);
+            payload = new Bundle();
+            payload.putBundle(NavigatorPatchWorkerService.KEY_INPUT, NavigatorPatchPipeline.workerBundle(result.input));
+            payload.putBundle(NavigatorPatchWorkerService.KEY_OUTPUT_RESULT, NavigatorPatchPipeline.workerBundle(result.output));
+            payload.putString(NavigatorPatchWorkerService.KEY_TRANSACTION, result.transaction.getPath());
+            payload.putBoolean(NavigatorPatchWorkerService.KEY_OPTIONAL_APPLIED, result.optionalApplied);
+        } else {
+            NavigatorPatchPipeline.ScanResult result = input.optBoolean("directory")
+                    ? NavigatorPatchPipeline.workerInspectDirectory(context, profile, source)
+                    : NavigatorPatchPipeline.workerScan(context, profile, source, new File(input.getString("output")));
+            payload = NavigatorPatchPipeline.workerBundle(result);
         }
-    }
-
-    private static void cancelAndFence(Messenger remote, CountDownLatch completed,
-            String operation) throws IOException {
-        sendCancel(remote, operation);
-        if (awaitUninterruptibly(completed, BIND_TIMEOUT_MS)) return;
-        try {
-            remote.send(Message.obtain(null, NavigatorPatchWorkerService.MSG_ABORT_PROCESS));
-        } catch (RemoteException processAlreadyDead) {
-            return;
-        }
-        if (!awaitUninterruptibly(completed, BIND_TIMEOUT_MS)) {
-            throw new IOException("Navigator patcher cancellation fence timeout");
-        }
-    }
-
-    private static boolean awaitUninterruptibly(CountDownLatch latch, long timeoutMs) {
-        long deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(timeoutMs);
-        while (true) {
-            long remaining = deadline - System.nanoTime();
-            if (remaining <= 0L) return latch.getCount() == 0L;
-            try {
-                return latch.await(remaining, TimeUnit.NANOSECONDS);
-            } catch (InterruptedException ignored) {
-                // Cancellation is already represented by the worker protocol and Store state.
-            }
-        }
+        return new org.json.JSONObject().put("payload", ShellWorkFiles.json(payload))
+                .put("report", NavigatorPatchReportStore.exportSnapshot(context));
     }
 }

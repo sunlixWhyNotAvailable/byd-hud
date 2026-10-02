@@ -390,6 +390,10 @@ final class LocalAdbBridge {
 
     private static ShanghaiStreamSession openShanghaiStream(Context context, String command)
             throws IOException {
+        if (ShellWorkEntryPoint.currentJob != null) return new ShanghaiStreamSession(
+                new ProcessBuilder("/system/bin/sh", "-c", command)
+                        .redirectError(ProcessBuilder.Redirect.appendTo(new File(
+                                ShellWorkEntryPoint.currentJob, "diagnostic-stderr.log"))).start());
         Context app = context.getApplicationContext();
         Socket socket = new Socket();
         try {
@@ -416,6 +420,10 @@ final class LocalAdbBridge {
     }
 
     static final class ShanghaiStreamSession implements AutoCloseable {
+        private java.lang.Process process;
+        private ShanghaiStreamSession(java.lang.Process process) {
+            this.socket = null; this.connection = null; this.command = ""; this.process = process;
+        }
         private final Socket socket;
         private final Connection connection;
         private final String command;
@@ -432,11 +440,21 @@ final class LocalAdbBridge {
             if (output == null) throw new IllegalArgumentException("output is required");
             if (closed.get()) throw new IOException("Shanghai stream closed");
             if (!reading.compareAndSet(false, true)) throw new IOException("Shanghai stream already consumed");
+            if (process != null) {
+                try (java.io.InputStream stream = process.getInputStream()) {
+                    byte[] buffer = new byte[64 * 1024]; int read;
+                    while (!closed.get() && (read = stream.read(buffer)) != -1) output.write(buffer, 0, read);
+                }
+                return;
+            }
             connection.streamShell(command, output);
         }
 
         @Override public void close() {
-            if (closed.compareAndSet(false, true)) closeExportSocket(socket);
+            if (closed.compareAndSet(false, true)) {
+                if (process != null) { process.destroy(); try { process.getInputStream().close(); } catch (IOException ignored) { } }
+                else closeExportSocket(socket);
+            }
         }
     }
 
@@ -494,6 +512,7 @@ final class LocalAdbBridge {
         }
 
         private void open(Context context) {
+            if (ShellWorkEntryPoint.currentJob != null) { apkPath = context.getApplicationInfo().sourceDir; return; }
             ScheduledFuture<?> guard = null;
             try {
                 guard = guard(CONNECT_TIMEOUT_MS, "connect/auth timeout");
@@ -562,6 +581,20 @@ final class LocalAdbBridge {
             if (!fullExport) throw new IOException("full export session required");
             if (output == null) throw new IllegalArgumentException("output is required");
             if (expectedBytes < 0L) throw new IllegalArgumentException("expectedBytes < 0");
+            if (ShellWorkEntryPoint.currentJob != null) {
+                long copied = 0;
+                try (java.io.InputStream stream = new java.io.FileInputStream(path)) {
+                    byte[] buffer = new byte[64 * 1024]; int count;
+                    while (copied < expectedBytes && (count = stream.read(buffer, 0,
+                            (int) Math.min(buffer.length, expectedBytes - copied))) != -1) {
+                        if (stopped.get() != null || Thread.currentThread().isInterrupted())
+                            throw new java.io.InterruptedIOException("Export cancelled");
+                        output.write(buffer, 0, count); copied += count; progress.accept(copied);
+                    }
+                    if (copied != expectedBytes || stream.read() != -1) throw new IOException("Source file size changed");
+                    return copied;
+                }
+            }
             if (unavailable != null) {
                 throw new IOException(unavailable.error.isEmpty()
                         ? "configuration export transport unavailable" : unavailable.error);
@@ -621,6 +654,14 @@ final class LocalAdbBridge {
         }
 
         private ShellResult executeUntimed(String command, long timeoutMs, int maxOutputBytes) {
+            if (ShellWorkEntryPoint.currentJob != null) {
+                if (stopped.get() != null || System.nanoTime() >= deadlineNanos)
+                    return exportFailure("skipped", 125, "export stopped", "");
+                try { return ShellWorkEntryPoint.command(command, maxOutputBytes,
+                        Math.min(timeoutMs, fullExport ? timeoutMs : Math.max(1L,
+                        TimeUnit.NANOSECONDS.toMillis(deadlineNanos - System.nanoTime())))); }
+                catch (IOException error) { return exportFailure("error", -1, error.toString(), ""); }
+            }
             if (unavailable != null) return unavailable;
             if (!busy.compareAndSet(false, true)) {
                 return exportFailure("skipped", 125, "export command already in progress", "");
@@ -1464,6 +1505,8 @@ final class LocalAdbBridge {
     private static ShellResult runTrustedRuntimeShellCommand(
             Context context, String safeCommand, int maxOutputBytes,
             boolean retryTransportFailure, boolean finishOnExitMarker) throws IOException {
+        if (ShellWorkEntryPoint.currentJob != null)
+            return ShellWorkEntryPoint.command(safeCommand, maxOutputBytes, 10_000L);
         Context appContext = context.getApplicationContext();
         synchronized (RUNTIME_CONNECTION_LOCK) {
             try {
@@ -2274,7 +2317,7 @@ final class LocalAdbBridge {
                             : exitCode == 126 ? "denied" : exitCode == 127 ? "unsupported" : "error", "");
         }
 
-        private ShellResult(String output, int exitCode, String raw,
+        ShellResult(String output, int exitCode, String raw,
                 boolean truncated, long droppedBytes, String status, String error) {
             this(output, exitCode, raw, truncated, droppedBytes, status, error, -1L, -1L);
         }

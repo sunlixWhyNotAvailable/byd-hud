@@ -168,14 +168,19 @@ public final class InstrumentProxyContractTest {
     }
 
     @Test
-    public void handoffReceiverIsRuntimeScopedInsteadOfManifestExported() throws IOException {
+    public void recoveryReceiverIsShellProtectedAndLaunchIdentityBound() throws IOException {
         String manifest = source("app/src/main/AndroidManifest.xml");
         String manager = source(
                 "app/src/main/java/com/bydhud/app/InstrumentProxyManager.java");
         String entry = source(
                 "app/src/main/java/com/bydhud/app/InstrumentProxyEntryPoint.java");
 
-        assertFalse(manifest.contains("android:name=\".InstrumentProxyReceiver\""));
+        assertTrue(manifest.contains("<receiver android:name=\".InstrumentProxyReceiver\"\n"
+                + "            android:exported=\"true\" android:permission=\"android.permission.DUMP\""));
+        String receiver = source("app/src/main/java/com/bydhud/app/InstrumentProxyReceiver.java");
+        assertTrue(receiver.contains("InstrumentProxyStore.canReconnect(context, identity)"));
+        assertTrue(receiver.contains("identity.generation != generation"));
+        assertTrue(receiver.contains("ShellRuntimeSession.mayRestore(context)"));
         assertTrue(manager.contains("registerHandoffReceiver()"));
         assertTrue(manager.contains("unregisterHandoffReceiver()"));
         assertTrue(entry.contains("connected.setPackage(\"com.bydhud.app\")"));

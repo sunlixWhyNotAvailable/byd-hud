@@ -103,19 +103,19 @@
 
         <service
             android:name=".HudRuntimeService"
-            android:exported="false"
+            android:exported="true"
+            android:permission="android.permission.DUMP"
             android:stopWithTask="false" />
+
+        <receiver android:name=".InstrumentProxyReceiver"
+            android:exported="true" android:permission="android.permission.DUMP" />
 
         <service
             android:name=".DashboardWidgetOverlayService"
             android:exported="false"
             android:stopWithTask="false" />
 
-        <service
-            android:name=".NavigatorPatchWorkerService"
-            android:exported="false"
-            android:process=":navigator_patcher"
-            android:stopWithTask="false" />
+
 
         <service
             android:name=".ClusterProjectionService"

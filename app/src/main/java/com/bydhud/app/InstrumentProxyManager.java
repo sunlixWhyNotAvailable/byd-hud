@@ -177,7 +177,7 @@ final class InstrumentProxyManager {
                 logStartSkip(reason, "shanghai-suspended");
                 return;
             }
-            if (HudPrefs.isUserShutdownActive(context)) {
+            if (HudPrefs.isUserShutdownActive(context) && !"owned-gps-cleanup".equals(reason)) {
                 runtimeActive = false;
                 outputRetry.setActive(false);
                 logStartSkip(reason, "user-shutdown");
@@ -240,6 +240,34 @@ final class InstrumentProxyManager {
         }
     }
 
+    /** Reattach to the authenticated survivor before considering a new helper launch. */
+    void awaitExistingRuntime() {
+        synchronized (lock) {
+            if (state != State.IDLE || !ShellRuntimeSession.mayRestore(context)) return;
+            InstrumentProxyStore.Identity existing = helperIdentitySnapshot();
+            if (!InstrumentProxyStore.canReconnect(context, existing)) return;
+            runtimeActive = true;
+            generation = existing.generation;
+            nonce = existing.nonce;
+            launchToken = existing.token;
+            state = State.STARTING;
+            startStage = "reattaching";
+            registerHandoffReceiver();
+            long expected = generation;
+            log("reattach requested generation=" + generation + " pid=" + existing.pid);
+            worker.schedule(() -> {
+                boolean missing;
+                synchronized (lock) {
+                    if (state != State.STARTING || generation != expected) return;
+                    missing = "reattaching".equals(startStage);
+                    if (missing) state = State.IDLE;
+                }
+                if (missing) ensureStarted("survivor-not-found");
+                else handleStartTimeout(expected);
+            }, START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        }
+    }
+
     /** Reads existing references and lifecycle state without calling the helper or its Binder. */
     static JSONObject configurationSnapshot() throws Exception {
         InstrumentProxyManager current = instance;
@@ -280,8 +308,8 @@ final class InstrumentProxyManager {
             if (!active) {
                 // Retain a healthy helper so source/manual handoffs do not recreate it.
                 // Calls already queued for final clear/status can still finish.
-                runtimeActive = false;
-                if (state == State.STARTING) {
+                runtimeActive = ShellRuntimeSession.mayRestore(context);
+                if (state == State.STARTING && !runtimeActive) {
                     log("start cancelled generation=" + generation
                             + " reason=no-output lastStage=" + startStage);
                     clearProxyLocked();
@@ -445,6 +473,7 @@ final class InstrumentProxyManager {
 
     void onRuntimeStopped(String reason, boolean forceShutdown) {
         synchronized (lock) {
+            if (!forceShutdown && ShellRuntimeSession.mayRestore(context)) return;
             if (!shouldShutdownForRuntimeStop(outputRetry.isActive(), forceShutdown)) {
                 log("runtime stop retained generation=" + generation + " reason=active-output");
                 return;
@@ -1308,6 +1337,10 @@ final class InstrumentProxyManager {
                 && pendingIdentity.pid != InstrumentProxyContract.proxyPid(result)) {
             expectedIdentity = false;
         }
+        if (pendingIdentity.startTimeTicks > 0
+                && pendingIdentity.startTimeTicks != InstrumentProxyContract.proxyStartTimeTicks(result)) {
+            expectedIdentity = false;
+        }
         if (candidate == null || binder == null || !expectedIdentity) {
             if (candidate != null) shutdownCandidate(candidate, requestGeneration);
             failStart(requestGeneration,
@@ -1349,6 +1382,12 @@ final class InstrumentProxyManager {
                     + " error=" + InstrumentProxyContract.error(result));
             return;
         }
+        try {
+            candidate.setRecoveryEnabled(requestGeneration, ShellRuntimeSession.mayRestore(context));
+        } catch (RemoteException error) {
+            failStart(requestGeneration, "recovery handshake failed", true);
+            return;
+        }
         synchronized (lock) {
             if (shanghaiSuspended || !runtimeActive || state != State.STARTING
                     || requestGeneration != generation) {
@@ -1370,12 +1409,29 @@ final class InstrumentProxyManager {
             connectedAtMs = SystemClock.elapsedRealtime();
             nextRetryAtMs = 0L;
             unregisterHandoffReceiver();
+            lock.notifyAll();
         }
         log("ready generation=" + requestGeneration
                 + " pid=" + connectedIdentity.pid
                 + " uid=" + connectedIdentity.uid
                 + " capabilities=" + connectedMode);
+        // Check after READY: GPS cleanup may have finished during the handshake.
+        synchronized (lock) {
+            if (proxy == candidate && !shanghaiSuspended && !ShanghaiOutputGate.isSuspended()
+                    && !new ShanghaiMockGps(context).hasPendingRecovery()) {
+                try {
+                    Bundle resumed = runShanghaiTransition(
+                            () -> candidate.resumeOutput(requestGeneration), "recover");
+                    String error = InstrumentProxyContract.error(resumed);
+                    if (!error.isEmpty()) throw new IOException(error);
+                } catch (Exception error) {
+                    handleCallFailure(requestGeneration, binder, error);
+                    return;
+                }
+            }
+        }
         worker.execute(() -> clearStartupDiagnostic(connectedIdentity));
+        LogcatRecorder.recoverShellCapture(context);
         for (Runnable listener : readyListeners) {
             try {
                 listener.run();
@@ -1383,6 +1439,72 @@ final class InstrumentProxyManager {
                 log("ready listener failed type=" + error.getClass().getSimpleName());
             }
         }
+    }
+
+    void launchWork(java.io.File directory) throws IOException {
+        launchWork(directory, false);
+    }
+
+    void launchWork(java.io.File directory, boolean cleanupOnly) throws IOException {
+        if (!cleanupOnly) ShellRuntimeSession.arm(context);
+        ensureStarted(cleanupOnly ? "owned-gps-cleanup" : "independent-work");
+        IInstrumentNavigationProxy current;
+        long currentGeneration;
+        long deadline = SystemClock.elapsedRealtime() + START_TIMEOUT_MS;
+        synchronized (lock) {
+            while (state == State.STARTING && SystemClock.elapsedRealtime() < deadline) {
+                try { lock.wait(Math.max(1, deadline - SystemClock.elapsedRealtime())); }
+                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
+            }
+            current = proxy; currentGeneration = generation;
+        }
+        if (current == null) throw new IOException("Independent shell runtime unavailable");
+        try {
+            current.setRecoveryEnabled(currentGeneration, ShellRuntimeSession.mayRestore(context));
+            current.launchWork(currentGeneration, directory.getAbsolutePath());
+        } catch (RemoteException error) { throw new IOException(error); }
+    }
+
+    boolean cancelWork(java.io.File directory) {
+        IInstrumentNavigationProxy current;
+        long currentGeneration;
+        synchronized (lock) { current = proxy; currentGeneration = generation; }
+        try { return current != null && current.cancelWork(currentGeneration, directory.getAbsolutePath()); }
+        catch (RemoteException | RuntimeException error) { return false; }
+    }
+
+    Bundle startSystemCapture(String id, String cursor, android.os.ParcelFileDescriptor file)
+            throws IOException {
+        ensureStarted("logcat-capture");
+        IInstrumentNavigationProxy current;
+        long currentGeneration;
+        long deadline = SystemClock.elapsedRealtime() + START_TIMEOUT_MS;
+        synchronized (lock) {
+            while (state == State.STARTING && SystemClock.elapsedRealtime() < deadline) {
+                try { lock.wait(Math.max(1, deadline - SystemClock.elapsedRealtime())); }
+                catch (InterruptedException error) {
+                    Thread.currentThread().interrupt(); throw new IOException(error);
+                }
+            }
+            current = proxy;
+            currentGeneration = generation;
+        }
+        if (current == null) throw new RuntimeUnavailableException();
+        try { return current.startSystemCapture(currentGeneration, id, cursor, file); }
+        catch (RemoteException error) { throw new IOException(error); }
+    }
+
+    static final class RuntimeUnavailableException extends IOException {
+        RuntimeUnavailableException() { super("shell runtime unavailable before capture dispatch"); }
+    }
+
+    Bundle systemCaptureState(String id, boolean stop) throws IOException {
+        IInstrumentNavigationProxy current;
+        long currentGeneration;
+        synchronized (lock) { current = proxy; currentGeneration = generation; }
+        if (current == null) throw new IOException("shell runtime unavailable");
+        try { return current.systemCaptureState(currentGeneration, id, stop); }
+        catch (RemoteException error) { throw new IOException(error); }
     }
 
     private void shutdownCandidate(

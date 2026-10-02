@@ -86,7 +86,7 @@ final class ConfigurationExportArtifacts {
         }
         VehicleConfigurationExport.artifactsChecked(now);
         if (scheduled != null) scheduled.cancel(false);
-        JobScheduler jobs = context.getSystemService(JobScheduler.class);
+        JobScheduler jobs = ShellWorkEntryPoint.currentJob == null ? context.getSystemService(JobScheduler.class) : null;
         if (next == Long.MAX_VALUE) {
             if (jobs != null) jobs.cancel(JOB_ID);
             return;
@@ -108,6 +108,14 @@ final class ConfigurationExportArtifacts {
         values.add(new File(context.getCacheDir(), "log-shares"));
         File external = context.getExternalCacheDir();
         if (external != null) values.add(new File(external, "log-shares"));
+        if (ShellWorkEntryPoint.currentJob == null) {
+            try {
+                File[] jobs = ShellWorkFiles.root(context).listFiles();
+                if (jobs != null) for (File job : jobs)
+                    if (job.getName().startsWith("configuration-") && ShellWorkFiles.settled(job))
+                        values.add(new File(job, "cache/log-shares"));
+            } catch (IOException ignored) { }
+        }
         return values;
     }
 

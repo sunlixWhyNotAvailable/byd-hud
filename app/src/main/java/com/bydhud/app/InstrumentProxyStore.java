@@ -47,7 +47,18 @@ final class InstrumentProxyStore {
                 .putLong(KEY_START_TICKS, identity.startTimeTicks)
                 .putInt(KEY_VERSION_CODE, identity.versionCode)
                 .putBoolean(KEY_CONNECTED, identity.connected)
+                .putString("source_apk", context.getApplicationInfo().sourceDir)
+                .putInt("protocol", InstrumentProxyContract.PROTOCOL_VERSION)
                 .commit();
+    }
+
+    static boolean canReconnect(Context context, Identity identity) {
+        return identity.isValid() && identity.connected && identity.pid > 0
+                && identity.versionCode == BuildConfig.VERSION_CODE
+                && identity.uid == context.getApplicationInfo().uid
+                && prefs(context).getInt("protocol", -1) == InstrumentProxyContract.PROTOCOL_VERSION
+                && context.getApplicationInfo().sourceDir.equals(
+                        prefs(context).getString("source_apk", ""));
     }
 
     static boolean clear(Context context, Identity expected) {

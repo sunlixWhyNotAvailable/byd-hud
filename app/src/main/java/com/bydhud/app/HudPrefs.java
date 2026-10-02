@@ -836,7 +836,9 @@ final class HudPrefs {
 
     //records explicit shutdown separately from boot preference so auto-start can be restored on next manual open.
     static void setUserShutdownActive(Context context, boolean active) {
-        prefs(context).edit().putBoolean(KEY_USER_SHUTDOWN_ACTIVE, active).apply();
+        // Recovery may race process teardown: publish explicit Stop durably first.
+        prefs(context).edit().putBoolean(KEY_USER_SHUTDOWN_ACTIVE, active).commit();
+        if (active) ShellRuntimeSession.disarm(context);
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

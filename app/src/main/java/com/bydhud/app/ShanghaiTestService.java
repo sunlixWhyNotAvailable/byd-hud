@@ -47,14 +47,14 @@ public final class ShanghaiTestService extends Service {
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
             ShanghaiTestController.get(this).recoverOwned("service-restart");
-            stopSelf();
+
         } else {
             activeSessionId = intent.getStringExtra(SESSION);
             ShanghaiTestController.get(this).onServiceReady(
                     activeSessionId, intent.getBooleanExtra(RESET, false));
         }
-        // An interrupted route is recovered, never automatically replayed.
-        return START_NOT_STICKY;
+        // Reattach to the same shell-owned route; never replay its initial points.
+        return START_STICKY;
     }
 
     @Override public void onDestroy() {

@@ -356,7 +356,7 @@ final class NavigatorPatchPipeline {
 
     static File workerTransaction(Context context, NavigatorPatchStore.Profile profile)
             throws IOException {
-        File root = new File(context.getFilesDir(), "navigator-patcher");
+        File root = NavigatorPatchStore.sharedRoot(context);
         if (!root.exists() && !root.mkdirs()) {
             throw new IOException("Cannot create patcher root");
         }
@@ -414,7 +414,7 @@ final class NavigatorPatchPipeline {
             }
             return result;
         } catch (Exception error) {
-            if (claimed) {
+            if (claimed && !NavigatorPatchWorkerClient.retained(context, profile)) {
                 if (NavigatorPatchStore.isCancellationRequested(context, profile)
                         || error instanceof OperationCancelledException
                         || Thread.currentThread().isInterrupted()) {
@@ -425,9 +425,15 @@ final class NavigatorPatchPipeline {
             }
             throw error;
         } finally {
-            deleteTree(source);
-            deleteTree(output);
-            if (registered) unregister(profile);
+            if (!NavigatorPatchWorkerClient.retained(context, profile)) {
+                deleteTree(source);
+                deleteTree(output);
+            }
+            if (registered) {
+                if (!NavigatorPatchWorkerClient.retained(context, profile))
+                    ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
+                unregister(profile);
+            }
             restoreCurrentThreadPriority(previousPriority);
         }
     }
@@ -452,36 +458,11 @@ final class NavigatorPatchPipeline {
             WorkerPatchResult result = NavigatorPatchWorkerClient.prepare(
                     context, profile, operation, source, transaction, expected);
             checkCancelled(context, profile);
-            PackageInfo initialInstalled = installedInfo(context, profile.packageName);
-            long initialUpdateTime = initialInstalled == null ? -1L : initialInstalled.lastUpdateTime;
-            long initialVersionCode = initialInstalled == null
-                    ? -1L : initialInstalled.getLongVersionCode();
-            String initialSigner = initialInstalled == null ? ""
-                    : NavigatorSigningKey.installedCertificateSha256(context, profile.packageName);
-            String initialFingerprint = initialInstalled == null ? ""
-                    : NavigatorPatchStore.selectedUri(context, profile).isEmpty()
-                    ? result.input.sha256
-                    : inspectInstalled(context, profile).sha256;
-            assertInstalledTarget(context, profile, initialUpdateTime, initialVersionCode,
-                    initialSigner, initialFingerprint);
-            checkCancelled(context, profile);
-            boolean destructive = initialInstalled != null
-                    && !NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName);
-            reportScan(context, operation, "PREPARED", result.output);
-            NavigatorPatchReportStore.requirePrepared(context, operation);
-            if (!NavigatorPatchStore.setTransaction(context, profile, transaction, destructive,
-                    result.output, initialUpdateTime, initialVersionCode, initialSigner,
-                    initialFingerprint,
-                    preparedDetail(result.output,
-                            destructive ? "Replacement requires data removal" : "Ready to install"))) {
-                throw new OperationCancelledException();
-            }
+            PreparedPatch prepared = publishPrepared(context, profile, operation, result);
             transaction = null;
-            return new PreparedPatch(profile, result.input, result.output, result.transaction,
-                    destructive, result.optionalApplied, initialUpdateTime, initialVersionCode,
-                    initialSigner, initialFingerprint);
+            return prepared;
         } catch (Exception error) {
-            if (claimed) {
+            if (claimed && !NavigatorPatchWorkerClient.retained(context, profile)) {
                 if (NavigatorPatchStore.isCancellationRequested(context, profile)
                         || error instanceof OperationCancelledException
                         || Thread.currentThread().isInterrupted()) {
@@ -492,12 +473,97 @@ final class NavigatorPatchPipeline {
                             NavigatorPatchStore.FAILED, error.getMessage());
                 }
             }
-            deleteTree(transaction);
+            if (!NavigatorPatchWorkerClient.retained(context, profile)) deleteTree(transaction);
             throw error;
         } finally {
-            deleteTree(source);
-            if (registered) unregister(profile);
+            if (!NavigatorPatchWorkerClient.retained(context, profile)) deleteTree(source);
+            if (registered) {
+                if (!NavigatorPatchWorkerClient.retained(context, profile))
+                    ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
+                unregister(profile);
+            }
             restoreCurrentThreadPriority(previousPriority);
+        }
+    }
+
+    private static PreparedPatch publishPrepared(Context context, NavigatorPatchStore.Profile profile,
+            String operation, WorkerPatchResult result) throws Exception {
+        File transaction = result.transaction;
+        PackageInfo initialInstalled = installedInfo(context, profile.packageName);
+        long initialUpdateTime = initialInstalled == null ? -1L : initialInstalled.lastUpdateTime;
+        long initialVersionCode = initialInstalled == null
+                ? -1L : initialInstalled.getLongVersionCode();
+        String initialSigner = initialInstalled == null ? ""
+                : NavigatorSigningKey.installedCertificateSha256(context, profile.packageName);
+        String initialFingerprint = initialInstalled == null ? ""
+                : NavigatorPatchStore.selectedUri(context, profile).isEmpty()
+                ? result.input.sha256
+                : inspectInstalled(context, profile).sha256;
+        assertInstalledTarget(context, profile, initialUpdateTime, initialVersionCode,
+                initialSigner, initialFingerprint);
+        checkCancelled(context, profile);
+        boolean destructive = initialInstalled != null
+                && !NavigatorSigningKey.installedUsesLocalKey(context, profile.packageName);
+        reportScan(context, operation, "PREPARED", result.output);
+        NavigatorPatchReportStore.requirePrepared(context, operation);
+        if (!NavigatorPatchStore.setTransaction(context, profile, transaction, destructive,
+                result.output, initialUpdateTime, initialVersionCode, initialSigner,
+                initialFingerprint,
+                preparedDetail(result.output,
+                    destructive ? "Replacement requires data removal" : "Ready to install"))) {
+            throw new OperationCancelledException();
+        }
+        return new PreparedPatch(profile, result.input, result.output, result.transaction,
+                destructive, result.optionalApplied, initialUpdateTime, initialVersionCode,
+                initialSigner, initialFingerprint);
+    }
+
+    static void recoverShellWork(Context context, NavigatorPatchStore.Profile profile, File job) {
+        boolean registered = false;
+        try {
+            register(profile);
+            registered = true;
+            org.json.JSONObject request = ShellWorkFiles.read(new File(job, "request.json")).getJSONObject("input");
+            String operation = request.getString("operation");
+            if (!operation.equals(NavigatorPatchStore.operation(context, profile).operationToken)) return;
+            org.json.JSONObject completed = ShellWorkClient.await(context, job, null);
+            if (completed.has("report")) NavigatorPatchReportStore.recordStage(context, operation,
+                    "SHELL_REPORT", "SUCCESS", "Recovered existing shell operation", completed.getJSONObject("report"));
+            Bundle payload = ShellWorkFiles.bundle(completed.getJSONObject("payload"));
+            checkCancelled(context, profile);
+            if (request.getInt("command") == NavigatorPatchWorkerService.MSG_SCAN) {
+                ScanResult result = workerUnbundle(payload);
+                reportScan(context, operation, "CHECK_COMPLETE", result);
+                NavigatorPatchStore.completeScanUnlessCancelled(context, result,
+                        NavigatorPatchStore.VERIFIED, "Compatibility check completed");
+            } else {
+                WorkerPatchResult result = new WorkerPatchResult(
+                        workerUnbundle(payload.getBundle(NavigatorPatchWorkerService.KEY_INPUT)),
+                        workerUnbundle(payload.getBundle(NavigatorPatchWorkerService.KEY_OUTPUT_RESULT)),
+                        new File(payload.getString(NavigatorPatchWorkerService.KEY_TRANSACTION)),
+                        payload.getBoolean(NavigatorPatchWorkerService.KEY_OPTIONAL_APPLIED));
+                publishPrepared(context, profile, operation, result);
+            }
+        } catch (Exception error) {
+            if (!registered || NavigatorPatchWorkerClient.retained(context, profile)) return;
+            if (NavigatorPatchStore.isCancellationRequested(context, profile))
+                NavigatorPatchStore.markCancelled(context, profile, "Cancelled");
+            else saveFailure(context, profile, error);
+        } finally {
+            if (registered) {
+                if (ShellWorkFiles.settled(job)) {
+                    try {
+                        org.json.JSONObject input = ShellWorkFiles.read(new File(job, "request.json")).getJSONObject("input");
+                        for (String key : new String[]{"source", "output"}) {
+                            String path = input.optString(key);
+                            if (!path.isEmpty()) deleteTree(ShellWorkFiles.inside(ShellWorkFiles.root(context), path));
+                        }
+                    } catch (Exception error) { AppEventLogger.event(context, "patch_shell_cleanup_failed " + error); }
+                    ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
+                }
+                unregister(profile);
+            }
+            MainActivity.requestPatchUiStateRefresh(context, true, "shell-work-result");
         }
     }
 
@@ -821,7 +887,10 @@ final class NavigatorPatchPipeline {
             }
             throw error;
         } finally {
-            if (registered) unregister(profile);
+            if (registered) {
+                ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
+                unregister(profile);
+            }
             restoreCurrentThreadPriority(previousPriority);
         }
     }
@@ -1470,7 +1539,8 @@ final class NavigatorPatchPipeline {
         return new PatchOutcome(false, false, false);
     }
 
-    private static void signSet(File directory) throws Exception {
+    static void signSet(File directory) throws Exception {
+        if (ShellWorkEntryPoint.currentJob != null) { ShellWorkEntryPoint.sign(directory); return; }
         List<File> members = new ArrayList<>();
         File memberDirectory = new File(directory, "members");
         File[] files = memberDirectory.listFiles((file, name) -> name.endsWith(".apk"));
@@ -1529,7 +1599,7 @@ final class NavigatorPatchPipeline {
     }
 
     private static File temporaryDirectory(Context context, String prefix) throws IOException {
-        File root = new File(context.getCacheDir(), "navigator-patcher");
+        File root = ShellWorkFiles.directory(new File(ShellWorkFiles.root(context), "patch-cache"));
         if (!root.exists() && !root.mkdirs()) throw new IOException("Cannot create patch cache");
         File directory = new File(root, prefix + UUID.randomUUID());
         if (!directory.mkdirs()) throw new IOException("Cannot create temporary APK-set");
@@ -1792,7 +1862,7 @@ final class NavigatorPatchPipeline {
 
     private static File temporary(Context context, String prefix, String suffix)
             throws IOException {
-        File root = new File(context.getCacheDir(), "navigator-patcher");
+        File root = ShellWorkFiles.directory(new File(ShellWorkFiles.root(context), "patch-cache"));
         if (!root.exists() && !root.mkdirs()) throw new IOException("Cannot create patch cache");
         return File.createTempFile(prefix, suffix, root);
     }

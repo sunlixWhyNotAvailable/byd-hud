@@ -27,6 +27,14 @@ final class LogcatCaptureFile {
         FileOutputStream open(File file) throws IOException;
     }
 
+    synchronized void resumeExternal() throws IOException {
+        if (started || finished || saved.exists() || !part.isFile()) {
+            throw new IOException("Cannot resume external capture " + part);
+        }
+        output = opener.open(part);
+        started = true;
+    }
+
     synchronized void append(byte[] bytes) throws IOException {
         append(bytes, 0, bytes == null ? 0 : bytes.length);
     }

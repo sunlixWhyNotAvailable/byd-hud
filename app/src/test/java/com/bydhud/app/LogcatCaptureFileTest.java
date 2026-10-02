@@ -22,6 +22,20 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public final class LogcatCaptureFileTest {
+    @Test public void reattachedWriterPreservesSameFileAndFinalizesOnlyAfterStop() throws Exception {
+        File directory = temporaryFolder.newFolder("shell-capture");
+        File part = new File(directory, "logcat.log.part");
+        LogcatCaptureFile restored = new LogcatCaptureFile(directory);
+        try (FileOutputStream survivor = new FileOutputStream(part, true)) {
+            survivor.write(utf8("before app loss\n"));
+            restored.resumeExternal();
+            survivor.write(utf8("after app loss\n"));
+            survivor.flush();
+            assertEquals("before app loss\nafter app loss\n", new String(Files.readAllBytes(restored.file().toPath()), StandardCharsets.UTF_8));
+        }
+        restored.finish();
+        assertEquals("logcat.log", restored.file().getName());
+    }
     @Rule
     public final TemporaryFolder temporaryFolder = new TemporaryFolder();
 

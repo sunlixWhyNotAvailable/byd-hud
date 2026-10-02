@@ -313,7 +313,9 @@ final class VehicleConfigurationZip {
             if (!hasAcquisitionBudget(path)) return;
             try {
                 addJson(path, "application-passive",
-                        VehicleConfigurationDiagnostics.collect(context, remainingBudgetMs()));
+                        ShellWorkEntryPoint.request != null
+                                ? ShellWorkEntryPoint.request.getJSONObject("input").getJSONObject("diagnostics")
+                                : VehicleConfigurationDiagnostics.collect(context, remainingBudgetMs()));
             } catch (Exception | LinkageError error) {
                 checkCancelled();
                 unavailable(path, error.getClass().getSimpleName() + ": " + safe(error.getMessage()));
@@ -948,7 +950,9 @@ final class VehicleConfigurationZip {
         }
 
         private JSONObject runtimeJson() throws Exception {
-            return VehicleConfigurationDiagnostics.runtime(context);
+            return ShellWorkEntryPoint.request != null
+                    ? ShellWorkEntryPoint.request.getJSONObject("input").getJSONObject("runtime")
+                    : VehicleConfigurationDiagnostics.runtime(context);
         }
 
         private JSONObject bydApiJson() throws Exception {
@@ -962,7 +966,9 @@ final class VehicleConfigurationZip {
         }
 
         private JSONObject someIpJson() throws Exception {
-            return VehicleConfigurationDiagnostics.someIp(context);
+            return ShellWorkEntryPoint.request != null
+                    ? ShellWorkEntryPoint.request.getJSONObject("input").getJSONObject("someip")
+                    : VehicleConfigurationDiagnostics.someIp(context);
         }
 
         private JSONObject reflectedClass(String name) throws Exception {

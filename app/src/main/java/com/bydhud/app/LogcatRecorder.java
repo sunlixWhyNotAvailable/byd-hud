@@ -72,6 +72,7 @@ final class LogcatRecorder {
     private static volatile Session activeSession;
     private static volatile Session finalizingSession;
     private static CaptureLease shanghaiLease;
+    private static final List<Runnable> pendingStopCompletions = new ArrayList<>();
     private static volatile String activeStartDay = "";
     private static File lastSavedFile;
     private static String lastStatus = STATUS_WAITING;
@@ -81,21 +82,36 @@ final class LogcatRecorder {
     }
 
     static synchronized boolean isRecording() {
-        return activeSession != null;
+        return activeSession != null || (finalizingSession == null && !ShellRuntimeSession.pendingCaptureDay().isEmpty());
     }
 
     /** Pins one concrete capture without restarting an existing recording. */
     static CaptureLease acquireForShanghai(Context context) throws IOException {
+        if (!ShellRuntimeSession.pendingCaptureDay().isEmpty()) {
+            Throwable failure = await(WORKER.submit(() -> recoverShellCaptureNow(context)), 30_000L);
+            if (failure != null) throw new IOException("Could not reattach existing recording", failure);
+        }
         Session session;
         boolean created;
         synchronized (LogcatRecorder.class) {
             if (shanghaiLease != null || finalizingSession != null) {
                 throw new IOException("Logcat capture is already reserved or finalizing");
             }
+            if (activeSession == null && !ShellRuntimeSession.pendingCaptureDay().isEmpty()) {
+                throw new IOException("Existing shell recording is still reconnecting");
+            }
             created = activeSession == null;
             session = created ? createSessionLocked(context.getApplicationContext()) : activeSession;
             shanghaiLease = new CaptureLease(session, created);
             if (created) WORKER.submit(() -> runBegin(session));
+            return shanghaiLease;
+        }
+    }
+
+    static CaptureLease recoverForShanghai(Context context, boolean originallyOwned) throws IOException {
+        CaptureLease lease = acquireForShanghai(context);
+        synchronized (LogcatRecorder.class) {
+            shanghaiLease = new CaptureLease(lease.session, originallyOwned);
             return shanghaiLease;
         }
     }
@@ -153,17 +169,16 @@ final class LogcatRecorder {
     }
 
     static synchronized String activeStartDay() {
-        return activeSession != null || finalizingSession != null ? activeStartDay : "";
+        return activeSession != null || finalizingSession != null ? activeStartDay : ShellRuntimeSession.pendingCaptureDay();
     }
 
     static synchronized boolean hasSessionForDay(String day) {
         String safeDay = day == null ? "" : day.trim();
-        return !safeDay.isEmpty() && safeDay.equals(activeStartDay())
-                && (activeSession != null || finalizingSession != null);
+        return !safeDay.isEmpty() && safeDay.equals(activeStartDay());
     }
 
     static String retentionActiveStartDay() {
-        return activeStartDay;
+        return activeStartDay();
     }
 
     static synchronized String statusText() {
@@ -187,6 +202,10 @@ final class LogcatRecorder {
                 }
                 lastStatus = STATUS_RECORDING;
                 return Result.recording(current.manifestFile, "already recording");
+            }
+            if (!ShellRuntimeSession.pendingCaptureDay().isEmpty()) {
+                recoverShellCapture(appContext);
+                return Result.pending(null, "reattaching shell recording");
             }
             session = createSessionLocked(appContext);
         }
@@ -232,6 +251,9 @@ final class LogcatRecorder {
     }
 
     static Result stop(Context context) {
+        if (queuePendingStop(context, null)) {
+            return Result.pending(null, "reattaching recording to stop");
+        }
         Session session;
         Future<?> future;
         synchronized (LogcatRecorder.class) {
@@ -274,6 +296,7 @@ final class LogcatRecorder {
     }
 
     static void stopAsync(Context context, Runnable completion) {
+        if (queuePendingStop(context, completion)) return;
         Session session;
         synchronized (LogcatRecorder.class) {
             if (shanghaiLease != null) {
@@ -316,6 +339,8 @@ final class LogcatRecorder {
     }
 
     private static Future<?> ensureFinishLocked(Session session) {
+        if (session.shellOwned) ShellRuntimeSession.prefs(session.context).edit()
+                .putBoolean("capture_stop", true).commit();
         Future<?> future = session.finishFuture;
         if (future == null) {
             future = WORKER.submit(() -> runFinish(session));
@@ -368,6 +393,8 @@ final class LogcatRecorder {
     private static List<Runnable> takeCompletionsLocked(Session session) {
         List<Runnable> completions = new ArrayList<>(session.completions);
         session.completions.clear();
+        completions.addAll(pendingStopCompletions);
+        pendingStopCompletions.clear();
         return completions;
     }
 
@@ -394,6 +421,8 @@ final class LogcatRecorder {
             session.manifest.put("captureId", session.captureId);
             session.manifest.put("status", "recording");
             session.manifest.put("startedAt", timestampForLine(session.startedWallMs));
+            session.manifest.put("startedWallMs", session.startedWallMs);
+            session.manifest.put("startedElapsedMs", session.startedElapsedMs);
             session.manifest.put("startedElapsedMs", session.startedElapsedMs);
             session.manifest.put("package", session.context.getPackageName());
             session.manifest.put("versionName", BuildConfig.VERSION_NAME);
@@ -406,6 +435,20 @@ final class LogcatRecorder {
                     "logcat -v threadtime -T <cursor> (continuous app-visible buffers)");
             session.manifest.put("app", appIdentity(session.context));
             session.manifest.put("runtime", runtimeIdentity(session.context));
+            if (LocalAdbBridge.isCurrentKeyKnownAuthorized(session.context)) {
+                try {
+                    beginShellCapture(session);
+                    return;
+                } catch (Exception error) {
+                    // Never open a competing writer after an ambiguous IPC failure.
+                    if (!abandonFailedShellStart(session, error)) throw error;
+                    session.shellOwned = false;
+                    session.readerStarted = false;
+                    clearShellCaptureIntent(session.context);
+                    recordInterruption(session, "shell capture start failed: " + errorDetail(error),
+                            "existing_adb_or_app_uid_fallback");
+                }
+            }
             try {
                 source = new AdbLogcatSource(LocalAdbBridge.openLogcatStream(
                         session.context, cursor(session.startedWallMs - 1_000L)));
@@ -417,6 +460,7 @@ final class LogcatRecorder {
                 source = null;
             }
             session.manifest.put("mode", session.mode);
+            session.manifest.put("writerOwner", "app-process");
             session.manifest.put("buffers",
                     "full_system_adb".equals(session.mode) ? "all" : "app-visible");
             if (source != null && !session.streamControl.install(source)) {
@@ -451,6 +495,142 @@ final class LogcatRecorder {
         }
     }
 
+    private static void beginShellCapture(Session session) throws Exception {
+        if (!NavHudLiveSender.activateUserRuntime(session.context)) throw new IOException("runtime disabled");
+        if (!ShellRuntimeSession.arm(session.context)) throw new IOException("session persistence failed");
+        HudRuntimeService.startPersistent(session.context, "shell-logcat");
+        session.mode = "full_system_adb";
+        session.shellOwned = true;
+        session.manifest.put("writerOwner", "shell-runtime");
+        writeLog(session, "=== BYD HUD shell capture start attempt " + session.captureId + " ===\n");
+        writeManifest(session);
+        if (!ShellRuntimeSession.prefs(session.context).edit()
+                .putString("capture_id", session.captureId).putString("capture_day", session.day)
+                .putString("capture_directory", session.directory.getAbsolutePath())
+                .putBoolean("capture_stop", false).commit()) throw new IOException("capture intent persistence failed");
+        try (android.os.ParcelFileDescriptor file = android.os.ParcelFileDescriptor.open(
+                session.logFile.file(), android.os.ParcelFileDescriptor.MODE_WRITE_ONLY
+                        | android.os.ParcelFileDescriptor.MODE_APPEND)) {
+            android.os.Bundle result = InstrumentProxyManager.get(session.context).startSystemCapture(
+                    session.captureId, cursor(session.startedWallMs - 1_000), file);
+            if (!result.getBoolean("running")) throw new IOException(result.getString("error", "writer unavailable"));
+        }
+        session.readerStarted = true;
+        updateDetail(session, "mode=full_system_adb writer=shell-runtime capture=" + session.captureId);
+        captureSnapshot(session, "before", fullSnapshotCommands(true));
+        publishUiState();
+    }
+
+    static void recoverShellCapture(Context context) {
+        WORKER.execute(() -> recoverShellCaptureNow(context));
+    }
+
+    private static boolean abandonFailedShellStart(Session session, Exception failure) {
+        if (failure instanceof InstrumentProxyManager.RuntimeUnavailableException) return true;
+        try {
+            android.os.Bundle state = InstrumentProxyManager.get(session.context)
+                    .systemCaptureState(session.captureId, false);
+            if (!state.getBoolean("running")) return true;
+            if (!session.captureId.equals(state.getString("id", ""))) return false;
+            state = InstrumentProxyManager.get(session.context).systemCaptureState(session.captureId, true);
+            session.knownLoss = true;
+            return !state.getBoolean("running");
+        } catch (Exception unknown) { return false; }
+    }
+
+    private static synchronized boolean queuePendingStop(Context context, Runnable completion) {
+        android.content.SharedPreferences saved = ShellRuntimeSession.prefs(context);
+        if (activeSession != null || finalizingSession != null || saved.getString("capture_id", "").isEmpty()) return false;
+        saved.edit().putBoolean("capture_stop", true).commit();
+        if (completion != null) pendingStopCompletions.add(completion);
+        lastStatus = STATUS_SAVING;
+        recoverShellCapture(context);
+        return true;
+    }
+
+    private static void recoverShellCaptureNow(Context context) {
+            android.content.SharedPreferences saved = ShellRuntimeSession.prefs(context);
+            synchronized (LogcatRecorder.class) {
+                if (activeSession != null || finalizingSession != null
+                        || (!ShellRuntimeSession.mayRestore(context) && !saved.getBoolean("capture_stop", false))) return;
+            }
+            String id = saved.getString("capture_id", "");
+            if (id.isEmpty()) return;
+            Session session = null;
+            try {
+                android.os.Bundle writer = InstrumentProxyManager.get(context).systemCaptureState(id, false);
+                session = new Session(context, saved.getString("capture_day", ""), id,
+                        new File(saved.getString("capture_directory", "")));
+                session.shellOwned = true;
+                session.shellWriterMissing = !id.equals(writer.getString("id", ""));
+                JSONObject manifest = new JSONObject(new String(new android.util.AtomicFile(
+                        session.manifestFile).readFully(), StandardCharsets.UTF_8));
+                if ("saved".equals(manifest.optString("status")) && !writer.getBoolean("running")) {
+                    clearShellCaptureIntent(context);
+                    synchronized (LogcatRecorder.class) {
+                        lastSavedFile = session.manifestFile;
+                        lastStatus = STATUS_SAVED;
+                        postCompletions(new ArrayList<>(pendingStopCompletions));
+                        pendingStopCompletions.clear();
+                    }
+                    publishUiState();
+                    return;
+                }
+                java.util.Iterator<String> keys = manifest.keys();
+                while (keys.hasNext()) { String key = keys.next(); session.manifest.put(key, manifest.get(key)); }
+                session.logFile.resumeExternal();
+                session.readerStarted = writer.getBoolean("running");
+                session.mode = "full_system_adb";
+                session.startedElapsedMs = manifest.optLong("startedElapsedMs");
+                session.startedWallMs = manifest.optLong("startedWallMs");
+                session.knownLoss = manifest.optBoolean("knownLoss", false);
+                JSONArray priorInterruptions = manifest.optJSONArray("interruptions");
+                if (priorInterruptions != null) for (int i = 0; i < priorInterruptions.length(); i++) {
+                    session.interruptions.add(priorInterruptions.getJSONObject(i));
+                }
+                if (!id.equals(writer.getString("id", "")) || !writer.getBoolean("running")) {
+                    session.knownLoss = true;
+                    session.shellWriterMissing = !id.equals(writer.getString("id", ""));
+                    recordInterruption(session, "shell writer was lost", "append_after_writer_loss");
+                    if (!saved.getBoolean("capture_stop", false)) {
+                        try (android.os.ParcelFileDescriptor file = android.os.ParcelFileDescriptor.open(
+                                session.logFile.file(), android.os.ParcelFileDescriptor.MODE_WRITE_ONLY
+                                        | android.os.ParcelFileDescriptor.MODE_APPEND)) {
+                            writer = InstrumentProxyManager.get(context).startSystemCapture(id,
+                                    cursor(System.currentTimeMillis()), file);
+                        }
+                        if (!writer.getBoolean("running")) throw new IOException("shell writer restart failed");
+                        session.shellWriterMissing = false;
+                        session.readerStarted = true;
+                    }
+                    writeManifest(session);
+                }
+                synchronized (LogcatRecorder.class) {
+                    if (activeSession != null || finalizingSession != null) return;
+                    activeSession = session;
+                    activeStartDay = session.day;
+                    lastStatus = STATUS_RECORDING;
+                    lastDetail = "shell writer reattached capture=" + id;
+                    if (saved.getBoolean("capture_stop", false) || !writer.getBoolean("running")) {
+                        session.stopRequested = true;
+                        activeSession = null;
+                        finalizingSession = session;
+                        ensureFinishLocked(session);
+                    }
+                }
+                publishUiState();
+                AppEventLogger.event(context, "shell_capture reattached id=" + id + " bytes=" + writer.getLong("bytes"));
+            } catch (Exception error) {
+                AppEventLogger.event(context, "shell_capture recovery_failed type=" + error.getClass().getSimpleName());
+                if (session != null) fail(session, "shell capture recovery failed: " + errorDetail(error));
+            }
+    }
+
+    private static void clearShellCaptureIntent(Context context) {
+        ShellRuntimeSession.prefs(context).edit().remove("capture_id").remove("capture_day")
+                .remove("capture_directory").remove("capture_stop").commit();
+    }
+
     interface IoAction {
         void run() throws IOException;
     }
@@ -471,6 +651,14 @@ final class LogcatRecorder {
         try {
             synchronized (LogcatRecorder.class) {
                 if (session.finalized || session.failed) return;
+            }
+            if (session.shellOwned && !session.shellWriterMissing) {
+                android.os.Bundle result = InstrumentProxyManager.get(session.context)
+                        .systemCaptureState(session.captureId, true);
+                if (result.getBoolean("running")) throw new IOException("shell capture still stopping");
+                session.readerStarted = false;
+                String error = result.getString("error", "");
+                if (!error.isEmpty()) { session.knownLoss = true; session.readerError = error; }
             }
             Throwable readerFailure = await(session.readerFuture, STREAM_STOP_TIMEOUT_MS);
             if (readerFailure != null) {
@@ -493,6 +681,7 @@ final class LogcatRecorder {
             session.manifest.put("runtimeEnd", runtimeIdentity(session.context));
             session.manifest.put("streamComplete", !session.knownLoss);
             writeManifest(session);
+            if (session.shellOwned) clearShellCaptureIntent(session.context);
             long savedBytes = session.logFile.bytes();
             List<Runnable> completions;
             synchronized (LogcatRecorder.class) {
@@ -876,14 +1065,15 @@ final class LogcatRecorder {
             session.manifest.put("segments", segments);
             session.manifest.put("bytes", session.logFile.bytes());
             session.manifest.put("diagnosticDroppedBytes", session.diagnosticDroppedBytes);
-            File temporary = new File(session.directory, "manifest.json.tmp");
-            writeFile(temporary,
-                    session.manifest.toString(2).getBytes(StandardCharsets.UTF_8));
-            if (session.manifestFile.exists() && !session.manifestFile.delete()) {
-                throw new IOException("Unable to replace manifest");
-            }
-            if (!temporary.renameTo(session.manifestFile)) {
-                throw new IOException("Unable to finalize manifest");
+            android.util.AtomicFile file = new android.util.AtomicFile(session.manifestFile);
+            FileOutputStream output = null;
+            try {
+                output = file.startWrite();
+                output.write(session.manifest.toString(2).getBytes(StandardCharsets.UTF_8));
+                file.finishWrite(output);
+            } catch (Exception error) {
+                if (output != null) file.failWrite(output);
+                throw error;
             }
         } catch (Exception error) {
             if (error instanceof IOException) throw (IOException) error;
@@ -919,13 +1109,25 @@ final class LogcatRecorder {
             session.stopRequested = true;
         }
         session.streamControl.stop();
+        boolean writerStopped = true;
+        if (session.shellOwned && !session.shellWriterMissing) {
+            try {
+                android.os.Bundle writer = InstrumentProxyManager.get(session.context).systemCaptureState(session.captureId, true);
+                writerStopped = !writer.getBoolean("running");
+                if (writerStopped) clearShellCaptureIntent(session.context);
+            } catch (Exception error) {
+                writerStopped = false;
+                detail += "; shell writer stop unconfirmed";
+            }
+        }
+        if (session.shellOwned && writerStopped) clearShellCaptureIntent(session.context);
         Throwable readerStop = await(session.readerFuture, STREAM_STOP_TIMEOUT_MS);
         if (readerStop instanceof TimeoutException) {
             detail += "; Logcat reader did not stop after stream close";
         }
         Log.e(TAG, detail);
         try {
-            finalizeLog(session);
+            if (writerStopped) finalizeLog(session);
         } catch (Exception error) {
             detail += "; log finalization failed: " + error.getClass().getSimpleName()
                     + ": " + safe(error.getMessage());
@@ -949,7 +1151,12 @@ final class LogcatRecorder {
             lastDetail = detail;
             session.failed = true;
             session.failureDetail = detail;
-            completions = takeCompletionsLocked(session);
+            if (writerStopped) completions = takeCompletionsLocked(session);
+            else {
+                pendingStopCompletions.addAll(session.completions);
+                session.completions.clear();
+                completions = new ArrayList<>();
+            }
         }
         publishUiState();
         postCompletions(completions);
@@ -1040,6 +1247,8 @@ final class LogcatRecorder {
 
     static final class Session {
         final Context context;
+        boolean shellOwned;
+        boolean shellWriterMissing;
         final String day;
         final String captureId;
         final File directory;

@@ -389,9 +389,6 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     protected void onStop() {
         super.onStop();
-        if (!isChangingConfigurations()) {
-            NavHudLiveSender.stopHudCheckIfRunning("hud-check-background");
-        }
         if (exitRequested || isFinishing()) {
             appendStatus("onStop after explicit exit");
             return;
@@ -2190,8 +2187,29 @@ public final class MainActivity extends ComponentActivity {
             cachedAdbAuthorizationStatusAvailable = true;
         }
         if (changed) {
+            ShellRuntimeSession.cacheStatus(refreshed, adbAuthorized);
             publishSharedUiStateChange();
         }
+    }
+
+    static void restoreRuntimeStatusCache(String checkpoint) {
+        if (checkpoint == null || checkpoint.isEmpty()) return;
+        try {
+            org.json.JSONObject saved = new org.json.JSONObject(checkpoint);
+            synchronized (NAV_RUNTIME_PERMISSION_CACHE_LOCK) {
+                if (cachedNavRuntimePermissionStatus != null) return;
+                cachedNavRuntimePermissionStatus = NavRuntimePermissionStatus.restore(saved);
+                cachedAdbAuthorizationKnown = saved.optBoolean("adb");
+                cachedAdbAuthorizationStatusAvailable = true;
+            }
+        } catch (Exception error) { Log.w(TAG, "Invalid runtime status checkpoint", error); }
+    }
+
+    static void restoreAppScanCache(Context context) {
+        if (ShellRuntimeSession.prefs(context).getString("apps", "").isEmpty()) return;
+        NavAppTaskScanner.Snapshot cached = NavAppTaskScanner.get(context).currentSnapshot();
+        appScanCacheAvailable = !cached.rows.isEmpty();
+        appScanStatus = "ok".equals(cached.status) ? "" : cached.status;
     }
 
     //keeps the cache comparison local so a status heartbeat publishes only actual changes.

@@ -225,6 +225,7 @@ public final class HudRuntimeService extends Service {
     public int onStartCommand(Intent intent, int flags, int startId) {
         String action = intent == null ? "" : intent.getAction();
         String reason = intent == null ? "sticky-restart" : intent.getStringExtra(EXTRA_REASON);
+        if ("com.bydhud.app.action.RECOVER_SHELL_RUNTIME".equals(action)) reason = "shell-session-recovery";
         log("runtime onStartCommand action=" + action
                 + " reason=" + reason
                 + " boot=" + HudPrefs.isBootEnabled(this)
@@ -241,6 +242,11 @@ public final class HudRuntimeService extends Service {
             UserRuntimeSession.PROCESS.activate();
             log("session restored reason=sticky-restart");
         }
+        if ("com.bydhud.app.action.RECOVER_SHELL_RUNTIME".equals(action)
+                && ShellRuntimeSession.mayRestore(this)) {
+            UserRuntimeSession.PROCESS.activate();
+            InstrumentProxyManager.get(this).awaitExistingRuntime();
+        }
         if (!UserRuntimeSession.allowsRuntime(this)) {
             HudRuntimeWatchdog.cancel(this);
             HudRuntimeState.markStopped(this, "runtime-disabled:" + reason);
@@ -252,14 +258,18 @@ public final class HudRuntimeService extends Service {
             HudRuntimeSupervisor.hardResetAfterPackageReplace(this, "service-start:" + reason);
             return START_NOT_STICKY;
         }
+        final String startReason = reason;
         BootCleanupGate.runWhenReady(this, () -> heartbeatHandler.post(
-                () -> completeStartAfterBootGate(reason)));
+                () -> completeStartAfterBootGate(startReason)));
         return START_STICKY;
     }
 
     private void completeStartAfterBootGate(String reason) {
         if (runtimeDestroyed
                 || !UserRuntimeSession.allowsRuntime(this)) return;
+        if (!ShellRuntimeSession.arm(this)) {
+            log("shell recovery unavailable: session intent could not be persisted");
+        }
         AppUpdateManager.onSessionEntry(this);
         HudRuntimeState.publishServicePresent(this, "onStartCommand");
         clearStartRequestGate();
@@ -278,6 +288,17 @@ public final class HudRuntimeService extends Service {
             }
             if (activeWork && HudPrefs.isTbtWithoutHudOutputEnabled(this)) {
                 NavHudLiveSender.get(this).refreshTbtObservers();
+            }
+            if (!runtimeStartInitialized && ShellRuntimeSession.takeServiceRestore()) {
+                NavHudLiveSender.get(this).restoreOutputSession();
+                NavAppDisplayController displays = NavAppDisplayController.get(this);
+                String projected = displays.persistedDashboardPackage();
+                if (!projected.isEmpty()) ClusterProjectionService.startProjection(this, projected,
+                        displays.persistedDashboardMode(), "shell-session-recovery");
+                if (ShellRuntimeSession.restoreCaptureServices() && NavPermissionStatus.check(this).captureGranted()) {
+                    NavRuntimePermissionRepair.checkAndRepairAsync(this, "shell-session-recovery", true,
+                            LocalAdbBridge.AuthorizationPromptMode.NEVER);
+                }
             }
             runtimeStartInitialized = true;
             runtimeActiveWork = activeWork;
