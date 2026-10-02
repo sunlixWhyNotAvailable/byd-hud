@@ -61,6 +61,7 @@ import androidx.compose.foundation.progressSemantics
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.text.BasicTextField
@@ -94,6 +95,7 @@ import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.onFocusChanged
@@ -2935,6 +2937,25 @@ private fun OptionsTab(
                         palette = palette,
                         width = 210.dp,
                         onSelected = { mode -> runAction { activity.composeSetMapMode(mode) } }
+                    )
+                }
+            }
+            row("map-update-rate") {
+                SettingRow(
+                    language.choose("Частота оновлення мапи", "Map update rate", "Частота обновления карты"),
+                    language.choose("Більша частота оновлення створює більше навантаження на систему", "A higher update rate increases system load", "Более высокая частота обновления увеличивает нагрузку на систему"),
+                    palette,
+                    enabled = mapProfilesEnabled
+                ) {
+                    Segmented(
+                        left = language.choose("1 Гц", "1 Hz", "1 Гц"),
+                        right = language.choose("5 Гц", "5 Hz", "5 Гц"),
+                        leftActive = mapSettings.updateRateHz == 1,
+                        palette = palette,
+                        onLeft = { runAction { activity.composeSetMapUpdateRate(1) } },
+                        onRight = { runAction { activity.composeSetMapUpdateRate(5) } },
+                        itemWidth = 90.dp,
+                        enabled = mapProfilesEnabled
                     )
                 }
             }
@@ -10225,7 +10246,8 @@ private fun Segmented(
     itemWidth: Dp = 64.dp,
     third: String? = null,
     thirdActive: Boolean = false,
-    onThird: () -> Unit = {}
+    onThird: () -> Unit = {},
+    enabled: Boolean = true
 ) {
     val selectionOffset by animateDpAsState(
         targetValue = when { thirdActive -> itemWidth * 2; leftActive -> 0.dp; else -> itemWidth },
@@ -10234,6 +10256,8 @@ private fun Segmented(
     )
     Box(
         modifier = Modifier
+            .selectableGroup()
+            .alpha(if (enabled) 1f else 0.5f)
             .height(42.dp)
             .clip(RoundedCornerShape(22.dp))
             .border(1.dp, palette.borderStrong, RoundedCornerShape(22.dp))
@@ -10249,9 +10273,9 @@ private fun Segmented(
                 .background(palette.accent)
         )
         Row {
-            SegmentedItem(left, leftActive, palette, itemWidth, onLeft)
-            SegmentedItem(right, !leftActive && !thirdActive, palette, itemWidth, onRight)
-            if (third != null) SegmentedItem(third, thirdActive, palette, itemWidth, onThird)
+            SegmentedItem(left, leftActive, palette, itemWidth, onLeft, enabled)
+            SegmentedItem(right, !leftActive && !thirdActive, palette, itemWidth, onRight, enabled)
+            if (third != null) SegmentedItem(third, thirdActive, palette, itemWidth, onThird, enabled)
         }
     }
 }
@@ -10263,9 +10287,10 @@ private fun SegmentedItem(
     active: Boolean,
     palette: Palette,
     itemWidth: Dp,
-    onClick: () -> Unit
+    onClick: () -> Unit,
+    enabled: Boolean = true
 ) {
-    val press = rememberPressFeedback()
+    val press = rememberPressFeedback(enabled, releaseHoldMillis = VISUAL_PRESS_HOLD_MS)
     Box(
         modifier = Modifier
             .height(32.dp)
@@ -10273,7 +10298,10 @@ private fun SegmentedItem(
             .clip(RoundedCornerShape(18.dp))
             .background(pressBackground(Color.Transparent, palette, press.pressed))
             .then(press.modifier)
-            .clickable(
+            .selectable(
+                selected = active,
+                enabled = enabled,
+                role = Role.RadioButton,
                 interactionSource = press.interactionSource,
                 indication = null,
                 onClick = onClick

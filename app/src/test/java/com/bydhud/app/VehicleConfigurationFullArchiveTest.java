@@ -93,10 +93,13 @@ public class VehicleConfigurationFullArchiveTest {
             assertTrue(manifest.getJSONArray("unavailable").getJSONObject(0).getString("path").contains("<IP_1>"));
             assertEquals("ERROR", manifest.getJSONObject("navigatorPatchReports")
                     .getString("status"));
-            assertNotNull(zip.getEntry("navigator-patch-reports.json"));
-            assertNotNull(zip.getEntry("INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt"));
+            String reportEntry = manifest.getJSONObject("navigatorPatchReports").getString("entry");
+            assertEquals(NavCaptureStore.todayDir() + "/diagnostics/navigator-patch-reports.json", reportEntry);
+            assertNull(zip.getEntry("navigator-patch-reports.json"));
+            assertNotNull(zip.getEntry(reportEntry));
+            assertNotNull(zip.getEntry(NavCaptureStore.todayDir() + "/diagnostics/INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt"));
             JSONObject reports = new JSONObject(new String(zip.getInputStream(zip.getEntry(
-                    "navigator-patch-reports.json")).readAllBytes(),
+                    reportEntry)).readAllBytes(),
                     java.nio.charset.StandardCharsets.UTF_8));
             assertEquals("ERROR", reports.getString("status"));
             assertFalse(manifest.has("maxTotalBytes"));

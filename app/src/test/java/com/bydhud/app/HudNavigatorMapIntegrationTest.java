@@ -58,6 +58,7 @@ public final class HudNavigatorMapIntegrationTest {
     @After public void cleanup() { NativeSpeedLimitTestSupport.stopCoordinator(output); }
 
     @Test public void changedNativeFramesAreCappedAtFiveHzAndOnlyLatestIsSent() {
+        HudPrefs.setMapSettings(context, HudPrefs.mapSettings(context).withUpdateRateHz(5));
         start("com.waze", 1);
         frame(new byte[]{1}, 1);
         assertEquals(1, packets("map_frame").size());
@@ -97,6 +98,18 @@ public final class HudNavigatorMapIntegrationTest {
         frame(new byte[]{4}, 3);
         NativeSpeedLimitTestSupport.idleMainLooperFor(1000);
         assertEquals(3, packets("map_frame").size());
+    }
+
+    @Test public void defaultOneHzCapsChangedNativeFramesUntilRateIsRaised() {
+        start("com.waze", 1);
+        frame(new byte[]{1}, 1);
+        frame(new byte[]{2}, 2);
+        NativeSpeedLimitTestSupport.idleMainLooperFor(400);
+        assertEquals(1, packets("map_frame").size());
+        HudPrefs.setMapSettings(context, HudPrefs.mapSettings(context).withUpdateRateHz(5));
+        frame(new byte[]{3}, 3);
+        assertEquals(2, packets("map_frame").size());
+        assertArrayEquals(HudMapImage.nativePayload(new byte[]{3}), packets("map_frame").get(1).payload);
     }
 
     @Test public void offStopsCaptureAndRouteEndCannotBeResurrectedByOldCallback() {

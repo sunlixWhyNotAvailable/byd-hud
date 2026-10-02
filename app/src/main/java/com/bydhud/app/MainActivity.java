@@ -1702,6 +1702,10 @@ public final class MainActivity extends ComponentActivity {
         saveMapSettings(HudPrefs.mapSettings(this).withPreset(preset), "map-preset-change");
     }
 
+    public void composeSetMapUpdateRate(int hz) {
+        saveMapSettings(HudPrefs.mapSettings(this).withUpdateRateHz(hz), "map-update-rate-change");
+    }
+
     public void composeSetMapValue(int control, float value) {
         saveMapSettings(HudPrefs.mapSettings(this).withValue(control, value), "map-geometry-change");
     }
@@ -4502,7 +4506,7 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setMapSettings(this, settings);
         if (settings.mode == HudMapSettings.EXPERIMENTAL) {
             NavHudLiveSender.refreshMapLiveSettings(reason);
-        } else {
+        } else if (current.mode != settings.mode) {
             NavHudLiveSender.stopMapLiveIfRunning(reason);
         }
         AppEventLogger.event(this, "ui " + settings.diagnostics());

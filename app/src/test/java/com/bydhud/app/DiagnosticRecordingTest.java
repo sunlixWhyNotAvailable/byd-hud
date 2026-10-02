@@ -85,9 +85,9 @@ public final class DiagnosticRecordingTest {
                 assertTrue(status.getBoolean("storageSnapshotReady"));
                 assertEquals("someip_tx", status.getJSONObject("journal").getString("currentTask"));
                 assertTrue(status.getJSONObject("journal").getInt("pendingTasks") > 0);
-                assertNotNull(zip.getEntry("INCOMPLETE-RECORDING.txt"));
-                assertTrue(new String(zip.getInputStream(zip.getEntry("INCOMPLETE-RECORDING.txt"))
-                        .readAllBytes(), StandardCharsets.UTF_8).contains("See diagnostics/recording-status.json"));
+                assertNotNull(zip.getEntry(day + "/diagnostics/INCOMPLETE-RECORDING.txt"));
+                assertTrue(new String(zip.getInputStream(zip.getEntry(day + "/diagnostics/INCOMPLETE-RECORDING.txt"))
+                        .readAllBytes(), StandardCharsets.UTF_8).contains("See " + day + "/diagnostics/recording-status.json"));
                 assertTrue(Collections.list(zip.entries()).stream().anyMatch(e -> e.getName().endsWith("someip_tx.jsonl")));
             }
         } finally { release.countDown(); assertTrue(writer.awaitCheckpoint(2000)); }
@@ -111,8 +111,8 @@ public final class DiagnosticRecordingTest {
             try (ZipFile zip = new ZipFile(result.file)) {
                 assertFalse(status(zip).getBoolean("storageSnapshotReady"));
                 assertEquals(3, zip.size());
-                assertNotNull(zip.getEntry("navigator-patch-reports.json"));
-                assertNotNull(zip.getEntry("INCOMPLETE-RECORDING.txt"));
+                assertNotNull(zip.getEntry(day + "/diagnostics/navigator-patch-reports.json"));
+                assertNotNull(zip.getEntry(day + "/diagnostics/INCOMPLETE-RECORDING.txt"));
             }
         } finally { release.countDown(); reader.join(2000); }
         assertEquals("preserve-me\n", read(new File(NavigationLogStorage.logsDir(context, day), "someip_tx.jsonl")));
@@ -156,11 +156,11 @@ public final class DiagnosticRecordingTest {
             assertTrue(status.getBoolean("lossObserved"));
             assertTrue(status.getJSONObject("mapImages").getInt("failures") > 0);
             assertTrue(status.getJSONObject("mapImages").getString("lastError").contains("artifact directory"));
-            assertNotNull(zip.getEntry("INCOMPLETE-RECORDING.txt"));
+            assertNotNull(zip.getEntry(day + "/diagnostics/INCOMPLETE-RECORDING.txt"));
         }
     }
 
-    @Test public void multipleDaysShareOneRecordingStatusInDiagnostics() throws Exception {
+    @Test public void multipleDaysShareOneRecordingStatusUnderExportDate() throws Exception {
         String earlierDay = "20200101";
         NavCaptureStore.writeSomeIpTx(context, earlierDay, "earlier");
         NavCaptureStore.writeSomeIpTx(context, day, "current");
@@ -180,7 +180,10 @@ public final class DiagnosticRecordingTest {
 
     private static JSONObject status(ZipFile zip) throws Exception {
         assertNull("recording status must not remain at archive root", zip.getEntry("recording-status.json"));
-        var entry = zip.getEntry("diagnostics/recording-status.json");
+        assertNull(zip.getEntry("diagnostics/recording-status.json"));
+        assertTrue("all log archive files must be under a date", Collections.list(zip.entries()).stream()
+                .allMatch(item -> item.getName().matches("[0-9]{8}/.+")));
+        var entry = zip.getEntry(NavCaptureStore.todayDir() + "/diagnostics/recording-status.json");
         assertNotNull("recording status must be in diagnostics", entry);
         return new JSONObject(new String(zip.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8));
     }

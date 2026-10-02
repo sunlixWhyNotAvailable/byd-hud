@@ -23,6 +23,7 @@ public final class HudPrefsMapSettingsTest {
         if (context != null) {
             context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit()
                     .remove("map_mode")
+                    .remove("map_update_rate_hz")
                     .remove("map_preset")
                     .remove("map_custom_x")
                     .remove("map_custom_y")
@@ -40,13 +41,16 @@ public final class HudPrefsMapSettingsTest {
         context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit().clear().apply();
 
         assertEquals(HudMapSettings.defaults(), HudPrefs.mapSettings(context));
+        assertEquals(1, HudPrefs.mapUpdateRateHz(context));
         int before = HudPrefs.outputOptionsRevision();
         HudMapSettings custom = HudMapSettings.defaults().withMode(HudMapSettings.EXPERIMENTAL)
+                .withUpdateRateHz(5)
                 .withValue(HudMapSettings.CONTROL_MAP_Y, -11)
                 .withValue(HudMapSettings.CONTROL_LANE_SCALE, 76);
         HudPrefs.setMapSettings(context, custom);
 
         assertEquals(custom, HudPrefs.mapSettings(context));
+        assertEquals(5, HudPrefs.mapUpdateRateHz(context));
         assertTrue(HudPrefs.outputOptionsRevision() > before);
     }
 

@@ -375,6 +375,7 @@ public final class NavigatorMapCapture {
 
     private static Bundle poll(Context app, Bundle data, String callerPackage, Bundle answer) {
         long now = SystemClock.elapsedRealtime();
+        int updateRateHz = HudPrefs.mapUpdateRateHz(app);
         String lifeEvents = string(data, "lifecycleEvents", "[]");
         String logRequest = null;
         String timeoutLog = null;
@@ -419,11 +420,13 @@ public final class NavigatorMapCapture {
                 long producerMinimum = longValue(data, "minPollIntervalMs", 0L);
                 long interval = Math.max(FRAME.requestIntervalMs(), producerMinimum > 0L
                         ? producerMinimum : NavigatorMapSessionState.IDLE_INTERVAL_MS);
+                interval = Math.max(interval, 1000L / updateRateHz);
                 answer.putLong("pollIntervalMs", interval);
                 if (interval != lastPollIntervalMs) {
                     cadenceLog = "navigator_map_capture cadence owner=" + field(ownerPackage, 96)
                             + " session=" + session + " pollIntervalMs=" + interval
                             + " cropIntervalMs=" + FRAME.requestIntervalMs()
+                            + " updateRateHz=" + updateRateHz
                             + " producerMinMs=" + producerMinimum;
                     lastPollIntervalMs = interval;
                 }

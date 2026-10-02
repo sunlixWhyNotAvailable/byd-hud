@@ -1382,6 +1382,7 @@ final class HudOutputCoordinator {
         long now = SystemClock.elapsedRealtime();
         long interval = java.util.Arrays.equals(lastNativeMapPayload, nativeMapPayload)
                 ? NavigatorMapSessionState.IDLE_INTERVAL_MS : NavigatorMapSessionState.FAST_INTERVAL_MS;
+        interval = Math.max(interval, 1000L / HudPrefs.mapUpdateRateHz(context));
         if (nativeMapAttemptAtMs >= 0L && now - nativeMapAttemptAtMs < interval) return;
         nativeMapAttemptAtMs = now;
         lastNativeMapPayload = nativeMapPayload;

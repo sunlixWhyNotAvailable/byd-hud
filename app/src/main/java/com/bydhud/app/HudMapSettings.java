@@ -21,11 +21,17 @@ public final class HudMapSettings {
 
     public final int mode;
     public final int preset;
+    public final int updateRateHz;
     public final Geometry custom;
 
     public HudMapSettings(int mode, int preset, Geometry custom) {
+        this(mode, preset, custom, 1);
+    }
+
+    public HudMapSettings(int mode, int preset, Geometry custom, int updateRateHz) {
         this.mode = normalizeMode(mode);
         this.preset = normalizePreset(preset);
+        this.updateRateHz = normalizeUpdateRateHz(updateRateHz);
         // Preserve the removed preset's visible geometry as Custom on upgrade.
         this.custom = preset == LEGACY_PRESET_SMALLER_CENTER || custom == null
                 ? Geometry.defaults() : custom;
@@ -45,20 +51,29 @@ public final class HudMapSettings {
     }
 
     public HudMapSettings withMode(int value) {
-        return new HudMapSettings(value, preset, custom);
+        return new HudMapSettings(value, preset, custom, updateRateHz);
     }
 
     public HudMapSettings withPreset(int value) {
-        return new HudMapSettings(mode, value, custom);
+        return new HudMapSettings(mode, value, custom, updateRateHz);
     }
 
     /** Editing a preset first copies its visible geometry into Custom. */
     public HudMapSettings withValue(int control, float value) {
-        return new HudMapSettings(mode, PRESET_CUSTOM, geometry().withValue(control, value));
+        return new HudMapSettings(mode, PRESET_CUSTOM, geometry().withValue(control, value), updateRateHz);
+    }
+
+    public HudMapSettings withUpdateRateHz(int value) {
+        return new HudMapSettings(mode, preset, custom, value);
+    }
+
+    static int normalizeUpdateRateHz(int value) {
+        return value == 5 ? 5 : 1;
     }
 
     public String diagnostics() {
-        return "map(mode=" + mode + ",preset=" + preset + ",custom=" + custom + ")";
+        return "map(mode=" + mode + ",preset=" + preset + ",custom=" + custom
+                + ",updateRateHz=" + updateRateHz + ")";
     }
 
     @Override
@@ -66,12 +81,13 @@ public final class HudMapSettings {
         if (this == value) return true;
         if (!(value instanceof HudMapSettings)) return false;
         HudMapSettings other = (HudMapSettings) value;
-        return mode == other.mode && preset == other.preset && custom.equals(other.custom);
+        return mode == other.mode && preset == other.preset && updateRateHz == other.updateRateHz
+                && custom.equals(other.custom);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hash(mode, preset, custom);
+        return Objects.hash(mode, preset, custom, updateRateHz);
     }
 
     private static int normalizeMode(int value) {

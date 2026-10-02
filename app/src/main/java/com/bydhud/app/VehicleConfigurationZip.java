@@ -1308,7 +1308,7 @@ final class VehicleConfigurationZip {
                 NavigatorPatchReportStore.ExportResult patchReports =
                         NavigatorPatchReportStore.writeReports(collector.context, zip);
                 JSONObject patchReportStatus = new JSONObject();
-                patchReportStatus.put("entry", "navigator-patch-reports.json")
+                patchReportStatus.put("entry", patchReports.entry)
                         .put("reportCount", patchReports.reportCount)
                         .put("status", !patchReports.error.isEmpty() ? "ERROR"
                                 : patchReports.incomplete ? "INCOMPLETE" : "COMPLETE")

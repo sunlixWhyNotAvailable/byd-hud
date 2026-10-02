@@ -66,12 +66,14 @@ final class NavigatorPatchReportStore {
     }
 
     static final class ExportResult {
+        final String entry;
         final int reportCount;
         final long bytes;
         final boolean incomplete;
         final String error;
 
-        ExportResult(int reportCount, long bytes, boolean incomplete, String error) {
+        ExportResult(String entry, int reportCount, long bytes, boolean incomplete, String error) {
+            this.entry = entry;
             this.reportCount = reportCount;
             this.bytes = bytes;
             this.incomplete = incomplete;
@@ -349,23 +351,31 @@ final class NavigatorPatchReportStore {
 
     static ExportResult writeReports(Context context, ZipOutputStream zip, JSONObject raw)
             throws IOException {
+        String directory = exportDirectory(raw);
+        String entry = directory + ZIP_ENTRY;
         JSONObject safe = VehicleConfigurationZip.sanitizeJsonForExport(
                 context, raw, ZIP_ENTRY);
         byte[] bytes = (safe.toString() + "\n").getBytes(StandardCharsets.UTF_8);
-        putEntry(zip, ZIP_ENTRY, bytes);
+        putEntry(zip, entry, bytes);
         boolean incomplete = safe.optBoolean("incompleteReports");
         if (incomplete) {
             String storageError = safe.optString("reportStorageError", "");
             String marker = storageError.isEmpty()
                     ? "At least one navigator patch operation is still active, prepared but "
-                            + "not installed, interrupted, or awaiting recovery. See " + ZIP_ENTRY
+                            + "not installed, interrupted, or awaiting recovery. See " + entry
                             + " for its current stage and outcome.\n"
                     : "Navigator patch report history could not be read: " + storageError
-                            + ". See " + ZIP_ENTRY + " for export status.\n";
-            putEntry(zip, INCOMPLETE_ENTRY, marker.getBytes(StandardCharsets.UTF_8));
+                            + ". See " + entry + " for export status.\n";
+            putEntry(zip, directory + INCOMPLETE_ENTRY, marker.getBytes(StandardCharsets.UTF_8));
         }
-        return new ExportResult(safe.optInt("reportCount"), bytes.length, incomplete,
+        return new ExportResult(entry, safe.optInt("reportCount"), bytes.length, incomplete,
                 safe.optString("reportStorageError", ""));
+    }
+
+    // Export-wide snapshots belong to the export date, not an arbitrary selected log day.
+    static String exportDirectory(JSONObject snapshot) {
+        return NavCaptureStore.todayDir(snapshot.optLong("generatedAt", System.currentTimeMillis()))
+                + "/diagnostics/";
     }
 
     private interface Mutator {

@@ -133,11 +133,13 @@ public final class NavigatorPatchReportStoreTest {
         LogShareZip.Result archive = LogShareZip.create(context, Arrays.asList(firstDay));
         assertTrue(archive.detail, archive.ok);
         try (ZipFile zip = new ZipFile(archive.file)) {
-            ZipEntry entry = zip.getEntry("navigator-patch-reports.json");
+            ZipEntry entry = zip.getEntry(NavCaptureStore.todayDir() + "/diagnostics/navigator-patch-reports.json");
             assertNotNull(entry);
             JSONObject history = new JSONObject(new String(
                     zip.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8));
             assertEquals(2, history.getInt("reportCount"));
+            assertTrue(java.util.Collections.list(zip.entries()).stream()
+                    .allMatch(item -> item.getName().matches("[0-9]{8}/.+")));
             assertEquals("operation-day-one", history.getJSONArray("reports")
                     .getJSONObject(0).getString("operationId"));
             assertEquals("operation-day-two", history.getJSONArray("reports")
@@ -195,7 +197,8 @@ public final class NavigatorPatchReportStoreTest {
         assertTrue(result.incomplete);
         try (ZipInputStream zip = new ZipInputStream(new ByteArrayInputStream(bytes.toByteArray()))) {
             ZipEntry entry = zip.getNextEntry();
-            assertEquals("navigator-patch-reports.json", entry.getName());
+            assertEquals(result.entry, entry.getName());
+            assertEquals(NavCaptureStore.todayDir() + "/diagnostics/navigator-patch-reports.json", entry.getName());
             String exported = new String(zip.readAllBytes(), StandardCharsets.UTF_8);
             assertFalse(exported.contains("VIN-PRIVATE-987"));
             assertFalse(exported.contains("secret-value"));
@@ -204,8 +207,9 @@ public final class NavigatorPatchReportStoreTest {
             JSONObject history = new JSONObject(exported);
             assertTrue(history.getJSONArray("reports").getJSONObject(0)
                     .getBoolean("incomplete"));
-            assertEquals("INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt",
+            assertEquals(NavCaptureStore.todayDir() + "/diagnostics/INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt",
                     zip.getNextEntry().getName());
+            assertTrue(new String(zip.readAllBytes(), StandardCharsets.UTF_8).contains(result.entry));
         }
     }
 
@@ -224,16 +228,18 @@ public final class NavigatorPatchReportStoreTest {
                     (phase, file, copied, total, files, count, unavailable) -> { });
             assertTrue(result.detail, result.ok);
             try (ZipFile zip = new ZipFile(result.file)) {
-                assertNotNull(zip.getEntry("navigator-patch-reports.json"));
-                assertNotNull(zip.getEntry("INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt"));
+                assertNotNull(zip.getEntry(NavCaptureStore.todayDir() + "/diagnostics/navigator-patch-reports.json"));
+                assertNotNull(zip.getEntry(NavCaptureStore.todayDir() + "/diagnostics/INCOMPLETE-NAVIGATOR-PATCH-REPORTS.txt"));
                 JSONObject history = new JSONObject(new String(zip.getInputStream(
-                        zip.getEntry("navigator-patch-reports.json")).readAllBytes(),
+                        zip.getEntry(NavCaptureStore.todayDir() + "/diagnostics/navigator-patch-reports.json")).readAllBytes(),
                         StandardCharsets.UTF_8));
                 assertEquals(2, history.getInt("reportCount"));
                 JSONObject manifest = new JSONObject(new String(zip.getInputStream(
                         zip.getEntry("manifest.json")).readAllBytes(), StandardCharsets.UTF_8));
                 assertEquals("INCOMPLETE", manifest.getJSONObject("navigatorPatchReports")
                         .getString("status"));
+                assertEquals(NavCaptureStore.todayDir() + "/diagnostics/navigator-patch-reports.json",
+                        manifest.getJSONObject("navigatorPatchReports").getString("entry"));
                 assertEquals("partial", manifest.getString("status"));
             }
         } finally {

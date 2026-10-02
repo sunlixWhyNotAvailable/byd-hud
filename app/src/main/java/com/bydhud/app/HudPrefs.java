@@ -46,6 +46,7 @@ final class HudPrefs {
     private static final String KEY_SPEED_LIMIT_LANE_OVERLAY_SIZE =
             "speed_limit_lane_overlay_size";
     private static final String KEY_MAP_MODE = "map_mode";
+    private static final String KEY_MAP_UPDATE_RATE_HZ = "map_update_rate_hz";
     private static final String KEY_MAP_PRESET = "map_preset";
     private static final String KEY_MAP_CUSTOM_X = "map_custom_x";
     private static final String KEY_MAP_CUSTOM_Y = "map_custom_y";
@@ -494,7 +495,12 @@ final class HudPrefs {
                         mapNumber(values, KEY_MAP_CUSTOM_SCALE, defaults.mapScale),
                         mapNumber(values, KEY_MAP_CUSTOM_LANE_X, defaults.laneX),
                         mapNumber(values, KEY_MAP_CUSTOM_LANE_Y, defaults.laneY),
-                        mapNumber(values, KEY_MAP_CUSTOM_LANE_SCALE, defaults.laneScale)));
+                        mapNumber(values, KEY_MAP_CUSTOM_LANE_SCALE, defaults.laneScale)),
+                mapUpdateRateHz(context));
+    }
+
+    static int mapUpdateRateHz(Context context) {
+        return HudMapSettings.normalizeUpdateRateHz(prefs(context).getInt(KEY_MAP_UPDATE_RATE_HZ, 1));
     }
 
     // Accept existing integer preferences as well as the new fractional values.
@@ -509,6 +515,7 @@ final class HudPrefs {
         HudMapSettings.Geometry custom = value.custom;
         prefs(context).edit()
                 .putInt(KEY_MAP_MODE, value.mode)
+                .putInt(KEY_MAP_UPDATE_RATE_HZ, value.updateRateHz)
                 .putInt(KEY_MAP_PRESET, value.preset)
                 .putFloat(KEY_MAP_CUSTOM_X, custom.mapX)
                 .putFloat(KEY_MAP_CUSTOM_Y, custom.mapY)

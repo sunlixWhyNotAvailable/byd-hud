@@ -56,6 +56,7 @@ public final class NavigatorMapCaptureTest {
         context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit()
                 .remove("map_profiles")
                 .remove("map_profiles_revision")
+                .remove("map_update_rate_hz")
                 .apply();
         installPackage(NavigatorMapCapture.WAZE_PACKAGE, WAZE_UID);
         installPackage(NavigatorMapCapture.MAPS_PACKAGE, MAPS_UID);
@@ -68,6 +69,7 @@ public final class NavigatorMapCaptureTest {
         context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit()
                 .remove("map_profiles")
                 .remove("map_profiles_revision")
+                .remove("map_update_rate_hz")
                 .apply();
         Shadows.shadowOf(context.getPackageManager()).removePackage(NavigatorMapCapture.WAZE_PACKAGE);
         Shadows.shadowOf(context.getPackageManager()).removePackage(NavigatorMapCapture.MAPS_PACKAGE);
@@ -199,6 +201,7 @@ public final class NavigatorMapCaptureTest {
     }
 
     @Test public void capableProducerUsesAdaptiveHintsWithSingleFlightAndErrorReset() throws Exception {
+        HudPrefs.setMapSettings(context, HudPrefs.mapSettings(context).withUpdateRateHz(5));
         NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 61L, null);
         Bundle hello = request(NavigatorMapCapture.MAPS_PACKAGE, "", false);
         hello.putLong("minPollIntervalMs", 1L);
@@ -231,6 +234,29 @@ public final class NavigatorMapCaptureTest {
         assertEquals(200L, NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID).getLong("pollIntervalMs"));
         Bundle legacy = poll(NavigatorMapCapture.MAPS_PACKAGE, "", false);
         assertEquals(1000L, legacy.getLong("pollIntervalMs"));
+    }
+
+    @Test public void selectedRateCapsRequestsAndChangesWithinTheSameSession() {
+        NavigatorMapCapture.activate(context, NavigatorMapCapture.MAPS_PACKAGE, 62L, null);
+        Bundle hello = request(NavigatorMapCapture.MAPS_PACKAGE, "", false);
+        hello.putLong("minPollIntervalMs", 1L);
+        Bundle first = NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID);
+        assertEquals(1000L, first.getLong("pollIntervalMs"));
+        Bundle failed = new Bundle();
+        failed.putString("package", NavigatorMapCapture.MAPS_PACKAGE);
+        failed.putString("session", first.getString("session"));
+        failed.putLong("id", first.getLong("id"));
+        failed.putString("status", "no_gl_frame");
+        NavigatorMapCapture.providerCall(context, "result", failed, MAPS_UID);
+        SystemClock.sleep(250L);
+        assertEquals(0L, NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID).getLong("id"));
+        HudPrefs.setMapSettings(context, HudPrefs.mapSettings(context).withUpdateRateHz(5));
+        Bundle fast = NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID);
+        assertEquals(first.getString("session"), fast.getString("session"));
+        assertEquals(200L, fast.getLong("pollIntervalMs"));
+        assertTrue(fast.getLong("id") > first.getLong("id"));
+        HudPrefs.setMapSettings(context, HudPrefs.mapSettings(context).withUpdateRateHz(1));
+        assertEquals(1000L, NavigatorMapCapture.providerCall(context, "poll", hello, MAPS_UID).getLong("pollIntervalMs"));
     }
 
     private void submitFrame(String packageName, int ownerUid, String source,
