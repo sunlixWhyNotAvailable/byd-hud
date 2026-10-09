@@ -11,4 +11,5 @@ local.properties
 .DS_Store
 .idea/
 *.iml
+.codex/
 AGENTS.md

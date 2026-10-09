@@ -76,6 +76,7 @@ public final class BootReceiver extends BroadcastReceiver {
         }
         AppUpdateManager.onRuntimeWake(context, action);
         HudRuntimeSupervisor.ensureStarted(context, "receiver:" + action);
+        DashboardWidgetController.onRuntimeWake(context, "receiver:" + action);
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

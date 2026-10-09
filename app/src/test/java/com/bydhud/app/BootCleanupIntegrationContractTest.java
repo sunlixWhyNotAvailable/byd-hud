@@ -42,7 +42,7 @@ public final class BootCleanupIntegrationContractTest {
         String runtime = source("HudRuntimeService.java");
         assertTrue(runtime.contains("BootCleanupGate.runWhenReady(appContext"));
         assertTrue(runtime.contains("private static void startPersistentAfterBootGate"));
-        assertTrue(runtime.contains("completeStartAfterBootGate(reason)"));
+        assertTrue(runtime.contains("() -> completeStartAfterBootGate("));
 
         String activity = source("MainActivity.java");
         assertTrue(activity.contains("BootCleanupGate.runWhenReady(this,"));

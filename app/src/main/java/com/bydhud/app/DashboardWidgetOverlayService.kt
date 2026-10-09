@@ -14,12 +14,14 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.Display
 import android.view.Gravity
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.view.ViewTreeObserver
 import android.widget.Toast
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.SideEffect
@@ -60,6 +62,53 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     }
     private val anchorParams = overlayParams()
     private val menuParams = overlayParams()
+    private var pendingDraw: ViewTreeObserver.OnDrawListener? = null
+    private var drawTimeout: Runnable? = null
+    private var forceWindowLayout = false
+    private var lastRenderDecision: DashboardWidgetLifecyclePolicy.ServiceStart? = null
+
+    private fun log(message: String) {
+        val anchor = if (::anchorView.isInitialized) anchorView else null
+        AppEventLogger.event(this, "dashboard_widget $message elapsedMs=${SystemClock.elapsedRealtime()} " +
+            "instance=$controllerInstance anchorAttached=$anchorAttached menuAttached=$menuAttached " +
+            "viewAttached=${anchor?.isAttachedToWindow} viewShown=${anchor?.isShown} " +
+            "windowVisibility=${anchor?.windowVisibility} displayState=${anchor?.display?.state} closing=$closing")
+    }
+
+    internal fun cancelWakeDraw(reason: String) {
+        val listener = pendingDraw ?: return
+        if (::anchorView.isInitialized && anchorView.viewTreeObserver.isAlive) {
+            anchorView.viewTreeObserver.removeOnDrawListener(listener)
+        }
+        pendingDraw = null
+        drawTimeout?.let(main::removeCallbacks)
+        drawTimeout = null
+        if (reason != "drawn") log("draw_tracking_end reason=$reason")
+    }
+
+    private fun observeNextDraw(reason: String, signaledAt: Long) {
+        cancelWakeDraw("superseded")
+        var drawn = false
+        val listener = object : ViewTreeObserver.OnDrawListener {
+            override fun onDraw() {
+                if (drawn || pendingDraw !== this) return
+                drawn = true
+                log("first_draw source=$reason signalElapsedMs=$signaledAt " +
+                    "latencyMs=${SystemClock.elapsedRealtime() - signaledAt} physicalVisibility=unverified")
+                // Android forbids removing this listener during draw dispatch.
+                main.post { if (pendingDraw === this) cancelWakeDraw("drawn") }
+            }
+        }
+        pendingDraw = listener
+        anchorView.viewTreeObserver.addOnDrawListener(listener)
+        drawTimeout = Runnable {
+            if (pendingDraw === listener && !drawn) {
+                log("draw_timeout source=$reason signalElapsedMs=$signaledAt " +
+                    "latencyMs=${SystemClock.elapsedRealtime() - signaledAt}")
+                cancelWakeDraw("timeout")
+            }
+        }.also { main.postDelayed(it, 5_000L) }
+    }
 
     override fun onCreate() {
         super.onCreate()
@@ -137,7 +186,12 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
 
     @Suppress("DEPRECATION")
     internal fun render() {
-        when (DashboardWidgetController.serviceStart(this, controllerInstance)) {
+        val decision = DashboardWidgetController.serviceStart(this, controllerInstance)
+        if (lastRenderDecision != decision) {
+            lastRenderDecision = decision
+            log("render_admission decision=$decision")
+        }
+        when (decision) {
             DashboardWidgetLifecyclePolicy.ServiceStart.WAIT_FOR_PERMISSION -> return
             DashboardWidgetLifecyclePolicy.ServiceStart.STOP -> {
                 closeFromController()
@@ -145,19 +199,39 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
             }
             DashboardWidgetLifecyclePolicy.ServiceStart.SHOW -> Unit
         }
-        val density = overlayContext.resources.displayMetrics.density
-        windowDp = if (Build.VERSION.SDK_INT >= 30) {
-            val metrics = windows.maximumWindowMetrics
-            val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
-                WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
-            Offset((metrics.bounds.width() - insets.left - insets.right) / density,
-                (metrics.bounds.height() - insets.top - insets.bottom) / density)
-        } else {
-            val metrics = DisplayMetrics()
-            windows.defaultDisplay.getMetrics(metrics)
-            Offset(metrics.widthPixels / density, metrics.heightPixels / density)
+        val wake = DashboardWidgetController.consumeWake(this, controllerInstance)
+        if (wake != null || !anchorAttached) {
+            observeNextDraw(wake?.first ?: "initial-attach", wake?.second ?: SystemClock.elapsedRealtime())
         }
-        updateWindows(DashboardWidgetController.state)
+        forceWindowLayout = wake != null
+        try {
+            val density = overlayContext.resources.displayMetrics.density
+            windowDp = if (Build.VERSION.SDK_INT >= 30) {
+                val metrics = windows.maximumWindowMetrics
+                val insets = metrics.windowInsets.getInsetsIgnoringVisibility(
+                    WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
+                Offset((metrics.bounds.width() - insets.left - insets.right) / density,
+                    (metrics.bounds.height() - insets.top - insets.bottom) / density)
+            } else {
+                val metrics = DisplayMetrics()
+                windows.defaultDisplay.getMetrics(metrics)
+                Offset(metrics.widthPixels / density, metrics.heightPixels / density)
+            }
+            updateWindows(DashboardWidgetController.state)
+            if (wake != null && !closing) {
+                anchorView.requestLayout()
+                anchorView.invalidate()
+                if (menuAttached) {
+                    menuView.requestLayout()
+                    menuView.invalidate()
+                }
+                log("wake_redraw_requested source=${wake.first} signalElapsedMs=${wake.second}")
+            }
+        } catch (error: RuntimeException) {
+            attachmentFailed(error)
+        } finally {
+            forceWindowLayout = false
+        }
     }
 
     private fun updateWindows(state: DashboardWidgetState) {
@@ -171,11 +245,16 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
             else menuAttached = updateWindow(menuView, menuParams,
                 DashboardWidgetWindowLayout(menu.left, menu.top, menu.width, menu.height), menuAttached)
         } catch (error: RuntimeException) {
-            Log.e("DashboardWidget", "Unable to attach/update overlay", error)
-            Toast.makeText(this, DashboardWidgetController.uiLanguage.choose("Не вдалося показати віджет",
-                "Unable to show widget", "Не удалось показать виджет"), Toast.LENGTH_LONG).show()
-            DashboardWidgetController.serviceAttachmentFailed(this, controllerInstance)
+            attachmentFailed(error)
         }
+    }
+
+    private fun attachmentFailed(error: RuntimeException) {
+        log("window_failed error=${error.javaClass.simpleName}:${error.message}")
+        Log.e("DashboardWidget", "Unable to attach/update overlay", error)
+        Toast.makeText(this, DashboardWidgetController.uiLanguage.choose("Не вдалося показати віджет",
+            "Unable to show widget", "Не удалось показать виджет"), Toast.LENGTH_LONG).show()
+        DashboardWidgetController.serviceAttachmentFailed(this, controllerInstance)
     }
 
     private fun updateWindow(view: ComposeView, params: WindowManager.LayoutParams,
@@ -185,14 +264,19 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         val height = (layout.height * density).roundToInt().coerceAtLeast(1)
         val x = (layout.left * density).roundToInt()
         val y = (layout.top * density).roundToInt()
-        if (attached && params.width == width && params.height == height && params.x == x && params.y == y) {
+        val registered = attached && view.parent != null
+        if (registered && !forceWindowLayout && params.width == width && params.height == height && params.x == x && params.y == y) {
             return true
         }
         params.width = width
         params.height = height
         params.x = x
         params.y = y
-        if (attached) windows.updateViewLayout(view, params) else windows.addView(view, params)
+        if (registered) windows.updateViewLayout(view, params) else windows.addView(view, params)
+        if (!registered || forceWindowLayout) {
+            log("window_${if (registered) "relayout" else "added"} part=${if (view === anchorView) "anchor" else "menu"} " +
+                "missingParent=${attached && !registered} width=$width height=$height x=$x y=$y")
+        }
         return true
     }
 
@@ -206,6 +290,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
         try {
             windows.removeViewImmediate(menuView)
         } catch (error: RuntimeException) {
+            log("detach_failed part=menu error=${error.javaClass.simpleName}")
             Log.w("DashboardWidget", "Menu overlay already detached", error)
         } finally {
             menuAttached = false
@@ -213,6 +298,8 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
     }
 
     internal fun removeOverlay() {
+        log("window_close")
+        cancelWakeDraw("closing")
         closing = true
         main.removeCallbacks(inactivityCallback)
         detachMenu()
@@ -220,6 +307,7 @@ class DashboardWidgetOverlayService : Service(), SavedStateRegistryOwner {
             try {
                 windows.removeViewImmediate(anchorView)
             } catch (error: RuntimeException) {
+                log("detach_failed part=anchor error=${error.javaClass.simpleName}")
                 Log.w("DashboardWidget", "Anchor overlay already detached", error)
             } finally {
                 anchorAttached = false

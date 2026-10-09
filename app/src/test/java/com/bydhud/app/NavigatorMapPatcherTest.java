@@ -180,6 +180,45 @@ public final class NavigatorMapPatcherTest {
         return null;
     }
 
+    @Test public void validatesPackagedSchedulerCompanionWithoutAllowingArbitraryClasses() throws Exception {
+        File workspace = findWorkspaceRoot();
+        Assume.assumeTrue("workspace fixtures unavailable", workspace != null);
+        File hud = new File(workspace, "byd-hud-production-oss/app/build/outputs/apk/performance/app-performance.apk");
+        Assume.assumeTrue("packaged HUD fixture unavailable", hud.isFile());
+        File work = Files.createTempDirectory("hud-payload-companion-test-").toFile();
+        try {
+            File payload = extractPayload(hud, new File(work, "payload.dex"));
+            validatePayload(payload, "waze");
+            validatePayload(payload, "gmaps");
+            List<ClassDef> classes = new ArrayList<>();
+            boolean found = false;
+            try (InputStream in = new BufferedInputStream(Files.newInputStream(payload.toPath()))) {
+                for (ClassDef cls : DexBackedDexFile.fromInputStream(Opcodes.forApi(35), in).getClasses()) {
+                    if (cls.getType().equals("Lcom/bydhud/mapcapture/WazeRenderScheduler-IA;")) {
+                        found = true;
+                        classes.add(new ImmutableClassDef(cls.getType(), cls.getAccessFlags(), cls.getSuperclass(),
+                                cls.getInterfaces(), "unexpected-source", cls.getAnnotations(), cls.getFields(), cls.getMethods()));
+                    } else classes.add(ImmutableClassDef.of(cls));
+                }
+            }
+            assertTrue("fixture must contain the D8 scheduler companion", found);
+            File invalid = new File(work, "invalid.dex");
+            DexPool.writeTo(invalid.getAbsolutePath(), new ImmutableDexFile(Opcodes.forApi(35), classes));
+            java.lang.reflect.InvocationTargetException error = org.junit.Assert.assertThrows(
+                    java.lang.reflect.InvocationTargetException.class, () -> validatePayload(invalid, "waze"));
+            assertTrue(error.getCause().getMessage(), error.getCause().getMessage().contains("unexpected shape"));
+        } finally { deleteTree(work.toPath()); }
+    }
+
+    private static void validatePayload(File payload, String family) throws Exception {
+        java.lang.reflect.Method inspect = NavigatorMapPatcher.class.getDeclaredMethod("inspectPayloadFile", File.class);
+        inspect.setAccessible(true);
+        Object info = inspect.invoke(null, payload);
+        java.lang.reflect.Method verify = NavigatorMapPatcher.class.getDeclaredMethod("verifyPayload", info.getClass(), String.class);
+        verify.setAccessible(true);
+        verify.invoke(null, info, family);
+    }
+
     private static File extractPayload(File apk, File output) throws Exception {
         List<ClassDef> payloadClasses = new ArrayList<>();
         Set<String> types = new HashSet<>();

@@ -81,6 +81,7 @@ public final class NavigatorMapPatcher {
     private static final String BACKGROUND = "Lcom/bydhud/mapcapture/BackgroundCapture;";
     private static final String BACKGROUND_TARGET = "Lcom/bydhud/mapcapture/BackgroundCapture$Target;";
     private static final String BACKGROUND_D8_ACCESS = "Lcom/bydhud/mapcapture/BackgroundCapture-IA;";
+    private static final String SCHEDULER_D8_ACCESS = "Lcom/bydhud/mapcapture/WazeRenderScheduler-IA;";
     private static final int MAX_DEX_BYTES = 64 * 1024 * 1024;
     private static final int MAX_METHOD_IDS = 65536;
     private static final Set<String> PAYLOAD_ROOTS = Collections.unmodifiableSet(
@@ -965,7 +966,7 @@ public final class NavigatorMapPatcher {
                     + " instructions=" + payload.instructionCount + " missing=" + missing);
         }
         for (String type : payload.classes) {
-            if (BACKGROUND_D8_ACCESS.equals(type)) continue;
+            if (BACKGROUND_D8_ACCESS.equals(type) || SCHEDULER_D8_ACCESS.equals(type)) continue;
             String name = type.substring(PAYLOAD_PREFIX.length(), type.length() - 1);
             int nested = name.indexOf('$');
             String root = nested < 0 ? name : name.substring(0, nested);
@@ -1096,8 +1097,20 @@ public final class NavigatorMapPatcher {
 
     private static void verifyKnownD8Companion(PayloadInfo payload)
             throws UnsupportedPatchException {
-        if (!payload.classes.contains(BACKGROUND_D8_ACCESS)) return;
-        ClassDef companion = payload.definitions.get(BACKGROUND_D8_ACCESS);
+        verifyKnownD8Companion(payload, BACKGROUND_D8_ACCESS, BACKGROUND_TARGET, new HashSet<>(Arrays.asList(
+                methodKey(BACKGROUND, "startCar", Collections.singletonList("Ljava/lang/Object;"), "V"),
+                methodKey(BACKGROUND, "startMaps", Collections.singletonList("Ljava/lang/Object;"), "V"),
+                methodKey(BACKGROUND, "startWaze", Collections.singletonList("Ljava/lang/Object;"), "V"))));
+        verifyKnownD8Companion(payload, SCHEDULER_D8_ACCESS,
+                "Lcom/bydhud/mapcapture/WazeRenderScheduler$State;", Collections.singleton(
+                        methodKey(WazeRenderPatch.OWNER, "attach",
+                                Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;"), "V")));
+    }
+
+    private static void verifyKnownD8Companion(PayloadInfo payload, String marker,
+            String target, Set<String> expectedSites) throws UnsupportedPatchException {
+        if (!payload.classes.contains(marker)) return;
+        ClassDef companion = payload.definitions.get(marker);
         int expectedClassFlags = AccessFlags.PUBLIC.getValue() | AccessFlags.FINAL.getValue()
                 | AccessFlags.SYNTHETIC.getValue();
         if (companion == null || companion.getAccessFlags() != expectedClassFlags
@@ -1110,8 +1123,8 @@ public final class NavigatorMapPatcher {
             throw new UnsupportedPatchException("known D8 map-capture companion has an unexpected shape");
         }
 
-        String markerConstructor = methodKey(BACKGROUND_TARGET, "<init>",
-                Collections.singletonList(BACKGROUND_D8_ACCESS), "V");
+        String markerConstructor = methodKey(target, "<init>",
+                Collections.singletonList(marker), "V");
         Method constructor = payload.methods.get(markerConstructor);
         int expectedMethodFlags = AccessFlags.SYNTHETIC.getValue() | AccessFlags.CONSTRUCTOR.getValue();
         if (constructor == null || constructor.getAccessFlags() != expectedMethodFlags
@@ -1120,7 +1133,7 @@ public final class NavigatorMapPatcher {
         }
         List<Instruction> body = new ArrayList<>();
         constructor.getImplementation().getInstructions().forEach(body::add);
-        String noArgConstructor = methodKey(BACKGROUND_TARGET, "<init>", Collections.emptyList(), "V");
+        String noArgConstructor = methodKey(target, "<init>", Collections.emptyList(), "V");
         if (body.size() != 2 || !(body.get(0) instanceof ReferenceInstruction)
                 || body.get(0).getOpcode() != Opcode.INVOKE_DIRECT
                 || !(((ReferenceInstruction) body.get(0)).getReference() instanceof MethodReference)
@@ -1131,10 +1144,6 @@ public final class NavigatorMapPatcher {
             throw new UnsupportedPatchException("known D8 map-capture constructor bridge is not a no-op delegate");
         }
 
-        Set<String> expectedSites = new HashSet<>(Arrays.asList(
-                methodKey(BACKGROUND, "startCar", Collections.singletonList("Ljava/lang/Object;"), "V"),
-                methodKey(BACKGROUND, "startMaps", Collections.singletonList("Ljava/lang/Object;"), "V"),
-                methodKey(BACKGROUND, "startWaze", Collections.singletonList("Ljava/lang/Object;"), "V")));
         Set<String> actualSites = new HashSet<>();
         int calls = 0;
         for (ClassDef definition : payload.definitions.values()) {
