@@ -166,7 +166,7 @@ final class VehicleConfigurationDiagnostics {
                 .put("subscriptionReadback", "unsupported: no audited read-only subscription API");
     }
 
-    private static JSONObject options(Context context) throws Exception {
+    static JSONObject options(Context context) throws Exception {
         NavCapturePrefs.IngressPreferences ingress = NavCapturePrefs.ingressPreferences(context);
         JSONObject navigators = new JSONObject();
         for (String name : new String[]{"com.waze", "app.revanced.android.apps.maps", "com.google.android.apps.maps"}) {
@@ -194,6 +194,7 @@ final class VehicleConfigurationDiagnostics {
         }
         return new JSONObject().put("navigators", navigators)
                 .put("selectedHudPackage", ingress.hudPackage)
+                .put("logOnlyPackages", new JSONArray(new java.util.TreeSet<>(ingress.logOnlyPackages)))
                 .put("autoStart", HudPrefs.isBootEnabled(context))
                 .put("png", HudPrefs.isPngOutputEnabled(context)).put("native", HudPrefs.isNativeOutputEnabled(context))
                 .put("lanes", HudPrefs.isLaneOutputEnabled(context)).put("distance", HudPrefs.isDistanceOutputEnabled(context))
@@ -205,10 +206,18 @@ final class VehicleConfigurationDiagnostics {
                 .put("wazeSurface", HudPrefs.isWazeCustomSurfaceEnabled(context))
                 .put("routeMetricsMode", metrics)
                 .put("etaOutputField", HudPrefs.etaOutputField(context))
+                .put("etaStreetFormat", HudPrefs.getEtaStreetFormat(context))
+                .put("etaWaitForFullText", HudPrefs.isEtaWaitForFullTextEnabled(context))
+                .put("etaArrivalColor", HudPrefs.getEtaArrivalColor(context))
+                .put("etaDurationColor", HudPrefs.getEtaDurationColor(context))
+                .put("etaRemainingDistanceColor", HudPrefs.getEtaRemainingDistanceColor(context))
+                .put("wazeWarningDistanceColor", HudPrefs.getWazeWarningDistanceColor(context))
                 .put("eta", HudPrefs.isEtaOutputEnabled(context))
                 .put("remainingTime", HudPrefs.isRemainingTimeOutputEnabled(context))
                 .put("remainingDistance", HudPrefs.isRemainingDistanceOutputEnabled(context))
                 .put("speedLimitMode", HudPrefs.speedLimitMode(context)).put("speedLimitFallback", HudPrefs.speedLimitFreeFallback(context))
+                .put("nativeSpeedLimitDelay", HudPrefs.isNativeSpeedLimitDelayEnabled(context))
+                .put("nativeSpeedLimitFallback", HudPrefs.getNativeSpeedLimitFallbackMode(context))
                 .put("speedLimitOverlaySeconds", HudPrefs.speedLimitOverlaySeconds(context))
                 .put("speedLimitPlacement", HudPrefs.speedLimitCompositePlacement(context))
                 .put("speedLimitManeuverSize", HudPrefs.speedLimitManeuverOverlaySize(context))
@@ -239,6 +248,7 @@ final class VehicleConfigurationDiagnostics {
 
     static JSONObject mapSettings(HudMapSettings settings) throws Exception {
         return new JSONObject().put("mode", settings.mode).put("preset", settings.preset)
+                .put("updateRateHz", settings.updateRateHz)
                 .put("effective", mapGeometry(settings.geometry()))
                 .put("custom", mapGeometry(settings.custom));
     }

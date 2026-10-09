@@ -4449,6 +4449,7 @@ final class NavHudLiveSender {
     private void logRouteStartOutputPreferences(
             String source, long generation, String reason) {
         if (!claimOutputPreferenceRouteStart(source, generation)) return;
+        UserSettingsDiagnostics.sessionStarted(context, source, generation);
         emitOutputPreferences(
                 source, generation, "route-start:" + safeReason(reason),
                 HudOutputPreferenceSnapshot.capture(context));

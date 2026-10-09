@@ -95,6 +95,10 @@ final class NavCaptureStore {
         append(context, targetDay, TBT_TX_FILE, line);
     }
 
+    static void writeUserSettings(Context context, String targetDay, String line) {
+        append(context, targetDay, UserSettingsDiagnostics.FILE_NAME, line);
+    }
+
     //keeps elapsed and wall-clock times together so pulled raw logs can be correlated without anchor math.
     static String timeFields(long elapsedRealtimeMs, long wallMs) {
         return "\"t\":" + Math.max(0L, elapsedRealtimeMs)

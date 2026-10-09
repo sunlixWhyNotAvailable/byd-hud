@@ -228,6 +228,14 @@ final class WazeCaptureDebugWriter {
         return work != null && post("someip_tx", work);
     }
 
+    boolean settingsTask(Runnable work) {
+        return work != null && runOrPost("user_settings", work);
+    }
+
+    boolean userSettings(Context context, String day, String line) {
+        return settingsTask(() -> NavCaptureStore.writeUserSettings(context, day, line));
+    }
+
     //Waits for work queued before this call; share/retirement invoke it from background threads.
     boolean awaitIdle() {
         if (android.os.Looper.myLooper() == thread.getLooper()) {

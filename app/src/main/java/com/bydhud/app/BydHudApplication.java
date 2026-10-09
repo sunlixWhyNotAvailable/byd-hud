@@ -16,6 +16,7 @@ public final class BydHudApplication extends Application {
         super.onCreate();
         ConfigurationExportArtifacts.checkAsync(this);
         if (!getPackageName().equals(Application.getProcessName())) return;
+        UserSettingsDiagnostics.start(this);
         BootCleanupGate.initialize(this);
         ShellRuntimeSession.restore(this);
         ShanghaiTestController.get(this).recoverOwned("process-start");
