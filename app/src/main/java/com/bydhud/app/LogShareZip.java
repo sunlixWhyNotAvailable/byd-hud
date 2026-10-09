@@ -390,6 +390,7 @@ final class LogShareZip {
             boolean reportsIncomplete = reportSnapshot.optBoolean("incompleteReports");
             boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved")
                     || !omissions.isEmpty();
+            JSONObject transferDiagnostics = transferDiagnosticSummary(files);
             health.put("selectedDays", new org.json.JSONArray(days))
                     .put("omittedOrTruncatedFiles", new org.json.JSONArray(omissions))
                     .put("collectionOutcome", incomplete ? "PARTIAL" : "FULL")
@@ -397,11 +398,21 @@ final class LogShareZip {
                     .put("navigatorPatchReportCount", reportSnapshot.optInt("reportCount"))
                     .put("navigatorPatchReportsIncluded", true)
                     .put("navigatorPatchReportsIncomplete", reportsIncomplete)
+                    .put("transferDiagnostics", transferDiagnostics)
                     .put("recordingStatus", incomplete ? "INCOMPLETE" : "snapshot_ready")
                     .put("note", "Writer counters cover this process only; this is not a guarantee of historical coverage.");
             String directory = NavigatorPatchReportStore.exportDirectory(reportSnapshot);
             String statusEntry = directory + "recording-status.json";
             addStatusFile(staging, files, statusEntry, health.toString(2));
+            String transferOutcome = transferDiagnostics.optString("outcome", "none");
+            if (!"none".equals(transferOutcome) && !"COMPLETE".equals(transferOutcome)) {
+                addStatusFile(staging, files, directory + "INCOMPLETE-TRANSFER-DIAGNOSTICS.txt",
+                        "Additional display-transfer diagnostics are not complete.\n"
+                                + "This status is separate from continuous Logcat completeness.\n"
+                                + transferDiagnostics.toString(2) + "\n"
+                                + "See each dated Logcat session's diagnostics/denza-transfer/"
+                                + " operation status.json and command output files.\n");
+            }
             if (incomplete) addStatusFile(staging, files, directory + "INCOMPLETE-RECORDING.txt",
                     "This archive may be missing diagnostic records.\n"
                     + "writerCheckpointReady=" + checkpoint + "\n"
@@ -414,6 +425,26 @@ final class LogShareZip {
         } catch (JSONException error) {
             throw new IOException("cannot serialize recording status", error);
         }
+    }
+
+    private static JSONObject transferDiagnosticSummary(List<SnapshotFile> files)
+            throws JSONException {
+        List<JSONObject> records = new ArrayList<>();
+        org.json.JSONArray unreadable = new org.json.JSONArray();
+        for (SnapshotFile file : files) {
+            if (!file.entryName.contains("/diagnostics/denza-transfer/")
+                    || !file.entryName.endsWith("/status.json")) continue;
+            try {
+                records.add(new JSONObject(new String(
+                        Files.readAllBytes(file.file.toPath()), StandardCharsets.UTF_8)));
+            } catch (IOException | JSONException error) {
+                records.add(new JSONObject().put("status", "unreadable"));
+                unreadable.put(new JSONObject().put("file", file.entryName)
+                        .put("error", error.getClass().getSimpleName() + ": " + error.getMessage()));
+            }
+        }
+        return DenzaTransferDiagnostics.summarizeForExport(records)
+                .put("unreadableMetadata", unreadable);
     }
 
     private static void addStatusFile(File staging, List<SnapshotFile> files, String name,

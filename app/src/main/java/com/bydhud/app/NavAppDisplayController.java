@@ -877,6 +877,7 @@ final class NavAppDisplayController {
 
     //Shutdown also releases an idle retained projection, after any in-flight move settles.
     void shutdownDashboardProjection(String reason) {
+        DenzaTransferDiagnostics.cancelAll("shutdown " + safe(reason));
         String shutdownReason = "shutdown " + safe(reason);
         synchronized (lock) {
             projectionShutdownRequested = true;
@@ -957,6 +958,30 @@ final class NavAppDisplayController {
             NavAppDisplayState admittedState) {
         final int layoutCommand = DashboardLayoutPolicy.layoutCommand(
                 dashboardMode, formatMethod);
+        DenzaTransferDiagnostics.Request diagnostic = null;
+        if (!HudPrefs.isUserShutdownActive(context) && !isShutdownReturnReason(reason)) {
+            try {
+                DenzaTransferDiagnostics.CaptureTarget target =
+                        LogcatRecorder.diagnosticTarget(context);
+                if (DenzaTransferDiagnostics.hasCaptureTarget(target)) {
+                    NavAppDisplayState cachedBefore = admittedState == null
+                            ? lastState(packageName) : admittedState;
+                    diagnostic = DenzaTransferDiagnostics.beginTransfer(
+                            context,
+                            target,
+                            packageName,
+                            toDashboard,
+                            dashboardMode,
+                            formatMethod,
+                            reason,
+                            cachedBefore,
+                            ClusterProjectionService.cachedDiagnosticSnapshot());
+                }
+            } catch (RuntimeException error) {
+                log(packageName, "denza_diagnostic_start_failed type="
+                        + error.getClass().getSimpleName());
+            }
+        }
         try {
             if (!isShutdownReturnCurrent(shutdownToken)) return;
             if (packageName.isEmpty()) {
@@ -1245,6 +1270,7 @@ final class NavAppDisplayController {
             String completionError = completionErrorForState(packageName);
             endMove(packageName);
             notifyMoveCompletion(completion, completionError);
+            DenzaTransferDiagnostics.completeTransfer(diagnostic, completionError);
         }
     }
 

@@ -3,7 +3,8 @@ package com.bydhud.app;
 import static org.junit.Assert.*;
 import android.app.Application;
 import android.content.Context;
-import android.graphics.Bitmap;
+import android.content.ContextWrapper;
+import android.content.pm.PackageManager;
 import java.io.File;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -14,7 +15,9 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.zip.ZipFile;
 import org.json.JSONObject;
 import org.junit.Before;
+import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
 import org.junit.runner.RunWith;
 import org.robolectric.RobolectricTestRunner;
 import org.robolectric.RuntimeEnvironment;
@@ -25,15 +28,18 @@ import org.robolectric.annotation.LooperMode;
 @Config(sdk = 33, application = Application.class)
 @LooperMode(LooperMode.Mode.PAUSED)
 public final class DiagnosticRecordingTest {
+    @Rule public final TemporaryFolder temporaryFolder = new TemporaryFolder();
+
     private Context context;
     private String day;
 
     @Before public void setUp() throws Exception {
-        context = RuntimeEnvironment.getApplication();
+        context = new IsolatedStorageContext(RuntimeEnvironment.getApplication(),
+                temporaryFolder.newFolder("storage"));
         var reset = NavigationLogStorage.class.getDeclaredMethod("invalidatePublicRootCache");
         reset.setAccessible(true);
         reset.invoke(null);
-        day = NavCaptureStore.todayDir(System.currentTimeMillis());
+        day = NavCaptureStore.todayDir();
     }
 
     @Test public void rotationAndConcurrentImageCompleteWithoutLosingJournal() throws Exception {
@@ -266,5 +272,45 @@ public final class DiagnosticRecordingTest {
     private static void await(CountDownLatch latch) {
         try { if (!latch.await(10, TimeUnit.SECONDS)) throw new AssertionError("latch timeout"); }
         catch (InterruptedException e) { Thread.currentThread().interrupt(); throw new AssertionError(e); }
+    }
+
+    private static final class IsolatedStorageContext extends ContextWrapper {
+        private final File root;
+
+        IsolatedStorageContext(Context base, File root) {
+            super(base);
+            this.root = root;
+        }
+
+        @Override public Context getApplicationContext() { return this; }
+
+        @Override public File getExternalFilesDir(String type) {
+            return directory("external-files", type);
+        }
+
+        @Override public File getExternalCacheDir() {
+            return directory("external-cache", null);
+        }
+
+        @Override public File getFilesDir() {
+            return directory("files", null);
+        }
+
+        @Override public File getCacheDir() {
+            return directory("cache", null);
+        }
+
+        @Override public int checkSelfPermission(String permission) {
+            return PackageManager.PERMISSION_DENIED;
+        }
+
+        private File directory(String name, String child) {
+            File result = new File(root, name);
+            if (child != null && !child.isEmpty()) result = new File(result, child);
+            if (!result.isDirectory() && !result.mkdirs() && !result.isDirectory()) {
+                throw new IllegalStateException("Unable to create test storage " + result);
+            }
+            return result;
+        }
     }
 }

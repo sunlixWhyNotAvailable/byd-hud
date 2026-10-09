@@ -170,12 +170,16 @@ final class WazeCaptureDebugWriter {
     }
 
     boolean rawEvent(Context context, String channel, String packageName, String payload) {
+        return rawEvent(context, channel, packageName, payload,
+                android.os.SystemClock.elapsedRealtime(), System.currentTimeMillis());
+    }
+
+    boolean rawEvent(Context context, String channel, String packageName, String payload,
+            long eventElapsedMs, long eventWallClockMs) {
         Context app = context == null ? null : context.getApplicationContext();
         if (app == null) {
             return false;
         }
-        long eventElapsedMs = android.os.SystemClock.elapsedRealtime();
-        long eventWallClockMs = System.currentTimeMillis();
         String targetDay = NavCaptureStore.todayDir(eventWallClockMs);
         return runOrPost("raw_nav_event",
                 () -> NavCaptureStore.writeRawEvent(

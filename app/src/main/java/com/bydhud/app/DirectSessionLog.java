@@ -77,17 +77,23 @@ final class DirectSessionLog {
                 dir, EVENTS_FILE, eventLine(event, detail, elapsedMs, wallMs, -1L));
     }
 
-    synchronized boolean raw(String raw) {
+    synchronized boolean raw(
+            String channel,
+            String packageName,
+            String raw,
+            long elapsedMs,
+            long wallMs) {
         if (ended || raw == null) {
             return false;
         }
-        long elapsedMs = SystemClock.elapsedRealtime();
-        long wallMs = System.currentTimeMillis();
         return writer.appendDirectRaw(dir, RAW_FILE, "{"
                 + NavCaptureStore.timeFields(elapsedMs, wallMs)
                 + ",\"source\":\"" + NavCaptureStore.esc(source) + "\""
                 + ",\"session\":\"" + NavCaptureStore.esc(sessionName) + "\""
                 + ",\"raw\":\"" + NavCaptureStore.esc(raw) + "\""
+                + ",\"channel\":\"" + NavCaptureStore.esc(channel) + "\""
+                + ",\"package\":\"" + NavCaptureStore.esc(packageName) + "\""
+                + ",\"schemaVersion\":2"
                 + "}");
     }
 

@@ -49,6 +49,22 @@ final class NavCaptureStore {
         WazeCaptureDebugWriter.get().rawEvent(context, channel, packageName, payload);
     }
 
+    static boolean directRawEvent(
+            Context context,
+            DirectSessionLog session,
+            String channel,
+            String packageName,
+            String payload,
+            long eventElapsedMs,
+            long eventWallClockMs) {
+        if (session != null && session.raw(
+                channel, packageName, payload, eventElapsedMs, eventWallClockMs)) {
+            return true;
+        }
+        return WazeCaptureDebugWriter.get().rawEvent(
+                context, channel, packageName, payload, eventElapsedMs, eventWallClockMs);
+    }
+
     static void writeRawEvent(Context context, String channel, String packageName, String payload,
             long eventElapsedMs, long eventWallClockMs, String targetDay) {
         append(context, targetDay, RAW_EVENTS_FILE, "{"

@@ -28,6 +28,8 @@ import java.util.List;
         shadows = {SomeIpTxLogTest.DebugWriter.class, SomeIpTxLogTest.Store.class})
 public final class SomeIpTxLogTest {
     private static final List<String> lines = new ArrayList<>();
+    private static final List<Runnable> deferredWrites = new ArrayList<>();
+    private static boolean deferWrites;
 
     private Context context;
     private SomeIpTxLog log;
@@ -38,6 +40,8 @@ public final class SomeIpTxLogTest {
         context.getSharedPreferences("byd_hud_prefs", Context.MODE_PRIVATE).edit()
                 .clear().commit();
         lines.clear();
+        deferredWrites.clear();
+        deferWrites = false;
         setStaticField(SomeIpTxLog.class, "instance", null);
         HudPrefs.setDetailedDebugArtifactsEnabled(context, true);
         log = SomeIpTxLog.get(context);
@@ -104,6 +108,45 @@ public final class SomeIpTxLogTest {
         assertFalse(json.has("payloadOmitted"));
     }
 
+    @Test
+    public void sameArrayIsSnapshottedOnceBeforeQueuedDiagnosticWrite() throws Exception {
+        byte[] payload = new byte[]{1, 2, 3};
+        deferWrites = true;
+        log.recordSend("manual", "check", 3L, "check", "manual", payload,
+                payload, 0, null, 2L);
+        payload[0] = 9;
+
+        drainDeferredWrites();
+
+        JSONObject json = new JSONObject(lines.get(0));
+        assertEquals("AQID", json.getString("payloadBase64"));
+        assertEquals(json.getString("payloadSha256"), json.getString("semanticSha256"));
+    }
+
+    @Test
+    public void separatePayloadArraysKeepTheirOwnFrozenHashesAndBytes() throws Exception {
+        byte[] payload = new byte[]{1, 2, 3};
+        byte[] semantic = new byte[]{4, 5, 6};
+        deferWrites = true;
+        log.recordSend("manual", "check", 3L, "check", "manual", payload,
+                semantic, 0, null, 2L);
+        payload[0] = 9;
+        semantic[0] = 9;
+
+        drainDeferredWrites();
+
+        JSONObject json = new JSONObject(lines.get(0));
+        assertEquals("AQID", json.getString("payloadBase64"));
+        assertFalse(json.getString("payloadSha256").equals(
+                json.getString("semanticSha256")));
+    }
+
+    private static void drainDeferredWrites() {
+        deferWrites = false;
+        for (Runnable write : new ArrayList<>(deferredWrites)) write.run();
+        deferredWrites.clear();
+    }
+
     @Implements(WazeCaptureDebugWriter.class)
     public static final class DebugWriter {
         @Implementation
@@ -113,6 +156,10 @@ public final class SomeIpTxLogTest {
 
         @Implementation
         protected boolean someIpTx(Runnable work) {
+            if (deferWrites) {
+                deferredWrites.add(work);
+                return true;
+            }
             work.run();
             return true;
         }

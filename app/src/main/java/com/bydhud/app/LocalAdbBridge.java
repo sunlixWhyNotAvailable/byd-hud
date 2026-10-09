@@ -32,11 +32,13 @@ import java.security.spec.X509EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.regex.Pattern;
 import java.util.function.LongConsumer;
@@ -50,6 +52,19 @@ final class LocalAdbBridge {
     private static final int PORT = 5555;
     private static final int CONNECT_TIMEOUT_MS = 3000;
     private static final int READ_TIMEOUT_MS = 5000;
+    private static final int DIAGNOSTIC_SNAPSHOT_COMMAND_TIMEOUT_MS = 5000;
+    private static final int DIAGNOSTIC_SNAPSHOT_SESSION_TIMEOUT_MS = 25_000;
+    private static final int SNAPSHOT_OPEN_NEW = 0;
+    private static final int SNAPSHOT_OPENING = 1;
+    private static final int SNAPSHOT_OPEN = 2;
+    private static final int SNAPSHOT_OPEN_TIMEOUT = 3;
+    private static final int SNAPSHOT_OPEN_CANCELLED = 4;
+    private static final int SNAPSHOT_OPEN_FAILED = 5;
+    private static final int SNAPSHOT_COMMAND_RUNNING = 0;
+    private static final int SNAPSHOT_COMMAND_COMPLETE = 1;
+    private static final int SNAPSHOT_COMMAND_TIMEOUT = 2;
+    private static final int SNAPSHOT_COMMAND_CANCELLED = 3;
+    private static final int SNAPSHOT_COMMAND_FAILED = 4;
     private static final int AUTH_PROMPT_TIMEOUT_MS = 60000;
     private static final Object AUTHORIZATION_SOCKET_LOCK = new Object();
     private static final Object PERMISSION_GRANT_LOCK = new Object();
@@ -76,6 +91,12 @@ final class LocalAdbBridge {
     private static final String PREFS_NAME = "byd_hud_adb_bridge_prefs";
     private static final String KEY_AUTHORIZED_FINGERPRINT = "authorized_fingerprint";
     private static final String EXIT_MARKER = "__BYDHUD_EXIT__:";
+    private static final ScheduledExecutorService DIAGNOSTIC_SNAPSHOT_DEADLINES =
+            Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "bydhud-diagnostic-snapshot-deadline");
+                thread.setDaemon(true);
+                return thread;
+            });
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
     private static final Pattern AUTO_CONTAINER_COMMAND = Pattern.compile(
@@ -257,6 +278,372 @@ final class LocalAdbBridge {
     static LogcatStreamSession logcatStreamForTest(Socket socket) throws IOException {
         return new LogcatStreamSession(socket, new Connection(socket, null, false),
                 "09-08 15:45:20.226");
+    }
+
+    enum DiagnosticSnapshotCommand {
+        SURFACE_FLINGER("dumpsys SurfaceFlinger"),
+        DISPLAY("dumpsys display"),
+        ACTIVITY_ACTIVITIES("dumpsys activity activities"),
+        WINDOW_WINDOWS("dumpsys window windows");
+
+        private final String shellCommand;
+
+        DiagnosticSnapshotCommand(String shellCommand) {
+            this.shellCommand = shellCommand;
+        }
+    }
+
+    static DiagnosticSnapshotSession createDiagnosticSnapshotSession(Context context) {
+        if (context == null) throw new IllegalArgumentException("context is required");
+        Context app = context.getApplicationContext();
+        return new DiagnosticSnapshotSession(app == null ? context : app, new Socket(),
+                UUID.randomUUID().toString().replace("-", ""));
+    }
+
+    /** Owns one prompt-free socket; callers publish it before open so Stop can abort connect. */
+    static final class DiagnosticSnapshotSession implements AutoCloseable {
+        private final Context context;
+        private final Socket socket;
+        private final String markerId;
+        private final AtomicInteger openState = new AtomicInteger(SNAPSHOT_OPEN_NEW);
+        private final AtomicBoolean streaming = new AtomicBoolean();
+        private final AtomicBoolean closed = new AtomicBoolean();
+        private volatile Connection connection;
+        private volatile DiagnosticSnapshotCommandRun activeCommand;
+
+        private DiagnosticSnapshotSession(Context context, Socket socket, String markerId) {
+            this.context = context;
+            this.socket = socket;
+            this.markerId = markerId;
+        }
+
+        void open(long remainingBudgetMs) throws IOException {
+            if (closed.get() || openState.get() == SNAPSHOT_OPEN_CANCELLED) {
+                throw new IOException("ADB snapshot connection cancelled");
+            }
+            if (remainingBudgetMs <= 0) {
+                close();
+                throw new DiagnosticSnapshotTimeoutException("ADB snapshot deadline exhausted", null);
+            }
+            if (!openState.compareAndSet(SNAPSHOT_OPEN_NEW, SNAPSHOT_OPENING)) {
+                if (closed.get() || openState.get() == SNAPSHOT_OPEN_CANCELLED) {
+                    throw new IOException("ADB snapshot connection cancelled");
+                }
+                throw new IOException("ADB snapshot already opened");
+            }
+            long budgetMs = Math.min(remainingBudgetMs, DIAGNOSTIC_SNAPSHOT_SESSION_TIMEOUT_MS);
+            long deadlineNanos = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(budgetMs);
+            ScheduledFuture<?> deadline = DIAGNOSTIC_SNAPSHOT_DEADLINES.schedule(
+                    this::expireOpen, budgetMs, TimeUnit.MILLISECONDS);
+            try {
+                if (closed.get() || openState.get() != SNAPSHOT_OPENING) throw openFailure();
+                if (context == null) throw new IOException("ADB snapshot context unavailable");
+                KeyPair pair = requireDiagnosticSnapshotKey(
+                        new File(context.getFilesDir(), KEY_DIR));
+                if (closed.get() || openState.get() != SNAPSHOT_OPENING) throw openFailure();
+                long connectBudgetMs = remainingMillis(deadlineNanos);
+                if (connectBudgetMs == 0L) throw new DiagnosticSnapshotTimeoutException(
+                        "ADB snapshot connection deadline exhausted", null);
+                int connectTimeoutMs = (int) Math.max(1L,
+                        Math.min(CONNECT_TIMEOUT_MS, connectBudgetMs));
+                socket.connect(new InetSocketAddress(HOST, PORT), connectTimeoutMs);
+                long authBudgetMs = remainingMillis(deadlineNanos);
+                if (authBudgetMs == 0L) throw new DiagnosticSnapshotTimeoutException(
+                        "ADB snapshot authentication deadline exhausted", null);
+                int authTimeoutMs = (int) Math.max(1L, Math.min(Integer.MAX_VALUE, authBudgetMs));
+                socket.setSoTimeout(authTimeoutMs);
+                authenticate(pair);
+                if (!openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN)) throw openFailure();
+                socket.setSoTimeout(READ_TIMEOUT_MS);
+            } catch (Exception error) {
+                int state = openState.get();
+                if (error instanceof SocketTimeoutException && state == SNAPSHOT_OPENING
+                        && remainingMillis(deadlineNanos) == 0L
+                        && openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN_TIMEOUT)) {
+                    state = SNAPSHOT_OPEN_TIMEOUT;
+                }
+                if (state == SNAPSHOT_OPENING) {
+                    openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN_FAILED);
+                }
+                closeExportSocket(socket);
+                closed.set(true);
+                if (state == SNAPSHOT_OPEN_TIMEOUT) throw new DiagnosticSnapshotTimeoutException(
+                        "ADB snapshot connection timed out", error);
+                if (state == SNAPSHOT_OPEN_CANCELLED) {
+                    throw new IOException("ADB snapshot connection cancelled", error);
+                }
+                if (error instanceof IOException) throw (IOException) error;
+                throw new IOException("Unable to open ADB diagnostic snapshot", error);
+            } finally {
+                deadline.cancel(false);
+            }
+        }
+
+        int stream(DiagnosticSnapshotCommand command, OutputStream output) throws IOException {
+            if (command == null) throw new IllegalArgumentException("snapshot command is required");
+            if (output == null) throw new IllegalArgumentException("output is required");
+            if (closed.get() || openState.get() != SNAPSHOT_OPEN || connection == null) {
+                throw new IOException("ADB diagnostic snapshot is unavailable");
+            }
+            if (!streaming.compareAndSet(false, true)) {
+                throw new IOException("ADB diagnostic snapshot already has an active command");
+            }
+            DiagnosticSnapshotCommandRun run = new DiagnosticSnapshotCommandRun();
+            activeCommand = run;
+            if (closed.get()) {
+                run.outcome.set(SNAPSHOT_COMMAND_CANCELLED);
+                activeCommand = null;
+                streaming.set(false);
+                throw new IOException("ADB diagnostic snapshot cancelled");
+            }
+            ExitMarkerOutputStream filtered = new ExitMarkerOutputStream(output,
+                    ("\0BYDHUD_DIAG_EXIT_" + markerId + ":").getBytes(StandardCharsets.US_ASCII));
+            ScheduledFuture<?> timeout = DIAGNOSTIC_SNAPSHOT_DEADLINES.schedule(
+                    () -> expireCommand(run), DIAGNOSTIC_SNAPSHOT_COMMAND_TIMEOUT_MS,
+                    TimeUnit.MILLISECONDS);
+            String shellCommand = command.shellCommand
+                    + "; __bydhud_diag_exit=$?; printf '\\000BYDHUD_DIAG_EXIT_"
+                    + markerId + ":%d' \"$__bydhud_diag_exit\"";
+            try {
+                connection.streamShell(shellCommand, filtered);
+                if (!run.outcome.compareAndSet(SNAPSHOT_COMMAND_RUNNING,
+                        SNAPSHOT_COMMAND_COMPLETE)) throw commandFailure(run, null);
+                return filtered.exitCode;
+            } catch (IOException error) {
+                try {
+                    filtered.flushPartial();
+                } catch (IOException outputError) {
+                    if (outputError != error) error.addSuppressed(outputError);
+                }
+                if (error instanceof SocketTimeoutException && run.outcome.compareAndSet(
+                        SNAPSHOT_COMMAND_RUNNING, SNAPSHOT_COMMAND_TIMEOUT)) {
+                    closed.set(true);
+                    closeExportSocket(socket);
+                }
+                if (run.outcome.compareAndSet(SNAPSHOT_COMMAND_RUNNING,
+                        SNAPSHOT_COMMAND_FAILED)) {
+                    closed.set(true);
+                    closeExportSocket(socket);
+                }
+                throw commandFailure(run, error);
+            } finally {
+                run.outcome.compareAndSet(SNAPSHOT_COMMAND_RUNNING, SNAPSHOT_COMMAND_COMPLETE);
+                timeout.cancel(false);
+                if (activeCommand == run) activeCommand = null;
+                streaming.set(false);
+            }
+        }
+
+        private void authenticate(KeyPair pair) throws IOException {
+            try {
+                OpenResult opened = Connection.openConnectedSocket(context,
+                        AuthorizationPromptMode.NEVER, pair, "", socket,
+                        endpointLabel(PORT), 0L, false);
+                if (opened.authorizationRequired || opened.connection == null) {
+                    throw new IOException("existing ADB key not authorized");
+                }
+                connection = opened.connection;
+            } catch (IOException error) {
+                throw error;
+            } catch (Exception error) {
+                throw new IOException("Unable to authenticate existing ADB key", error);
+            }
+        }
+
+        private void expireOpen() {
+            if (openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN_TIMEOUT)) {
+                closed.set(true);
+                closeExportSocket(socket);
+            }
+        }
+
+        private void expireCommand(DiagnosticSnapshotCommandRun run) {
+            if (run.outcome.compareAndSet(SNAPSHOT_COMMAND_RUNNING, SNAPSHOT_COMMAND_TIMEOUT)) {
+                closed.set(true);
+                closeExportSocket(socket);
+            }
+        }
+
+        private IOException openFailure() {
+            int state = openState.get();
+            if (state == SNAPSHOT_OPEN_TIMEOUT) return new DiagnosticSnapshotTimeoutException(
+                    "ADB snapshot connection timed out", null);
+            return new IOException(state == SNAPSHOT_OPEN_CANCELLED
+                    ? "ADB snapshot connection cancelled" : "ADB snapshot closed while opening");
+        }
+
+        private IOException commandFailure(DiagnosticSnapshotCommandRun run, IOException cause) {
+            if (run.outcome.get() == SNAPSHOT_COMMAND_TIMEOUT) {
+                return new DiagnosticSnapshotTimeoutException(
+                        "ADB diagnostic command exceeded 5 seconds", cause);
+            }
+            if (run.outcome.get() == SNAPSHOT_COMMAND_CANCELLED) {
+                return new IOException("ADB diagnostic snapshot cancelled", cause);
+            }
+            return cause == null ? new IOException("ADB diagnostic snapshot command failed") : cause;
+        }
+
+        @Override public void close() {
+            if (closed.compareAndSet(false, true)) {
+                openState.compareAndSet(SNAPSHOT_OPEN_NEW, SNAPSHOT_OPEN_CANCELLED);
+                openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN_CANCELLED);
+                DiagnosticSnapshotCommandRun run = activeCommand;
+                if (run != null) run.outcome.compareAndSet(
+                        SNAPSHOT_COMMAND_RUNNING, SNAPSHOT_COMMAND_CANCELLED);
+                closeExportSocket(socket);
+            }
+        }
+    }
+
+    static final class DiagnosticSnapshotTimeoutException extends IOException {
+        DiagnosticSnapshotTimeoutException(String message, Throwable cause) {
+            super(message, cause);
+        }
+    }
+
+    private static final class DiagnosticSnapshotCommandRun {
+        final AtomicInteger outcome = new AtomicInteger(SNAPSHOT_COMMAND_RUNNING);
+    }
+
+    private static KeyPair requireDiagnosticSnapshotKey(File directory) throws IOException {
+        try {
+            KeyPair pair = loadConfigurationExportKeyPair(
+                    new File(directory, PRIVATE_KEY_FILE), new File(directory, PUBLIC_KEY_FILE));
+            if (pair == null) throw new IOException("existing complete ADB key unavailable");
+            return pair;
+        } catch (IOException error) {
+            throw error;
+        } catch (Exception error) {
+            throw new IOException("existing ADB key unavailable", error);
+        }
+    }
+
+    static KeyPair diagnosticSnapshotKeyForTest(File directory) throws IOException {
+        return requireDiagnosticSnapshotKey(directory);
+    }
+
+    private static long remainingMillis(long deadlineNanos) {
+        long remaining = deadlineNanos - System.nanoTime();
+        return remaining <= 0 ? 0 : Math.max(1L, (remaining + 999_999L) / 1_000_000L);
+    }
+
+    private static final class ExitMarkerOutputStream extends OutputStream {
+        private final OutputStream output;
+        private final byte[] marker;
+        private final byte[] tail;
+        private int tailLength;
+        private boolean resolved;
+        private int exitCode = -1;
+
+        ExitMarkerOutputStream(OutputStream output, byte[] marker) {
+            this.output = output;
+            this.marker = marker;
+            this.tail = new byte[marker.length + 3];
+        }
+
+        @Override public void write(int value) throws IOException {
+            byte[] single = {(byte) value};
+            write(single, 0, 1);
+        }
+
+        @Override public void write(byte[] bytes, int offset, int length) throws IOException {
+            if (resolved) throw new IOException("ADB snapshot output already finished");
+            if (length == 0) return;
+            int flushLength = Math.max(0, tailLength + length - tail.length);
+            int fromTail = Math.min(flushLength, tailLength);
+            if (fromTail > 0) {
+                output.write(tail, 0, fromTail);
+                System.arraycopy(tail, fromTail, tail, 0, tailLength - fromTail);
+                tailLength -= fromTail;
+            }
+            int fromInput = flushLength - fromTail;
+            if (fromInput > 0) {
+                output.write(bytes, offset, fromInput);
+                offset += fromInput;
+                length -= fromInput;
+            }
+            System.arraycopy(bytes, offset, tail, tailLength, length);
+            tailLength += length;
+        }
+
+        @Override public void flush() throws IOException {
+            if (resolved) {
+                output.flush();
+                return;
+            }
+            int markerStart = -1;
+            for (int candidateDigits = 1; candidateDigits <= 3; candidateDigits++) {
+                int candidateStart = tailLength - marker.length - candidateDigits;
+                if (candidateStart >= 0 && matchesMarker(candidateStart)
+                        && containsDigits(candidateStart + marker.length, candidateDigits)) {
+                    markerStart = candidateStart;
+                    break;
+                }
+            }
+            if (markerStart < 0) {
+                flushPartial();
+                throw new IOException("ADB diagnostic command exit status missing");
+            }
+            int status = 0;
+            for (int i = markerStart + marker.length; i < tailLength; i++) {
+                int digit = tail[i] - '0';
+                status = status * 10 + digit;
+            }
+            if (markerStart > 0) output.write(tail, 0, markerStart);
+            exitCode = status;
+            tailLength = 0;
+            resolved = true;
+            output.flush();
+        }
+
+        void flushPartial() throws IOException {
+            if (tailLength > 0) output.write(tail, 0, tailLength);
+            tailLength = 0;
+            output.flush();
+        }
+
+        private boolean matchesMarker(int offset) {
+            for (int i = 0; i < marker.length; i++) {
+                if (tail[offset + i] != marker[i]) return false;
+            }
+            return true;
+        }
+
+        private boolean containsDigits(int offset, int length) {
+            for (int i = offset; i < offset + length; i++) {
+                if (tail[i] < '0' || tail[i] > '9') return false;
+            }
+            return true;
+        }
+    }
+
+    static DiagnosticSnapshotSession diagnosticSnapshotForTest(Socket socket) throws IOException {
+        DiagnosticSnapshotSession session = new DiagnosticSnapshotSession(null, socket,
+                "TEST_NONCE");
+        session.openState.set(SNAPSHOT_OPEN);
+        session.connection = new Connection(socket, null, false);
+        return session;
+    }
+
+    static DiagnosticSnapshotSession diagnosticSnapshotOpenForTest(Socket socket, KeyPair pair)
+            throws IOException {
+        DiagnosticSnapshotSession session = new DiagnosticSnapshotSession(null, socket,
+                "TEST_NONCE");
+        session.openState.set(SNAPSHOT_OPENING);
+        try {
+            if (pair == null) throw new IOException("existing complete ADB key unavailable");
+            socket.setSoTimeout(CONNECT_TIMEOUT_MS);
+            session.authenticate(pair);
+            if (!session.openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN)) {
+                throw session.openFailure();
+            }
+            socket.setSoTimeout(READ_TIMEOUT_MS);
+            return session;
+        } catch (IOException error) {
+            session.openState.compareAndSet(SNAPSHOT_OPENING, SNAPSHOT_OPEN_FAILED);
+            session.close();
+            throw error;
+        }
     }
 
     /** Opens an isolated fixed Shanghai helper/capture stream; it never uses the runtime socket. */

@@ -3313,9 +3313,8 @@ final class NavHudLiveSender {
                 + " hudEtaMetrics=\"" + normalizeString(prepared.etaDiagnostics()) + "\""
                 + " hudLaneCount=" + prepared.laneCount()
                 + " hudDiagnostics=semantic-plan";
-        if (session != null) session.raw(raw);
-        WazeCaptureDebugWriter.get().rawEvent(
-                context, "waze_direct", WAZE_PACKAGE, raw);
+        NavCaptureStore.directRawEvent(context, session, "waze_direct", WAZE_PACKAGE,
+                raw, receivedAtMs, receivedWallClockMs);
     }
 
     private void startGMapsDirectProbe(String reason) {
@@ -3642,9 +3641,8 @@ final class NavHudLiveSender {
                 + " hudLaneCount=" + prepared.laneCount()
                 + " hudDiagnostics=semantic-plan";
         DirectSessionLog session = gmapsDirectSession;
-        if (session != null) session.raw(raw);
-        WazeCaptureDebugWriter.get().rawEvent(
-                context, "gmaps_direct", GMapsDirectChannel.PACKAGE_NAME, raw);
+        NavCaptureStore.directRawEvent(context, session, "gmaps_direct",
+                GMapsDirectChannel.PACKAGE_NAME, raw, receivedAtMs, receivedWallClockMs);
     }
 
     private void onDirectSpeedLimitEvent(String ownerPackage, int displayValue,

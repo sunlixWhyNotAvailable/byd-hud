@@ -85,6 +85,27 @@ final class LogcatRecorder {
         return activeSession != null || (finalizingSession == null && !ShellRuntimeSession.pendingCaptureDay().isEmpty());
     }
 
+    /** Returns the immutable active recording identity without opening or probing any service. */
+    static DenzaTransferDiagnostics.CaptureTarget diagnosticTarget(Context context) {
+        if (context == null || HudPrefs.isUserShutdownActive(context)) return null;
+        synchronized (LogcatRecorder.class) {
+            if (activeSession != null && !activeSession.stopRequested
+                    && !activeSession.finalized && !activeSession.failed) {
+                return new DenzaTransferDiagnostics.CaptureTarget(
+                        activeSession.day, activeSession.captureId, activeSession.directory);
+            }
+            if (finalizingSession != null) return null;
+        }
+        android.content.SharedPreferences saved = ShellRuntimeSession.prefs(context);
+        if (!saved.getBoolean("active", false) || saved.getBoolean("capture_stop", false)) return null;
+        String id = saved.getString("capture_id", "");
+        String day = saved.getString("capture_day", "");
+        String path = saved.getString("capture_directory", "");
+        if (!id.matches("\\d{8}_\\d{6}_\\d{3}") || !day.matches("\\d{8}")
+                || path.isEmpty()) return null;
+        return new DenzaTransferDiagnostics.CaptureTarget(day, id, new File(path));
+    }
+
     /** Pins one concrete capture without restarting an existing recording. */
     static CaptureLease acquireForShanghai(Context context) throws IOException {
         if (!ShellRuntimeSession.pendingCaptureDay().isEmpty()) {
@@ -139,6 +160,7 @@ final class LogcatRecorder {
             return lease.isHealthy() ? Result.recording(lease.manifestFile(), lease.mode())
                     : Result.failed(lease.manifestFile(), "shared capture ended during Shanghai");
         }
+        cancelTransferDiagnostics(lease.session, "logcat_stop");
         Throwable failure = finish == null ? null : await(finish, 90_000L);
         if (failure != null || lease.session.failed) {
             return Result.failed(lease.manifestFile(), failure == null
@@ -278,6 +300,7 @@ final class LogcatRecorder {
             session.streamControl.stop();
             future = ensureFinishLocked(session);
         }
+        cancelTransferDiagnostics(session, "logcat_stop");
         Throwable failure = await(future, 90_000L);
         if (failure instanceof TimeoutException) {
             return Result.pending(session.manifestFile, "finalization still running");
@@ -323,6 +346,11 @@ final class LogcatRecorder {
             addCompletionLocked(session, completion);
             ensureFinishLocked(session);
         }
+        cancelTransferDiagnostics(session, "logcat_stop");
+    }
+
+    private static void cancelTransferDiagnostics(Session session, String reason) {
+        if (session != null) DenzaTransferDiagnostics.cancelCapture(session.captureId, reason);
     }
 
     static String fullLogcatCommandForTest(long cursorMs) {
@@ -541,6 +569,7 @@ final class LogcatRecorder {
     private static synchronized boolean queuePendingStop(Context context, Runnable completion) {
         android.content.SharedPreferences saved = ShellRuntimeSession.prefs(context);
         if (activeSession != null || finalizingSession != null || saved.getString("capture_id", "").isEmpty()) return false;
+        DenzaTransferDiagnostics.cancelCapture(saved.getString("capture_id", ""), "logcat_stop");
         saved.edit().putBoolean("capture_stop", true).commit();
         if (completion != null) pendingStopCompletions.add(completion);
         lastStatus = STATUS_SAVING;
@@ -617,6 +646,9 @@ final class LogcatRecorder {
                         finalizingSession = session;
                         ensureFinishLocked(session);
                     }
+                }
+                if (session.stopRequested) {
+                    cancelTransferDiagnostics(session, "logcat_stop");
                 }
                 publishUiState();
                 AppEventLogger.event(context, "shell_capture reattached id=" + id + " bytes=" + writer.getLong("bytes"));
@@ -1109,6 +1141,7 @@ final class LogcatRecorder {
             session.stopRequested = true;
         }
         session.streamControl.stop();
+        cancelTransferDiagnostics(session, "logcat_failed");
         boolean writerStopped = true;
         if (session.shellOwned && !session.shellWriterMissing) {
             try {

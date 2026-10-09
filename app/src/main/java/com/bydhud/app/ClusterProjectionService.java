@@ -29,6 +29,9 @@ import android.view.View;
 import android.view.WindowManager;
 import android.widget.FrameLayout;
 
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -51,6 +54,7 @@ public final class ClusterProjectionService extends Service
     private static final int VIRTUAL_DENSITY = DashboardProjectionPolicy.VIRTUAL_DENSITY;
     private static final int VIRTUAL_DISPLAY_FLAGS = 320;
     private static final int MAIN_DISPLAY_ID = 0;
+    private static final int UNKNOWN_DISPLAY_ID = -1;
     private static final String ACTION_PROJECT =
             "com.bydhud.app.action.CLUSTER_PROJECT";
     private static final String ACTION_RETURN =
@@ -98,6 +102,8 @@ public final class ClusterProjectionService extends Service
     private int projectionLeft;
     private int projectionTop;
     private boolean projectionGeometryValid = true;
+    private int overlayHostDisplayId = UNKNOWN_DISPLAY_ID;
+    private int virtualDisplayId = UNKNOWN_DISPLAY_ID;
     private boolean projectionPlacementReady;
     private boolean blackWindowVisible;
     private int virtualDisplayGeneration;
@@ -275,6 +281,68 @@ public final class ClusterProjectionService extends Service
         return service == null
                 ? NavAppDisplayState.DISPLAY_UNKNOWN
                 : service.currentProjectedDisplayId(packageName);
+    }
+
+    /** Cached projection fields only; does not inspect a Display, Surface, or system service. */
+    static JSONObject cachedDiagnosticSnapshot() {
+        ClusterProjectionService service = instance;
+        if (service == null) {
+            JSONObject unavailable = new JSONObject();
+            putSafe(unavailable, "status", "unavailable");
+            putSafe(unavailable, "reason", "service_not_initialized");
+            putSafe(unavailable, "owner", "");
+            putSafe(unavailable, "pendingOwner", "");
+            putSafe(unavailable, "generation", -1L);
+            putSafe(unavailable, "ownerToken", 0L);
+            putSafe(unavailable, "overlayHostDisplayId", UNKNOWN_DISPLAY_ID);
+            putSafe(unavailable, "virtualDisplayId", UNKNOWN_DISPLAY_ID);
+            putSafe(unavailable, "displayIdsKnown", false);
+            return unavailable;
+        }
+        synchronized (service.lock) {
+            try {
+                JSONObject geometry = new JSONObject()
+                        .put("width", service.projectionWidth)
+                        .put("height", service.projectionHeight)
+                        .put("bufferWidth", service.projectionBufferWidth)
+                        .put("bufferHeight", service.projectionBufferHeight)
+                        .put("left", service.projectionLeft)
+                        .put("top", service.projectionTop)
+                        .put("valid", service.projectionGeometryValid);
+                return new JSONObject()
+                        .put("status", "cached")
+                        .put("source", "projection_service_memory")
+                        .put("capturedAtElapsedMs", android.os.SystemClock.elapsedRealtime())
+                        .put("coherence", "existing_projection_lock")
+                        .put("owner", service.projectedPackage)
+                        .put("overlayHostDisplayId", service.overlayHostDisplayId)
+                        .put("virtualDisplayId", service.virtualDisplayId)
+                        .put("displayIdsKnown", service.overlayHostDisplayId >= 0
+                                && service.virtualDisplayId >= 0)
+                        .put("pendingOwner", service.pendingPackage)
+                        .put("generation", service.projectionGeneration)
+                        .put("ownerToken", service.projectionOwnerToken)
+                        .put("mode", service.projectionMode)
+                        .put("projectionRequested", service.projectionRequested)
+                        .put("placementReady", service.projectionPlacementReady)
+                        .put("contentVisible", service.projectionContentVisible)
+                        .put("surfaceGeneration", service.surfaceGeneration)
+                        .put("virtualDisplayGeneration", service.virtualDisplayGeneration)
+                        .put("blackWindowDisplayGeneration", service.blackWindowDisplayGeneration)
+                        .put("geometry", geometry)
+                        .put("physicalDisplayConfirmation", "not_recorded");
+            } catch (JSONException error) {
+                JSONObject unavailable = new JSONObject();
+                putSafe(unavailable, "status", "error");
+                putSafe(unavailable, "reason", error.getClass().getSimpleName());
+                return unavailable;
+            }
+        }
+    }
+
+    private static JSONObject putSafe(JSONObject target, String key, Object value) {
+        try { target.put(key, value); } catch (JSONException ignored) { }
+        return target;
     }
 
     //refreshes borrowed surface metadata after PixelCopy stalls without moving the app between displays.
@@ -869,11 +937,12 @@ public final class ClusterProjectionService extends Service
             log("projection failed: no display available");
             return;
         }
+        int targetDisplayId = targetDisplay.getDisplayId();
         Context displayContext = createDisplayContext(targetDisplay);
         WindowManager manager =
                 (WindowManager) displayContext.getSystemService(Context.WINDOW_SERVICE);
         if (manager == null) {
-            log("projection failed: no WindowManager for display=" + targetDisplay.getDisplayId());
+            log("projection failed: no WindowManager for display=" + targetDisplayId);
             return;
         }
         SurfaceView surfaceView = new SurfaceView(displayContext);
@@ -906,6 +975,7 @@ public final class ClusterProjectionService extends Service
             overlayWindowManager = manager;
             overlayRoot = root;
             overlaySurfaceView = surfaceView;
+            overlayHostDisplayId = targetDisplayId;
             projectionContentVisible = false;
             projectionWidth = geometry.width;
             projectionHeight = geometry.height;
@@ -924,15 +994,16 @@ public final class ClusterProjectionService extends Service
                     overlayRoot = null;
                     overlaySurfaceView = null;
                     projectionSurface = null;
+                    overlayHostDisplayId = UNKNOWN_DISPLAY_ID;
                     projectionContentVisible = false;
                 }
             }
-            log("overlay add failed display=" + targetDisplay.getDisplayId()
+            log("overlay add failed display=" + targetDisplayId
                     + " mode=surface_view"
                     + " " + e.getClass().getSimpleName() + " " + safe(e.getMessage()));
             return;
         }
-        log("overlay added mode=surface_view display=" + targetDisplay.getDisplayId()
+        log("overlay added mode=surface_view display=" + targetDisplayId
                 + " name=" + targetDisplay.getName());
     }
 
@@ -996,6 +1067,7 @@ public final class ClusterProjectionService extends Service
                     && expectedPackage.equals(projectedPackage);
             if (accepted) {
                 virtualDisplay = created;
+                virtualDisplayId = displayId;
                 virtualDisplayGeneration++;
                 projectionPlacementReady = true;
             }
@@ -2292,11 +2364,13 @@ public final class ClusterProjectionService extends Service
             blackWindowVisible = false;
             blackWindowDisplayGeneration = 0;
             virtualDisplay = null;
+            virtualDisplayId = UNKNOWN_DISPLAY_ID;
             virtualDisplayGeneration++;
             projectionSurface = null;
             overlaySurfaceView = null;
             overlayRoot = null;
             overlayWindowManager = null;
+            overlayHostDisplayId = UNKNOWN_DISPLAY_ID;
             pendingPackage = "";
             pendingTaskState = null;
             pendingTransferToken = 0L;

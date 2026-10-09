@@ -81,13 +81,15 @@ final class SomeIpTxLog {
         boolean failed = result == null || result != 0 || (error != null && !error.isEmpty());
         if (failed || !sameState(repeatedState, source, channel, topic, kind, result,
                 semantic, retainPayload)) {
+            byte[] exactSnapshot = exact.clone();
+            byte[] semanticSnapshot = semantic == exact ? exactSnapshot : semantic.clone();
             flushRepeated();
             queueSend(day, currentSequence, elapsedMs, wallMs, source, channel, topic,
-                    kind, reason, exact.clone(), semantic.clone(), result, error, durationMs,
+                    kind, reason, exactSnapshot, semanticSnapshot, result, error, durationMs,
                     retainPayload);
             if (!failed) {
                 repeatedState = new RepeatedState(source, channel, topic, kind, result,
-                        semantic.clone(), currentSequence, elapsedMs, wallMs, retainPayload);
+                        semanticSnapshot, currentSequence, elapsedMs, wallMs, retainPayload);
             }
             return;
         }
@@ -192,7 +194,8 @@ final class SomeIpTxLog {
             boolean retainPayload) {
         prepareWriterDay(targetDay);
         String payloadHash = sha256(payload);
-        String semanticHash = sha256(semanticPayload);
+        String semanticHash = payload == semanticPayload
+                ? payloadHash : sha256(semanticPayload);
         if (retainPayload) writerPayloadHashBySequence.put(currentSequence, payloadHash);
         writerSemanticHashBySequence.put(currentSequence, semanticHash);
         boolean includePayload = retainPayload && writerPayloadHashes.add(payloadHash);

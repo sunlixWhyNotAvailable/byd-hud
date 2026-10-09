@@ -1272,7 +1272,8 @@ public final class NavigatorMapCapture {
                     if (!HudPrefs.isDetailedDebugArtifactsEnabled(app)) return;
                     NavigationLogStorage.withReadLock(() -> {
                         File dir = new File(NavigationLogStorage.logsDir(app, day), "map-frames");
-                        String cropName = NavCaptureStore.writeDirectArtifactIfAbsent(dir, "map-hud", croppedPng);
+                        String cropName = NavCaptureStore.writeDirectArtifactFileIfAbsent(
+                                dir, fileName, croppedPng);
                         log(app, "navigator_map_capture artifacts owner=" + field(owner, 96)
                                 + " session=" + frameSession + " id=" + id + " day=" + day
                                 + " hud=" + cropName + " cropHash=" + cropHash
