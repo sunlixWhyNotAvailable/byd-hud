@@ -92,7 +92,7 @@ public final class NavigatorAssetActionPolicyTest {
     @Test
     public void replacementAssetsKeepStableIdentityAndPermitSameVersionUpdates() {
         NavigatorAssetManager.Asset waze = NavigatorAssetManager.findAsset("waze-direct-5.20.0.1");
-        assertEquals("979090937DB76796FA6C1DECD21E86890D660EF87349DBF8963E808C867CF123",
+        assertEquals("D051C76376EF399F0900A3BA48A6D66E91A7D67F70BDE3B1DA50A79A52461E57",
                 waze.sha256);
         assertEquals("5.20.0.1", waze.versionName);
         assertEquals(1030706L, waze.versionCode);
@@ -102,7 +102,7 @@ public final class NavigatorAssetActionPolicyTest {
                 + "navigator-assets-v2/waze-5.20.0.1-direct-v2.apk", waze.url);
         assertEquals("waze-5.20.0.1-direct-v2.apk", waze.fileName);
         assertTrue(NavigatorAssetManager.installIdentityChanged(
-                "B29E876C5F1CD7A15BD50CEEC536D15BF81F9B61CE9D2B5BB8BAE20DCC9F81EE|same-package",
+                "979090937DB76796FA6C1DECD21E86890D660EF87349DBF8963E808C867CF123|same-package",
                 waze.sha256 + "|same-package"));
 
         NavigatorAssetManager.Asset maps = NavigatorAssetManager.findAsset(
