@@ -100,17 +100,8 @@ public final class NavigatorMapPatcherTest {
 
         File outputRoot = Files.createTempDirectory("navigator-map-patcher-test-").toFile();
         try {
-            File assembledHud = new File(workspace,
-                    "byd-hud-production-oss/app/build/outputs/apk/performance/app-performance.apk");
-            File mapsPayload;
-            File wazePayload;
-            if (assembledHud.isFile()) {
-                mapsPayload = extractPayload(assembledHud, new File(outputRoot, "hud-payload.dex"));
-                wazePayload = mapsPayload;
-            } else {
-                mapsPayload = extractPayload(capturedMaps, new File(outputRoot, "maps-payload.dex"));
-                wazePayload = extractPayload(capturedWaze, new File(outputRoot, "waze-payload.dex"));
-            }
+            File mapsPayload = extractPayload(capturedMaps, new File(outputRoot, "maps-payload.dex"));
+            File wazePayload = extractPayload(capturedWaze, new File(outputRoot, "waze-payload.dex"));
             File released = new File(workspace, "direct-apks/release-assets/navigator-assets-v2-update-20261001");
             for (String family : new String[]{"gmaps", "waze"}) {
                 File legacy = new File(released, family.equals("gmaps") ? directMaps.getName() : directWaze.getName());
@@ -148,6 +139,35 @@ public final class NavigatorMapPatcherTest {
         } finally {
             deleteTree(outputRoot.toPath());
         }
+    }
+
+    @Test public void upgradesPublishedWazeAndRejectsLegacyPayload() throws Exception {
+        File workspace = findWorkspaceRoot();
+        Assume.assumeTrue("workspace APK fixtures are unavailable", workspace != null);
+        File r10 = new File(workspace, "direct-apks/release-assets/navigator-assets-v2-update-20261002/waze-5.20.0.1-direct-v2.apk");
+        File current = new File(workspace, "navigator-map-probe/dist/production-consumer/waze-map-capture-hud-consumer.apk");
+        assertTrue(r10.isFile()); assertTrue(current.isFile());
+        File work = Files.createTempDirectory("waze-render-upgrade-test-").toFile();
+        try {
+            File payload = extractPayload(current, new File(work, "payload.dex"));
+            NavigatorMapPatcher.Inspection before = NavigatorMapPatcher.inspect(Collections.singletonList(r10), "waze", WAZE_VERSION);
+            assertEquals(before.reason, NavigatorMapPatcher.PATCHABLE, before.state);
+            File output = new File(work, "upgrade");
+            NavigatorMapPatcher.Inspection upgraded = NavigatorMapPatcher.patch(Collections.singletonList(r10), output,
+                    payload, "waze", WAZE_VERSION);
+            assertEquals(upgraded.reason, NavigatorMapPatcher.PATCHED, upgraded.state);
+            File patched = new File(output, r10.getName());
+            assertOutputRetainsMembersAndNativeLibraries(r10, patched);
+            File copiedDir = new File(work, "idempotent");
+            NavigatorMapPatcher.Inspection copied = NavigatorMapPatcher.patch(Collections.singletonList(patched), copiedDir,
+                    payload, "waze", WAZE_VERSION);
+            assertEquals(copied.reason, NavigatorMapPatcher.PATCHED, copied.state);
+            assertEquals(sha256(Files.newInputStream(patched.toPath())),
+                    sha256(Files.newInputStream(new File(copiedDir, patched.getName()).toPath())));
+            File legacyPayload = extractPayload(r10, new File(work, "old.dex"));
+            assertEquals(NavigatorMapPatcher.UNSUPPORTED, NavigatorMapPatcher.patch(Collections.singletonList(r10),
+                    new File(work, "old"), legacyPayload, "waze", WAZE_VERSION).state);
+        } finally { deleteTree(work.toPath()); }
     }
 
     private static File findWorkspaceRoot() throws Exception {

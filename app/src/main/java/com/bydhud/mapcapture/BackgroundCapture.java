@@ -135,9 +135,24 @@ public final class BackgroundCapture {
         if (waze.get() == view) { waze.clear(); wazeStopped = false; }
         event("waze_view_destroyed", view, "");
     }
+    public static boolean wazeHostDestroyed(Object service) {
+        try {
+            Object host = call(service, "getHostInfo");
+            if (host == null || !"com.bydhud.app".equals(call(host, "getPackageName"))) return false;
+            // The framework service is already destroyed. Losing our host must
+            // not run Waze's separate whole-application shutdown callback.
+            event("waze_host_disconnect_preserved", service, "host=com.bydhud.app");
+            android.util.Log.i("BYDMapCapture", "Waze host disconnected; navigator preserved");
+            return true;
+        } catch (Throwable error) {
+            failure("waze_host_destroyed", error);
+            return false;
+        }
+    }
     // Called AFTER the OEM controller release has acknowledged EGL target destruction.
     public static void wazeReleased(Object view) {
         if (!BYPASS.get() && target != null && target.owner == view) {
+            WazeRenderScheduler.detach();
             Target old = target; target = null; close(old); state = "waze_released";
             event("waze_controller_released", view, "");
         }
@@ -201,11 +216,13 @@ public final class BackgroundCapture {
             t.frameSource = get(t.driver,null,"a");
             call(t.driver, "k"); // Existing synchronous release/ack on Waze's render executor.
             target = t;
+            WazeRenderScheduler.attach(t.driver, executor);
             call(t.callbacks, "b", new Class<?>[]{Surface.class,int.class,int.class,int.class},
                     t.surface, t.width, t.height, t.view.getResources().getDisplayMetrics().densityDpi);
             state = "waze_offscreen"; event("offscreen_attached", view, wazeIdentity(t));
         } catch (Throwable e) {
             failure("waze_attach", e);
+            WazeRenderScheduler.detach();
             try { call(view, "t"); } catch (Throwable cleanup) { failure("waze_attach_cleanup", cleanup); }
             target = null; close(t);
             failed = view; // One failed attempt per session, not an endless creation loop.
@@ -366,12 +383,14 @@ public final class BackgroundCapture {
             t.callbacks = get(t.driver,null,"k"); t.frameSource = get(t.driver,null,"a");
             call(t.driver,"k");
             target = t;
+            WazeRenderScheduler.attach(t.driver, executor);
             call(t.callbacks,"b",new Class<?>[]{Surface.class,int.class,int.class,int.class},
                     t.surface,t.width,t.height,CaptureBridge.densityDpi());
             state = "waze_car_offscreen";
             event("offscreen_attached",owner,wazeIdentity(t)+" presenter="+(t.ownsPresenter ? "created" : "borrowed"));
         } catch (Throwable e) {
             failure("car_attach",e);
+            WazeRenderScheduler.detach();
             try { releaseCar(t,true); } catch (Throwable cleanup) { failure("car_attach_cleanup",cleanup); }
             target=null; close(t); failedCars.put(owner,true);
         } finally { BYPASS.set(false); }
@@ -629,6 +648,7 @@ public final class BackgroundCapture {
 
     private static void release(String reason, boolean restoreVisible) {
         Target t = target; if (t == null) return;
+        if (isWaze(t)) WazeRenderScheduler.detach();
         boolean wasBypass = BYPASS.get(); BYPASS.set(true);
         try {
             if (!isWaze(t)) releaseFollowing(t.owner,reason);

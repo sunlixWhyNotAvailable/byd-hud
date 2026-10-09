@@ -72,6 +72,8 @@ public final class NavigatorMapCapture {
     private static long processingId;
     private static long lastRejectedLogAtElapsedMs;
     private static String lastProducerState = "";
+    private static String lastRenderStatsState = "";
+    private static long lastRenderStatsAt = -1;
 
     private NavigatorMapCapture() {
     }
@@ -175,6 +177,8 @@ public final class NavigatorMapCapture {
             lastPollIntervalMs = -1L;
             processingId = 0L;
             lastProducerState = "";
+            lastRenderStatsState = "";
+            lastRenderStatsAt = -1;
             overrideProfile = null;
             profileEpoch++;
             catalogRevision = -1L;
@@ -281,6 +285,8 @@ public final class NavigatorMapCapture {
             lastPollIntervalMs = -1L;
             processingId = 0L;
             lastProducerState = "";
+            lastRenderStatsState = "";
+            lastRenderStatsAt = -1;
             notify = changed ? onFrameChanged : null;
             onFrameChanged = null;
             cancelExpiryLocked();
@@ -381,12 +387,14 @@ public final class NavigatorMapCapture {
         String timeoutLog = null;
         String cadenceLog = null;
         String producerStateLog = null;
+        String renderStatsLog = null;
         String lifeSession = "";
         boolean acceptLifecycle = false;
         synchronized (LOCK) {
             if (!session.isEmpty()
                     && callerPackage.equals(ownerPackage)
                     && FRAME.isCurrent(ownerPackage, ownerGeneration, session)) {
+                renderStatsLog = renderStatsLocked(data, callerPackage, session, now);
                 answer.putBoolean("active", true);
                 answer.putBoolean("fullSourceMemory", true);
                 answer.putInt("outputMaxEdge", MAX_BITMAP_SIDE);
@@ -454,12 +462,14 @@ public final class NavigatorMapCapture {
                 answer.putBoolean("journalAccepted", true);
                 acceptLifecycle = true;
                 lifeSession = stoppedSession;
+                renderStatsLog = renderStatsLocked(data, callerPackage, stoppedSession, now);
             }
         }
         if (timeoutLog != null) {
             log(app, timeoutLog);
         }
         if (cadenceLog != null) log(app, cadenceLog);
+        if (renderStatsLog != null) log(app, renderStatsLog);
         if (producerStateLog != null) {
             log(app, producerStateLog);
         }
@@ -1318,6 +1328,23 @@ public final class NavigatorMapCapture {
         }
         log(app, "navigator_map_capture uid_rejected uid=" + uid
                 + " package=" + field(callerPackage, 96));
+    }
+
+    // Cumulative counters allow rates/CPU time to be compared without per-frame logging.
+    private static String renderStatsLocked(Bundle data, String owner, String frameSession, long now) {
+        String raw = string(data, "renderStats", "");
+        if (raw.isEmpty() || raw.length() > 2048) return null;
+        try {
+            JSONObject stats = new JSONObject(raw);
+            String state = owner + frameSession + stats.optString("id") + stats.optBoolean("active")
+                    + stats.optLong("intervalMs") + stats.optString("error");
+            if (state.equals(lastRenderStatsState) && lastRenderStatsAt >= 0 && now - lastRenderStatsAt < 5000) return null;
+            lastRenderStatsState = state;
+            lastRenderStatsAt = now;
+            return "navigator_map_capture render_stats owner=" + field(owner, 96)
+                    + " session=" + field(frameSession, 96) + " draws=" + longValue(data, "draws", 0)
+                    + " stats=" + stats;
+        } catch (JSONException error) { return null; }
     }
 
     private static void logLifecycleEvents(

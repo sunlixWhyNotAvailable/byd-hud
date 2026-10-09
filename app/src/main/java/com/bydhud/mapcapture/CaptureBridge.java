@@ -71,7 +71,7 @@ public final class CaptureBridge {
             Bundle hello = new Bundle();
             hello.putString("package", app.getPackageName());
             hello.putString("build", app.getPackageName().equals("com.waze")
-                    ? "map-probe-r9-policy-bulk-hud-consumer-v1" : "map-probe-r12-policy-watchdog-hud-consumer-v1");
+                    ? "map-probe-r11-render-demand-hud-consumer-v1" : "map-probe-r12-policy-watchdog-hud-consumer-v1");
             hello.putBoolean("fullSourceMemory", true);
             hello.putLong("captureProtocol", 2L);
             hello.putString("captureCapabilities", CapturePollPolicy.CAPABILITIES);
@@ -85,6 +85,7 @@ public final class CaptureBridge {
             hello.putString("producerError", lastError);
             hello.putString("captureSession",session);
             hello.putAll(BackgroundCapture.metadata());
+            WazeRenderScheduler.metadata(hello);
             Bundle request = app.getContentResolver().call(ENDPOINT, "poll", null, hello);
             if (request == null) throw new IllegalStateException("empty_collector_reply");
             lastError = "";
@@ -96,6 +97,8 @@ public final class CaptureBridge {
             fullSource = active && request.getBoolean("fullSourceMemory", false);
             outputEdge = CapturePollPolicy.outputEdge(request == null ? 0 : request.getInt("outputMaxEdge"), fullSource);
             leaseMs = CapturePollPolicy.bounded(request == null ? 0 : request.getLong("leaseMs"), 6000, 1000, 30000);
+            if (app.getPackageName().equals("com.waze")) WazeRenderScheduler.policy(active,
+                    request == null ? 1000 : request.getLong("pollIntervalMs", 1000), leaseMs);
             BackgroundCapture.lease(active);
             if (active || (request!=null && request.getBoolean("journalAccepted"))) BackgroundCapture.acknowledged(hello.getLong("lifecycleSequence"));
             if (request == null || !request.getBoolean("active")) {
@@ -104,6 +107,7 @@ public final class CaptureBridge {
                 request.putLong("producerRequestNs", SystemClock.elapsedRealtimeNanos());
                 if (app.getPackageName().equals("com.waze")) {
                     setWaze(request);
+                    WazeRenderScheduler.request();
                     worker.postDelayed(() -> {
                         if (takeWaze(request)) finish(request, null, "no_gl_frame", "waze", 0, 0);
                     }, CapturePollPolicy.bounded(request.getLong("frameTimeoutMs"), 2500, 100, 30000));
@@ -173,6 +177,7 @@ public final class CaptureBridge {
     public static void wazeFrame(Object renderer) {
         draws++;
         BackgroundCapture.wazeFrame(renderer);
+        WazeRenderScheduler.frame(renderer);
         Bundle request = takeWaze();
         if (request == null) return;
         try {
@@ -216,6 +221,7 @@ public final class CaptureBridge {
                 GLES20.glBindFramebuffer(target, old[0]);
             }
             request.putLong("callbackNs", SystemClock.elapsedRealtimeNanos());
+            WazeRenderScheduler.readback(renderer, request.getLong("callbackNs") - request.getLong("captureStartNs"));
             request.putInt("previousGlError", previousError);
             request.putString("glVersion", version);
             worker.post(() -> {
@@ -235,6 +241,10 @@ public final class CaptureBridge {
 
     private static void setWaze(Bundle request) {
         synchronized (WAZE_LOCK) { wazeRequest = request; }
+    }
+
+    static boolean hasWazeRequest() {
+        synchronized (WAZE_LOCK) { return wazeRequest != null; }
     }
 
     private static Bundle takeWaze() {

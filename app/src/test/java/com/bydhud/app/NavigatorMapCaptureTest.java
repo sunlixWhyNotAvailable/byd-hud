@@ -60,6 +60,29 @@ public final class NavigatorMapCaptureTest {
 
     private Context context;
 
+    @Test public void rendererSummaryIsBoundedAndLogsTransitionsImmediately() {
+        Bundle data = new Bundle();
+        data.putString("renderStats", "{\"id\":\"target1\",\"active\":true,\"intervalMs\":200,\"frames\":1}");
+        assertNotNull(renderSummary(data, 0));
+        data.putString("renderStats", "{\"id\":\"target1\",\"active\":true,\"intervalMs\":200,\"frames\":2}");
+        assertNull(renderSummary(data, 200));
+        assertNotNull(renderSummary(data, 5000));
+        data.putString("renderStats", "{\"id\":\"target1\",\"active\":false,\"intervalMs\":200}");
+        assertNotNull(renderSummary(data, 5001));
+        data.putString("renderStats", "invalid");
+        assertNull(renderSummary(data, 10000));
+        data.putString("renderStats", new String(new char[2049]));
+        assertNull(renderSummary(data, 10000));
+    }
+
+    private String renderSummary(Bundle data, long now) {
+        return ReflectionHelpers.callStaticMethod(NavigatorMapCapture.class, "renderStatsLocked",
+                ReflectionHelpers.ClassParameter.from(Bundle.class, data),
+                ReflectionHelpers.ClassParameter.from(String.class, NavigatorMapCapture.WAZE_PACKAGE),
+                ReflectionHelpers.ClassParameter.from(String.class, "test-session"),
+                ReflectionHelpers.ClassParameter.from(long.class, now));
+    }
+
     @Before
     public void setUp() {
         context = RuntimeEnvironment.getApplication();

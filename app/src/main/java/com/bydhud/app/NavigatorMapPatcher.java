@@ -67,7 +67,7 @@ import java.util.zip.ZipFile;
 
 /**
  * On-device port of navigator-map-probe/tools/PatchCapture.java.
- * The source DEX and payload contracts are verified against Maps r11 and Waze r8.
+ * Waze scheduling hooks are shared with the offline asset recipe.
  */
 public final class NavigatorMapPatcher {
     public static final String PATCHABLE = "PATCHABLE";
@@ -75,7 +75,7 @@ public final class NavigatorMapPatcher {
     public static final String UNSUPPORTED = "UNSUPPORTED";
     public static final String FAILED = "FAILED";
     public static final String PAYLOAD_PREFIX = "Lcom/bydhud/mapcapture/";
-    public static final String REVISION = "navigator-map-capture-r1";
+    public static final String REVISION = "navigator-map-capture-r2";
 
     private static final String BRIDGE = "Lcom/bydhud/mapcapture/CaptureBridge;";
     private static final String BACKGROUND = "Lcom/bydhud/mapcapture/BackgroundCapture;";
@@ -86,7 +86,7 @@ public final class NavigatorMapPatcher {
     private static final Set<String> PAYLOAD_ROOTS = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList("CaptureBridge", "BackgroundCapture", "CaptureLease",
                     "CapturePollPolicy", "CarCapturePolicy", "MapsFollowing",
-                    "MapsNavigationCamera", "PixelMath")));
+                    "MapsNavigationCamera", "PixelMath", "WazeRenderScheduler", "WazeRenderPolicy")));
     private static final Set<String> REQUIRED_PAYLOAD_CLASSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(BRIDGE, BACKGROUND,
                     "Lcom/bydhud/mapcapture/CaptureLease;",
@@ -171,6 +171,7 @@ public final class NavigatorMapPatcher {
         int payloadClassCount;
         int maxPayloadMethods;
         PayloadInfo payload;
+        boolean scheduled;
     }
 
     private static final class PatchPlan {
@@ -225,17 +226,35 @@ public final class NavigatorMapPatcher {
             Analysis source = analyze(sourceApks, family);
             PayloadInfo suppliedPayload = inspectPayloadFile(payloadDex);
             verifyPayload(suppliedPayload, family);
+            if ("waze".equals(family) && !currentPayload(suppliedPayload, family))
+                throw new UnsupportedPatchException("Waze scheduling requires current payload");
             if (source.payload != null) {
-                // Verified legacy hooks stay in place; replace only their standalone payload DEX.
+                // Preserve verified hooks and add only the missing scheduling/host extension.
                 verifyCaptured(source, family);
-                if (!currentPayload(suppliedPayload)) throw new UnsupportedPatchException("capture upgrade requires current capabilities");
+                if (!currentPayload(suppliedPayload, family)) throw new UnsupportedPatchException("capture upgrade requires current capabilities");
                 if (!outputDir.isDirectory() && !outputDir.mkdirs()) throw new IOException("cannot create candidate directory");
                 DexUnit previous = source.payloadDex.get(0);
-                for (File apk : sourceApks) {
-                    File output = new File(outputDir, apk.getName());
-                    if (apk.getCanonicalFile().equals(previous.apk.getCanonicalFile())) {
-                        repack(apk, output, Collections.singletonMap(previous.name, payloadDex), Collections.emptyMap());
-                    } else Files.copy(apk.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                File staging = new File(outputDir, ".map-upgrade-" + UUID.randomUUID());
+                if (!staging.mkdir()) throw new IOException("cannot create capture upgrade staging");
+                try {
+                    Map<File, Map<String, File>> changes = new HashMap<>();
+                    changes.computeIfAbsent(previous.apk.getCanonicalFile(), ignored -> new HashMap<>())
+                            .put(previous.name, payloadDex);
+                    if ("waze".equals(family)) for (DexUnit unit : source.targetDex) {
+                        DexFile changed = renderExtension(unit.dex);
+                        verifyDexMethodLimit(unit.dex, changed);
+                        File out = new File(staging, unit.name);
+                        DexPool.writeTo(out.getAbsolutePath(), changed);
+                        changes.computeIfAbsent(unit.apk.getCanonicalFile(), ignored -> new HashMap<>()).put(unit.name, out);
+                    }
+                    for (File apk : sourceApks) {
+                        File output = new File(outputDir, apk.getName());
+                        Map<String, File> replacements = changes.get(apk.getCanonicalFile());
+                        if (replacements != null) repack(apk, output, replacements, Collections.emptyMap());
+                        else Files.copy(apk.toPath(), output.toPath(), StandardCopyOption.REPLACE_EXISTING);
+                    }
+                } finally {
+                    deleteTree(staging);
                 }
                 Inspection upgraded = inspectInternal(outputMembers(sourceApks, outputDir), family, version);
                 return PATCHED.equals(upgraded.state) ? upgraded : result(FAILED, "capture upgrade failed: " + upgraded.reason);
@@ -260,7 +279,7 @@ public final class NavigatorMapPatcher {
                     DexUnit unit = targetDexIterator.next();
                     PatchPlan one = new PatchPlan(family);
                     DexFile changed = rewrite(unit.dex, one);
-                    verifyDexMethodLimit(unit.dex, one.calls);
+                    verifyDexMethodLimit(unit.dex, changed);
                     merge(total.anchorCounts, one.anchorCounts);
                     merge(total.calls, one.calls);
 
@@ -344,8 +363,8 @@ public final class NavigatorMapPatcher {
                 PatchPlan total = new PatchPlan(family);
                 for (DexUnit unit : analysis.targetDex) {
                     PatchPlan one = new PatchPlan(family);
-                    rewrite(unit.dex, one);
-                    verifyDexMethodLimit(unit.dex, one.calls);
+                    DexFile changed = rewrite(unit.dex, one);
+                    verifyDexMethodLimit(unit.dex, changed);
                     merge(total.anchorCounts, one.anchorCounts);
                     merge(total.calls, one.calls);
                 }
@@ -365,16 +384,17 @@ public final class NavigatorMapPatcher {
 
         try {
             verifyCaptured(analysis, family);
-            return currentPayload(analysis.payload)
+            return currentPayload(analysis.payload, family) && (!"waze".equals(family) || analysis.scheduled)
                     ? result(PATCHED, "complete " + family + " map-capture payload and hooks verified")
-                    : result(PATCHABLE, "verified legacy capture payload; policy/bulk upgrade available");
+                    : result(PATCHABLE, "verified legacy capture; producer upgrade available");
         } catch (UnsupportedPatchException error) {
             return result(UNSUPPORTED, message(error));
         }
     }
 
-    private static boolean currentPayload(PayloadInfo payload) {
-        return payload != null && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease");
+    private static boolean currentPayload(PayloadInfo payload, String family) {
+        return payload != null && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease")
+                && (!"waze".equals(family) || payload.bridgeStrings.contains("map-probe-r11-render-demand-hud-consumer-v1"));
     }
 
     private static Analysis analyze(List<File> apks, String family) throws IOException {
@@ -467,6 +487,7 @@ public final class NavigatorMapPatcher {
                     if (!(reference instanceof MethodReference)) continue;
                     MethodReference called = (MethodReference) reference;
                     if (!called.getDefiningClass().startsWith(PAYLOAD_PREFIX)) continue;
+                    if ("waze".equals(family) && WazeRenderPatch.extension(called)) continue;
                     analysis.hasAnyPayloadReference = true;
                     if (!allowed.contains(method.getDefiningClass())) {
                         analysis.unexpectedPayloadCallOwner = true;
@@ -512,6 +533,23 @@ public final class NavigatorMapPatcher {
         verifyHookPlacement(analysis, family);
         if (analysis.payload == null) throw new UnsupportedPatchException("map-capture payload DEX is missing");
         verifyPayload(analysis.payload, family);
+        if ("waze".equals(family)) {
+            List<Method> methods = new ArrayList<>();
+            for (DexUnit unit : analysis.targetDex) for (ClassDef cls : unit.dex.getClasses())
+                cls.getMethods().forEach(methods::add);
+            try { analysis.scheduled = WazeRenderPatch.verifySet(methods); }
+            catch (RuntimeException error) { throw new UnsupportedPatchException("invalid Waze extension: " + message(error)); }
+            for (Method method : methods) {
+                if (method.getImplementation() == null) continue;
+                for (Instruction op : method.getImplementation().getInstructions())
+                    if (op instanceof ReferenceInstruction && ((ReferenceInstruction)op).getReference() instanceof MethodReference) {
+                        MethodReference ref = (MethodReference)((ReferenceInstruction)op).getReference();
+                        if (WazeRenderPatch.extension(ref)) requireStaticImplemented(analysis.payload, key(ref));
+                    }
+            }
+            if (currentPayload(analysis.payload, family) && !analysis.scheduled)
+                throw new UnsupportedPatchException("scheduling payload lacks its complete hook set");
+        }
         for (DexUnit unit : analysis.dexUnits) {
             if (unit.dex.getMethodSection().size() > MAX_METHOD_IDS) {
                 throw new UnsupportedPatchException("DEX method reference limit exceeded: " + unit.name);
@@ -918,7 +956,7 @@ public final class NavigatorMapPatcher {
             requiredClasses.remove("Lcom/bydhud/mapcapture/MapsNavigationCamera;");
         }
         if (!payload.classes.containsAll(requiredClasses)
-                || payload.classes.size() < 30 || payload.classes.size() > 48
+                || payload.classes.size() < 30 || payload.classes.size() > 56
                 || payload.implementedMethods < 80 || payload.instructionCount < 2500) {
             Set<String> missing = new HashSet<>(requiredClasses);
             missing.removeAll(payload.classes);
@@ -968,6 +1006,18 @@ public final class NavigatorMapPatcher {
         }
         for (String reference : expectedHookRefs(family).keySet()) {
             requireStaticImplemented(payload, reference);
+        }
+        if ("waze".equals(family) && currentPayload(payload, family)) {
+            for (String type : Arrays.asList("WazeRenderScheduler", "WazeRenderPolicy"))
+                if (!payload.classes.contains(PAYLOAD_PREFIX + type + ";"))
+                    throw new UnsupportedPatchException("scheduling payload missing " + type);
+            for (String name : Arrays.asList("allow", "begin", "end", "surfaceQueued", "callbackQueued", "threadStopping"))
+                requireStaticImplemented(payload, methodKey(WazeRenderPatch.OWNER, name,
+                        Collections.singletonList("Ljava/lang/Object;"), name.equals("allow") ? "Z" : "V"));
+            requireStaticImplemented(payload, methodKey(WazeRenderPatch.OWNER, "await",
+                    Arrays.asList("Ljava/lang/Object;", "Ljava/lang/Object;"), "V"));
+            requireStaticImplemented(payload, methodKey(BACKGROUND, "wazeHostDestroyed",
+                    Collections.singletonList("Ljava/lang/Object;"), "Z"));
         }
     }
 
@@ -1190,6 +1240,7 @@ public final class NavigatorMapPatcher {
         if ("gmaps".equals(family)) {
             result.add("Lbpey;");
         } else {
+            result.addAll(WazeRenderPatch.owners());
             result.add("Lcom/waze/mobile/WazeMobileApplication;");
             result.add("Lcom/waze/map/opengl/w;");
             result.add("Lcom/waze/map/NativeCanvasRenderer;");
@@ -1248,6 +1299,7 @@ public final class NavigatorMapPatcher {
         for (ClassDef classDef : dex.getClasses()) {
             for (Method method : classDef.getMethods()) {
                 Method changed = patchMethod(method, plan);
+                if ("waze".equals(plan.profile)) changed = WazeRenderPatch.patch(changed);
                 if (changed != method) {
                     changedMethods.put(key(method), changed);
                     matchingMethods++;
@@ -1264,6 +1316,14 @@ public final class NavigatorMapPatcher {
             }
         });
         return rewriter.getDexFileRewriter().rewrite(dex);
+    }
+
+    private static DexFile renderExtension(DexFile dex) {
+        return new DexRewriter(new RewriterModule() {
+            @Override public Rewriter<Method> getMethodRewriter(Rewriters rewriters) {
+                return WazeRenderPatch::patch;
+            }
+        }).getDexFileRewriter().rewrite(dex);
     }
 
     private static boolean hasTargetClass(DexBackedDexFile dex, String family) {
@@ -1554,16 +1614,17 @@ public final class NavigatorMapPatcher {
     }
 
     private static void verifyDexMethodLimit(DexBackedDexFile original,
-            Map<String, Integer> insertedCalls) throws UnsupportedPatchException {
-        Set<String> existing = new HashSet<>();
-        for (int index = 0; index < original.getMethodSection().size(); index++) {
-            existing.add(key(original.getMethodSection().get(index)));
+            DexFile changed) throws UnsupportedPatchException {
+        Set<String> references = new HashSet<>();
+        for (int i = 0; i < original.getMethodSection().size(); i++) references.add(key(original.getMethodSection().get(i)));
+        for (ClassDef cls : changed.getClasses()) for (Method method : cls.getMethods()) {
+            if (method.getImplementation() == null) continue;
+            for (Instruction op : method.getImplementation().getInstructions())
+                if (op instanceof ReferenceInstruction && ((ReferenceInstruction)op).getReference() instanceof MethodReference)
+                    references.add(key((MethodReference)((ReferenceInstruction)op).getReference()));
         }
-        int newIds = 0;
-        for (String call : insertedCalls.keySet()) if (!existing.contains(call)) newIds++;
-        if (original.getMethodSection().size() + newIds > MAX_METHOD_IDS) {
+        if (references.size() > MAX_METHOD_IDS)
             throw new UnsupportedPatchException("DEX method reference ceiling would be exceeded");
-        }
     }
 
     private static void repack(File input, File output, Map<String, File> replacements,
