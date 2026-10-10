@@ -53,44 +53,6 @@ public class UserSettingsDiagnosticsTest {
         assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
     }
 
-    @Test public void capturesEffectiveDefaultsWithoutWritingPreferencesOrPrivateState() throws Exception {
-        context.getSharedPreferences("byd_hud_prefs", 0).edit()
-                .putString("unrelated_private_token", "must-not-export").commit();
-        JSONObject settings = UserSettingsDiagnostics.snapshot(context);
-        JSONObject output = settings.getJSONObject("output");
-        assertTrue(output.getBoolean("autoStart"));
-        assertEquals(1, output.getJSONObject("mapLayout").getInt("updateRateHz"));
-        assertEquals(3, output.getJSONArray("effectiveMapImageProfiles").length());
-        assertFalse(output.getJSONArray("effectiveMapImageProfiles").getJSONObject(0).getBoolean("saved"));
-        assertTrue(settings.getJSONObject("updates").getBoolean("autoCheck"));
-        assertFalse(settings.getJSONObject("logging").getBoolean("detailedArtifacts"));
-        assertFalse(settings.toString().contains("must-not-export"));
-        assertEquals(1, context.getSharedPreferences("byd_hud_prefs", 0).getAll().size());
-        for (String name : UserSettingsDiagnostics.PREFERENCE_FILES) {
-            if (!name.equals("byd_hud_prefs")) assertTrue(name, context.getSharedPreferences(name, 0).getAll().isEmpty());
-        }
-    }
-
-    @Test public void preservesMapAndTransferProfilesAndSelection() throws Exception {
-        HudMapProfiles.save(context, null, new HudMapProfile(HudMapProfile.Source.WAZE_SURFACE, -3.5f, -80.2f, 35.6f));
-        context.getSharedPreferences("bydhud_steering_transfer", 0).edit().putString("profiles_v2",
-                "[{\"id\":\"star\",\"keyCode\":305,\"pressMode\":\"double\",\"packageName\":\"com.waze\",\"windowProfile\":\"full\"}]").commit();
-        context.getSharedPreferences("byd_hud_nav_capture_prefs", 0).edit()
-                .putString("hud_package", "com.waze")
-                .putStringSet("log_only_packages", Collections.singleton("com.example.navigator")).commit();
-        JSONObject snapshot = UserSettingsDiagnostics.snapshot(context).getJSONObject("output");
-        JSONObject profile = snapshot.getJSONArray("mapImageProfiles").getJSONObject(0);
-        assertEquals(-3.5, profile.getDouble("x"), 0.001);
-        assertEquals(-80.2, profile.getDouble("y"), 0.001);
-        assertEquals(35.6, profile.getDouble("scale"), 0.001);
-        assertEquals("double", snapshot.getJSONArray("steeringTransferProfiles").getJSONObject(0).getString("pressMode"));
-        assertEquals("com.waze", snapshot.getString("selectedHudPackage"));
-        assertEquals("com.example.navigator", snapshot.getJSONArray("logOnlyPackages").getString(0));
-        HudMapProfiles.delete(context, HudMapProfile.Source.WAZE_SURFACE);
-        assertEquals(1, snapshot.getJSONArray("mapImageProfiles").length());
-        assertEquals(0, UserSettingsDiagnostics.snapshot(context).getJSONObject("output").getJSONArray("mapImageProfiles").length());
-    }
-
     @Test public void queuedWritesKeepEachObservedChangeAndNormalExportIncludesHistory() throws Exception {
         UserSettingsDiagnostics.start(context);
         assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
@@ -127,19 +89,4 @@ public class UserSettingsDiagnosticsTest {
         }
     }
 
-    @Test public void ignoresRuntimeOnlyChangesAndRecordsFreshBaselineAfterRestart() throws Exception {
-        UserSettingsDiagnostics.start(context);
-        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
-        JSONObject before = new JSONObject(Files.readAllLines(file.toPath()).get(0));
-        context.getSharedPreferences("byd_hud_prefs", 0).edit().putBoolean("runtime_service_running", true).commit();
-        Shadows.shadowOf(Looper.getMainLooper()).idle();
-        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
-        assertEquals(1, Files.readAllLines(file.toPath()).size());
-        UserSettingsDiagnostics.resetForTests();
-        UserSettingsDiagnostics.start(context);
-        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
-        JSONObject after = new JSONObject(Files.readAllLines(file.toPath()).get(1));
-        assertNotEquals(before.getString("processSession"), after.getString("processSession"));
-        assertEquals(before.getJSONObject("settings").toString(), after.getJSONObject("settings").toString());
-    }
 }

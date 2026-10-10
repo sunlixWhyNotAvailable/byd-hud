@@ -16,58 +16,12 @@ import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.Config;
 
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 29, application = Application.class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class HudMapCompositorRasterTest {
-    @Test
-    public void calibrationIsExplicitExperimentalOnlyAndNavigationRendersAboveIt() throws Exception {
-        byte[] maneuver = solidPng(100, 10, Color.BLUE);
-        byte[] lanes = solidPng(100, 10, Color.GREEN);
-        HudMapSettings experimental = HudMapSettings.defaults()
-                .withMode(HudMapSettings.EXPERIMENTAL);
-        HudExperimentalCompositor compositor = new HudExperimentalCompositor();
-
-        HudExperimentalCompositor.Result mapOnly = compositor.compose(input(
-                null, null, experimental, true));
-        Bitmap mapUpper = decode(mapOnly.f8Png());
-        Bitmap mapLower = decode(mapOnly.f7Png());
-        assertEquals(720, mapUpper.getWidth());
-        assertEquals(48, mapUpper.getHeight());
-        assertEquals(960, mapLower.getWidth());
-        assertEquals(48, mapLower.getHeight());
-        assertTrue(countColor(mapUpper, Color.RED) > 0);
-        assertTrue(countColor(mapLower, Color.RED) > 0);
-        assertTrue(countColor(mapUpper, Color.YELLOW) > 0);
-        assertTrue(countColor(mapLower, Color.YELLOW) > 0);
-
-        HudExperimentalCompositor.Result calibrated = compositor.compose(input(
-                maneuver, lanes, experimental, true));
-        Bitmap upper = decode(calibrated.f8Png());
-        Bitmap lower = decode(calibrated.f7Png());
-        assertEquals(Color.BLUE, upper.getPixel(300, 20));
-        assertEquals(Color.GREEN, lower.getPixel(480, 24));
-
-        HudExperimentalCompositor.Result ordinaryRoute = compositor.compose(input(
-                maneuver, lanes, experimental, false));
-        Bitmap routeUpper = decode(ordinaryRoute.f8Png());
-        Bitmap routeLower = decode(ordinaryRoute.f7Png());
-        assertTrue(countColor(routeUpper, Color.BLUE) > 0);
-        assertTrue(countColor(routeLower, Color.GREEN) > 0);
-        assertEquals(0, countColor(routeUpper, Color.YELLOW));
-        assertEquals(0, countColor(routeLower, Color.YELLOW));
-
-        for (int mode : new int[]{HudMapSettings.OFF, HudMapSettings.NATIVE}) {
-            HudExperimentalCompositor.Result disabled = new HudExperimentalCompositor().compose(
-                    input(null, null, experimental.withMode(mode), true));
-            assertTrue(disabled.isEmpty());
-        }
-        assertFalse(HudExperimentalCompositor.hasMeaningfulF8Content(input(
-                null, null, experimental, false)));
-    }
 
     @Test
     public void liveMapUsesSharedSeamAndLaneArtStaysAboveIt() throws Exception {

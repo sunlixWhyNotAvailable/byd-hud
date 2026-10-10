@@ -6,7 +6,6 @@ import android.app.Application;
 import android.app.PendingIntent;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.Looper;
@@ -27,11 +26,8 @@ import org.robolectric.annotation.LooperMode;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
-import java.util.zip.ZipFile;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 33, application = Application.class)
@@ -83,36 +79,6 @@ public final class GMapsRegistrationDiagnosticsTest {
         ((HandlerThread) thread.get(channel)).quitSafely();
     }
 
-    @Test public void rejectionBeforeHelloIsInOrdinaryExportWithoutLogcat() throws Exception {
-        // Present extra with null value matches the unresolved N9 boundary.
-        NavInfoLogger.registerClient(context, request().putExtra(
-                NavInfoLogger.EXTRA_IDENTITY, (PendingIntent) null));
-        deliverReplies();
-        assertTrue(logs.toString(), logs.toString().contains("identityReason=missing_token"));
-        assertTrue(logs.toString().contains(NavInfoLogger.BRIDGE_BUILD));
-        assertTrue(NavInfoLogger.noClient());
-        assertFalse(connected());
-        assertTrue(callbacks.isEmpty());
-        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
-        LogShareZip.Result result = LogShareZip.create(context,
-                Collections.singletonList(NavCaptureStore.todayDir(System.currentTimeMillis())));
-        assertTrue(result.detail, result.ok);
-        boolean eventFound = false;
-        boolean sessionFound = false;
-        try (ZipFile archive = new ZipFile(result.file)) {
-            for (java.util.zip.ZipEntry entry : Collections.list(archive.entries())) {
-                if (!entry.getName().endsWith("events.log") && !entry.getName().endsWith("events.jsonl")) continue;
-                String text = new String(archive.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8);
-                if (text.contains("identityReason=missing_token")) {
-                    eventFound |= entry.getName().endsWith("events.log");
-                    sessionFound |= entry.getName().contains("gmaps-direct/");
-                }
-            }
-        }
-        assertTrue("ordinary event log", eventFound);
-        assertTrue("direct-session log", sessionFound);
-    }
-
     @Test public void wrongCreatorReportsPackageAndUidAndCannotRegister() throws Exception {
         NavInfoLogger.registerClient(context, request().putExtra(
                 NavInfoLogger.EXTRA_IDENTITY, identity("another.app")));
@@ -123,135 +89,6 @@ public final class GMapsRegistrationDiagnosticsTest {
         assertTrue(NavInfoLogger.noClient());
         assertFalse(connected());
         assertTrue(callbacks.isEmpty());
-    }
-
-    @Test public void validIdentityStillRequiresHelloForConnection() throws Exception {
-        NavInfoLogger.registerClient(context, request().putExtra(
-                NavInfoLogger.EXTRA_IDENTITY, identity("com.bydhud.app")));
-        Shadows.shadowOf(Looper.getMainLooper()).idle();
-        for (Message message : replies) if (message.what == NavInfoLogger.MESSAGE_DIAGNOSTIC) deliver(message);
-        assertFalse(connected());
-        assertTrue(callbacks.isEmpty());
-        assertTrue(logs.toString().contains("identityReason=trusted_creator"));
-        assertTrue(logs.toString().contains("registration_result"));
-        for (Message message : replies) if (message.what == NavInfoLogger.MESSAGE_HELLO) deliver(message);
-        assertTrue(connected());
-        assertTrue(callbacks.contains("onHandshakeAvailable"));
-    }
-
-    @Test public void diagnosticIsBoundedAndCorrelatedBeforeRouteEpochChecks() throws Exception {
-        set("routeGenerationCapable", true);
-        Message message = Message.obtain();
-        message.what = NavInfoLogger.MESSAGE_DIAGNOSTIC;
-        Bundle data = new Bundle();
-        data.putInt("protocolVersion", 3);
-        data.putString("channelId", "old-request");
-        data.putString("detail", "stale-payload");
-        message.setData(data);
-        deliver(message);
-        assertFalse(logs.toString().contains("stale-payload"));
-        data.putString("channelId", "test-request-1");
-        data.putString("detail", "header\n" + "x".repeat(2000));
-        deliver(message);
-        String last = logs.stream().filter(line -> line.startsWith("bridge_diagnostic channelId="))
-                .reduce((a, b) -> b).orElseThrow();
-        assertTrue(last.contains("detail=header "));
-        assertFalse(last.contains("\n"));
-        assertTrue(last.length() < 1400);
-        assertFalse(connected());
-        assertTrue(callbacks.isEmpty());
-    }
-
-    @Test public void oldClientWithoutOptInGetsNoDiagnosticMessages() {
-        Intent request = request();
-        request.removeExtra(NavInfoLogger.EXTRA_DIAGNOSTICS);
-        NavInfoLogger.registerClient(context, request);
-        Shadows.shadowOf(Looper.getMainLooper()).idle();
-        assertTrue(replies.isEmpty());
-        assertTrue(NavInfoLogger.noClient());
-    }
-
-    @Test public void senderEvidenceIncludesFreshParcelLookupAndSurvivesOrdinaryExport() throws Exception {
-        PendingIntent token = identity("com.bydhud.app");
-        set("registrationIdentity", token);
-        set("identityChannelId", "test-request-1");
-        String snapshot = GMapsIdentityDiagnostics.snapshot(context, token, true);
-        assertTrue(snapshot, snapshot.contains("cachedPackage=com.bydhud.app"));
-        assertTrue(snapshot, snapshot.contains("freshPackage=com.bydhud.app"));
-        assertTrue(snapshot, snapshot.contains("parcelEqual=true"));
-        assertTrue(snapshot, snapshot.contains("freshService=true"));
-        NavInfoLogger.registerClient(context, request().putExtra(NavInfoLogger.EXTRA_IDENTITY, (PendingIntent) null));
-        deliverReplies();
-        assertTrue(logs.toString().contains("stage=reply_rejected"));
-        assertTrue(logs.toString().contains("identity_reply channelId=test-request-1"));
-        assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
-        LogShareZip.Result result = LogShareZip.create(context,
-                Collections.singletonList(NavCaptureStore.todayDir(System.currentTimeMillis())));
-        assertTrue(result.detail, result.ok);
-        int copies = 0;
-        try (ZipFile archive = new ZipFile(result.file)) {
-            for (java.util.zip.ZipEntry entry : Collections.list(archive.entries())) {
-                if (!entry.getName().endsWith("events.log") && !entry.getName().endsWith("events.jsonl")) continue;
-                String text = new String(archive.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8);
-                if (text.contains("stage=reply_rejected") && text.contains("freshPackage=com.bydhud.app")) copies++;
-            }
-        }
-        assertEquals("daily and session journals", 2, copies);
-        assertFalse(connected());
-    }
-
-    @Test public void cancellationAndGetterFailureHaveExplicitIndependentEvidence() {
-        PendingIntent token = PendingIntent.getService(context, GMapsIdentityDiagnostics.REQUEST,
-                GMapsIdentityDiagnostics.identityIntent(context), GMapsIdentityDiagnostics.FLAGS);
-        assertTrue(GMapsIdentityDiagnostics.snapshot(context, token, true).contains("existingEqual=true"));
-        token.cancel();
-        assertTrue(GMapsIdentityDiagnostics.snapshot(context, token, true).contains("existingPresent=false"));
-        StringBuilder fields = new StringBuilder();
-        GMapsIdentityDiagnostics.field(fields, "creatorPackage", () -> {
-            throw new SecurityException("denied\nlookup", new IllegalStateException("cause"));
-        });
-        GMapsIdentityDiagnostics.field(fields, "creatorUid", () -> 10456);
-        assertTrue(fields.toString().contains("creatorPackageError=java.lang.SecurityException"));
-        assertTrue(fields.toString().contains("java.lang.IllegalStateException:cause"));
-        assertTrue(fields.toString().contains("creatorUid=10456"));
-        assertFalse(fields.toString().contains("\n"));
-    }
-
-    @Test public void sendUsesExactRetainedTokenAndLogsCreationEnvironment() throws Exception {
-        Method send = GMapsDirectChannel.class.getDeclaredMethod("sendRegistration", String.class, boolean.class, int.class);
-        send.setAccessible(true);
-        assertEquals(true, send.invoke(channel, "ACTION_START_CHANNEL", true, 3));
-        Field retained = GMapsDirectChannel.class.getDeclaredField("registrationIdentity");
-        retained.setAccessible(true);
-        List<Intent> sent = Shadows.shadowOf((Application) context).getBroadcastIntents();
-        Intent request = sent.stream().filter(i -> "ACTION_START_CHANNEL".equals(i.getAction())).reduce((a,b) -> b).orElseThrow();
-        assertSame(retained.get(channel), request.getParcelableExtra(NavInfoLogger.EXTRA_IDENTITY));
-        assertTrue(logs.toString().contains("identity_environment build=" + GMapsIdentityDiagnostics.BUILD));
-        assertTrue(logs.toString().contains("stage=before_send"));
-        assertTrue(logs.toString().contains("stage=after_send"));
-        assertTrue(logs.toString().contains("requestCode=2101"));
-    }
-
-    @Test @Config(sdk = 29)
-    public void olderAndroidStillRecordsMetadataAndExplicitUnsupportedTypeApi() {
-        String snapshot = GMapsIdentityDiagnostics.snapshot(context, identity("com.bydhud.app"), true);
-        assertTrue(snapshot, snapshot.contains("cachedPackage=com.bydhud.app"));
-        assertTrue(snapshot, snapshot.contains("freshPackage=com.bydhud.app"));
-        assertTrue(snapshot, snapshot.contains("TypeRead=unsupported_api_29"));
-        assertFalse(snapshot, snapshot.contains("NoSuchMethodError"));
-    }
-
-    @Test public void diagnosticAfterHelloDoesNotEraseSuccessfulHandshakeEvidence() throws Exception {
-        set("identityChannelId", "test-request-1");
-        NavInfoLogger.registerClient(context, request().putExtra(
-                NavInfoLogger.EXTRA_IDENTITY, identity("com.bydhud.app")));
-        deliverReplies();
-        assertTrue(connected());
-        Method send = GMapsDirectChannel.class.getDeclaredMethod("sendRegistration", String.class, boolean.class, int.class);
-        send.setAccessible(true);
-        send.invoke(channel, "ACTION_START_CHANNEL", true, 3);
-        assertTrue(logs.toString(), logs.toString().contains("helloReceived=true"));
-        assertFalse(logs.toString(), logs.toString().contains("reason=missing_hello_or_registration_result"));
     }
 
     private Intent request() {

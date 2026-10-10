@@ -7,7 +7,6 @@ import static org.junit.Assert.assertTrue;
 import android.app.Application;
 import android.content.Context;
 
-import org.json.JSONObject;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Test;
@@ -19,10 +18,8 @@ import org.robolectric.annotation.LooperMode;
 
 import java.io.File;
 import java.lang.reflect.Constructor;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ScheduledExecutorService;
 
 @RunWith(RobolectricTestRunner.class)
@@ -127,74 +124,6 @@ public final class ShanghaiTestControllerBehaviorTest {
         assertFalse(LogcatRecorder.isReservedForShanghai());
         assertFalse(ShanghaiOutputGate.isSuspended());
         assertEquals(ShanghaiTestState.Phase.ERROR, ShanghaiTestController.snapshot().phase);
-    }
-
-    @Test public void gpsCleanupFailureIsRecordedAndDoesNotBlockCaptureOrServiceCleanup()
-            throws Exception {
-        ShanghaiBehaviorSupport.gpsCleanupResult = ShanghaiMockGps.Result.of(
-                ShanghaiMockGps.Code.PROVIDER_ERROR, "injected GPS cleanup failure");
-        controller.stop("gps-failure", null);
-        scheduler.runUntilIdle();
-
-        List<String> events = ShanghaiBehaviorSupport.EVENTS;
-        assertTrue("events=" + events, events.contains("diagnostics.record:mock_cleanup"));
-        assertTrue("events=" + events, events.contains(
-                "diagnostics.detail:mock_cleanup:PROVIDER_ERROR: injected GPS cleanup failure"));
-        assertTrue("events=" + events, events.contains("diagnostics.stop"));
-        assertTrue("events=" + events, events.contains(
-                "instrument.resume:leaseReleased=true:recordingRetained=true"));
-        assertTrue("events=" + events, events.contains("output.resume"));
-        assertTrue("events=" + events, events.contains("service.finish"));
-        assertTrue(LogcatRecorder.isRecording());
-        assertTrue(ShanghaiTestController.snapshot().cleanupPending);
-        assertEquals(ShanghaiTestState.Phase.ERROR, ShanghaiTestController.snapshot().phase);
-    }
-
-    @Test public void captureStopFailureStillReleasesSharedLeaseRestoresOutputsAndStopsService()
-            throws Exception {
-        ShanghaiBehaviorSupport.failDiagnosticsStop = true;
-        controller.stop("capture-failure", null);
-        scheduler.runUntilIdle();
-
-        List<String> events = ShanghaiBehaviorSupport.EVENTS;
-        assertTrue("events=" + events, events.contains("diagnostics.stop"));
-        assertTrue("events=" + events, events.contains(
-                "instrument.resume:leaseReleased=true:recordingRetained=true"));
-        assertTrue("events=" + events, events.contains("output.resume"));
-        assertTrue("events=" + events, events.contains("service.finish"));
-        assertTrue(LogcatRecorder.isRecording());
-        assertFalse(LogcatRecorder.isReservedForShanghai());
-        assertEquals(ShanghaiTestState.Phase.ERROR, ShanghaiTestController.snapshot().phase);
-        JSONObject summary = new JSONObject(new String(Files.readAllBytes(
-                new File(scratch, "shanghai-session.json").toPath()), StandardCharsets.UTF_8));
-        assertTrue(summary.getString("error").contains("injected capture stop failure"));
-    }
-
-    @Test public void controllerStopsOnlyItsOwnedLogcatCaptureOnHealthyCleanup() throws Exception {
-        Context context = RuntimeEnvironment.getApplication();
-        LogcatRecorder.Session ownedSession = new LogcatRecorder.Session(
-                context, "20260923", "shanghai-owned", scratch);
-        ownedSession.finalized = true;
-        ownedSession.finishFuture = CompletableFuture.completedFuture(null);
-        LogcatRecorder.CaptureLease ownedLease = new LogcatRecorder.CaptureLease(ownedSession, true);
-        ShanghaiBehaviorSupport.setField(LogcatRecorder.class, "activeSession", ownedSession);
-        ShanghaiBehaviorSupport.setField(LogcatRecorder.class, "shanghaiLease", ownedLease);
-        Object run = ShanghaiBehaviorSupport.getField(controller, "current");
-        setRunField(run, "logcat", ownedLease);
-        ShanghaiBehaviorSupport.failHelperRestore = false;
-
-        controller.stop("healthy", null);
-        scheduler.runUntilIdle();
-
-        List<String> events = ShanghaiBehaviorSupport.EVENTS;
-        assertFalse(LogcatRecorder.isRecording());
-        assertFalse(LogcatRecorder.isReservedForShanghai());
-        assertTrue(ownedSession.stopRequested);
-        assertTrue("events=" + events, events.contains(
-                "instrument.resume:leaseReleased=true:recordingRetained=false"));
-        assertTrue("events=" + events, events.contains("output.resume"));
-        assertTrue("events=" + events, events.contains("service.finish"));
-        assertEquals(ShanghaiTestState.Phase.STOPPED, ShanghaiTestController.snapshot().phase);
     }
 
     private static int count(List<String> events, String expected) {

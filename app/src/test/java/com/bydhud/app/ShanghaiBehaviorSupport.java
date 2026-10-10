@@ -1,6 +1,5 @@
 package com.bydhud.app;
 
-import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.Intent;
@@ -15,7 +14,6 @@ import org.robolectric.annotation.Implementation;
 import org.robolectric.annotation.Implements;
 import org.robolectric.shadow.api.Shadow;
 
-import java.io.File;
 import java.io.IOException;
 import java.lang.reflect.Field;
 import java.util.ArrayDeque;
