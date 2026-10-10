@@ -1878,7 +1878,17 @@ public final class ClusterProjectionService extends Service
         if (displayManager == null) {
             return null;
         }
-        Display[] displays = displayManager.getDisplays();
+        return chooseClusterDisplay(displayManager.getDisplays());
+    }
+
+    static Display chooseClusterDisplay(Display[] displays) {
+        // OEM full-map content is composed above the parent's ordinary window root.
+        for (Display display : displays) {
+            if (display != null && "shared_fission_bg_XDJAScreenProjection_0"
+                    .equals(display.getName())) {
+                return display;
+            }
+        }
         Display fallbackNonDefault = null;
         Display fallbackDisplayTwo = null;
         Display defaultDisplay = null;
