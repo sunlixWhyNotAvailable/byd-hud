@@ -117,6 +117,8 @@ final class SomeIpHudClient {
 
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
+        RoadInfoTxHistory.Attempt diagnostic = SomeIpRoadInfoDiagnostics.beforeSend(topic, payload);
+        Integer result = null;
         try {
             data.writeInterfaceToken(SOMEIP_DESCRIPTOR);
             data.writeInt(1);
@@ -126,8 +128,10 @@ final class SomeIpHudClient {
             data.writeByteArray(payload);
             binder.transact(TRANSACTION_FIRE_EVENT, data, reply, 0);
             reply.readException();
-            return reply.readInt();
+            result = reply.readInt();
+            return result;
         } finally {
+            if (diagnostic != null) diagnostic.complete(result);
             reply.recycle();
             data.recycle();
         }

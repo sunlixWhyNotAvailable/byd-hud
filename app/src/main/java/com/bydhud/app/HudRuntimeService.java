@@ -188,6 +188,7 @@ public final class HudRuntimeService extends Service {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     static void stopPersistent(Context context, String reason) {
+        SomeIpRoadInfoDiagnostics.onRuntimeStopped();
         Context appContext = context.getApplicationContext();
         clearStartRequestGate();
         HudRuntimeState.clearServicePresent(appContext, "stop:" + reason);
@@ -276,6 +277,7 @@ public final class HudRuntimeService extends Service {
         HudPrefs.setRuntimeServiceRunning(this, true);
         HudRuntimeState.markHeartbeat(this, "onStartCommand:" + reason);
         DashboardWidgetController.onRuntimeStart(this);
+        SomeIpRoadInfoDiagnostics.onRuntimeStarted(this);
         boolean activeWork = HudRuntimeSupervisor.hasActiveRuntimeWork(this);
         if (!runtimeStartInitialized || activeWork != runtimeActiveWork) {
             if (!runtimeStartInitialized) requestInitialUiRefresh("runtime-create");
@@ -342,6 +344,7 @@ public final class HudRuntimeService extends Service {
     //cleans up lifecycle state here so Android teardown does not leave stale runtime markers behind.
     public void onDestroy() {
         runtimeDestroyed = true;
+        SomeIpRoadInfoDiagnostics.onRuntimeStopped();
         heartbeatHandler.removeCallbacks(heartbeatRunnable);
         clearStartRequestGate();
         HudRuntimeState.clearServicePresent(this, "destroyed");

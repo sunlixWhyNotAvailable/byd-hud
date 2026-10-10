@@ -253,6 +253,26 @@ public final class DiagnosticRecordingTest {
         }
     }
 
+    @Test public void roadInfoReceiveJournalAndRotatedHistoryExportWithTheirOriginalDays() throws Exception {
+        String earlierDay = "20200102";
+        NavCaptureStore.writeSomeIpRx(context, earlierDay, "{\"event\":\"previous\"}");
+        NavCaptureStore.writeSomeIpRx(context, day, "{\"event\":\"first\"}");
+        assertTrue(NavCaptureStore.rotate(new File(NavigationLogStorage.logsDir(context, day), "someip_rx.jsonl")));
+        NavCaptureStore.writeSomeIpRx(context, day, "{\"event\":\"second\"}");
+        LogShareZip.Result result = LogShareZip.create(context, java.util.Arrays.asList(earlierDay, day));
+        assertTrue(result.detail, result.ok);
+        try (ZipFile zip = new ZipFile(result.file)) {
+            for (String suffix : new String[]{earlierDay + "/logs/someip_rx.jsonl",
+                    day + "/logs/someip_rx.jsonl.1", day + "/logs/someip_rx.jsonl"}) {
+                var entry = Collections.list(zip.entries()).stream()
+                        .filter(item -> item.getName().endsWith(suffix)).findFirst().orElseThrow();
+                String expected = suffix.startsWith(earlierDay) ? "previous" : suffix.endsWith(".1") ? "first" : "second";
+                assertEquals("{\"event\":\"" + expected + "\"}\n",
+                        new String(zip.getInputStream(entry).readAllBytes(), StandardCharsets.UTF_8));
+            }
+        }
+    }
+
     private static JSONObject status(ZipFile zip) throws Exception {
         assertNull("recording status must not remain at archive root", zip.getEntry("recording-status.json"));
         assertNull(zip.getEntry("diagnostics/recording-status.json"));

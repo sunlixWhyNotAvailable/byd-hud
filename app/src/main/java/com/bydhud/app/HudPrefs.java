@@ -786,6 +786,7 @@ final class HudPrefs {
     static void setDetailedDebugArtifactsEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_DETAILED_DEBUG_ARTIFACTS, enabled).apply();
         SomeIpTxLog.onDetailedModeChanged(context, enabled);
+        SomeIpRoadInfoDiagnostics.onDetailedModeChanged(context);
     }
 
     //opens Options once for each installed build, then defaults later launches to Apps.

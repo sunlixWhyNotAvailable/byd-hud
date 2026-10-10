@@ -23,6 +23,14 @@ import java.util.function.BooleanSupplier;
 
 /** Read-only client for the stock SOME/IP event service. */
 final class ShanghaiSomeIpClient implements Closeable {
+    interface EventSink {
+        void offer(long topic, long timestamp, int length, byte[] payload);
+        void rejectAfterSeal(long topic, byte[] payload);
+        long receivedCount();
+        boolean healthy();
+        default void status(String event) { }
+        default void malformed(String reason) { throw new IllegalArgumentException(reason); }
+    }
     private static final String CLIENT_DESCRIPTOR = "ts.car.someip.sdk.ISomeIpClientInterface";
     private static final String CALLBACK_DESCRIPTOR = "ts.car.someip.sdk.ISomeIpCallback";
     private static final ComponentName COMPONENT = new ComponentName(
@@ -32,7 +40,8 @@ final class ShanghaiSomeIpClient implements Closeable {
 
     private final Context context;
     private final String clientType;
-    private final ShanghaiEventJournal journal;
+    private final EventSink journal;
+    private final List<Long> topics;
     private final CountDownLatch connected = new CountDownLatch(1);
     private final List<Long> subscribed = new ArrayList<>();
     private final List<Long> startedServices = new ArrayList<>();
@@ -48,18 +57,33 @@ final class ShanghaiSomeIpClient implements Closeable {
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
+            disconnected = false;
             service = binder;
             connected.countDown();
         }
         @Override public void onServiceDisconnected(ComponentName name) {
             disconnected = true;
             service = null;
+            journal.status("disconnected");
+        }
+        @Override public void onBindingDied(ComponentName name) {
+            onServiceDisconnected(name);
+        }
+        @Override public void onNullBinding(ComponentName name) {
+            disconnected = true;
+            connected.countDown();
+            journal.status("null_binding");
         }
     };
 
     ShanghaiSomeIpClient(Context context, String sessionId, ShanghaiEventJournal journal) {
+        this(context, "bydhud-shanghai-" + sessionId, ShanghaiTopics.ALL, journal);
+    }
+
+    ShanghaiSomeIpClient(Context context, String clientType, List<Long> topics, EventSink journal) {
         this.context = context.getApplicationContext();
-        this.clientType = "bydhud-shanghai-" + sessionId;
+        this.clientType = clientType;
+        this.topics = new ArrayList<>(topics);
         this.journal = journal;
         this.callback = new Callback(journal);
     }
@@ -73,7 +97,7 @@ final class ShanghaiSomeIpClient implements Closeable {
         if (cancelled.getAsBoolean()) return true;
         registerCallback();
         startRequestedClients(cancelled);
-        for (long topic : ShanghaiTopics.ALL) {
+        for (long topic : topics) {
             JSONObject item = new JSONObject().put("topic", ShanghaiTopics.hex(topic));
             if (cancelled.getAsBoolean()) {
                 item.put("accepted", false).put("skipped", "stop_requested");
@@ -94,7 +118,7 @@ final class ShanghaiSomeIpClient implements Closeable {
 
     private void startRequestedClients(BooleanSupplier cancelled) throws Exception {
         Set<Long> services = new LinkedHashSet<>();
-        for (long topic : ShanghaiTopics.ALL) {
+        for (long topic : topics) {
             services.add(0x000B000000000000L | (topic & 0x0000FFFFFFFF0000L));
         }
         for (long serviceId : services) {
@@ -124,7 +148,9 @@ final class ShanghaiSomeIpClient implements Closeable {
         try {
             data.writeInterfaceToken(CLIENT_DESCRIPTOR);
             data.writeStrongBinder(callback);
-            requireService().transact(1, data, reply, 0);
+            if (!requireService().transact(1, data, reply, 0)) {
+                throw new RemoteException("Callback registration transaction rejected");
+            }
             reply.readException();
             callbackRegistered = true;
         } finally {
@@ -200,7 +226,9 @@ final class ShanghaiSomeIpClient implements Closeable {
         try {
             data.writeInterfaceToken(CLIENT_DESCRIPTOR);
             if (value != null) data.writeLong(value);
-            requireService().transact(code, data, reply, 0);
+            if (!requireService().transact(code, data, reply, 0)) {
+                throw new RemoteException("SOME/IP client transaction rejected: " + code);
+            }
             reply.readException();
             return reply.readInt();
         } finally {
@@ -216,11 +244,11 @@ final class ShanghaiSomeIpClient implements Closeable {
     }
 
     private static final class Callback extends Binder {
-        private final ShanghaiEventJournal journal;
+        private final EventSink journal;
         private boolean sealed;
         private int inFlight;
 
-        Callback(ShanghaiEventJournal journal) {
+        Callback(EventSink journal) {
             this.journal = journal;
             attachInterface(null, CALLBACK_DESCRIPTOR);
         }
@@ -242,6 +270,8 @@ final class ShanghaiSomeIpClient implements Closeable {
                     } else if (frame != null) {
                         journal.rejectAfterSeal(frame.topic, frame.payload);
                     }
+                } catch (RuntimeException error) {
+                    journal.malformed(error.getClass().getSimpleName());
                 } finally {
                     if (admitted) end();
                 }
@@ -253,7 +283,7 @@ final class ShanghaiSomeIpClient implements Closeable {
             }
             if (code == 2) {
                 data.enforceInterface(CALLBACK_DESCRIPTOR);
-                data.readInt();
+                journal.status("hal_available_" + (data.readInt() != 0));
                 if (reply != null) reply.writeNoException();
                 return true;
             }

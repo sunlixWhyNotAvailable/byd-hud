@@ -21,7 +21,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 
 /** Bounded asynchronous raw SOME/IP journal. Duplicate payloads are intentionally retained. */
-final class ShanghaiEventJournal implements Closeable {
+final class ShanghaiEventJournal implements Closeable, ShanghaiSomeIpClient.EventSink {
     static final int QUEUE_CAPACITY = 512;
     static final long MAX_QUEUED_PAYLOAD_BYTES = 16L * 1024L * 1024L;
     private static final int MAX_PAYLOAD_BYTES = 4 * 1024 * 1024;
@@ -59,7 +59,7 @@ final class ShanghaiEventJournal implements Closeable {
         writerThread.start();
     }
 
-    void offer(long topic, long oemTimestamp, int declaredLength, byte[] payload) {
+    @Override public void offer(long topic, long oemTimestamp, int declaredLength, byte[] payload) {
         byte[] safe = payload == null ? new byte[0] : payload.clone();
         long wall = System.currentTimeMillis();
         long elapsedNanos = elapsedRealtimeNanos.getAsLong();
@@ -77,7 +77,7 @@ final class ShanghaiEventJournal implements Closeable {
         }
     }
 
-    void rejectAfterSeal(long topic, byte[] payload) {
+    @Override public void rejectAfterSeal(long topic, byte[] payload) {
         byte[] safe = payload == null ? new byte[0] : payload;
         long wall = System.currentTimeMillis();
         received.incrementAndGet();
@@ -140,10 +140,10 @@ final class ShanghaiEventJournal implements Closeable {
         synchronized (topics) { topics.computeIfAbsent(topic, TopicStats::new).dropped++; }
     }
 
-    long receivedCount() { return received.get(); }
+    @Override public long receivedCount() { return received.get(); }
     long persistedCount() { return persisted.get(); }
     long droppedCount() { return dropped.get(); }
-    boolean healthy() { return writeFailures.get() == 0 && (writerThread.isAlive() || closed); }
+    @Override public boolean healthy() { return writeFailures.get() == 0 && (writerThread.isAlive() || closed); }
     boolean finalized() { return !accepting && !writerThread.isAlive(); }
     String error() { return firstError; }
 
