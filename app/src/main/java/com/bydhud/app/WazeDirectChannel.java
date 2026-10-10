@@ -97,6 +97,25 @@ public final class WazeDirectChannel {
     private final Object tripStateLock = new Object();
     private final TreeSet<Long> pendingTripControls = new TreeSet<>();
     private final TreeSet<Long> pendingTripNormalizations = new TreeSet<>();
+    private final java.util.concurrent.ConcurrentSkipListMap<Long, WazeRouteTiming.Ingress>
+            ingressDiagnostics = new java.util.concurrent.ConcurrentSkipListMap<>();
+    private volatile WazeRouteTiming.Ingress oldestDiagnostic;
+    private long drainPostedElapsedMs;
+    private final RuntimeIncidentRecorder.Watch ingressWatch = new RuntimeIncidentRecorder.Watch("waze_ingress", 2_000L) {
+        @Override boolean pending() { return oldestDiagnostic != null; }
+        @Override long token() { WazeRouteTiming.Ingress value = oldestDiagnostic; return value == null ? -1 : value.sequence; }
+        @Override long since() { WazeRouteTiming.Ingress value = oldestDiagnostic; return value == null ? -1 : value.elapsedMs; }
+        @Override org.json.JSONObject details() throws Exception {
+            WazeRouteTiming.Ingress value = oldestDiagnostic;
+            WazeRouteTiming.Ingress blocker = value == null ? null : ingressDiagnostics.get(value.blockingSequence);
+            java.util.Map.Entry<Long, WazeRouteTiming.Ingress> latest = ingressDiagnostics.lastEntry();
+            return (value == null ? new org.json.JSONObject() : value.details())
+                    .put("blockingIngress", blocker == null ? org.json.JSONObject.NULL : blocker.details())
+                    .put("latestIngress", latest == null ? org.json.JSONObject.NULL : latest.getValue().details())
+                    .put("channelThread", RuntimeIncidentRecorder.thread(channelThread))
+                    .put("writers", WazeCaptureDebugWriter.healthSnapshot());
+        }
+    };
     private final WazeTripStateQueue<WazeStepData, DirectTbtFrame.TripMetrics>
             pendingTripState = new WazeTripStateQueue<>();
     private final WazeRouteTiming ingressQueueTiming = new WazeRouteTiming(
@@ -151,6 +170,7 @@ public final class WazeDirectChannel {
     public WazeDirectChannel(Context context, Listener listener) {
         this.context = Objects.requireNonNull(context, "context").getApplicationContext();
         this.listener = Objects.requireNonNull(listener, "listener");
+        RuntimeIncidentRecorder.initialize(this.context);
         wazeAlertsEnabled = HudPrefs.isWazeAlertsEnabled(this.context);
         channelThread.start();
         channelHandler = new Handler(channelThread.getLooper());
@@ -710,6 +730,17 @@ public final class WazeDirectChannel {
 
     private void onTemplate(int expectedGeneration, Bundleable response,
             IngressStamp ingress) throws Exception {
+        ingress.diagnostic.normalizing(SystemClock.elapsedRealtime());
+        try { parseTemplate(expectedGeneration, response, ingress); }
+        finally {
+            if (ingress.diagnostic.normalizationEnd < 0) {
+                ingress.diagnostic.normalized(SystemClock.elapsedRealtime());
+            }
+        }
+    }
+
+    private void parseTemplate(int expectedGeneration, Bundleable response,
+            IngressStamp ingress) throws Exception {
         if (suspended) return;
         Object value = response == null ? null : response.get();
         if (!(value instanceof TemplateWrapper)) {
@@ -742,6 +773,7 @@ public final class WazeDirectChannel {
                 + " next=" + (routing.getNextStep() != null));
         if (current != null) {
             WazeStepData step = WazeStepData.from(current);
+            ingress.diagnostic.normalized(SystemClock.elapsedRealtime());
             mergeTripUpdate(expectedGeneration, connectionPermit,
                     new WazeTripStateQueue.Update<>(ingress.sequence,
                             ingress.elapsedTimeMs, true, step,
@@ -1326,8 +1358,9 @@ public final class WazeDirectChannel {
         synchronized (tripStateLock) {
             if (!hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) return null;
             IngressStamp ingress = new IngressStamp(++navigationIngressSequence,
-                    SystemClock.elapsedRealtime(), System.currentTimeMillis());
+                    SystemClock.elapsedRealtime(), System.currentTimeMillis(), expectedGeneration, "Trip");
             pendingTripNormalizations.add(ingress.sequence);
+            trackIngress(ingress);
             return ingress;
         }
     }
@@ -1335,11 +1368,21 @@ public final class WazeDirectChannel {
     private void postTripControl(int expectedGeneration,
             WazeStartAdmission.Permit expectedPermit, boolean requireCurrent,
             IngressControl action) {
+        postTripControl(expectedGeneration, expectedPermit, requireCurrent, "control", action);
+    }
+
+    private void postTripControl(int expectedGeneration,
+            WazeStartAdmission.Permit expectedPermit, boolean requireCurrent,
+            String source, IngressControl action) {
         synchronized (tripStateLock) {
             IngressStamp ingress = new IngressStamp(++navigationIngressSequence,
-                    SystemClock.elapsedRealtime(), System.currentTimeMillis());
+                    SystemClock.elapsedRealtime(), System.currentTimeMillis(), expectedGeneration, source);
             pendingTripControls.add(ingress.sequence);
+            ingress.diagnostic.handlerPost = SystemClock.elapsedRealtime();
+            trackIngress(ingress);
             boolean posted = channelHandler.post(() -> {
+                ingress.diagnostic.actionStart = SystemClock.elapsedRealtime();
+                ingress.diagnostic.stage = "control";
                 try {
                     if (!requireCurrent || isCurrent(expectedGeneration)
                             && expectedPermit == connectionPermit
@@ -1352,6 +1395,8 @@ public final class WazeDirectChannel {
             });
             if (!posted) {
                 pendingTripControls.remove(ingress.sequence);
+                ingressDiagnostics.remove(ingress.sequence);
+                refreshOldestDiagnostic();
                 scheduleTripStateDrainLocked();
             }
         }
@@ -1360,6 +1405,9 @@ public final class WazeDirectChannel {
     private void completeTripControl(long sequence) {
         synchronized (tripStateLock) {
             pendingTripControls.remove(sequence);
+            WazeRouteTiming.Ingress trace = ingressDiagnostics.get(sequence);
+            if (trace != null && !trace.merged) ingressDiagnostics.remove(sequence);
+            refreshOldestDiagnostic();
             scheduleTripStateDrainLocked();
         }
     }
@@ -1369,7 +1417,9 @@ public final class WazeDirectChannel {
             WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update) {
         synchronized (tripStateLock) {
             if (!hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) return;
-            pendingTripState.merge(update);
+            boolean accepted = pendingTripState.merge(update);
+            WazeRouteTiming.Ingress trace = ingressDiagnostics.get(update.sequence);
+            if (trace != null) trace.merged = accepted;
             scheduleTripStateDrainLocked();
         }
     }
@@ -1379,22 +1429,38 @@ public final class WazeDirectChannel {
             WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update) {
         synchronized (tripStateLock) {
             if (update != null && hasCurrentIngressIdentity(expectedGeneration, expectedPermit)) {
-                pendingTripState.merge(update);
+                ingress.diagnostic.merged = pendingTripState.merge(update);
             }
             pendingTripNormalizations.remove(ingress.sequence);
+            if (!ingress.diagnostic.merged) ingressDiagnostics.remove(ingress.sequence);
+            refreshOldestDiagnostic();
             scheduleTripStateDrainLocked();
         }
     }
 
     private void scheduleTripStateDrainLocked() {
-        if (tripStateDrainScheduled || !pendingTripState.hasPending()) return;
+        if (!pendingTripState.hasPending()) return;
         long newestPending = pendingTripState.newestPendingSequence();
         if (!pendingTripNormalizations.isEmpty()
-                && pendingTripNormalizations.first() <= newestPending) return;
-        if (!pendingTripControls.isEmpty()
-                && newestPending > pendingTripControls.first()) {
+                && pendingTripNormalizations.first() <= newestPending) {
+            markIngressBlocked(newestPending, pendingTripNormalizations.first(), "older_normalization");
             return;
         }
+        if (!pendingTripControls.isEmpty()
+                && newestPending > pendingTripControls.first()) {
+            markIngressBlocked(newestPending, pendingTripControls.first(), "older_control");
+            return;
+        }
+        long now = SystemClock.elapsedRealtime();
+        if (!tripStateDrainScheduled) drainPostedElapsedMs = now;
+        for (WazeRouteTiming.Ingress trace : ingressDiagnostics.headMap(newestPending, true).values()) {
+            if (!trace.merged || "render_output".equals(trace.stage)) continue;
+            if (trace.barrierRelease < 0) trace.barrierRelease = now;
+            trace.drainPost = drainPostedElapsedMs;
+            trace.blockingSequence = -1;
+            trace.stage = "ready_queue";
+        }
+        if (tripStateDrainScheduled) return;
         tripStateDrainScheduled = channelHandler.post(tripStateDrain);
     }
 
@@ -1411,6 +1477,9 @@ public final class WazeDirectChannel {
             snapshot = pendingTripState.take();
         }
         if (snapshot == null) return;
+        for (WazeRouteTiming.Ingress trace : ingressDiagnostics.headMap(snapshot.sequence, true).values()) {
+            trace.stage = "render_output";
+        }
         try {
             if (snapshot.stepUpdated || snapshot.laneUpdated) {
                 publishCurrentStep(snapshot,
@@ -1436,6 +1505,8 @@ public final class WazeDirectChannel {
         } finally {
             synchronized (tripStateLock) {
                 pendingTripState.finishProcessing();
+                ingressDiagnostics.headMap(snapshot.sequence, true).clear();
+                refreshOldestDiagnostic();
                 scheduleTripStateDrainLocked();
             }
         }
@@ -1449,6 +1520,7 @@ public final class WazeDirectChannel {
         WazeRouteTiming.Frame timing = owner.beginFrame(frameElapsedMs, reason);
         timing.markTripQueueIngress(snapshot.sequence, snapshot.ingressElapsedMs,
                 snapshot.coalescedCount);
+        timing.markIngressDetails(ingressDiagnostics.get(snapshot.sequence));
         timing.markTripDrainStart(drainStartElapsedMs);
         timing.markTripRenderEnd(renderFinishedElapsedMs);
         return timing;
@@ -1459,6 +1531,8 @@ public final class WazeDirectChannel {
             long discardThrough = navigationIngressSequence;
             pendingTripState.resetThrough(discardThrough);
             pendingTripNormalizations.headSet(discardThrough, true).clear();
+            ingressDiagnostics.headMap(discardThrough, true).clear();
+            refreshOldestDiagnostic();
             tripStateDrainScheduled = false;
             channelHandler.removeCallbacks(tripStateDrain);
         }
@@ -1468,6 +1542,36 @@ public final class WazeDirectChannel {
         synchronized (tripStateLock) {
             pendingTripState.discardThrough(sequence);
             pendingTripNormalizations.headSet(sequence, true).clear();
+            ingressDiagnostics.headMap(sequence, true).clear();
+            refreshOldestDiagnostic();
+        }
+    }
+
+    private void trackIngress(IngressStamp ingress) {
+        ingressDiagnostics.put(ingress.sequence, ingress.diagnostic);
+        refreshOldestDiagnostic();
+        RuntimeIncidentRecorder.watch(ingressWatch);
+    }
+
+    private void refreshOldestDiagnostic() {
+        java.util.Map.Entry<Long, WazeRouteTiming.Ingress> first = ingressDiagnostics.firstEntry();
+        oldestDiagnostic = first == null ? null : first.getValue();
+        long latest = pendingTripState.newestPendingSequence();
+        // Coalesced work needs the oldest deadline and selected frame timing, not a history of every arrival.
+        for (WazeRouteTiming.Ingress trace : ingressDiagnostics.values()) {
+            if (trace != oldestDiagnostic && trace.sequence != latest && trace.merged
+                    && !pendingTripControls.contains(trace.sequence)
+                    && !pendingTripNormalizations.contains(trace.sequence)
+                    && !"render_output".equals(trace.stage)) ingressDiagnostics.remove(trace.sequence);
+        }
+    }
+
+    private void markIngressBlocked(long through, long blocker, String stage) {
+        for (WazeRouteTiming.Ingress trace : ingressDiagnostics.headMap(through, true).values()) {
+            if (!trace.merged || "render_output".equals(trace.stage)) continue;
+            trace.blockingSequence = blocker;
+            trace.stage = stage;
+            trace.barrierRelease = -1;
         }
     }
 
@@ -2149,6 +2253,7 @@ public final class WazeDirectChannel {
         IngressStamp ingress = beginTripIngress(expectedGeneration, expectedPermit);
         if (ingress == null) return;
         WazeTripStateQueue.Update<WazeStepData, DirectTbtFrame.TripMetrics> update = null;
+        ingress.diagnostic.normalizing(SystemClock.elapsedRealtime());
         try {
             Object value = bundle == null ? null : bundle.get();
             if (!(value instanceof Trip)) {
@@ -2178,6 +2283,7 @@ public final class WazeDirectChannel {
         } catch (Throwable t) {
             log("trip parse failed: " + t);
         } finally {
+            ingress.diagnostic.normalized(SystemClock.elapsedRealtime());
             finishTripIngress(expectedGeneration, expectedPermit, ingress, update);
         }
     }
@@ -2272,7 +2378,7 @@ public final class WazeDirectChannel {
                 }
             };
             if (ingressSuccess != null) {
-                postTripControl(expectedGeneration, expectedPermit, false, action);
+                postTripControl(expectedGeneration, expectedPermit, false, "template", action);
             } else {
                 postBinder(expectedGeneration, () -> action.run(null));
             }
@@ -2306,7 +2412,7 @@ public final class WazeDirectChannel {
                 }
             };
             if (ingressSuccess != null) {
-                postTripControl(expectedGeneration, expectedPermit, false,
+                postTripControl(expectedGeneration, expectedPermit, false, "template_failure",
                         ingress -> action.run());
             } else {
                 postBinder(expectedGeneration, action);
@@ -2360,11 +2466,13 @@ public final class WazeDirectChannel {
         final long sequence;
         final long elapsedTimeMs;
         final long wallTimeMs;
+        final WazeRouteTiming.Ingress diagnostic;
 
-        IngressStamp(long sequence, long elapsedTimeMs, long wallTimeMs) {
+        IngressStamp(long sequence, long elapsedTimeMs, long wallTimeMs, int generation, String source) {
             this.sequence = sequence;
             this.elapsedTimeMs = elapsedTimeMs;
             this.wallTimeMs = wallTimeMs;
+            diagnostic = new WazeRouteTiming.Ingress(sequence, elapsedTimeMs, generation, source);
         }
     }
 

@@ -41,6 +41,20 @@ final class WazeCaptureDebugWriter {
     private volatile long taskStartedAt;
     private volatile String currentTask = "";
     private volatile String lastError = "";
+    private volatile long lastCompletedElapsedMs;
+    private volatile long taskStartedElapsedMs;
+    private final RuntimeIncidentRecorder.Watch incidentWatch = new RuntimeIncidentRecorder.Watch("writer", 5_000L) {
+        @Override boolean pending() { return pendingTasks.get() > 0; }
+        @Override long token() { return completedTasks.get(); }
+        @Override long since() {
+            Long oldest = queuedAt.peek();
+            return oldest == null ? -1L : Math.max(oldest, lastCompletedElapsedMs);
+        }
+        @Override JSONObject details() throws Exception {
+            return health().put("thread", RuntimeIncidentRecorder.thread(thread))
+                    .put("storageLockOwners", NavigationLogStorage.lockDiagnostics());
+        }
+    };
 
     static String currentOperation() {
         WazeCaptureDebugWriter writer = CURRENT.get();
@@ -65,13 +79,15 @@ final class WazeCaptureDebugWriter {
     private void failed(String error) {
         failures.incrementAndGet();
         lastError = error == null ? "unknown" : error.substring(0, Math.min(error.length(), 512));
+        RuntimeIncidentRecorder.loss(thread.getName(), lastError);
     }
 
     private JSONObject health() throws JSONException {
         Long oldest = queuedAt.peek();
         return new JSONObject().put("writer", thread.getName()).put("startedAtWallMs", startedAt)
                 .put("completedTasks", completedTasks.get())
-                .put("oldestQueuedAgeMs", oldest == null ? 0 : Math.max(0L, System.currentTimeMillis() - oldest))
+                .put("oldestQueuedAgeMs", oldest == null ? 0 : Math.max(0L, android.os.SystemClock.elapsedRealtime() - oldest))
+                .put("currentTaskAgeMs", currentTask.isEmpty() ? 0 : Math.max(0L, android.os.SystemClock.elapsedRealtime() - taskStartedElapsedMs))
                 .put("alive", thread.isAlive()).put("pendingTasks", pendingTasks.get())
                 .put("pendingBitmaps", pendingBitmaps.get()).put("droppedBitmaps", droppedBitmaps.get())
                 .put("failures", failures.get()).put("lastError", lastError)
@@ -86,6 +102,7 @@ final class WazeCaptureDebugWriter {
         boolean loss = journal.failures.get() > 0 || journal.droppedBitmaps.get() > 0
                 || (images != null && (images.failures.get() > 0 || images.droppedBitmaps.get() > 0));
         return new JSONObject().put("scope", "current_process")
+                .put("incidentPersistenceUncertain", RuntimeIncidentRecorder.persistenceUncertain())
                 .put("sampledAtWallMs", System.currentTimeMillis()).put("lossObserved", loss)
                 .put("journal", journal.health())
                 .put("mapImages", images == null ? JSONObject.NULL : images.health())
@@ -203,6 +220,7 @@ final class WazeCaptureDebugWriter {
         if (work == null) return false;
         if (!tryReserveBitmap()) {
             droppedBitmaps.incrementAndGet();
+            RuntimeIncidentRecorder.loss(thread.getName(), "direct_event: bitmap_queue_full");
             Log.w(TAG, "debug_writer_drop type=direct_event reason=bitmap_queue_full");
             return false;
         }
@@ -230,10 +248,6 @@ final class WazeCaptureDebugWriter {
 
     boolean someIpTx(Runnable work) {
         return work != null && post("someip_tx", work);
-    }
-
-    boolean someIpRx(Runnable work) {
-        return work != null && post("someip_rx", work);
     }
 
     boolean settingsTask(Runnable work) {
@@ -297,13 +311,15 @@ final class WazeCaptureDebugWriter {
     }
 
     private boolean post(String type, Runnable work) {
-        Long enqueuedAt = System.currentTimeMillis();
+        Long enqueuedAt = android.os.SystemClock.elapsedRealtime();
         queuedAt.add(enqueuedAt);
         pendingTasks.incrementAndGet();
+        RuntimeIncidentRecorder.watch(incidentWatch);
         boolean posted = handler.post(() -> {
             CURRENT.set(this);
             currentTask = type;
             taskStartedAt = System.currentTimeMillis();
+            taskStartedElapsedMs = android.os.SystemClock.elapsedRealtime();
             try {
                 work.run();
             } catch (RuntimeException e) {
@@ -311,6 +327,7 @@ final class WazeCaptureDebugWriter {
                 Log.w(TAG, "debug_writer_failed type=" + type, e);
             } finally {
                 lastCompletedTaskAt = System.currentTimeMillis();
+                lastCompletedElapsedMs = android.os.SystemClock.elapsedRealtime();
                 currentTask = "";
                 taskStartedAt = 0L;
                 CURRENT.remove();

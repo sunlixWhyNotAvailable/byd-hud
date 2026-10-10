@@ -107,10 +107,6 @@ final class NavCaptureStore {
         append(context, targetDay, SOMEIP_TX_FILE, line);
     }
 
-    static void writeSomeIpRx(Context context, String targetDay, String line) {
-        append(context, targetDay, "someip_rx.jsonl", line);
-    }
-
     static void writeTbtTx(Context context, String targetDay, String line) {
         append(context, targetDay, TBT_TX_FILE, line);
     }

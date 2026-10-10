@@ -1,6 +1,8 @@
 package com.bydhud.app;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertTrue;
 
 import android.app.Application;
@@ -34,6 +36,7 @@ import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** Exercises AndroidX Trip callbacks through the Waze ingress and drain path. */
 @RunWith(RobolectricTestRunner.class)
@@ -49,7 +52,8 @@ public final class WazeIngressBehaviorTest {
     private INavigationHost navigationHost;
 
     @Before
-    public void setUp() {
+    public void setUp() throws Exception {
+        IncidentTestSupport.restartProcessDiagnostics();
         Context context = RuntimeEnvironment.getApplication();
         listener = new RecordingListener();
         channel = new WazeDirectChannel(context, listener);
@@ -102,6 +106,133 @@ public final class WazeIngressBehaviorTest {
         Field field = owner.getClass().getDeclaredField(name);
         field.setAccessible(true);
         return field.get(owner);
+    }
+
+    @Test public void busyChannelKeepsOldestDeadlineAndDeliversLatestTrip() throws Exception {
+        startRoute(routeTrip("Initial", Maneuver.TYPE_TURN_NORMAL_LEFT, 600, 75L, 4500L));
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        ((android.os.Handler) field(channel, "channelHandler")).post(() -> {
+            entered.countDown();
+            try { release.await(5, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        });
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        try {
+            navigationHost.updateTrip(Bundleable.create(routeTrip("Older", Maneuver.TYPE_TURN_NORMAL_LEFT, 550, 70, 4000)));
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(2100));
+            for (int i = 0; i < 20; i++) {
+                navigationHost.updateTrip(Bundleable.create(routeTrip("Latest " + i,
+                        Maneuver.TYPE_TURN_NORMAL_RIGHT, 300, 40, 2500)));
+            }
+            JSONObjectRecord incident = awaitIncident();
+            assertEquals("ready_queue", incident.details.getString("stage"));
+            assertEquals("Trip", incident.details.getString("source"));
+            assertTrue(incident.value.getLong("ageMs") >= 2000);
+            assertTrue(incident.details.getJSONObject("channelThread").getJSONArray("stack").length() > 0);
+        } finally { release.countDown(); }
+        awaitHandlerBarrier(navigationHost);
+        List<DirectTbtFrame> frames = listener.frameSnapshot();
+        assertEquals("Latest 19", frames.get(frames.size() - 1).getRoadText());
+        assertEquals("coalescing must not replay the older 20 snapshots", 2, frames.size());
+    }
+
+    @Test public void queuedTemplateIsAttributedSeparatelyFromTripNormalization() throws Exception {
+        startRoute(routeTrip("Initial", Maneuver.TYPE_TURN_NORMAL_LEFT, 600, 75, 4500));
+        CountDownLatch entered = new CountDownLatch(1), release = new CountDownLatch(1);
+        ((android.os.Handler) field(channel, "channelHandler")).post(() -> {
+            entered.countDown();
+            try { release.await(5, TimeUnit.SECONDS); }
+            catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        });
+        assertTrue(entered.await(2, TimeUnit.SECONDS));
+        try {
+            channel.templateCallbackForTest().onSuccess(null);
+            navigationHost.updateTrip(Bundleable.create(routeTrip("After template", Maneuver.TYPE_TURN_NORMAL_RIGHT, 300, 40, 2500)));
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(2100));
+            JSONObjectRecord incident = awaitIncident();
+            assertEquals("template", incident.details.getString("source"));
+            assertEquals("handler_queue", incident.details.getString("stage"));
+            assertEquals("older_control", incident.details.getJSONObject("latestIngress").getString("stage"));
+        } finally { release.countDown(); }
+        awaitHandlerBarrier(navigationHost);
+        assertEquals("After template", listener.frameSnapshot().get(1).getRoadText());
+        String timing = listener.timings.get(listener.timings.size() - 1).directLine("test");
+        assertTrue(timing, timing.contains("ingressSource=Trip"));
+        assertTrue(timing, timing.contains("preNormalizationQueueMs=-1"));
+        assertTrue(timing, timing.contains("normalizationStartElapsedMs="));
+    }
+
+    @Test @Config(shadows = DelayedBundle.class)
+    public void blockedNormalizationIsIdentifiedAndCannotReviveATerminatedRoute() throws Exception {
+        startRoute(routeTrip("Initial", Maneuver.TYPE_TURN_NORMAL_LEFT, 600, 75, 4500));
+        DelayedBundle.target = Bundleable.create(routeTrip("Blocked old trip", Maneuver.TYPE_TURN_NORMAL_RIGHT, 300, 40, 2500));
+        DelayedBundle.entered = new CountDownLatch(1);
+        DelayedBundle.release = new CountDownLatch(1);
+        DelayedBundle.decoded = null;
+        AtomicReference<Throwable> failure = new AtomicReference<>();
+        Thread binder = new Thread(() -> {
+            try { navigationHost.updateTrip(DelayedBundle.target); }
+            catch (Throwable error) { failure.set(error); }
+        }, "test-trip-normalizer");
+        binder.start();
+        try {
+            assertTrue(DelayedBundle.entered.await(2, TimeUnit.SECONDS));
+            org.robolectric.shadows.ShadowSystemClock.advanceBy(java.time.Duration.ofMillis(2100));
+            JSONObjectRecord incident = awaitIncident();
+            assertEquals("normalization", incident.details.getString("stage"));
+            assertEquals("Trip", incident.details.getString("source"));
+            assertEquals("test-trip-normalizer", incident.details.getJSONObject("normalizationThread").getString("name"));
+            channel.noteRouteTerminalGeneration("test_terminal", 1000);
+            awaitHandlerBarrier(navigationHost);
+        } finally { DelayedBundle.release.countDown(); binder.join(2000); }
+        assertFalse("normalization callback must finish", binder.isAlive());
+        if (failure.get() != null) throw new AssertionError("normalization callback failed", failure.get());
+        assertTrue("delayed payload must deserialize successfully", DelayedBundle.decoded instanceof Trip);
+        assertEquals("Blocked old trip", ((Trip) DelayedBundle.decoded).getSteps().get(0).getRoad().toString());
+        assertNull("a parse failure must not masquerade as route-generation rejection", listener.tripParseFailure);
+        awaitHandlerBarrier(navigationHost);
+        assertTrue(listener.frameSnapshot().stream().noneMatch(frame -> "Blocked old trip".equals(frame.getRoadText())));
+    }
+
+    @org.robolectric.annotation.Implements(value = Bundleable.class, isInAndroidSdk = false)
+    public static final class DelayedBundle {
+        static Bundleable target;
+        static CountDownLatch entered, release;
+        static volatile Object decoded;
+        @org.robolectric.annotation.RealObject Bundleable value;
+        @org.robolectric.annotation.Implementation protected Object get() throws Exception {
+            if (value == target) {
+                entered.countDown();
+                if (!release.await(5, TimeUnit.SECONDS)) throw new AssertionError("normalizer release timeout");
+            }
+            Object result = org.robolectric.shadow.api.Shadow.directlyOn(value, Bundleable.class, "get");
+            if (value == target) decoded = result;
+            return result;
+        }
+    }
+
+    private JSONObjectRecord awaitIncident() throws Exception {
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(3);
+        while (System.nanoTime() < deadline) {
+            for (byte[] bytes : RuntimeIncidentRecorder.snapshot(RuntimeEnvironment.getApplication(),
+                    java.util.Collections.singletonList(NavCaptureStore.todayDir())).values()) {
+                for (String line : new String(bytes, java.nio.charset.StandardCharsets.UTF_8).split("\n")) {
+                    org.json.JSONObject record = new org.json.JSONObject(line);
+                    if ("stall".equals(record.optString("event")) && "waze_ingress".equals(record.optString("source"))) {
+                        return new JSONObjectRecord(record);
+                    }
+                }
+            }
+            Thread.sleep(20);
+        }
+        throw new AssertionError("missing Waze incident");
+    }
+
+    private static final class JSONObjectRecord {
+        final org.json.JSONObject value, details;
+        JSONObjectRecord(org.json.JSONObject value) throws Exception {
+            this.value = value; details = value.getJSONObject("details");
+        }
     }
 
     private void startRoute(Trip trip) throws Exception {
@@ -164,6 +295,7 @@ public final class WazeIngressBehaviorTest {
 
     private static final class RecordingListener implements WazeDirectChannel.Listener {
         final List<DirectTbtFrame> frames = new CopyOnWriteArrayList<>();
+        final List<WazeRouteTiming.Frame> timings = new CopyOnWriteArrayList<>();
         final AtomicBoolean blockNextFrame = new AtomicBoolean();
         volatile CountDownLatch blockedFrameEntered = new CountDownLatch(0);
         volatile CountDownLatch releaseBlockedFrame = new CountDownLatch(0);
@@ -172,6 +304,7 @@ public final class WazeIngressBehaviorTest {
         volatile CountDownLatch handshakeUnavailable = new CountDownLatch(0);
         volatile CountDownLatch barrier = new CountDownLatch(0);
         volatile String handshakeUnavailableReason;
+        volatile String tripParseFailure;
         volatile String expectedLog;
         volatile CountDownLatch expectedLogLatch = new CountDownLatch(0);
         volatile int navigationStartedCount;
@@ -237,6 +370,7 @@ public final class WazeIngressBehaviorTest {
         public void onFrame(String ownerPackage, int sessionGeneration,
                 DirectTbtFrame frame, String reason, WazeRouteTiming.Frame timing) {
             frames.add(frame);
+            if (timing != null) timings.add(timing);
             if (blockNextFrame.compareAndSet(true, false)) {
                 blockedFrameEntered.countDown();
                 try {
@@ -270,6 +404,7 @@ public final class WazeIngressBehaviorTest {
 
         @Override
         public void onLog(String message) {
+            if (message.startsWith("trip parse failed:")) tripParseFailure = message;
             if (BARRIER_LOG.equals(message)) barrier.countDown();
             if (message.equals(expectedLog)) expectedLogLatch.countDown();
         }

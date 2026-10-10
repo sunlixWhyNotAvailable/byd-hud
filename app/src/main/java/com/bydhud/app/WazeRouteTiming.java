@@ -314,6 +314,49 @@ final class WazeRouteTiming {
         return result.length() == 0 ? "unknown" : result.toString();
     }
 
+    /** Metadata only: never retains a Trip, template or image. */
+    static final class Ingress {
+        final long sequence, elapsedMs;
+        final int generation;
+        volatile String source, stage = "handler_queue";
+        volatile long handlerPost = UNSET, actionStart = UNSET;
+        volatile long normalizationStart = UNSET, normalizationEnd = UNSET;
+        volatile long barrierRelease = UNSET, drainPost = UNSET, blockingSequence = UNSET;
+        volatile Thread normalizationThread;
+        volatile boolean merged;
+
+        Ingress(long sequence, long elapsedMs, int generation, String source) {
+            this.sequence = sequence; this.elapsedMs = elapsedMs;
+            this.generation = generation; this.source = source;
+        }
+        void normalizing(long now) {
+            normalizationThread = Thread.currentThread();
+            normalizationStart = now;
+            stage = "normalization";
+        }
+        void normalized(long now) {
+            normalizationEnd = now;
+            stage = "ordering_wait";
+        }
+        String fields() {
+            return " ingressSource=" + source + " ingressGeneration=" + generation
+                    + " handlerPostElapsedMs=" + handlerPost + " actionStartElapsedMs=" + actionStart
+                    + " normalizationStartElapsedMs=" + normalizationStart
+                    + " normalizationEndElapsedMs=" + normalizationEnd
+                    + " barrierReleaseElapsedMs=" + barrierRelease + " drainPostElapsedMs=" + drainPost
+                    + " preNormalizationQueueMs=" + delta(handlerPost, actionStart)
+                    + " normalizationMs=" + delta(normalizationStart, normalizationEnd)
+                    + " orderingWaitMs=" + delta(normalizationEnd, barrierRelease);
+        }
+        org.json.JSONObject details() throws Exception {
+            return new org.json.JSONObject().put("sequence", sequence).put("generation", generation)
+                    .put("source", source).put("stage", stage).put("blockingSequence", blockingSequence)
+                    .put("timing", fields())
+                    .put("normalizationThread", normalizationEnd < 0
+                            ? RuntimeIncidentRecorder.thread(normalizationThread) : org.json.JSONObject.NULL);
+        }
+    }
+
     static final class Frame {
         private final WazeRouteTiming parent;
         private final long frameElapsedMs;
@@ -324,6 +367,8 @@ final class WazeRouteTiming {
         private long tripDrainStartElapsedMs = UNSET;
         private long tripRenderEndElapsedMs = UNSET;
         private int tripCoalescedCount;
+        private String ingressDetails = "";
+        private long tripReadyElapsedMs = UNSET;
         private long listenerHandoffElapsedMs = UNSET;
         private long listenerCallbackElapsedMs = UNSET;
 
@@ -343,6 +388,12 @@ final class WazeRouteTiming {
 
         synchronized void markTripDrainStart(long elapsedMs) {
             tripDrainStartElapsedMs = first(tripDrainStartElapsedMs, elapsedMs);
+        }
+
+        synchronized void markIngressDetails(Ingress ingress) {
+            if (ingress == null) return;
+            ingressDetails = ingress.fields();
+            tripReadyElapsedMs = Math.max(ingress.barrierRelease, ingress.drainPost);
         }
 
         synchronized void markTripRenderEnd(long elapsedMs) {
@@ -413,11 +464,13 @@ final class WazeRouteTiming {
 
         private String tripQueueFields() {
             return " tripIngressSequence=" + tripIngressSequence
+                    + ingressDetails
                     + " tripIngressElapsedMs=" + tripIngressElapsedMs
                     + " tripDrainStartElapsedMs=" + tripDrainStartElapsedMs
                     + " tripRenderEndElapsedMs=" + tripRenderEndElapsedMs
                     + " tripCoalescedCount=" + tripCoalescedCount
                     + " ingressToDrainMs=" + delta(tripIngressElapsedMs, tripDrainStartElapsedMs)
+                    + " readyQueueMs=" + delta(tripReadyElapsedMs, tripDrainStartElapsedMs)
                     + " drainToRenderMs=" + delta(tripDrainStartElapsedMs, tripRenderEndElapsedMs)
                     + " renderToListenerMs=" + delta(tripRenderEndElapsedMs, listenerHandoffElapsedMs);
         }
