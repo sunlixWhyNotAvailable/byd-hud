@@ -918,6 +918,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.mapSettings(this),
                 HudPrefs.isWazeCustomSurfaceEnabled(this),
                 dashboardScreenMode,
+                HudPrefs.isDashboardKeepBlackBackgroundEnabled(this),
                 HudPrefs.dashboardFormatMethod(this, dashboardScreenMode),
                 dashboardProfile.widthPercent,
                 dashboardProfile.heightPercent,
@@ -1723,6 +1724,12 @@ public final class MainActivity extends ComponentActivity {
         HudPrefs.setDashboardScreenMode(this, persistedMode);
         appendStatus("Dashboard screen mode " + persistedMode);
         refreshControls();
+    }
+
+    public void composeSetDashboardKeepBlackBackgroundEnabled(boolean enabled) {
+        HudPrefs.setDashboardKeepBlackBackgroundEnabled(this, enabled);
+        AppEventLogger.event(this, "ui dashboard_keep_black_background=" + enabled);
+        invalidateComposeSnapshot();
     }
 
     public void composeSetDashboardFormatMethod(int editedMode, int method) {
@@ -2852,6 +2859,7 @@ public final class MainActivity extends ComponentActivity {
         public final HudMapSettings mapSettings;
         public final boolean wazeCustomSurfaceEnabled;
         public final int dashboardScreenMode;
+        public final boolean dashboardKeepBlackBackground;
         public final int dashboardFormatMethod;
         public final int dashboardWidthPercent;
         public final int dashboardHeightPercent;
@@ -2932,6 +2940,7 @@ public final class MainActivity extends ComponentActivity {
                 int speedLimitLaneOverlaySize, HudMapSettings mapSettings,
                 boolean wazeCustomSurfaceEnabled,
                 int dashboardScreenMode,
+                boolean dashboardKeepBlackBackground,
                 int dashboardFormatMethod,
                 int dashboardWidthPercent, int dashboardHeightPercent,
                 int dashboardOffsetPercent, int dashboardScalePercent,
@@ -3007,6 +3016,7 @@ public final class MainActivity extends ComponentActivity {
             this.mapSettings = mapSettings == null ? HudMapSettings.defaults() : mapSettings;
             this.wazeCustomSurfaceEnabled = wazeCustomSurfaceEnabled;
             this.dashboardScreenMode = HudPrefs.normalizeDashboardScreenMode(dashboardScreenMode);
+            this.dashboardKeepBlackBackground = dashboardKeepBlackBackground;
             this.dashboardFormatMethod = HudPrefs.normalizeDashboardFormatMethod(
                     this.dashboardScreenMode, dashboardFormatMethod);
             this.dashboardWidthPercent = dashboardWidthPercent;
@@ -3131,6 +3141,7 @@ public final class MainActivity extends ComponentActivity {
                     && Objects.equals(mapLive, other.mapLive)
                     && wazeCustomSurfaceEnabled == other.wazeCustomSurfaceEnabled
                     && dashboardScreenMode == other.dashboardScreenMode
+                    && dashboardKeepBlackBackground == other.dashboardKeepBlackBackground
                     && dashboardFormatMethod == other.dashboardFormatMethod
                     && dashboardWidthPercent == other.dashboardWidthPercent
                     && dashboardHeightPercent == other.dashboardHeightPercent
@@ -3205,6 +3216,7 @@ public final class MainActivity extends ComponentActivity {
                     speedLimitCompositePlacement, speedLimitManeuverOverlaySize,
                     speedLimitLaneOverlaySize, mapSettings, mapLive, wazeCustomSurfaceEnabled,
                     dashboardScreenMode,
+                    dashboardKeepBlackBackground,
                     dashboardFormatMethod, dashboardWidthPercent, dashboardHeightPercent,
                     dashboardOffsetPercent,
                     dashboardScalePercent, dashboardWidgetState, dashboardWidgetOverlayPermission,

@@ -904,17 +904,20 @@ public final class ClusterProjectionService extends Service
                 return "projection output changed before move";
             }
             blackView = blackWindowView;
-            if (blackView == null || !blackWindowVisible) return "";
-            if (blackWindowDisplayGeneration != expectedDisplayGeneration) {
-                return "projection black window bound to stale display";
+            if (blackView != null && blackWindowVisible) {
+                if (blackWindowDisplayGeneration != expectedDisplayGeneration) {
+                    return "projection black window bound to stale display";
+                }
+                try {
+                    blackView.setVisibility(View.GONE);
+                } catch (RuntimeException e) {
+                    return "projection black window hide failed: "
+                            + e.getClass().getSimpleName() + " " + safe(e.getMessage());
+                }
+                blackWindowVisible = false;
             }
-            try {
-                blackView.setVisibility(View.GONE);
-            } catch (RuntimeException e) {
-                return "projection black window hide failed: "
-                        + e.getClass().getSimpleName() + " " + safe(e.getMessage());
-            }
-            blackWindowVisible = false;
+            String visibilityFailure = setOverlayVisibleOnMain(true, "prepare-move");
+            if (!visibilityFailure.isEmpty()) return visibilityFailure;
         }
         log("projection_black hidden package=" + packageName
                 + " display=" + targetDisplayId
@@ -1972,18 +1975,44 @@ public final class ClusterProjectionService extends Service
                 projectionGeometryValid);
     }
 
-    //A confirmed normal Return publishes black pixels before clearing the exact owner.
+    // Keep the Surface reusable; window alpha hides the entire SurfaceView output when Off.
+    private String setOverlayVisibleOnMain(boolean visible, String reason) {
+        if (overlayRoot == null || overlayWindowManager == null
+                || !(overlayRoot.getLayoutParams() instanceof WindowManager.LayoutParams)) {
+            return "projection overlay layout unavailable";
+        }
+        WindowManager.LayoutParams params = (WindowManager.LayoutParams) overlayRoot.getLayoutParams();
+        float alpha = visible ? 1f : 0f;
+        if (params.alpha == alpha) return "";
+        float previousAlpha = params.alpha;
+        params.alpha = alpha;
+        try {
+            overlayWindowManager.updateViewLayout(overlayRoot, params);
+            log("projection_overlay visible=" + visible + " reason=" + safe(reason));
+            return "";
+        } catch (RuntimeException error) {
+            params.alpha = previousAlpha;
+            String failure = "projection overlay visibility failed: "
+                    + error.getClass().getSimpleName() + " " + safe(error.getMessage());
+            log(failure + " visible=" + visible + " reason=" + safe(reason));
+            return failure;
+        }
+    }
+
+    // A confirmed Return applies the saved background choice before clearing the exact owner.
     private String retainProjectionIdle(
             String packageName,
             int expectedProjectionGeneration,
             long expectedOwnerToken,
             String reason) {
-        String blackFailure = showBlackWindowForIdleOnMain(
+        boolean keepBlack = HudPrefs.isDashboardKeepBlackBackgroundEnabled(this);
+        String blackFailure = keepBlack ? showBlackWindowForIdleOnMain(
                 packageName,
                 expectedProjectionGeneration,
                 expectedOwnerToken,
-                reason);
+                reason) : "";
         boolean reusable;
+        String visibilityFailure;
         synchronized (lock) {
             if (!ProjectionLifecyclePolicy.matchesOutputOwner(
                     projectionRequested,
@@ -1996,6 +2025,11 @@ public final class ClusterProjectionService extends Service
                     expectedProjectionGeneration,
                     expectedOwnerToken)) {
                 return "projection output owner changed before idle";
+            }
+            visibilityFailure = setOverlayVisibleOnMain(keepBlack && blackFailure.isEmpty(), reason);
+            if (!visibilityFailure.isEmpty()) {
+                blackFailure = blackFailure.isEmpty() ? visibilityFailure
+                        : blackFailure + "; " + visibilityFailure;
             }
             projectionGeneration++;
             pendingPackage = "";
@@ -2010,13 +2044,14 @@ public final class ClusterProjectionService extends Service
             reusable = hasReusableResourcesLocked();
         }
         updateNotification("Dashboard projection idle");
-        if (!reusable) {
-            releaseProjection("idle-resource-invalid " + safe(reason));
+        if (!reusable || !blackFailure.isEmpty()) {
+            releaseProjection((blackFailure.isEmpty() ? "idle-resource-invalid "
+                    : "idle-background-failed ") + safe(reason));
             drainPendingShutdownRelease(reason);
             return blackFailure;
         }
         log("projection_idle retained=true black="
-                + (blackFailure.isEmpty() ? "shown" : "failed")
+                + (!keepBlack ? "disabled" : blackFailure.isEmpty() ? "shown" : "failed")
                 + " reason=" + safe(reason));
         drainPendingShutdownRelease(reason);
         return blackFailure;
@@ -2506,6 +2541,12 @@ public final class ClusterProjectionService extends Service
                 return;
             }
             if (projectionContentVisible) return;
+            String visibilityFailure = setOverlayVisibleOnMain(true, "content-confirmed");
+            if (!visibilityFailure.isEmpty()) {
+                log("projection_content reveal_failed package=" + safe(packageName)
+                        + " error=" + visibilityFailure);
+                return;
+            }
             projectionContentVisible = true;
         }
         log("projection_content confirmed package=" + safe(packageName)

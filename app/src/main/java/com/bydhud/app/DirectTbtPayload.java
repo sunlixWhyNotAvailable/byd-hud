@@ -244,6 +244,7 @@ public final class DirectTbtPayload {
         writeStringField(fields, 26, "");
         writeVarintField(fields, 28, Math.max(0, nativeManeuver));
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
+        writeStringField(fields, 30, HudCheckPayload.DIAGNOSTIC_GUIDE_LINE);
         return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
                 maneuverPng, displayTextStart, displayTextEnd, hasStreetEta,
@@ -260,6 +261,7 @@ public final class DirectTbtPayload {
         writeVarintField(inner, 2, 2);
         writeVarintField(inner, 6, 255);
         writeVarintField(inner, 16, 1);
+        writeStringField(inner, 30, "");
         return wrap(inner.toByteArray());
     }
 

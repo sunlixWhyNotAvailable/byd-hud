@@ -3232,6 +3232,22 @@ private fun OptionsTab(
                     )
                 }
             }
+            row("dashboard-keep-black-background") {
+                SwitchRow(
+                    language.choose(
+                        "Залишати чорне тло при поверненні на планшет",
+                        "Keep black background when returning to the tablet",
+                        "Оставлять чёрный фон при возврате на планшет"),
+                    language.choose(
+                        "Після повернення застосунку на планшет залишає чорне тло в області його вікна на приборці.",
+                        "Keeps a black background in the app's dashboard window area after returning the app to the tablet.",
+                        "После возврата приложения на планшет оставляет чёрный фон в области его окна на приборке."),
+                    snapshot.dashboardKeepBlackBackground,
+                    palette
+                ) { enabled ->
+                    runAction { activity.composeSetDashboardKeepBlackBackgroundEnabled(enabled) }
+                }
+            }
             if (snapshot.dashboardScreenMode != HudPrefs.DASHBOARD_MODE_NONE) {
                 row("dashboard-format-method") {
                     ActionRow(

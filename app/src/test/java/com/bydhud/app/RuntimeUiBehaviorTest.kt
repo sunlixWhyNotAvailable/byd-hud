@@ -90,6 +90,25 @@ class RuntimeUiBehaviorTest {
         }
     }
 
+    @Test fun returnBackgroundDefaultsOffAndPersistsAcrossDashboardModes() {
+        session.select("Options", "dashboard-window-profile")
+        HudPrefs.setDashboardScreenMode(host, HudPrefs.DASHBOARD_MODE_NONE)
+        render()
+        val label = "Keep black background when returning to the tablet"
+        switch(label).assertIsDisplayed().assertIsOff().assertIsEnabled()
+        switch(label).performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick) { it() }
+        settle()
+        assertTrue(HudPrefs.isDashboardKeepBlackBackgroundEnabled(host))
+        ui.runOnIdle {
+            host.composeSetDashboardScreenMode(HudPrefs.DASHBOARD_MODE_FULL)
+            invalidateSnapshot()
+        }
+        settle()
+        switch(label).assertIsOn()
+        assertTrue(UserSettingsDiagnostics.snapshot(host).getJSONObject("output")
+            .getBoolean("dashboardKeepBlackBackground"))
+    }
+
     @Test fun hiddenUiShowsBackgroundChangesWithoutRestartingWork() {
         render()
         switch("PNG output").assertIsOn()

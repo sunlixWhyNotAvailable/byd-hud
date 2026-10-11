@@ -14,6 +14,9 @@ import java.util.zip.DeflaterOutputStream;
 
 /** Bounded diagnostic SOME/IP payloads; no lifecycle or ownership side effects. */
 public final class HudCheckPayload {
+    // shortcut: fixed step12 geometry for the private N9 diagnostic; not a real route.
+    static final String DIAGNOSTIC_GUIDE_LINE =
+            "[[121.4737,31.2304,0],[121.4740,31.2307,0]]";
     private static final long ROAD_SERVICE_ID = 0x000B010A00010000L;
     private static final long TRAFFIC_INFO_SERVICE_ID = 0x000B000700070000L;
     private static final long MATRIX_SERVICE_ID = 0x000B820282020000L;
@@ -73,7 +76,7 @@ public final class HudCheckPayload {
 
         // Every snapshot clears optional fields first; this prevents a previous
         // extended case's ETA/camera/geometry from lingering in a receiver.
-        writeExtendedNeutralFields(fields);
+        writeExtendedNeutralFields(fields, extended ? "" : DIAGNOSTIC_GUIDE_LINE);
         if (extended) writeExtendedFields(fields, state.extendedIndex);
         return wrap(fields.toByteArray());
     }
@@ -179,7 +182,7 @@ public final class HudCheckPayload {
         }
     }
 
-    private static void writeExtendedNeutralFields(ByteArrayOutputStream out) {
+    private static void writeExtendedNeutralFields(ByteArrayOutputStream out, String guideLine) {
         writeVarintField(out, 3, 0);
         writeVarintField(out, 4, 0);
         for (int field = 11; field <= 15; field++) writeVarintField(out, field, 0);
@@ -194,7 +197,7 @@ public final class HudCheckPayload {
         writeStringField(out, 25, "");
         writeStringField(out, 26, "");
         writeStringField(out, 27, "");
-        writeStringField(out, 30, "");
+        writeStringField(out, 30, guideLine);
         writeStringField(out, 31, "");
         writeDoubleField(out, 32, 0.0d);
         writeDoubleField(out, 33, 0.0d);
@@ -246,8 +249,7 @@ public final class HudCheckPayload {
                 writeVarintField(out, 22, 12);
                 break;
             case 11:
-                writeStringField(out, 30,
-                        "[[121.4737,31.2304,0],[121.4740,31.2307,0]]");
+                writeStringField(out, 30, DIAGNOSTIC_GUIDE_LINE);
                 break;
             case 12:
                 writeStringField(out, 31, "121.4740,31.2307,0");

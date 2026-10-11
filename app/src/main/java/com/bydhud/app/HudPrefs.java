@@ -60,6 +60,7 @@ final class HudPrefs {
     //keeps the legacy boolean only as a migration input for the mode selector.
     private static final String KEY_FULLSCREEN_DASHBOARD = "fullscreen_dashboard";
     private static final String KEY_DASHBOARD_SCREEN_MODE = "dashboard_screen_mode";
+    private static final String KEY_DASHBOARD_KEEP_BLACK_BACKGROUND = "dashboard_keep_black_background";
     private static final String KEY_DASHBOARD_HEIGHT_PERCENT = "dashboard_height_percent";
     private static final String KEY_DASHBOARD_PARTIAL_WIDTH_PERCENT = "dashboard_partial_width_percent";
     private static final String KEY_DASHBOARD_PARTIAL_HEIGHT_PERCENT = "dashboard_partial_height_percent";
@@ -600,6 +601,14 @@ final class HudPrefs {
 
     static int normalizeDashboardScreenMode(int mode) {
         return clamp(mode, DASHBOARD_MODE_NONE, DASHBOARD_MODE_FULL);
+    }
+
+    static boolean isDashboardKeepBlackBackgroundEnabled(Context context) {
+        return prefs(context).getBoolean(KEY_DASHBOARD_KEEP_BLACK_BACKGROUND, false);
+    }
+
+    static void setDashboardKeepBlackBackgroundEnabled(Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_DASHBOARD_KEEP_BLACK_BACKGROUND, enabled).apply();
     }
 
     static int dashboardFormatMethod(Context context, int dashboardMode) {
