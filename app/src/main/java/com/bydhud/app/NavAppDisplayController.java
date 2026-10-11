@@ -70,14 +70,6 @@ final class NavAppDisplayController {
             "(?s).*mDisplayId=([0-9]+).{0,700}remote_dashboard.*");
     private static final Pattern REMOTE_DASHBOARD_DISPLAY_AFTER = Pattern.compile(
             "(?s).*remote_dashboard.{0,700}mDisplayId=([0-9]+).*");
-    private static final Pattern TASK_ID_DISPLAY_PATTERN =
-            Pattern.compile(".*taskId=([0-9]+).*displayId=([0-9]+).*");
-    private static final Pattern DISPLAY_ID_TASK_PATTERN =
-            Pattern.compile(".*displayId=([0-9]+).*taskId=([0-9]+).*");
-    private static final Pattern TASK_ID_COLON_PATTERN =
-            Pattern.compile(".*taskId=([0-9]+):.*");
-    private static final Pattern TASK_ID_PATTERN =
-            Pattern.compile(".*taskId=([0-9]+).*");
 
     //defines the Listener module boundary so related behavior stays readable inside one unit.
     interface Listener {
@@ -2342,7 +2334,7 @@ final class NavAppDisplayController {
         if (normalized.isEmpty() || dumpsys == null || dumpsys.isEmpty()) {
             return null;
         }
-        String[] lines = dumpsys.split("\\r?\\n");
+        String[] lines = NavAppTaskScanner.activityTaskLines(dumpsys);
         int sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
         int currentTaskId = -1;
         int currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2382,16 +2374,6 @@ final class NavAppDisplayController {
             }
             if (currentTaskId >= 0) {
                 block.append(line).append('\n');
-            } else if (containsPackage(line, normalized)) {
-                int[] inline = parseInlineTaskValues(line, sectionDisplayId);
-                if (inline != null) {
-                    selected = preferVisibleTask(selected, new NavAppDisplayState(
-                            normalized,
-                            inline[0],
-                            inline[1],
-                            parseVisible(line),
-                            "parsed"));
-                }
             }
         }
         return preferVisibleTask(
@@ -2402,7 +2384,7 @@ final class NavAppDisplayController {
     private static NavAppDisplayState parseTaskId(
             String logicalPackage, int targetTaskId, String dumpsys) {
         if (targetTaskId < 0 || dumpsys == null || dumpsys.isEmpty()) return null;
-        String[] lines = dumpsys.split("\\r?\\n");
+        String[] lines = NavAppTaskScanner.activityTaskLines(dumpsys);
         int sectionDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
         int currentTaskId = -1;
         int currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2468,39 +2450,6 @@ final class NavAppDisplayController {
         return NavAppTaskScanner.parseTaskHeader(line, fallbackDisplayId);
     }
 
-    //parses source data here so downstream HUD code receives normalized navigation fields.
-    private static int[] parseInlineTaskValues(String line, int fallbackDisplayId) {
-        Matcher taskDisplay = TASK_ID_DISPLAY_PATTERN.matcher(line);
-        if (taskDisplay.matches()) {
-            return new int[]{
-                    parseInt(taskDisplay.group(1), -1),
-                    parseInt(taskDisplay.group(2), NavAppDisplayState.DISPLAY_UNKNOWN)
-            };
-        }
-        Matcher displayTask = DISPLAY_ID_TASK_PATTERN.matcher(line);
-        if (displayTask.matches()) {
-            return new int[]{
-                    parseInt(displayTask.group(2), -1),
-                    parseInt(displayTask.group(1), NavAppDisplayState.DISPLAY_UNKNOWN)
-            };
-        }
-        Matcher taskColon = TASK_ID_COLON_PATTERN.matcher(line);
-        if (taskColon.matches()) {
-            return new int[]{
-                    parseInt(taskColon.group(1), -1),
-                    fallbackDisplayId
-            };
-        }
-        Matcher taskOnly = TASK_ID_PATTERN.matcher(line);
-        if (taskOnly.matches()) {
-            return new int[]{
-                    parseInt(taskOnly.group(1), -1),
-                    fallbackDisplayId
-            };
-        }
-        return null;
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private static NavAppDisplayState taskFromBlock(
             String packageName,
@@ -2511,7 +2460,7 @@ final class NavAppDisplayController {
             return null;
         }
         String value = block.toString();
-        if (!containsPackage(value, packageName)) {
+        if (!NavAppTaskScanner.taskPackages(value).contains(packageName)) {
             return null;
         }
         return new NavAppDisplayState(
@@ -2590,18 +2539,6 @@ final class NavAppDisplayController {
             }
         }
         return NavAppDisplayState.DISPLAY_UNKNOWN;
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private static boolean containsPackage(String text, String packageName) {
-        if (text == null || packageName == null || packageName.isEmpty()) {
-            return false;
-        }
-        Pattern packagePattern = Pattern.compile(
-                "(^|[^A-Za-z0-9_.$])"
-                        + Pattern.quote(packageName)
-                        + "($|[^A-Za-z0-9_.$])");
-        return packagePattern.matcher(text).find();
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.

@@ -1,0 +1,18 @@
+ACTIVITY MANAGER ACTIVITIES (dumpsys activity activities)
+Display #0 (activities from top to bottom):
+  * Task{ad2674a #5 type=undefined ?? U=0 visible=false visibleRequested=false mode=fullscreen magicmode=0 translucent=true sz=0}
+    mCreatedByOrganizer=true
+    isSleeping=false
+
+Display #2 (activities from top to bottom):
+Display #3 (activities from top to bottom):
+Display #4 (activities from top to bottom):
+Display #21 (activities from top to bottom):
+
+ActivityTaskSupervisor state:
+  topDisplayFocusedRootTask=Task{70502d1 #115 type=standard A=10258:app.azimutgps U=0 visible=true sz=1}
+Display: mDisplayId=0 rootTasks=7
+  * Task{ad2674a #5 type=undefined ?? U=0 visible=false visibleRequested=false mode=fullscreen magicmode=0 translucent=true sz=0}
+  deepestLastOrientationSource=Task{13743a0 #117 type=standard A=10226:com.waze U=0 visible=false visibleRequested=false mode=fullscreen magicmode=0 translucent=true sz=0}
+Display: mDisplayId=21 rootTasks=0
+  mLastFocusedRootTask=Task{13743a0 #117 type=standard A=10226:com.waze U=0 visible=false visibleRequested=false mode=fullscreen magicmode=0 translucent=true sz=0}

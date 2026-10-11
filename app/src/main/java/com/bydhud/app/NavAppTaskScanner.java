@@ -39,9 +39,13 @@ final class NavAppTaskScanner {
     private static final Pattern TASK_HASH_NO_DISPLAY_PATTERN =
             Pattern.compile("\\s*(?:\\*\\s*)?Task\\{[^#]*#([0-9]+).*");
     private static final Pattern GLOBAL_TASK_SUMMARY_PATTERN = Pattern.compile(
-            ".*\\b(?:topDisplayFocusedRootTask|topResumedActivity|mFocusedRootTask)\\s*=.*");
-    private static final Pattern PACKAGE_PATTERN =
-            Pattern.compile("(?<![A-Za-z0-9_])([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=[/\\s}:,]|$)");
+            "\\s*(?:topDisplayFocusedRootTask|mFocusedRootTask)\\s*=.*");
+    private static final Pattern SUPERVISOR_SECTION_PATTERN =
+            Pattern.compile("(?m)^\\s*Activity(?:Task|Stack)Supervisor state:");
+    private static final Pattern ACTIVITY_PACKAGE_PATTERN = Pattern.compile(
+            "(?m)^\\s*packageName=([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=\\s|$)");
+    private static final Pattern TASK_OWNER_PATTERN = Pattern.compile(
+            "\\s(?:A=(?:[0-9]+:)?|I=)([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=[/\\s}]|$)");
     private static final Pattern FOREGROUND_SERVICE_PATTERN = Pattern.compile(
             "(?im)\\b(?:isForeground|foregroundService|foreground)\\s*=\\s*true\\b");
     private static final SimpleDateFormat TIME_FORMAT =
@@ -207,8 +211,7 @@ final class NavAppTaskScanner {
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
     private void parseTaskRows(String dumpsys, Map<String, RowBuilder> rows) {
-        String safeDump = dumpsys == null ? "" : dumpsys;
-        String[] lines = safeDump.split("\\r?\\n");
+        String[] lines = activityTaskLines(dumpsys);
         int currentTaskId = -1;
         int currentDisplayId = -1;
         int sectionDisplayId = -1;
@@ -304,13 +307,13 @@ final class NavAppTaskScanner {
             return;
         }
         String value = block.toString();
-        Set<String> packages = extractInstalledPackages(value);
+        Set<String> packages = taskPackages(value);
         if (packages.isEmpty()) {
             return;
         }
         boolean visible = parseVisible(value);
-        int safeDisplayId = displayId < 0 ? MAIN_DISPLAY_ID : displayId;
         for (String packageName : packages) {
+            if (!isVisiblePackage(packageName) || !isInstalledPackage(packageName)) continue;
             RowBuilder row = rows.get(packageName);
             if (row == null) {
                 row = new RowBuilder(packageName);
@@ -320,22 +323,34 @@ final class NavAppTaskScanner {
                 row.hasTask = true;
                 row.visible = visible;
                 row.taskId = taskId;
-                row.displayId = safeDisplayId;
+                row.displayId = displayId;
             }
         }
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private Set<String> extractInstalledPackages(String value) {
+    static Set<String> taskPackages(String value) {
         Set<String> packages = new HashSet<>();
-        Matcher matcher = PACKAGE_PATTERN.matcher(value == null ? "" : value);
+        String block = value == null ? "" : value;
+        Matcher matcher = ACTIVITY_PACKAGE_PATTERN.matcher(block);
         while (matcher.find()) {
-            String normalized = normalizePackage(matcher.group(1));
-            if (isVisiblePackage(normalized) && isInstalledPackage(normalized)) {
-                packages.add(normalized);
-            }
+            packages.add(matcher.group(1));
+        }
+        // Compact dumps may omit Activity details; only the task header can identify its owner.
+        if (packages.isEmpty()) {
+            int newline = block.indexOf('\n');
+            matcher = TASK_OWNER_PATTERN.matcher(newline < 0 ? block : block.substring(0, newline));
+            if (matcher.find()) packages.add(matcher.group(1));
         }
         return packages;
+    }
+
+    static String[] activityTaskLines(String dumpsys) {
+        String value = dumpsys == null ? "" : dumpsys;
+        // The supervisor section repeats tasks and historical references without activity-tree scope.
+        Matcher summary = SUPERVISOR_SECTION_PATTERN.matcher(value);
+        if (summary.find()) value = value.substring(0, summary.start());
+        return value.split("\\r?\\n");
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
@@ -373,10 +388,9 @@ final class NavAppTaskScanner {
         if (!root.matches()) {
             return null;
         }
-        int displayId = fallbackDisplayId < 0 ? MAIN_DISPLAY_ID : fallbackDisplayId;
         return new int[]{
                 parseInt(root.group(1), -1),
-                displayId
+                fallbackDisplayId
         };
     }
 
