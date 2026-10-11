@@ -2356,13 +2356,20 @@ final class NavHudLiveSender {
         int displayId = requestedDisplayId >= 0
                 ? requestedDisplayId
                 : state == null || state.displayId < 0 ? 0 : state.displayId;
+        if (!WazeSurfaceActivity.launch(context, displayId)) {
+            if (WazeSurfaceActivity.isActive()) {
+                log("waze surface launch failed; existing host preserved task="
+                        + WazeSurfaceActivity.activeTaskId()
+                        + " display=" + WazeSurfaceActivity.activeDisplayId()
+                        + " reason=" + safeReason(reason));
+            } else {
+                fallbackFromWazeSurface("surface-launch-failed");
+            }
+            return;
+        }
         wazeSurfaceLaunchPending = true;
         handler.removeCallbacks(wazeSurfaceReadyTimeout);
         handler.postDelayed(wazeSurfaceReadyTimeout, WAZE_SURFACE_READY_TIMEOUT_MS);
-        if (!WazeSurfaceActivity.launch(context, displayId)) {
-            fallbackFromWazeSurface("surface-launch-failed");
-            return;
-        }
         log("waze surface launch requested display=" + displayId
                 + " bringToFront=" + bringToFront
                 + " timeoutMs=" + WAZE_SURFACE_READY_TIMEOUT_MS
@@ -2627,7 +2634,14 @@ final class NavHudLiveSender {
     }
 
     static boolean wazeSurfaceHandoffNeedsLaunch(int action) {
-        return action == SURFACE_HANDOFF_RELAUNCH || action == SURFACE_HANDOFF_WAIT;
+        return action == SURFACE_HANDOFF_RELAUNCH;
+    }
+
+    private void requestMissingWazeSurfaceForHandoff(String reason) {
+        // Recheck on the owner thread: the Activity may have appeared since polling.
+        if (WazeSurfaceActivity.activeTaskId() >= 0) return;
+        // Create on the tablet, then use the existing shell-authorized task move.
+        requestWazeSurfaceActivity("display-handoff:" + safeReason(reason), true, 0);
     }
 
     static boolean isTransientWazeSurfaceUnavailable(
@@ -2742,8 +2756,7 @@ final class NavHudLiveSender {
                 log("surface_missing target=" + targetDisplay
                         + " routeGeneration=" + start.routeGeneration
                         + " reason=" + safeReason(reason));
-                requestWazeSurfaceActivity(
-                        "display-handoff:" + safeReason(reason), true, targetDisplay);
+                requestMissingWazeSurfaceForHandoff(reason);
             }
             start.ready.countDown();
         });
@@ -2765,6 +2778,7 @@ final class NavHudLiveSender {
         long lastRelaunchRequestMs = 0L;
         int confirmedMovedTask = -1;
         int confirmedMovedTarget = NavAppDisplayState.DISPLAY_UNKNOWN;
+        int waitingTask = -1;
         while (SystemClock.elapsedRealtime() < deadline) {
             int taskId = WazeSurfaceActivity.activeTaskId();
             int actualDisplay = WazeSurfaceActivity.activeDisplayId();
@@ -2856,20 +2870,23 @@ final class NavHudLiveSender {
                 long now = SystemClock.elapsedRealtime();
                 if (now - lastRelaunchRequestMs >= 500L) {
                     lastRelaunchRequestMs = now;
-                    log((action == SURFACE_HANDOFF_RELAUNCH
-                            ? "surface_relaunch" : "surface_restore")
+                    log("surface_relaunch"
                             + " target=" + targetDisplay
                             + " routeGeneration=" + start.routeGeneration
                             + " reason=" + safeReason(reason));
                     handler.post(() -> {
                         if (start.routeGeneration == wazeRouteGeneration
                                 && shouldUseWazeSurface()) {
-                            requestWazeSurfaceActivity(
-                                    "display-handoff:" + safeReason(reason),
-                                    true, targetDisplay);
+                            requestMissingWazeSurfaceForHandoff(reason);
                         }
                     });
                 }
+            } else if (action == SURFACE_HANDOFF_WAIT && waitingTask != taskId) {
+                waitingTask = taskId;
+                log("surface_wait task=" + taskId + " target=" + targetDisplay
+                        + " instance=" + WazeSurfaceActivity.activeInstanceId()
+                        + " epoch=" + WazeSurfaceActivity.activeSurfaceEpoch()
+                        + " reason=" + safeReason(reason));
             }
             try {
                 Thread.sleep(WAZE_SURFACE_HANDOFF_POLL_MS);
