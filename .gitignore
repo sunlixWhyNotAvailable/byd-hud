@@ -5,7 +5,6 @@ build/
 build_outputs/
 local.properties
 *.apk
-!app/src/test/resources/apk/valid.apk
 *.aab
 *.jks
 *.keystore

@@ -35,6 +35,8 @@ public final class ShellWorkEntryPoint {
                 currentControl = control;
                 JSONObject manifest = ShellWorkFiles.read(new File(control, "request.json"));
                 validateManifest(app, args[0], manifest);
+                if (InstrumentNavigationProxyService.isTerminalWorkState(
+                        ShellWorkFiles.read(new File(control, "state.json")).optString("state"))) return;
                 currentJob = ShellWorkFiles.inside(ShellWorkFiles.root(app), manifest.getString("artifact"));
                 if (!currentJob.getParentFile().equals(ShellWorkFiles.root(app).getCanonicalFile()))
                     throw new IOException("Invalid shell artifact workspace");
@@ -145,7 +147,8 @@ public final class ShellWorkEntryPoint {
         return values;
     }
 
-    private static int bootCount() throws IOException {
+    // app_process is not registered with ActivityManager as a content-provider client.
+    static int bootCount() throws IOException {
         LocalAdbBridge.ShellResult result = command("settings get global boot_count", 128, 5_000);
         if (result.exitCode != 0) throw new IOException("Cannot read shell operation boot identity");
         try { return Integer.parseInt(result.output.trim()); }

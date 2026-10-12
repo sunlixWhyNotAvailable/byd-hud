@@ -36,10 +36,6 @@ android {
         disable += "ExpiredTargetSdkVersion"
     }
 
-    testOptions {
-        unitTests.isIncludeAndroidResources = true
-    }
-
     buildFeatures {
         aidl = true
         buildConfig = true
@@ -79,9 +75,6 @@ dependencies {
     implementation("com.android:zipflinger:8.7.3")
     implementation("io.sentry:sentry-android-core:8.43.0")
     testImplementation("junit:junit:4.13.2")
-    testImplementation("org.json:json:20240303")
-    testImplementation("org.robolectric:robolectric:4.16.1")
-    testImplementation("androidx.compose.ui:ui-test-junit4")
 }
 
 val copyPerformanceApkToBuildOutputs by tasks.registering(Copy::class) {

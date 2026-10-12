@@ -101,7 +101,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     private final Runnable recoverClient = this::recoverClient;
     private final ShellLogcatCapture logcatCapture = new ShellLogcatCapture();
     private java.lang.Process recoveryCommand;
-    private final java.util.Map<String, java.lang.Process> workProcesses = new java.util.HashMap<>();
+    private final java.util.Map<String, java.lang.Process> workProcesses = new java.util.concurrent.ConcurrentHashMap<>();
 
     InstrumentNavigationProxyService(
             Context systemContext, long generation, String nonce, int allowedUid,
@@ -512,8 +512,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         long identity = Binder.clearCallingIdentity();
         try {
             Context app = shellAppContext();
-            int currentBoot = android.provider.Settings.Global.getInt(
-                    app.getContentResolver(), android.provider.Settings.Global.BOOT_COUNT, -1);
+            int currentBoot = ShellWorkEntryPoint.bootCount();
             if (boot != currentBoot) throw new SecurityException("Shell job boot identity changed");
             if (!validWorkType(type) || id == null || !id.matches("[A-Za-z0-9_-]{1,80}"))
                 throw new SecurityException("Invalid shell operation identity");
@@ -591,14 +590,15 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                     || request.optInt("version", -1) != appVersionCode)
                 throw new SecurityException("Trusted shell operation identity mismatch");
             org.json.JSONObject state = readWorkState(control);
-            int currentBoot = android.provider.Settings.Global.getInt(
-                    systemContext.getContentResolver(), android.provider.Settings.Global.BOOT_COUNT, -1);
+            java.lang.Process worker = workProcesses.get(id);
+            int currentBoot = ShellWorkEntryPoint.bootCount();
             if (!isTerminalWorkState(state.optString("state"))
                     && request.optInt("boot", -1) != currentBoot) {
                 finishInterruptedWork(control, request);
                 state = readWorkState(control);
             } else if ("RUNNING".equals(state.optString("state"))
-                    && !ShellWorkFiles.running(control)) {
+                    // A launched process can still be starting before it acquires owner.lock.
+                    && (worker == null ? !awaitingWorkStart(state) : !worker.isAlive())) {
                 finishInterruptedWork(control, request);
                 state = readWorkState(control);
             }
@@ -649,13 +649,15 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             String phase = state.optString("state");
             if (isTerminalWorkState(phase)) return;
             if ("RUNNING".equals(phase) || new File(control, "started.json").exists()) {
-                finishInterruptedWork(control, request);
+                if (!awaitingWorkStart(state))
+                    finishInterruptedWork(control, request);
                 return;
             }
             File artifact = ShellWorkFiles.inside(ShellWorkFiles.root(app), request.getString("artifact"));
             if (!artifact.getParentFile().equals(ShellWorkFiles.root(app).getCanonicalFile()))
                 throw new SecurityException("Invalid shell artifact directory");
             writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "RUNNING")
+                    .put("startupDeadlineElapsedMs", android.os.SystemClock.elapsedRealtime() + 15_000L)
                     .put("progress", new org.json.JSONObject().put("phase", "STARTING")));
             ProcessBuilder builder = new ProcessBuilder("/system/bin/app_process", "/system/bin",
                     ShellWorkEntryPoint.class.getName(), id);
@@ -895,15 +897,27 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     }
 
     private static void finishInterruptedWork(File control, org.json.JSONObject request) throws Exception {
-        if (isTerminalWorkState(readWorkState(control).optString("state"))) return;
-        writeWorkState(control, new org.json.JSONObject().put("id", request.optString("id"))
-                .put("state", "INTERRUPTED")
-                .put("result", new org.json.JSONObject().put("ok", false)
-                        .put("cleanupPending", "shanghai".equals(request.optString("type")))
-                        .put("error", "Shell worker exited before returning a result; operation was not replayed")));
+        try (java.io.RandomAccessFile owner = new java.io.RandomAccessFile(new File(control, "owner.lock"), "rw");
+             java.nio.channels.FileLock lock = owner.getChannel().tryLock()) {
+            if (lock == null || isTerminalWorkState(readWorkState(control).optString("state"))) return;
+            writeWorkState(control, new org.json.JSONObject().put("id", request.optString("id"))
+                    .put("state", "INTERRUPTED")
+                    .put("result", new org.json.JSONObject().put("ok", false)
+                            .put("cleanupPending", "shanghai".equals(request.optString("type")))
+                            .put("error", "Shell worker exited before returning a result; operation was not replayed")));
+        } catch (java.nio.channels.OverlappingFileLockException anotherStatusRead) {
+            // Another status reader owns the interruption decision.
+        }
     }
 
-    private static boolean isTerminalWorkState(String state) {
+    private static boolean awaitingWorkStart(org.json.JSONObject state) {
+        org.json.JSONObject progress = state.optJSONObject("progress");
+        // A restarted proxy has no Process handle while the child is still initializing.
+        return progress != null && "STARTING".equals(progress.optString("phase"))
+                && android.os.SystemClock.elapsedRealtime() < state.optLong("startupDeadlineElapsedMs");
+    }
+
+    static boolean isTerminalWorkState(String state) {
         return "SUCCEEDED".equals(state) || "FAILED".equals(state)
                 || "CANCELLED".equals(state) || "INTERRUPTED".equals(state);
     }
