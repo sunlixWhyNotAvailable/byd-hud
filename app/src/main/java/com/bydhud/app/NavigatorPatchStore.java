@@ -6,6 +6,7 @@ import android.content.SharedPreferences;
 import android.content.pm.ApplicationInfo;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
+import android.provider.Settings;
 
 import java.io.File;
 import java.io.IOException;
@@ -56,10 +57,13 @@ final class NavigatorPatchStore {
     private static final String KEY_OPERATION_PROGRESS = "operation_progress";
     private static final String KEY_OPERATION_ERROR = "operation_error";
     private static final String KEY_OPERATION_STARTED_AT = "operation_started_at";
+    private static final String KEY_OPERATION_BOOT_COUNT = "operation_boot_count";
     private static final String KEY_READY_AT = "ready_at";
     private static final String KEY_CANCEL_REQUESTED = "cancel_requested";
     private static final String KEY_TRANSACTION_DIR = "transaction_dir";
     private static final String KEY_DESTRUCTIVE = "destructive";
+    private static final String KEY_DESTRUCTIVE_CONSENT_TOKEN = "destructive_consent_token";
+    private static final String KEY_DESTRUCTIVE_CONSENT_IDENTITY = "destructive_consent_identity";
     private static final String KEY_STATE_AT = "state_at";
     private static final String KEY_SESSION_ID = "session_id";
     private static final String KEY_TRANSACTION_TOKEN = "transaction_token";
@@ -232,6 +236,12 @@ final class NavigatorPatchStore {
     private NavigatorPatchStore() {
     }
 
+    static final class DestructiveApprovalRequiredException extends IOException {
+        DestructiveApprovalRequiredException() {
+            super("Destructive replacement requires confirmation for this operation and installed APK");
+        }
+    }
+
     static SharedPreferences prefs(Context context) {
         return context.getApplicationContext()
                 .getSharedPreferences(PREFS, Context.MODE_PRIVATE);
@@ -363,6 +373,9 @@ final class NavigatorPatchStore {
                     .putString(profileKey(profile, KEY_OPERATION_TOKEN), operationId)
                     .putString(profileKey(profile, KEY_REPORT_ID), reportId)
                     .putLong(profileKey(profile, KEY_OPERATION_STARTED_AT), startedAt)
+                    .putInt(profileKey(profile, KEY_OPERATION_BOOT_COUNT),
+                            Settings.Global.getInt(context.getContentResolver(),
+                                    Settings.Global.BOOT_COUNT, -1))
                     .putInt(profileKey(profile, KEY_OPERATION_PROGRESS), 0)
                     .putString(profileKey(profile, KEY_OPERATION_ERROR), "")
                     .putLong(profileKey(profile, KEY_READY_AT), 0L)
@@ -664,6 +677,16 @@ final class NavigatorPatchStore {
                 profile, "", IDLE, "", "", 0L, 0, "", 0L, false, false);
     }
 
+    static int operationBoot(Context context, Profile profile) {
+        return profile == null ? -1 : prefs(context).getInt(
+                profileKey(profile, KEY_OPERATION_BOOT_COUNT), -1);
+    }
+
+    static void setOperationBoot(Context context, Profile profile, int boot) {
+        if (profile == null || boot < 0) return;
+        prefs(context).edit().putInt(profileKey(profile, KEY_OPERATION_BOOT_COUNT), boot).commit();
+    }
+
     static synchronized OperationSnapshot[] operations(Context context) {
         OperationSnapshot[] result = new OperationSnapshot[Profile.values().length];
         for (int i = 0; i < Profile.values().length; i++) {
@@ -726,6 +749,8 @@ final class NavigatorPatchStore {
                 .putBoolean(profileKey(profile, KEY_DESTRUCTIVE), destructive)
                 .putString(profileKey(profile, KEY_TRANSACTION_TOKEN), directory.getName())
                 .putInt(profileKey(profile, KEY_SESSION_ID), -1)
+                .remove(profileKey(profile, KEY_DESTRUCTIVE_CONSENT_TOKEN))
+                .remove(profileKey(profile, KEY_DESTRUCTIVE_CONSENT_IDENTITY))
                 .putString(profileKey(profile, KEY_EXPECTED_SHA), expected.sha256)
                 .putLong(profileKey(profile, KEY_EXPECTED_VERSION_CODE), expected.versionCode)
                 .putString(profileKey(profile, KEY_EXPECTED_SIGNER), expected.signerSha256)
@@ -749,6 +774,108 @@ final class NavigatorPatchStore {
         if (!committed) throw new IOException("Cannot publish navigator patch transaction");
         transitionLocal(context, profile, READY_TO_INSTALL, readyDetail, 100);
         return true;
+    }
+
+    static synchronized void approveDestructiveInstall(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared) throws IOException {
+        if (prepared == null || prepared.profile == null || !prepared.destructive)
+            throw new IOException("Destructive install approval has no matching prepared operation");
+        Profile profile = prepared.profile;
+        OperationSnapshot operation = operation(context, profile);
+        if (!OP_PATCH.equals(operation.kind) || !READY_TO_INSTALL.equals(operation.phase)
+                || operation.operationToken.isEmpty() || !operation.destructive
+                || !matchesPreparedIdentity(context, prepared)) {
+            throw new IOException("Prepared operation changed before destructive confirmation");
+        }
+        String identity = preparedIdentity(prepared);
+        boolean saved = prefs(context).edit()
+                .putString(profileKey(profile, KEY_DESTRUCTIVE_CONSENT_TOKEN), operation.operationToken)
+                .putString(profileKey(profile, KEY_DESTRUCTIVE_CONSENT_IDENTITY), identity)
+                .commit();
+        if (!saved) throw new IOException("Cannot persist destructive replacement confirmation");
+    }
+
+    static synchronized void requireDestructiveInstallApproval(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared) throws IOException {
+        if (prepared == null || prepared.profile == null || !prepared.destructive) return;
+        Profile profile = prepared.profile;
+        OperationSnapshot operation = operation(context, profile);
+        SharedPreferences preferences = prefs(context);
+        requireDestructiveInstallApproval(context, prepared, operation, preferences,
+                READY_TO_INSTALL);
+    }
+
+    private static void requireDestructiveInstallApproval(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared, OperationSnapshot operation,
+            SharedPreferences preferences, String requiredPhase) throws IOException {
+        Profile profile = prepared.profile;
+        boolean phaseMatches = requiredPhase.equals(operation.phase);
+        if (INSTALL_PREPARING.equals(requiredPhase)) {
+            phaseMatches = phaseMatches
+                    && profile.id.equals(preferences.getString(KEY_INSTALL_OWNER, ""))
+                    && operation.operationToken.equals(preferences.getString(
+                            KEY_INSTALL_OWNER_TOKEN, ""));
+        }
+        if (!OP_PATCH.equals(operation.kind) || !phaseMatches
+                || operation.operationToken.isEmpty() || !operation.destructive
+                || !matchesPreparedIdentity(context, prepared)
+                || !operation.operationToken.equals(preferences.getString(
+                        profileKey(profile, KEY_DESTRUCTIVE_CONSENT_TOKEN), ""))
+                || !preparedIdentity(prepared).equals(preferences.getString(
+                        profileKey(profile, KEY_DESTRUCTIVE_CONSENT_IDENTITY), ""))) {
+            throw new DestructiveApprovalRequiredException();
+        }
+    }
+
+    static synchronized void consumeDestructiveInstallApproval(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared) throws IOException {
+        if (prepared == null || prepared.profile == null || !prepared.destructive) return;
+        OperationSnapshot operation = operation(context, prepared.profile);
+        requireDestructiveInstallApproval(context, prepared, operation, prefs(context),
+                INSTALL_PREPARING);
+        boolean consumed = prefs(context).edit()
+                .remove(profileKey(prepared.profile, KEY_DESTRUCTIVE_CONSENT_TOKEN))
+                .remove(profileKey(prepared.profile, KEY_DESTRUCTIVE_CONSENT_IDENTITY))
+                .commit();
+        if (!consumed) throw new IOException("Cannot consume destructive replacement confirmation");
+    }
+
+    static synchronized boolean awaitingDestructiveApproval(Context context, Profile profile) {
+        if (profile == null) return false;
+        OperationSnapshot operation = operation(context, profile);
+        if (!OP_PATCH.equals(operation.kind) || !READY_TO_INSTALL.equals(operation.phase)
+                || !operation.destructive || operation.operationToken.isEmpty()) return false;
+        SharedPreferences preferences = prefs(context);
+        String identity = preferences.getString(profileKey(profile, KEY_INITIAL_SIGNER), "");
+        String preparedIdentity = profile.packageName + "|"
+                + preferences.getLong(profileKey(profile, KEY_INITIAL_UPDATE_TIME), -1L) + "|"
+                + preferences.getLong(profileKey(profile, KEY_INITIAL_VERSION_CODE), -1L) + "|"
+                + identity + "|" + preferences.getString(
+                        profileKey(profile, KEY_INITIAL_FINGERPRINT), "");
+        return !operation.operationToken.equals(preferences.getString(
+                        profileKey(profile, KEY_DESTRUCTIVE_CONSENT_TOKEN), ""))
+                || !preparedIdentity.equals(preferences.getString(
+                        profileKey(profile, KEY_DESTRUCTIVE_CONSENT_IDENTITY), ""));
+    }
+
+    private static boolean matchesPreparedIdentity(Context context,
+            NavigatorPatchPipeline.PreparedPatch prepared) {
+        Profile profile = prepared.profile;
+        SharedPreferences preferences = prefs(context);
+        return prepared.installedUpdateTime == preferences.getLong(
+                        profileKey(profile, KEY_INITIAL_UPDATE_TIME), -1L)
+                && prepared.installedVersionCode == preferences.getLong(
+                        profileKey(profile, KEY_INITIAL_VERSION_CODE), -1L)
+                && same(prepared.installedSignerSha256, preferences.getString(
+                        profileKey(profile, KEY_INITIAL_SIGNER), ""))
+                && same(prepared.installedFingerprint, preferences.getString(
+                        profileKey(profile, KEY_INITIAL_FINGERPRINT), ""));
+    }
+
+    private static String preparedIdentity(NavigatorPatchPipeline.PreparedPatch prepared) {
+        return prepared.profile.packageName + "|" + prepared.installedUpdateTime + "|"
+                + prepared.installedVersionCode + "|" + prepared.installedSignerSha256 + "|"
+                + prepared.installedFingerprint;
     }
 
     static synchronized void setTransactionDirectory(Context context, Profile profile,
@@ -1006,8 +1133,13 @@ final class NavigatorPatchStore {
     }
 
     static File sharedRoot(Context context) {
-        try { return ShellWorkFiles.directory(new File(ShellWorkFiles.root(context), "transactions")); }
-        catch (IOException error) { throw new IllegalStateException(error); }
+        File external = ShellWorkFiles.externalFiles(context);
+        if (external == null) {
+            int user = context.getApplicationInfo().uid / 100000;
+            external = new File("/storage/emulated/" + user + "/Android/data/"
+                    + context.getPackageName() + "/files");
+        }
+        return new File(new File(external, "shell-work"), "transactions");
     }
 
     static File transactionDirectory(Context context) {
@@ -1169,7 +1301,8 @@ final class NavigatorPatchStore {
         for (Profile other : Profile.values()) {
             if (other == profile) continue;
             OperationSnapshot queued = operation(context, other);
-            if (readyBefore(queued, candidateAt)) return false;
+            if (readyBefore(queued, candidateAt)
+                    && !awaitingDestructiveApproval(context, other)) return false;
         }
         preferences.edit()
                 .putString(KEY_INSTALL_OWNER, profile.id)

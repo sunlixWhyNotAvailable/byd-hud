@@ -74,6 +74,32 @@ public final class RuntimeRecentsLifecycleTest {
         return shadowOf(alarm.operation).getSavedIntent();
     }
 
+    @Test public void latestCheckpointAndAllStopWaitersSurviveOrderedPersistence() throws Exception {
+        assertTrue(ShellRuntimeSession.arm(context));
+        java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+        java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        ShellRuntimeSession.afterPersistence(() -> {
+            entered.countDown();
+            try { assertTrue(release.await(5, java.util.concurrent.TimeUnit.SECONDS)); }
+            catch (InterruptedException e) { throw new AssertionError(e); }
+        });
+        assertTrue(entered.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        java.util.concurrent.CountDownLatch stopped = new java.util.concurrent.CountDownLatch(2);
+        ShellRuntimeSession.checkpointOutput(context, "running", null);
+        ShellRuntimeSession.checkpointOutput(context, "stopped", stopped::countDown);
+        ShellRuntimeSession.checkpointOutput(context, "stopped", stopped::countDown);
+        release.countDown();
+        assertTrue(stopped.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        assertEquals("stopped", ShellRuntimeSession.prefs(context).getString("output", ""));
+        HudPrefs.setUserShutdownActive(context, true);
+        ShellRuntimeSession.checkpointOutput(context, "late-running", null);
+        java.util.concurrent.CountDownLatch complete = new java.util.concurrent.CountDownLatch(1);
+        ShellRuntimeSession.afterPersistence(complete::countDown);
+        assertTrue(complete.await(5, java.util.concurrent.TimeUnit.SECONDS));
+        assertFalse(ShellRuntimeSession.prefs(context).getBoolean("active", true));
+        assertFalse(ShellRuntimeSession.prefs(context).contains("output"));
+    }
+
     @Implements(BootCleanupGate.class)
     public static class Gate {
         static Runnable pending;

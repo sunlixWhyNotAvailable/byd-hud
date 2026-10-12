@@ -356,7 +356,10 @@ final class NavigatorPatchPipeline {
 
     static File workerTransaction(Context context, NavigatorPatchStore.Profile profile)
             throws IOException {
-        File root = NavigatorPatchStore.sharedRoot(context);
+        File runtimeRoot = ShellWorkFiles.root(context).getCanonicalFile();
+        File root = NavigatorPatchStore.sharedRoot(context).getCanonicalFile();
+        if (!runtimeRoot.equals(root.getParentFile()))
+            throw new IOException("Navigator patch storage escaped the shell runtime root");
         if (!root.exists() && !root.mkdirs()) {
             throw new IOException("Cannot create patcher root");
         }
@@ -520,10 +523,12 @@ final class NavigatorPatchPipeline {
 
     static void recoverShellWork(Context context, NavigatorPatchStore.Profile profile, File job) {
         boolean registered = false;
+        org.json.JSONObject expected = null;
         try {
             register(profile);
             registered = true;
-            org.json.JSONObject request = ShellWorkFiles.read(new File(job, "request.json")).getJSONObject("input");
+            expected = ShellWorkClient.expected(context, job);
+            org.json.JSONObject request = expected.getJSONObject("input");
             String operation = request.getString("operation");
             if (!operation.equals(NavigatorPatchStore.operation(context, profile).operationToken)) return;
             org.json.JSONObject completed = ShellWorkClient.await(context, job, null);
@@ -531,17 +536,17 @@ final class NavigatorPatchPipeline {
                     "SHELL_REPORT", "SUCCESS", "Recovered existing shell operation", completed.getJSONObject("report"));
             Bundle payload = ShellWorkFiles.bundle(completed.getJSONObject("payload"));
             checkCancelled(context, profile);
-            if (request.getInt("command") == NavigatorPatchWorkerService.MSG_SCAN) {
+            if (request.getInt("command") == NavigatorPatchWorkerClient.MSG_SCAN) {
                 ScanResult result = workerUnbundle(payload);
                 reportScan(context, operation, "CHECK_COMPLETE", result);
                 NavigatorPatchStore.completeScanUnlessCancelled(context, result,
                         NavigatorPatchStore.VERIFIED, "Compatibility check completed");
             } else {
                 WorkerPatchResult result = new WorkerPatchResult(
-                        workerUnbundle(payload.getBundle(NavigatorPatchWorkerService.KEY_INPUT)),
-                        workerUnbundle(payload.getBundle(NavigatorPatchWorkerService.KEY_OUTPUT_RESULT)),
-                        new File(payload.getString(NavigatorPatchWorkerService.KEY_TRANSACTION)),
-                        payload.getBoolean(NavigatorPatchWorkerService.KEY_OPTIONAL_APPLIED));
+                        workerUnbundle(payload.getBundle(NavigatorPatchWorkerClient.KEY_INPUT)),
+                        workerUnbundle(payload.getBundle(NavigatorPatchWorkerClient.KEY_OUTPUT_RESULT)),
+                        new File(payload.getString(NavigatorPatchWorkerClient.KEY_TRANSACTION)),
+                        payload.getBoolean(NavigatorPatchWorkerClient.KEY_OPTIONAL_APPLIED));
                 publishPrepared(context, profile, operation, result);
             }
         } catch (Exception error) {
@@ -551,15 +556,25 @@ final class NavigatorPatchPipeline {
             else saveFailure(context, profile, error);
         } finally {
             if (registered) {
-                if (ShellWorkFiles.settled(job)) {
+                boolean finished = false;
+                try {
+                    finished = ShellWorkClient.terminal(
+                            ShellWorkClient.state(context, job).optString("state"));
+                } catch (IOException ignored) { }
+                if (finished) {
                     try {
-                        org.json.JSONObject input = ShellWorkFiles.read(new File(job, "request.json")).getJSONObject("input");
+                        org.json.JSONObject input = expected == null ? null
+                                : expected.optJSONObject("input");
                         for (String key : new String[]{"source", "output"}) {
-                            String path = input.optString(key);
+                            String path = input == null ? "" : input.optString(key);
                             if (!path.isEmpty()) deleteTree(ShellWorkFiles.inside(ShellWorkFiles.root(context), path));
                         }
                     } catch (Exception error) { AppEventLogger.event(context, "patch_shell_cleanup_failed " + error); }
-                    ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
+                    String retained = ShellRuntimeSession.prefs(context)
+                            .getString("patch_" + profile.id, "");
+                    if (job.getAbsolutePath().equals(retained)) {
+                        ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
+                    }
                 }
                 unregister(profile);
             }
@@ -567,7 +582,7 @@ final class NavigatorPatchPipeline {
         }
     }
 
-    /** Heavy read-only work executed by NavigatorPatchWorkerService. */
+    /** Heavy read-only work executed by the authenticated shell worker. */
     static ScanResult workerScan(Context context, NavigatorPatchStore.Profile profile,
             File selectedSource, File setDirectory) throws Exception {
         checkWorkerInterrupted();
@@ -590,7 +605,7 @@ final class NavigatorPatchPipeline {
         return result;
     }
 
-    /** Heavy materialize/patch/sign/verify work executed by NavigatorPatchWorkerService. */
+    /** Heavy materialize/patch/sign/verify work executed by the authenticated shell worker. */
     static WorkerPatchResult workerPrepare(Context context, NavigatorPatchStore.Profile profile,
             File selectedSource, File transaction, ScanResult expected) throws Exception {
         checkWorkerInterrupted();
@@ -655,7 +670,7 @@ final class NavigatorPatchPipeline {
         boolean directApplied = NavigatorPatchStore.PATCHABLE.equals(input.directState)
                 && NavigatorPatchStore.PATCHED.equals(output.directState);
         optionalApplied |= mapAttempted && NavigatorPatchStore.PATCHED.equals(output.mapState);
-        if (!directApplied && !optionalApplied && !mapAttempted) {
+        if (!directApplied && !optionalApplied) {
             throw new IOException("No patch component was applied");
         }
         return new WorkerPatchResult(input, output, transaction, optionalApplied);

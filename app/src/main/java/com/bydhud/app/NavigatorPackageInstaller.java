@@ -44,6 +44,7 @@ final class NavigatorPackageInstaller {
         if (prepared == null || prepared.profile == null || prepared.output == null) {
             throw new IOException("Prepared patch is missing");
         }
+        NavigatorPatchStore.requireDestructiveInstallApproval(context, prepared);
         String reportId = NavigatorPatchStore.reportId(context, prepared.profile);
         String reportedSha = NavigatorPatchReportStore.requirePrepared(context, reportId);
         if (!reportedSha.equalsIgnoreCase(prepared.output.sha256)) {
@@ -75,6 +76,7 @@ final class NavigatorPackageInstaller {
                     prepared.profile.packageName, "navigator-patch", true);
             if (prepared.destructive && isInstalled(context, prepared.profile.packageName)) {
                 verifyInstallTargetUnchanged(context, prepared);
+                NavigatorPatchStore.consumeDestructiveInstallApproval(context, prepared);
                 NavigatorPatchStore.expectCallback(context, prepared.profile, OP_UNINSTALL);
                 NavigatorPatchStore.transition(context, prepared.profile,
                         NavigatorPatchStore.UNINSTALL_REQUESTED,
@@ -97,6 +99,22 @@ final class NavigatorPackageInstaller {
         INSTALL_QUEUE.execute(() -> drainInstallQueueNow(appContext));
     }
 
+    /** Reopens a retained READY_TO_INSTALL transaction after the user confirms again. */
+    static void approveQueuedDestructiveInstall(Context context,
+            NavigatorPatchStore.Profile profile) throws Exception {
+        NavigatorPatchStore.OperationSnapshot operation =
+                NavigatorPatchStore.operation(context, profile);
+        if (!NavigatorPatchStore.READY_TO_INSTALL.equals(operation.phase)
+                || !operation.destructive) {
+            throw new IOException("No queued destructive navigator install is awaiting approval");
+        }
+        NavigatorPatchPipeline.PreparedPatch prepared =
+                NavigatorPatchPipeline.resumePrepared(context, profile);
+        if (!prepared.destructive) throw new IOException("Queued install is no longer destructive");
+        NavigatorPatchStore.approveDestructiveInstall(context, prepared);
+        begin(context, prepared);
+    }
+
     private static void drainInstallQueueNow(Context context) {
         if (!canInstall(context)) return;
         NavigatorPatchStore.OperationSnapshot global =
@@ -112,6 +130,7 @@ final class NavigatorPackageInstaller {
                     NavigatorPatchStore.operation(context, profile);
             if (NavigatorPatchStore.RECOVERY_REQUIRED.equals(operation.phase)) return;
             if (NavigatorPatchStore.READY_TO_INSTALL.equals(operation.phase)
+                    && !NavigatorPatchStore.awaitingDestructiveApproval(context, profile)
                     && operation.readyAt > 0L && operation.readyAt < nextReadyAt) {
                 next = profile;
                 nextReadyAt = operation.readyAt;
@@ -121,6 +140,10 @@ final class NavigatorPackageInstaller {
         try {
             begin(context, NavigatorPatchPipeline.resumePrepared(context, next));
         } catch (Exception error) {
+            if (error instanceof NavigatorPatchStore.DestructiveApprovalRequiredException) {
+                MainActivity.publishSharedUiStateChange();
+                return;
+            }
             NavigatorPatchStore.OperationSnapshot current =
                     NavigatorPatchStore.operation(context, next);
             if (NavigatorPatchStore.CANCELLED.equals(current.phase)) return;

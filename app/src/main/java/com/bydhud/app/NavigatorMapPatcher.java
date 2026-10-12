@@ -75,7 +75,7 @@ public final class NavigatorMapPatcher {
     public static final String UNSUPPORTED = "UNSUPPORTED";
     public static final String FAILED = "FAILED";
     public static final String PAYLOAD_PREFIX = "Lcom/bydhud/mapcapture/";
-    public static final String REVISION = "navigator-map-capture-r2";
+    public static final String REVISION = "navigator-map-capture-r3";
 
     private static final String BRIDGE = "Lcom/bydhud/mapcapture/CaptureBridge;";
     private static final String BACKGROUND = "Lcom/bydhud/mapcapture/BackgroundCapture;";
@@ -87,7 +87,8 @@ public final class NavigatorMapPatcher {
     private static final Set<String> PAYLOAD_ROOTS = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList("CaptureBridge", "BackgroundCapture", "CaptureLease",
                     "CapturePollPolicy", "CarCapturePolicy", "MapsFollowing",
-                    "MapsNavigationCamera", "PixelMath", "WazeRenderScheduler", "WazeRenderPolicy")));
+                    "MapsNavigationCamera", "PixelMath", "CaptureReadbackBuffer",
+                    "LifecycleJournalBatch", "LifecycleJournalSpool", "WazeRenderScheduler", "WazeRenderPolicy")));
     private static final Set<String> REQUIRED_PAYLOAD_CLASSES = Collections.unmodifiableSet(
             new HashSet<>(Arrays.asList(BRIDGE, BACKGROUND,
                     "Lcom/bydhud/mapcapture/CaptureLease;",
@@ -129,20 +130,11 @@ public final class NavigatorMapPatcher {
         final File apk;
         final String name;
         final DexBackedDexFile dex;
-        final Set<String> classes;
-        final boolean hasTargets;
-        final boolean hasPayload;
-        final boolean hasPayloadReferences;
 
-        DexUnit(File apk, String name, DexBackedDexFile dex, Set<String> classes,
-                boolean hasTargets, boolean hasPayload, boolean hasPayloadReferences) {
+        DexUnit(File apk, String name, DexBackedDexFile dex) {
             this.apk = apk;
             this.name = name;
             this.dex = dex;
-            this.classes = classes;
-            this.hasTargets = hasTargets;
-            this.hasPayload = hasPayload;
-            this.hasPayloadReferences = hasPayloadReferences;
         }
     }
 
@@ -157,7 +149,6 @@ public final class NavigatorMapPatcher {
     }
 
     private static final class Analysis {
-        final List<File> files = new ArrayList<>();
         final List<DexUnit> dexUnits = new ArrayList<>();
         final List<DexUnit> targetDex = new ArrayList<>();
         final List<DexUnit> payloadDex = new ArrayList<>();
@@ -165,12 +156,12 @@ public final class NavigatorMapPatcher {
         final Map<String, Map<String, Integer>> callsByTargetMethod = new HashMap<>();
         final Map<String, Integer> actualCalls = new TreeMap<>();
         final Set<File> targetApks = new HashSet<>();
+        final Map<DexUnit, DexFile> rewrittenTargets = new HashMap<>();
+        final Map<DexUnit, PatchPlan> targetPlans = new HashMap<>();
         boolean hasAnyPayloadClass;
         boolean hasAnyPayloadReference;
         boolean unexpectedPayloadCallOwner;
         boolean duplicateRelevantClass;
-        int payloadClassCount;
-        int maxPayloadMethods;
         PayloadInfo payload;
         boolean scheduled;
     }
@@ -213,7 +204,13 @@ public final class NavigatorMapPatcher {
     public static Inspection patch(List<File> sourceApks, File outputDir, File payloadDex,
             String profile, String version) {
         try {
-            Inspection input = inspectInternal(sourceApks, profile, version);
+            String family = normalizeProfile(profile);
+            if (family == null) return result(UNSUPPORTED, "unsupported navigator profile");
+            if (!supportedVersion(family, version)) {
+                return result(UNSUPPORTED, "unsupported " + family + " map-capture version: " + safe(version));
+            }
+            Analysis source = analyze(sourceApks, family);
+            Inspection input = inspectAnalysis(source, family, version);
             if (PATCHED.equals(input.state)) {
                 copyMembers(sourceApks, outputDir);
                 Inspection copied = inspectInternal(outputMembers(sourceApks, outputDir),
@@ -223,15 +220,12 @@ public final class NavigatorMapPatcher {
             }
             if (!PATCHABLE.equals(input.state)) return input;
 
-            String family = normalizeProfile(profile);
-            Analysis source = analyze(sourceApks, family);
             PayloadInfo suppliedPayload = inspectPayloadFile(payloadDex);
             verifyPayload(suppliedPayload, family);
             if ("waze".equals(family) && !currentPayload(suppliedPayload, family))
                 throw new UnsupportedPatchException("Waze scheduling requires current payload");
             if (source.payload != null) {
                 // Preserve verified hooks and add only the missing scheduling/host extension.
-                verifyCaptured(source, family);
                 if (!currentPayload(suppliedPayload, family)) throw new UnsupportedPatchException("capture upgrade requires current capabilities");
                 if (!outputDir.isDirectory() && !outputDir.mkdirs()) throw new IOException("cannot create candidate directory");
                 DexUnit previous = source.payloadDex.get(0);
@@ -260,8 +254,6 @@ public final class NavigatorMapPatcher {
                 Inspection upgraded = inspectInternal(outputMembers(sourceApks, outputDir), family, version);
                 return PATCHED.equals(upgraded.state) ? upgraded : result(FAILED, "capture upgrade failed: " + upgraded.reason);
             }
-            requireSupportedTargets(source, family);
-
             File parent = outputDir.getAbsoluteFile().getParentFile();
             if (parent != null && !parent.exists() && !parent.mkdirs()) {
                 throw new IOException("cannot create candidate parent");
@@ -278,9 +270,13 @@ public final class NavigatorMapPatcher {
                 java.util.Iterator<DexUnit> targetDexIterator = source.targetDex.iterator();
                 while (targetDexIterator.hasNext()) {
                     DexUnit unit = targetDexIterator.next();
-                    PatchPlan one = new PatchPlan(family);
-                    DexFile changed = rewrite(unit.dex, one);
-                    verifyDexMethodLimit(unit.dex, changed);
+                    PatchPlan one = source.targetPlans.remove(unit);
+                    DexFile changed = source.rewrittenTargets.remove(unit);
+                    if (one == null || changed == null) {
+                        one = new PatchPlan(family);
+                        changed = rewrite(unit.dex, one);
+                        verifyDexMethodLimit(unit.dex, changed);
+                    }
                     merge(total.anchorCounts, one.anchorCounts);
                     merge(total.calls, one.calls);
 
@@ -355,6 +351,11 @@ public final class NavigatorMapPatcher {
             return result(UNSUPPORTED, "unsupported " + family + " map-capture version: " + safe(version));
         }
         Analysis analysis = analyze(apks, family);
+        return inspectAnalysis(analysis, family, version);
+    }
+
+    private static Inspection inspectAnalysis(Analysis analysis, String family, String version)
+            throws IOException {
         if (analysis.duplicateRelevantClass) {
             return result(UNSUPPORTED, "duplicate map-capture or target class across APK members");
         }
@@ -366,6 +367,8 @@ public final class NavigatorMapPatcher {
                     PatchPlan one = new PatchPlan(family);
                     DexFile changed = rewrite(unit.dex, one);
                     verifyDexMethodLimit(unit.dex, changed);
+                    analysis.targetPlans.put(unit, one);
+                    analysis.rewrittenTargets.put(unit, changed);
                     merge(total.anchorCounts, one.anchorCounts);
                     merge(total.calls, one.calls);
                 }
@@ -394,7 +397,8 @@ public final class NavigatorMapPatcher {
     }
 
     private static boolean currentPayload(PayloadInfo payload, String family) {
-        return payload != null && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease")
+        return payload != null && payload.bridgeStrings.contains(REVISION)
+                && payload.bridgeStrings.contains("bydhud-map-v2:source-mode,output-edge,frame-timeout,lease")
                 && (!"waze".equals(family) || payload.bridgeStrings.contains("map-probe-r11-render-demand-hud-consumer-v1"));
     }
 
@@ -410,7 +414,6 @@ public final class NavigatorMapPatcher {
             }
             String canonical = file.getCanonicalPath();
             if (!canonicalFiles.add(canonical)) throw new UnsupportedPatchException("duplicate APK member supplied");
-            result.files.add(file);
             try (ZipFile zip = new ZipFile(file)) {
                 Set<String> names = new HashSet<>();
                 java.util.Enumeration<? extends ZipEntry> entries = zip.entries();
@@ -423,12 +426,10 @@ public final class NavigatorMapPatcher {
                     byte[] bytes = readEntry(zip, entry, MAX_DEX_BYTES);
                     DexBackedDexFile dex = DexBackedDexFile.fromInputStream(Opcodes.forApi(35),
                             new ByteArrayInputStream(bytes));
-                    Set<String> classes = new HashSet<>();
                     boolean hasTargets = false;
                     boolean hasPayload = false;
                     for (ClassDef classDef : dex.getClasses()) {
                         String type = classDef.getType();
-                        classes.add(type);
                         if (targetOwners.contains(type)) {
                             hasTargets = true;
                             result.targetOwners.add(type);
@@ -437,7 +438,6 @@ public final class NavigatorMapPatcher {
                         if (type.startsWith(PAYLOAD_PREFIX)) {
                             hasPayload = true;
                             result.hasAnyPayloadClass = true;
-                            result.payloadClassCount++;
                             if (!relevantClasses.add(type)) result.duplicateRelevantClass = true;
                         }
                     }
@@ -457,8 +457,7 @@ public final class NavigatorMapPatcher {
                         result.unexpectedPayloadCallOwner = true;
                     }
                     if (hasTargets || hasPayload || hasPayloadReferences) {
-                        DexUnit unit = new DexUnit(file, entry.getName(), dex, classes,
-                                hasTargets, hasPayload, hasPayloadReferences);
+                        DexUnit unit = new DexUnit(file, entry.getName(), dex);
                         result.dexUnits.add(unit);
                         if (hasTargets) result.targetDex.add(unit);
                         if (hasPayload) result.payloadDex.add(unit);
@@ -645,6 +644,10 @@ public final class NavigatorMapPatcher {
     private static void verifyLifecyclePlacement(Method method, String methodKey, Hook hook)
             throws UnsupportedPatchException {
         List<Instruction> instructions = instructions(method);
+        if (AccessFlags.STATIC.isSet(method.getAccessFlags())
+                || !"V".equals(method.getReturnType())) {
+            throw new UnsupportedPatchException("hook target call mode or return changed: " + methodKey);
+        }
         int receiver = parameterStart(method);
         String returnType = hook.guard ? "Z" : "V";
         String callKey = "mapsFollowing".equals(hook.name)
@@ -735,6 +738,10 @@ public final class NavigatorMapPatcher {
 
     private static void verifyMapsConstructor(Method constructor) throws UnsupportedPatchException {
         List<Instruction> instructions = instructions(constructor);
+        if (AccessFlags.STATIC.isSet(constructor.getAccessFlags())
+                || !"V".equals(constructor.getReturnType())) {
+            throw new UnsupportedPatchException("Maps constructor call mode or return changed");
+        }
         int receiver = parameterStart(constructor);
         String initKey = methodKey(BRIDGE, "init", Collections.singletonList("Landroid/content/Context;"), "V");
         String trackKey = methodKey(BRIDGE, "trackMaps", Collections.singletonList("Ljava/lang/Object;"), "V");
@@ -769,6 +776,10 @@ public final class NavigatorMapPatcher {
 
     private static void verifyMapsCameraPlacement(Method method) throws UnsupportedPatchException {
         List<Instruction> instructions = instructions(method);
+        if (AccessFlags.STATIC.isSet(method.getAccessFlags())
+                || !"V".equals(method.getReturnType())) {
+            throw new UnsupportedPatchException("Maps camera target call mode or return changed");
+        }
         String anchor = methodKey("Lbrfd;", "f", Arrays.asList("Lcksk;", "Lbrfe;"), "V");
         String hook = methodKey(BACKGROUND, "mapsNavigationApplied",
                 Collections.singletonList("Ljava/lang/Object;"), "V");
@@ -777,6 +788,9 @@ public final class NavigatorMapPatcher {
         for (int i = 0; i < instructions.size(); i++) {
             if (!isMethodCall(instructions.get(i), anchor)) continue;
             anchors++;
+            if (!isInstanceInvoke(instructions.get(i))) {
+                throw new UnsupportedPatchException("Maps state application call mode changed");
+            }
             int receiver = invocationReceiver(instructions.get(i));
             if (i + 1 >= instructions.size() || !isRangeCall(instructions.get(i + 1), hook, receiver, 1)) {
                 throw new UnsupportedPatchException("Maps camera hook is not after its state application call");
@@ -791,7 +805,9 @@ public final class NavigatorMapPatcher {
     private static void verifyEntryPlacement(Method method, String hookKey)
             throws UnsupportedPatchException {
         List<Instruction> instructions = instructions(method);
-        if (instructions.isEmpty() || !isRangeCall(instructions.get(0), hookKey,
+        if (AccessFlags.STATIC.isSet(method.getAccessFlags())
+                || !"V".equals(method.getReturnType())
+                || instructions.isEmpty() || !isRangeCall(instructions.get(0), hookKey,
                 parameterStart(method), 1)) {
             throw new UnsupportedPatchException("entry hook is not at method entry: " + key(method));
         }
@@ -800,22 +816,26 @@ public final class NavigatorMapPatcher {
 
     private static void verifyWazeSwapPlacement(Method method) throws UnsupportedPatchException {
         List<Instruction> instructions = instructions(method);
+        if (AccessFlags.STATIC.isSet(method.getAccessFlags())
+                || !"Z".equals(method.getReturnType())) {
+            throw new UnsupportedPatchException("Waze swap target call mode or return changed");
+        }
         String anchor = methodKey("Ljavax/microedition/khronos/egl/EGL10;", "eglSwapBuffers",
                 Arrays.asList("Ljavax/microedition/khronos/egl/EGLDisplay;",
                         "Ljavax/microedition/khronos/egl/EGLSurface;"), "Z");
         int receiver = parameterStart(method);
+        String hook = methodKey(BRIDGE, "wazeFrame",
+                Collections.singletonList("Ljava/lang/Object;"), "V");
         int anchors = 0;
         int hooks = 0;
         for (int i = 0; i < instructions.size(); i++) {
             if (isMethodCall(instructions.get(i), anchor)) {
                 anchors++;
-                if (i == 0 || !isRangeCall(instructions.get(i - 1),
-                        methodKey(BRIDGE, "wazeFrame", Collections.singletonList("Ljava/lang/Object;"), "V"),
-                        receiver, 1)) {
+                if (i == 0 || !isRangeCall(instructions.get(i - 1), hook, receiver, 1)) {
                     throw new UnsupportedPatchException("Waze frame hook is not before eglSwapBuffers");
                 }
             }
-            if (isWazeFrameHook(instructions.get(i))) hooks++;
+            if (isRangeCall(instructions.get(i), hook, receiver, 1)) hooks++;
         }
         if (anchors != 1 || hooks != anchors) {
             throw new UnsupportedPatchException("Waze swap hook anchor inventory changed");
@@ -849,6 +869,14 @@ public final class NavigatorMapPatcher {
         RegisterRangeInstruction range = (RegisterRangeInstruction) instruction;
         return range.getStartRegister() == firstRegister && range.getRegisterCount() == registerCount
                 && methodKey.equals(key((MethodReference) ((ReferenceInstruction) instruction).getReference()));
+    }
+
+    private static boolean isInstanceInvoke(Instruction instruction) {
+        Opcode opcode = instruction.getOpcode();
+        return opcode == Opcode.INVOKE_VIRTUAL || opcode == Opcode.INVOKE_DIRECT
+                || opcode == Opcode.INVOKE_INTERFACE || opcode == Opcode.INVOKE_SUPER
+                || opcode == Opcode.INVOKE_VIRTUAL_RANGE || opcode == Opcode.INVOKE_DIRECT_RANGE
+                || opcode == Opcode.INVOKE_INTERFACE_RANGE || opcode == Opcode.INVOKE_SUPER_RANGE;
     }
 
     private static boolean isMethodCall(Instruction instruction, String methodKey) {
@@ -1375,7 +1403,7 @@ public final class NavigatorMapPatcher {
                 throw new IllegalStateException("Already patched: " + owner);
             }
             if (mapsConstructor && instruction.getOpcode() == Opcode.RETURN_VOID) {
-                add(body, i, p0, plan, reference(BRIDGE, "trackMaps",
+                addBefore(body, i, p0, plan, reference(BRIDGE, "trackMaps",
                         Collections.singletonList("Ljava/lang/Object;"), "V"));
                 plan.count("maps_track");
                 hooks++;
@@ -1386,35 +1414,35 @@ public final class NavigatorMapPatcher {
                     ? ((RegisterRangeInstruction) instruction).getStartRegister() : -1;
             if ("gmaps".equals(plan.profile) && owner.equals("Lbrer;") && name.equals("pF")
                     && call != null && key(call).equals("Lbrfd;->f(Lcksk;Lbrfe;)V")) {
-                add(body, i + 1, receiver, plan, reference(BACKGROUND, "mapsNavigationApplied",
+                addAfter(body, i + 1, receiver, plan, reference(BACKGROUND, "mapsNavigationApplied",
                         Collections.singletonList("Ljava/lang/Object;"), "V"));
                 plan.count("maps_camera_applied");
                 hooks++;
             }
             if (mapsConstructor && call != null && call.getDefiningClass().equals("Ljava/lang/Object;")
                     && call.getName().equals("<init>") && receiver == p0) {
-                add(body, i + 1, p0 + 1, plan, reference(BRIDGE, "init",
+                addAfter(body, i + 1, p0 + 1, plan, reference(BRIDGE, "init",
                         Collections.singletonList("Landroid/content/Context;"), "V"));
                 plan.count("maps_init");
                 hooks++;
             }
             if (swap && call != null && call.getName().equals("eglSwapBuffers")
                     && call.getDefiningClass().equals("Ljavax/microedition/khronos/egl/EGL10;")) {
-                add(body, i, p0, plan, reference(BRIDGE, "wazeFrame",
+                addBefore(body, i, p0, plan, reference(BRIDGE, "wazeFrame",
                         Collections.singletonList("Ljava/lang/Object;"), "V"));
                 plan.count("waze_swap");
                 hooks++;
             }
             if (canvas && call != null && call.getName().equals("RenderNTV")
                     && call.getDefiningClass().equals(owner)) {
-                add(body, i + 1, p0, plan, reference(BRIDGE, "wazeFrame",
+                addAfter(body, i + 1, p0, plan, reference(BRIDGE, "wazeFrame",
                         Collections.singletonList("Ljava/lang/Object;"), "V"));
                 plan.count("waze_canvas");
                 hooks++;
             }
         }
         if (startup) {
-            add(body, 0, p0, plan, reference(BRIDGE, "init",
+            addBefore(body, 0, p0, plan, reference(BRIDGE, "init",
                     Collections.singletonList("Landroid/content/Context;"), "V"));
             plan.count("waze_init");
             hooks++;
@@ -1496,13 +1524,13 @@ public final class NavigatorMapPatcher {
             } else if (background.end) {
                 for (int i = body.getInstructions().size() - 1; i >= 0; i--) {
                     if (body.getInstructions().get(i).getOpcode() == Opcode.RETURN_VOID) {
-                        add(body, i, p0, plan, reference(BACKGROUND, background.name,
+                        addBefore(body, i, p0, plan, reference(BACKGROUND, background.name,
                                 background.args, "V"));
                         plan.count(key(method));
                     }
                 }
             } else {
-                add(body, 0, p0, plan, reference(BACKGROUND, background.name,
+                addBefore(body, 0, p0, plan, reference(BACKGROUND, background.name,
                         background.args, "V"));
                 plan.count(key(method));
             }
@@ -1513,10 +1541,21 @@ public final class NavigatorMapPatcher {
                 method.getAccessFlags(), method.getAnnotations(), method.getHiddenApiRestrictions(), body);
     }
 
-    private static void add(MutableMethodImplementation body, int index, int register,
+    private static void addBefore(MutableMethodImplementation body, int index, int register,
             PatchPlan plan, MethodReference reference) {
+        add(body, index, register, plan, reference, true);
+    }
+
+    private static void addAfter(MutableMethodImplementation body, int index, int register,
+            PatchPlan plan, MethodReference reference) {
+        add(body, index, register, plan, reference, false);
+    }
+
+    private static void add(MutableMethodImplementation body, int index, int register,
+            PatchPlan plan, MethodReference reference, boolean transferLabels) {
         var original = body.getInstructions().get(index);
-        List<Label> labels = new ArrayList<>(original.getLocation().getLabels());
+        List<Label> labels = transferLabels
+                ? new ArrayList<>(original.getLocation().getLabels()) : Collections.emptyList();
         BuilderInstruction3rc hook = new BuilderInstruction3rc(Opcode.INVOKE_STATIC_RANGE,
                 register, reference.getParameterTypes().size(), reference);
         body.addInstruction(index, hook);
@@ -1556,24 +1595,21 @@ public final class NavigatorMapPatcher {
     }
 
     private static void verifyCarRendererHook(Method method) throws UnsupportedPatchException {
-        if (!method.getDefiningClass().equals("Lcom/waze/car_lib/i/a/s;")
-                || !method.getName().equals("d") || method.getImplementation() == null) return;
+        String target = "Lcom/waze/car_lib/i/a/s;->d(Lcom/waze/car_lib/i/a/h;"
+                + "Lcom/waze/car_lib/i/a/f;Lcom/waze/map/ed;Lcom/waze/bj/e;"
+                + "Lcom/waze/map/opengl/w;)V";
+        if (!target.equals(key(method))) return;
+        String hook = methodKey(BACKGROUND, "carRendererReady",
+                Collections.singletonList("Ljava/lang/Object;"), "V");
         List<Instruction> instructions = new ArrayList<>();
         method.getImplementation().getInstructions().forEach(instructions::add);
         int found = 0;
         for (int i = 0; i < instructions.size(); i++) {
             Instruction instruction = instructions.get(i);
-            if (!(instruction instanceof ReferenceInstruction)
-                    || !(((ReferenceInstruction) instruction).getReference() instanceof MethodReference)) continue;
-            MethodReference called = (MethodReference) ((ReferenceInstruction) instruction).getReference();
-            if (!called.getDefiningClass().equals(BACKGROUND)
-                    || !called.getName().equals("carRendererReady")) continue;
+            if (!isMethodCall(instruction, hook)) continue;
             found++;
-            if (!(instruction instanceof RegisterRangeInstruction)) {
-                throw new UnsupportedPatchException("Car renderer hook is not a range invocation");
-            }
-            int receiver = ((RegisterRangeInstruction) instruction).getStartRegister();
-            if (receiver != method.getImplementation().getRegisterCount() - 6 || i == 0
+            int receiver = method.getImplementation().getRegisterCount() - 6;
+            if (!isRangeCall(instruction, hook, receiver, 1) || i == 0
                     || !isCarManagerAssignment(instructions.get(i - 1), method.getDefiningClass(), receiver)) {
                 throw new UnsupportedPatchException("Car renderer hook is not after its receiver's manager assignment");
             }
@@ -1591,35 +1627,33 @@ public final class NavigatorMapPatcher {
                 || !method.getName().equals("onDrawFrame") || method.getImplementation() == null) return;
         List<Instruction> instructions = new ArrayList<>();
         method.getImplementation().getInstructions().forEach(instructions::add);
+        if (AccessFlags.STATIC.isSet(method.getAccessFlags())
+                || !"V".equals(method.getReturnType())) {
+            throw new UnsupportedPatchException("Waze canvas target call mode or return changed");
+        }
+        String anchor = methodKey(method.getDefiningClass(), "RenderNTV",
+                Arrays.asList("Ljava/lang/String;", "I", "I"), "V");
+        String hook = methodKey(BRIDGE, "wazeFrame",
+                Collections.singletonList("Ljava/lang/Object;"), "V");
+        int receiver = parameterStart(method);
         int renderCalls = 0;
         int frameHooks = 0;
         for (int i = 0; i < instructions.size(); i++) {
             Instruction instruction = instructions.get(i);
-            if (!(instruction instanceof ReferenceInstruction)
-                    || !(((ReferenceInstruction) instruction).getReference() instanceof MethodReference)) continue;
-            MethodReference called = (MethodReference) ((ReferenceInstruction) instruction).getReference();
-            if (called.getDefiningClass().equals(method.getDefiningClass())
-                    && called.getName().equals("RenderNTV")) {
+            if (isMethodCall(instruction, anchor)) {
                 renderCalls++;
-                if (i + 1 >= instructions.size() || !isWazeFrameHook(instructions.get(i + 1))) {
+                if (instruction.getOpcode() != Opcode.INVOKE_DIRECT
+                        || invocationReceiver(instruction) != receiver
+                        || i + 1 >= instructions.size()
+                        || !isRangeCall(instructions.get(i + 1), hook, receiver, 1)) {
                     throw new UnsupportedPatchException("Waze canvas hook is not immediately after RenderNTV");
                 }
             }
-            if (isWazeFrameHook(instruction)) frameHooks++;
+            if (isRangeCall(instruction, hook, receiver, 1)) frameHooks++;
         }
         if (renderCalls != 1 || frameHooks != 1) {
             throw new UnsupportedPatchException("Waze canvas hook structure changed");
         }
-    }
-
-    private static boolean isWazeFrameHook(Instruction instruction) {
-        if (!(instruction instanceof ReferenceInstruction)
-                || !(((ReferenceInstruction) instruction).getReference() instanceof MethodReference)) return false;
-        MethodReference method = (MethodReference) ((ReferenceInstruction) instruction).getReference();
-        return method.getDefiningClass().equals(BRIDGE) && method.getName().equals("wazeFrame")
-                && method.getParameterTypes().size() == 1
-                && method.getParameterTypes().get(0).toString().equals("Ljava/lang/Object;")
-                && method.getReturnType().equals("V");
     }
 
     private static void verifyDexMethodLimit(DexBackedDexFile original,

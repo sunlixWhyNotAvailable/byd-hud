@@ -164,11 +164,6 @@ final class WazeAccessibilityParser {
         return isUsableWazePayload(NavAccessibilityPayload.nodes(payload));
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean isUsableWazePayloadForTest(String payload) {
-        return isUsableWazePayload(payload);
-    }
-
     //keeps this Waze step isolated so visual and accessibility evidence can be debugged independently.
     static NavParserResult arrivalResult(String packageName, String destination,
             String fallbackRoad, String reason, int confidence) {

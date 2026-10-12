@@ -44,20 +44,26 @@ final class ShanghaiSomeIpClient implements Closeable {
     private final List<Long> topics;
     private final CountDownLatch connected = new CountDownLatch(1);
     private final List<Long> subscribed = new ArrayList<>();
+    private final List<Long> acceptedTopics = new ArrayList<>();
     private final List<Long> startedServices = new ArrayList<>();
     private final Callback callback;
     private final JSONArray results = new JSONArray();
     private final JSONArray clientResults = new JSONArray();
     private final JSONObject cleanup = ShanghaiJson.object("status", "pending");
     private volatile IBinder service;
-    private volatile boolean disconnected;
+    private volatile IBinder readyService;
+    private volatile boolean disconnected = true;
+    private volatile boolean rebindRequired;
+    private long retryAt;
     private boolean bound;
     private boolean callbackRegistered;
-    private boolean closed;
+    private boolean initialSubscriptionsCompleted;
+    private volatile boolean closed;
 
     private final ServiceConnection connection = new ServiceConnection() {
         @Override public void onServiceConnected(ComponentName name, IBinder binder) {
-            disconnected = false;
+            if (closed) return;
+            disconnected = true;
             service = binder;
             connected.countDown();
         }
@@ -68,6 +74,7 @@ final class ShanghaiSomeIpClient implements Closeable {
         }
         @Override public void onBindingDied(ComponentName name) {
             onServiceDisconnected(name);
+            rebindRequired = true;
         }
         @Override public void onNullBinding(ComponentName name) {
             disconnected = true;
@@ -91,34 +98,75 @@ final class ShanghaiSomeIpClient implements Closeable {
     boolean start(long bindTimeoutMs, BooleanSupplier cancelled) throws Exception {
         Intent intent = new Intent().setComponent(COMPONENT).setType(clientType);
         bound = context.bindService(intent, connection, Context.BIND_AUTO_CREATE);
+        rebindRequired = !bound;
         if (!bound || !connected.await(bindTimeoutMs, TimeUnit.MILLISECONDS) || service == null) {
             return false;
         }
-        if (cancelled.getAsBoolean()) return true;
-        registerCallback();
-        startRequestedClients(cancelled);
-        for (long topic : topics) {
+        initialize(service, topics, cancelled, false);
+        return true;
+    }
+
+    private synchronized void initialize(IBinder binder, List<Long> requested,
+            BooleanSupplier cancelled, boolean reconnect) throws Exception {
+        if (closed || cancelled.getAsBoolean() || binder == null) return;
+        subscribed.clear();
+        startedServices.clear();
+        registerCallback(binder);
+        startRequestedClients(binder, requested, cancelled);
+        for (long topic : requested) {
             JSONObject item = new JSONObject().put("topic", ShanghaiTopics.hex(topic));
+            if (reconnect) item.put("reconnect", true);
             if (cancelled.getAsBoolean()) {
                 item.put("accepted", false).put("skipped", "stop_requested");
                 results.put(item);
                 continue;
             }
             try {
-                int result = transactInt(8, topic);
+                int result = transactInt(binder, 8, topic);
                 item.put("result", result).put("accepted", result == 0);
-                if (result == 0) subscribed.add(topic);
+                if (result == 0) {
+                    subscribed.add(topic);
+                    if (!reconnect && !acceptedTopics.contains(topic)) acceptedTopics.add(topic);
+                }
             } catch (Throwable error) {
                 item.put("accepted", false).put("error", error.toString());
             }
             results.put(item);
         }
-        return true;
+        if (!closed && !cancelled.getAsBoolean() && service == binder) {
+            initialSubscriptionsCompleted = true;
+            readyService = binder;
+            disconnected = false;
+            journal.status(reconnect ? "reconnected subscriptions=" + subscribed.size() : "connected");
+        }
     }
 
-    private void startRequestedClients(BooleanSupplier cancelled) throws Exception {
+    synchronized void restoreConnection(BooleanSupplier cancelled) {
+        if (closed || cancelled.getAsBoolean() || healthy()
+                || android.os.SystemClock.elapsedRealtime() < retryAt) return;
+        retryAt = android.os.SystemClock.elapsedRealtime() + 1_000L;
+        try {
+            if (rebindRequired) {
+                rebindRequired = false;
+                if (bound) context.unbindService(connection);
+                bound = context.bindService(new Intent().setComponent(COMPONENT).setType(clientType),
+                        connection, Context.BIND_AUTO_CREATE);
+                if (!bound) rebindRequired = true;
+            }
+            IBinder current = service;
+            if (current != null) initialize(current,
+                    new ArrayList<>(initialSubscriptionsCompleted ? acceptedTopics : topics),
+                    cancelled, initialSubscriptionsCompleted);
+        } catch (Exception error) {
+            disconnected = true;
+            journal.status("reconnect_failed " + error);
+        }
+    }
+
+    private void startRequestedClients(IBinder binder, List<Long> requested,
+            BooleanSupplier cancelled) throws Exception {
         Set<Long> services = new LinkedHashSet<>();
-        for (long topic : topics) {
+        for (long topic : requested) {
             services.add(0x000B000000000000L | (topic & 0x0000FFFFFFFF0000L));
         }
         for (long serviceId : services) {
@@ -129,7 +177,7 @@ final class ShanghaiSomeIpClient implements Closeable {
                 continue;
             }
             int result;
-            try { result = transactInt(4, serviceId); }
+            try { result = transactInt(binder, 4, serviceId); }
             catch (Throwable error) {
                 item.put("accepted", false).put("error", error.toString());
                 clientResults.put(item);
@@ -142,13 +190,13 @@ final class ShanghaiSomeIpClient implements Closeable {
         }
     }
 
-    private void registerCallback() throws Exception {
+    private void registerCallback(IBinder binder) throws Exception {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(CLIENT_DESCRIPTOR);
             data.writeStrongBinder(callback);
-            if (!requireService().transact(1, data, reply, 0)) {
+            if (!binder.transact(1, data, reply, 0)) {
                 throw new RemoteException("Callback registration transaction rejected");
             }
             reply.readException();
@@ -159,11 +207,17 @@ final class ShanghaiSomeIpClient implements Closeable {
         }
     }
 
-    int subscribedCount() { return subscribed.size(); }
-    boolean live() { return !disconnected && service != null && journal.receivedCount() > 0; }
-    boolean healthy() { return !disconnected && service != null && journal.healthy(); }
-    JSONArray subscriptionResults() { return results; }
-    JSONArray clientResults() { return clientResults; }
+    synchronized int subscribedCount() { return subscribed.size(); }
+    boolean live() { return healthy() && journal.receivedCount() > 0; }
+    boolean healthy() {
+        return !closed && !disconnected && service != null && service == readyService && journal.healthy();
+    }
+    synchronized JSONArray subscriptionResults() { return copyArray(results); }
+    synchronized JSONArray clientResults() { return copyArray(clientResults); }
+    private static JSONArray copyArray(JSONArray source) {
+        try { return new JSONArray(source.toString()); }
+        catch (org.json.JSONException error) { throw new IllegalStateException(error); }
+    }
     JSONObject cleanupResult() { return cleanup; }
 
     @Override public synchronized void close() {
@@ -221,12 +275,16 @@ final class ShanghaiSomeIpClient implements Closeable {
     }
 
     private int transactInt(int code, Long value) throws Exception {
+        return transactInt(requireService(), code, value);
+    }
+
+    private int transactInt(IBinder binder, int code, Long value) throws Exception {
         Parcel data = Parcel.obtain();
         Parcel reply = Parcel.obtain();
         try {
             data.writeInterfaceToken(CLIENT_DESCRIPTOR);
             if (value != null) data.writeLong(value);
-            if (!requireService().transact(code, data, reply, 0)) {
+            if (!binder.transact(code, data, reply, 0)) {
                 throw new RemoteException("SOME/IP client transaction rejected: " + code);
             }
             reply.readException();

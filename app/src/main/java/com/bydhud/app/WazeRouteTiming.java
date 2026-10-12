@@ -141,12 +141,6 @@ final class WazeRouteTiming {
         }
     }
 
-    static void clearPendingForTest() {
-        synchronized (PENDING_LOCK) {
-            PENDING.clear();
-        }
-    }
-
     synchronized void markDirectStart(long elapsedMs, int sessionGeneration, String reason) {
         directStartElapsedMs = first(directStartElapsedMs, elapsedMs);
         directSessionGeneration = sessionGeneration;

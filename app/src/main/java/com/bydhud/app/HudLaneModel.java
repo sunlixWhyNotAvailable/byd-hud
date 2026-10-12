@@ -67,50 +67,6 @@ final class HudLaneModel {
         return out.toString();
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean hasMixedRecommendations(HudState state) {
-        LaneSpec[] lanes = parse(state);
-        for (LaneSpec lane : lanes) {
-            if (lane.hasMixedRecommendations()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean hasSmoothDirections(HudState state) {
-        LaneSpec[] lanes = parse(state);
-        for (LaneSpec lane : lanes) {
-            if (lane.hasSmoothDirection()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean hasRampDirections(HudState state) {
-        LaneSpec[] lanes = parse(state);
-        for (LaneSpec lane : lanes) {
-            if (lane.hasRampDirection()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean hasCustomLaneResources(HudState state) {
-        LaneSpec[] lanes = parse(state);
-        for (LaneSpec lane : lanes) {
-            if (lane.hasCustomLaneResource()) {
-                return true;
-            }
-        }
-        return false;
-    }
-
     static boolean hasUnrepresentableSemanticDirections(HudState state) {
         LaneSpec[] lanes = parse(state);
         for (LaneSpec lane : lanes) {
@@ -383,44 +339,6 @@ final class HudLaneModel {
             return recommendationCodeForParts(parts);
         }
 
-        //keeps this predicate explicit so safety checks can be audited without tracing callers.
-        boolean hasMixedRecommendations() {
-            if (parts.length <= 1) {
-                return false;
-            }
-            boolean first = parts[0].recommended;
-            for (LanePart part : parts) {
-                if (part.recommended != first) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        //keeps this predicate explicit so safety checks can be audited without tracing callers.
-        boolean hasSmoothDirection() {
-            if ("Ls".equals(label.replace("*", "").replace("!", ""))
-                    || "Rs".equals(label.replace("*", "").replace("!", ""))) {
-                return true;
-            }
-            for (LanePart part : parts) {
-                if (part.isSmooth()) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        //keeps this predicate explicit so safety checks can be audited without tracing callers.
-        boolean hasRampDirection() {
-            String clean = label.replace("*", "").replace("!", "");
-            return "RampL".equals(clean) || "RampR".equals(clean);
-        }
-
-        //keeps this predicate explicit so safety checks can be audited without tracing callers.
-        boolean hasCustomLaneResource() {
-            return customResourceName.startsWith("global_image_landcustom_hud_");
-        }
     }
 
     //defines the LanePart module boundary so related behavior stays readable inside one unit.
@@ -457,11 +375,6 @@ final class HudLaneModel {
         //keeps this HUD step isolated so cluster payload behavior stays predictable.
         String label() {
             return HudLaneModel.label(token, recommended);
-        }
-
-        //keeps this predicate explicit so safety checks can be audited without tracing callers.
-        boolean isSmooth() {
-            return "Ls".equals(token) || "Rs".equals(token);
         }
 
         int instrumentMask() {

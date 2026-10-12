@@ -4,7 +4,6 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
 import android.content.pm.Signature;
-import android.os.Build;
 import android.security.keystore.KeyGenParameterSpec;
 import android.security.keystore.KeyProperties;
 
@@ -45,7 +44,6 @@ final class NavigatorSigningKey {
 
     static String installedCertificateSha256(Context context, String packageName)
             throws Exception {
-        if (Build.VERSION.SDK_INT < 28) throw new IOException("signing info unavailable");
         PackageInfo info = context.getPackageManager().getPackageInfo(
                 packageName, PackageManager.GET_SIGNING_CERTIFICATES);
         if (info.signingInfo == null || info.signingInfo.hasMultipleSigners()) {

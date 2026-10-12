@@ -9,7 +9,6 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
-import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
@@ -119,11 +118,7 @@ public final class HudRuntimeService extends Service {
         intent.setAction(ACTION_START_PERSISTENT);
         intent.putExtra(EXTRA_REASON, safeReason);
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                appContext.startForegroundService(intent);
-            } else {
-                appContext.startService(intent);
-            }
+            appContext.startForegroundService(intent);
             AppEventLogger.event(appContext,
                     "runtime startPersistent requested reason=" + safeReason);
         } catch (RuntimeException error) {
@@ -267,9 +262,7 @@ public final class HudRuntimeService extends Service {
     private void completeStartAfterBootGate(String reason) {
         if (runtimeDestroyed
                 || !UserRuntimeSession.allowsRuntime(this)) return;
-        if (!ShellRuntimeSession.arm(this)) {
-            log("shell recovery unavailable: session intent could not be persisted");
-        }
+        ShellRuntimeSession.armAsync(this);
         AppUpdateManager.onSessionEntry(this);
         HudRuntimeState.publishServicePresent(this, "onStartCommand");
         clearStartRequestGate();
@@ -376,9 +369,7 @@ public final class HudRuntimeService extends Service {
                 launchIntent,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT,
                 MainActivityDisplayGuard.tabletOptions());
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
         return builder
                 .setSmallIcon(R.drawable.ic_hud_notification)
                 .setContentTitle("BYD HUD")
@@ -398,9 +389,6 @@ public final class HudRuntimeService extends Service {
 
     //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager == null || manager.getNotificationChannel(CHANNEL_ID) != null) {
             return;
@@ -414,11 +402,7 @@ public final class HudRuntimeService extends Service {
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopForegroundCompat() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            stopForeground(true);
-        }
+        stopForeground(STOP_FOREGROUND_REMOVE);
     }
 
     //starts or schedules work here so lifecycle recovery follows one controlled path.

@@ -13,14 +13,11 @@ import java.io.IOException;
 import java.io.InterruptedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
-import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.Date;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
-import java.util.Locale;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Consumer;
@@ -124,7 +121,8 @@ final class LogShareZip {
         }
         boolean locked = false;
         try {
-            Map<String, byte[]> incidents = RuntimeIncidentRecorder.snapshot(context, days);
+            List<String> omissions = new ArrayList<>();
+            Map<String, byte[]> incidents = RuntimeIncidentRecorder.snapshot(context, days, omissions);
             locked = awaitStorageLock();
             if (!locked) return new SelectionSummary(false, days.size(), 0, 0L,
                     "storage busy; retry export when the current operation completes");
@@ -139,9 +137,13 @@ final class LogShareZip {
             }
             bytes += reports.reportBytes;
             int count = files.size() + 1;
-            boolean ready = !files.isEmpty();
+            boolean reportOnlyDay = false;
+            for (String day : days) reportOnlyDay |= reports.days.containsKey(day);
+            boolean ready = !files.isEmpty() || reportOnlyDay;
             String detail = !ready ? "no readable files or patch reports"
-                    : "ready; navigator patch report history will be included";
+                    : omissions.isEmpty()
+                    ? "ready; navigator patch report history will be included"
+                    : "ready with omitted incident files: " + omissions;
             return new SelectionSummary(ready, days.size(), count, bytes, detail);
         } catch (IOException | RuntimeException error) {
             return new SelectionSummary(false, days.size(), 0, 0L, error.getMessage());
@@ -153,150 +155,24 @@ final class LogShareZip {
         }
     }
 
-    // Freeze topology/lengths briefly, then let journal appends continue during copying.
-    static synchronized Result create(Context context, List<String> selectedDays) {
-        return create(context, selectedDays, "");
-    }
-
-    //Navigation-log Sentry uploads carry a short correlation ID in the archive name.
-    static synchronized Result create(Context context, List<String> selectedDays, String uploadId) {
-        if (context == null) {
-            return failure("missing context");
-        }
-        if (uploadId == null || (!uploadId.isEmpty() && !uploadId.matches("[0-9a-f]{8}"))) {
-            return failure("invalid upload id");
-        }
-        List<String> days;
-        try {
-            days = checkedDays(selectedDays);
-        } catch (IOException e) {
-            return failure(e.getMessage());
-        }
-        Context app = context.getApplicationContext();
-        File shareDir = writableShareDir(app);
-        if (shareDir == null) {
-            return failure("share cache unavailable");
-        }
-        String fileName = ZIP_PREFIX
-                + new SimpleDateFormat("yyyyMMdd-HHmmss-SSS", Locale.US).format(new Date())
-                + (uploadId.isEmpty() ? "" : "-" + uploadId)
-                + ".zip";
-        File output = new File(shareDir, fileName);
-        File part = new File(shareDir, fileName + ".part");
-        File staging = new File(shareDir, fileName + ".staging");
-        if (output.exists() || part.exists() || staging.exists()) {
-            return failure("share name collision");
-        }
-
-        boolean writeHeld = false;
-        boolean pinned = false;
-        try {
-            JSONObject reportSnapshot = NavigatorPatchReportStore.exportSnapshot(app);
-            phase(Phase.WAITING_FOR_WRITES, WazeCaptureDebugWriter.get().pendingTasks());
-            long waitStarted = System.currentTimeMillis();
-            boolean checkpoint = WazeCaptureDebugWriter.get()
-                    .awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS);
-            checkCancelled();
-            Log.i(TAG, "share_phase phase=WAITING_FOR_WRITES duration_ms="
-                    + (System.currentTimeMillis() - waitStarted)
-                    + " checkpoint=" + (checkpoint ? "ready" : "timeout")
-                    + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
-
-            phase(Phase.COPYING, WazeCaptureDebugWriter.get().pendingTasks());
-            long copyStarted = System.currentTimeMillis();
-            if (!staging.mkdirs()) {
-                throw new IOException("cannot create staging directory");
-            }
-            writeHeld = awaitStorageLock();
-            if (!writeHeld) throw new IOException("storage busy: no log snapshot obtained; existing files preserved");
-            NavigationLogStorage.pinExportDays(days);
-            pinned = true;
-            List<SnapshotFile> sources = snapshotFiles(app, days);
-            if (sources.isEmpty()) throw new IOException("no readable recording files");
-            List<String> omissions = new ArrayList<>();
-            // Small replace-in-place metadata must be frozen while its writers are excluded.
-            java.util.Iterator<SnapshotFile> metadata = sources.iterator();
-            while (metadata.hasNext()) {
-                SnapshotFile source = metadata.next();
-                if (source.file.getName().endsWith(".json")) {
-                    try {
-                        if (source.length > 1024 * 1024) throw new IOException("oversized mutable metadata");
-                        source.captured = Files.readAllBytes(source.file.toPath());
-                    } catch (IOException failed) {
-                        omissions.add(source.entryName + ": " + failed.getMessage());
-                        metadata.remove();
-                    }
-                }
-            }
-            NavigationLogStorage.unlockTopologyWrite();
-            writeHeld = false;
-            addIncidentSources(sources, RuntimeIncidentRecorder.snapshot(app, days));
-            List<SnapshotFile> snapshot = copySnapshotToStaging(staging, sources, omissions);
-            NavigationLogStorage.unpinExportDays(days);
-            pinned = false;
-            if (snapshot.isEmpty()) throw new IOException("no recording files copied: " + omissions);
-            boolean incomplete = addWriterStatus(staging, snapshot, days,
-                    checkpoint, true, reportSnapshot, omissions);
-            Log.i(TAG, "share_phase phase=COPYING duration_ms="
-                    + (System.currentTimeMillis() - copyStarted)
-                    + " files=" + snapshot.size()
-                    + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
-
-            phase(Phase.ARCHIVING, WazeCaptureDebugWriter.get().pendingTasks());
-            long archiveStarted = System.currentTimeMillis();
-            NavigatorPatchReportStore.ExportResult reportStatus = writeZip(
-                    part, snapshot, app, reportSnapshot);
-            checkCancelled();
-            if (!part.renameTo(output)) {
-                throw new IOException("final rename failed");
-            }
-            Log.i(TAG, "share_phase phase=ARCHIVING duration_ms="
-                    + (System.currentTimeMillis() - archiveStarted)
-                    + " bytes=" + output.length()
-                    + " pending=" + WazeCaptureDebugWriter.get().pendingTasks());
-            return new Result(incomplete ? CollectionOutcome.PARTIAL : CollectionOutcome.FULL, output,
-                    "files=" + (snapshot.size() + 1 + (reportStatus.incomplete ? 1 : 0))
-                            + " bytes=" + output.length()
-                            + " reports=" + reportStatus.reportCount
-                            + " recording=" + (incomplete ? "PARTIAL" : "FULL")
-                            + " patchReports=" + (reportStatus.incomplete ? "INCOMPLETE" : "complete"),
-                    reportStatus.incomplete);
-        } catch (IOException | RuntimeException | InterruptedException e) {
-            if (e instanceof InterruptedException) Thread.currentThread().interrupt();
-            deleteArtifact(part);
-            deleteArtifact(output);
-            try {
-                String failure = "log_export_failed reason=" + e.getMessage()
-                        + " health=" + WazeCaptureDebugWriter.healthSnapshot();
-                Log.w(TAG, failure);
-                AppEventLogger.event(app, failure);
-            } catch (JSONException ignored) { Log.w(TAG, "log_export_failed", e); }
-            return failure(e.getMessage());
-        } finally {
-            if (writeHeld) {
-                NavigationLogStorage.unlockTopologyWrite();
-            }
-            if (pinned) NavigationLogStorage.unpinExportDays(days);
-            deleteTree(staging);
-        }
-    }
-
     static Result createIndependent(Context context, List<String> days, String uploadId, String operationId) {
         File job = null;
         boolean pinned = false;
         try {
             job = ShellWorkClient.job(context, "log", operationId);
-            File requestFile = new File(job, "request.json");
-            if (!requestFile.exists()) {
+            if (!ShellWorkClient.hasRequest(context, "log", operationId)) {
                 checkedDays(days);
-                JSONObject reports = NavigatorPatchReportStore.exportSnapshot(context);
+                List<JSONObject> reportList = NavigatorPatchReportStore.snapshotAll(context);
+                Map<String, Long> reportDays = NavigatorPatchReportStore.reportDays(reportList);
+                JSONObject reports = NavigatorPatchReportStore.exportSnapshot(reportList);
                 boolean checkpoint = WazeCaptureDebugWriter.get().awaitCheckpoint(WRITER_CHECKPOINT_TIMEOUT_MS);
                 org.json.JSONArray sources = new org.json.JSONArray();
+                List<String> omissions = new ArrayList<>();
                 if (!awaitStorageLock()) throw new IOException("storage busy: existing files preserved");
                 try {
                     NavigationLogStorage.pinExportDays(days);
                     pinned = true;
-                    for (SnapshotFile file : snapshotFiles(context, days)) {
+                    for (SnapshotFile file : snapshotFiles(context, days, reportDays)) {
                         JSONObject source = new JSONObject().put("path", file.file.getCanonicalPath())
                                 .put("entry", file.entryName).put("length", file.length);
                         if (file.file.getName().endsWith(".json")) {
@@ -308,10 +184,11 @@ final class LogShareZip {
                         sources.put(source);
                     }
                 } finally { NavigationLogStorage.unlockTopologyWrite(); }
-                JSONObject health = freezeIncidentSources(context, days, job, sources);
+                JSONObject health = freezeIncidentSources(context, days, job, sources, omissions);
                 ShellWorkClient.prepare(context, "log", operationId, new JSONObject()
                         .put("sources", sources).put("reports", reports).put("health", health)
                         .put("checkpoint", checkpoint).put("days", new org.json.JSONArray(days))
+                        .put("omissions", new org.json.JSONArray(omissions))
                         .put("uploadId", uploadId));
             } else {
                 NavigationLogStorage.withWriteLock(() -> NavigationLogStorage.pinExportDays(days));
@@ -348,12 +225,21 @@ final class LogShareZip {
         File part = new File(shares, output.getName() + ".part");
         File staging = new File(shares, output.getName() + ".staging");
         List<String> omissions = new ArrayList<>();
+        org.json.JSONArray priorOmissions = input.optJSONArray("omissions");
+        if (priorOmissions != null) {
+            for (int i = 0; i < priorOmissions.length(); i++) {
+                String omission = priorOmissions.optString(i, "");
+                if (!omission.isEmpty()) omissions.add(omission);
+            }
+        }
         try {
             ShellWorkFiles.directory(staging);
             ShellWorkEntryPoint.progress(new JSONObject().put("phase", "COPYING"));
             List<SnapshotFile> files = copySnapshotToStaging(staging, sources, omissions);
-            if (files.isEmpty()) throw new IOException("No recording files copied: " + omissions);
             JSONObject reports = input.getJSONObject("reports");
+            if (files.isEmpty() && !reportsCoverSelectedDay(reports, input.optJSONArray("days"))) {
+                throw new IOException("No recording files or selected-day patch reports copied: " + omissions);
+            }
             boolean incomplete = addWriterStatus(staging, files, ShellWorkEntryPoint.strings(input.getJSONArray("days")),
                     input.getBoolean("checkpoint"), true, reports, omissions, input.getJSONObject("health"));
             ShellWorkEntryPoint.progress(new JSONObject().put("phase", "ARCHIVING"));
@@ -388,7 +274,12 @@ final class LogShareZip {
 
     static JSONObject freezeIncidentSources(Context context, List<String> days, File job,
             org.json.JSONArray sources) throws Exception {
-        for (Map.Entry<String, byte[]> entry : RuntimeIncidentRecorder.snapshot(context, days).entrySet()) {
+        return freezeIncidentSources(context, days, job, sources, new ArrayList<>());
+    }
+
+    static JSONObject freezeIncidentSources(Context context, List<String> days, File job,
+            org.json.JSONArray sources, List<String> omissions) throws Exception {
+        for (Map.Entry<String, byte[]> entry : RuntimeIncidentRecorder.snapshot(context, days, omissions).entrySet()) {
             File frozen = new File(ShellWorkFiles.directory(new File(job, "metadata")),
                     sources.length() + "-incidents.jsonl");
             Files.write(frozen.toPath(), entry.getValue());
@@ -397,6 +288,22 @@ final class LogShareZip {
         }
         // Failures observed while waiting/copying must travel with the frozen shell request.
         return WazeCaptureDebugWriter.healthSnapshot();
+    }
+
+    private static boolean reportsCoverSelectedDay(JSONObject snapshot, org.json.JSONArray selectedDays) {
+        if (snapshot == null || selectedDays == null) return false;
+        Set<String> selected = new HashSet<>();
+        for (int i = 0; i < selectedDays.length(); i++) {
+            String day = selectedDays.optString(i, "");
+            if (day.matches("[0-9]{8}")) selected.add(day);
+        }
+        org.json.JSONArray reports = snapshot.optJSONArray("reports");
+        if (reports == null) return false;
+        for (int i = 0; i < reports.length(); i++) {
+            JSONObject report = reports.optJSONObject(i);
+            if (report != null && selected.contains(report.optString("day"))) return true;
+        }
+        return false;
     }
 
     private static JSONObject incidentSummary(List<SnapshotFile> files) throws IOException {
@@ -426,9 +333,10 @@ final class LogShareZip {
             JSONObject history = incidentSummary(files);
             boolean uncertain = history.optBoolean("coverageUncertain")
                     || health.optBoolean("incidentPersistenceUncertain");
-            boolean incomplete = !checkpoint || !storageReady || health.getBoolean("lossObserved")
-                    || history.optBoolean("lossObserved") || uncertain
+            boolean confirmedIncomplete = !checkpoint || !storageReady
+                    || health.getBoolean("lossObserved") || history.optBoolean("lossObserved")
                     || !omissions.isEmpty();
+            boolean incomplete = confirmedIncomplete || uncertain;
             JSONObject transferDiagnostics = transferDiagnosticSummary(files);
             health.put("selectedDays", new org.json.JSONArray(days))
                     .put("incidentHistory", history)
@@ -439,9 +347,8 @@ final class LogShareZip {
                     .put("navigatorPatchReportsIncluded", true)
                     .put("navigatorPatchReportsIncomplete", reportsIncomplete)
                     .put("transferDiagnostics", transferDiagnostics)
-                    .put("recordingStatus", uncertain
-                            && !history.optBoolean("lossObserved") && !health.getBoolean("lossObserved")
-                            ? "UNCERTAIN" : incomplete ? "INCOMPLETE" : "snapshot_ready")
+                    .put("recordingStatus", confirmedIncomplete ? "INCOMPLETE"
+                            : uncertain ? "UNCERTAIN" : "snapshot_ready")
                     .put("note", "Writer counters cover this process; incidentHistory covers selected days across restarts. A stall alone does not prove loss.");
             String directory = NavigatorPatchReportStore.exportDirectory(reportSnapshot);
             String statusEntry = directory + "recording-status.json";
@@ -514,12 +421,27 @@ final class LogShareZip {
         try {
             File[] jobs = ShellWorkFiles.root(app).listFiles();
             if (jobs != null) for (File job : jobs) {
-                if (job.getName().startsWith("upload-") && !ShellWorkFiles.settled(job)) {
-                    JSONObject input = ShellWorkFiles.read(new File(job, "request.json")).optJSONObject("input");
-                    if (input != null) retained.add(input.optString("archive"));
+                if (job == null || !job.isDirectory()) continue;
+                if (!job.getName().startsWith("upload-")
+                        && !job.getName().startsWith("log-")) continue;
+                try {
+                    JSONObject expected = ShellWorkClient.expected(app, job);
+                    String state = ShellWorkClient.state(app, job).optString("state");
+                    boolean settled = "SUCCEEDED".equals(state) || "FAILED".equals(state)
+                            || "CANCELLED".equals(state) || "INTERRUPTED".equals(state);
+                    if (job.getName().startsWith("upload-") && !settled) {
+                        JSONObject input = expected.optJSONObject("input");
+                        if (input != null && !input.optString("archive").isEmpty()) {
+                            retained.add(input.optString("archive"));
+                        }
+                    }
+                    if (job.getName().startsWith("log-") && settled) {
+                        parents.add(new File(job, "cache/log-shares"));
+                    }
+                } catch (Exception error) {
+                    AppEventLogger.event(app, "shell_share_retention_job_unavailable id="
+                            + job.getName() + " reason=" + error.getClass().getSimpleName());
                 }
-                if (job.getName().startsWith("log-") && ShellWorkFiles.settled(job))
-                    parents.add(new File(job, "cache/log-shares"));
             }
             for (java.util.Map.Entry<String, ?> entry : ShellRuntimeSession.prefs(app).getAll().entrySet()) {
                 if (!entry.getKey().startsWith("share_work_")) continue;

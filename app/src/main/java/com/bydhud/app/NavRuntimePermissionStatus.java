@@ -38,23 +38,6 @@ final class NavRuntimePermissionStatus {
                 NavAccessibilityService.runtimeDetailForRuntimeCheck());
     }
 
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    static NavRuntimePermissionStatus fromSettingsForTest(
-            NavPermissionStatus settings,
-            boolean notificationListenerConnected,
-            boolean accessibilityServiceConnected,
-            boolean accessibilityServiceCrashed,
-            String notificationDetail,
-            String accessibilityDetail) {
-        return new NavRuntimePermissionStatus(
-                settings,
-                notificationListenerConnected,
-                accessibilityServiceConnected,
-                accessibilityServiceCrashed,
-                notificationDetail,
-                accessibilityDetail);
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean settingsGranted() {
         return settings != null && settings.captureGranted();

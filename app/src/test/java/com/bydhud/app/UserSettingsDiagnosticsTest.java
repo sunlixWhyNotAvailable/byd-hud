@@ -53,7 +53,8 @@ public class UserSettingsDiagnosticsTest {
         assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
     }
 
-    @Test public void queuedWritesKeepEachObservedChangeAndNormalExportIncludesHistory() throws Exception {
+    @Test @Config(shadows = LogShareShellTestSupport.class)
+    public void queuedWritesKeepEachObservedChangeAndNormalExportIncludesHistory() throws Exception {
         UserSettingsDiagnostics.start(context);
         assertTrue(WazeCaptureDebugWriter.get().awaitCheckpoint(2000));
         UserSettingsDiagnostics.sessionStarted(context, "waze", 7);
@@ -79,7 +80,8 @@ public class UserSettingsDiagnosticsTest {
         assertFalse(new JSONObject(lines.get(2)).getJSONObject("settings").getJSONObject("output").getBoolean("png"));
         assertTrue(new JSONObject(lines.get(3)).getJSONObject("settings").getJSONObject("output").getBoolean("png"));
         assertEquals("not_collected", new JSONObject(lines.get(3)).getJSONObject("navigatorSettings").getString("status"));
-        LogShareZip.Result result = LogShareZip.create(context, Collections.singletonList(day));
+        LogShareZip.Result result = LogShareShellTestSupport.export(
+                context, Collections.singletonList(day));
         assertTrue(result.detail, result.ok);
         try (ZipFile zip = new ZipFile(result.file)) {
             var entry = zip.getEntry(day + "/logs/" + UserSettingsDiagnostics.FILE_NAME);

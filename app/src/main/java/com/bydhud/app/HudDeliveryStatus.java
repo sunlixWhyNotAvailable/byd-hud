@@ -37,10 +37,6 @@ final class HudDeliveryStatus {
                 && SystemClock.elapsedRealtime() - successfulAt <= RUNNING_FRESH_MS;
     }
 
-    static boolean hasTransportFailure() {
-        return transportFailed;
-    }
-
     // Maps delivery evidence to the HUD pill without coupling it to permission or capture state.
     static String uiStatus() {
         if (transportFailed) {

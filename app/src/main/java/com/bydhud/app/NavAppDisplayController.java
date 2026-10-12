@@ -112,7 +112,8 @@ final class NavAppDisplayController {
         for (NavAppDisplayState observation : observations.values()) {
             placements.put(new JSONObject().put("packageName", observation.packageName)
                     .put("taskId", observation.taskId).put("displayId", observation.displayId)
-                    .put("visible", observation.visible));
+                    .put("visible", observation.visible)
+                    .put("bounds", observation.bounds == null ? JSONObject.NULL : observation.bounds.flattenToString()));
         }
         return result.put("cachedPlacements", placements)
                 .put("placementMeaning", "cached_app_observation_not_current_physical_confirmation")
@@ -131,11 +132,6 @@ final class NavAppDisplayController {
     static NavAppDisplayState parseTaskIdForTest(
             String logicalPackage, int targetTaskId, String dumpsys) {
         return parseTaskId(logicalPackage, targetTaskId, dumpsys);
-    }
-
-    //parses source data here so downstream HUD code receives normalized navigation fields.
-    static int parseDashboardDisplayIdForTest(String dumpsys) {
-        return parseDashboardDisplayId(dumpsys);
     }
 
     static int dashboardModeForWidgetForTest(int mode) {
@@ -1706,8 +1702,16 @@ final class NavAppDisplayController {
                         current.visible,
                         label + " failed: " + outputFailure));
             }
+            if (current.bounds == null) {
+                NavAppDisplayState measured = checkTaskId(normalized, current.taskId, label + "-bounds");
+                if (measured == null || measured.displayId != current.displayId) {
+                    throw new IOException("Task changed before bounds capture");
+                }
+                current = measured;
+            }
+            android.graphics.Rect targetBounds = boundsForMove(normalized, current, targetDisplay);
             String command = "cmd activity display move-stack " + current.taskId + " " + targetDisplay;
-            BooleanSupplier currentGate = requestCurrent == null ? () -> true : requestCurrent;
+            BooleanSupplier currentGate = taskOwnerGate(normalized, requestCurrent);
             TaskMoveSequencer.Result sequence = TaskMoveSequencer.execute(
                     current,
                     targetDisplay,
@@ -1754,20 +1758,26 @@ final class NavAppDisplayController {
                         confirmed.visible,
                         label + " failed: " + sequence.error));
             }
-            if (confirmed.displayId == targetDisplay) {
+            if (confirmed.displayId == targetDisplay && targetBounds != null) {
+                String geometryFailure = resizeTaskBounds(normalized, current, targetDisplay, targetBounds,
+                        currentGate, label);
+                if (!geometryFailure.isEmpty()) {
+                    return remember(new NavAppDisplayState(normalized, current.taskId,
+                            NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " failed: " + geometryFailure));
+                }
+                confirmed = checkTaskId(normalized, current.taskId, label + "-bounds-confirmed");
+            }
+            if (confirmed != null && confirmed.displayId == targetDisplay) {
                 return remember(new NavAppDisplayState(
                         normalized,
                         confirmed.taskId,
                         confirmed.displayId,
                         confirmed.visible,
-                        label + " ok from=" + current.displayId + " to=" + targetDisplay));
+                        label + " ok from=" + current.displayId + " to=" + targetDisplay, confirmed.bounds));
             }
-            return remember(new NavAppDisplayState(
-                    normalized,
-                    confirmed.taskId,
-                    confirmed.displayId,
-                    confirmed.visible,
-                    label + " check failed target=" + targetDisplay));
+            return remember(new NavAppDisplayState(normalized, current.taskId,
+                    confirmed == null ? NavAppDisplayState.DISPLAY_UNKNOWN : confirmed.displayId,
+                    confirmed != null && confirmed.visible, label + " check failed target=" + targetDisplay));
         } catch (IOException | SecurityException e) {
             return remember(new NavAppDisplayState(
                     normalized,
@@ -1840,9 +1850,11 @@ final class NavAppDisplayController {
                         label + " failed: task/display state unknown");
             }
             if (current.displayId == targetDisplay) return current;
+            android.graphics.Rect targetBounds = boundsForMove(normalized, current, targetDisplay);
+            BooleanSupplier currentGate = taskOwnerGate(normalized, requestCurrent);
             String command = "cmd activity display move-stack " + taskId + " " + targetDisplay;
             TaskMoveSequencer.Result sequence = TaskMoveSequencer.execute(
-                    current, targetDisplay, requestCurrent, new TaskMoveSequencer.Io() {
+                    current, targetDisplay, currentGate, new TaskMoveSequencer.Io() {
                         @Override
                         public NavAppDisplayState query(String stage) throws IOException {
                             return checkTaskId(normalized, taskId, label + "-" + stage);
@@ -1870,6 +1882,14 @@ final class NavAppDisplayController {
                         sequence.state != null && sequence.state.visible,
                         label + " failed: " + sequence.error);
             }
+            if (sequence.current && sequence.state != null && sequence.state.displayId == targetDisplay
+                    && targetBounds != null) {
+                String failure = resizeTaskBounds(normalized, current, targetDisplay, targetBounds,
+                        currentGate, label);
+                if (!failure.isEmpty()) return new NavAppDisplayState(normalized, taskId,
+                        NavAppDisplayState.DISPLAY_UNKNOWN, false, label + " failed: " + failure);
+                return checkTaskId(normalized, taskId, label + "-bounds-confirmed");
+            }
             return sequence.state == null
                     ? new NavAppDisplayState(normalized, taskId,
                             NavAppDisplayState.DISPLAY_UNKNOWN, false,
@@ -1888,6 +1908,108 @@ final class NavAppDisplayController {
                     + " task=" + taskId + " target=" + targetDisplay
                     + " reason=" + safe(reason));
         }
+    }
+
+    private BooleanSupplier taskOwnerGate(String packageName, BooleanSupplier requested) {
+        long owner = ClusterProjectionService.projectedGenerationTokenForWidget(packageName);
+        return () -> (requested == null || requested.getAsBoolean())
+                && (owner <= 0L || owner == ClusterProjectionService.projectedGenerationTokenForWidget(packageName));
+    }
+
+    private android.graphics.Rect boundsForMove(String packageName, NavAppDisplayState before,
+            int targetDisplay) throws IOException {
+        android.graphics.Rect target = ClusterProjectionService.taskBounds(packageName, targetDisplay);
+        String key = "task_bounds_" + packageName + "_" + before.taskId;
+        int boot = android.provider.Settings.Global.getInt(context.getContentResolver(),
+                android.provider.Settings.Global.BOOT_COUNT, -1);
+        if (target != null) {
+            if (before.bounds == null) throw new IOException("Original task bounds unavailable");
+            if (before.displayId == MAIN_DISPLAY_ID) {
+                try {
+                    String saved = new JSONObject().put("boot", boot).put("bounds", before.bounds.flattenToString())
+                            .put("sourceDisplay", before.displayId).toString();
+                    if (!dashboardPrefs().edit().putString(key, saved).commit()) {
+                        throw new IOException("Could not persist original task bounds");
+                    }
+                } catch (org.json.JSONException invalid) { throw new IOException(invalid); }
+            }
+            return target;
+        }
+        if (targetDisplay == MAIN_DISPLAY_ID) {
+            try {
+                JSONObject saved = new JSONObject(dashboardPrefs().getString(key, ""));
+                if (boot >= 0 && saved.getInt("boot") == boot) {
+                    return android.graphics.Rect.unflattenFromString(saved.getString("bounds"));
+                }
+            } catch (org.json.JSONException ignored) { }
+        }
+        return null;
+    }
+
+    private String resizeTaskBounds(String packageName, NavAppDisplayState before, int target,
+            android.graphics.Rect expected, BooleanSupplier current, String reason) throws IOException {
+        String result = TaskBoundsTransaction.apply(before, target, expected, current,
+                new TaskBoundsTransaction.Io() {
+                    @Override public NavAppDisplayState query() throws IOException {
+                        return checkTaskId(packageName, before.taskId, reason + "-geometry");
+                    }
+                    @Override public boolean resize(android.graphics.Rect bounds) throws IOException {
+                        if (!current.getAsBoolean()) return false;
+                        NavAppDisplayState live = query();
+                        if (live == null || live.taskId != before.taskId
+                                || (live.displayId != target && live.displayId != before.displayId)) return false;
+                        int resizedDisplay = live.displayId;
+                        String command = "cmd activity task resize " + before.taskId + " "
+                                + bounds.left + " " + bounds.top + " " + bounds.right + " " + bounds.bottom;
+                        LocalAdbBridge.ShellResult resized = runMutationCommandOnce(packageName, command, reason);
+                        if (!resized.success()) return false;
+                        long deadline = SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
+                        do {
+                            live = query();
+                            if (live == null || live.taskId != before.taskId || live.displayId != resizedDisplay)
+                                return false;
+                            if (bounds.equals(live.bounds)) return current.getAsBoolean();
+                            if (!current.getAsBoolean()) return false;
+                            SystemClock.sleep(DISPLAY_CONFIRM_INTERVAL_MS);
+                        } while (SystemClock.elapsedRealtime() < deadline);
+                        return false;
+                    }
+                    @Override public boolean move(int display) throws IOException {
+                        if (!current.getAsBoolean() || !runMutationCommandOnce(packageName,
+                                "cmd activity display move-stack " + before.taskId + " " + display,
+                                reason + "-geometry-rollback").success()) return false;
+                        long deadline = SystemClock.elapsedRealtime() + DISPLAY_CONFIRM_TIMEOUT_MS;
+                        do {
+                            NavAppDisplayState live = query();
+                            if (!current.getAsBoolean() || live == null || live.taskId != before.taskId) return false;
+                            if (live.displayId == display) return true;
+                            SystemClock.sleep(DISPLAY_CONFIRM_INTERVAL_MS);
+                        } while (SystemClock.elapsedRealtime() < deadline);
+                        return false;
+                    }
+                });
+        log(packageName, "task_geometry task=" + before.taskId + " target=" + target
+                + " expected=" + expected + " result=" + (result.isEmpty() ? "confirmed" : result));
+        return result;
+    }
+
+    synchronized String resizeProjectedTasks(String packageName, int display, android.graphics.Rect target,
+            android.graphics.Rect previous, BooleanSupplier current) {
+        try {
+            NavAppDisplayState task = checkDisplay(packageName, "profile-geometry");
+            if (task.taskId < 0 || task.displayId != display) return "Projection task not on expected display";
+            String result = resizeTaskBounds(packageName, new NavAppDisplayState(packageName, task.taskId,
+                    display, task.visible, task.status, previous), display, target, current, "profile-resize");
+            if (!result.isEmpty()) return result;
+            if ("com.waze".equals(packageName) && WazeSurfaceActivity.activeDisplayId() == display
+                    && WazeSurfaceActivity.activeTaskId() >= 0) {
+                NavAppDisplayState surface = checkTaskId(packageName, WazeSurfaceActivity.activeTaskId(), "profile-surface");
+                if (surface == null || surface.displayId != display) return "Surface task changed";
+                return resizeTaskBounds(packageName, new NavAppDisplayState(packageName, surface.taskId,
+                        display, surface.visible, surface.status, previous), display, target, current, "profile-surface-resize");
+            }
+            return "";
+        } catch (IOException error) { return "Profile task resize failed: " + error; }
     }
 
     private NavAppDisplayState checkTaskId(
@@ -2394,7 +2516,7 @@ final class NavAppDisplayController {
             if (section.matches()) {
                 if (currentTaskId == targetTaskId) {
                     return new NavAppDisplayState(logicalPackage, targetTaskId,
-                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id");
+                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()));
                 }
                 currentTaskId = -1;
                 currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2405,7 +2527,7 @@ final class NavAppDisplayController {
             if (NavAppTaskScanner.isGlobalTaskSummary(line)) {
                 if (currentTaskId == targetTaskId) {
                     return new NavAppDisplayState(logicalPackage, targetTaskId,
-                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id");
+                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()));
                 }
                 currentTaskId = -1;
                 currentDisplayId = NavAppDisplayState.DISPLAY_UNKNOWN;
@@ -2417,7 +2539,7 @@ final class NavAppDisplayController {
             if (header != null) {
                 if (currentTaskId == targetTaskId) {
                     return new NavAppDisplayState(logicalPackage, targetTaskId,
-                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id");
+                            currentDisplayId, parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()));
                 }
                 currentTaskId = header[0];
                 currentDisplayId = header[1];
@@ -2427,7 +2549,7 @@ final class NavAppDisplayController {
         }
         return currentTaskId == targetTaskId
                 ? new NavAppDisplayState(logicalPackage, targetTaskId, currentDisplayId,
-                        parseVisible(block.toString()), "parsed-task-id")
+                        parseVisible(block.toString()), "parsed-task-id", parseBounds(block.toString()))
                 : null;
     }
 
@@ -2468,7 +2590,17 @@ final class NavAppDisplayController {
                 taskId,
                 displayId,
                 parseVisible(value),
-                "parsed");
+                "parsed", parseBounds(value));
+    }
+
+    private static android.graphics.Rect parseBounds(String block) {
+        Matcher bounds = Pattern.compile("(?m)^\\s*mBounds=Rect\\((-?\\d+),\\s*(-?\\d+) - (-?\\d+),\\s*(-?\\d+)\\)").matcher(block);
+        if (!bounds.find()) return null;
+        try {
+            android.graphics.Rect result = new android.graphics.Rect(Integer.parseInt(bounds.group(1)),
+                    Integer.parseInt(bounds.group(2)), Integer.parseInt(bounds.group(3)), Integer.parseInt(bounds.group(4)));
+            return result.isEmpty() ? null : result;
+        } catch (NumberFormatException invalid) { return null; }
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.

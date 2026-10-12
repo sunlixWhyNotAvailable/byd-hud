@@ -485,11 +485,11 @@ final class HudPrefs {
     }
 
     static HudMapSettings mapSettings(Context context) {
-        SharedPreferences values = prefs(context);
+        java.util.Map<String, ?> values = prefs(context).getAll();
         HudMapSettings.Geometry defaults = HudMapSettings.defaults().custom;
         return new HudMapSettings(
-                values.getInt(KEY_MAP_MODE, HudMapSettings.OFF),
-                values.getInt(KEY_MAP_PRESET, HudMapSettings.PRESET_CUSTOM),
+                (int) mapNumber(values, KEY_MAP_MODE, HudMapSettings.OFF),
+                (int) mapNumber(values, KEY_MAP_PRESET, HudMapSettings.PRESET_CUSTOM),
                 new HudMapSettings.Geometry(
                         mapNumber(values, KEY_MAP_CUSTOM_X, defaults.mapX),
                         mapNumber(values, KEY_MAP_CUSTOM_Y, defaults.mapY),
@@ -497,7 +497,7 @@ final class HudPrefs {
                         mapNumber(values, KEY_MAP_CUSTOM_LANE_X, defaults.laneX),
                         mapNumber(values, KEY_MAP_CUSTOM_LANE_Y, defaults.laneY),
                         mapNumber(values, KEY_MAP_CUSTOM_LANE_SCALE, defaults.laneScale)),
-                mapUpdateRateHz(context));
+                (int) mapNumber(values, KEY_MAP_UPDATE_RATE_HZ, 1));
     }
 
     static int mapUpdateRateHz(Context context) {
@@ -505,8 +505,8 @@ final class HudPrefs {
     }
 
     // Accept existing integer preferences as well as the new fractional values.
-    private static float mapNumber(SharedPreferences values, String key, float fallback) {
-        Object value = values.getAll().get(key);
+    private static float mapNumber(java.util.Map<String, ?> values, String key, float fallback) {
+        Object value = values.get(key);
         float number = value instanceof Number ? ((Number) value).floatValue() : fallback;
         return Float.isFinite(number) ? number : fallback;
     }
@@ -845,9 +845,21 @@ final class HudPrefs {
 
     //records explicit shutdown separately from boot preference so auto-start can be restored on next manual open.
     static void setUserShutdownActive(Context context, boolean active) {
-        // Recovery may race process teardown: publish explicit Stop durably first.
-        prefs(context).edit().putBoolean(KEY_USER_SHUTDOWN_ACTIVE, active).commit();
-        if (active) ShellRuntimeSession.disarm(context);
+        prefs(context).edit().putBoolean(KEY_USER_SHUTDOWN_ACTIVE, active).apply();
+        ShellRuntimeSession.persistShutdown(context, active);
+    }
+
+    static boolean flush(Context context) {
+        return prefs(context).edit().commit();
+    }
+
+    static String dashboardHostGeometry(Context context) {
+        return prefs(context).getString("dashboard_host_geometry", "");
+    }
+
+    static boolean setDashboardHostGeometry(Context context, String value) {
+        return value.equals(dashboardHostGeometry(context))
+                || prefs(context).edit().putString("dashboard_host_geometry", value).commit();
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.

@@ -156,10 +156,6 @@ public final class HudCheckPayload {
         return Collections.unmodifiableList(result);
     }
 
-    public static long[] auxiliaryServiceIds() {
-        return AUXILIARY_SERVICES.clone();
-    }
-
     public static int extendedCount() {
         return HudCheckState.extendedCount();
     }
@@ -204,6 +200,13 @@ public final class HudCheckPayload {
     }
 
     private static void writeExtendedFields(ByteArrayOutputStream out, int index) {
+        if (index >= 25 && index < HudCheckState.extendedCount()) {
+            writeDoubleField(out, 19, HudCheckGeometry.LONGITUDE);
+            writeDoubleField(out, 20, HudCheckGeometry.LATITUDE);
+            writeDoubleField(out, 32, HudCheckGeometry.HEADING);
+            writeStringField(out, 30, HudCheckGeometry.line(index));
+            return;
+        }
         switch (Math.floorMod(index, HudCheckState.extendedCount())) {
             case 0:
                 writeStringField(out, 26, "12:34");

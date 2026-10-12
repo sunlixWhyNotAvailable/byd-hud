@@ -242,12 +242,6 @@ public final class WazeRouteLifecycleV2Receiver extends BroadcastReceiver {
         }
     }
 
-    static void resetIdentityCacheForTest() {
-        synchronized (IDENTITY_LOCK) {
-            cachedWazeUid = -1;
-        }
-    }
-
     static boolean matchesIdentityMetadata(String creatorPackage, int creatorUid,
             int installedUid) {
         return installedUid >= 0

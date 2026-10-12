@@ -67,8 +67,6 @@ internal data class DashboardWidgetState(
     )
 
     fun selectShape(value: DashboardWidgetShape) = copy(shape = value, hidden = false, expanded = false)
-    fun selectOrientation(value: DashboardWidgetOrientation) = copy(orientation = value, expanded = false)
-    fun selectDirection(forward: Boolean) = copy(expandForward = forward, expanded = false)
     fun selectOpeningDirection(index: Int) = when (index.coerceIn(0, 3)) {
         0 -> copy(orientation = DashboardWidgetOrientation.Vertical, expandForward = false, expanded = false)
         1 -> copy(orientation = DashboardWidgetOrientation.Horizontal, expandForward = true, expanded = false)

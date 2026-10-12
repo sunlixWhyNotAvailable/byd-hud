@@ -56,11 +56,14 @@ public final class NavTaskDisplayParsingTest {
                 + "    packageName=com.bydhud.app processName=com.bydhud.app\n"
                 + "    launchedFromPackage=com.waze\n"
                 + "  * Task{d #113 A=10231:com.waze visible=false}\n"
+                + "    mBounds=Rect(0, 0 - 2560, 540), isSplitMain=true\n"
+                + "    mGlobalConfig={ mBounds=Rect(0, 0 - 2560, 1600) }\n"
                 + "    packageName=com.waze processName=com.waze\n";
         String history = capturedDump().substring(capturedDump().indexOf("ActivityTaskSupervisor"));
         String dump = tree + history;
         NavAppDisplayState waze = NavAppDisplayController.parseTaskForTest("com.waze", dump);
         assertPlacement(waze, 113, 21);
+        assertEquals(new android.graphics.Rect(0, 0, 2560, 540), waze.bounds);
         assertFalse(waze.isOnMainDisplay());
         assertFalse(waze.visible);
         DashboardProjectionPolicy.ObservedDisplay observed =
@@ -68,6 +71,7 @@ public final class NavTaskDisplayParsingTest {
         assertFalse(SteeringTransferPolicy.toggleMovesToDashboard(observed));
         assertTrue(SteeringTransferPolicy.canReturnToMain(observed));
         assertPlacement(NavAppDisplayController.parseTaskIdForTest("com.waze", 116, dump), 116, 21);
+        assertEquals(waze.bounds, NavAppDisplayController.parseTaskIdForTest("com.waze", 113, dump).bounds);
         assertEquals(113, scanWaze(dump).taskId);
         assertEquals(21, scanWaze(dump).displayId);
 

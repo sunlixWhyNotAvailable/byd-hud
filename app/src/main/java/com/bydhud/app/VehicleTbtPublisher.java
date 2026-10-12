@@ -792,10 +792,6 @@ final class VehicleTbtPublisher {
         return true;
     }
 
-    static DirectTbtFrame.TravelMetrics selectMetricsForTest(DirectTbtFrame frame) {
-        return selectMetrics(frame);
-    }
-
     private static int toInt(long value, int fallback) {
         if (value < 0L) return fallback;
         return value > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) value;

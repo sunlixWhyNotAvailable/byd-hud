@@ -20,6 +20,7 @@ public final class BydHudApplication extends Application {
         UserSettingsDiagnostics.start(this);
         BootCleanupGate.initialize(this);
         ShellRuntimeSession.restore(this);
+        ShellRuntimeSession.afterPersistence(() -> DashboardProjectionPolicy.initialize(this));
         ShanghaiTestController.get(this).recoverOwned("process-start");
         AppUpdateManager.initialize(this);
         UpdateHintManager.initialize(this);

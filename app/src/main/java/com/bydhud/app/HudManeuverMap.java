@@ -33,18 +33,4 @@ final class HudManeuverMap {
         return SOURCE_TO_NATIVE[sourceId];
     }
 
-    //keeps this HUD step isolated so cluster payload behavior stays predictable.
-    static int nativeToFirstSource(int nativeId) {
-        for (int i = 0; i < SOURCE_TO_NATIVE.length; i++) {
-            if (SOURCE_TO_NATIVE[i] == nativeId) {
-                return i;
-            }
-        }
-        return nativeId;
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean hasKnownSource(int sourceId) {
-        return sourceId >= 0 && sourceId < SOURCE_TO_NATIVE.length;
-    }
 }

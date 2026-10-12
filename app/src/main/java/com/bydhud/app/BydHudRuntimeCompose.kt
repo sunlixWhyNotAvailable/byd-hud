@@ -234,7 +234,9 @@ internal sealed class UpdateCheckState {
     data class Available(val info: AppUpdateManager.UpdateInfo) : UpdateCheckState()
     data class Ready(val info: AppUpdateManager.UpdateInfo, val installerError: Boolean) : UpdateCheckState()
     //defines Downloading UI/state support so Compose code can keep rendering intent explicit.
-    data class Downloading(val info: AppUpdateManager.UpdateInfo, val progress: String) : UpdateCheckState()
+    data class Downloading(val info: AppUpdateManager.UpdateInfo, val progress: String,
+        val cancellable: Boolean = false, val cancelling: Boolean = false,
+        val cancellationFailed: Boolean = false) : UpdateCheckState()
     //defines Error UI/state support so Compose code can keep rendering intent explicit.
     data class Error(val message: String) : UpdateCheckState()
 }
@@ -246,9 +248,14 @@ internal fun updateCheckStateFor(
     val checked = (snapshot.result as? AppUpdateManager.CheckResult.Available)?.info
     if (operation != null) {
         val operationInfo = checked?.takeIf { it.version == operation.update.version } ?: operation.update
-        return when (operation.phase) {
+        val operationState = when (operation.phase) {
             AppUpdateOperationPhase.DOWNLOADING,
-            AppUpdateOperationPhase.PREPARING,
+            AppUpdateOperationPhase.PREPARING -> UpdateCheckState.Downloading(operationInfo, operation.progress, cancellable = true)
+            AppUpdateOperationPhase.CANCELLING -> UpdateCheckState.Downloading(operationInfo, operation.progress, cancelling = true)
+            AppUpdateOperationPhase.CANCEL_FAILED -> UpdateCheckState.Downloading(operationInfo, operation.progress,
+                cancellable = true, cancellationFailed = true)
+            AppUpdateOperationPhase.CANCELLED -> (checked ?: operationInfo.takeIf { it.downloadUrl.isNotBlank() })
+                ?.let { UpdateCheckState.Available(it) }
             AppUpdateOperationPhase.INSTALLING -> UpdateCheckState.Downloading(operationInfo, operation.progress)
             AppUpdateOperationPhase.READY -> {
                 val newer = checked?.takeIf { it.version != operation.update.version }
@@ -257,6 +264,7 @@ internal fun updateCheckStateFor(
             }
             AppUpdateOperationPhase.FAILED -> UpdateCheckState.Error(operation.error ?: "Update failed")
         }
+        if (operationState != null) return operationState
     }
     if (snapshot.checking) return UpdateCheckState.Checking
     return when (val result = snapshot.result) {
@@ -1000,7 +1008,6 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
         mapProfileEditor = editor.copy(draft = profile)
         if (snapshot.mapProfileCalibration.running || mapProfileShowRequested) {
             activity.composeUpdateMapProfile(profile)
-            refresh()
         }
     }
 
@@ -1339,7 +1346,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 && selectedOptionsSectionKey == "map-display"
                 && snapshot.mapSettings.mode != HudMapSettings.OFF
         if (!profileEditorVisible) {
-            if (snapshot.mapProfileCalibration.running) {
+            if (snapshot.mapProfileCalibration.running || mapProfileShowRequested) {
                 activity.composeStopMapProfile("map-profile-exit")
             }
             mapProfileShowRequested = false
@@ -1751,6 +1758,7 @@ private fun RuntimeApp(activity: MainActivity, uiSession: RuntimeUiSession.Sessi
                 palette = palette,
                 language = copy.language,
                 state = updateState,
+                onCancel = { updateOperation?.let { AppUpdateManager.cancelUpdate(it.id) } },
                 onUpdate = {
                     val offered = when (val state = updateState) {
                         is UpdateCheckState.Available -> state.info
@@ -4432,10 +4440,13 @@ private fun UpdateCheckOverlay(
     language: Language,
     state: UpdateCheckState,
     onUpdate: () -> Unit,
+    onCancel: () -> Unit,
     onClose: () -> Unit
 ) {
     val notesScroll = rememberScrollState()
     val updateEnabled = state is UpdateCheckState.Available || state is UpdateCheckState.Ready
+    val downloading = state as? UpdateCheckState.Downloading
+    val cancellingText = language.choose("Скасовується…", "Cancelling…", "Отменяется…")
     Box(
         modifier = Modifier
             .fillMaxSize()
@@ -4516,8 +4527,15 @@ private fun UpdateCheckOverlay(
                         }
                         is UpdateCheckState.Downloading -> {
                             Text(
-                                copy.updateDownloading,
-                                color = palette.text,
+                                when {
+                                    state.cancellationFailed -> language.choose(
+                                        "Не вдалося повністю скасувати оновлення. Натисніть «Скасувати» ще раз.",
+                                        "Could not fully cancel the update. Press Cancel to retry.",
+                                        "Не удалось полностью отменить обновление. Нажмите «Отменить» ещё раз.")
+                                    state.cancelling -> cancellingText
+                                    else -> copy.updateDownloading
+                                },
+                                color = if (state.cancellationFailed) palette.red else palette.text,
                                 fontSize = 15.sp,
                                 fontWeight = FontWeight.SemiBold
                             )
@@ -4541,7 +4559,7 @@ private fun UpdateCheckOverlay(
                     }
                 }
             }
-            if (state is UpdateCheckState.Downloading) {
+            if (state is UpdateCheckState.Downloading && !state.cancellationFailed) {
                 UpdateProgressBar(progress = state.progress, palette = palette)
             }
             Row(
@@ -4550,12 +4568,16 @@ private fun UpdateCheckOverlay(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 HudButton(
-                    copy.updateAction,
+                    when {
+                        downloading?.cancelling == true -> cancellingText
+                        downloading?.cancellable == true -> language.choose("Скасувати", "Cancel", "Отменить")
+                        else -> copy.updateAction
+                    },
                     palette,
                     primary = true,
-                    enabled = updateEnabled,
+                    enabled = updateEnabled || downloading?.cancellable == true,
                     width = 138.dp,
-                    onClick = onUpdate
+                    onClick = if (downloading?.cancellable == true) onCancel else onUpdate
                 )
                 HudButton(copy.updateClose, palette, width = 138.dp, onClick = onClose)
             }
@@ -6668,7 +6690,9 @@ private fun PatchTab(
                                         copy.applyPatch,
                                         palette,
                                         primary = true,
-                                        enabled = !busy && row.patchEnabled,
+                                        enabled = (!busy && row.patchEnabled) ||
+                                                (operation?.approvalRequired == true &&
+                                                !actionPendingProfiles.contains(row.profileId)),
                                         width = 150.dp,
                                         onClick = { onPatch(row.profileId) }
                                     )
@@ -7574,7 +7598,7 @@ private fun HudCheckTab(
                         "${copy.checkManeuvers} · ${copy.checkManeuversChannels}" to
                             "${language.choose("Прямо", "Straight", "Прямо")} · ${copy.stockImage}",
                         copy.checkLanes to "S* | S | S* | S | S* · ${copy.stockImage}",
-                        copy.distanceMeters to "77",
+                        copy.distanceMeters to if (state.isGeometryCheck()) "9" else "77",
                         copy.streetText to "Continue straight"
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
@@ -7585,6 +7609,14 @@ private fun HudCheckTab(
                                 Text(value, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                             }
                         }
+                    }
+                    if (state.isGeometryCheck()) {
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE}\n" +
+                                "f32: ${HudCheckGeometry.HEADING}° · f28: 11 · f31: []",
+                            color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp
+                        )
                     }
                 }
             }
@@ -7598,18 +7630,39 @@ private fun HudCheckTab(
                         Box(Modifier.weight(1f)) {
                             Column(
                                 modifier = Modifier
-                                    .fillMaxWidth(0.7f)
+                                    .fillMaxWidth(if (state.isGeometryCheck()) 1f else 0.7f)
                                     .heightIn(min = 100.dp)
                                     .clip(RoundedCornerShape(7.dp))
                                     .background(palette.field)
                                     .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-                                    .padding(12.dp),
+                                    .padding(if (state.isGeometryCheck()) 8.dp else 12.dp),
                                 verticalArrangement = Arrangement.Center
                             ) {
+                                if (state.isGeometryCheck()) {
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                                        Text(localizeHudCheckLabel(state.extendedLabel(ukrainian), language), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                        Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                                    }
+                                    Spacer(Modifier.height(4.dp))
+                                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                                        state.extendedValue().lines().chunked(4).forEachIndexed { column, points ->
+                                            Column(Modifier.weight(1f)) {
+                                                points.forEachIndexed { row, point ->
+                                                    Text(
+                                                        if (state.extendedValue() == "[]") point else "${column * 4 + row + 1}. $point",
+                                                        color = palette.accent, fontFamily = FontFamily.Monospace,
+                                                        fontSize = 12.sp, lineHeight = 16.sp
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    }
+                                } else {
                                 Text(localizeHudCheckLabel(state.extendedLabel(ukrainian), language), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
                                 Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                                 Spacer(Modifier.height(8.dp))
                                 Text(state.extendedValue(), color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 20.sp)
+                                }
                             }
                         }
                         Column(Modifier.width(280.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -7645,11 +7698,19 @@ private fun HudCheckTab(
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        if (state.automatic) copy.checkCycle else copy.checkManualCycleHint,
+                        if (state.isGeometryCheck() && state.automatic) language.choose(
+                            "Кожен етап геометрії — 5 секунд · частота передачі — 1 Гц",
+                            "Each geometry stage lasts 5 seconds · transmission rate: 1 Hz",
+                            "Каждый этап геометрии — 5 секунд · частота передачи — 1 Гц"
+                        ) else if (state.automatic) copy.checkCycle else copy.checkManualCycleHint,
                         color = palette.text,
                         fontSize = 13.sp
                     )
-                    Text(copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
+                    Text(if (state.isGeometryCheck()) language.choose(
+                        "Змінюється лише геометрія маршруту f30 · координати й курс взяті зі штатного запису N9, GPS не змінюється",
+                        "Only route geometry f30 changes · position and heading come from the stock N9 recording; GPS stays unchanged",
+                        "Меняется только геометрия маршрута f30 · координаты и курс взяты из штатной записи N9, GPS не меняется"
+                    ) else copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
                 }
             }
         } else {
@@ -8743,6 +8804,10 @@ private fun localizeHudCheckLabel(value: String, language: Language): String {
         "Position" -> "Положение"
         "Road data" -> "Данные дороги"
         "Guide line" -> "Линия маршрута"
+        "Empty geometry" -> "Пустая геометрия"
+        "Straight geometry" -> "Прямая геометрия"
+        "Left geometry" -> "Геометрия налево"
+        "Right geometry" -> "Геометрия направо"
         "Guide point" -> "Точка маршрута"
         "Heading" -> "Курс"
         "Route progress" -> "Прогресс маршрута"

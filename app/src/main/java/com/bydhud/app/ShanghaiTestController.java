@@ -35,6 +35,7 @@ final class ShanghaiTestController {
     private volatile Run current;
     private boolean recoveryQueued;
     private final List<Runnable> stopCompletions = new ArrayList<>();
+    private final List<Runnable> recoveryCompletions = new ArrayList<>();
 
     private ShanghaiTestController(Context context) { this.context = context.getApplicationContext(); }
 
@@ -112,7 +113,7 @@ final class ShanghaiTestController {
                 try {
                     run.job = ShellWorkClient.prepare(context, "shanghai", run.id,
                             new JSONObject().put("action", "reset"));
-                    InstrumentProxyManager.get(context).launchWork(run.job);
+                    ShellWorkClient.launch(context, run.job);
                     run.jobObservedMs = SystemClock.elapsedRealtime();
                 } catch (Exception error) { run.failure = describe(error); }
                 finish(run); return;
@@ -139,7 +140,10 @@ final class ShanghaiTestController {
         worker.execute(() -> finish(run));
     }
 
-    synchronized void recoverOwned(String reason) {
+    synchronized void recoverOwned(String reason) { recoverOwned(reason, null); }
+
+    synchronized void recoverOwned(String reason, Runnable idleCompletion) {
+        if (idleCompletion != null) recoveryCompletions.add(idleCompletion);
         if (current != null || recoveryQueued) return;
         String saved = ShellRuntimeSession.prefs(context).getString("shanghai_work", "");
         if (!saved.isEmpty() && ShellRuntimeSession.mayRestore(context)) {
@@ -149,8 +153,16 @@ final class ShanghaiTestController {
                 String jobPath = value.optString("job");
                 if (!jobPath.isEmpty()) {
                     run.job = ShellWorkFiles.inside(ShellWorkFiles.root(context), jobPath);
-                    JSONObject result = ShellWorkFiles.read(new File(run.job, "result.json"));
-                    if (result.optBoolean("cleanupPending") || !result.optBoolean("ok", true))
+                    JSONObject expected = ShellWorkClient.expected(context, run.job);
+                    if (!"shanghai".equals(expected.optString("type"))
+                            || !run.id.equals(expected.optString("id")))
+                        throw new IOException("Saved Shanghai operation identity changed");
+                    JSONObject state = ShellWorkClient.state(context, run.job);
+                    if (ShellWorkClient.terminal(state.optString("state"))
+                            && (!"SUCCEEDED".equals(state.optString("state"))
+                            || state.optJSONObject("result") == null
+                            || state.getJSONObject("result").optBoolean("cleanupPending")
+                            || !state.getJSONObject("result").optBoolean("ok", true)))
                         throw new IOException("Previous shell cleanup is pending");
                 }
                 run.recovered = true;
@@ -161,26 +173,44 @@ final class ShanghaiTestController {
                 current = run;
                 if (run.job != null) ShanghaiOutputGate.suspend();
                 publish(run, ShanghaiTestState.Phase.RECOVERING, "");
-                launch(run);
+                if (run.job != null && ShellWorkClient.terminal(
+                        ShellWorkClient.state(context, run.job).optString("state"))) {
+                    worker.execute(() -> finish(run));
+                } else launch(run);
                 return;
             } catch (Exception error) { AppEventLogger.event(context, "shanghai_reattach_failed " + describe(error)); }
+        }
+        if (saved.isEmpty() && !gps().hasPendingRecovery()) {
+            cached = new ShanghaiTestState();
+            main.post(this::completeRecoveryCallbacks);
+            return;
         }
         recoveryQueued = true;
         worker.execute(() -> {
             try {
-                File owner = new File(ShellWorkFiles.root(context), "gps-owner/files/shanghai-mock-gps-recovery.xml");
-                if (owner.exists()) {
-                    File cleanup = ShellWorkClient.prepare(context, "shanghai", "cleanup-" + UUID.randomUUID(),
-                            new JSONObject().put("action", "cleanup"));
+                if (!cancelSavedShellRun(saved)) {
+                    cached = new ShanghaiTestState(ShanghaiTestState.Phase.ERROR, 0, "",
+                            localized("Попередня shell-операція ще завершується.",
+                                    "The previous shell operation is still finishing.",
+                                    "Предыдущая shell-операция ещё завершается."),
+                            ShanghaiTestState.CaptureStatus.FAILED, true, "", "");
+                    return;
+                }
+                if (!saved.isEmpty()) {
+                    File cleanup = ShellWorkClient.prepare(context, "shanghai",
+                            "cleanup-" + UUID.randomUUID(), new JSONObject().put("action", "cleanup"));
                     JSONObject result = ShellWorkClient.await(context, cleanup, null);
-                    if (!result.optBoolean("cleanupPending")) ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit();
                     if (result.optBoolean("cleanupPending")) {
                         cached = new ShanghaiTestState(ShanghaiTestState.Phase.ERROR, 0, "",
                                 localized("Очищення GPS не завершене. Повторіть скидання.",
-                                        "GPS cleanup is incomplete. Retry reset.", "Очистка GPS не завершена. Повторите сброс."),
+                                        "GPS cleanup is incomplete. Retry reset.",
+                                        "Очистка GPS не завершена. Повторите сброс."),
                                 ShanghaiTestState.CaptureStatus.NOT_STARTED, true, "", "");
-                        AppEventLogger.event(context, "shell_gps_cleanup_pending " + result.optString("cleanup"));
+                        AppEventLogger.event(context, "shell_gps_cleanup_pending "
+                                + result.optString("cleanup"));
+                        return;
                     }
+                    ShellRuntimeSession.prefs(context).edit().remove("shanghai_work").commit();
                 }
                 if (!gps().hasPendingRecovery()) return;
                 cached = new ShanghaiTestState(ShanghaiTestState.Phase.RECOVERING, 0,
@@ -209,8 +239,41 @@ final class ShanghaiTestController {
                 }
                 synchronized (ShanghaiTestController.this) { recoveryQueued = false; }
                 notifyUi();
+                completeRecoveryCallbacks();
             }
         });
+    }
+
+    private boolean cancelSavedShellRun(String saved) {
+        if (saved == null || saved.isEmpty()) return true;
+        try {
+            JSONObject value = new JSONObject(saved);
+            String path = value.optString("job", "");
+            if (path.isEmpty()) return true;
+            File job = ShellWorkFiles.inside(ShellWorkFiles.root(context), path);
+            JSONObject expected;
+            try { expected = ShellWorkClient.expected(context, job); }
+            catch (IOException untrustedLegacyJob) {
+                AppEventLogger.event(context, "shanghai_legacy_job_not_replayed id="
+                        + value.optString("id"));
+                return true;
+            }
+            if (!"shanghai".equals(expected.optString("type"))
+                    || !value.optString("id").equals(expected.optString("id"))) return false;
+            JSONObject state = ShellWorkClient.state(context, job);
+            if (ShellWorkClient.terminal(state.optString("state"))) return true;
+            ShellWorkClient.cancel(context, job);
+            long deadline = SystemClock.elapsedRealtime() + 10_000L;
+            while (SystemClock.elapsedRealtime() < deadline) {
+                if (ShellWorkClient.terminal(
+                        ShellWorkClient.state(context, job).optString("state"))) return true;
+                Thread.sleep(50L);
+            }
+            return false;
+        } catch (Exception error) {
+            AppEventLogger.event(context, "shanghai_saved_shell_recovery_unavailable " + describe(error));
+            return false;
+        }
     }
 
     private void prepare(Run run) {
@@ -269,7 +332,7 @@ final class ShanghaiTestController {
             run.job = ShellWorkClient.prepare(context, "shanghai", run.id, new JSONObject()
                     .put("id", run.id).put("evidence", run.directory.getPath()));
             checkpoint(run);
-            InstrumentProxyManager.get(context).launchWork(run.job);
+            ShellWorkClient.launch(context, run.job);
             run.jobObservedMs = SystemClock.elapsedRealtime();
             publish(run, ShanghaiTestState.Phase.PREPARING, "");
             worker.schedule(() -> tick(run), 100, TimeUnit.MILLISECONDS);
@@ -284,7 +347,7 @@ final class ShanghaiTestController {
             run.diagnostics = new ShanghaiDiagnostics(context, segment, run.day);
             run.diagnostics.start(run.id);
             run.captureReady = true;
-            InstrumentProxyManager.get(context).launchWork(run.job);
+            ShellWorkClient.launch(context, run.job);
             run.jobObservedMs = SystemClock.elapsedRealtime();
             tick(run);
         } catch (Exception error) { fail(run, describe(error)); }
@@ -299,8 +362,9 @@ final class ShanghaiTestController {
     }
 
     private void reconcileWorker(Run run) throws IOException {
-        if (SystemClock.elapsedRealtime() - run.jobObservedMs > 15_000 && !ShellWorkFiles.running(run.job)) {
-            InstrumentProxyManager.get(context).launchWork(run.job);
+        if (SystemClock.elapsedRealtime() - run.jobObservedMs > 15_000) {
+            JSONObject state = ShellWorkClient.state(context, run.job);
+            if ("REGISTERED".equals(state.optString("state"))) ShellWorkClient.launch(context, run.job);
             run.jobObservedMs = SystemClock.elapsedRealtime();
         }
     }
@@ -309,10 +373,13 @@ final class ShanghaiTestController {
         if (current != run || run.finishing) return;
         try {
             if (run.cancelled) { finish(run); return; }
-            JSONObject status = ShellWorkFiles.read(new File(run.job, "progress.json"));
-            run.elapsed = status.optInt("elapsed", run.elapsed);
-            run.originElapsedMs = status.optLong("origin", run.originElapsedMs);
-            if (ShellWorkFiles.settled(run.job)) { finish(run); return; }
+            JSONObject status = ShellWorkClient.state(context, run.job);
+            JSONObject progress = status.optJSONObject("progress");
+            if (progress != null) {
+                run.elapsed = progress.optInt("elapsed", run.elapsed);
+                run.originElapsedMs = progress.optLong("origin", run.originElapsedMs);
+            }
+            if (ShellWorkClient.terminal(status.optString("state"))) { finish(run); return; }
             reconcileWorker(run);
             if (run.logcat != null && !run.logcat.isHealthy()) { fail(run, "Required Logcat stopped"); return; }
             publish(run, run.elapsed < ShanghaiTestState.PREPARATION_SECONDS
@@ -332,20 +399,33 @@ final class ShanghaiTestController {
         if (current != run || run.finishing) return;
         if (run.job != null) {
             try {
-                File resultFile = new File(run.job, "result.json");
-                if (!ShellWorkFiles.settled(run.job)) {
+                JSONObject state = ShellWorkClient.state(context, run.job);
+                if (!ShellWorkClient.terminal(state.optString("state"))) {
                     reconcileWorker(run);
-                    if (run.resetAny) ShellWorkFiles.write(new File(run.job, "reset-any"), new JSONObject());
-                    if (run.cancelled || !run.failure.isEmpty()) ShellWorkClient.cancel(run.job);
+                    if ((run.cancelled || !run.failure.isEmpty()) && !run.cancelRequested) {
+                        run.cancelRequested = ShellWorkClient.cancel(context, run.job, run.resetAny
+                                && "RUNNING".equals(state.optString("state")));
+                    }
                     worker.schedule(() -> finish(run), 100, TimeUnit.MILLISECONDS);
                     return;
                 }
-                JSONObject result = ShellWorkFiles.read(resultFile);
+                JSONObject result = state.optJSONObject("result");
+                if (result == null) result = new JSONObject();
                 run.completed = result.optBoolean("completed");
                 run.elapsed = result.optInt("elapsed", run.elapsed);
                 run.cleanupDetail = result.optString("cleanup");
                 run.cleanupFailed = result.optBoolean("cleanupPending", !result.optBoolean("ok"));
                 if (run.failure.isEmpty()) run.failure = result.optString("failure", result.optString("error"));
+                String workerState = state.optString("state");
+                if (!"SUCCEEDED".equals(workerState) && run.failure.isEmpty())
+                    run.failure = result.optString("error", "Shanghai shell operation "
+                            + workerState.toLowerCase(java.util.Locale.ROOT));
+                if (run.resetAny && !result.optBoolean("resetAny")) {
+                    ShanghaiMockGps.Result reset = gps().resetAny();
+                    run.cleanupDetail += (run.cleanupDetail.isEmpty() ? "" : "; ")
+                            + "reset-any fallback: " + reset.code + ": " + reset.detail;
+                    if (!reset.success()) run.cleanupFailed = true;
+                }
                 run.finishing = true;
                 publish(run, ShanghaiTestState.Phase.FINISHING, "");
                 finalizeCapture(run);
@@ -434,6 +514,7 @@ final class ShanghaiTestController {
             notifyUi();
             MainActivity.requestStorageRefreshAfterMutation(context, "shanghai-finished");
             completeStopCallbacks();
+            completeRecoveryCallbacks();
         }
     }
 
@@ -517,6 +598,16 @@ final class ShanghaiTestController {
         for (Runnable completion : callbacks) main.post(completion);
     }
 
+    private void completeRecoveryCallbacks() {
+        List<Runnable> callbacks;
+        synchronized (this) {
+            if (current != null || recoveryQueued || recoveryCompletions.isEmpty()) return;
+            callbacks = new ArrayList<>(recoveryCompletions);
+            recoveryCompletions.clear();
+        }
+        for (Runnable completion : callbacks) main.post(completion);
+    }
+
     private static String describe(Throwable error) {
         return error.getClass().getSimpleName() + ": " + String.valueOf(error.getMessage());
     }
@@ -538,6 +629,7 @@ final class ShanghaiTestController {
         boolean completed;
         boolean captureReady;
         boolean cleanupFailed;
+        boolean cancelRequested;
         long originElapsedMs;
         long startDeadlineMs;
         long startedWallMs;

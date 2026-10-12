@@ -8,7 +8,7 @@ import java.util.List;
 
 /** Fixed IPC and diagnostic contract shared by the app and its shell helper. */
 final class InstrumentProxyContract {
-    static final int PROTOCOL_VERSION = 6;
+    static final int PROTOCOL_VERSION = 7;
     static final int CAP_SYSTEM_CONTEXT = 1;
     static final int CAP_DIRECT_FID = 1 << 1;
     static final int CAP_INSTRUMENT_SDK = 1 << 2;
@@ -226,20 +226,6 @@ final class InstrumentProxyContract {
             if (direction < 0 || direction >= 255
                     || (recommendation != 255
                     && (recommendation < 0 || recommendation >= 255))) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    static boolean requiredOperationsSucceeded(
-            List<Operation> operations, int requiredCount) {
-        if (operations == null || requiredCount <= 0 || requiredCount > operations.size()) {
-            return false;
-        }
-        for (int index = 0; index < requiredCount; index++) {
-            Operation operation = operations.get(index);
-            if (operation == null || operation.result != 0 || !operation.error.isEmpty()) {
                 return false;
             }
         }

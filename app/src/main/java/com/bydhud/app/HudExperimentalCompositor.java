@@ -54,15 +54,20 @@ public final class HudExperimentalCompositor {
         ContentKey upperKey = ContentKey.from(upper);
         ContentKey lowerKey = ContentKey.from(lower);
         synchronized (cacheLock) {
-            if (!upperKey.equals(lastUpperKey)) {
-                Result rendered = hasMeaningfulF8Content(upper) ? renderer.render(upper) : Result.empty();
-                lastUpper = rendered == null ? null : rendered.f8Png();
-                lastUpperKey = hasMeaningfulF8Content(upper) && lastUpper == null ? null : upperKey;
+            boolean upperChanged = !upperKey.equals(lastUpperKey);
+            boolean lowerChanged = !lowerKey.equals(lastLowerKey);
+            if (!upperChanged && !lowerChanged) return new Result(lastUpper, lastLower);
+
+            boolean renderUpper = upperChanged && hasMeaningfulF8Content(upper);
+            boolean renderLower = lowerChanged && hasMeaningfulF7Content(lower);
+            Result rendered = renderUpper || renderLower ? renderer.render(input) : Result.empty();
+            if (upperChanged) {
+                lastUpper = renderUpper && rendered != null ? rendered.f8Png() : null;
+                lastUpperKey = renderUpper && lastUpper == null ? null : upperKey;
             }
-            if (!lowerKey.equals(lastLowerKey)) {
-                Result rendered = hasMeaningfulF7Content(lower) ? renderer.render(lower) : Result.empty();
-                lastLower = rendered == null ? null : rendered.f7Png();
-                lastLowerKey = hasMeaningfulF7Content(lower) && lastLower == null ? null : lowerKey;
+            if (lowerChanged) {
+                lastLower = renderLower && rendered != null ? rendered.f7Png() : null;
+                lastLowerKey = renderLower && lastLower == null ? null : lowerKey;
             }
             return new Result(lastUpper, lastLower);
         }

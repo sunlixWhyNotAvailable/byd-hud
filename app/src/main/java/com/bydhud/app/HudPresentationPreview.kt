@@ -39,17 +39,6 @@ internal data class HudPresentationPreview(
 
     fun waitApplies(etaStreetEnabled: Boolean) = etaStreetEnabled
 
-    fun streetSample(mask: Int, ua: Boolean, short: Boolean = false): String {
-        val fields = buildList {
-            if (mask and 1 != 0) add("18:45")
-            if (mask and 2 != 0) add(if (ua) "25 хв" else "25 min")
-            if (mask and 4 != 0) add(if (ua) "8,4 км" else "8.4 km")
-        }.joinToString(" | ")
-        return if (fields.isEmpty()) {
-            if (streetFormat == EtaStreetFormat.Prefix) "Dn" else ""
-        } else if (streetFormat == EtaStreetFormat.Replace) fields
-        else "[$fields] " + if (short) "Dn" else "Dniprovske"
-    }
 }
 
 /** Recolor only text coverage against the approved (1,6,13) schematic background. */

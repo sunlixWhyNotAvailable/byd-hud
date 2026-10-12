@@ -111,9 +111,16 @@ final class ConfigurationExportArtifacts {
         if (ShellWorkEntryPoint.currentJob == null) {
             try {
                 File[] jobs = ShellWorkFiles.root(context).listFiles();
-                if (jobs != null) for (File job : jobs)
-                    if (job.getName().startsWith("configuration-") && ShellWorkFiles.settled(job))
-                        values.add(new File(job, "cache/log-shares"));
+                if (jobs != null) for (File job : jobs) {
+                    if (!job.getName().startsWith("configuration-")) continue;
+                    try {
+                        ShellWorkClient.expected(context, job);
+                        if (ShellWorkClient.terminal(
+                                ShellWorkClient.state(context, job).optString("state"))) {
+                            values.add(new File(job, "cache/log-shares"));
+                        }
+                    } catch (IOException untrustedOrUnavailable) { /* Keep artifacts unless trusted terminal state is known. */ }
+                }
             } catch (IOException ignored) { }
         }
         return values;

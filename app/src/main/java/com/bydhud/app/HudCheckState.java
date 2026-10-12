@@ -88,7 +88,11 @@ public final class HudCheckState {
                     "markers=0xD619A0F8,0xE38A6876 · f12=5.0 · f13=2.2 · second marker-only"),
             new ExtendedSample("Route summary", "Підсумок маршруту",
                     "RouteMetadata · f1, f3–4",
-                    "routeId=1 · active=1 · f4=epoch ms × 1000")
+                    "routeId=1 · active=1 · f4=epoch ms × 1000"),
+            new ExtendedSample("Empty geometry", "Порожня геометрія", "RoadInfo · f30", "[]"),
+            new ExtendedSample("Straight geometry", "Пряма геометрія", "RoadInfo · f30", ""),
+            new ExtendedSample("Left geometry", "Геометрія ліворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Right geometry", "Геометрія праворуч", "RoadInfo · f30", "")
     };
 
     public final Mode mode;
@@ -261,8 +265,10 @@ public final class HudCheckState {
         return EXTENDED[extendedIndex].field;
     }
 
+    public boolean isGeometryCheck() { return mode == Mode.EXTENDED && extendedIndex >= 25; }
+
     public String extendedValue() {
-        return EXTENDED[extendedIndex].value;
+        return isGeometryCheck() ? HudCheckGeometry.display(extendedIndex) : EXTENDED[extendedIndex].value;
     }
 
     public String expected(boolean ukrainian) {
@@ -283,7 +289,7 @@ public final class HudCheckState {
         boolean baseline = mode == Mode.EXTENDED;
         Maneuver maneuver = baseline ? MANEUVERS[0] : MANEUVERS[maneuverIndex];
         String laneText = baseline ? EXTENDED_BASELINE_LANES : lanes();
-        int meters = baseline ? EXTENDED_BASELINE_DISTANCE : distance();
+        int meters = isGeometryCheck() ? 9 : baseline ? EXTENDED_BASELINE_DISTANCE : distance();
         String street = baseline ? EXTENDED_BASELINE_STREET : effectiveStreet();
 
         state.hudCheck = this;

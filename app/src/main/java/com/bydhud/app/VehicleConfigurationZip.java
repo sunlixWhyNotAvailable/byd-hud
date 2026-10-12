@@ -927,14 +927,11 @@ final class VehicleConfigurationZip {
         private JSONObject packageJson(String packageName) throws Exception {
             JSONObject value = new JSONObject();
             try {
-                int flags = Build.VERSION.SDK_INT >= 28
-                        ? PackageManager.GET_SIGNING_CERTIFICATES
-                        : PackageManager.GET_SIGNATURES;
+                int flags = PackageManager.GET_SIGNING_CERTIFICATES;
                 PackageInfo info = context.getPackageManager().getPackageInfo(packageName, flags);
                 value.put("installed", true);
                 value.put("versionName", info.versionName == null ? "" : info.versionName);
-                value.put("versionCode", Build.VERSION.SDK_INT >= 28
-                        ? info.getLongVersionCode() : info.versionCode);
+                value.put("versionCode", info.getLongVersionCode());
                 value.put("lastUpdateTime", info.lastUpdateTime);
                 value.put("sourceDir", info.applicationInfo == null
                         ? "" : info.applicationInfo.sourceDir);
@@ -1997,7 +1994,7 @@ final class VehicleConfigurationZip {
     }
 
     private static Signature[] signatures(PackageInfo info) {
-        if (Build.VERSION.SDK_INT >= 28 && info.signingInfo != null) {
+        if (info.signingInfo != null) {
             Signature[] values = info.signingInfo.hasMultipleSigners()
                     ? info.signingInfo.getApkContentsSigners()
                     : info.signingInfo.getSigningCertificateHistory();

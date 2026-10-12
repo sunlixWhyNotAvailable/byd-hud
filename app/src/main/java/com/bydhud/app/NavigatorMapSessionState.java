@@ -94,15 +94,6 @@ final class NavigatorMapSessionState {
             String owner,
             long generation,
             String expectedSession,
-            String nextInputPixelHash) {
-        return hasSameInputPixels(owner, generation, expectedSession, nextInputPixelHash,
-                null, -1L);
-    }
-
-    boolean hasSameInputPixels(
-            String owner,
-            long generation,
-            String expectedSession,
             String nextInputPixelHash,
             HudMapProfile.Source nextSource,
             long nextProfileRevision) {
@@ -111,17 +102,6 @@ final class NavigatorMapSessionState {
                 && inputPixelHash.equals(nextInputPixelHash)
                 && source == nextSource
                 && profileRevision == nextProfileRevision;
-    }
-
-    FrameUpdate refreshSameInput(
-            String owner,
-            long generation,
-            String expectedSession,
-            String nextInputPixelHash,
-            long receivedAt,
-            long now) {
-        return refreshSameInput(owner, generation, expectedSession, nextInputPixelHash,
-                null, -1L, receivedAt, now);
     }
 
     FrameUpdate refreshSameInput(
@@ -142,19 +122,6 @@ final class NavigatorMapSessionState {
         recordFreshCrop(true, receivedAt);
         frameSequence++;
         return FrameUpdate.SAME;
-    }
-
-    FrameUpdate publish(
-            String owner,
-            long generation,
-            String expectedSession,
-            String nextInputPixelHash,
-            String nextOutputPixelHash,
-            byte[] nextPng,
-            long receivedAt,
-            long now) {
-        return publish(owner, generation, expectedSession, nextInputPixelHash,
-                nextOutputPixelHash, nextPng, null, -1L, receivedAt, now);
     }
 
     FrameUpdate publish(
@@ -213,10 +180,6 @@ final class NavigatorMapSessionState {
         return true;
     }
 
-    byte[] pngCopy() {
-        return png == null ? null : Arrays.copyOf(png, png.length);
-    }
-
     byte[] pngForSnapshot() {
         return png;
     }
@@ -239,10 +202,6 @@ final class NavigatorMapSessionState {
 
     HudMapProfile.Source source() {
         return png == null ? null : source;
-    }
-
-    long profileRevision() {
-        return png == null ? -1L : profileRevision;
     }
 
     private static boolean isFreshReceipt(long receivedAt, long now) {

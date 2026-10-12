@@ -234,6 +234,7 @@ final class ShanghaiBehaviorSupport {
 
     static final class BoundContext extends ContextWrapper {
         final ControlledSomeIpBinder binder;
+        ServiceConnection connection;
 
         BoundContext(Context base, ControlledSomeIpBinder binder) {
             super(base);
@@ -243,6 +244,7 @@ final class ShanghaiBehaviorSupport {
         @Override public Context getApplicationContext() { return this; }
 
         @Override public boolean bindService(Intent intent, ServiceConnection connection, int flags) {
+            this.connection = connection;
             connection.onServiceConnected(intent.getComponent(), binder);
             return true;
         }

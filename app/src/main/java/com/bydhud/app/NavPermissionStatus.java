@@ -70,25 +70,6 @@ final class NavPermissionStatus {
                 accessibilityServices);
     }
 
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    static NavPermissionStatus forTest(
-            boolean notificationListenerEnabled,
-            boolean accessibilityServiceEnabled,
-            boolean accessibilityMasterEnabled,
-            boolean dashboardOverlayEnabled,
-            String notificationListenersRaw,
-            String accessibilityServicesRaw) {
-        return new NavPermissionStatus(
-                notificationListenerEnabled,
-                accessibilityServiceEnabled,
-                accessibilityMasterEnabled,
-                dashboardOverlayEnabled,
-                true,
-                true,
-                notificationListenersRaw,
-                accessibilityServicesRaw);
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     boolean captureGranted() {
         return notificationListenerEnabled

@@ -289,6 +289,9 @@ final class NativeSpeedLimitEngine {
             }
             setFallback(false, "target-match");
         } else {
+            if (mapLivePolicy && attemptBudgetExhausted()) {
+                setFallback(true, "map-live-budget-exhausted");
+            }
             if (mapLivePolicy && mapLiveConfirmed) {
                 targetConfirmed = true;
                 setFallback(true, "confirmed-session-drift");

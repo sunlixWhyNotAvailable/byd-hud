@@ -14,13 +14,19 @@ import android.os.Looper;
 import android.os.Process;
 import android.os.RemoteException;
 import android.os.SystemClock;
+import android.os.ParcelFileDescriptor;
 import android.util.Log;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
 import java.io.FileReader;
+import java.io.IOException;
+import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
@@ -499,54 +505,429 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
         finally { Binder.restoreCallingIdentity(identity); }
     }
 
-    @Override public synchronized void launchWork(long requestGeneration, String directory) {
+    @Override public synchronized Bundle registerWork(long requestGeneration, String id,
+            String type, String artifactDirectory, int boot, String requestJson,
+            ParcelFileDescriptor[] snapshots) {
         enforceSession(requestGeneration);
         long identity = Binder.clearCallingIdentity();
         try {
-            Context app = systemContext.createPackageContext("com.bydhud.app", Context.CONTEXT_IGNORE_SECURITY);
-            java.io.File job = ShellWorkFiles.inside(ShellWorkFiles.root(app), directory);
-            if (!job.getParentFile().equals(ShellWorkFiles.root(app).getCanonicalFile())
-                    || !job.getName().matches("[A-Za-z0-9_-]{1,100}"))
-                throw new SecurityException("Invalid shell job directory");
-            org.json.JSONObject request = ShellWorkFiles.read(new java.io.File(job, "request.json"));
-            if (request.optInt("uid") != allowedUid || request.optInt("version") != appVersionCode)
-                throw new SecurityException("Shell job owner changed");
-            workProcesses.entrySet().removeIf(entry -> !entry.getValue().isAlive());
-            java.lang.Process existing = workProcesses.get(directory);
-            if (existing != null && existing.isAlive()) return;
-            if (new java.io.File(job, "result.json").exists()) return;
-            if (ShellWorkFiles.running(job)) return;
-            if (new java.io.File(job, "started.json").exists()) {
-                ShellWorkFiles.write(new java.io.File(job, "result.json"), new org.json.JSONObject()
-                        .put("ok", false).put("cleanupPending", "shanghai".equals(request.optString("type")))
-                        .put("error", "Shell worker exited without a result; operation was not replayed"));
-                return;
+            Context app = shellAppContext();
+            int currentBoot = android.provider.Settings.Global.getInt(
+                    app.getContentResolver(), android.provider.Settings.Global.BOOT_COUNT, -1);
+            if (boot != currentBoot) throw new SecurityException("Shell job boot identity changed");
+            if (!validWorkType(type) || id == null || !id.matches("[A-Za-z0-9_-]{1,80}"))
+                throw new SecurityException("Invalid shell operation identity");
+            if (requestJson == null || requestJson.getBytes(StandardCharsets.UTF_8).length > 768 * 1024)
+                throw new SecurityException("Shell operation descriptor is oversized");
+            File sharedRoot = ShellWorkFiles.directory(ShellWorkFiles.root(app)).getCanonicalFile();
+            File artifact = ShellWorkFiles.inside(sharedRoot, artifactDirectory);
+            if (!artifact.getParentFile().equals(sharedRoot)
+                    || !artifact.getName().equals(type + "-" + id))
+                throw new SecurityException("Invalid shell artifact location");
+            org.json.JSONObject original = new org.json.JSONObject(requestJson);
+            validateWorkInput(app, id, type, original);
+            org.json.JSONArray paths = ShellWorkClient.snapshotFiles(type, original);
+            int descriptorCount = snapshots == null ? 0 : snapshots.length;
+            if (descriptorCount != paths.length())
+                throw new SecurityException("Shell input snapshot count mismatch");
+            File control = ShellWorkFiles.controlJob(id);
+            File manifestFile = new File(control, "request.json");
+            org.json.JSONObject manifest = manifestFile.isFile()
+                    ? ShellWorkFiles.read(manifestFile) : null;
+            if (manifest != null) {
+                if (!id.equals(manifest.optString("id")) || !type.equals(manifest.optString("type"))
+                        || boot != manifest.optInt("boot", -1)
+                        || !artifact.getAbsolutePath().equals(manifest.optString("artifact"))
+                        || !original.toString().equals(manifest.optJSONObject("input").toString())) {
+                    throw new SecurityException("Operation ID is already bound to a different request");
+                }
+                return registrationState(manifest, readWorkState(control));
             }
-            ProcessBuilder builder = new ProcessBuilder("/system/bin/app_process", "/system/bin",
-                    ShellWorkEntryPoint.class.getName(), job.getAbsolutePath());
-            builder.environment().put("CLASSPATH", app.getApplicationInfo().sourceDir);
-            builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(
-                    new java.io.File(job, "worker.log")));
-            workProcesses.put(directory, builder.start());
-        } catch (Exception error) { throw new IllegalStateException("Cannot launch shell work", error); }
-        finally { Binder.restoreCallingIdentity(identity); }
+            if (!control.isDirectory() && !control.mkdirs())
+                throw new IOException("Cannot create private shell operation");
+            android.system.Os.chmod(control.getPath(), 0700);
+            org.json.JSONArray fingerprints = new org.json.JSONArray();
+            org.json.JSONObject workerInput = new org.json.JSONObject(original.toString());
+            File snapshotsDir = new File(control, "snapshots");
+            if (paths.length() > 0) {
+                if (snapshotsDir.exists()) deletePrivateTree(snapshotsDir, control);
+                if (!snapshotsDir.mkdirs()) throw new IOException("Cannot create private shell snapshots");
+            }
+            for (int index = 0; index < paths.length(); index++) {
+                String sourceName = paths.getString(index);
+                File target = snapshotTarget(type, workerInput, snapshotsDir, index, sourceName);
+                CopyDigest digest = copySnapshot(snapshots[index], target);
+                fingerprints.put(new org.json.JSONObject().put("index", index)
+                        .put("length", digest.length).put("sha256", digest.sha256));
+                replaceSnapshotPath(type, workerInput, index, target.getAbsolutePath());
+            }
+            manifest = new org.json.JSONObject().put("schema", 1).put("id", id).put("type", type)
+                    .put("uid", allowedUid).put("version", appVersionCode)
+                    .put("apk", app.getApplicationInfo().sourceDir).put("boot", boot)
+                    .put("artifact", artifact.getAbsolutePath()).put("input", original)
+                    .put("workerInput", workerInput).put("inputFingerprints", fingerprints)
+                    .put("state", "REGISTERED").put("createdAt", System.currentTimeMillis());
+            ShellWorkFiles.write(manifestFile, manifest);
+            writeWorkState(control, new org.json.JSONObject().put("state", "REGISTERED")
+                    .put("progress", new org.json.JSONObject().put("phase", "REGISTERED")));
+            return registrationState(manifest, readWorkState(control));
+        } catch (Exception error) {
+            throw new IllegalStateException("Cannot register trusted shell operation: " + error.getMessage(), error);
+        } finally {
+            closeDescriptors(snapshots);
+            Binder.restoreCallingIdentity(identity);
+        }
     }
 
-    @Override public synchronized boolean cancelWork(long requestGeneration, String directory) {
+    @Override public Bundle workState(long requestGeneration, String id) {
         enforceSession(requestGeneration);
-        java.lang.Process process = workProcesses.get(directory);
-        if (process == null) return false;
-        if (new java.io.File(directory).getName().startsWith("shanghai-")) return false;
         long identity = Binder.clearCallingIdentity();
         try {
+            if (id == null || !id.matches("[A-Za-z0-9_-]{1,80}"))
+                throw new SecurityException("Invalid shell operation ID");
+            File control = ShellWorkFiles.controlJob(id);
+            org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
+            if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid
+                    || request.optInt("version", -1) != appVersionCode)
+                throw new SecurityException("Trusted shell operation identity mismatch");
+            org.json.JSONObject state = readWorkState(control);
+            int currentBoot = android.provider.Settings.Global.getInt(
+                    systemContext.getContentResolver(), android.provider.Settings.Global.BOOT_COUNT, -1);
+            if (!isTerminalWorkState(state.optString("state"))
+                    && request.optInt("boot", -1) != currentBoot) {
+                finishInterruptedWork(control, request);
+                state = readWorkState(control);
+            } else if ("RUNNING".equals(state.optString("state"))
+                    && !ShellWorkFiles.running(control)) {
+                finishInterruptedWork(control, request);
+                state = readWorkState(control);
+            }
+            return stateBundle(control, state);
+        } catch (Exception error) {
+            throw new IllegalStateException("Cannot read trusted shell operation state: " + error.getMessage(), error);
+        } finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public synchronized void completeWorkSign(long requestGeneration, String id,
+            String requestId, boolean ok, String detail) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try {
+            File control = ShellWorkFiles.controlJob(id);
+            org.json.JSONObject sign = ShellWorkFiles.read(new File(control, "sign-request.json"));
+            if (!requestId.equals(sign.optString("id")))
+                throw new SecurityException("Signing request identity mismatch");
+            File response = new File(control, "sign-response-" + requestId + ".json");
+            if (response.isFile()) {
+                org.json.JSONObject prior = ShellWorkFiles.read(response);
+                if (!requestId.equals(prior.optString("id")) || ok != prior.optBoolean("ok"))
+                    throw new SecurityException("Conflicting signing completion");
+                return;
+            }
+            ShellWorkFiles.write(response, new org.json.JSONObject().put("id", requestId)
+                    .put("ok", ok).put("detail", detail == null ? "" : detail));
+        } catch (Exception error) {
+            throw new IllegalStateException("Cannot complete trusted signing request", error);
+        } finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public synchronized void launchWork(long requestGeneration, String id) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try {
+            Context app = shellAppContext();
+            File control = ShellWorkFiles.controlJob(id);
+            org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
+            if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid
+                    || request.optInt("version", -1) != appVersionCode
+                    || !request.optString("apk").equals(app.getApplicationInfo().sourceDir))
+                throw new SecurityException("Shell job owner changed");
+            workProcesses.entrySet().removeIf(entry -> !entry.getValue().isAlive());
+            java.lang.Process existing = workProcesses.get(id);
+            if (existing != null && existing.isAlive()) return;
+            org.json.JSONObject state = readWorkState(control);
+            String phase = state.optString("state");
+            if (isTerminalWorkState(phase)) return;
+            if ("RUNNING".equals(phase) || new File(control, "started.json").exists()) {
+                finishInterruptedWork(control, request);
+                return;
+            }
+            File artifact = ShellWorkFiles.inside(ShellWorkFiles.root(app), request.getString("artifact"));
+            if (!artifact.getParentFile().equals(ShellWorkFiles.root(app).getCanonicalFile()))
+                throw new SecurityException("Invalid shell artifact directory");
+            writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "RUNNING")
+                    .put("progress", new org.json.JSONObject().put("phase", "STARTING")));
+            ProcessBuilder builder = new ProcessBuilder("/system/bin/app_process", "/system/bin",
+                    ShellWorkEntryPoint.class.getName(), id);
+            builder.environment().put("CLASSPATH", app.getApplicationInfo().sourceDir);
+            builder.redirectErrorStream(true).redirectOutput(ProcessBuilder.Redirect.appendTo(
+                    new File(control, "worker.log")));
+            try { workProcesses.put(id, builder.start()); }
+            catch (IOException error) {
+                writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "FAILED")
+                        .put("result", new org.json.JSONObject().put("ok", false)
+                                .put("error", "Cannot start shell worker: " + error.getClass().getSimpleName())));
+                throw error;
+            }
+        } catch (Exception error) {
+            throw new IllegalStateException("Cannot launch trusted shell work: " + error.getMessage(), error);
+        } finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public synchronized boolean cancelWork(long requestGeneration, String id,
+            boolean resetAnyMockGps) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try {
+            File control = ShellWorkFiles.controlJob(id);
+            org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
+            if (!id.equals(request.optString("id")) || request.optInt("uid", -1) != allowedUid)
+                throw new SecurityException("Shell operation owner changed");
+            org.json.JSONObject workState = readWorkState(control);
+            if (isTerminalWorkState(workState.optString("state"))) return true;
+            if (resetAnyMockGps) {
+                org.json.JSONObject input = request.optJSONObject("input");
+                if (!"RUNNING".equals(workState.optString("state"))
+                        || !"shanghai".equals(request.optString("type"))
+                        || input == null || "cleanup".equals(input.optString("action")))
+                    throw new SecurityException("Reset-any is only valid for an active Shanghai route");
+                File resetAny = new File(control, "reset-any");
+                if (!resetAny.exists()) ShellWorkFiles.write(resetAny,
+                        new org.json.JSONObject().put("id", id));
+            }
+            File cancel = new File(control, "cancel");
+            if (!cancel.exists()) ShellWorkFiles.write(cancel, new org.json.JSONObject().put("id", id));
+            java.lang.Process process = workProcesses.get(id);
+            if (process == null || !process.isAlive()) {
+                if (!"RUNNING".equals(readWorkState(control).optString("state"))) {
+                    writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "CANCELLED")
+                            .put("result", new org.json.JSONObject().put("ok", false).put("cancelled", true)
+                                    .put("error", "Cancelled before worker launch")));
+                    return true;
+                }
+                return false;
+            }
+            if ("shanghai".equals(request.optString("type"))) return true;
             process.destroyForcibly();
             if (!process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS)) return false;
-            java.io.File result = new java.io.File(directory, "result.json");
-            if (!result.exists()) ShellWorkFiles.write(result, new org.json.JSONObject()
-                    .put("ok", false).put("cancelled", true).put("error", "Cancelled by owner"));
+            writeWorkState(control, new org.json.JSONObject().put("id", id).put("state", "CANCELLED")
+                    .put("result", new org.json.JSONObject().put("ok", false).put("cancelled", true)
+                            .put("error", "Cancelled by operation owner")));
             return true;
         } catch (Exception error) { return false; }
         finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    private Context shellAppContext() throws Exception {
+        if (Process.myUid() != 2000) throw new SecurityException("Shell runtime owner required");
+        Context app = systemContext.createPackageContext("com.bydhud.app", Context.CONTEXT_IGNORE_SECURITY);
+        if (app.getApplicationInfo().uid != allowedUid
+                || app.getPackageManager().getPackageInfo("com.bydhud.app", 0).versionCode != appVersionCode)
+            throw new SecurityException("Shell app installation changed");
+        return app;
+    }
+
+    private static boolean validWorkType(String type) {
+        return "patch".equals(type) || "log".equals(type) || "configuration".equals(type)
+                || "upload".equals(type) || "shanghai".equals(type);
+    }
+
+    private static void validateWorkInput(Context app, String id, String type, org.json.JSONObject input)
+            throws Exception {
+        File shared = ShellWorkFiles.root(app).getCanonicalFile();
+        File transactions = new File(shared, "transactions").getCanonicalFile();
+        File cache = new File(shared, "patch-cache").getCanonicalFile();
+        if ("patch".equals(type)) {
+            NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(input.optString("profile"));
+            if (profile == null || !input.optString("operation").matches("[A-Za-z0-9_-]{1,100}"))
+                throw new SecurityException("Invalid patch operation identity");
+            int command = input.optInt("command", -1);
+            if (command != NavigatorPatchWorkerClient.MSG_SCAN
+                    && command != NavigatorPatchWorkerClient.MSG_PREPARE)
+                throw new SecurityException("Invalid patch command");
+            String source = input.optString("source");
+            if (input.optBoolean("directory")) {
+                File sourceSet = ShellWorkFiles.ownedPath(transactions, source);
+                if (!sourceSet.isDirectory() || !isApkSetDirectory(sourceSet))
+                    throw new SecurityException("Invalid nested APK-set inspection path");
+            } else if (!source.isEmpty()) {
+                // Source bytes arrive via a Binder file descriptor and are replaced by a shell-only copy.
+                if (new File(source).isDirectory()) throw new SecurityException("Patch source must be a file");
+            }
+            String output = input.optString("output");
+            if (!output.isEmpty()) {
+                File scan = ShellWorkFiles.ownedPath(cache, output);
+                if (!scan.getParentFile().equals(cache)
+                        || !scan.getName().startsWith(profile.id + "-worker-scan-"))
+                    throw new SecurityException("Invalid patch inspection output path");
+            }
+            String transaction = input.optString("transaction");
+            if (command == NavigatorPatchWorkerClient.MSG_PREPARE) {
+                File tx = ShellWorkFiles.ownedPath(transactions, transaction);
+                if (!tx.getParentFile().equals(transactions) || !tx.getName().matches("tx-[A-Za-z0-9-]+"))
+                    throw new SecurityException("Invalid patch transaction path");
+            } else if (!transaction.isEmpty()) throw new SecurityException("Unexpected patch transaction path");
+        } else if ("upload".equals(type)) {
+            if (!input.optString("operation").matches("[A-Za-z0-9_-]{1,100}")
+                    || input.optJSONArray("days") == null)
+                throw new SecurityException("Invalid upload descriptor");
+        } else if ("log".equals(type)) {
+            if (input.optJSONArray("sources") == null || input.optJSONArray("days") == null)
+                throw new SecurityException("Invalid log export descriptor");
+        } else if ("shanghai".equals(type)) {
+            String action = input.optString("action", "route");
+            if (!"route".equals(action) && !"reset".equals(action)
+                    && !"cleanup".equals(action))
+                throw new SecurityException("Invalid Shanghai action");
+            if ("route".equals(action) && !id.equals(input.optString("id")))
+                throw new SecurityException("Shanghai route identity mismatch");
+            String evidence = input.optString("evidence");
+            if ("route".equals(action) && evidence.isEmpty())
+                throw new SecurityException("Shanghai route evidence path is missing");
+            if (!evidence.isEmpty()) {
+                File external = ShellWorkFiles.externalFiles(app);
+                if (external == null) throw new IOException("Shanghai evidence storage unavailable");
+                File root = external.getCanonicalFile();
+                File evidenceDirectory = ShellWorkFiles.ownedPath(root, evidence);
+                if (!evidenceDirectory.getName().matches("shanghai_[A-Za-z0-9_-]{1,80}"))
+                    throw new SecurityException("Invalid Shanghai evidence path");
+            }
+        }
+    }
+
+    private static File snapshotTarget(String type, org.json.JSONObject input, File root,
+            int index, String originalPath) throws Exception {
+        if ("patch".equals(type) && input.optBoolean("directory")) {
+            String base = new File(originalPath).getName();
+            if (!base.toLowerCase(java.util.Locale.ROOT).endsWith(".apk"))
+                throw new SecurityException("Invalid APK-set member");
+            File members = new File(root, "inspect-set/members");
+            if (!members.isDirectory() && !members.mkdirs()) throw new IOException("Cannot snapshot APK set");
+            return new File(members, base);
+        }
+        String suffix = new File(originalPath).getName();
+        String ext = suffix.matches(".*\\.[A-Za-z0-9]{1,8}$")
+                ? suffix.substring(suffix.lastIndexOf('.')) : ".bin";
+        return new File(root, String.format(java.util.Locale.ROOT, "%04d%s", index, ext));
+    }
+
+    private static void replaceSnapshotPath(String type, org.json.JSONObject input, int index,
+            String replacement) throws Exception {
+        if ("patch".equals(type)) {
+            if (input.optBoolean("directory")) input.put("source", new File(replacement).getParentFile()
+                    .getParentFile().getAbsolutePath());
+            else input.put("source", replacement);
+        }
+        else if ("upload".equals(type)) input.put("archive", replacement);
+        else if ("log".equals(type)) {
+            org.json.JSONArray sources = input.getJSONArray("sources");
+            int seen = 0;
+            for (int i = 0; i < sources.length(); i++) {
+                org.json.JSONObject source = sources.getJSONObject(i);
+                if (source.optString("path").isEmpty()) continue;
+                if (seen++ == index) { source.put("path", replacement); break; }
+            }
+        }
+    }
+
+    private static CopyDigest copySnapshot(ParcelFileDescriptor descriptor, File target) throws Exception {
+        if (descriptor == null) throw new SecurityException("Missing shell input descriptor");
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        long length = 0;
+        try (FileInputStream input = new FileInputStream(descriptor.getFileDescriptor());
+             FileOutputStream output = new FileOutputStream(target)) {
+            byte[] buffer = new byte[64 * 1024]; int read;
+            while ((read = input.read(buffer)) >= 0) {
+                length += read;
+                if (length > 2L * 1024L * 1024L * 1024L)
+                    throw new IOException("Shell input snapshot exceeds size limit");
+                digest.update(buffer, 0, read); output.write(buffer, 0, read);
+            }
+            output.getFD().sync();
+        }
+        android.system.Os.chmod(target.getPath(), 0600);
+        byte[] bytes = digest.digest();
+        char[] hex = new char[bytes.length * 2];
+        final char[] digits = "0123456789abcdef".toCharArray();
+        for (int i = 0; i < bytes.length; i++) {
+            int value = bytes[i] & 0xff; hex[i * 2] = digits[value >>> 4]; hex[i * 2 + 1] = digits[value & 15];
+        }
+        return new CopyDigest(length, new String(hex));
+    }
+
+    private static Bundle registrationState(org.json.JSONObject manifest, org.json.JSONObject state)
+            throws Exception {
+        Bundle bundle = new Bundle();
+        bundle.putString("state", state.optString("state", "REGISTERED"));
+        bundle.putString("worker_input", manifest.getJSONObject("workerInput").toString());
+        bundle.putString("input_fingerprints", manifest.getJSONArray("inputFingerprints").toString());
+        return bundle;
+    }
+
+    private static org.json.JSONObject readWorkState(File control) throws IOException {
+        return ShellWorkFiles.read(new File(control, "state.json"));
+    }
+
+    static void writeWorkState(File control, org.json.JSONObject state) throws IOException {
+        ShellWorkFiles.write(new File(control, "state.json"), state);
+    }
+
+    private static Bundle stateBundle(File control, org.json.JSONObject state) throws Exception {
+        Bundle bundle = new Bundle();
+        bundle.putString("state", state.optString("state", "REGISTERED"));
+        bundle.putString("progress_json", state.optJSONObject("progress") == null ? "{}"
+                : state.getJSONObject("progress").toString());
+        bundle.putString("result_json", state.optJSONObject("result") == null ? "{}"
+                : state.getJSONObject("result").toString());
+        org.json.JSONObject request = ShellWorkFiles.read(new File(control, "sign-request.json"));
+        String signId = request.optString("id");
+        bundle.putString("sign_request_json", !signId.isEmpty()
+                && !new File(control, "sign-response-" + signId + ".json").isFile()
+                ? request.toString() : "{}");
+        return bundle;
+    }
+
+    private static void deletePrivateTree(File target, File privateRoot) throws IOException {
+        File candidate = ShellWorkFiles.ownedPath(privateRoot, target.getPath());
+        File[] children = candidate.listFiles();
+        if (children != null) for (File child : children) deletePrivateTree(child, privateRoot);
+        if (!candidate.delete()) throw new IOException("Cannot reset private shell snapshot");
+    }
+
+    private static void finishInterruptedWork(File control, org.json.JSONObject request) throws Exception {
+        if (isTerminalWorkState(readWorkState(control).optString("state"))) return;
+        writeWorkState(control, new org.json.JSONObject().put("id", request.optString("id"))
+                .put("state", "INTERRUPTED")
+                .put("result", new org.json.JSONObject().put("ok", false)
+                        .put("cleanupPending", "shanghai".equals(request.optString("type")))
+                        .put("error", "Shell worker exited before returning a result; operation was not replayed")));
+    }
+
+    private static boolean isTerminalWorkState(String state) {
+        return "SUCCEEDED".equals(state) || "FAILED".equals(state)
+                || "CANCELLED".equals(state) || "INTERRUPTED".equals(state);
+    }
+
+    private static boolean isApkSetDirectory(File directory) {
+        String name = directory.getName();
+        File transaction = directory.getParentFile();
+        return ("patched-set".equals(name) || "source-set".equals(name)
+                || "map-candidate-set".equals(name)) && transaction != null
+                && transaction.getName().matches("tx-[A-Za-z0-9-]+")
+                && transaction.getParentFile() != null
+                && transaction.getParentFile().getName().equals("transactions")
+                && new File(directory, "members").isDirectory();
+    }
+
+    private static void closeDescriptors(ParcelFileDescriptor[] descriptors) {
+        if (descriptors == null) return;
+        for (ParcelFileDescriptor descriptor : descriptors)
+            if (descriptor != null) try { descriptor.close(); } catch (IOException ignored) { }
+    }
+
+    private static final class CopyDigest {
+        final long length; final String sha256;
+        CopyDigest(long length, String sha256) { this.length = length; this.sha256 = sha256; }
     }
 
     private static Bundle outputSuspendedResult() {

@@ -99,6 +99,8 @@ final class LocalAdbBridge {
             });
     private static final Pattern MOVE_STACK_COMMAND =
             Pattern.compile("cmd activity display move-stack [0-9]{1,6} [0-9]{1,3}");
+    private static final Pattern RESIZE_TASK_COMMAND = Pattern.compile(
+            "cmd activity task resize [0-9]{1,6}(?: -?[0-9]{1,5}){4}");
     private static final Pattern AUTO_CONTAINER_COMMAND = Pattern.compile(
             "service call (?:auto_container|AutoContainer) 2 i32 1000 i32 (?:16|17|18) s16 '\"\"'");
     private static final Pattern DIAGNOSTIC_LOGCAT_COMMAND = Pattern.compile(
@@ -1406,6 +1408,7 @@ final class LocalAdbBridge {
             throw new SecurityException("ADB runtime command is not allowed: " + safeCommand);
         }
         boolean outputWrite = MOVE_STACK_COMMAND.matcher(safeCommand).matches()
+                || RESIZE_TASK_COMMAND.matcher(safeCommand).matches()
                 || AUTO_CONTAINER_COMMAND.matcher(safeCommand).matches();
         if (outputWrite && !ShanghaiOutputGate.enterWrite()) {
             return exportFailure("skipped", 125, "Shanghai output is suspended", "");
@@ -1989,6 +1992,7 @@ final class LocalAdbBridge {
                 || "dumpsys activity activities".equals(command)
                 || isVehicleConfigurationCommand(command)
                 || MOVE_STACK_COMMAND.matcher(command).matches()
+                || RESIZE_TASK_COMMAND.matcher(command).matches()
                 || AUTO_CONTAINER_COMMAND.matcher(command).matches();
     }
 

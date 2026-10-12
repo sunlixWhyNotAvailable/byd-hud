@@ -129,10 +129,6 @@ final class NavAppTaskScanner {
         }
     }
 
-    static Snapshot preferredSnapshotForTest(Snapshot current, Snapshot scanned) {
-        return preferredSnapshot(current, scanned);
-    }
-
     private static Snapshot preferredSnapshot(Snapshot current, Snapshot scanned) {
         if (current != null
                 && current.hasAuthoritativeTaskState()

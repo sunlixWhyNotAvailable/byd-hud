@@ -1246,7 +1246,9 @@ final class NavigatorAssetManager {
         try {
             root = new File(appContext.getFilesDir(), "navigator-patcher").getCanonicalFile();
             protectedNames = protectedTransactionNames(appContext, root);
-        } catch (IOException error) {
+        } catch (IOException | RuntimeException error) {
+            AppEventLogger.event(appContext, "navigator_asset orphan_sweep_unavailable error="
+                    + error.getClass().getSimpleName());
             ORPHAN_SWEEP_RUNNING.set(false);
             return;
         }
@@ -1283,6 +1285,8 @@ final class NavigatorAssetManager {
             worker.setPriority(Thread.MIN_PRIORITY);
             worker.start();
         } catch (RuntimeException error) {
+            AppEventLogger.event(appContext, "navigator_asset orphan_sweep_start_failed error="
+                    + error.getClass().getSimpleName());
             ORPHAN_SWEEP_RUNNING.set(false);
         }
     }
@@ -1319,19 +1323,56 @@ final class NavigatorAssetManager {
     }
 
     private static void reconcileCatalogRevision(Context context, Asset asset) {
-        String previous = string(context, asset, "catalog_sha", "");
-        if (asset.sha256.equals(previous)) return;
-        android.content.SharedPreferences.Editor editor = prefs(context).edit()
-                .putString(key(asset, "catalog_sha"), asset.sha256)
-                .remove(key(asset, "installed_identity"))
-                .remove(key(asset, "installed_matches"))
-                .putBoolean(key(asset, "download_ready"), false);
-        if (PHASE_NONE.equals(string(context, asset, "phase", PHASE_NONE))) {
-            editor.putString(key(asset, "state"), NOT_DOWNLOADED)
-                    .putString(key(asset, "progress"), "0%")
-                    .putString(key(asset, "error"), "");
+        synchronized (TRANSACTION_LOCK) {
+            String previous = string(context, asset, "catalog_sha", "");
+            if (asset.sha256.equals(previous)) return;
+            if (!previous.isEmpty() && catalogFilesAreIdle(context, asset)) {
+                deleteObsoleteCatalogFile(context, downloadFile(context, asset), previous);
+                deleteObsoleteCatalogFile(context, new File(
+                        new File(context.getFilesDir(), "updates"), asset.fileName), previous);
+            }
+            android.content.SharedPreferences.Editor editor = prefs(context).edit()
+                    .putString(key(asset, "catalog_sha"), asset.sha256)
+                    .remove(key(asset, "installed_identity"))
+                    .remove(key(asset, "installed_matches"))
+                    .putBoolean(key(asset, "download_ready"), false);
+            if (PHASE_NONE.equals(string(context, asset, "phase", PHASE_NONE))) {
+                editor.putString(key(asset, "state"), NOT_DOWNLOADED)
+                        .putString(key(asset, "progress"), "0%")
+                        .putString(key(asset, "error"), "");
+            }
+            editor.commit();
         }
-        editor.commit();
+    }
+
+    private static boolean catalogFilesAreIdle(Context context, Asset asset) {
+        String phase = string(context, asset, "phase", PHASE_NONE);
+        if (!PHASE_NONE.equals(phase)
+                || DOWNLOADING.equals(string(context, asset, "state", NOT_DOWNLOADED))
+                || VERIFYING.equals(string(context, asset, "state", NOT_DOWNLOADED))
+                || prefs(context).getLong(key(asset, "download_id"), NO_DOWNLOAD) != NO_DOWNLOAD) {
+            return false;
+        }
+        synchronized (ACTIVE_VALIDATIONS) {
+            if (ACTIVE_VALIDATIONS.contains(asset.id)) return false;
+        }
+        synchronized (ACTIVE_INSTALL_VERIFICATIONS) {
+            return !ACTIVE_INSTALL_VERIFICATIONS.contains(asset.id);
+        }
+    }
+
+    private static void deleteObsoleteCatalogFile(Context context, File candidate, String previousSha) {
+        if (candidate == null || !candidate.isFile()) return;
+        try {
+            File parent = candidate.getParentFile().getCanonicalFile();
+            File file = candidate.getCanonicalFile();
+            if (!parent.equals(file.getParentFile())
+                    || !previousSha.equalsIgnoreCase(sha256(file))) return;
+            if (!file.delete()) AppEventLogger.event(context,
+                    "navigator_asset stale_file_delete_failed name=" + candidate.getName());
+        } catch (Exception error) {
+            // Keep files that cannot be proven to be the previous catalog APK.
+        }
     }
 
     private static PackageInfo installedInfo(Context context, String packageName) {

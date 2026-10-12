@@ -390,6 +390,12 @@ public final class NavigatorMapCapture {
         String renderStatsLog = null;
         String lifeSession = "";
         boolean acceptLifecycle = false;
+        boolean modernLifecycle = false;
+        String producerJournalOwner = string(data, "lifecycleOwner", "");
+        String producerJournalSession = string(data, "lifecycleSessionId", "");
+        modernLifecycle = !producerJournalSession.isEmpty();
+        boolean lifecycleIdentityValid = !modernLifecycle
+                || callerPackage.equals(producerJournalOwner);
         synchronized (LOCK) {
             if (!session.isEmpty()
                     && callerPackage.equals(ownerPackage)
@@ -401,8 +407,7 @@ public final class NavigatorMapCapture {
                 answer.putLong("frameTimeoutMs", 2500L);
                 answer.putLong("leaseMs", 6000L);
                 answer.putString("session", session);
-                if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty()) {
-                    answer.putBoolean("journalAccepted", true);
+                if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty() && lifecycleIdentityValid) {
                     acceptLifecycle = true;
                     lifeSession = session;
                 }
@@ -412,6 +417,8 @@ public final class NavigatorMapCapture {
                         + " pid=" + integer(data, "pid", 0)
                         + " controller=" + field(string(data, "controller", ""), 160)
                         + " producerError=" + field(string(data, "producerError", ""), 384)
+                        + " lifecycleJournalError=" + field(string(data, "lifecycleJournalError", ""), 128)
+                        + " lifecyclePending=" + integer(data, "lifecyclePendingCount", 0)
                         + " backgroundState=" + field(string(data, "backgroundState", ""), 96)
                         + " carReadiness=" + field(string(data, "carReadiness", ""), 192);
                 if (!producerState.equals(lastProducerState)) {
@@ -459,9 +466,10 @@ public final class NavigatorMapCapture {
                     && string(data, "captureSession", "").equals(stoppedSession)
                     && !stoppedSession.isEmpty()
                     && now - stoppedAtElapsedMs < POST_STOP_JOURNAL_MS) {
-                answer.putBoolean("journalAccepted", true);
-                acceptLifecycle = true;
-                lifeSession = stoppedSession;
+                if (!"[]".equals(lifeEvents) && !lifeEvents.isEmpty() && lifecycleIdentityValid) {
+                    acceptLifecycle = true;
+                    lifeSession = stoppedSession;
+                }
                 renderStatsLog = renderStatsLocked(data, callerPackage, stoppedSession, now);
             }
         }
@@ -477,7 +485,39 @@ public final class NavigatorMapCapture {
             log(app, logRequest);
         }
         if (acceptLifecycle) {
-            logLifecycleEvents(app, callerPackage, lifeSession, lifeEvents);
+            if (modernLifecycle) {
+                try {
+                    final String journalFrameSession = lifeSession;
+                    NavigatorMapLifecycleJournal.Result journal = NavigatorMapLifecycleJournal.accept(
+                            app, callerPackage, producerJournalSession, new JSONArray(lifeEvents),
+                            longValue(data, "lifecycleCursorSequence", 0L),
+                            longValue(data, "lifecycleChunkSequence", 0L),
+                            integer(data, "lifecycleChunkIndex", 0),
+                            (journalOwner, producerSession, fragment) -> {
+                                long wall = System.currentTimeMillis();
+                                String line = "navigator_map_capture producer_lifecycle owner="
+                                        + field(journalOwner, 96) + " session=" + field(journalFrameSession, 96)
+                                        + " producerSession=" + field(producerSession, 96)
+                                        + " fragment=" + fragment;
+                                return AppEventLogger.writeEvent(app, line, wall,
+                                        NavCaptureStore.todayDir(wall));
+                            });
+                    if (journal.accepted) {
+                        answer.putBoolean("journalAccepted", true);
+                        answer.putString("journalOwner", callerPackage);
+                        answer.putString("journalSessionId", producerJournalSession);
+                        answer.putLong("journalAckSequence", journal.ackSequence);
+                        answer.putLong("journalAckChunkSequence", journal.ackChunkSequence);
+                        answer.putInt("journalAckChunkIndex", journal.ackChunkIndex);
+                    }
+                } catch (JSONException error) {
+                    log(app, "navigator_map_capture journal_parse_error owner="
+                            + field(callerPackage, 96) + " session=" + field(producerJournalSession, 96));
+                }
+            } else {
+                logLifecycleEvents(app, callerPackage, lifeSession, lifeEvents);
+                answer.putBoolean("journalAccepted", true);
+            }
         }
         return answer;
     }

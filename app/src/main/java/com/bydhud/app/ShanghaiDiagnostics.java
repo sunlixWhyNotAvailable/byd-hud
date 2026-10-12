@@ -5,7 +5,6 @@ import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
-import java.security.MessageDigest;
 import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.Locale;
@@ -33,7 +32,8 @@ final class ShanghaiDiagnostics {
     private volatile ShanghaiSessionJournal sessionJournal;
     private volatile ShanghaiEventJournal someIpJournal;
     private volatile ShanghaiSomeIpClient someIp;
-    private volatile ShanghaiDiagnosticAdb adb;
+    private volatile JSONObject shellCoverage;
+    private long shellCoverageModified = -1;
 
     ShanghaiDiagnostics(android.content.Context context, File directory, String storageDay) {
         if (context == null || directory == null) throw new IllegalArgumentException("context and directory are required");
@@ -83,8 +83,6 @@ final class ShanghaiDiagnostics {
             flushPending();
             record("diagnostics_start", "session=" + safeSessionId);
             if (stopRequested.get()) return;
-            String token = token(safeSessionId);
-
             record("shell_diagnostics", "ADAS, pcap and snapshots are retained in shell-runtime/");
             if (stopRequested.get()) return;
 
@@ -99,12 +97,14 @@ final class ShanghaiDiagnostics {
             if (!bound) record("someip_unavailable", "bind failed or timed out");
             else record("someip_subscriptions", someIp.subscriptionResults().toString());
             if (stopRequested.get()) return;
-            if (adb != null) adb.resolveReadiness(5_000L);
+            refreshShellCoverage();
 
             ready = true;
             state = hasLiveChannel() ? State.CAPTURING : State.PARTIAL;
             record("diagnostics_ready", coverage().toString());
             while (!stopRequested.get()) {
+                someIp.restoreConnection(stopRequested::get);
+                refreshShellCoverage();
                 if (!internalWritersHealthy()) {
                     failure = "Diagnostic journal writer failed";
                     state = State.FAILED;
@@ -123,6 +123,7 @@ final class ShanghaiDiagnostics {
             try {
                 ready = true;
                 closeChannels();
+                refreshShellCoverage();
                 if (state != State.FAILED) state = State.STOPPED;
                 ShanghaiSessionJournal journal = sessionJournal;
                 if (journal != null) {
@@ -174,9 +175,30 @@ final class ShanghaiDiagnostics {
 
     boolean hasLiveChannel() {
         ShanghaiSomeIpClient currentSomeIp = someIp;
-        ShanghaiDiagnosticAdb currentAdb = adb;
         return currentSomeIp != null && currentSomeIp.subscribedCount() > 0 && currentSomeIp.healthy()
-                || currentAdb != null && currentAdb.hasLiveChannel();
+                || shellStreamLive("adas") || shellStreamLive("pcap");
+    }
+
+    private boolean shellStreamLive(String name) {
+        JSONObject current = shellCoverage;
+        JSONObject stream = current == null ? null : current.optJSONObject(name);
+        return stream != null && "streaming".equals(stream.optString("status"))
+                && ("adas".equals(name) ? stream.optBoolean("ready") : stream.optLong("bytes") >= 24L);
+    }
+
+    private void refreshShellCoverage() {
+        File root = directory.getName().startsWith("reattach-") ? directory.getParentFile() : directory;
+        File file = new File(root, "shell-runtime/diagnostic-coverage.json");
+        long modified = file.isFile() ? file.lastModified() : 0;
+        if (modified == shellCoverageModified) return;
+        shellCoverageModified = modified;
+        try {
+            shellCoverage = file.isFile() ? new JSONObject(new String(
+                    java.nio.file.Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8)) : null;
+        } catch (Exception error) {
+            shellCoverage = ShanghaiJson.object("readError", error.toString(), "path", file.getPath());
+            shellCoverageModified = -1;
+        }
     }
 
     private boolean internalWritersHealthy() {
@@ -189,7 +211,6 @@ final class ShanghaiDiagnostics {
         ShanghaiSomeIpClient currentSomeIp = someIp;
         ShanghaiEventJournal raw = someIpJournal;
         ShanghaiSessionJournal events = sessionJournal;
-        ShanghaiDiagnosticAdb currentAdb = adb;
         JSONObject channels = ShanghaiJson.object(
                 "someIpRequestedTopics", ShanghaiTopics.ALL.size(),
                 "someIpSubscribedTopics", currentSomeIp == null ? 0 : currentSomeIp.subscribedCount(),
@@ -203,7 +224,8 @@ final class ShanghaiDiagnostics {
                         ? JSONObject.NULL : currentSomeIp.clientResults(),
                 "someIpCleanup", currentSomeIp == null
                         ? JSONObject.NULL : currentSomeIp.cleanupResult(),
-                "adb", currentAdb == null ? JSONObject.NULL : currentAdb.coverageJson(),
+                "adb", shellCoverage == null ? JSONObject.NULL : ShanghaiJson.copy(shellCoverage),
+                "adbSource", "shell-runtime/diagnostic-coverage.json",
                 "sessionEventsPersisted", events == null ? 0 : events.writtenCount(),
                 "sessionEventsDropped", events == null ? pendingCount() : events.droppedCount(),
                 "physicalHudVerified", false,
@@ -250,9 +272,6 @@ final class ShanghaiDiagnostics {
         ShanghaiEventJournal raw = someIpJournal;
         try { if (raw != null) raw.close(); }
         catch (Throwable error) { closeFailed("SOME/IP journal cleanup", error); }
-        ShanghaiDiagnosticAdb currentAdb = adb;
-        try { if (currentAdb != null) currentAdb.close(); }
-        catch (Throwable error) { closeFailed("ADB diagnostic cleanup", error); }
     }
 
     private void closeFailed(String channel, Throwable error) {
@@ -264,10 +283,8 @@ final class ShanghaiDiagnostics {
     private boolean finalizationConfirmed() {
         ShanghaiEventJournal raw = someIpJournal;
         ShanghaiSessionJournal events = sessionJournal;
-        ShanghaiDiagnosticAdb currentAdb = adb;
         return (raw == null || raw.finalized())
-                && (events == null || events.finalized())
-                && (currentAdb == null || currentAdb.finalized());
+                && (events == null || events.finalized());
     }
 
     private void writeCoverage(Coverage coverage) {
@@ -306,16 +323,6 @@ final class ShanghaiDiagnostics {
         // after actual termination, independently of whether capture succeeded.
         ACTIVE_CAPTURES.removeIf(capture -> capture.workerFinished
                 && capture.finalizationConfirmed());
-    }
-
-    private static String token(String value) throws Exception {
-        byte[] hash = MessageDigest.getInstance("SHA-256")
-                .digest(value.getBytes(StandardCharsets.UTF_8));
-        StringBuilder result = new StringBuilder(12);
-        for (int index = 0; index < 6; index++) {
-            result.append(String.format(Locale.ROOT, "%02x", hash[index] & 0xff));
-        }
-        return result.toString();
     }
 
     static final class Coverage {

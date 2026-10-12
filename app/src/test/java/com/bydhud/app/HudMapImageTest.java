@@ -2,7 +2,6 @@ package com.bydhud.app;
 
 import android.app.Application;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
@@ -13,10 +12,11 @@ import org.robolectric.RobolectricTestRunner;
 import org.robolectric.annotation.Config;
 import org.robolectric.annotation.GraphicsMode;
 
-
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertArrayEquals;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 29, application = Application.class)
@@ -25,6 +25,7 @@ public final class HudMapImageTest {
 
     @Test
     public void profilesSelectOriginalMapAreaWithoutTransparentMargins() {
+        assertArrayEquals(new byte[]{0x0a, 0x00}, HudMapImage.nativePayload(null));
         Bitmap source = Bitmap.createBitmap(1500, 900, Bitmap.Config.ARGB_8888);
         try {
             Canvas canvas = new Canvas(source);
@@ -38,13 +39,28 @@ public final class HudMapImageTest {
             int[] colors = {Color.RED, Color.BLUE, Color.YELLOW, Color.CYAN};
             float[][] offsets = {{-100,0},{100,0},{0,100},{0,-100}};
             for (int i = 0; i < offsets.length; i++) {
-                Bitmap result = decode(HudMapImage.profileCropPng(source,
-                        new HudMapProfile(profile.source, offsets[i][0], offsets[i][1], 100)));
-                try { assertEquals(colors[i], result.getPixel(150, 90)); }
+                Bitmap result = HudMapImage.profileCrop(source,
+                        new HudMapProfile(profile.source, offsets[i][0], offsets[i][1], 100));
+                assertNotNull(result);
+                try {
+                    assertEquals(colors[i], result.getPixel(150, 90));
+                    java.io.ByteArrayOutputStream encoded = new java.io.ByteArrayOutputStream();
+                    assertTrue(result.compress(Bitmap.CompressFormat.PNG, 100, encoded));
+                    byte[] wire = HudMapImage.nativePayload(encoded.toByteArray());
+                    java.nio.ByteBuffer packet = java.nio.ByteBuffer.wrap(wire);
+                    assertEquals(10, packet.get() & 255);
+                    int length = 0, shift = 0, next;
+                    do { next = packet.get() & 255; length |= (next & 127) << shift; shift += 7; }
+                    while ((next & 128) != 0);
+                    assertEquals(length, packet.remaining());
+                    byte[] payload = new byte[length]; packet.get(payload);
+                    assertArrayEquals(encoded.toByteArray(), android.util.Base64.decode(payload, android.util.Base64.DEFAULT));
+                }
                 finally { result.recycle(); }
             }
             for (float scale : new float[]{20, 50, 92, 100, 125.5f, 300}) {
-                Bitmap result = decode(HudMapImage.profileCropPng(source, profile.withScale(scale)));
+                Bitmap result = HudMapImage.profileCrop(source, profile.withScale(scale));
+                assertNotNull(result);
                 try {
                     for (int x : new int[]{0, 150, 299}) for (int y : new int[]{0, 90, 179})
                         assertEquals(255, Color.alpha(result.getPixel(x, y)));
@@ -58,9 +74,4 @@ public final class HudMapImageTest {
         } finally { source.recycle(); }
     }
 
-    private static Bitmap decode(byte[] png) {
-        Bitmap bitmap = BitmapFactory.decodeByteArray(png, 0, png.length);
-        assertNotNull(bitmap);
-        return bitmap;
-    }
 }

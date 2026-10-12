@@ -174,14 +174,6 @@ public final class HudExperimentalLayout {
         return argb | 0xff000000;
     }
 
-    public static boolean isCanonicalF8(int width, int height) {
-        return width == F8_WIDTH_PX && height == F8_HEIGHT_PX;
-    }
-
-    public static boolean isCanonicalF7(int width, int height) {
-        return width == F7_WIDTH_PX && height == F7_HEIGHT_PX;
-    }
-
     private static void requireField(float width, float height) {
         requirePositive(width, "fieldWidth");
         requirePositive(height, "fieldHeight");

@@ -36,7 +36,7 @@ public final class NavInfoLogger {
     public static final String EXTRA_IDENTITY = "com.bydhud.gmapsbridge.IDENTITY";
     public static final String EXTRA_CHANNEL_ID = "com.bydhud.gmapsbridge.CHANNEL_ID";
     public static final String EXTRA_DIAGNOSTICS = "com.bydhud.gmapsbridge.DIAGNOSTICS";
-    public static final String BRIDGE_BUILD = "3.3.1-test-20260928-r1";
+    public static final String BRIDGE_BUILD = "gmaps-navinfo-bridge-r2";
     public static final int PROTOCOL_VERSION = 3;
     public static final int MESSAGE_HELLO = 1;
     public static final int MESSAGE_START = 2;

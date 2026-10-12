@@ -65,7 +65,6 @@ public final class MainActivity extends ComponentActivity {
     private static final String TAG = "BydHudTest";
     private static final long SEND_INTERVAL_MS = 1000L;
     private static final int STATUS_LOG_MAX_LINES = 35;
-    private static final int NAV_RUNTIME_RECONNECT_RETRY_LIMIT = 2;
     private static final long NAV_RUNTIME_RECHECK_DELAY_MS = 1500L;
     private static final long NAV_PERMISSION_SELF_CHECK_DELAY_MS = 600L;
     private static final long STORAGE_SCAN_CACHE_TTL_MS = 30000L;
@@ -105,7 +104,6 @@ public final class MainActivity extends ComponentActivity {
     private static final AtomicBoolean ASSET_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean PATCH_FORCE_REFRESH_PENDING = new AtomicBoolean(false);
     private static final AtomicBoolean MAP_PROFILE_CACHE_REFRESHING = new AtomicBoolean(false);
-    private static final AtomicLong UI_STATE_REVISION = new AtomicLong();
     private static final Object PATCH_REFRESH_GATE_LOCK = new Object();
     private static final Object PACKAGE_METADATA_CACHE_LOCK = new Object();
     private static final Map<String, String> APP_LABEL_CACHE = new HashMap<>();
@@ -241,7 +239,6 @@ public final class MainActivity extends ComponentActivity {
                 requestRuntimeStatusRefresh(this, true, "overlay-permission-return");
                 maybeStartPendingAdbAuthorization();
             });
-    private int navRuntimeReconnectAttemptsThisLaunch;
     private boolean exitRequested;
     private boolean arrowCuratedMode = true;
     private boolean pngVisible = true;
@@ -371,6 +368,10 @@ public final class MainActivity extends ComponentActivity {
         }
         cancelPendingAutoAdbStart();
         RESUMED_ACTIVITY.compareAndSet(this, null);
+        Context app = getApplicationContext();
+        ShellRuntimeSession.afterPersistence(() -> {
+            if (!HudPrefs.flush(app)) AppEventLogger.event(app, "UI settings persistence failed on pause");
+        });
         super.onPause();
     }
 
@@ -426,220 +427,6 @@ public final class MainActivity extends ComponentActivity {
         }
         appendStatus("back pressed: moving task to background");
         moveTaskToBack(true);
-    }
-
-    //builds this artifact here so callers do not duplicate protocol or UI construction details.
-    private View buildUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(12, 12, 12, 12);
-        root.setBackgroundColor(uiBackgroundColor());
-        rootView = root;
-
-        LinearLayout header = new LinearLayout(this);
-        header.setOrientation(LinearLayout.HORIZONTAL);
-        header.setGravity(Gravity.CENTER_VERTICAL);
-        TextView title = label(buildSafetyBanner(), 18, true);
-        header.addView(title, new LinearLayout.LayoutParams(0,
-                ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        languageUaButton = button("Укр", v -> setUiLanguage(true));
-        languageEngButton = button("Eng", v -> setUiLanguage(false));
-        themeDarkButton = button("Темна", v -> setUiTheme(true));
-        themeLightButton = button("Light", v -> setUiTheme(false));
-        header.addView(languageUaButton);
-        header.addView(languageEngButton);
-        header.addView(themeDarkButton);
-        header.addView(themeLightButton);
-        root.addView(header);
-
-        LinearLayout contentHost = new LinearLayout(this);
-        contentHost.setOrientation(LinearLayout.VERTICAL);
-        root.addView(contentHost, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f));
-
-        mainTabView = new ScrollView(this);
-        LinearLayout mainRoot = tabContentRoot();
-        mainTabView.addView(mainRoot);
-        contentHost.addView(mainTabView, tabLayoutParams());
-
-        appsTabView = new ScrollView(this);
-        LinearLayout appsRoot = tabContentRoot();
-        appsTabView.addView(appsRoot);
-        contentHost.addView(appsTabView, tabLayoutParams());
-
-        logTabView = new ScrollView(this);
-        LinearLayout logRoot = tabContentRoot();
-        logTabView.addView(logRoot);
-        contentHost.addView(logTabView, tabLayoutParams());
-
-        manualTabView = new ScrollView(this);
-        LinearLayout manualRoot = tabContentRoot();
-        manualTabView.addView(manualRoot);
-        contentHost.addView(manualTabView, tabLayoutParams());
-
-        mainTabButton = button("Main", v -> selectTab(0));
-        appsTabButton = button("Apps", v -> selectTab(1));
-        logTabButton = button("Logs", v -> selectTab(2));
-        manualTabButton = button("Manual", v -> selectTab(3));
-        root.addView(row(mainTabButton, appsTabButton, logTabButton, manualTabButton));
-
-        currentStateView = label("", 16, false);
-        mainRoot.addView(currentStateView);
-
-        mainRoot.addView(section("Permissions and Runtime"));
-        adbBridgeStatusView = label("nav permission self-check pending", 14, false);
-        mainRoot.addView(adbBridgeStatusView);
-        adbBridgeGrantButton = button("Grant ADB",
-                v -> requestAdbPermissionGrant(
-                        "ui-grant",
-                        LocalAdbBridge.AuthorizationPromptMode.FORCE));
-        bgSettingsButton = button("Open \"Disable background apps\" menu",
-                v -> BgSettingsLauncher.open(this));
-        mainRoot.addView(row(adbBridgeGrantButton, bgSettingsButton));
-
-        mainRoot.addView(section("Navigation Output"));
-        pngOutputSwitchListener = (buttonView, checked) ->
-                setPngOutputEnabled(checked);
-        nativeOutputSwitchListener = (buttonView, checked) ->
-                setNativeOutputEnabled(checked);
-        laneOutputSwitchListener = (buttonView, checked) ->
-                setLaneOutputEnabled(checked);
-        distanceOutputSwitchListener = (buttonView, checked) ->
-                setDistanceOutputEnabled(checked);
-        streetOutputSwitchListener = (buttonView, checked) ->
-                setStreetOutputEnabled(checked);
-        pngOutputSwitch = switchRow(mainRoot, "PNG output",
-                HudPrefs.isPngOutputEnabled(this), pngOutputSwitchListener);
-        nativeOutputSwitch = switchRow(mainRoot, "Native output",
-                HudPrefs.isNativeOutputEnabled(this), nativeOutputSwitchListener);
-        laneOutputSwitch = switchRow(mainRoot, "Lane output",
-                HudPrefs.isLaneOutputEnabled(this), laneOutputSwitchListener);
-        distanceOutputSwitch = switchRow(mainRoot, "Distance output",
-                HudPrefs.isDistanceOutputEnabled(this), distanceOutputSwitchListener);
-        streetOutputSwitch = switchRow(mainRoot, "Street output",
-                HudPrefs.isStreetOutputEnabled(this), streetOutputSwitchListener);
-
-        mainRoot.addView(section("Navigation Preferences"));
-        bootSwitchListener = (buttonView, checked) -> setBootMode(checked);
-        bootSwitch = switchRow(mainRoot, "Boot runtime service", HudPrefs.isBootEnabled(this),
-                bootSwitchListener);
-        smallDistanceClampSwitchListener = (buttonView, checked) ->
-                setSmallDistanceClamp(checked);
-        smallDistanceClampSwitch = switchRow(mainRoot, "Small distance clamp",
-                HudPrefs.isSmallDistanceClampEnabled(this), smallDistanceClampSwitchListener);
-
-        logRoot.addView(section("Logcat"));
-        logcatRecorderStatusView = label(LogcatRecorder.STATUS_WAITING, 14, false);
-        logRoot.addView(logcatRecorderStatusView);
-        logcatStartButton = button("Start Logcat", v -> startLogcatRecording());
-        logcatStopButton = button("Stop Logcat", v -> stopLogcatRecording());
-        logRoot.addView(row(logcatStartButton, logcatStopButton));
-
-        logRoot.addView(section("Navigation Logs"));
-        logPathsView = label(logPathsText(), 13, false);
-        logRoot.addView(logPathsView);
-
-        logRoot.addView(section("Status Log"));
-        statusView = label("", 13, false);
-        logRoot.addView(statusView);
-
-        manualRoot.addView(section("Manual HUD Output"));
-        manualModeSwitchListener = (buttonView, checked) -> setManualMode(checked);
-        manualModeSwitch = switchRow(manualRoot, "Manual mode", manualModeEnabled,
-                manualModeSwitchListener);
-
-        manualRoot.addView(section("Connection"));
-        connectButton = button("Connect", v -> connectSomeIp());
-        startButton = button("Start", v -> startSending());
-        stopButton = button("Stop", v -> stopSending(true));
-        disconnectButton = button("Disconnect", v -> disconnectHud());
-        manualRoot.addView(row(
-                connectButton,
-                startButton,
-                stopButton,
-                disconnectButton));
-        manualRoot.addView(row(
-                button("Background", v -> moveTaskToBack(true)),
-                button("Stop Exit", v -> exitAndFinish())));
-
-        manualRoot.addView(section("Distance"));
-        distanceEdit = numberEditText(state.distanceToIntersection, "Distance m");
-        distanceApplyButton = button("Apply Distance", v -> applyDistanceAndSend());
-        manualRoot.addView(row(distanceEdit, distanceApplyButton));
-        roadNameEdit = editText(state.roadName);
-        manualRoot.addView(roadNameEdit);
-
-        manualRoot.addView(section("Lanes"));
-        laneCountEdit = numberEditText(state.numOfLanes, "Count");
-        laneEdit = editText(state.laneString);
-        laneShowButton = button("Lanes Show", v -> setLaneBitmap(true));
-        laneHideButton = button("Lanes Hide", v -> setLaneBitmap(false));
-        manualRoot.addView(row(laneShowButton, laneHideButton));
-        manualRoot.addView(laneEdit);
-        laneApplyButton = button("Apply Lanes", v -> applyLaneCountAndSend());
-        laneRandomizeButton = button("Next Lanes", v -> randomizeLanesAndSend());
-        manualRoot.addView(row(laneCountEdit, laneApplyButton, laneRandomizeButton));
-
-        manualRoot.addView(section("Arrow Visibility"));
-        pngShowButton = button("PNG Show", v -> setPngVisible(true));
-        pngHideButton = button("PNG Hide", v -> setPngVisible(false));
-        nativeShowButton = button("Native Show", v -> setNativeVisible(true));
-        nativeHideButton = button("Native Hide", v -> setNativeVisible(false));
-        manualRoot.addView(row(pngShowButton, pngHideButton));
-        manualRoot.addView(row(nativeShowButton, nativeHideButton));
-
-        manualRoot.addView(section("Supported Arrows"));
-        arrowsCuratedButton = button("Supported", v -> switchArrowMode(true));
-        arrowsRawButton = button("Raw", v -> switchArrowMode(false));
-        manualRoot.addView(row(arrowsCuratedButton, arrowsRawButton));
-        curatedPrevButton = button("Prev", v -> stepCurated(-1));
-        curatedNextButton = button("Next", v -> stepCurated(1));
-        manualRoot.addView(row(curatedPrevButton, curatedNextButton));
-
-        manualRoot.addView(section("Raw Arrows"));
-        rawPngIdEdit = numberEditText(state.turnBitmapId, "PNG/S ID");
-        rawNativeIdEdit = numberEditText(state.maneuverId, "Native/N ID");
-        manualRoot.addView(row(rawPngIdEdit, rawNativeIdEdit));
-        rawPngPrevButton = button("PNG Prev", v -> stepRawPng(-1));
-        rawPngNextButton = button("PNG Next", v -> stepRawPng(1));
-        manualRoot.addView(row(rawPngPrevButton, rawPngNextButton));
-        rawNativePrevButton = button("Native Prev", v -> stepRawNative(-1));
-        rawNativeNextButton = button("Native Next", v -> stepRawNative(1));
-        manualRoot.addView(row(rawNativePrevButton, rawNativeNextButton));
-        rawApplyButton = button("Apply Raw", v -> applyRawArrowsAndSend());
-        manualRoot.addView(row(rawApplyButton));
-
-        manualRoot.addView(section("Quick Hide"));
-        manualRoot.addView(row(
-                button("Hide PNG + Native", v -> setBothArrowsHidden())));
-
-        manualRoot.addView(section("Guide Point"));
-        guidePointEdit = editText(state.guidePoint);
-        guidePointEdit.setInputType(InputType.TYPE_CLASS_TEXT);
-        manualRoot.addView(guidePointEdit);
-        manualRoot.addView(row(button("Apply Guide", v -> applyNavigationFieldsAndSend())));
-
-        appsRoot.addView(section("Supported apps"));
-        appsRoot.addView(warningLabel("SUPPORTED APPS: Google Maps, Waze"));
-        appsRoot.addView(warningLabel("Unsupported apps are logging only"));
-        capturePackagesView = label("", 14, false);
-        appsRoot.addView(capturePackagesView);
-        appsRefreshButton = button("Оновити застосунки", v -> composeRefreshApps());
-        appsRoot.addView(row(appsRefreshButton));
-        appsCuratedListRoot = tabContentRoot();
-        appsRoot.addView(appsCuratedListRoot);
-        appsRoot.addView(section("All apps"));
-        appsRawListRoot = tabContentRoot();
-        appsRoot.addView(appsRawListRoot);
-
-        refreshActiveAppsList();
-        refreshUiModeButtons();
-        selectTab(0);
-        applyUiLanguage();
-        applyUiTheme();
-        return root;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -1173,6 +960,12 @@ public final class MainActivity extends ComponentActivity {
             throws Exception {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
         if (profile == null) throw new IllegalArgumentException("Unknown patch profile");
+        if (NavigatorPatchStore.awaitingDestructiveApproval(this, profile)) {
+            if (!destructiveApproved) throw new NavigatorPatchStore.DestructiveApprovalRequiredException();
+            try { NavigatorPackageInstaller.approveQueuedDestructiveInstall(this, profile); }
+            finally { requestPatchUiStateRefresh(this, true, "patch-approval"); }
+            return;
+        }
         NavigatorPatchPipeline.PreparedPatch prepared =
                 NavigatorPatchPipeline.prepareViaWorker(this, profile);
         if (prepared.destructive && !destructiveApproved) {
@@ -1182,6 +975,7 @@ public final class MainActivity extends ComponentActivity {
                     "Installed signer changed; review the destructive warning and retry");
         }
         try {
+            if (prepared.destructive) NavigatorPatchStore.approveDestructiveInstall(this, prepared);
             NavigatorPackageInstaller.begin(this, prepared);
         } catch (Exception error) {
             String phase = NavigatorPatchStore.operation(this, profile).phase;
@@ -1240,6 +1034,7 @@ public final class MainActivity extends ComponentActivity {
 
     public boolean composeNavigatorPatchIsDestructive(String profileId) {
         NavigatorPatchStore.Profile profile = NavigatorPatchStore.Profile.fromId(profileId);
+        if (profile != null && NavigatorPatchStore.awaitingDestructiveApproval(this, profile)) return true;
         if (profile == null || !NavigatorPackageInstaller.isInstalled(this, profile.packageName)) {
             return false;
         }
@@ -1353,7 +1148,8 @@ public final class MainActivity extends ComponentActivity {
                     value.operationToken, value.startedAt, value.progress, value.error,
                     value.readyAt, value.destructive, value.busy(),
                     NavigatorPatchStore.RECOVERY_REQUIRED.equals(value.phase),
-                    NavigatorPatchStore.canCancel(value), value.terminal(), value.acknowledged));
+                    NavigatorPatchStore.canCancel(value), value.terminal(), value.acknowledged,
+                    NavigatorPatchStore.awaitingDestructiveApproval(this, value.profile)));
         }
         result.sort((left, right) -> Long.compare(left.startedAt, right.startedAt));
         return Collections.unmodifiableList(result);
@@ -1455,9 +1251,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeOpenBackgroundSettings() {
-        composeOpenBackgroundSettingsFromReminder();
-    }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public boolean composeShouldShowBackgroundReminder() {
@@ -1590,9 +1383,6 @@ public final class MainActivity extends ComponentActivity {
         refreshControls();
     }
 
-    public void composeSetWholeRouteMetricsEnabled(boolean enabled) {
-        setWholeRouteMetricsEnabled(enabled);
-    }
 
     public void composeSetRouteMetricsMode(int mode) {
         setRouteMetricsMode(mode);
@@ -1880,10 +1670,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    public void composeSetUaLanguage(boolean ua) {
-        setUiLanguage(ua);
-        DashboardWidgetController.refresh(this);
-    }
 
     public void composeSetUiLanguage(String language) {
         HudPrefs.setUiLanguage(this, language);
@@ -2036,9 +1822,6 @@ public final class MainActivity extends ComponentActivity {
         requestRuntimeUiStateRefresh(this, true, "apps-manual");
     }
 
-    public long composeUiStateRevision() {
-        return UI_STATE_REVISION.get();
-    }
 
     public void composeRequestRuntimeUiStateRefresh(boolean force, String reason) {
         requestRuntimeUiStateRefresh(this, force, reason);
@@ -2093,7 +1876,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     static void publishSharedUiStateChange() {
-        UI_STATE_REVISION.incrementAndGet();
         MainActivity activity = RESUMED_ACTIVITY.get();
         if (activity != null && !activity.destroyed) {
             activity.invalidateComposeSnapshot();
@@ -2572,9 +2354,6 @@ public final class MainActivity extends ComponentActivity {
                 operationId);
     }
 
-    static void publishStorageShareCompletion(List<String> storageDays) {
-        publishShareCompletion(immutableStorageDays(storageDays));
-    }
 
     static void refreshAfterStorageShare(Context context, String reason) {
         requestStorageRefreshAfterMutation(context, reason);
@@ -3492,6 +3271,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean cancelAllowed;
         public final boolean terminal;
         public final boolean acknowledged;
+        public final boolean approvalRequired;
 
         ComposePatchOperation(String profileId, String kind, String phase, String detail,
                 String operationToken, long startedAt, int progress, String error, long readyAt,
@@ -3505,6 +3285,14 @@ public final class MainActivity extends ComponentActivity {
                 String operationToken, long startedAt, int progress, String error, long readyAt,
                 boolean destructive, boolean busy, boolean recoveryRequired,
                 boolean cancelAllowed, boolean terminal, boolean acknowledged) {
+            this(profileId, kind, phase, detail, operationToken, startedAt, progress, error,
+                    readyAt, destructive, busy, recoveryRequired, cancelAllowed, terminal, acknowledged, false);
+        }
+
+        ComposePatchOperation(String profileId, String kind, String phase, String detail,
+                String operationToken, long startedAt, int progress, String error, long readyAt,
+                boolean destructive, boolean busy, boolean recoveryRequired,
+                boolean cancelAllowed, boolean terminal, boolean acknowledged, boolean approvalRequired) {
             this.profileId = profileId == null ? "" : profileId;
             this.kind = kind == null ? "" : kind;
             this.phase = phase == null ? NavigatorPatchStore.IDLE : phase;
@@ -3520,6 +3308,7 @@ public final class MainActivity extends ComponentActivity {
             this.cancelAllowed = cancelAllowed;
             this.terminal = terminal;
             this.acknowledged = acknowledged;
+            this.approvalRequired = approvalRequired;
         }
 
         static ComposePatchOperation idle() {
@@ -3538,6 +3327,7 @@ public final class MainActivity extends ComponentActivity {
                     && recoveryRequired == other.recoveryRequired
                     && cancelAllowed == other.cancelAllowed && terminal == other.terminal
                     && acknowledged == other.acknowledged
+                    && approvalRequired == other.approvalRequired
                     && Objects.equals(profileId, other.profileId)
                     && Objects.equals(kind, other.kind)
                     && Objects.equals(phase, other.phase)
@@ -3550,7 +3340,7 @@ public final class MainActivity extends ComponentActivity {
         public int hashCode() {
             return Objects.hash(profileId, kind, phase, detail, operationToken, startedAt,
                     progress, error, readyAt, destructive, busy, recoveryRequired,
-                    cancelAllowed, terminal, acknowledged);
+                    cancelAllowed, terminal, acknowledged, approvalRequired);
         }
     }
 
@@ -3653,9 +3443,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void refreshUiState() {
-        refreshControls();
-    }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void refreshActiveAppsList() {
@@ -4218,11 +4005,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
-    private void cancelRunnable(Runnable runnable) {
-        if (runnable != null) {
-            handler.removeCallbacks(runnable);
-        }
-    }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void exitAndFinish() {
@@ -4280,7 +4062,7 @@ public final class MainActivity extends ComponentActivity {
                     HudRuntimeService.stopPersistent(this, safeReason);
                     HudPrefs.setRuntimeServiceRunning(this, false);
                     HudRuntimeState.markStopped(this, safeReason);
-                    finishAfterStop();
+                    ShellRuntimeSession.afterPersistence(() -> handler.post(this::finishAfterStop));
                 });
             });
         }));
@@ -4403,14 +4185,6 @@ public final class MainActivity extends ComponentActivity {
         NavHudLiveSender.get(this).onWazeAlertsPreferenceChanged(enabled);
         appendStatus("Waze alerts " + (enabled ? "ON" : "OFF"));
         AppEventLogger.event(this, "ui waze_alerts=" + enabled);
-        refreshControls();
-    }
-
-    private void setWholeRouteMetricsEnabled(boolean enabled) {
-        HudPrefs.setWholeRouteMetricsEnabled(this, enabled);
-        cachedPayloadKey = "";
-        appendStatus("Whole route metrics " + (enabled ? "ON" : "OFF"));
-        AppEventLogger.event(this, "ui whole_route_metrics=" + enabled);
         refreshControls();
     }
 
@@ -4541,13 +4315,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void setUiLanguage(boolean ua) {
-        HudPrefs.setUaLanguage(this, ua);
-        appendStatus("UI language " + (ua ? "UA" : "ENG"));
-        refreshUiModeButtons();
-        applyUiLanguage();
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void setUiTheme(boolean dark) {
         HudPrefs.setDarkTheme(this, dark);
@@ -5188,7 +4955,6 @@ public final class MainActivity extends ComponentActivity {
         if (status.readyForCapture()
                 && LocalAdbBridge.canShortCircuitReadyForCapture(
                 this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
-            navRuntimeReconnectAttemptsThisLaunch = 0;
             autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.AUTHORIZED;
             updateAdbBridgeStatus(uiSummary);
             appendStatus("nav permission self-check: " + status.summary());
@@ -5220,7 +4986,6 @@ public final class MainActivity extends ComponentActivity {
     private boolean ensureNavCaptureRuntimeReadyForStart(String mode, String packageName) {
         NavRuntimePermissionStatus status = navRuntimePermissionStatus();
         if (status.readyForCapture()) {
-            navRuntimeReconnectAttemptsThisLaunch = 0;
             if (!LocalAdbBridge.canShortCircuitReadyForCapture(
                     this, LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE)) {
                 requestAdbPermissionGrant(
@@ -5246,30 +5011,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void requestNavCaptureRuntimeReconnect(
-            String reason,
-            NavRuntimePermissionStatus status) {
-        NavNotificationListenerService.requestRuntimeRebind(this, reason);
-        if (status == null || status.readyForCapture() || status.needsAdbGrant()) {
-            scheduleNavPermissionSelfCheck(false, NAV_RUNTIME_RECHECK_DELAY_MS);
-            return;
-        }
-        if (adbGrantInProgress) {
-            appendStatus("capture services reconnect pending: adb bridge already running");
-            scheduleNavPermissionSelfCheck(false, NAV_RUNTIME_RECHECK_DELAY_MS);
-            return;
-        }
-        if (navRuntimeReconnectAttemptsThisLaunch >= NAV_RUNTIME_RECONNECT_RETRY_LIMIT) {
-            appendStatus("capture services reconnect pending: retry limit reached");
-            scheduleNavPermissionSelfCheck(false, NAV_RUNTIME_RECHECK_DELAY_MS);
-            return;
-        }
-        navRuntimeReconnectAttemptsThisLaunch++;
-        requestAdbPermissionGrant(
-                "runtime-reconnect-" + reason,
-                LocalAdbBridge.AuthorizationPromptMode.NEVER);
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void requestAdbPermissionGrant(
             String reason,
@@ -5420,7 +5161,6 @@ public final class MainActivity extends ComponentActivity {
                 + " repairCollision=" + repairCollision
                 + " autoState=" + autoAdbAuthorizationState);
         if (status.readyForCapture()) {
-            navRuntimeReconnectAttemptsThisLaunch = 0;
         }
         String prefix;
         switch (result.code) {
@@ -5477,20 +5217,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String navPermissionStatusRows(NavPermissionStatus status) {
-        return "Notification listener: " + enabledDisabled(status.notificationListenerEnabled)
-                + "\nAccessibility service: " + enabledDisabled(status.accessibilityServiceEnabled)
-                + "\nAccessibility master: " + enabledDisabled(status.accessibilityMasterEnabled)
-                + "\nDashboard overlay: " + enabledDisabled(status.dashboardOverlayEnabled)
-                + "\nStorage read: " + enabledDisabled(status.storageReadEnabled)
-                + "\nStorage write: " + enabledDisabled(status.storageWriteEnabled);
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private String enabledDisabled(boolean value) {
-        return value ? "enabled" : "disabled";
-    }
-
     //sends encoded data here so transport side effects stay behind a single boundary.
     private void sendCurrentState(String reason) {
         if (!"loop".equals(reason) && !reason.endsWith("-compose")) {
@@ -5952,16 +5678,6 @@ public final class MainActivity extends ComponentActivity {
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
-    private void applyTextFieldsAndSend() {
-        if (!applyNavigationFields()) {
-            appendStatus("text fields waiting: numeric fields are incomplete");
-            refreshControls();
-            return;
-        }
-        refreshStateView();
-        sendCurrentState("fields");
-    }
-
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     private void applyNavigationFieldsAndSend() {
         if (!applyNavigationFields()) {

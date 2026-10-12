@@ -46,8 +46,13 @@ public final class ShanghaiTestService extends Service {
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) {
-            ShanghaiTestController.get(this).recoverOwned("service-restart");
-
+            ShanghaiTestController.get(this).recoverOwned("service-restart", () ->
+                    new android.os.Handler(getMainLooper()).post(() -> {
+                        if (!ShanghaiTestController.snapshot().isBusy()
+                                && (activeSessionId == null || activeSessionId.isEmpty())) {
+                            stopSelf(startId);
+                        }
+                    }));
         } else {
             activeSessionId = intent.getStringExtra(SESSION);
             ShanghaiTestController.get(this).onServiceReady(

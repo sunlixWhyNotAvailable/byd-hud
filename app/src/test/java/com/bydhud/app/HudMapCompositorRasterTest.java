@@ -16,12 +16,67 @@ import org.robolectric.annotation.GraphicsMode;
 import org.robolectric.annotation.Config;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertNull;
 
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk = 29, application = Application.class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
 public final class HudMapCompositorRasterTest {
+
+    @Test
+    public void changedPlanesShareOneRenderAndUnchangedPlaneStaysCached() {
+        int[] renders = {0};
+        boolean[] failNextRender = {false};
+        byte[] upperPng = {1};
+        byte[] lowerPng = {2};
+        HudExperimentalCompositor compositor = new HudExperimentalCompositor(input -> {
+            renders[0]++;
+            assertTrue(input.maneuverPng.length > 0);
+            assertTrue(input.lanePng.length > 0);
+            if (failNextRender[0]) {
+                failNextRender[0] = false;
+                return HudExperimentalCompositor.Result.empty();
+            }
+            return new HudExperimentalCompositor.Result(input.maneuverPng.clone(), input.lanePng.clone());
+        });
+        HudMapSettings settings = HudMapSettings.defaults();
+
+        HudExperimentalCompositor.Inputs initial = input(new byte[]{1}, new byte[]{2},
+                settings, false, null);
+        HudExperimentalCompositor.Result first = compositor.compose(initial);
+        assertEquals(1, renders[0]);
+        assertArrayEquals(upperPng, first.f8Png());
+        assertArrayEquals(lowerPng, first.f7Png());
+        compositor.compose(initial);
+        assertEquals(1, renders[0]);
+
+        HudExperimentalCompositor.Result upperChanged = compositor.compose(input(
+                new byte[]{3}, new byte[]{2}, settings, false, null));
+        assertEquals(2, renders[0]);
+        assertArrayEquals(new byte[]{3}, upperChanged.f8Png());
+        assertArrayEquals(lowerPng, upperChanged.f7Png());
+        HudExperimentalCompositor.Result lowerChanged = compositor.compose(input(
+                new byte[]{3}, new byte[]{4}, settings, false, null));
+        assertEquals(3, renders[0]);
+        assertArrayEquals(new byte[]{3}, lowerChanged.f8Png());
+        assertArrayEquals(new byte[]{4}, lowerChanged.f7Png());
+
+        HudExperimentalCompositor.Inputs nextLower = input(
+                new byte[]{3}, new byte[]{5}, settings, false, null);
+        failNextRender[0] = true;
+        HudExperimentalCompositor.Result failed = compositor.compose(nextLower);
+        assertEquals(4, renders[0]);
+        assertArrayEquals(new byte[]{3}, failed.f8Png());
+        assertNull(failed.f7Png());
+        HudExperimentalCompositor.Result recovered = compositor.compose(nextLower);
+        assertEquals(5, renders[0]);
+        assertArrayEquals(new byte[]{3}, recovered.f8Png());
+        assertArrayEquals(new byte[]{5}, recovered.f7Png());
+        compositor.compose(nextLower);
+        assertEquals(5, renders[0]);
+    }
 
     @Test
     public void liveMapUsesSharedSeamAndLaneArtStaysAboveIt() throws Exception {

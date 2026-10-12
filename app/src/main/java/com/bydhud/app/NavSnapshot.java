@@ -57,11 +57,6 @@ public final class NavSnapshot {
         this.rawReason = rawReason == null ? "" : rawReason;
     }
 
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    public boolean isUsableForHud() {
-        return confidence >= 70 && maneuver != Maneuver.UNKNOWN;
-    }
-
     //normalizes values here so malformed app text cannot leak into HUD payloads.
     private static int clampConfidence(int confidence) {
         if (confidence < 0) {

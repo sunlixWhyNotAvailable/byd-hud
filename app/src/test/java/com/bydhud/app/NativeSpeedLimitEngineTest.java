@@ -34,6 +34,23 @@ public final class NativeSpeedLimitEngineTest {
         assertFalse(unconfirmed.logs.stream().anyMatch(line -> line.contains("outcome=io_error")));
     }
 
+    @Test public void pausedMapLiveRestoresFallbackWithoutReplenishingWriteQuota() {
+        Fake f = new Fake();
+        f.engine.configureMapLive("map:1", 75);
+        f.until(40_000);
+        assertEquals(6, f.writes.size());
+        assertTrue(f.fallback);
+        f.engine.pauseMapLive("map:1", "temporary-owner-change");
+        assertFalse(f.fallback);
+        f.engine.configureMapLive("map:1", 75);
+        assertTrue("exhausted session resumes bitmap fallback", f.fallback);
+        f.until(80_000);
+        assertEquals("resume never grants more Native writes", 6, f.writes.size());
+        f.raw = NativeSpeedLimitEngine.expectedRaw(75);
+        f.until(82_000);
+        assertFalse("late readback still removes fallback", f.fallback);
+    }
+
     private static final class Task {
         final long at, id;
         final Runnable run;

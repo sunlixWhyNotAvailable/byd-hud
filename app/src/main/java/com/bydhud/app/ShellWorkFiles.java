@@ -2,6 +2,9 @@ package com.bydhud.app;
 
 import android.content.Context;
 import android.os.Bundle;
+import android.os.Process;
+import android.system.Os;
+import android.system.StructStat;
 import org.json.JSONObject;
 import java.io.File;
 import java.io.FileOutputStream;
@@ -11,21 +14,61 @@ import java.util.Iterator;
 
 /** Small, durable messages; APKs and archives stay streamed on disk. */
 final class ShellWorkFiles {
+    static final String CONTROL_ROOT = "/data/local/tmp/com.bydhud.app/shell-work";
+
     static boolean running(File job) throws IOException {
         try (java.io.RandomAccessFile owner = new java.io.RandomAccessFile(new File(job, "owner.lock"), "rw")) {
             try (java.nio.channels.FileLock lock = owner.getChannel().tryLock()) { return lock == null; }
             catch (java.nio.channels.OverlappingFileLockException lockedInThisProcess) { return true; }
         }
     }
-    static boolean settled(File job) {
-        try { return new File(job, "result.json").isFile() && !running(job); }
-        catch (IOException ignored) { return false; }
-    }
-
     static File root(Context context) throws IOException {
         File external = externalFiles(context);
         if (external == null) throw new IOException("Shared runtime storage unavailable");
-        return directory(new File(external, "shell-work"));
+        return new File(external, "shell-work").getCanonicalFile();
+    }
+
+    /** Private app-side operation expectations; never shared with shell or another app. */
+    static File expectationRoot(Context context) throws IOException {
+        return directory(new File(context.getNoBackupFilesDir(), "shell-work-expectations"))
+                .getCanonicalFile();
+    }
+
+    /** Created only by the UID-2000 proxy, so workers can persist control state outside shared storage. */
+    static File controlRoot() throws IOException {
+        if (Process.myUid() != 2000) throw new IOException("Shell runtime owner required");
+        File root = new File(CONTROL_ROOT).getCanonicalFile();
+        if (!root.isDirectory() && !root.mkdirs()) throw new IOException("Cannot create private shell runtime");
+        try {
+            Os.chmod(root.getPath(), 0700);
+            StructStat stat = Os.stat(root.getPath());
+            if (stat.st_uid != 2000 || (stat.st_mode & 0077) != 0) {
+                throw new IOException("Private shell runtime ownership mismatch");
+            }
+        } catch (android.system.ErrnoException error) {
+            throw new IOException("Cannot verify private shell runtime", error);
+        }
+        return root;
+    }
+
+    static File controlJob(String id) throws IOException {
+        if (id == null || !id.matches("[A-Za-z0-9_-]{1,120}"))
+            throw new IOException("Invalid shell operation ID");
+        File root = controlRoot();
+        File job = new File(root, id).getCanonicalFile();
+        if (!job.getParentFile().equals(root)) throw new IOException("Invalid private shell operation path");
+        return job;
+    }
+
+    static File ownedPath(File root, String path) throws IOException {
+        if (path == null || path.isEmpty()) throw new IOException("Missing runtime path");
+        File canonicalRoot = root.getCanonicalFile();
+        File candidate = new File(path).getCanonicalFile();
+        if (!candidate.equals(canonicalRoot)
+                && !candidate.getPath().startsWith(canonicalRoot.getPath() + File.separator)) {
+            throw new IOException("Runtime path outside owned workspace");
+        }
+        return candidate;
     }
 
     static File externalFiles(Context context) {
@@ -43,9 +86,8 @@ final class ShellWorkFiles {
     }
 
     static File inside(File root, String path) throws IOException {
-        File file = new File(path).getCanonicalFile();
-        if (!file.getPath().startsWith(root.getCanonicalPath() + File.separator))
-            throw new IOException("Runtime path outside owned workspace");
+        File file = ownedPath(root, path);
+        if (file.equals(root.getCanonicalFile())) throw new IOException("Runtime path names workspace root");
         return file;
     }
 

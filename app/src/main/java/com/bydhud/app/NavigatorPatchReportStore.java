@@ -266,8 +266,15 @@ final class NavigatorPatchReportStore {
 
     /** Day-to-latest-write map used to expose report-only days in Storage export selection. */
     static Map<String, Long> reportDays(Context context) throws IOException {
+        return reportDays(snapshotAll(context));
+    }
+
+    /** Builds the day index from an already captured export snapshot without taking another lock. */
+    static Map<String, Long> reportDays(List<JSONObject> reports) {
         Map<String, Long> days = new LinkedHashMap<>();
-        for (JSONObject report : snapshotAll(context)) {
+        if (reports == null) return Collections.emptyMap();
+        for (JSONObject report : reports) {
+            if (report == null) continue;
             String day = report.optString("day");
             if (!day.matches("\\d{8}")) continue;
             days.put(day, Math.max(days.getOrDefault(day, 0L), report.optLong("updatedAt")));
@@ -308,11 +315,16 @@ final class NavigatorPatchReportStore {
 
     /** Complete JSON snapshot for configuration and normal-log ZIPs; history ignores selected days. */
     static JSONObject exportSnapshot(Context context) throws IOException {
-        List<JSONObject> reports = snapshotAll(context);
+        return exportSnapshot(snapshotAll(context));
+    }
+
+    /** Serializes the exact report list captured before an export topology lock was acquired. */
+    static JSONObject exportSnapshot(List<JSONObject> reports) throws IOException {
         boolean incomplete = false;
         JSONArray entries = new JSONArray();
-        for (JSONObject report : reports) {
-            entries.put(report);
+        if (reports != null) for (JSONObject report : reports) {
+            if (report == null) continue;
+            entries.put(copy(report));
             incomplete |= report.optBoolean("incomplete");
         }
         JSONObject result = new JSONObject();

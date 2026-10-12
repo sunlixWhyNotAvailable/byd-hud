@@ -31,16 +31,20 @@ final class ShellShanghaiRoute {
             ShellWorkFiles.directory(evidence);
             File shellEvidence = ShellWorkFiles.directory(new File(evidence, "shell-runtime"));
             ShanghaiDiagnosticAdb diagnostics = new ShanghaiDiagnosticAdb(app, shellEvidence,
-                    input.getString("id").replace("-", "").substring(0, 16));
+                    tokenFromSessionId(input.getString("id")));
             boolean completed = false;
             long origin = 0;
+            long lastCoverageWriteMs = Long.MIN_VALUE;
             int elapsed = 0;
             String failure = "";
             ShanghaiMockGps.Result cleanup;
+            boolean resetAnyRequested = false;
             try (ShanghaiSessionJournal journal = new ShanghaiSessionJournal(new File(shellEvidence, "route.jsonl"))) {
                 try {
                     diagnostics.start();
                     diagnostics.resolveReadiness(5_000);
+                    writeCoverage(shellEvidence, diagnostics);
+                    lastCoverageWriteMs = SystemClock.elapsedRealtime();
                     ShanghaiRoute route = ShanghaiRoute.load(app);
                     ShanghaiMockGps.Result begun = gps.begin(input.getString("id"));
                     journal.record("mock_begin", begun.code + ": " + begun.detail);
@@ -55,6 +59,11 @@ final class ShellShanghaiRoute {
                         if (origin == 0) origin = gps.lastInjectedElapsedMs();
                         ShellWorkEntryPoint.progress(new JSONObject().put("phase", elapsed < 15 ? "PREPARING" : "DRIVING")
                                 .put("elapsed", elapsed).put("origin", origin));
+                        long coverageNow = SystemClock.elapsedRealtime();
+                        if (coverageNow - lastCoverageWriteMs >= 1_000L) {
+                            writeCoverage(shellEvidence, diagnostics);
+                            lastCoverageWriteMs = coverageNow;
+                        }
                         if (elapsed == ShanghaiRoute.DURATION_SECONDS) { completed = true; break; }
                         long now = SystemClock.elapsedRealtime();
                         long next = origin + ((now - origin) / 1000 + 1) * 1000;
@@ -66,16 +75,35 @@ final class ShellShanghaiRoute {
                 } catch (Exception error) { failure = error.toString(); journal.record("failure", failure); }
                 finally {
                     Thread.interrupted();
-                    cleanup = new File(app.job, "reset-any").exists() ? gps.resetAny() : gps.cleanupOwned();
+                    File resetAny = ShellWorkEntryPoint.currentControl == null ? null
+                            : new File(ShellWorkEntryPoint.currentControl, "reset-any");
+                    resetAnyRequested = resetAny != null && resetAny.isFile();
+                    cleanup = resetAnyRequested
+                            ? gps.resetAny() : gps.cleanupOwned();
                     journal.record("mock_cleanup", cleanup.code + ": " + cleanup.detail);
                     try { Thread.sleep(5_000); } catch (InterruptedException ignored) { Thread.interrupted(); }
                     diagnostics.close();
-                    ShellWorkFiles.write(new File(shellEvidence, "diagnostic-coverage.json"), diagnostics.coverageJson());
+                    writeCoverage(shellEvidence, diagnostics);
                 }
             }
             return new JSONObject().put("completed", completed).put("elapsed", elapsed).put("origin", origin)
                     .put("failure", failure).put("cleanup", cleanup.code + ": " + cleanup.detail)
+                    .put("resetAny", resetAnyRequested)
                     .put("cleanupPending", !cleanup.success() || gps.hasPendingRecovery());
         }
+    }
+
+    static String tokenFromSessionId(String id) throws java.security.NoSuchAlgorithmException {
+        if (id == null || id.isEmpty()) throw new IllegalArgumentException("Shanghai session ID is missing");
+        byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(id.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        StringBuilder token = new StringBuilder(12);
+        for (int i = 0; i < 6; i++) token.append(String.format(java.util.Locale.ROOT, "%02x", digest[i] & 0xff));
+        return token.toString();
+    }
+
+    private static void writeCoverage(File directory, ShanghaiDiagnosticAdb diagnostics)
+            throws java.io.IOException {
+        ShellWorkFiles.write(new File(directory, "diagnostic-coverage.json"), diagnostics.coverageJson());
     }
 }

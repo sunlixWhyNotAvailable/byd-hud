@@ -138,11 +138,7 @@ public final class ClusterProjectionService extends Service
         intent.putExtra(EXTRA_REASON, safe(reason));
         putTaskState(intent, taskState);
         putCompletion(intent, requestCurrent, completion);
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent);
-        } else {
-            context.startService(intent);
-        }
+        context.startForegroundService(intent);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -185,11 +181,7 @@ public final class ClusterProjectionService extends Service
                 intent.putExtra(EXTRA_RETURN_OWNER_TOKEN, service.projectionOwnerToken);
             }
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            context.startForegroundService(intent);
-        } else {
-            context.startService(intent);
-        }
+        context.startForegroundService(intent);
     }
 
     static void applyDashboardProfile(Context context, int dashboardMode, String reason) {
@@ -281,6 +273,17 @@ public final class ClusterProjectionService extends Service
         return service == null
                 ? NavAppDisplayState.DISPLAY_UNKNOWN
                 : service.currentProjectedDisplayId(packageName);
+    }
+
+    static android.graphics.Rect taskBounds(String packageName, int displayId) {
+        ClusterProjectionService service = instance;
+        if (service == null) return null;
+        synchronized (service.lock) {
+            if (!service.projectionRequested || !packageName.equals(service.projectedPackage)
+                    || service.virtualDisplay == null || service.virtualDisplay.getDisplay() == null
+                    || service.virtualDisplay.getDisplay().getDisplayId() != displayId) return null;
+            return new android.graphics.Rect(0, 0, service.projectionBufferWidth, service.projectionBufferHeight);
+        }
     }
 
     /** Cached projection fields only; does not inspect a Display, Surface, or system service. */
@@ -936,8 +939,8 @@ public final class ClusterProjectionService extends Service
             log("overlay permission missing; trying addView anyway");
         }
         Display targetDisplay = chooseClusterDisplay();
-        if (targetDisplay == null) {
-            log("projection failed: no display available");
+        if (!DashboardProjectionPolicy.matchesHost(targetDisplay)) {
+            log("projection failed: dashboard geometry unavailable for current display");
             return;
         }
         int targetDisplayId = targetDisplay.getDisplayId();
@@ -1107,6 +1110,12 @@ public final class ClusterProjectionService extends Service
             String reason,
             long expectedProjectionGeneration,
             BooleanSupplier stillCurrent) {
+        final android.graphics.Rect previous;
+        final int expectedServiceGeneration;
+        synchronized (lock) {
+            previous = new android.graphics.Rect(0, 0, projectionBufferWidth, projectionBufferHeight);
+            expectedServiceGeneration = projectionGeneration;
+        }
         final CountDownLatch completed = new CountDownLatch(1);
         final AtomicBoolean gate = new AtomicBoolean(true);
         final AtomicReference<String> result = new AtomicReference<>(
@@ -1155,7 +1164,46 @@ public final class ClusterProjectionService extends Service
             mainHandler.removeCallbacks(resize);
             return "profile resize interrupted";
         }
-        return result.get();
+        if (!result.get().isEmpty()) return result.get();
+        DashboardProjectionPolicy.Geometry geometry = DashboardProjectionPolicy.geometryForProfile(
+                DashboardProjectionPolicy.nativeProfileForMode(dashboardMode, profile));
+        return confirmProfileTaskBounds(packageName, expectedServiceGeneration, expectedProjectionGeneration,
+                geometry, previous, stillCurrent, reason);
+    }
+
+    private String confirmProfileTaskBounds(String packageName, int expectedGeneration, long owner,
+            DashboardProjectionPolicy.Geometry geometry, android.graphics.Rect previous,
+            BooleanSupplier callerCurrent, String reason) {
+        final int display;
+        synchronized (lock) {
+            display = virtualDisplay == null || virtualDisplay.getDisplay() == null ? -1
+                    : virtualDisplay.getDisplay().getDisplayId();
+        }
+        BooleanSupplier current = () -> {
+            if (!callerCurrent.getAsBoolean()) return false;
+            synchronized (lock) {
+                return projectionRequested && projectionGeneration == expectedGeneration && projectionOwnerToken == owner
+                        && packageName.equals(projectedPackage) && projectionBufferWidth == geometry.bufferWidth
+                        && projectionBufferHeight == geometry.bufferHeight && virtualDisplay != null
+                        && virtualDisplay.getDisplay() != null && virtualDisplay.getDisplay().getDisplayId() == display;
+            }
+        };
+        if (!current.getAsBoolean()) return "Profile task geometry superseded";
+        String result = NavAppDisplayController.get(this).resizeProjectedTasks(packageName, display,
+                new android.graphics.Rect(0, 0, geometry.bufferWidth, geometry.bufferHeight), previous, current);
+        log("profile_task_geometry package=" + packageName + " display=" + display + " result=" + result);
+        if (result.isEmpty() && current.getAsBoolean()) {
+            synchronized (lock) {
+                if (current.getAsBoolean()) projectionPlacementReady = true;
+            }
+        }
+        if (!result.isEmpty()) mainHandler.post(() -> {
+            if (!current.getAsBoolean()) return;
+            synchronized (lock) { projectionGeometryValid = false; projectionPlacementReady = false; }
+            recoverProjectionAfterResizeFailure(packageName, expectedGeneration, owner, projectionMode,
+                    "task-bounds " + reason);
+        });
+        return result;
     }
 
     // Adjustable cluster-window geometry was inspired by BYDMate's projection controls.
@@ -1269,7 +1317,7 @@ public final class ClusterProjectionService extends Service
                 projectionLeft = geometry.left;
                 projectionTop = geometry.top;
                 projectionGeometryValid = true;
-                projectionPlacementReady = oldPlacementReady;
+                projectionPlacementReady = false;
                 surfaceGeneration++;
             }
             log("profile_resize_applied package=" + projectedPackage
@@ -1277,6 +1325,11 @@ public final class ClusterProjectionService extends Service
                     + " window=" + geometry.width + "x" + geometry.height
                     + " buffer=" + geometry.bufferWidth + "x" + geometry.bufferHeight
                     + " left=" + geometry.left + " top=" + geometry.top);
+            if (oldPlacementReady) {
+                new Thread(() -> confirmProfileTaskBounds(packageName, expectedProjectionGeneration,
+                        expectedOwnerToken, geometry, new android.graphics.Rect(0, 0, oldBufferWidth, oldBufferHeight),
+                        () -> true, reason), "dashboard-task-resize").start();
+            }
             return true;
         } catch (RuntimeException e) {
             try {
@@ -1538,7 +1591,7 @@ public final class ClusterProjectionService extends Service
                 projectionTop = geometry.top;
                 projectionMode = normalizedMode;
                 projectionGeometryValid = true;
-                projectionPlacementReady = oldPlacementReady;
+                projectionPlacementReady = false;
                 surfaceGeneration++;
             }
             log("profile_resize_applied package=" + packageName
@@ -1925,11 +1978,6 @@ public final class ClusterProjectionService extends Service
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    static boolean isClusterDisplayNameForTest(String name) {
-        return isClusterDisplayName(name);
-    }
-
-    //keeps this predicate explicit so safety checks can be audited without tracing callers.
     private static boolean isClusterDisplayName(String name) {
         String value = NavTextNormalizer.lower(name);
         if (isVirtualProjectionDisplayName(value)) {
@@ -1947,7 +1995,7 @@ public final class ClusterProjectionService extends Service
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
-    private static boolean isVirtualProjectionDisplayName(String name) {
+    static boolean isVirtualProjectionDisplayName(String name) {
         String value = NavTextNormalizer.lower(name);
         return value.contains(VIRTUAL_DISPLAY_NAME)
                 || value.contains("remote_dashboard");
@@ -2672,9 +2720,7 @@ public final class ClusterProjectionService extends Service
                 0,
                 launchIntent,
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
-        Notification.Builder builder = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
-                ? new Notification.Builder(this, CHANNEL_ID)
-                : new Notification.Builder(this);
+        Notification.Builder builder = new Notification.Builder(this, CHANNEL_ID);
         return builder
                 .setSmallIcon(android.R.drawable.ic_dialog_map)
                 .setContentTitle("BYD HUD dashboard")
@@ -2694,9 +2740,6 @@ public final class ClusterProjectionService extends Service
 
     //builds this artifact here so callers do not duplicate protocol or UI construction details.
     private void createNotificationChannel() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
-            return;
-        }
         NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (manager == null || manager.getNotificationChannel(CHANNEL_ID) != null) {
             return;
@@ -2710,11 +2753,7 @@ public final class ClusterProjectionService extends Service
 
     //stops or releases work here so stale capture and HUD output cannot keep running silently.
     private void stopForegroundCompat() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE);
-        } else {
-            stopForeground(true);
-        }
+        stopForeground(STOP_FOREGROUND_REMOVE);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.

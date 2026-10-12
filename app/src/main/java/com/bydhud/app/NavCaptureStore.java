@@ -181,12 +181,6 @@ final class NavCaptureStore {
         return safeKind + "-" + hash + ".png";
     }
 
-    static synchronized String writeDirectArtifactIfAbsent(
-            File dir, String kind, byte[] bytes) {
-        String fileName = directArtifactFileName(kind, bytes);
-        return writeDirectArtifactFileIfAbsent(dir, fileName, bytes);
-    }
-
     static synchronized String writeDirectArtifactFileIfAbsent(
             File dir, String fileName, byte[] bytes) {
         if (dir == null || fileName == null

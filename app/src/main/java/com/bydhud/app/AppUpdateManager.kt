@@ -275,6 +275,9 @@ object AppUpdateManager {
     @JvmStatic
     fun retryReadyInstall(): Boolean = operationController?.retryInstall() == true
 
+    @JvmStatic
+    fun cancelUpdate(operationId: Long): Boolean = operationController?.cancel(operationId) == true
+
     //keeps this predicate explicit so safety checks can be audited without tracing callers.
     fun isAutoCheckEnabled(context: Context): Boolean {
         return context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -567,7 +570,23 @@ object AppUpdateManager {
         override suspend fun recover(onProgress: (AppUpdateOperationSnapshot) -> Unit): AppUpdateOperationSnapshot? = withContext(Dispatchers.IO) {
             val environment = environment.resolve()
             val store = store(environment)
-            val active = if (ShellRuntimeSession.mayRestore(context)) store.readAll()
+            val records = store.readAll()
+            val recovery = recovery(environment, store)
+            for (cancelled in records.filter { it.phase == AppUpdateOwnershipPhase.CANCELLED }) {
+                val observed = AppUpdateOperationSnapshot(cancelled.operationId, UpdateInfo(cancelled.version, "", ""),
+                    AppUpdateOperationPhase.CANCELLING)
+                onProgress(observed)
+                try {
+                    recovery.cancelUnexposed(cancelled.operationId)
+                } catch (error: CancellationException) {
+                    throw error
+                } catch (error: Exception) {
+                    recordCleanupFailure(cancelled.operationId, error)
+                    return@withContext observed.copy(phase = AppUpdateOperationPhase.CANCEL_FAILED,
+                        error = error.message ?: "Update cancellation failed")
+                }
+            }
+            val active = if (ShellRuntimeSession.mayRestore(context)) records
                 .filter { it.phase == AppUpdateOwnershipPhase.ACTIVE && it.downloadId >= 0 }
                 .maxByOrNull { it.operationId } else null
             if (active != null) {
@@ -583,12 +602,13 @@ object AppUpdateManager {
                     store.write(active.copy(targetVersionCode = prepared.targetVersionCode, phase = AppUpdateOwnershipPhase.READY))
                     removeDownload(environment.downloadService, active.downloadId)
                     return@withContext observed.copy(phase = AppUpdateOperationPhase.READY, progress = "100%", ready = prepared)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
                 } catch (error: Exception) {
                     recovery(environment, store).cancelUnexposed(active.operationId)
                     throw error
                 }
             }
-            val recovery = recovery(environment, store)
             val record = recovery.recover() ?: return@withContext null
             val readyFile = store.readyFile(record)
             AppUpdateOperationSnapshot(
@@ -672,6 +692,14 @@ object AppUpdateManager {
             recovery(environment, store(environment)).cancelUnexposed(operationId)
         }
 
+        override suspend fun requestCancellation(operationId: Long) = withContext(Dispatchers.IO) {
+            val environment = environment.resolve()
+            val store = store(environment)
+            store.markCancelled(operationId)
+            store.read(operationId)?.let { if (it.downloadId >= 0) removeDownload(environment.downloadService, it.downloadId) }
+            AppEventLogger.event(context, "app_update cancel_requested operation_id=$operationId")
+        }
+
         override fun recordCleanupFailure(operationId: Long, error: Throwable) {
             runCatching {
                 AppEventLogger.event(
@@ -693,7 +721,7 @@ object AppUpdateManager {
         ) { downloadId -> removeDownload(environment.downloadService, downloadId) }
 
         private fun removeDownload(manager: DownloadManager, downloadId: Long) {
-            if (downloadId >= 0L) runCatching { manager.remove(downloadId) }
+            if (downloadId >= 0L) manager.remove(downloadId)
         }
 
         @Suppress("DEPRECATION")

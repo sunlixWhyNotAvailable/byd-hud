@@ -8,7 +8,6 @@ import android.graphics.Matrix;
 import android.graphics.RectF;
 
 import java.io.ByteArrayOutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 /** Small image conversions shared by live-map output paths. */
@@ -17,22 +16,6 @@ public final class HudMapImage {
     private static final int HEIGHT = HudMapGeometry.SOURCE_HEIGHT;
 
     private HudMapImage() {
-    }
-
-    /** Center-crops and scales a source image into the compositor's 300x180 PNG. */
-    public static byte[] centerCropPng(Bitmap source) {
-        if (source == null || source.isRecycled()) return new byte[0];
-        float fitPercent = 100f * Math.max(WIDTH / (float) source.getWidth(),
-                HEIGHT / (float) source.getHeight());
-        return encodeAndRecycle(framedBitmap(source, 0, 0, fitPercent));
-    }
-
-    /** Applies source framing before producing the same 300x180 image used by HUD output. */
-    public static byte[] profileCropPng(Bitmap source, HudMapProfile profile) {
-        if (profile == null) {
-            return centerCropPng(source);
-        }
-        return encodeAndRecycle(profileCrop(source, profile));
     }
 
     static Bitmap profileCrop(Bitmap source, HudMapProfile profile) {
@@ -50,11 +33,6 @@ public final class HudMapImage {
         } catch (RuntimeException | OutOfMemoryError ignored) {
             return new byte[0];
         }
-    }
-
-    private static byte[] encodeAndRecycle(Bitmap bitmap) {
-        try { return encodePng(bitmap); }
-        finally { if (bitmap != null) bitmap.recycle(); }
     }
 
     private static Bitmap framedBitmap(Bitmap source, float x, float y, float scalePercent) {
@@ -93,21 +71,30 @@ public final class HudMapImage {
         if (canonicalPng == null || canonicalPng.length == 0) {
             return new byte[]{0x0a, 0x00};
         }
-        byte[] encoded = Base64.getEncoder().encodeToString(canonicalPng)
-                .getBytes(StandardCharsets.US_ASCII);
-        ByteArrayOutputStream payload = new ByteArrayOutputStream(encoded.length + 6);
-        payload.write(0x0a);
-        writeVarint(payload, encoded.length);
-        payload.write(encoded, 0, encoded.length);
-        return payload.toByteArray();
+        byte[] encoded = Base64.getEncoder().encode(canonicalPng);
+        byte[] payload = new byte[encoded.length + 1 + varintSize(encoded.length)];
+        payload[0] = 0x0a;
+        int offset = writeVarint(payload, 1, encoded.length);
+        System.arraycopy(encoded, 0, payload, offset, encoded.length);
+        return payload;
     }
 
-    private static void writeVarint(ByteArrayOutputStream out, int value) {
+    private static int varintSize(int value) {
+        int size = 1;
+        while ((value & ~0x7f) != 0) {
+            size++;
+            value >>>= 7;
+        }
+        return size;
+    }
+
+    private static int writeVarint(byte[] out, int offset, int value) {
         int remaining = value;
         while ((remaining & ~0x7f) != 0) {
-            out.write((remaining & 0x7f) | 0x80);
+            out[offset++] = (byte) ((remaining & 0x7f) | 0x80);
             remaining >>>= 7;
         }
-        out.write(remaining);
+        out[offset++] = (byte) remaining;
+        return offset;
     }
 }

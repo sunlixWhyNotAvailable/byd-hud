@@ -87,7 +87,8 @@ object VehicleConfigurationExport {
             worker.execute {
                 control.worker = Thread.currentThread()
                 if (restored?.optString("phase") == ConfigurationExportPhase.CANCELLING.name) {
-                    runCatching { ShellWorkClient.cancel(ShellWorkClient.job(app, "configuration", operationId)) }
+                    runCatching { ShellWorkClient.cancel(app,
+                            ShellWorkClient.job(app, "configuration", operationId)) }
                     control.cancel()
                 }
                 try {

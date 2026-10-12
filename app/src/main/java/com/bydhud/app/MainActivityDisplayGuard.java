@@ -17,6 +17,10 @@ final class MainActivityDisplayGuard {
 
     void check(Activity activity, String phase) {
         Intent incoming = activity.getIntent();
+        if ("new-intent".equals(phase)
+                && (incoming == null || !incoming.getBooleanExtra(REPAIR, false))) {
+            repairRequested = false;
+        }
         int displayId = activity.getWindowManager().getDefaultDisplay().getDisplayId();
         String detail = "phase=" + phase + " task=" + activity.getTaskId()
                 + " display=" + displayId + " target=" + Display.DEFAULT_DISPLAY

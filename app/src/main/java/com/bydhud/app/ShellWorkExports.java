@@ -11,7 +11,7 @@ final class ShellWorkExports {
     static VehicleConfigurationZip.Result configuration(Context context, String id,
             VehicleConfigurationZip.Control control, VehicleConfigurationZip.ProgressListener progress) throws Exception {
         File job = ShellWorkClient.job(context, "configuration", id);
-        if (!new File(job, "request.json").exists()) {
+        if (!ShellWorkClient.hasRequest(context, "configuration", id)) {
             // Freeze app-owned service/cache observations before crossing the process boundary.
             ShellWorkClient.prepare(context, "configuration", id, new JSONObject()
                     .put("runtime", VehicleConfigurationDiagnostics.runtime(context))

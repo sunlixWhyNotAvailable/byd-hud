@@ -420,17 +420,14 @@ final class HudOutputCoordinator {
             String owner = mapOwnerPackage;
             HudMapProfile.Source expectedSource = profile.source;
             NavigatorMapCapture.activate(context, owner, session, expectedSource, () -> {
-                Runnable changed = mapProfileCalibrationChanged;
-                if (mapProfileCalibrationSession == session
-                        && mapProfileCalibrationDraft != null
-                        && mapProfileCalibrationDraft.source == expectedSource
-                        && changed != null) changed.run();
                 worker.post(() -> {
-                    if (mapProfileCalibrationSession == session
-                            && mapProfileCalibrationDraft != null
-                            && mapProfileCalibrationDraft.source == expectedSource) {
-                        scheduleImmediate("map-profile-frame");
-                    }
+                    if (mapProfileCalibrationSession != session
+                            || mapProfileCalibrationDraft == null
+                            || mapProfileCalibrationDraft.source != expectedSource
+                            || mapOwnerGeneration != session) return;
+                    Runnable changed = mapProfileCalibrationChanged;
+                    if (changed != null) changed.run();
+                    scheduleImmediate("map-profile-frame");
                 });
             });
             NavigatorMapCapture.refreshProfiles();

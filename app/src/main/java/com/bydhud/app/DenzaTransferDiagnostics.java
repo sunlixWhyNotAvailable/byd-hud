@@ -30,7 +30,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 /** Collects one bounded-time read-only Denza snapshot for an active Logcat capture. */
 final class DenzaTransferDiagnostics {
     static final long POST_TRANSFER_DELAY_MS = 1_500L;
-    static final long COMMAND_TIMEOUT_MS = 5_000L;
     static final long COLLECTION_TIMEOUT_MS = 25_000L;
     private static final String TAG = "BydHudDenzaDiagnostics";
     private static final String DIRECTORY = "diagnostics/denza-transfer";
@@ -126,7 +125,8 @@ final class DenzaTransferDiagnostics {
                     .put("app", appState(normalizedPackage, state))
                     .put("projection", projectionBefore == null
                             ? new JSONObject().put("status", "unavailable")
-                            : new JSONObject(projectionBefore.toString()));
+                            : new JSONObject(projectionBefore.toString()))
+                    .put("dashboardHost", DashboardProjectionPolicy.hostSnapshot());
             JSONObject base = new JSONObject()
                     .put("schemaVersion", 1)
                     .put("snapshotAtomic", false)
@@ -605,16 +605,6 @@ final class DenzaTransferDiagnostics {
                         session.close();
                         nextCommand++;
                         break;
-                    } catch (SnapshotDeadlineException error) {
-                        finalStatus = "timeout";
-                        failure = "collection_deadline";
-                        synchronized (activeLock) {
-                            result = finishCommandResult(result, command, output, commandStarted,
-                                    "timeout", failure);
-                            if (!commandRecorded) commands.put(result);
-                        }
-                        nextCommand++;
-                        break;
                     } catch (SnapshotCancelledException error) {
                         synchronized (activeLock) {
                             String terminal = "timeout".equals(request.status)
@@ -726,7 +716,8 @@ final class DenzaTransferDiagnostics {
             JSONObject post = new JSONObject()
                     .put("capturedAtElapsedMs", SystemClock.elapsedRealtime())
                     .put("app", appState(request.packageName, state))
-                    .put("projection", projection);
+                    .put("projection", projection)
+                    .put("dashboardHost", DashboardProjectionPolicy.hostSnapshot());
             JSONObject base = new JSONObject(request.baseJson);
             JSONObject before = base.optJSONObject("preTransfer");
             JSONObject beforeApp = before == null ? null : before.optJSONObject("app");

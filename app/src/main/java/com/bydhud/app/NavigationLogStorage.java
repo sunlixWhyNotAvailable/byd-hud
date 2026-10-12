@@ -274,6 +274,8 @@ final class NavigationLogStorage {
         final boolean active;
         final List<File> tombstones;
         final String detail;
+        final File incidentRoot;
+        final List<File> roots;
 
         DayRetirement(
                 boolean ok,
@@ -281,11 +283,24 @@ final class NavigationLogStorage {
                 boolean active,
                 List<File> tombstones,
                 String detail) {
+            this(ok, day, active, tombstones, detail, null, Collections.emptyList());
+        }
+
+        DayRetirement(
+                boolean ok,
+                String day,
+                boolean active,
+                List<File> tombstones,
+                String detail,
+                File incidentRoot,
+                List<File> roots) {
             this.ok = ok;
             this.day = day == null ? "" : day;
             this.active = active;
             this.tombstones = Collections.unmodifiableList(new ArrayList<>(tombstones));
             this.detail = detail == null ? "" : detail;
+            this.incidentRoot = incidentRoot;
+            this.roots = Collections.unmodifiableList(new ArrayList<>(roots));
         }
     }
 
@@ -328,11 +343,6 @@ final class NavigationLogStorage {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     static File storageRootDir(Context context) {
         return withReadLock(() -> publicFirstDir(context, ""));
-    }
-
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    static File navCaptureDir(Context context) {
-        return storageRootDir(context);
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -451,6 +461,14 @@ final class NavigationLogStorage {
                         deleteRecursively(tombstone, tombstone.getParentFile(), null);
                     }
                 }
+                boolean logsRemoved = true;
+                for (File tombstone : retirement.tombstones) {
+                    logsRemoved &= tombstone != null && !tombstone.exists();
+                }
+                if (logsRemoved && !hasLiveStorageDay(retirement.roots, retirement.day)
+                        && !isProtectedStorageDay(retirement.day)) {
+                    RuntimeIncidentRecorder.deleteDay(retirement.incidentRoot, retirement.day);
+                }
             } finally {
                 if (onComplete != null) {
                     onComplete.run();
@@ -514,11 +532,6 @@ final class NavigationLogStorage {
         return publicLogsPath() + "/" + LOGCAT_DIR;
     }
 
-    //keeps this step explicit so callers can rely on one documented behavior boundary.
-    static String publicNavCapturePath() {
-        return publicLogsPath();
-    }
-
     //keeps historical crop sessions discoverable after their runtime was retired.
     static String publicWazeCropPath() {
         return PUBLIC_ROOT + "/<yyyymmdd>/" + WAZE_CROP_DIR
@@ -576,21 +589,6 @@ final class NavigationLogStorage {
                 retentionLimitBytes(context),
                 safePathSegment(reason, "manual"),
                 onComplete));
-    }
-
-    //exposes this helper so parser behavior can be verified without depending on Android runtime state.
-    //exposes active-logcat protection to host-side retention probes.
-    static void enforceNavCaptureRetentionForTest(
-            File root,
-            String activeDay,
-            String activeLogcatDay,
-            long maxBytes) {
-        runNavCaptureRetention(
-                root,
-                activeDay,
-                activeLogcatDay,
-                maxBytes,
-                null);
     }
 
     //captures one coalesced retention request so worker threads do not touch UI or capture state.
@@ -771,24 +769,6 @@ final class NavigationLogStorage {
         });
     }
 
-    static void registerDirectSession(String day, String sessionDir, String sessionName) {
-        String key = directSessionKey(day, sessionDir, sessionName);
-        if (!key.isEmpty()) {
-            synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
-                ACTIVE_DIRECT_SESSIONS.add(key);
-            }
-        }
-    }
-
-    static void unregisterDirectSession(String day, String sessionDir, String sessionName) {
-        String key = directSessionKey(day, sessionDir, sessionName);
-        if (!key.isEmpty()) {
-            synchronized (ACTIVE_DIRECT_SESSION_LOCK) {
-                ACTIVE_DIRECT_SESSIONS.remove(key);
-            }
-        }
-    }
-
     //schedules retention off the capture path so parser timing is not blocked by recursive deletion.
     private static void scheduleNavCaptureRetention(RetentionRequest request) {
         if (request == null) {
@@ -868,7 +848,8 @@ final class NavigationLogStorage {
                     activeLogcatDay,
                     activeDirectSessionsSnapshot(),
                     request.maxBytes,
-                    stats);
+                    stats,
+                    new File(request.context.getFilesDir(), "runtime-incidents"));
             RetentionOutcome outcome = new RetentionOutcome(
                     beforeBytes,
                     Math.max(0L, beforeBytes - stats.deletedBytes),
@@ -918,6 +899,18 @@ final class NavigationLogStorage {
             Set<String> activeDirectSessions,
             long maxBytes,
             RetentionStats stats) {
+        runNavCaptureRetention(roots, activeDay, activeLogcatDay, activeDirectSessions,
+                maxBytes, stats, null);
+    }
+
+    private static void runNavCaptureRetention(
+            List<File> roots,
+            String activeDay,
+            String activeLogcatDay,
+            Set<String> activeDirectSessions,
+            long maxBytes,
+            RetentionStats stats,
+            File incidentRoot) {
         if (roots == null || roots.isEmpty() || maxBytes <= 0L) {
             return;
         }
@@ -942,6 +935,13 @@ final class NavigationLogStorage {
             long deletedBefore = stats == null ? 0L : stats.deletedBytes;
             for (File tombstone : detached.tombstones) {
                 deleteRecursively(tombstone, tombstone.getParentFile(), stats);
+            }
+            boolean removed = true;
+            for (File tombstone : detached.tombstones) removed &= !tombstone.exists();
+            if (removed && "day".equals(candidate.kind)
+                    && !hasLiveStorageDay(roots, candidate.day)
+                    && !isProtectedStorageDay(candidate.day)) {
+                RuntimeIncidentRecorder.deleteDay(incidentRoot, candidate.day);
             }
             long deleted = stats == null
                     ? candidate.estimatedBytes
@@ -1115,6 +1115,29 @@ final class NavigationLogStorage {
                 activeNavCaptureDay(),
                 LogcatRecorder.retentionActiveStartDay(),
                 activeDirectSessionsSnapshot());
+    }
+
+    private static boolean hasLiveStorageDay(List<File> roots, String day) {
+        if (roots == null || day == null || !day.matches("[0-9]{8}")) return false;
+        for (File root : roots) {
+            File live = new File(root, day);
+            if (live.isDirectory()) return true;
+        }
+        return false;
+    }
+
+    private static boolean isProtectedStorageDay(String day) {
+        if (day == null || !day.matches("[0-9]{8}")) return true;
+        return withReadLock(() -> isProtectedStorageDayLocked(day));
+    }
+
+    private static boolean isProtectedStorageDayLocked(String day) {
+        return day.equals(activeNavCaptureDay())
+                || day.equals(LogcatRecorder.retentionActiveStartDay())
+                || hasActiveDirectSessionForDay(day, activeDirectSessionsSnapshot())
+                || EXPORT_PINS.containsKey(day)
+                || ShellWorkClient.pinsDay(day)
+                || ShanghaiTestController.protectsStorageDay(day);
     }
 
     private static boolean isProtectedRetentionCandidate(
@@ -1399,12 +1422,19 @@ final class NavigationLogStorage {
             boolean active) {
         if (EXPORT_PINS.containsKey(day) || ShellWorkClient.pinsDay(day)) return new DayRetirement(false, day, active,
                 Collections.emptyList(), "log export is using this day");
+        if (active || isActiveNavCaptureDayForTest(
+                day, activeNavCaptureDay(), LogcatRecorder.retentionActiveStartDay())) {
+            return new DayRetirement(false, day, true,
+                    Collections.emptyList(), "active capture is using this day");
+        }
         if (ShanghaiTestController.protectsStorageDay(day)) {
             return new DayRetirement(false, day, active,
                     Collections.emptyList(), "Shanghai capture is using this day");
         }
         List<File> sources = new ArrayList<>();
+        List<File> roots = new ArrayList<>();
         for (StorageRoot root : accessibleRootsLocked(context)) {
+            roots.add(root.dir);
             File source = new File(root.dir, day);
             if (!source.exists()) {
                 continue;
@@ -1458,7 +1488,8 @@ final class NavigationLogStorage {
             tombstones.add(fragment.tombstone);
         }
         return new DayRetirement(true, day, active, tombstones,
-                "retired fragments=" + tombstones.size());
+                "retired fragments=" + tombstones.size(),
+                new File(context.getFilesDir(), "runtime-incidents"), roots);
     }
 
     private static File uniqueTombstone(File root, String day, long stamp, int index) {

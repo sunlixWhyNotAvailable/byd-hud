@@ -11,16 +11,6 @@ final class HudOutputPreferences {
     }
 
     //keeps this HUD step isolated so cluster payload behavior stays predictable.
-    static HudState applyToCopy(Context context, HudState rawState) {
-        if (rawState == null) {
-            return null;
-        }
-        HudState state = rawState.copy();
-        apply(context, state);
-        return state;
-    }
-
-    //keeps this HUD step isolated so cluster payload behavior stays predictable.
     static void apply(Context context, HudState payloadState) {
         if (payloadState == null) {
             return;

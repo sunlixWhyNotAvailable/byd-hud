@@ -18,6 +18,10 @@ interface IInstrumentNavigationProxy {
     void setRecoveryEnabled(long generation, boolean enabled);
     Bundle startSystemCapture(long generation, String id, String cursor, in ParcelFileDescriptor destination);
     Bundle systemCaptureState(long generation, String id, boolean stop);
-    void launchWork(long generation, String directory);
-    boolean cancelWork(long generation, String directory);
+    Bundle registerWork(long generation, String id, String type, String artifactDirectory,
+            int boot, String requestJson, in ParcelFileDescriptor[] snapshots);
+    Bundle workState(long generation, String id);
+    void completeWorkSign(long generation, String id, String requestId, boolean ok, String detail);
+    void launchWork(long generation, String id);
+    boolean cancelWork(long generation, String id, boolean resetAnyMockGps);
 }

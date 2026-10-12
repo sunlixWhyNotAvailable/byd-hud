@@ -98,12 +98,30 @@ final class GMapsDirectChannel {
     private boolean identityEnvironmentLogged;
     private final AtomicBoolean identitySystemCaptureRunning = new AtomicBoolean();
     private long lastIdentitySystemCaptureMs = -60_000L;
+    private static final long IDENTITY_EVIDENCE_BACKOFF_MS = 60_000L;
+    private final Object identitySystemCaptureLock = new Object();
+    private final java.util.ArrayDeque<IdentityEvidenceRequest> pendingIdentityEvidence = new java.util.ArrayDeque<>();
+    private final java.util.LinkedHashMap<String, Long> identityEvidenceBackoffByKey = new java.util.LinkedHashMap<>();
+    private String activeIdentityEvidenceKey = "";
+    private String lastIdentityEvidenceKey = "";
     private long lastSequence = -1L;
     private long currentStructuredFrameAtMs;
     private String currentManeuver = "";
     private byte[] currentFallbackPng = new byte[0];
     private String lastBitmapDiagnosticKey = "";
     private DirectTbtFrame currentFrame;
+
+    private static final class IdentityEvidenceRequest {
+        final String channelId;
+        final String reason;
+        final String key;
+
+        IdentityEvidenceRequest(String channelId, String reason, long sessionGeneration) {
+            this.channelId = channelId == null ? "" : channelId;
+            this.reason = reason == null ? "unknown" : reason;
+            this.key = sessionGeneration + "\u0000" + this.reason;
+        }
+    }
 
     GMapsDirectChannel(Context context, Listener listener) {
         this.context = context.getApplicationContext();
@@ -1039,40 +1057,94 @@ final class GMapsDirectChannel {
     }
 
     private void captureIdentitySystemEvidence(String reason) {
+        IdentityEvidenceRequest requested = new IdentityEvidenceRequest(
+                identityChannelId, reason, sessionGeneration);
+        IdentityEvidenceRequest start = null;
         long now = SystemClock.elapsedRealtime();
-        final String request = identityChannelId;
-        if (now - lastIdentitySystemCaptureMs < 60_000L
-                || !identitySystemCaptureRunning.compareAndSet(false, true)) {
-            listener.onLog("identity_system channelId=" + request
-                    + " state=coalesced reason=" + reason);
-            return;
+        synchronized (identitySystemCaptureLock) {
+            if (requested.key.equals(activeIdentityEvidenceKey)) return;
+            for (IdentityEvidenceRequest pending : pendingIdentityEvidence) {
+                if (requested.key.equals(pending.key)) return;
+            }
+            // A changed reason/channel is new evidence and bypasses same-reason backoff.
+            Long lastForKey = identityEvidenceBackoffByKey.get(requested.key);
+            if (lastForKey != null && now - lastForKey < IDENTITY_EVIDENCE_BACKOFF_MS) return;
+            // Preserve a previously started legacy capture while its identity is unknown.
+            if (lastIdentityEvidenceKey.isEmpty() && lastIdentitySystemCaptureMs > 0L
+                    && now - lastIdentitySystemCaptureMs < IDENTITY_EVIDENCE_BACKOFF_MS) return;
+            if (identitySystemCaptureRunning.get()) {
+                pendingIdentityEvidence.addLast(requested);
+                return;
+            }
+            identitySystemCaptureRunning.set(true);
+            activeIdentityEvidenceKey = requested.key;
+            lastIdentityEvidenceKey = requested.key;
+            lastIdentitySystemCaptureMs = now;
+            rememberIdentityEvidenceSchedule(requested.key, now);
+            start = requested;
         }
-        lastIdentitySystemCaptureMs = now;
-        listener.onLog("identity_system channelId=" + request + " state=scheduled reason=" + reason);
+        startIdentityEvidenceCapture(start);
+    }
+
+    private void startIdentityEvidenceCapture(IdentityEvidenceRequest request) {
+        if (request == null) return;
+        listener.onLog("identity_system channelId=" + request.channelId
+                + " state=scheduled reason=" + request.reason);
         Thread capture = new Thread(() -> {
             try {
                 LocalAdbBridge.ShellResult result = LocalAdbBridge.captureGMapsIdentityEvidence(context);
-                listener.onLog("identity_system channelId=" + request + " exit=" + result.exitCode
+                listener.onLog("identity_system channelId=" + request.channelId + " exit=" + result.exitCode
                         + " status=" + result.status + " error=" + GMapsIdentityDiagnostics.text(result.error, 900)
                         + " truncated=" + result.truncated + " droppedBytes=" + result.droppedBytes);
                 String[] lines = result.output.split("\\r?\\n", -1);
                 for (int i = 0; i < lines.length; i++) {
-                    listener.onLog("identity_system channelId=" + request + " line=" + i + " "
+                    listener.onLog("identity_system channelId=" + request.channelId + " line=" + i + " "
                             + GMapsIdentityDiagnostics.text(lines[i], 2000));
                 }
-                listener.onLog("identity_system channelId=" + request + " state=complete lines=" + lines.length);
+                listener.onLog("identity_system channelId=" + request.channelId + " state=complete lines=" + lines.length);
             } catch (Throwable error) {
-                listener.onLog("identity_system channelId=" + request + " state=failed error="
+                listener.onLog("identity_system channelId=" + request.channelId + " state=failed error="
                         + GMapsIdentityDiagnostics.error(error));
             } finally {
-                identitySystemCaptureRunning.set(false);
+                finishIdentityEvidenceCapture(request);
             }
         }, "BydHudIdentityEvidence");
         try { capture.start(); }
         catch (Throwable error) {
-            identitySystemCaptureRunning.set(false);
-            listener.onLog("identity_system channelId=" + request + " state=schedule_failed error="
+            listener.onLog("identity_system channelId=" + request.channelId + " state=schedule_failed error="
                     + GMapsIdentityDiagnostics.error(error));
+            finishIdentityEvidenceCapture(request);
+        }
+    }
+
+    private void finishIdentityEvidenceCapture(IdentityEvidenceRequest finished) {
+        IdentityEvidenceRequest next = null;
+        synchronized (identitySystemCaptureLock) {
+            if (finished != null && finished.key.equals(activeIdentityEvidenceKey)) {
+                activeIdentityEvidenceKey = "";
+            }
+            while (!pendingIdentityEvidence.isEmpty()) {
+                IdentityEvidenceRequest candidate = pendingIdentityEvidence.removeFirst();
+                long now = SystemClock.elapsedRealtime();
+                Long lastForKey = identityEvidenceBackoffByKey.get(candidate.key);
+                if (lastForKey != null && now - lastForKey < IDENTITY_EVIDENCE_BACKOFF_MS) continue;
+                next = candidate;
+                activeIdentityEvidenceKey = candidate.key;
+                lastIdentityEvidenceKey = candidate.key;
+                lastIdentitySystemCaptureMs = now;
+                rememberIdentityEvidenceSchedule(candidate.key, now);
+                break;
+            }
+            identitySystemCaptureRunning.set(next != null);
+        }
+        if (next != null) startIdentityEvidenceCapture(next);
+    }
+
+    private void rememberIdentityEvidenceSchedule(String key, long atElapsedMs) {
+        identityEvidenceBackoffByKey.put(key, atElapsedMs);
+        while (identityEvidenceBackoffByKey.size() > 32) {
+            String oldest = identityEvidenceBackoffByKey.keySet().iterator().next();
+            identityEvidenceBackoffByKey.remove(oldest);
         }
     }
 

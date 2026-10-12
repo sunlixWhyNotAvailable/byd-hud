@@ -657,17 +657,6 @@ final class WazeRouteLifecycleStore {
                 pendingGeneration, pendingElapsedMs, pendingReasonCode);
     }
 
-    static boolean shouldInvalidateForBoot(
-            int storedBootCount,
-            int currentBootCount,
-            long storedElapsedMs,
-            long nowElapsedMs) {
-        if (storedBootCount >= 0 && currentBootCount >= 0) {
-            return storedBootCount != currentBootCount;
-        }
-        return storedElapsedMs > 0L && nowElapsedMs < storedElapsedMs;
-    }
-
     private static Snapshot emptySnapshot() {
         return new Snapshot(false, 0L, 0L, 0L, 0, NO_TERMINAL_FENCE);
     }

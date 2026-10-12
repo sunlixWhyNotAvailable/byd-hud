@@ -73,16 +73,27 @@ final class RuntimeIncidentRecorder {
 
     private void poll() {
         long now = SystemClock.elapsedRealtime();
-        for (Watch watch : watches.keySet()) {
-            try { sample(watch, now); }
-            catch (Exception error) { Log.w(TAG, "incident_sample_failed " + watch.name, error); }
-            synchronized (this) {
-                if (!watch.pending() && watch.incident == null) watches.remove(watch);
+        try {
+            for (Watch watch : watches.keySet()) {
+                try { sample(watch, now); }
+                catch (Exception error) { Log.w(TAG, "incident_sample_failed " + watch.name, error); }
+                synchronized (this) {
+                    if (!watch.pending() && watch.incident == null) watches.remove(watch);
+                }
             }
-        }
-        synchronized (this) {
-            scheduled = !watches.isEmpty();
-            if (scheduled) executor.schedule(this::poll, 1, TimeUnit.SECONDS);
+        } finally {
+            synchronized (this) {
+                scheduled = false;
+                if (!watches.isEmpty()) {
+                    scheduled = true;
+                    try {
+                        executor.schedule(this::poll, 1, TimeUnit.SECONDS);
+                    } catch (RuntimeException rejected) {
+                        scheduled = false;
+                        throw rejected;
+                    }
+                }
+            }
         }
     }
 
@@ -193,6 +204,13 @@ final class RuntimeIncidentRecorder {
 
     // Freeze private files before handing an export job to the shell UID.
     static Map<String, byte[]> snapshot(Context context, java.util.List<String> days) throws IOException {
+        return snapshot(context, days, null);
+    }
+
+    // Unreadable optional journals are omissions, not a reason to discard readable ZIP sources.
+    static Map<String, byte[]> snapshot(
+            Context context, java.util.List<String> days, java.util.List<String> omissions)
+            throws IOException {
         Map<String, byte[]> result = new LinkedHashMap<>();
         synchronized (FILE_LOCK) {
             for (String day : days) {
@@ -200,12 +218,65 @@ final class RuntimeIncidentRecorder {
                 java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
                 for (String name : new String[]{FILE_NAME, PERSISTENCE_FILE}) {
                     File file = new File(new File(directory(context), day), name);
-                    if (file.isFile()) { bytes.write(Files.readAllBytes(file.toPath())); bytes.write('\n'); }
+                    if (file.exists() && !file.isFile()) {
+                        if (omissions == null) {
+                            throw new IOException("incident journal is not a regular file: " + file);
+                        }
+                        recordOmission(omissions, day, name, "not a regular file");
+                    } else if (file.isFile()) {
+                        try {
+                            bytes.write(Files.readAllBytes(file.toPath()));
+                            bytes.write('\n');
+                        } catch (IOException error) {
+                            if (omissions == null) throw error;
+                            recordOmission(omissions, day, name,
+                                    error.getClass().getSimpleName() + ": " + error.getMessage());
+                        }
+                    }
                 }
                 if (bytes.size() > 0) result.put(day + "/diagnostics/" + FILE_NAME, bytes.toByteArray());
             }
         }
         return result;
+    }
+
+    private static void recordOmission(
+            java.util.List<String> omissions, String day, String name, String cause) {
+        if (omissions != null) {
+            omissions.add(day + "/diagnostics/" + name + ": " + cause);
+        }
+    }
+
+    /** Removes only the app-private incident directory for a fully retired storage day. */
+    static boolean deleteDay(File incidentRoot, String day) {
+        if (incidentRoot == null || day == null || !day.matches("[0-9]{8}")) return false;
+        synchronized (FILE_LOCK) {
+            try {
+                File root = incidentRoot.getCanonicalFile();
+                File target = new File(root, day);
+                if (!target.exists()) return true;
+                if (Files.isSymbolicLink(target.toPath())
+                        || !target.getCanonicalFile().getParentFile().equals(root)) return false;
+                return deleteIncidentTree(target, root.getPath());
+            } catch (IOException | SecurityException error) {
+                Log.w(TAG, "incident_day_delete_failed day=" + day, error);
+                return false;
+            }
+        }
+    }
+
+    private static boolean deleteIncidentTree(File file, String canonicalRoot) throws IOException {
+        if (Files.isSymbolicLink(file.toPath())) return file.delete() || !file.exists();
+        String path = file.getCanonicalPath();
+        if (!path.equals(canonicalRoot) && !path.startsWith(canonicalRoot + File.separator)) return false;
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children == null) return false;
+            for (File child : children) {
+                if (!deleteIncidentTree(child, canonicalRoot)) return false;
+            }
+        }
+        return file.delete() || !file.exists();
     }
 
     static JSONObject summarize(Iterable<byte[]> files) throws Exception {

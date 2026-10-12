@@ -12,7 +12,6 @@ final class WazeTripStateQueue<S, M> {
     private long stepElapsedMs = UNSET;
     private int distanceMeters;
     private boolean distanceKnown;
-    private boolean authoritativeLanes;
     private M metrics;
     private long metricsSequence = UNSET;
     private long metricsElapsedMs = UNSET;
@@ -44,7 +43,6 @@ final class WazeTripStateQueue<S, M> {
                 stepElapsedMs = update.elapsedMs;
                 distanceMeters = Math.max(0, update.distanceMeters);
                 distanceKnown = update.distanceKnown;
-                authoritativeLanes = update.authoritativeLanes;
                 accepted = true;
             }
             if (update.maneuverType >= 0) {
@@ -121,7 +119,7 @@ final class WazeTripStateQueue<S, M> {
             newestElapsedMs = laneChangeElapsedMs;
         }
         Snapshot<S, M> snapshot = new Snapshot<>(stepUpdated, metricsUpdated, laneUpdated, step,
-                distanceKnown, distanceMeters, authoritativeLanes, metrics,
+                distanceKnown, distanceMeters, metrics,
                 laneUpdated ? laneDisposition : LANES_PRESERVE,
                 laneUpdated ? laneSource : null, newestSequence, newestElapsedMs, coalescedCount);
         laneDirty = false;
@@ -156,7 +154,6 @@ final class WazeTripStateQueue<S, M> {
             processedStepSequence = UNSET;
             distanceMeters = 0;
             distanceKnown = false;
-            authoritativeLanes = false;
         }
         if (maneuverSequence <= sequence) {
             maneuverType = -1;
@@ -183,7 +180,6 @@ final class WazeTripStateQueue<S, M> {
         stepElapsedMs = UNSET;
         distanceMeters = 0;
         distanceKnown = false;
-        authoritativeLanes = false;
         metrics = null;
         metricsSequence = UNSET;
         metricsElapsedMs = UNSET;
@@ -253,7 +249,6 @@ final class WazeTripStateQueue<S, M> {
         final S step;
         final boolean distanceKnown;
         final int distanceMeters;
-        final boolean authoritativeLanes;
         final int laneDisposition;
         final S laneSource;
         final M metrics;
@@ -262,8 +257,8 @@ final class WazeTripStateQueue<S, M> {
         final int coalescedCount;
 
         Snapshot(boolean stepUpdated, boolean metricsUpdated, boolean laneUpdated, S step,
-                boolean distanceKnown, int distanceMeters, boolean authoritativeLanes,
-                M metrics, int laneDisposition, S laneSource,
+                boolean distanceKnown, int distanceMeters, M metrics,
+                int laneDisposition, S laneSource,
                 long sequence, long ingressElapsedMs,
                 int coalescedCount) {
             this.stepUpdated = stepUpdated;
@@ -272,7 +267,6 @@ final class WazeTripStateQueue<S, M> {
             this.step = step;
             this.distanceKnown = distanceKnown;
             this.distanceMeters = distanceMeters;
-            this.authoritativeLanes = authoritativeLanes;
             this.laneDisposition = laneDisposition;
             this.laneSource = laneSource;
             this.metrics = metrics;

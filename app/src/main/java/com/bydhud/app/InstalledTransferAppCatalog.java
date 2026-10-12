@@ -119,35 +119,6 @@ public final class InstalledTransferAppCatalog {
         return Entry.fallback(normalized.isEmpty() ? packageName : normalized);
     }
 
-    static List<Candidate> filterAndSortCandidates(
-            Collection<Candidate> candidates,
-            String selfPackage) {
-        if (candidates == null || candidates.isEmpty()) {
-            return Collections.emptyList();
-        }
-        String normalizedSelf = normalizePackage(selfPackage);
-        Map<String, Candidate> unique = new HashMap<>();
-        for (Candidate candidate : candidates) {
-            if (candidate == null) {
-                continue;
-            }
-            String packageName = normalizePackage(candidate.packageName);
-            if (packageName.isEmpty()
-                    || packageName.equals(normalizedSelf)
-                    || !candidate.launchable
-                    || candidate.system) {
-                continue;
-            }
-            String label = fallbackLabel(candidate.label, packageName);
-            if (!unique.containsKey(packageName)) {
-                unique.put(packageName, new Candidate(packageName, label, false, true));
-            }
-        }
-        List<Candidate> result = new ArrayList<>(unique.values());
-        result.sort(candidateComparator());
-        return Collections.unmodifiableList(result);
-    }
-
     static String fallbackLabel(String label, String packageName) {
         if (label == null || label.trim().isEmpty()) {
             return packageName == null ? "" : packageName;
@@ -156,18 +127,6 @@ public final class InstalledTransferAppCatalog {
     }
 
     private static Comparator<Entry> entryComparator() {
-        final Collator collator = Collator.getInstance(Locale.getDefault());
-        collator.setStrength(Collator.PRIMARY);
-        return (left, right) -> {
-            int labelOrder = collator.compare(left.label, right.label);
-            if (labelOrder != 0) {
-                return labelOrder;
-            }
-            return left.packageName.compareToIgnoreCase(right.packageName);
-        };
-    }
-
-    private static Comparator<Candidate> candidateComparator() {
         final Collator collator = Collator.getInstance(Locale.getDefault());
         collator.setStrength(Collator.PRIMARY);
         return (left, right) -> {
@@ -330,17 +289,4 @@ public final class InstalledTransferAppCatalog {
         }
     }
 
-    static final class Candidate {
-        final String packageName;
-        final String label;
-        final boolean system;
-        final boolean launchable;
-
-        Candidate(String packageName, String label, boolean system, boolean launchable) {
-            this.packageName = packageName;
-            this.label = label;
-            this.system = system;
-            this.launchable = launchable;
-        }
-    }
 }

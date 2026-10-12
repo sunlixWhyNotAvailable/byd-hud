@@ -301,11 +301,6 @@ final class NavPermissionGrantPlan {
         return error.isEmpty() && !notificationService.isEmpty() && !accessibilityService.isEmpty();
     }
 
-    //keeps command construction behind fixed setting keys and shell quoting.
-    static String secureSettingPutCommandForTest(String key, String value) {
-        return secureSettingPutCommand(key, value);
-    }
-
     private static String secureSettingPutCommand(String key, String value) {
         if (!NOTIFICATION_LISTENERS.equals(key)
                 && !ACCESSIBILITY_SERVICES.equals(key)

@@ -38,6 +38,7 @@ import java.util.function.Consumer;
 final class InstrumentProxyManager {
     private static final String TAG = "BydHudInstrumentProxy";
     private static final long START_TIMEOUT_MS = 5_000L;
+    private static final long STARTUP_DEADLINE_MS = 45_000L;
     private static final long CALL_TIMEOUT_MS = 3_000L;
     private static final long PING_TIMEOUT_MS = 2_000L;
     private static final long RETRY_DELAY_MS = 30_000L;
@@ -126,6 +127,7 @@ final class InstrumentProxyManager {
     private String nonce = "";
     private String launchToken = "";
     private long connectedAtMs;
+    private long startupDeadlineAtMs;
     private long nextRetryAtMs;
     private int rapidFailureCount;
     private boolean runtimeActive;
@@ -139,6 +141,7 @@ final class InstrumentProxyManager {
     private CapabilityMode capabilityMode = CapabilityMode.NONE;
     private boolean trafficLightCapable;
     private boolean nativeSpeedCapable;
+    private boolean navigationOutputReady;
     private boolean shanghaiSuspended;
     private boolean shanghaiHelperAcknowledged;
 
@@ -207,6 +210,7 @@ final class InstrumentProxyManager {
             }
             state = State.STARTING;
             startStage = "requested";
+            startupDeadlineAtMs = now + STARTUP_DEADLINE_MS;
             generation = Math.max(1L, generationCounter.incrementAndGet());
             nonce = newNonce();
             launchToken = newLaunchToken();
@@ -233,9 +237,13 @@ final class InstrumentProxyManager {
             log("start requested generation=" + requestGeneration + " reason=" + safe(reason));
             worker.execute(() -> {
                 launch(requestGeneration, requestNonce, requestLaunchToken);
-                // Give queued handoffs time to complete after the bounded shell operation.
+                long remaining;
+                synchronized (lock) {
+                    remaining = generation == requestGeneration
+                            ? Math.max(0L, startupDeadlineAtMs - SystemClock.elapsedRealtime()) : 0L;
+                }
                 worker.schedule(() -> handleStartTimeout(requestGeneration),
-                        START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+                        remaining, TimeUnit.MILLISECONDS);
             });
         }
     }
@@ -252,6 +260,7 @@ final class InstrumentProxyManager {
             launchToken = existing.token;
             state = State.STARTING;
             startStage = "reattaching";
+            startupDeadlineAtMs = SystemClock.elapsedRealtime() + STARTUP_DEADLINE_MS;
             registerHandoffReceiver();
             long expected = generation;
             log("reattach requested generation=" + generation + " pid=" + existing.pid);
@@ -260,11 +269,11 @@ final class InstrumentProxyManager {
                 synchronized (lock) {
                     if (state != State.STARTING || generation != expected) return;
                     missing = "reattaching".equals(startStage);
-                    if (missing) state = State.IDLE;
+                    if (missing) { state = State.IDLE; lock.notifyAll(); }
                 }
                 if (missing) ensureStarted("survivor-not-found");
                 else handleStartTimeout(expected);
-            }, START_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            }, STARTUP_DEADLINE_MS, TimeUnit.MILLISECONDS);
         }
     }
 
@@ -291,6 +300,8 @@ final class InstrumentProxyManager {
                     .put("rapidFailureCount", current.rapidFailureCount)
                     .put("pingInFlight", current.pingInFlight)
                     .put("capabilityMode", current.capabilityMode.name())
+                    .put("shellRuntimeReady", current.state == State.READY && current.proxy != null)
+                    .put("navigationOutputReady", current.navigationOutputReady)
                     .put("trafficLightCapable", current.trafficLightCapable)
                     .put("nativeSpeedCapable", current.nativeSpeedCapable)
                     .put("lastResult", new JSONObject().put("status", "unsupported")
@@ -318,6 +329,7 @@ final class InstrumentProxyManager {
                     nonce = "";
                     launchToken = "";
                     unregisterHandoffReceiver();
+                    lock.notifyAll();
                     worker.execute(() -> cleanupHelper("output-ended"));
                 }
                 return;
@@ -352,6 +364,7 @@ final class InstrumentProxyManager {
                 startStage = "shanghai-suspended";
                 unregisterHandoffReceiver();
                 shanghaiHelperAcknowledged = true;
+                lock.notifyAll();
             } else {
                 shanghaiHelperAcknowledged = true;
             }
@@ -374,6 +387,8 @@ final class InstrumentProxyManager {
         synchronized (lock) {
             if (shanghaiSuspended && proxy == active && generation == activeGeneration) {
                 shanghaiHelperAcknowledged = true;
+                navigationOutputReady = false;
+                lock.notifyAll();
             }
         }
     }
@@ -383,20 +398,25 @@ final class InstrumentProxyManager {
         IInstrumentNavigationProxy current;
         IBinder currentBinder;
         long currentGeneration;
+        boolean navigationCapable;
         synchronized (lock) {
             current = state == State.READY ? proxy : null;
             currentBinder = state == State.READY ? proxyBinder : null;
             currentGeneration = generation;
+            navigationCapable = capabilityMode != CapabilityMode.NONE;
         }
         boolean failed = false;
+        boolean resumed = false;
+        boolean readyPublished = false;
         try {
-            if (current != null) {
+            if (current != null && navigationCapable) {
                 final IInstrumentNavigationProxy active = current;
                 final long activeGeneration = currentGeneration;
                 Bundle result = runShanghaiTransition(
                         () -> active.resumeOutput(activeGeneration), "resume");
                 String error = InstrumentProxyContract.error(result);
                 if (!error.isEmpty()) throw new IOException(error);
+                resumed = true;
             }
         } catch (IOException | InterruptedException | RuntimeException error) {
             failed = true;
@@ -407,8 +427,16 @@ final class InstrumentProxyManager {
             synchronized (lock) {
                 shanghaiSuspended = false;
                 shanghaiHelperAcknowledged = false;
+                if (resumed && state == State.READY && proxy == current
+                        && generation == currentGeneration && proxyBinder != null
+                        && proxyBinder.isBinderAlive()) {
+                    navigationOutputReady = true;
+                    readyPublished = true;
+                    lock.notifyAll();
+                }
                 restart = runtimeActive && outputRetry.isActive();
             }
+            if (readyPublished) notifyReadyListeners();
             if (restart) ensureStarted(failed
                     ? "shanghai-resume-recovery" : "shanghai-resumed");
         }
@@ -507,6 +535,7 @@ final class InstrumentProxyManager {
             if (state == State.BLOCKED) return;
             outputRetry.cancel();
             nextRetryAtMs = 0L;
+            // A fresh successful ADB authorization starts a new bounded startup sequence.
             rapidFailureCount = 0;
         }
         ensureStarted("rsa-authorized");
@@ -517,9 +546,19 @@ final class InstrumentProxyManager {
         readyListeners.addIfAbsent(listener);
         boolean ready;
         synchronized (lock) {
-            ready = state == State.READY && proxy != null;
+            ready = state == State.READY && proxy != null && navigationOutputReady;
         }
         if (ready) listener.run();
+    }
+
+    private void notifyReadyListeners() {
+        for (Runnable listener : readyListeners) {
+            try {
+                listener.run();
+            } catch (RuntimeException error) {
+                log("ready listener failed type=" + error.getClass().getSimpleName());
+            }
+        }
     }
 
     void addUnavailableListener(UnavailableListener listener) {
@@ -622,7 +661,8 @@ final class InstrumentProxyManager {
 
     private boolean trafficLightCapabilityAvailable() {
         synchronized (lock) {
-            return state == State.READY && proxy != null && trafficLightCapable;
+            return state == State.READY && proxy != null && navigationOutputReady
+                    && trafficLightCapable;
         }
     }
 
@@ -911,6 +951,7 @@ final class InstrumentProxyManager {
         IInstrumentNavigationProxy current;
         IBinder currentBinder;
         long currentGeneration;
+        boolean outputReady;
         synchronized (lock) {
             if (shanghaiSuspended) {
                 deliver(callback, Result.unavailable(
@@ -920,6 +961,11 @@ final class InstrumentProxyManager {
             current = proxy;
             currentBinder = proxyBinder;
             currentGeneration = generation;
+            outputReady = navigationOutputReady || operation.startsWith("native_speed:");
+        }
+        if (!outputReady) {
+            deliver(callback, Result.unavailable("navigation output capability unavailable"));
+            return;
         }
         if (current == null || currentBinder == null) {
             deliver(callback, Result.unavailable("proxy unavailable"));
@@ -1151,11 +1197,13 @@ final class InstrumentProxyManager {
             nextRetryAtMs = 0L;
             rapidFailureCount = 0;
             capabilityMode = CapabilityMode.NONE;
+            navigationOutputReady = false;
             startStage = "shutdown";
             // Queue cleanup before a later lifecycle request can queue its launch.
             if (current != null) shutdownCandidate(current, currentGeneration);
             worker.execute(() -> cleanupHelper("shutdown"));
             unregisterHandoffReceiver();
+            lock.notifyAll();
         }
         resetCallWorker("shutdown");
         log("shutdown reason=" + safe(reason));
@@ -1364,6 +1412,8 @@ final class InstrumentProxyManager {
                         result, InstrumentProxyContract.CAP_INSTRUMENT_SDK));
         boolean connectedTrafficLight = InstrumentProxyContract.hasCapability(
                 result, InstrumentProxyContract.CAP_TRAFFIC_LIGHT);
+        boolean connectedNavigationOutput =
+                InstrumentProxyContract.hasUsableNavigationCapability(result);
         if (!InstrumentProxyContract.isReady(result)
                 || !InstrumentProxyContract.hasUsableCapability(result)) {
             shutdownCandidate(candidate, requestGeneration);
@@ -1373,9 +1423,11 @@ final class InstrumentProxyManager {
                 state = State.BLOCKED;
                 outputRetry.cancel();
                 capabilityMode = CapabilityMode.NONE;
+                navigationOutputReady = false;
                 nextRetryAtMs = Long.MAX_VALUE;
                 unregisterHandoffReceiver();
                 worker.execute(() -> cleanupHelper("capability-blocked"));
+                lock.notifyAll();
             }
             log("capability circuit open generation=" + requestGeneration
                     + " capabilities=" + InstrumentProxyContract.capabilities(result)
@@ -1403,11 +1455,13 @@ final class InstrumentProxyManager {
             outputRetry.cancel();
             helperIdentity = connectedIdentity;
             capabilityMode = connectedMode;
+            navigationOutputReady = false;
             trafficLightCapable = connectedTrafficLight;
             nativeSpeedCapable = InstrumentProxyContract.hasCapability(result,
                     InstrumentProxyContract.CAP_NATIVE_SPEED);
             connectedAtMs = SystemClock.elapsedRealtime();
             nextRetryAtMs = 0L;
+            // Preserve the failure streak: a handshaken helper may still die before stability.
             unregisterHandoffReceiver();
             lock.notifyAll();
         }
@@ -1415,81 +1469,121 @@ final class InstrumentProxyManager {
                 + " pid=" + connectedIdentity.pid
                 + " uid=" + connectedIdentity.uid
                 + " capabilities=" + connectedMode);
-        // Check after READY: GPS cleanup may have finished during the handshake.
+        // Do not hold the manager lock across Binder. Publish navigation readiness only after
+        // the output resume succeeds and this generation is still the active connection.
+        boolean shouldResume = connectedNavigationOutput && !ShanghaiOutputGate.isSuspended()
+                && !new ShanghaiMockGps(context).hasPendingRecovery();
+        if (shouldResume) {
+            try {
+                Bundle resumed = runShanghaiTransition(
+                        () -> candidate.resumeOutput(requestGeneration), "recover");
+                String error = InstrumentProxyContract.error(resumed);
+                if (!error.isEmpty()) throw new IOException(error);
+            } catch (Exception error) {
+                handleCallFailure(requestGeneration, binder, error);
+                return;
+            }
+        }
+        boolean outputReady = false;
         synchronized (lock) {
-            if (proxy == candidate && !shanghaiSuspended && !ShanghaiOutputGate.isSuspended()
-                    && !new ShanghaiMockGps(context).hasPendingRecovery()) {
-                try {
-                    Bundle resumed = runShanghaiTransition(
-                            () -> candidate.resumeOutput(requestGeneration), "recover");
-                    String error = InstrumentProxyContract.error(resumed);
-                    if (!error.isEmpty()) throw new IOException(error);
-                } catch (Exception error) {
-                    handleCallFailure(requestGeneration, binder, error);
-                    return;
-                }
+            if (shouldResume && proxy == candidate && proxyBinder == binder
+                    && state == State.READY && generation == requestGeneration
+                    && !shanghaiSuspended && binder.isBinderAlive()) {
+                navigationOutputReady = true;
+                outputReady = true;
+                lock.notifyAll();
             }
         }
         worker.execute(() -> clearStartupDiagnostic(connectedIdentity));
         LogcatRecorder.recoverShellCapture(context);
-        for (Runnable listener : readyListeners) {
-            try {
-                listener.run();
-            } catch (RuntimeException error) {
-                log("ready listener failed type=" + error.getClass().getSimpleName());
-            }
-        }
+        if (outputReady) notifyReadyListeners();
     }
 
-    void launchWork(java.io.File directory) throws IOException {
-        launchWork(directory, false);
-    }
-
-    void launchWork(java.io.File directory, boolean cleanupOnly) throws IOException {
-        if (!cleanupOnly) ShellRuntimeSession.arm(context);
-        ensureStarted(cleanupOnly ? "owned-gps-cleanup" : "independent-work");
-        IInstrumentNavigationProxy current;
+    Bundle registerWork(String id, String type, java.io.File artifact, JSONObject request,
+            android.os.ParcelFileDescriptor[] snapshots, int boot) throws IOException {
+        boolean cleanupOnly = "shanghai".equals(type) && "cleanup".equals(request.optString("action"));
+        if (!cleanupOnly && !ShellRuntimeSession.arm(context))
+            throw new IOException("Shell runtime is not armed for this operation");
+        IInstrumentNavigationProxy current = awaitShellProxy(
+                cleanupOnly ? "owned-gps-cleanup" : "independent-work");
         long currentGeneration;
-        long deadline = SystemClock.elapsedRealtime() + START_TIMEOUT_MS;
-        synchronized (lock) {
-            while (state == State.STARTING && SystemClock.elapsedRealtime() < deadline) {
-                try { lock.wait(Math.max(1, deadline - SystemClock.elapsedRealtime())); }
-                catch (InterruptedException error) { Thread.currentThread().interrupt(); throw new IOException(error); }
-            }
-            current = proxy; currentGeneration = generation;
-        }
-        if (current == null) throw new IOException("Independent shell runtime unavailable");
+        synchronized (lock) { currentGeneration = generation; }
         try {
             current.setRecoveryEnabled(currentGeneration, ShellRuntimeSession.mayRestore(context));
-            current.launchWork(currentGeneration, directory.getAbsolutePath());
-        } catch (RemoteException error) { throw new IOException(error); }
+            return current.registerWork(currentGeneration, id, type, artifact.getCanonicalPath(),
+                    boot, request.toString(), snapshots);
+        } catch (RemoteException error) {
+            throw new IOException("Cannot register trusted shell operation", error);
+        }
     }
 
-    boolean cancelWork(java.io.File directory) {
+    Bundle workState(String id) throws IOException {
+        IInstrumentNavigationProxy current = awaitShellProxy("independent-work-state");
+        long currentGeneration;
+        synchronized (lock) { currentGeneration = generation; }
+        try { return current.workState(currentGeneration, id); }
+        catch (RemoteException error) { throw new IOException("Cannot read trusted shell state", error); }
+    }
+
+    void completeWorkSign(String id, String requestId, boolean ok, String detail) throws IOException {
+        IInstrumentNavigationProxy current = awaitShellProxy("independent-work-sign");
+        long currentGeneration;
+        synchronized (lock) { currentGeneration = generation; }
+        try { current.completeWorkSign(currentGeneration, id, requestId, ok, detail); }
+        catch (RemoteException error) { throw new IOException("Cannot complete trusted signing request", error); }
+    }
+
+    void launchWork(String id) throws IOException { launchWork(id, false); }
+
+    void launchWork(String id, boolean cleanupOnly) throws IOException {
+        if (!cleanupOnly && !ShellRuntimeSession.arm(context))
+            throw new IOException("Shell runtime is not armed for this operation");
+        IInstrumentNavigationProxy current = awaitShellProxy(
+                cleanupOnly ? "owned-gps-cleanup" : "independent-work");
+        long currentGeneration;
+        synchronized (lock) { currentGeneration = generation; }
+        try {
+            current.setRecoveryEnabled(currentGeneration, ShellRuntimeSession.mayRestore(context));
+            current.launchWork(currentGeneration, id);
+        } catch (RemoteException error) { throw new IOException("Cannot launch trusted shell operation", error); }
+    }
+
+    private IInstrumentNavigationProxy awaitShellProxy(String reason) throws IOException {
+        ensureStarted(reason);
+        synchronized (lock) {
+            while (state == State.STARTING) {
+                long remaining = startupDeadlineAtMs - SystemClock.elapsedRealtime();
+                if (remaining <= 0L) break;
+                try { lock.wait(remaining); }
+                catch (InterruptedException error) {
+                    Thread.currentThread().interrupt(); throw new IOException("Interrupted waiting for shell runtime", error);
+                }
+            }
+            if (state == State.READY && proxy != null && proxyBinder != null && proxyBinder.isBinderAlive())
+                return proxy;
+            throw new IOException("Trusted shell runtime unavailable: " + state.name().toLowerCase(java.util.Locale.ROOT)
+                    + " stage=" + startStage);
+        }
+    }
+
+    boolean cancelWork(String id) {
+        return cancelWork(id, false);
+    }
+
+    boolean cancelWork(String id, boolean resetAnyMockGps) {
         IInstrumentNavigationProxy current;
         long currentGeneration;
         synchronized (lock) { current = proxy; currentGeneration = generation; }
-        try { return current != null && current.cancelWork(currentGeneration, directory.getAbsolutePath()); }
+        try { return current != null && current.cancelWork(
+                currentGeneration, id, resetAnyMockGps); }
         catch (RemoteException | RuntimeException error) { return false; }
     }
 
     Bundle startSystemCapture(String id, String cursor, android.os.ParcelFileDescriptor file)
             throws IOException {
-        ensureStarted("logcat-capture");
-        IInstrumentNavigationProxy current;
+        IInstrumentNavigationProxy current = awaitShellProxy("logcat-capture");
         long currentGeneration;
-        long deadline = SystemClock.elapsedRealtime() + START_TIMEOUT_MS;
-        synchronized (lock) {
-            while (state == State.STARTING && SystemClock.elapsedRealtime() < deadline) {
-                try { lock.wait(Math.max(1, deadline - SystemClock.elapsedRealtime())); }
-                catch (InterruptedException error) {
-                    Thread.currentThread().interrupt(); throw new IOException(error);
-                }
-            }
-            current = proxy;
-            currentGeneration = generation;
-        }
-        if (current == null) throw new RuntimeUnavailableException();
+        synchronized (lock) { currentGeneration = generation; }
         try { return current.startSystemCapture(currentGeneration, id, cursor, file); }
         catch (RemoteException error) { throw new IOException(error); }
     }
@@ -1544,6 +1638,7 @@ final class InstrumentProxyManager {
             }
             worker.execute(() -> cleanupHelper("start-failed"));
             unregisterHandoffReceiver();
+            lock.notifyAll();
         }
         log("start failed generation=" + requestGeneration + " stage=" + failedStage
                 + " error=" + safe(error)
@@ -1580,10 +1675,10 @@ final class InstrumentProxyManager {
             wasReady = state == State.READY;
             long uptime = connectedAtMs == 0L ? 0L
                     : SystemClock.elapsedRealtime() - connectedAtMs;
-            if (uptime >= STABLE_CONNECTION_MS) rapidFailureCount = 0;
-            rapidFailureCount++;
+            rapidFailureCount = binderFailureCountAfterDisconnect(rapidFailureCount, uptime);
             clearProxyLocked();
             state = State.IDLE;
+            lock.notifyAll();
             retry = shouldRetryBinder(runtimeActive, rapidFailureCount);
             nextRetryAtMs = retry ? 0L
                     : SystemClock.elapsedRealtime() + RETRY_DELAY_MS;
@@ -1716,6 +1811,7 @@ final class InstrumentProxyManager {
         pingInFlight = false;
         pingToken++;
         capabilityMode = CapabilityMode.NONE;
+        navigationOutputReady = false;
         trafficLightCapable = false;
         nativeSpeedCapable = false;
     }
@@ -1756,6 +1852,10 @@ final class InstrumentProxyManager {
 
     static boolean shouldRetryBinder(boolean runtimeActive, int failureCount) {
         return runtimeActive && failureCount == 1;
+    }
+
+    static int binderFailureCountAfterDisconnect(int priorFailures, long connectedDurationMs) {
+        return (connectedDurationMs >= STABLE_CONNECTION_MS ? 0 : priorFailures) + 1;
     }
 
     private void retryImmediately(long requestGeneration, String reason) {

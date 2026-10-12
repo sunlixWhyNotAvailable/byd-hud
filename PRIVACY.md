@@ -17,6 +17,13 @@ configuration ZIP includes all retained patch reports, regardless of selected
 dates or logging switches, with the existing configuration-export sanitization.
 They are not uploaded automatically.
 
+BYD HUD also keeps a local, time-stamped history of its settings for diagnosis:
+HUD output options, map and dashboard profiles, widget appearance, logging and
+update preferences. This history records the settings used at the time, including
+when detailed image logging is disabled, and is included with the selected days
+in a user-requested log export. It does not read the navigators' private settings
+or upload this history automatically.
+
 ## Navigation log upload
 
 Navigation logs are uploaded only when the user selects one or more stored days, presses Share, reviews the warning, chooses `Send to developer`, and confirms `OK` in the optional-comment dialog.

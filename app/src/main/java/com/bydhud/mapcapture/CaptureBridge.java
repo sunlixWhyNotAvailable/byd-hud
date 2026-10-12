@@ -17,6 +17,7 @@ import android.os.SystemClock;
 import java.lang.ref.WeakReference;
 import java.lang.reflect.Proxy;
 import java.nio.ByteBuffer;
+import java.util.UUID;
 import android.os.SharedMemory;
 import android.system.OsConstants;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -26,6 +27,7 @@ import javax.microedition.khronos.egl.EGLSurface;
 
 /** Diagnostic producer only: no file writes, PNG compression, or HUD calls. */
 public final class CaptureBridge {
+    private static final String REVISION = "navigator-map-capture-r3";
     private static final Uri ENDPOINT = Uri.parse("content://com.bydhud.app.mapframes");
     private static final AtomicBoolean BUSY = new AtomicBoolean();
     private static final Object WAZE_LOCK = new Object();
@@ -36,15 +38,19 @@ public final class CaptureBridge {
     private static volatile long draws;
     private static volatile String lastError = "";
     private static String session = "";
+    private static volatile String lifecycleSessionId = "";
     private static long pollIntervalMs = CapturePollPolicy.DEFAULT_MS;
-    private static volatile boolean fullSource;
+    private static volatile boolean journalSendingEnabled = true;
     private static volatile int outputEdge = 320;
     private static Boolean swapRedBlue;
     private static volatile long leaseMs = 6000;
+    private static final CaptureReadbackBuffer WAZE_READBACK = new CaptureReadbackBuffer();
+    // Keep this opaque so JVM diagnostics can reflect CaptureBridge fields
+    // without resolving the optional EGLSurface API on the host runtime.
+    private static Object readbackSurface;
     private static final java.util.WeakHashMap<Object, AtomicBoolean> MAPS_PENDING = new java.util.WeakHashMap<>();
     static int outputEdge() { return outputEdge; }
     static long leaseMs() { return leaseMs; }
-    static boolean fullSource() { return fullSource; }
 
     public static synchronized void init(Context context) {
         try {
@@ -52,7 +58,15 @@ public final class CaptureBridge {
             if (context.getPackageName().equals("com.waze") && android.os.Build.VERSION.SDK_INT >= 28
                     && !context.getApplicationInfo().processName.equals(android.app.Application.getProcessName())) return;
             app = context.getApplicationContext();
-            if (app == null) { app = null; return; }
+            if (app == null) return;
+            String newJournalSession = android.os.Process.myPid() + "-" + UUID.randomUUID();
+            try {
+                lifecycleSessionId = BackgroundCapture.initializeJournal(app,
+                        android.os.Process.myPid(), newJournalSession);
+            } catch (Throwable error) {
+                lifecycleSessionId = newJournalSession;
+                lastError = "lifecycle_journal_init: " + error(error);
+            }
             HandlerThread thread = new HandlerThread("MapProbeProducer");
             thread.start();
             worker = new Handler(thread.getLooper());
@@ -68,8 +82,16 @@ public final class CaptureBridge {
     private static void poll() {
         long delay = CapturePollPolicy.DEFAULT_MS;
         try {
+            if (!BackgroundCapture.journalReady()) {
+                String newJournalSession = android.os.Process.myPid() + "-" + UUID.randomUUID();
+                lifecycleSessionId = BackgroundCapture.initializeJournal(app,
+                        android.os.Process.myPid(), newJournalSession);
+            }
             Bundle hello = new Bundle();
             hello.putString("package", app.getPackageName());
+            hello.putString("revision", REVISION);
+            hello.putString("lifecycleOwner", app.getPackageName());
+            hello.putString("lifecycleSessionId", lifecycleSessionId);
             hello.putString("build", app.getPackageName().equals("com.waze")
                     ? "map-probe-r11-render-demand-hud-consumer-v1" : "map-probe-r12-policy-watchdog-hud-consumer-v1");
             hello.putBoolean("fullSourceMemory", true);
@@ -84,24 +106,39 @@ public final class CaptureBridge {
             hello.putString("controller", controller == null ? "none" : identity(controller));
             hello.putString("producerError", lastError);
             hello.putString("captureSession",session);
-            hello.putAll(BackgroundCapture.metadata());
+            hello.putAll(BackgroundCapture.metadata(journalSendingEnabled));
             WazeRenderScheduler.metadata(hello);
             Bundle request = app.getContentResolver().call(ENDPOINT, "poll", null, hello);
             if (request == null) throw new IllegalStateException("empty_collector_reply");
             lastError = "";
-            boolean active = request != null && request.getBoolean("active");
-            delay = CapturePollPolicy.interval(active, request == null
-                    ? CapturePollPolicy.DEFAULT_MS
-                    : request.getLong("pollIntervalMs", CapturePollPolicy.DEFAULT_MS));
+            boolean active = request.getBoolean("active");
+            delay = CapturePollPolicy.interval(active,
+                    request.getLong("pollIntervalMs", CapturePollPolicy.DEFAULT_MS));
             if (active) session=request.getString("session",session);
-            fullSource = active && request.getBoolean("fullSourceMemory", false);
-            outputEdge = CapturePollPolicy.outputEdge(request == null ? 0 : request.getInt("outputMaxEdge"), fullSource);
-            leaseMs = CapturePollPolicy.bounded(request == null ? 0 : request.getLong("leaseMs"), 6000, 1000, 30000);
+            boolean fullSource = active && request.getBoolean("fullSourceMemory", false);
+            outputEdge = CapturePollPolicy.outputEdge(request.getInt("outputMaxEdge"), fullSource);
+            leaseMs = CapturePollPolicy.bounded(request.getLong("leaseMs"), 6000, 1000, 30000);
             if (app.getPackageName().equals("com.waze")) WazeRenderScheduler.policy(active,
-                    request == null ? 1000 : request.getLong("pollIntervalMs", 1000), leaseMs);
+                    request.getLong("pollIntervalMs", 1000), leaseMs);
             BackgroundCapture.lease(active);
-            if (active || (request!=null && request.getBoolean("journalAccepted"))) BackgroundCapture.acknowledged(hello.getLong("lifecycleSequence"));
-            if (request == null || !request.getBoolean("active")) {
+            boolean journalAccepted = request.getBoolean("journalAccepted");
+            if (request.containsKey("journalAckSequence")) {
+                if (journalAccepted
+                        && app.getPackageName().equals(request.getString("journalOwner"))
+                        && lifecycleSessionId.equals(request.getString("journalSessionId"))) {
+                    BackgroundCapture.acknowledged(request.getLong("journalAckSequence"),
+                            request.getLong("journalAckChunkSequence", 0L),
+                            request.getInt("journalAckChunkIndex", 0),
+                            hello.getLong("lifecycleCursorSequence"),
+                            hello.getLong("lifecycleChunkSequence"),
+                            hello.getInt("lifecycleChunkIndex", 0));
+                }
+            } else if (active || journalAccepted) {
+                // Older collectors acknowledge only complete legacy event sequences.
+                BackgroundCapture.acknowledged(hello.getLong("lifecycleSequence"));
+            }
+            journalSendingEnabled = active || journalAccepted;
+            if (!request.getBoolean("active")) {
                 if (takeWaze() != null) BUSY.set(false);
             } else if (request.getLong("id") != 0 && BUSY.compareAndSet(false, true)) {
                 request.putLong("producerRequestNs", SystemClock.elapsedRealtimeNanos());
@@ -115,10 +152,14 @@ public final class CaptureBridge {
                     new Handler(Looper.getMainLooper()).post(() -> captureMaps(request));
                 }
             }
-        } catch (Throwable e) { lastError = error(e); delay = CapturePollPolicy.DEFAULT_MS; } // Existing lease expires if IPC stays unavailable.
+        } catch (Throwable e) {
+            journalSendingEnabled = false;
+            lastError = error(e);
+            delay = CapturePollPolicy.DEFAULT_MS;
+        } // Existing lease expires if IPC stays unavailable.
         finally {
             pollIntervalMs = delay;
-            if (worker != null) worker.postDelayed(CaptureBridge::poll, delay);
+            worker.postDelayed(CaptureBridge::poll, delay);
         }
     }
 
@@ -185,12 +226,16 @@ public final class CaptureBridge {
             request.putString("frameSourceMode", BackgroundCapture.wazeSource(renderer));
             EGL10 egl = (EGL10) EGLContext.getEGL();
             EGLSurface surface = egl.eglGetCurrentSurface(EGL10.EGL_DRAW);
+            if (readbackSurface == null || !readbackSurface.equals(surface)) {
+                WAZE_READBACK.release();
+                readbackSurface = surface;
+            }
             int[] w = new int[1], h = new int[1];
             if (!egl.eglQuerySurface(egl.eglGetCurrentDisplay(), surface, EGL10.EGL_WIDTH, w)
                     || !egl.eglQuerySurface(egl.eglGetCurrentDisplay(), surface, EGL10.EGL_HEIGHT, h)
                     || w[0] < 1 || h[0] < 1 || (long) w[0] * h[0] > 12000000) throw new IllegalStateException("invalid_egl_dimensions");
             int width = w[0], height = h[0];
-            ByteBuffer bytes = ByteBuffer.allocateDirect(width * height * 4);
+            ByteBuffer bytes = WAZE_READBACK.acquire(width, height);
             String version = GLES20.glGetString(GLES20.GL_VERSION);
             boolean es3 = version != null && version.contains("OpenGL ES 3");
             int[] old = new int[1];
@@ -234,8 +279,7 @@ public final class CaptureBridge {
                 } catch (Throwable e) { finish(request, null, error(e), source, width, height); }
             });
         } catch (Throwable e) {
-            if (worker != null) worker.post(() -> finish(request, null, error(e), "waze", 0, 0));
-            else BUSY.set(false);
+            worker.post(() -> finish(request, null, error(e), "waze", 0, 0));
         }
     }
 
@@ -325,7 +369,7 @@ public final class CaptureBridge {
             request.putString("package", app.getPackageName());
             request.putString("status", status);
             request.putString("source", source);
-            request.putAll(BackgroundCapture.metadata());
+            request.putAll(BackgroundCapture.metadata(false));
             request.putInt("sourceWidth", width);
             request.putInt("sourceHeight", height);
             request.putLong("sendNs", SystemClock.elapsedRealtimeNanos());

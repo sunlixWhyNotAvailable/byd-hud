@@ -62,12 +62,6 @@ final class DashboardLayoutPolicy {
                 || !isAutoContainerCommand(command);
     }
 
-    static int ipcOffCommand(int ownership) {
-        return ownership == OWNERSHIP_NONE
-                ? PROTOCOL_NATIVE
-                : AUTOCONTAINER_RELEASE;
-    }
-
     /** Executes the production command sequence; callbacks retain their current-operation fences. */
     static String executeWidget(int mode, int command, int ownership,
             Supplier<String> release, IntFunction<String> protocol, Supplier<String> layout) {

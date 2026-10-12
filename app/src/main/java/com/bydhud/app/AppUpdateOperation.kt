@@ -5,6 +5,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -23,6 +24,9 @@ import java.util.Properties
 internal enum class AppUpdateOperationPhase {
     DOWNLOADING,
     PREPARING,
+    CANCELLING,
+    CANCEL_FAILED,
+    CANCELLED,
     INSTALLING,
     READY,
     FAILED
@@ -60,6 +64,7 @@ internal interface AppUpdateOperationDriver {
         onExposed: (AppUpdateReadyApk) -> Unit
     )
 
+    suspend fun requestCancellation(operationId: Long)
     suspend fun cancelUnexposed(operationId: Long)
     fun recordCleanupFailure(operationId: Long, error: Throwable) = Unit
 }
@@ -91,6 +96,7 @@ internal class AppUpdateOperationController(
     private var nextOperationId = initialOperationId
     private var job: Job? = null
     private var recovering = false
+    private var recoveryRequired = false
     private var pendingStart: Pair<Long, AppUpdateManager.UpdateInfo>? = null
 
     fun recover(): Job {
@@ -112,10 +118,13 @@ internal class AppUpdateOperationController(
                 synchronized(lock) {
                     if (generation != ticket || !recovering) return@synchronized
                     recovering = false
+                    recoveryRequired = true
                     val pending = pendingStart
                     pendingStart = null
                     if (pending == null) mutableSnapshot.value = mutableSnapshot.value?.copy(
                         phase = AppUpdateOperationPhase.FAILED, error = error.message ?: "Update recovery failed")
+                        ?: AppUpdateOperationSnapshot(++nextOperationId, AppUpdateManager.UpdateInfo("", "", ""),
+                            AppUpdateOperationPhase.FAILED, error = error.message ?: "Update recovery failed")
                     if (pending != null) {
                         mutableSnapshot.value = AppUpdateOperationSnapshot(
                             id = pending.first,
@@ -130,11 +139,13 @@ internal class AppUpdateOperationController(
             synchronized(lock) {
                 if (generation != ticket || !recovering) return@synchronized
                 recovering = false
+                recoveryRequired = false
                 if (recovered != null) {
                     nextOperationId = maxOf(nextOperationId, recovered.id)
                     mutableSnapshot.value = recovered
                     pendingStart = null
                 } else {
+                    mutableSnapshot.value = null
                     val pending = pendingStart
                     pendingStart = null
                     if (pending != null) startLocked(pending.second, pending.first)
@@ -151,6 +162,8 @@ internal class AppUpdateOperationController(
         if (existing != null) {
             val active = existing.phase == AppUpdateOperationPhase.DOWNLOADING ||
                 existing.phase == AppUpdateOperationPhase.PREPARING ||
+                existing.phase == AppUpdateOperationPhase.CANCELLING ||
+                existing.phase == AppUpdateOperationPhase.CANCEL_FAILED ||
                 existing.phase == AppUpdateOperationPhase.INSTALLING
             if (active || (existing.phase == AppUpdateOperationPhase.READY && existing.update.version == update.version)) {
                 return@synchronized existing.id
@@ -158,8 +171,9 @@ internal class AppUpdateOperationController(
         }
         pendingStart?.let { return@synchronized it.first }
         val operationId = ++nextOperationId
-        if (recovering) {
+        if (recovering || recoveryRequired) {
             pendingStart = operationId to update
+            if (!recovering) recover()
             return@synchronized operationId
         }
         startLocked(update, operationId)
@@ -187,7 +201,7 @@ internal class AppUpdateOperationController(
                 ) return@launch
                 handoff(ticket, operationId, ready)
             } catch (cancelled: CancellationException) {
-                runCatching { driver.cancelUnexposed(operationId) }
+                cleanupCancelledWorker(ticket, operationId)
                 throw cancelled
             } catch (error: Exception) {
                 val cleanupError = runCatching { driver.cancelUnexposed(operationId) }.exceptionOrNull()
@@ -214,13 +228,53 @@ internal class AppUpdateOperationController(
             try {
                 handoff(ticket, current.id, ready)
             } catch (cancelled: CancellationException) {
-                runCatching { driver.cancelUnexposed(current.id) }
+                cleanupCancelledWorker(ticket, current.id)
                 throw cancelled
             }
         }
         job = launched
         launched.start()
         true
+    }
+
+    fun cancel(operationId: Long): Boolean = synchronized(lock) {
+        val current = mutableSnapshot.value ?: return@synchronized false
+        if (current.id != operationId || (current.phase != AppUpdateOperationPhase.DOWNLOADING &&
+                current.phase != AppUpdateOperationPhase.PREPARING &&
+                current.phase != AppUpdateOperationPhase.CANCEL_FAILED)) return@synchronized false
+        val previous = job
+        val ticket = ++generation
+        recovering = false
+        pendingStart = null
+        mutableSnapshot.value = current.copy(phase = AppUpdateOperationPhase.CANCELLING, error = null)
+        previous?.cancel()
+        job = scope.launch {
+            withContext(NonCancellable) {
+                var failure: Throwable? = null
+                try { driver.requestCancellation(operationId) }
+                catch (error: Exception) { failure = error }
+                // Wait for file writers before cleanup; a late prepare result cannot launch Android.
+                previous?.join()
+                try { driver.cancelUnexposed(operationId); failure = null }
+                catch (error: Exception) { failure = error }
+                failure?.let { runCatching { driver.recordCleanupFailure(operationId, it) } }
+                publish(ticket, operationId) {
+                    it.copy(phase = if (failure == null) AppUpdateOperationPhase.CANCELLED else AppUpdateOperationPhase.CANCEL_FAILED,
+                        progress = "0%", ready = null,
+                        error = failure?.message ?: failure?.javaClass?.simpleName)
+                }
+            }
+        }
+        true
+    }
+
+    private suspend fun cleanupCancelledWorker(ticket: Long, operationId: Long) {
+        // Explicit Cancel/Shutdown has its own cleanup owner after joining this worker.
+        if (synchronized(lock) { generation != ticket }) return
+        withContext(NonCancellable) {
+            try { driver.cancelUnexposed(operationId) }
+            catch (error: Exception) { runCatching { driver.recordCleanupFailure(operationId, error) } }
+        }
     }
 
     fun dismissTerminalFailure() = synchronized(lock) {
@@ -230,21 +284,26 @@ internal class AppUpdateOperationController(
     }
 
     fun shutdown() {
-        val operationId = synchronized(lock) {
+        val stopped = synchronized(lock) {
             ++generation
             recovering = false
             pendingStart = null
-            job?.cancel()
+            val previous = job
+            previous?.cancel()
             job = null
             val current = mutableSnapshot.value
             mutableSnapshot.value = null
-            current?.id
+            current?.id to previous
         }
+        val operationId = stopped.first
         if (operationId != null) scope.launch {
-            try {
-                driver.cancelUnexposed(operationId)
-            } catch (error: Throwable) {
-                runCatching { driver.recordCleanupFailure(operationId, error) }
+            withContext(NonCancellable) {
+                stopped.second?.join()
+                try {
+                    driver.cancelUnexposed(operationId)
+                } catch (error: Throwable) {
+                    runCatching { driver.recordCleanupFailure(operationId, error) }
+                }
             }
         }
     }
@@ -280,7 +339,7 @@ internal object AppUpdateOperationIds {
     fun processSeed(): Long = System.currentTimeMillis().coerceAtLeast(0L)
 }
 
-internal enum class AppUpdateOwnershipPhase { ACTIVE, READY, EXPOSED }
+internal enum class AppUpdateOwnershipPhase { ACTIVE, READY, EXPOSED, CANCELLED }
 
 /** Shared file transaction; Android supplies APK verification, never a prevalidated flag. */
 internal suspend fun prepareUpdateApk(
@@ -291,10 +350,19 @@ internal suspend fun prepareUpdateApk(
 ): AppUpdateReadyApk {
     if (!download.isFile) throw IllegalStateException("Downloaded APK not found")
     FileInputStream(download).use { input ->
-        FileOutputStream(part).use { output -> input.copyTo(output) }
+        FileOutputStream(part).use { output ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            while (true) {
+                currentCoroutineContext().ensureActive()
+                val size = input.read(buffer)
+                if (size < 0) break
+                output.write(buffer, 0, size)
+            }
+        }
     }
     currentCoroutineContext().ensureActive()
     val version = validate(part)
+    currentCoroutineContext().ensureActive()
     if (ready.exists() && !ready.delete()) throw IllegalStateException("Could not replace owned update APK")
     if (!part.renameTo(ready)) throw IllegalStateException("Could not publish update APK")
     return AppUpdateReadyApk(ready.absolutePath, version)
@@ -382,7 +450,8 @@ internal class AppUpdateOwnershipStore(
                 partName = safeName(values.required("partName")),
                 readyName = safeName(values.required("readyName")),
                 targetVersionCode = values.requiredLong("targetVersionCode"),
-                phase = AppUpdateOwnershipPhase.valueOf(values.required("phase"))
+                phase = if (cancellationFile(operationId).isFile) AppUpdateOwnershipPhase.CANCELLED
+                    else AppUpdateOwnershipPhase.valueOf(values.required("phase"))
             )
         }.getOrElse {
             recordFile.delete()
@@ -399,9 +468,18 @@ internal class AppUpdateOwnershipStore(
 
     @Synchronized fun clear(operationId: Long) {
         val recordFile = recordFile(operationId)
-        recordFile.delete()
-        File(recordFile.parentFile, "${recordFile.name}.tmp").delete()
+        for (file in listOf(recordFile, File(recordFile.parentFile, "${recordFile.name}.tmp"), cancellationFile(operationId))) {
+            check(!file.exists() || file.delete()) { "Could not remove update ownership" }
+        }
     }
+
+    @Synchronized fun markCancelled(operationId: Long) {
+        stagingRoot.mkdirs()
+        FileOutputStream(cancellationFile(operationId)).use { it.fd.sync() }
+    }
+
+    private fun cancellationFile(operationId: Long): File =
+        File(recordFile(operationId).parentFile, "cancel-$operationId")
 
     fun downloadFile(record: AppUpdateOwnershipRecord) = ownedFile(downloadRoot, record.downloadName)
     fun partFile(record: AppUpdateOwnershipRecord) = ownedFile(stagingRoot, record.partName)
@@ -444,7 +522,7 @@ internal class AppUpdateOwnershipRecovery(
     fun recover(): AppUpdateOwnershipRecord? {
         val installed = installedVersionCode()
         return store.readAll().mapNotNull { record ->
-            if (record.phase == AppUpdateOwnershipPhase.ACTIVE ||
+            if (record.phase == AppUpdateOwnershipPhase.ACTIVE || record.phase == AppUpdateOwnershipPhase.CANCELLED ||
                 installed >= record.targetVersionCode ||
                 !store.readyFile(record).isFile
             ) {
@@ -460,15 +538,19 @@ internal class AppUpdateOwnershipRecovery(
     }
 
     fun cancelUnexposed(operationId: Long) {
-        val record = store.read(operationId) ?: return
-        if (record.phase != AppUpdateOwnershipPhase.EXPOSED) cleanup(record)
+        val record = store.read(operationId)
+        if (record == null) { store.clear(operationId); return }
+        if (record.phase != AppUpdateOwnershipPhase.EXPOSED) {
+            store.markCancelled(operationId)
+            cleanup(record)
+        }
     }
 
     private fun cleanup(record: AppUpdateOwnershipRecord) {
         remove(record.downloadId)
-        store.downloadFile(record).delete()
-        store.partFile(record).delete()
-        store.readyFile(record).delete()
+        for (file in listOf(store.downloadFile(record), store.partFile(record), store.readyFile(record))) {
+            check(!file.exists() || file.delete()) { "Could not remove owned update APK" }
+        }
         store.clear(record.operationId)
     }
 

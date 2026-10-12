@@ -36,7 +36,7 @@ public final class GMapsRegistrationDiagnosticsTest {
     private Context context;
     private GMapsDirectChannel channel;
     private DirectSessionLog session;
-    private final List<String> logs = new ArrayList<>();
+    private final List<String> logs = new java.util.concurrent.CopyOnWriteArrayList<>();
     private final List<String> callbacks = new ArrayList<>();
     private final List<Message> replies = new ArrayList<>();
     private Messenger reply;
@@ -91,6 +91,56 @@ public final class GMapsRegistrationDiagnosticsTest {
         assertTrue(callbacks.isEmpty());
     }
 
+    @Test
+    @Config(shadows = IdentityCapture.class)
+    public void identityEvidenceCompletesQueuedChannelsAndReasonsOnce() throws Exception {
+        IdentityCapture.entered = new java.util.concurrent.CountDownLatch(1);
+        IdentityCapture.release = new java.util.concurrent.CountDownLatch(1);
+        IdentityCapture.calls.set(0);
+        set("lastIdentitySystemCaptureMs", -60_000L);
+        set("identityChannelId", "first-channel");
+        Method capture = GMapsDirectChannel.class.getDeclaredMethod("captureIdentitySystemEvidence", String.class);
+        capture.setAccessible(true);
+        capture.invoke(channel, "rejected");
+        try {
+            assertTrue(IdentityCapture.entered.await(3, java.util.concurrent.TimeUnit.SECONDS));
+            capture.invoke(channel, "rejected");
+            set("identityChannelId", "replacement-channel");
+            set("sessionGeneration", 2L);
+            capture.invoke(channel, "rejected");
+            capture.invoke(channel, "missing_hello_or_registration_result");
+            capture.invoke(channel, "missing_hello_or_registration_result");
+        } finally { IdentityCapture.release.countDown(); }
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(4);
+        while (logs.stream().filter(line -> line.contains("state=complete")).count() < 3
+                && System.nanoTime() < deadline) Thread.sleep(10);
+        assertEquals(3, IdentityCapture.calls.get());
+        assertEquals(3, logs.stream().filter(line -> line.contains("state=complete")).count());
+        assertEquals(1, logs.stream().filter(line -> line.equals(
+                "identity_system channelId=first-channel state=scheduled reason=rejected")).count());
+        assertEquals(1, logs.stream().filter(line -> line.equals(
+                "identity_system channelId=replacement-channel state=scheduled reason=rejected")).count());
+        assertEquals(1, logs.stream().filter(line -> line.equals(
+                "identity_system channelId=replacement-channel state=scheduled reason=missing_hello_or_registration_result")).count());
+        assertEquals(1, logs.stream().filter(line -> line.contains("channelId=first-channel line=0 evidence-")).count());
+        assertEquals(2, logs.stream().filter(line -> line.contains("channelId=replacement-channel line=0 evidence-")).count());
+    }
+
+    @org.robolectric.annotation.Implements(LocalAdbBridge.class)
+    public static class IdentityCapture {
+        static java.util.concurrent.CountDownLatch entered, release;
+        static final java.util.concurrent.atomic.AtomicInteger calls = new java.util.concurrent.atomic.AtomicInteger();
+        @org.robolectric.annotation.Implementation
+        protected static LocalAdbBridge.ShellResult captureGMapsIdentityEvidence(Context context) throws Exception {
+            int call = calls.incrementAndGet();
+            if (call == 1) {
+                entered.countDown();
+                if (!release.await(4, java.util.concurrent.TimeUnit.SECONDS)) throw new java.io.IOException("capture blocked");
+            }
+            return new LocalAdbBridge.ShellResult("evidence-" + call, 0, "", false, 0L, "ok", "");
+        }
+    }
+
     private Intent request() {
         return new Intent("ACTION_START_CHANNEL")
                 .putExtra(NavInfoLogger.EXTRA_CLIENT, reply)
@@ -119,9 +169,14 @@ public final class GMapsRegistrationDiagnosticsTest {
     }
 
     private void set(String name, Object value) throws Exception {
+        Field field = field(name);
+        field.set(channel, value);
+    }
+
+    private Field field(String name) throws Exception {
         Field field = GMapsDirectChannel.class.getDeclaredField(name);
         field.setAccessible(true);
-        field.set(channel, value);
+        return field;
     }
 
     private boolean connected() throws Exception {

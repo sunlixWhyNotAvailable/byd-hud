@@ -147,7 +147,9 @@ object StorageLogShareWorkflow {
             selectedDays = submittedDays,
             selectionRevision = selectionRevision,
             toDeveloper = toDeveloper,
-            reportTitle = if (toDeveloper) report!!.title else ""
+            reportTitle = if (toDeveloper) report!!.title else "",
+            collectionOutcome = restored?.optString("collectionOutcome").orEmpty(),
+            patchReportsIncomplete = restored?.optBoolean("patchReportsIncomplete", false) ?: false
         ))
         log(operationId, "started destination=${if (toDeveloper) "sentry" else "android"} " +
             "days=${submittedDays.joinToString(",")}")
@@ -185,7 +187,7 @@ object StorageLogShareWorkflow {
                 control.cancelled = true
                 if (ShellWorkClient.hasRequest(app, "log", control.operationId)) {
                     val job = ShellWorkClient.job(app, "log", control.operationId)
-                    ShellWorkClient.cancel(job)
+                    ShellWorkClient.cancel(app, job)
                     ShellWorkClient.await(app, job, null)
                 }
                 return
@@ -199,7 +201,7 @@ object StorageLogShareWorkflow {
             }
             if (toDeveloper && ShellWorkClient.hasRequest(app, "upload", control.operationId)) {
                 val job = ShellWorkClient.job(app, "upload", control.operationId)
-                val input = ShellWorkFiles.read(File(job, "request.json")).getJSONObject("input")
+                val input = ShellWorkClient.expected(app, job).getJSONObject("input")
                 val result = ShellWorkExports.upload(app, File(input.getString("archive")),
                     submittedDays, control.operationId, report!!)
                 finish(control.operationId, if (result.ok) StorageLogSharePhase.SENT else StorageLogSharePhase.FAILED,
@@ -581,7 +583,9 @@ object StorageLogShareWorkflow {
                     selectedDays = days, toDeveloper = developer, currentFile = value.optString("file"),
                     archiveBytes = value.optLong("archiveBytes"), reportTitle = value.optString("title"),
                     foundFiles = value.optInt("count"), knownBytes = value.optLong("bytes"),
-                    selectionRevision = value.optInt("revision"), inventoryComplete = true))
+                    selectionRevision = value.optInt("revision"), inventoryComplete = true,
+                    collectionOutcome = value.optString("collectionOutcome"),
+                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false)))
                 // A single preparation queue resumes the same retained jobs, never a new upload.
                 restorationWorker.execute {
                     while (!HudPrefs.isUserShutdownActive(context)) {
@@ -597,7 +601,9 @@ object StorageLogShareWorkflow {
                     detail = value.optString("detail"), eventId = value.optString("event"),
                     dismissed = value.optBoolean("dismissed"), reportTitle = value.optString("title"),
                     selectionRevision = value.optInt("revision"), foundFiles = value.optInt("count"),
-                    knownBytes = value.optLong("bytes"), inventoryComplete = true)
+                    knownBytes = value.optLong("bytes"), inventoryComplete = true,
+                    collectionOutcome = value.optString("collectionOutcome"),
+                    patchReportsIncomplete = value.optBoolean("patchReportsIncomplete", false))
                 if (report != null) reports[id] = report
                 addSnapshot(snapshot)
             }
@@ -613,7 +619,8 @@ object StorageLogShareWorkflow {
             .put("ended", current.endedAtElapsedMs).put("count", current.foundFiles).put("bytes", current.knownBytes)
             .put("revision", current.selectionRevision).put("file", current.currentFile)
             .put("archiveBytes", current.archiveBytes).put("detail", current.detail).put("event", current.eventId)
-            .put("dismissed", current.dismissed)
+            .put("dismissed", current.dismissed).put("collectionOutcome", current.collectionOutcome)
+            .put("patchReportsIncomplete", current.patchReportsIncomplete)
         ShellRuntimeSession.prefs(app).edit().putString("share_work_" + current.operationId, value.toString()).commit()
     }
 

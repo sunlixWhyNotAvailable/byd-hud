@@ -48,18 +48,6 @@ final class NavCaptureIngressPolicy {
         }
     }
 
-    static void disarmPackage(String packageName) {
-        String normalized = normalize(packageName);
-        NavAccessibilityService.cancelPendingCapture(normalized);
-        NavNotificationListenerService.cancelPendingPosted(normalized);
-    }
-
-    static Mode resolveModeForTest(String packageName, String hudPackage,
-            Set<String> logOnlyPackages, boolean shutdown) {
-        return new Snapshot(hudPackage, logOnlyPackages, shutdown)
-                .mode(normalize(packageName));
-    }
-
     private static String normalize(String packageName) {
         return packageName == null ? "" : packageName.trim().toLowerCase(java.util.Locale.ROOT);
     }

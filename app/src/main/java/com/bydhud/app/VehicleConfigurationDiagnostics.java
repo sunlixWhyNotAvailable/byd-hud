@@ -136,7 +136,6 @@ final class VehicleConfigurationDiagnostics {
             reads.add("audio.outputDeviceTypes", "AudioManager.getDevices; no addresses/names", () -> audioDevices(app));
             reads.add("system.health", "ActivityManager.MemoryInfo, filesystem capacity and clocks", () -> health(app));
             reads.add("system.thermal", "PowerManager.getCurrentThermalStatus", () -> {
-                if (Build.VERSION.SDK_INT < 29) throw new UnsupportedOperationException("requires Android 10");
                 return required(app.getSystemService(PowerManager.class)).getCurrentThermalStatus();
             });
         }
@@ -229,6 +228,7 @@ final class VehicleConfigurationDiagnostics {
                 .put("switchToTbtOnStart", HudPrefs.isSwitchToTbtOnHudStartEnabled(context))
                 .put("steeringTransferProfiles", steeringTransfers)
                 .put("dashboardMode", mode)
+                .put("dashboardHostGeometry", HudPrefs.dashboardHostGeometry(context))
                 .put("dashboardKeepBlackBackground", HudPrefs.isDashboardKeepBlackBackgroundEnabled(context))
                 .put("miniFormatMethod", HudPrefs.dashboardFormatMethod(
                         context, HudPrefs.DASHBOARD_MODE_PARTIAL))

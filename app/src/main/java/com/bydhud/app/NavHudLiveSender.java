@@ -134,7 +134,7 @@ final class NavHudLiveSender {
     static boolean activateUserRuntime(Context context) {
         if (HudPrefs.isUserShutdownActive(context)) return false;
         UserRuntimeSession.PROCESS.activate();
-        ShellRuntimeSession.arm(context);
+        ShellRuntimeSession.armAsync(context);
         ShanghaiTestController.get(context).recoverOwned("runtime-enable");
         return true;
     }
@@ -166,7 +166,13 @@ final class NavHudLiveSender {
     public static void updateMapProfile(HudMapProfile profile) {
         NavHudLiveSender current = instance;
         if (current != null && profile != null) {
-            current.handler.post(() -> current.updateMapProfileOnWorker(profile));
+            current.handler.post(() -> {
+                current.queuedMapProfileDraft = profile;
+                if (!current.mapProfileUpdateQueued) {
+                    current.mapProfileUpdateQueued = true;
+                    current.handler.postDelayed(current.publishMapProfileDraft, 32L);
+                }
+            });
         }
     }
 
@@ -208,8 +214,13 @@ final class NavHudLiveSender {
         if (current == null) return;
         HudMapLiveState snapshot = current.mapLiveState;
         if (!snapshot.running) return;
-        current.handler.post(() -> current.refreshMapLiveSettingsOnWorker(
-                snapshot.session, reason));
+        synchronized (current) {
+            current.queuedMapLiveSession = snapshot.session;
+            current.queuedMapLiveReason = reason;
+            if (current.mapLiveRefreshQueued) return;
+            current.mapLiveRefreshQueued = true;
+        }
+        current.handler.postDelayed(current.publishMapLiveSettings, 32L);
     }
 
     static void onNativeSpeedBitmapChanged(String owner) {
@@ -248,15 +259,21 @@ final class NavHudLiveSender {
                 HudPrefs.isBootEnabled(context), HudPrefs.isUserShutdownActive(context));
     }
 
-    private void checkpointOutput() {
+    private void checkpointOutput() { checkpointOutput(null); }
+
+    private void checkpointOutput(Runnable completion) {
         try {
             JSONObject state = new JSONObject().put("check", hudCheckState.checkpoint())
                     .put("mapLive", mapLiveState.running);
             HudMapProfile draft = mapProfileCalibrationState.running ? mapProfileCalibrationState.draft : null;
             if (draft != null) state.put("profile", new JSONObject().put("source", draft.source.name())
                     .put("x", draft.x).put("y", draft.y).put("scale", draft.scale));
-            ShellRuntimeSession.prefs(context).edit().putString("output", state.toString()).commit();
-        } catch (Exception error) { log("runtime output checkpoint failed " + error.getClass().getSimpleName()); }
+            ShellRuntimeSession.checkpointOutput(context, state.toString(),
+                    completion == null ? null : () -> handler.post(completion));
+        } catch (Exception error) {
+            log("runtime output checkpoint failed " + error.getClass().getSimpleName());
+            if (completion != null) completion.run();
+        }
     }
 
     void restoreOutputSession() {
@@ -585,11 +602,6 @@ final class NavHudLiveSender {
         if (current != null) current.updateHudCheck(HudCheckState::stop, reason);
     }
 
-    static boolean mapLiveStartAllowedForTest(
-            boolean runtimeEnabled, boolean shanghai, int mapMode) {
-        return runtimeEnabled && !shanghai && mapMode == HudMapSettings.EXPERIMENTAL;
-    }
-
     static boolean isCurrentMapLiveSessionForTest(HudMapLiveState state, long session) {
         return state != null && state.running && session > 0L && state.session == session;
     }
@@ -663,6 +675,28 @@ final class NavHudLiveSender {
         log("map_profile start rejected reason=" + safeReason(reason));
     }
 
+    private HudMapProfile queuedMapProfileDraft;
+    private boolean mapLiveRefreshQueued;
+    private long queuedMapLiveSession;
+    private String queuedMapLiveReason;
+    private final Runnable publishMapLiveSettings = () -> {
+        long session;
+        String reason;
+        synchronized (this) {
+            mapLiveRefreshQueued = false;
+            session = queuedMapLiveSession;
+            reason = queuedMapLiveReason;
+        }
+        refreshMapLiveSettingsOnWorker(session, reason);
+    };
+    private boolean mapProfileUpdateQueued;
+    private final Runnable publishMapProfileDraft = () -> {
+        mapProfileUpdateQueued = false;
+        HudMapProfile draft = queuedMapProfileDraft;
+        queuedMapProfileDraft = null;
+        updateMapProfileOnWorker(draft);
+    };
+
     private void updateMapProfileOnWorker(HudMapProfile profile) {
         if (profile == null) return;
         if (mapProfileStartPending) {
@@ -706,6 +740,9 @@ final class NavHudLiveSender {
     }
 
     private void stopMapProfileOnWorker(String reason, Runnable completion) {
+        handler.removeCallbacks(publishMapProfileDraft);
+        mapProfileUpdateQueued = false;
+        queuedMapProfileDraft = null;
         ++mapProfileRequestGeneration;
         mapProfileStartPending = false;
         pendingMapProfileDraft = null;
@@ -938,7 +975,7 @@ final class NavHudLiveSender {
 
     static long hudCheckIntervalMs(HudCheckState state) {
         return state.mode == HudCheckState.Mode.EXTENDED && state.automatic
-                ? HUD_CHECK_INTERVAL_MS : SEND_INTERVAL_MS;
+                ? state.isGeometryCheck() ? 5_000L : HUD_CHECK_INTERVAL_MS : SEND_INTERVAL_MS;
     }
 
     void startManual(HudState state, String reason) {
@@ -1051,9 +1088,10 @@ final class NavHudLiveSender {
             pendingManualPublishState = null;
             pendingManualPublishReason = "";
         }
+        checkpointOutput();
         if (!manualTbtActive) {
             hudOutput.stopManualOutput("manual-stop:" + safeReason(reason),
-                    () -> handler.post(() -> { if (completion != null) completion.run(); }));
+                    () -> handler.post(() -> checkpointOutput(completion)));
             return;
         }
         long generation = manualTbtGeneration;
@@ -1077,7 +1115,7 @@ final class NavHudLiveSender {
                                 + " restored=" + tbtPublisher.ownerPackage()
                                 + " reason=" + safeReason(reason));
                     }
-                    if (completion != null) completion.run();
+                    checkpointOutput(completion);
                 }));
     }
 
@@ -1137,7 +1175,7 @@ final class NavHudLiveSender {
     private boolean stopInProgress;
     private String pendingStopStartPackage = "";
     private String pendingStopStartReason = "";
-    private Runnable pendingStopCompletion;
+    private final java.util.List<Runnable> pendingStopCompletions = new java.util.ArrayList<>();
     private boolean pendingForcedDirectTeardown;
     private String pendingHudDemotionObserverPackage = "";
     private long wazeTbtRouteStartedAtMs;
@@ -1346,16 +1384,14 @@ final class NavHudLiveSender {
         final PendingWazeListenerFrame surface;
         final int coalescedCluster;
         final int coalescedSurface;
-        final boolean deferred;
 
         WazeListenerFrameBatch(PendingWazeListenerFrame cluster,
                 PendingWazeListenerFrame surface, int coalescedCluster,
-                int coalescedSurface, boolean deferred) {
+                int coalescedSurface) {
             this.cluster = cluster;
             this.surface = surface;
             this.coalescedCluster = coalescedCluster;
             this.coalescedSurface = coalescedSurface;
-            this.deferred = deferred;
         }
     }
 
@@ -1391,16 +1427,11 @@ final class NavHudLiveSender {
 
         WazeListenerFrameBatch take() {
             if (!dispatchScheduled) {
-                return new WazeListenerFrameBatch(null, null, 0, 0, false);
-            }
-            if (!alertClearBarriers.isEmpty()
-                    && hasFrameAfter(alertClearBarriers.first())) {
-                dispatchScheduled = false;
-                return new WazeListenerFrameBatch(null, null, 0, 0, true);
+                return new WazeListenerFrameBatch(null, null, 0, 0);
             }
             dispatchScheduled = false;
             WazeListenerFrameBatch batch = new WazeListenerFrameBatch(
-                    cluster, surface, coalescedCluster, coalescedSurface, false);
+                    cluster, surface, coalescedCluster, coalescedSurface);
             cluster = null;
             surface = null;
             coalescedCluster = 0;
@@ -1438,11 +1469,6 @@ final class NavHudLiveSender {
         }
 
         boolean isCurrent(int generation) { return generation == inputGeneration; }
-
-        private boolean hasFrameAfter(long sequence) {
-            return (cluster != null && cluster.ingressSequence > sequence)
-                    || (surface != null && surface.ingressSequence > sequence);
-        }
     }
 
     //initializes owned dependencies here so later runtime work can avoid repeated setup.
@@ -2502,7 +2528,6 @@ final class NavHudLiveSender {
         synchronized (wazeDirectFrameLock) {
             batch = wazeListenerFrames.take();
         }
-        if (batch.deferred) return;
         if (batch.coalescedCluster > 0 || batch.coalescedSurface > 0) {
             WazeCaptureDebugWriter.get().appEvent(context,
                     "nav_live waze_direct listener_frames_coalesced="
@@ -4598,20 +4623,6 @@ final class NavHudLiveSender {
         wazeDirectProbeSessionGeneration = 0;
     }
 
-    private boolean rejectStaleWazeEvidence(String packageName, int routeGeneration,
-                                            String channel, boolean mayStartNewRoute) {
-        if (!WAZE_PACKAGE.equals(packageName)) return false;
-        if (routeGeneration != wazeRouteGeneration
-                || (wazeDirectRouteEnded && !mayStartNewRoute)) {
-            log("stale waze evidence ignored channel=" + channel
-                    + " expectedGeneration=" + routeGeneration
-                    + " currentGeneration=" + wazeRouteGeneration
-                    + " routeEnded=" + wazeDirectRouteEnded);
-            return true;
-        }
-        return false;
-    }
-
     static boolean shouldObserveTbtWithoutHud(Context context, String packageName) {
         String normalized = normalizePackage(packageName);
         return shouldObserveTbtWithoutHudForTest(
@@ -4959,18 +4970,18 @@ final class NavHudLiveSender {
                 pendingSourceSwitchPackage = "";
                 pendingSourceSwitchReason = reason;
                 log("source switch converted to stop reason=" + safeReason(reason));
-                if (completion != null) pendingStopCompletion = completion;
+                if (completion != null) pendingStopCompletions.add(completion);
                 return;
             }
             if (stopInProgress) {
                 pendingStopStartPackage = "";
                 pendingStopStartReason = "";
                 log("stop already in progress reason=" + safeReason(reason));
-                if (completion != null) pendingStopCompletion = completion;
+                if (completion != null) pendingStopCompletions.add(completion);
                 return;
             }
             if (runtimeReinitInProgress) {
-                if (completion != null) pendingStopCompletion = completion;
+                if (completion != null) pendingStopCompletions.add(completion);
                 log("stop completion queued during package reinit reason="
                         + safeReason(reason));
                 return;
@@ -4987,7 +4998,7 @@ final class NavHudLiveSender {
                 if (completion != null) completion.run();
                 return;
             }
-            if (completion != null) pendingStopCompletion = completion;
+            if (completion != null) pendingStopCompletions.add(completion);
             stopOnMain(reason, clearHud);
             if (!stopInProgress) finishStopCompletion();
         });
@@ -5427,12 +5438,16 @@ final class NavHudLiveSender {
 
     private void finishStopCompletion() {
         if (pendingForcedDirectTeardown) {
-            hardStopDirectNavigatorsForPackageReplace();
             pendingForcedDirectTeardown = false;
+            try { hardStopDirectNavigatorsForPackageReplace(); }
+            catch (RuntimeException error) { log("forced teardown failed " + error); }
         }
-        Runnable completion = pendingStopCompletion;
-        pendingStopCompletion = null;
-        if (completion != null) completion.run();
+        java.util.List<Runnable> completions = new java.util.ArrayList<>(pendingStopCompletions);
+        pendingStopCompletions.clear();
+        for (Runnable completion : completions) {
+            try { completion.run(); }
+            catch (RuntimeException error) { log("stop completion failed " + error); }
+        }
     }
 
     private void hardStopDirectNavigatorsForPackageReplace() {

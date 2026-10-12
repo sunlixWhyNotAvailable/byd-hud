@@ -40,7 +40,8 @@ public final class NavigatorMapSessionStateTest {
         assertEquals(200, state.requestIntervalMs());
         state.activate("com.waze", 2, "replacement");
         assertEquals(NavigatorMapSessionState.FrameUpdate.REJECTED,
-                state.publish("com.waze", 1, "s", "late", "crop-b", new byte[]{2}, 14000, 14000));
+                state.publish("com.waze", 1, "s", "late", "crop-b", new byte[]{2},
+                        null, -1L, 14000, 14000));
         assertEquals(200, state.requestIntervalMs());
     }
 

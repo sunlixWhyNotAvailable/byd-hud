@@ -78,10 +78,6 @@ final class NativeSpeedLimitController {
         publishBitmap();
     }
 
-    void refreshMapLive(long session, int limit) {
-        refreshMapLive(session, limit, false);
-    }
-
     void refreshMapLive(long session, int limit, boolean profileCalibration) {
         if (session <= 0L) return;
         owner = "manual";

@@ -31,14 +31,15 @@ final class AppEventLogger {
         WazeCaptureDebugWriter.get().appEvent(context, line);
     }
 
-    static void writeEvent(
+    static boolean writeEvent(
             Context context,
             String line,
             long wallClockMs,
             String targetDay) {
-        append(context, targetDay, EVENTS_FILE,
+        boolean written = append(context, targetDay, EVENTS_FILE,
                 timestamp(wallClockMs) + " " + line + "\n", false);
-        NavigationLogStorage.enforceNavCaptureRetention(context);
+        if (written) NavigationLogStorage.enforceNavCaptureRetention(context);
+        return written;
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -52,7 +53,7 @@ final class AppEventLogger {
     }
 
     //guard event log rotation and append because runtime callbacks write from multiple threads.
-    private static void append(
+    private static boolean append(
             Context context,
             String targetDay,
             String name,
@@ -80,6 +81,7 @@ final class AppEventLogger {
                     NavigationLogStorage.withWriteLock(() -> rotate(file, name));
                 }
             }
+            return file != null;
         }
     }
 
