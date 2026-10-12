@@ -855,6 +855,7 @@ final class NavigatorPatchPipeline {
             throws Exception {
         int previousPriority = lowerCurrentThreadPriority();
         boolean registered = false;
+        File inspectionTransaction = null;
         try {
             register(profile);
             registered = true;
@@ -862,6 +863,19 @@ final class NavigatorPatchPipeline {
             File transaction = NavigatorPatchStore.transactionDirectory(context, profile);
             File patched = new File(transaction, "patched-set");
             if (!patched.isDirectory()) throw new IOException("Queued APK-set is missing");
+            if (!transaction.getCanonicalFile().getParentFile().equals(
+                    NavigatorPatchStore.sharedRoot(context).getCanonicalFile())) {
+                File legacyRoot = new File(context.getFilesDir(), "navigator-patcher").getCanonicalFile();
+                File legacy = ShellWorkFiles.inside(legacyRoot, transaction.getPath());
+                if (!legacy.getParentFile().equals(legacyRoot))
+                    throw new IOException("Invalid legacy patch transaction path");
+                // Only inspection needs shared storage; retain the original transaction for install/rollback.
+                inspectionTransaction = workerTransaction(context, profile);
+                File staged = new File(inspectionTransaction, "patched-set");
+                copySetDirectory(patched, staged);
+                patched = staged;
+                checkCancelled(context, profile);
+            }
             String operation = UUID.randomUUID().toString();
             ScanResult output = NavigatorPatchWorkerClient.inspectDirectory(
                     context, profile, operation, patched);
@@ -902,6 +916,7 @@ final class NavigatorPatchPipeline {
             }
             throw error;
         } finally {
+            if (inspectionTransaction != null) deleteTree(inspectionTransaction);
             if (registered) {
                 ShellRuntimeSession.prefs(context).edit().remove("patch_" + profile.id).commit();
                 unregister(profile);

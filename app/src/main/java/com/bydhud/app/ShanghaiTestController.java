@@ -330,7 +330,7 @@ final class ShanghaiTestController {
             InstrumentProxyManager.get(context).suspendForShanghai();
             if (run.cancelled) { finish(run); return; }
             run.job = ShellWorkClient.prepare(context, "shanghai", run.id, new JSONObject()
-                    .put("id", run.id).put("evidence", run.directory.getPath()));
+                    .put("id", run.id).put("day", run.day).put("evidence", run.directory.getPath()));
             checkpoint(run);
             ShellWorkClient.launch(context, run.job);
             run.jobObservedMs = SystemClock.elapsedRealtime();

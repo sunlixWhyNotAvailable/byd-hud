@@ -71,6 +71,34 @@ final class ShellWorkFiles {
         return candidate;
     }
 
+    static File shanghaiEvidence(File publicRoot, File externalRoot,
+            String day, String id, String path) throws IOException {
+        if (day == null || !day.matches("[0-9]{8}")
+                || id == null || !id.matches("[A-Za-z0-9_-]{1,80}")
+                || path == null || path.isEmpty())
+            throw new IOException("Invalid Shanghai evidence identity");
+        File candidate = new File(path).getCanonicalFile();
+        String relative = day + "/logs/logcat/shanghai_" + id;
+        for (File root : new File[]{publicRoot, externalRoot}) {
+            if (root != null && candidate.equals(new File(root, relative).getCanonicalFile()))
+                return inside(root, path);
+        }
+        throw new IOException("Invalid Shanghai evidence path");
+    }
+
+    static File patchInspectionOutput(File cache, String profile,
+            boolean installedInspection, String path) throws IOException {
+        File scan = inside(cache, path);
+        String name = scan.getName();
+        boolean installed = installedInspection && name.matches(
+                java.util.regex.Pattern.quote(profile + "-installed-")
+                        + "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}");
+        if (!scan.getParentFile().equals(cache.getCanonicalFile())
+                || (!name.startsWith(profile + "-worker-scan-") && !installed))
+            throw new IOException("Invalid patch inspection output path");
+        return scan;
+    }
+
     static File externalFiles(Context context) {
         if (android.os.Process.myUid() != 2000) return context.getExternalFilesDir(null);
         // app_process has no app attribution: ContextImpl's storage lookup rejects its shell UID.

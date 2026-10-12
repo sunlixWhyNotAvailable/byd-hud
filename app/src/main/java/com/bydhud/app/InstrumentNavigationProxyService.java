@@ -758,10 +758,10 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             }
             String output = input.optString("output");
             if (!output.isEmpty()) {
-                File scan = ShellWorkFiles.ownedPath(cache, output);
-                if (!scan.getParentFile().equals(cache)
-                        || !scan.getName().startsWith(profile.id + "-worker-scan-"))
-                    throw new SecurityException("Invalid patch inspection output path");
+                boolean installedInspection = command == NavigatorPatchWorkerClient.MSG_SCAN
+                        && !input.optBoolean("directory") && source.isEmpty()
+                        && input.optString("transaction").isEmpty();
+                ShellWorkFiles.patchInspectionOutput(cache, profile.id, installedInspection, output);
             }
             String transaction = input.optString("transaction");
             if (command == NavigatorPatchWorkerClient.MSG_PREPARE) {
@@ -789,10 +789,12 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (!evidence.isEmpty()) {
                 File external = ShellWorkFiles.externalFiles(app);
                 if (external == null) throw new IOException("Shanghai evidence storage unavailable");
-                File root = external.getCanonicalFile();
-                File evidenceDirectory = ShellWorkFiles.ownedPath(root, evidence);
-                if (!evidenceDirectory.getName().matches("shanghai_[A-Za-z0-9_-]{1,80}"))
-                    throw new SecurityException("Invalid Shanghai evidence path");
+                int user = app.getApplicationInfo().uid / 100000;
+                File publicRoot = new File("/storage/emulated/" + user + "/Documents/"
+                        + NavigationLogStorage.ROOT_DIR);
+                ShellWorkFiles.shanghaiEvidence(publicRoot,
+                        new File(external, NavigationLogStorage.ROOT_DIR),
+                        input.optString("day"), id, evidence);
             }
         }
     }
