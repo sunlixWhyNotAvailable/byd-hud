@@ -46,6 +46,11 @@ final class NavAppTaskScanner {
             "(?m)^\\s*packageName=([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=\\s|$)");
     private static final Pattern TASK_OWNER_PATTERN = Pattern.compile(
             "\\s(?:A=(?:[0-9]+:)?|I=)([a-zA-Z][a-zA-Z0-9_]*(?:\\.[a-zA-Z0-9_]+)+)(?=[/\\s}]|$)");
+    private static final String BOUNDS_RECT =
+            "mBounds=Rect\\((-?\\d+),\\s*(-?\\d+) - (-?\\d+),\\s*(-?\\d+)\\)";
+    private static final Pattern TASK_BOUNDS_PATTERN = Pattern.compile("(?m)^[\\t ]*" + BOUNDS_RECT);
+    private static final Pattern CURRENT_BOUNDS_PATTERN = Pattern.compile(
+            "(?m)^[\\t ]*CurrentConfiguration=\\{[^\\r\\n]*?winConfig=\\{[\\t ]*" + BOUNDS_RECT);
     private static final Pattern FOREGROUND_SERVICE_PATTERN = Pattern.compile(
             "(?im)\\b(?:isForeground|foregroundService|foreground)\\s*=\\s*true\\b");
     private static final SimpleDateFormat TIME_FORMAT =
@@ -347,6 +352,25 @@ final class NavAppTaskScanner {
         Matcher summary = SUPERVISOR_SECTION_PATTERN.matcher(value);
         if (summary.find()) value = value.substring(0, summary.start());
         return value.split("\\r?\\n");
+    }
+
+    static int[] parseTaskBounds(String block) {
+        if (block == null) return null;
+        Matcher bounds = TASK_BOUNDS_PATTERN.matcher(block);
+        if (!bounds.find()) {
+            // DiLink nests live bounds here; last-reported configurations can be stale after a move.
+            bounds = CURRENT_BOUNDS_PATTERN.matcher(block);
+            if (!bounds.find()) return null;
+        }
+        try {
+            int left = Integer.parseInt(bounds.group(1));
+            int top = Integer.parseInt(bounds.group(2));
+            int right = Integer.parseInt(bounds.group(3));
+            int bottom = Integer.parseInt(bounds.group(4));
+            return right > left && bottom > top ? new int[]{left, top, right, bottom} : null;
+        } catch (NumberFormatException invalid) {
+            return null;
+        }
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

@@ -2600,13 +2600,8 @@ final class NavAppDisplayController {
     }
 
     private static android.graphics.Rect parseBounds(String block) {
-        Matcher bounds = Pattern.compile("(?m)^\\s*mBounds=Rect\\((-?\\d+),\\s*(-?\\d+) - (-?\\d+),\\s*(-?\\d+)\\)").matcher(block);
-        if (!bounds.find()) return null;
-        try {
-            android.graphics.Rect result = new android.graphics.Rect(Integer.parseInt(bounds.group(1)),
-                    Integer.parseInt(bounds.group(2)), Integer.parseInt(bounds.group(3)), Integer.parseInt(bounds.group(4)));
-            return result.isEmpty() ? null : result;
-        } catch (NumberFormatException invalid) { return null; }
+        int[] bounds = NavAppTaskScanner.parseTaskBounds(block);
+        return bounds == null ? null : new android.graphics.Rect(bounds[0], bounds[1], bounds[2], bounds[3]);
     }
 
     //parses source data here so downstream HUD code receives normalized navigation fields.
