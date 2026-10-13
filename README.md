@@ -198,9 +198,11 @@ In `Options → Dashboard window profile`, choose None, Partial or Full. None le
 
 Select the mode you want to configure, then adjust its settings. Repeat for the other mode if you use both. Changes are saved immediately; this page has no separate Save button.
 
+Partial's `No switching` method uses the window profile without requesting a native Partial/Full layout. When leaving Alternative, the previously activated mode is released first. Method changes take effect on the next transfer or MINI/FULL action.
+
 | Setting | Effect |
 | --- | --- |
-| Screen format method | Native or Alternative, saved separately for each mode |
+| Screen format method | Native or Alternative; Partial also offers No switching. Saved separately for each mode |
 | Width / Height | 20–100% of the dashboard dimensions; defines the window size |
 | Horizontal offset | Position within the remaining space: 0% left, 50% center, 100% right |
 | Scale | 20–150%; changes the projected content inside the window |
@@ -236,7 +238,7 @@ The additional navigation options control the dashboard turn-by-turn (TBT) card 
 
 Enable Square or Circle in `Options → Dashboard widget` and grant permission to display over other apps. Tap the widget for IPC OFF, TBT, MINI and FULL; drag to move it or long-press to hide it temporarily. Opening BYD HUD restores an enabled hidden widget.
 
-The buttons change the dashboard layout, not the running app or its display. MINI/FULL can apply the matching saved window profile. Size, appearance, opening direction and automatic collapse are configurable. ADB is required for mode changes.
+The buttons change the dashboard layout, not the running app or its display. MINI/FULL can apply the matching saved window profile. With Partial's No switching method, MINI leaves the native layout unchanged and only applies the profile when profile application is enabled and an app is projected. Size, appearance, opening direction and automatic collapse are configurable. ADB is required for mode changes.
 
 <details>
 <summary>Screenshot: Dashboard widget</summary>

@@ -764,6 +764,9 @@ final class NavAppDisplayController {
     private String sendWidgetDashboardLayout(
             String owner, long token, int mode, int dashboardMode,
             int formatMethod, int command) {
+        if (command == DashboardLayoutPolicy.NO_LAYOUT_COMMAND) {
+            return isWidgetOperationCurrent(token) ? "" : widgetCancellationReason();
+        }
         if (!DashboardLayoutPolicy.isAutoContainerCommand(command)) {
             return sendWidgetProtocolOperation(token, command,
                     "dashboard mode=" + dashboardMode + " method=" + formatMethod);
@@ -1368,6 +1371,9 @@ final class NavAppDisplayController {
             String releaseFailure = releasePersistedAutoContainerOwnership(
                     current, reason + "-before-dashboard");
             if (!releaseFailure.isEmpty()) return releaseFailure;
+        }
+        if (command == DashboardLayoutPolicy.NO_LAYOUT_COMMAND) {
+            return isCurrent(current) ? "" : "layout command cancelled: stale request";
         }
         if (!DashboardLayoutPolicy.isAutoContainerCommand(command)) {
             String failure = StockMapProtocol30011.dispatch(

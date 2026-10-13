@@ -118,6 +118,7 @@ final class HudPrefs {
     static final int DASHBOARD_MODE_FULL = 2;
     static final int DASHBOARD_FORMAT_NATIVE = 0;
     static final int DASHBOARD_FORMAT_ALTERNATIVE = 1;
+    static final int DASHBOARD_FORMAT_NO_SWITCHING = 2;
     private static final String KEY_STORAGE_LIMIT_GB = "storage_limit_gb";
     private static final String KEY_DETAILED_DEBUG_ARTIFACTS = "detailed_debug_artifacts";
     private static final String KEY_OPTIONS_INTRO_VERSION_CODE = "options_intro_version_code";
@@ -633,6 +634,8 @@ final class HudPrefs {
     }
 
     static int normalizeDashboardFormatMethod(int dashboardMode, int method) {
+        if (normalizeDashboardScreenMode(dashboardMode) == DASHBOARD_MODE_PARTIAL
+                && method == DASHBOARD_FORMAT_NO_SWITCHING) return method;
         return method == DASHBOARD_FORMAT_NATIVE || method == DASHBOARD_FORMAT_ALTERNATIVE
                 ? method : defaultDashboardFormatMethod(dashboardMode);
     }

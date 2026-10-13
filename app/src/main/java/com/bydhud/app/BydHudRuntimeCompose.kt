@@ -3260,7 +3260,11 @@ private fun OptionsTab(
                 row("dashboard-format-method") {
                     ActionRow(
                         language.choose("Спосіб встановлення формату екрану", "Screen format method", "Способ установки формата экрана"),
-                        language.choose(
+                        if (snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NO_SWITCHING) language.choose(
+                            "Переносить застосунок у вибрану область приборки, не змінюючи її штатний режим.",
+                            "Moves the app to the selected dashboard area without changing the dashboard's native mode.",
+                            "Переносит приложение в выбранную область приборки, не меняя её штатный режим."
+                        ) else language.choose(
                             "Бажаний режим - штатний. Якщо штатний не працює - використовуйте альтернативний",
                             "Preferred mode: Native. If Native does not work, use Alternative.",
                             "Предпочтительный режим — штатный. Если он не работает, используйте альтернативный."),
@@ -3287,7 +3291,19 @@ private fun OptionsTab(
                                     )
                                 }
                             },
-                            itemWidth = 150.dp
+                            itemWidth = 150.dp,
+                            third = if (snapshot.dashboardScreenMode == HudPrefs.DASHBOARD_MODE_PARTIAL)
+                                language.choose("Без перемикання", "No switching", "Без переключения") else null,
+                            thirdActive = snapshot.dashboardScreenMode == HudPrefs.DASHBOARD_MODE_PARTIAL
+                                && snapshot.dashboardFormatMethod == HudPrefs.DASHBOARD_FORMAT_NO_SWITCHING,
+                            onThird = {
+                                runAction {
+                                    activity.composeSetDashboardFormatMethod(
+                                        snapshot.dashboardScreenMode,
+                                        HudPrefs.DASHBOARD_FORMAT_NO_SWITCHING
+                                    )
+                                }
+                            }
                         )
                     }
                 }

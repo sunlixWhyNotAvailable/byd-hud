@@ -5,6 +5,7 @@ import java.util.function.Supplier;
 
 /** Pure command ordering for dashboard format-method and TBT transitions. */
 final class DashboardLayoutPolicy {
+    static final int NO_LAYOUT_COMMAND = 0;
     static final int AUTOCONTAINER_FULL = 16;
     static final int AUTOCONTAINER_MINI = 17;
     static final int AUTOCONTAINER_RELEASE = 18;
@@ -27,15 +28,16 @@ final class DashboardLayoutPolicy {
 
     static int layoutCommand(int dashboardMode, int formatMethod) {
         int mode = HudPrefs.normalizeDashboardScreenMode(dashboardMode);
-        boolean alternative = HudPrefs.normalizeDashboardFormatMethod(mode, formatMethod)
-                == HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE;
+        int method = HudPrefs.normalizeDashboardFormatMethod(mode, formatMethod);
+        if (method == HudPrefs.DASHBOARD_FORMAT_NO_SWITCHING) return NO_LAYOUT_COMMAND;
+        boolean alternative = method == HudPrefs.DASHBOARD_FORMAT_ALTERNATIVE;
         if (mode == HudPrefs.DASHBOARD_MODE_FULL) {
             return alternative ? AUTOCONTAINER_FULL : PROTOCOL_FULL;
         }
         if (mode == HudPrefs.DASHBOARD_MODE_PARTIAL) {
             return alternative ? AUTOCONTAINER_MINI : PROTOCOL_PARTIAL;
         }
-        return 0;
+        return NO_LAYOUT_COMMAND;
     }
 
     static boolean isAutoContainerCommand(int command) {
