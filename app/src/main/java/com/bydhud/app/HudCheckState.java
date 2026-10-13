@@ -89,10 +89,11 @@ public final class HudCheckState {
             new ExtendedSample("Route summary", "Підсумок маршруту",
                     "RouteMetadata · f1, f3–4",
                     "routeId=1 · active=1 · f4=epoch ms × 1000"),
-            new ExtendedSample("Empty geometry", "Порожня геометрія", "RoadInfo · f30", "[]"),
-            new ExtendedSample("Straight geometry", "Пряма геометрія", "RoadInfo · f30", ""),
-            new ExtendedSample("Left geometry", "Геометрія ліворуч", "RoadInfo · f30", ""),
-            new ExtendedSample("Right geometry", "Геометрія праворуч", "RoadInfo · f30", "")
+            new ExtendedSample("Baseline heading", "Базовий курс", "RoadInfo · f30 / f32", ""),
+            new ExtendedSample("Heading +90°", "Курс +90°", "RoadInfo · f30 / f32", ""),
+            new ExtendedSample("Restore heading", "Повернення курсу", "RoadInfo · f30 / f32", ""),
+            new ExtendedSample("Heading −90°", "Курс −90°", "RoadInfo · f30 / f32", ""),
+            new ExtendedSample("Clear geometry", "Прибрати геометрію", "RoadInfo · f30 / f32", "[]")
     };
 
     public final Mode mode;

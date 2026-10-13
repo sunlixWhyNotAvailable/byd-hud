@@ -203,7 +203,7 @@ public final class HudCheckPayload {
         if (index >= 25 && index < HudCheckState.extendedCount()) {
             writeDoubleField(out, 19, HudCheckGeometry.LONGITUDE);
             writeDoubleField(out, 20, HudCheckGeometry.LATITUDE);
-            writeDoubleField(out, 32, HudCheckGeometry.HEADING);
+            writeDoubleField(out, 32, HudCheckGeometry.heading(index));
             writeStringField(out, 30, HudCheckGeometry.line(index));
             return;
         }

@@ -7613,8 +7613,7 @@ private fun HudCheckTab(
                     if (state.isGeometryCheck()) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE}\n" +
-                                "f32: ${HudCheckGeometry.HEADING}° · f28: 11 · f31: []",
+                            "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: 11 · f31: []",
                             color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp
                         )
                     }
@@ -7641,6 +7640,10 @@ private fun HudCheckTab(
                                 if (state.isGeometryCheck()) {
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                         Text(localizeHudCheckLabel(state.extendedLabel(ukrainian), language), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                        Text(
+                                            "f32: ${HudCheckGeometry.heading(state.extendedIndex)}°",
+                                            color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 18.sp
+                                        )
                                         Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
                                     }
                                     Spacer(Modifier.height(4.dp))
@@ -7699,17 +7702,21 @@ private fun HudCheckTab(
                     Spacer(Modifier.height(8.dp))
                     Text(
                         if (state.isGeometryCheck() && state.automatic) language.choose(
-                            "Кожен етап геометрії — 5 секунд · частота передачі — 1 Гц",
-                            "Each geometry stage lasts 5 seconds · transmission rate: 1 Hz",
-                            "Каждый этап геометрии — 5 секунд · частота передачи — 1 Гц"
+                            "Кожен етап перевірки курсу — 10 секунд · частота передачі — 1 Гц",
+                            "Each heading stage lasts 10 seconds · transmission rate: 1 Hz",
+                            "Каждый этап проверки курса — 10 секунд · частота передачи — 1 Гц"
                         ) else if (state.automatic) copy.checkCycle else copy.checkManualCycleHint,
                         color = palette.text,
                         fontSize = 13.sp
                     )
-                    Text(if (state.isGeometryCheck()) language.choose(
-                        "Змінюється лише геометрія маршруту f30 · координати й курс взяті зі штатного запису N9, GPS не змінюється",
-                        "Only route geometry f30 changes · position and heading come from the stock N9 recording; GPS stays unchanged",
-                        "Меняется только геометрия маршрута f30 · координаты и курс взяты из штатной записи N9, GPS не меняется"
+                    Text(if (state.isGeometryCheck() && state.extendedValue() == "[]") language.choose(
+                        "Геометрія f30 порожня · курс повернуто до базового · координати та GPS не змінюються",
+                        "Geometry f30 is empty · baseline heading restored · position and GPS stay unchanged",
+                        "Геометрия f30 пустая · курс возвращён к базовому · координаты и GPS не меняются"
+                    ) else if (state.isGeometryCheck()) language.choose(
+                        "Змінюється лише курс f32 · геометрія f30 та координати незмінні · GPS не змінюється",
+                        "Only heading f32 changes · geometry f30 and position stay fixed · GPS stays unchanged",
+                        "Меняется только курс f32 · геометрия f30 и координаты неизменны · GPS не меняется"
                     ) else copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
                 }
             }
@@ -8804,10 +8811,11 @@ private fun localizeHudCheckLabel(value: String, language: Language): String {
         "Position" -> "Положение"
         "Road data" -> "Данные дороги"
         "Guide line" -> "Линия маршрута"
-        "Empty geometry" -> "Пустая геометрия"
-        "Straight geometry" -> "Прямая геометрия"
-        "Left geometry" -> "Геометрия налево"
-        "Right geometry" -> "Геометрия направо"
+        "Baseline heading" -> "Базовый курс"
+        "Heading +90°" -> "Курс +90°"
+        "Restore heading" -> "Возврат курса"
+        "Heading −90°" -> "Курс −90°"
+        "Clear geometry" -> "Убрать геометрию"
         "Guide point" -> "Точка маршрута"
         "Heading" -> "Курс"
         "Route progress" -> "Прогресс маршрута"
