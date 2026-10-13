@@ -104,9 +104,11 @@ final class NavRuntimePermissionRepair {
             running = true;
             lastStartedMs = now;
         }
+        long authorizationGeneration = LocalAdbBridge.authorizationCancellationGeneration();
         Thread worker = new Thread(() -> {
             try {
-                checkAndRepairBlockingOwned(appContext, reason, allowAdb, safeMode);
+                checkAndRepairBlockingOwned(
+                        appContext, reason, allowAdb, safeMode, authorizationGeneration);
             } finally {
                 finishRepair(appContext);
             }
@@ -119,7 +121,8 @@ final class NavRuntimePermissionRepair {
             Context context,
             String reason,
             boolean allowAdb,
-            LocalAdbBridge.AuthorizationPromptMode promptMode) {
+            LocalAdbBridge.AuthorizationPromptMode promptMode,
+            long authorizationGeneration) {
         Context appContext = context.getApplicationContext();
         if (HudPrefs.isUserShutdownActive(appContext)) {
             return LocalAdbBridge.Result.partial("Shutdown active");
@@ -128,26 +131,43 @@ final class NavRuntimePermissionRepair {
                 ? LocalAdbBridge.AuthorizationPromptMode.NEVER
                 : promptMode;
         synchronized (LOCK) {
+            if (safeMode != LocalAdbBridge.AuthorizationPromptMode.NEVER
+                    && !LocalAdbBridge.isAuthorizationGenerationCurrent(authorizationGeneration)) {
+                return LocalAdbBridge.authorizationSuperseded(appContext, "repair_admission");
+            }
             if (running && safeMode == LocalAdbBridge.AuthorizationPromptMode.FORCE) {
                 LocalAdbBridge.AuthorizationCancellation cancellation =
-                        LocalAdbBridge.cancelPendingAuthorization();
-                AppEventLogger.event(appContext, "nav_permission_repair force_wait"
-                        + " pending_auth_cancelled=" + cancellation.socketClosed);
-                long deadline = android.os.SystemClock.elapsedRealtime()
-                        + FORCE_WAIT_FOR_ACTIVE_REPAIR_MS;
-                while (running) {
-                    long remaining = deadline - android.os.SystemClock.elapsedRealtime();
-                    if (remaining <= 0L) {
-                        break;
-                    }
-                    try {
-                        LOCK.wait(remaining);
-                    } catch (InterruptedException e) {
-                        Thread.currentThread().interrupt();
-                        return LocalAdbBridge.Result.partial(
-                                "Interrupted while waiting for active permission repair");
-                    }
+                        LocalAdbBridge.cancelPendingAuthorization(authorizationGeneration);
+                if (cancellation == null) {
+                    return LocalAdbBridge.authorizationSuperseded(appContext, "repair_wait_start");
                 }
+                authorizationGeneration = cancellation.generation;
+                try {
+                    AppEventLogger.event(appContext, "nav_permission_repair force_wait"
+                            + " pending_auth_cancelled=" + cancellation.socketClosed);
+                    long deadline = android.os.SystemClock.elapsedRealtime()
+                            + FORCE_WAIT_FOR_ACTIVE_REPAIR_MS;
+                    while (running) {
+                        long remaining = deadline - android.os.SystemClock.elapsedRealtime();
+                        if (remaining <= 0L) {
+                            break;
+                        }
+                        try {
+                            LOCK.wait(remaining);
+                        } catch (InterruptedException e) {
+                            Thread.currentThread().interrupt();
+                            return LocalAdbBridge.Result.partial(
+                                    "Interrupted while waiting for active permission repair");
+                        }
+                    }
+                } finally {
+                    //Release this wait's cancellation even if no FORCE grant follows.
+                    LocalAdbBridge.clearPendingAuthorizationCancellation(cancellation.generation);
+                }
+            }
+            if (safeMode != LocalAdbBridge.AuthorizationPromptMode.NEVER
+                    && !LocalAdbBridge.isAuthorizationGenerationCurrent(authorizationGeneration)) {
+                return LocalAdbBridge.authorizationSuperseded(appContext, "repair_wait_end");
             }
             if (running) {
                 AppEventLogger.event(appContext, "nav_permission_repair skipped reason="
@@ -162,7 +182,8 @@ final class NavRuntimePermissionRepair {
                     appContext,
                     reason,
                     allowAdb,
-                    safeMode);
+                    safeMode,
+                    authorizationGeneration);
         } finally {
             finishRepair(appContext);
         }
@@ -173,9 +194,14 @@ final class NavRuntimePermissionRepair {
             Context appContext,
             String reason,
             boolean allowAdb,
-            LocalAdbBridge.AuthorizationPromptMode safeMode) {
+            LocalAdbBridge.AuthorizationPromptMode safeMode,
+            long authorizationGeneration) {
         if (HudPrefs.isUserShutdownActive(appContext)) {
             return LocalAdbBridge.Result.partial("Shutdown active");
+        }
+        if (safeMode != LocalAdbBridge.AuthorizationPromptMode.NEVER
+                && !LocalAdbBridge.isAuthorizationGenerationCurrent(authorizationGeneration)) {
+            return LocalAdbBridge.authorizationSuperseded(appContext, "repair_owned");
         }
         NavRuntimePermissionStatus before = NavRuntimePermissionStatus.check(appContext);
         boolean keyKnown = LocalAdbBridge.isCurrentKeyKnownAuthorized(appContext);
@@ -212,7 +238,8 @@ final class NavRuntimePermissionRepair {
         }
 
         LocalAdbBridge.Result result =
-                LocalAdbBridge.grantNavCapturePermissions(appContext, safeMode);
+                LocalAdbBridge.grantNavCapturePermissions(
+                        appContext, safeMode, authorizationGeneration);
         AppEventLogger.event(appContext, "nav_permission_repair adb_result "
                 + result.code + " " + result.message);
         return result;

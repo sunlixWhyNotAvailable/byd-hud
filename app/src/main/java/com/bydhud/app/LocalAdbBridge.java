@@ -1142,9 +1142,18 @@ final class LocalAdbBridge {
 
     //closes only the socket waiting for RSA approval so a manual retry can prompt immediately.
     static AuthorizationCancellation cancelPendingAuthorization() {
+        return cancelPendingAuthorization(null);
+    }
+
+    //A delayed FORCE may replace only the generation it was admitted under.
+    static AuthorizationCancellation cancelPendingAuthorization(Long expectedGeneration) {
         Socket socket;
         long generation;
         synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            if (expectedGeneration != null
+                    && expectedGeneration != authorizationCancellationGeneration) {
+                return null;
+            }
             authorizationCancellationGeneration++;
             generation = authorizationCancellationGeneration;
             authorizationCancellationPending = true;
@@ -1188,18 +1197,35 @@ final class LocalAdbBridge {
     static Result grantNavCapturePermissions(
             Context context,
             AuthorizationPromptMode authorizationPromptMode) {
+        return grantNavCapturePermissions(
+                context, authorizationPromptMode, authorizationCancellationGeneration());
+    }
+
+    static Result grantNavCapturePermissions(
+            Context context,
+            AuthorizationPromptMode authorizationPromptMode,
+            long authorizationGeneration) {
         AuthorizationCancellation forceCancellation = null;
         if (authorizationPromptMode == AuthorizationPromptMode.FORCE) {
-            forceCancellation = cancelPendingAuthorization();
+            forceCancellation = cancelPendingAuthorization(authorizationGeneration);
+            if (forceCancellation == null) {
+                return authorizationSuperseded(context, "force_start");
+            }
+            authorizationGeneration = forceCancellation.generation;
         }
         synchronized (PERMISSION_GRANT_LOCK) {
             permissionGrantInProgress = true;
             try {
+                if (authorizationPromptMode != AuthorizationPromptMode.NEVER
+                        && !isAuthorizationGenerationCurrent(authorizationGeneration)) {
+                    return authorizationSuperseded(context, "grant_lock");
+                }
                 if (forceCancellation != null
                         && !clearPendingAuthorizationCancellation(forceCancellation.generation)) {
-                    return Result.authorizationRequired("ADB authorization retry superseded.");
+                    return authorizationSuperseded(context, "force_release");
                 }
-                return grantNavCapturePermissionsLocked(context, authorizationPromptMode);
+                return grantNavCapturePermissionsLocked(
+                        context, authorizationPromptMode, authorizationGeneration);
             } finally {
                 permissionGrantInProgress = false;
             }
@@ -1209,7 +1235,8 @@ final class LocalAdbBridge {
     //serializes permission repair so service and UI authorization attempts cannot overlap.
     private static Result grantNavCapturePermissionsLocked(
             Context context,
-            AuthorizationPromptMode authorizationPromptMode) {
+            AuthorizationPromptMode authorizationPromptMode,
+            long authorizationGeneration) {
         Context appContext = context.getApplicationContext();
         String normalizedPackage = appContext.getPackageName();
         NavPermissionStatus before = NavPermissionStatus.check(appContext);
@@ -1234,7 +1261,8 @@ final class LocalAdbBridge {
 
         Connection connection = null;
         try {
-            OpenResult openResult = Connection.open(appContext, authorizationPromptMode);
+            OpenResult openResult = Connection.open(
+                    appContext, authorizationPromptMode, authorizationGeneration);
             if (openResult.authorizationRequired) {
                 if (openResult.authorizationPromptSent) {
                     return Result.authorizationRequired(
@@ -1244,6 +1272,10 @@ final class LocalAdbBridge {
                         "ADB key is not authorized.");
             }
             connection = openResult.connection;
+            if (authorizationPromptMode != AuthorizationPromptMode.NEVER
+                    && !isAuthorizationGenerationCurrent(authorizationGeneration)) {
+                return authorizationSuperseded(appContext, "grant_connected");
+            }
             String endpointSuffix = openResult.endpointLabel.isEmpty()
                     ? ""
                     : " via " + openResult.endpointLabel;
@@ -2307,9 +2339,20 @@ final class LocalAdbBridge {
         static OpenResult open(
                 Context context,
                 AuthorizationPromptMode authorizationPromptMode) throws Exception {
+            return open(context, authorizationPromptMode, authorizationCancellationGeneration());
+        }
+
+        static OpenResult open(
+                Context context,
+                AuthorizationPromptMode authorizationPromptMode,
+                long cancellationGeneration) throws Exception {
+            if (authorizationPromptMode != AuthorizationPromptMode.NEVER
+                    && !isAuthorizationGenerationCurrent(cancellationGeneration)) {
+                AppEventLogger.event(context, "adb_bridge authorization_superseded phase=connect");
+                return new OpenResult(null, true, false, endpointLabel(PORT));
+            }
             KeyPair keyPair = loadOrCreateKeyPair(context);
             String keyFingerprint = fingerprint(keyPair);
-            long cancellationGeneration = authorizationCancellationGeneration();
             Log.i(TAG, "ADB bridge opening key=" + keyFingerprint);
             AppEventLogger.event(context, "adb_bridge open key=" + keyFingerprint);
             String endpoint = endpointLabel(PORT);
@@ -2407,9 +2450,9 @@ final class LocalAdbBridge {
                     }
                     String publicKey = AdbKeyFormatter.formatPublicKey(
                             (RSAPublicKey) keyPair.getPublic());
-                    Log.i(TAG, "ADB public key sent key=" + keyFingerprint);
-                    AppEventLogger.event(context, "adb_bridge public_key_sent key=" + keyFingerprint);
                     if (!trackPendingAuthorization(socket, cancellationGeneration)) {
+                        AppEventLogger.event(context,
+                                "adb_bridge authorization_superseded phase=public_key");
                         connection.close();
                         return new OpenResult(null, true, false, endpoint);
                     }
@@ -2420,6 +2463,8 @@ final class LocalAdbBridge {
                             0,
                             nulPayload(publicKey));
                     publicKeySent = true;
+                    Log.i(TAG, "ADB public key sent key=" + keyFingerprint);
+                    AppEventLogger.event(context, "adb_bridge public_key_sent key=" + keyFingerprint);
                     socket.setSoTimeout(AUTH_PROMPT_TIMEOUT_MS);
                     continue;
                 }
@@ -3007,14 +3052,31 @@ final class LocalAdbBridge {
         }
     }
 
-    //captures the cancellation generation before connect so FORCE can invalidate that attempt.
-    private static long authorizationCancellationGeneration() {
+    //Capture at request admission; delayed work must not adopt a later cancellation.
+    static long authorizationCancellationGeneration() {
         synchronized (AUTHORIZATION_SOCKET_LOCK) {
             return authorizationCancellationGeneration;
         }
     }
 
-    //clears the handoff marker only when the queued FORCE attempt owns the grant lock.
+    static boolean isAuthorizationGenerationCurrent(long generation) {
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            return generation == authorizationCancellationGeneration;
+        }
+    }
+
+    static boolean isAuthorizationCancellationPending() {
+        synchronized (AUTHORIZATION_SOCKET_LOCK) {
+            return authorizationCancellationPending;
+        }
+    }
+
+    static Result authorizationSuperseded(Context context, String phase) {
+        AppEventLogger.event(context, "adb_bridge authorization_superseded phase=" + phase);
+        return Result.authorizationRequired("ADB authorization attempt cancelled or superseded.");
+    }
+
+    //Only the owner may release a cancellation; never clear a newer request's marker.
     static boolean clearPendingAuthorizationCancellation(long generation) {
         synchronized (AUTHORIZATION_SOCKET_LOCK) {
             if (generation != authorizationCancellationGeneration) {

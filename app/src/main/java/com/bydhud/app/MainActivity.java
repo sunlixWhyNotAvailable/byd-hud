@@ -4833,7 +4833,8 @@ public final class MainActivity extends ComponentActivity {
         maybeRequestOverlayPermission();
         boolean grantInProgress = adbGrantInProgress
                 || LocalAdbBridge.isPermissionGrantInProgress()
-                || NavRuntimePermissionRepair.isRunning();
+                || NavRuntimePermissionRepair.isRunning()
+                || LocalAdbBridge.isAuthorizationCancellationPending();
         if (!AdbAuthorizationUiPolicy.canStart(
                 autoAdbAuthorizationState,
                 mainUiReady,
@@ -4854,7 +4855,8 @@ public final class MainActivity extends ComponentActivity {
             pendingAutoAdbStartRunnable = null;
             boolean stillBusy = adbGrantInProgress
                     || LocalAdbBridge.isPermissionGrantInProgress()
-                    || NavRuntimePermissionRepair.isRunning();
+                    || NavRuntimePermissionRepair.isRunning()
+                    || LocalAdbBridge.isAuthorizationCancellationPending();
             if (stillBusy) {
                 maybeStartPendingAdbAuthorization();
                 return;
@@ -5031,7 +5033,8 @@ public final class MainActivity extends ComponentActivity {
                 composeBlockingUiFlow,
                 adbGrantInProgress
                         || LocalAdbBridge.isPermissionGrantInProgress()
-                        || NavRuntimePermissionRepair.isRunning())) {
+                        || NavRuntimePermissionRepair.isRunning()
+                        || LocalAdbBridge.isAuthorizationCancellationPending())) {
             maybeStartPendingAdbAuthorization();
             return;
         }
@@ -5050,8 +5053,16 @@ public final class MainActivity extends ComponentActivity {
             appendStatus("adb bridge grant already running");
             return;
         }
+        if (authorizationPromptMode == LocalAdbBridge.AuthorizationPromptMode.AUTO_ONCE
+                && LocalAdbBridge.isAuthorizationCancellationPending()) {
+            autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.PENDING_UI;
+            AppEventLogger.event(this, "adb_auto deferred reason=cancellation_pending request=" + reason);
+            maybeStartPendingAdbAuthorization();
+            return;
+        }
         adbGrantInProgress = true;
         long grantGeneration = ++adbGrantGeneration;
+        long authorizationGeneration = LocalAdbBridge.authorizationCancellationGeneration();
         cancelPendingAutoAdbStart();
         if (authorizationPromptMode != LocalAdbBridge.AuthorizationPromptMode.NEVER) {
             autoAdbAuthorizationState = AdbAuthorizationUiPolicy.AutoState.RUNNING;
@@ -5079,7 +5090,8 @@ public final class MainActivity extends ComponentActivity {
                         appContext,
                         reason,
                         true,
-                        authorizationPromptMode);
+                        authorizationPromptMode,
+                        authorizationGeneration);
             } catch (RuntimeException e) {
                 result = LocalAdbBridge.Result.failed(
                         e.getClass().getSimpleName() + ": " + e.getMessage());
