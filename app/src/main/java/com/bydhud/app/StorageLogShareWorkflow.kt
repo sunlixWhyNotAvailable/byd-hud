@@ -199,8 +199,9 @@ object StorageLogShareWorkflow {
                 MainActivity.queueStorageShare(file, submittedDays, control.operationId)
                 return
             }
-            if (toDeveloper && ShellWorkClient.hasRequest(app, "upload", control.operationId)) {
-                val job = ShellWorkClient.job(app, "upload", control.operationId)
+            val uploadWorkId = ShellWorkExports.uploadWorkId(control.operationId)
+            if (toDeveloper && ShellWorkClient.hasRequest(app, "upload", uploadWorkId)) {
+                val job = ShellWorkClient.job(app, "upload", uploadWorkId)
                 val input = ShellWorkClient.expected(app, job).getJSONObject("input")
                 val result = ShellWorkExports.upload(app, File(input.getString("archive")),
                     submittedDays, control.operationId, report!!)

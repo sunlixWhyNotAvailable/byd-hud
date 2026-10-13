@@ -34,9 +34,14 @@ final class ShellWorkExports {
         return result;
     }
 
+    static String uploadWorkId(String operationId) {
+        // The archive keeps the visible ID; private shell requests are keyed by ID without type.
+        return operationId + "-upload";
+    }
+
     static SentryLogUploader.Result upload(Context context, File archive, List<String> days,
             String id, SentryLogReport report) throws Exception {
-        File job = ShellWorkClient.prepare(context, "upload", id, new JSONObject().put("operation", id)
+        File job = ShellWorkClient.prepare(context, "upload", uploadWorkId(id), new JSONObject().put("operation", id)
                 .put("archive", archive.getPath()).put("days", new JSONArray(days))
                 .put("title", report.getTitle()).put("comment", report.getComment()));
         JSONObject result = ShellWorkClient.await(context, job, null);

@@ -1938,7 +1938,13 @@ public final class ClusterProjectionService extends Service
     }
 
     static Display chooseClusterDisplay(Display[] displays) {
-        // OEM full-map content is composed above the parent's ordinary window root.
+        // The OEM card branch is composed above the full-map branch.
+        for (Display display : displays) {
+            if (display != null && "shared_fission_bg_XDJAScreenProjection_1"
+                    .equals(display.getName())) {
+                return display;
+            }
+        }
         for (Display display : displays) {
             if (display != null && "shared_fission_bg_XDJAScreenProjection_0"
                     .equals(display.getName())) {
