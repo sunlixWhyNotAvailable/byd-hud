@@ -89,11 +89,15 @@ public final class HudCheckState {
             new ExtendedSample("Route summary", "Підсумок маршруту",
                     "RouteMetadata · f1, f3–4",
                     "routeId=1 · active=1 · f4=epoch ms × 1000"),
-            new ExtendedSample("Baseline heading", "Базовий курс", "RoadInfo · f30 / f32", ""),
-            new ExtendedSample("Heading +90°", "Курс +90°", "RoadInfo · f30 / f32", ""),
-            new ExtendedSample("Restore heading", "Повернення курсу", "RoadInfo · f30 / f32", ""),
-            new ExtendedSample("Heading −90°", "Курс −90°", "RoadInfo · f30 / f32", ""),
-            new ExtendedSample("Clear geometry", "Прибрати геометрію", "RoadInfo · f30 / f32", "[]")
+            new ExtendedSample("Straight", "Прямо", "RoadInfo · f30", ""),
+            new ExtendedSample("Slight left", "Плавно ліворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Slight right", "Плавно праворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Left", "Ліворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Right", "Праворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Sharp left", "Різко ліворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Sharp right", "Різко праворуч", "RoadInfo · f30", ""),
+            new ExtendedSample("Left U-turn candidate", "Розворот ліворуч · кандидат", "RoadInfo · f30", ""),
+            new ExtendedSample("Right U-turn candidate", "Розворот праворуч · кандидат", "RoadInfo · f30", "")
     };
 
     public final Mode mode;

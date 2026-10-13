@@ -7718,21 +7718,17 @@ private fun HudCheckTab(
                     Spacer(Modifier.height(8.dp))
                     Text(
                         if (state.isGeometryCheck() && state.automatic) language.choose(
-                            "Кожен етап перевірки курсу — 10 секунд · частота передачі — 1 Гц",
-                            "Each heading stage lasts 10 seconds · transmission rate: 1 Hz",
-                            "Каждый этап проверки курса — 10 секунд · частота передачи — 1 Гц"
+                            "Кожен етап перевірки геометрії — 10 секунд · частота передачі — 1 Гц",
+                            "Each geometry stage lasts 10 seconds · transmission rate: 1 Hz",
+                            "Каждый этап проверки геометрии — 10 секунд · частота передачи — 1 Гц"
                         ) else if (state.automatic) copy.checkCycle else copy.checkManualCycleHint,
                         color = palette.text,
                         fontSize = 13.sp
                     )
-                    Text(if (state.isGeometryCheck() && state.extendedValue() == "[]") language.choose(
-                        "Геометрія f30 порожня · курс повернуто до базового · координати та GPS не змінюються",
-                        "Geometry f30 is empty · baseline heading restored · position and GPS stay unchanged",
-                        "Геометрия f30 пустая · курс возвращён к базовому · координаты и GPS не меняются"
-                    ) else if (state.isGeometryCheck()) language.choose(
-                        "Змінюється лише курс f32 · геометрія f30 та координати незмінні · GPS не змінюється",
-                        "Only heading f32 changes · geometry f30 and position stay fixed · GPS stays unchanged",
-                        "Меняется только курс f32 · геометрия f30 и координаты неизменны · GPS не меняется"
+                    Text(if (state.isGeometryCheck()) language.choose(
+                        "Змінюється лише геометрія f30 · курс f32 та координати незмінні · GPS не змінюється",
+                        "Only geometry f30 changes · heading f32 and position stay fixed · GPS stays unchanged",
+                        "Меняется только геометрия f30 · курс f32 и координаты неизменны · GPS не меняется"
                     ) else copy.checkExtendedNotice, color = palette.muted, fontSize = 13.sp)
                 }
             }
@@ -8810,6 +8806,9 @@ private fun localizeHudCheckLabel(value: String, language: Language): String {
         "Slight left" -> "Плавно налево"
         "Slight right" -> "Плавно направо"
         "Sharp left" -> "Резко налево"
+        "Sharp right" -> "Резко направо"
+        "Left U-turn candidate" -> "Разворот налево · кандидат"
+        "Right U-turn candidate" -> "Разворот направо · кандидат"
         "Left U-turn" -> "Разворот налево"
         "Right U-turn" -> "Разворот направо"
         "Roundabout right exit 2" -> "Круг, второй съезд направо"
@@ -8827,11 +8826,6 @@ private fun localizeHudCheckLabel(value: String, language: Language): String {
         "Position" -> "Положение"
         "Road data" -> "Данные дороги"
         "Guide line" -> "Линия маршрута"
-        "Baseline heading" -> "Базовый курс"
-        "Heading +90°" -> "Курс +90°"
-        "Restore heading" -> "Возврат курса"
-        "Heading −90°" -> "Курс −90°"
-        "Clear geometry" -> "Убрать геометрию"
         "Guide point" -> "Точка маршрута"
         "Heading" -> "Курс"
         "Route progress" -> "Прогресс маршрута"
