@@ -45,8 +45,6 @@ public final class ShellWorkEntryPoint {
                         .put("input", manifest.getJSONObject("workerInput"));
                 ShellWorkFiles.write(new File(control, "started.json"),
                         new JSONObject().put("pid", Process.myPid()).put("id", args[0]));
-                if (new File(control, "cancel").exists())
-                    throw new InterruptedException("Cancelled before start");
                 Thread ownerThread = Thread.currentThread();
                 Thread cancellation = new Thread(() -> {
                     try {
@@ -61,6 +59,8 @@ public final class ShellWorkEntryPoint {
                 JSONObject result;
                 String state;
                 try {
+                    if (new File(control, "cancel").exists())
+                        throw new InterruptedException("Cancelled before start");
                     result = execute(new ShellWorkContext(app, system, currentJob), system)
                             .put("ok", true);
                     state = "SUCCEEDED";
@@ -75,6 +75,16 @@ public final class ShellWorkEntryPoint {
                 Thread.interrupted();
                 writeState(control, state, result, new JSONObject().put("phase", state));
                 cancellation.interrupt();
+                try {
+                    ExportArtifactFiles.Removed removed = new ExportArtifactFiles.Removed();
+                    ShellExportCleanup.cleanCopies(manifest.optString("type"), control, currentJob, removed);
+                    if (removed.files > 0) android.util.Log.i("BYDHUD_SHELL_WORK",
+                            "export_copies_retired id=" + args[0] + " files=" + removed.files + " bytes=" + removed.bytes);
+                } catch (IOException cleanupError) {
+                    // The terminal result stays available; a later sweep retries deletion.
+                    android.util.Log.w("BYDHUD_SHELL_WORK", "export_copies_retained id=" + args[0]
+                            + " reason=" + ShellExportCleanup.failure(cleanupError));
+                }
             }
         } catch (Throwable error) {
             android.util.Log.e("BYDHUD_SHELL_WORK", "startup failed", error);

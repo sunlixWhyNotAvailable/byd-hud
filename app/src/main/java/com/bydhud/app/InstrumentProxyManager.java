@@ -1564,6 +1564,27 @@ final class InstrumentProxyManager {
         catch (RemoteException error) { throw new IOException("Cannot read trusted shell state", error); }
     }
 
+    Bundle retireExportArtifacts(String request, boolean acquire) throws IOException {
+        IInstrumentNavigationProxy current;
+        if (acquire) {
+            try { current = awaitShellProxy("export-retention"); }
+            catch (IOException unavailable) { throw new IOException("cleanup_transport_unavailable", unavailable); }
+        }
+        else synchronized (lock) { current = state == State.READY ? proxy : null; }
+        long currentGeneration;
+        synchronized (lock) { currentGeneration = generation; }
+        if (current == null) throw new IOException("cleanup_transport_unavailable");
+        try {
+            Bundle reply = current.retireExportArtifacts(currentGeneration, request);
+            if (reply == null || reply.getInt("schema", 0) != 1)
+                throw new IOException("cleanup_protocol_unavailable");
+            return reply;
+        } catch (RemoteException | RuntimeException error) {
+            // An older same-version retained helper may not implement the appended AIDL call.
+            throw new IOException("cleanup_transport_or_protocol_unavailable", error);
+        }
+    }
+
     void completeWorkSign(String id, String requestId, boolean ok, String detail) throws IOException {
         IInstrumentNavigationProxy current = awaitShellProxy("independent-work-sign");
         long currentGeneration;

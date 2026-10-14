@@ -17,8 +17,125 @@ final class ShellWorkClient {
     private static final String[] TYPES = {"patch", "log", "configuration", "upload", "shanghai"};
     private static final java.util.Map<String, List<String>> logPins =
             new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Object CLEANUP_LOCK = new Object();
+    private static final java.util.Set<String> CLEANUP_REPORTED = new java.util.HashSet<>();
 
     private ShellWorkClient() { }
+
+    static java.util.Set<String> retainedArchives(Context context) throws Exception {
+        java.util.Set<String> retained = new java.util.HashSet<>();
+        for (java.util.Map.Entry<String, ?> entry : ShellRuntimeSession.prefs(context).getAll().entrySet()) {
+            if (!entry.getKey().startsWith("share_work_")) continue;
+            try {
+                JSONObject saved = new JSONObject(String.valueOf(entry.getValue()));
+                if (pendingShare(saved.optString("phase")) && !saved.optString("file").isEmpty())
+                    retained.add(new File(saved.getString("file")).getAbsolutePath());
+            } catch (org.json.JSONException unreadableShare) { retained.add("*"); }
+        }
+        return retained;
+    }
+
+    private static boolean pendingShare(String phase) {
+        return !phase.isEmpty() && !"READY".equals(phase) && !"SENT".equals(phase)
+                && !"FAILED".equals(phase) && !"CANCELLED".equals(phase);
+    }
+
+    /** One transport acquisition per pass; results never authorize launch or signing. */
+    static long retireExports(Context context, boolean logs) throws Exception {
+        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper())
+            throw new IOException("Export cleanup cannot wait on UI thread");
+        synchronized (CLEANUP_LOCK) {
+            long start = android.os.SystemClock.elapsedRealtime();
+            File root = ShellWorkFiles.root(context);
+            File[] directories = root.listFiles();
+            if (directories == null) {
+                if (root.exists()) throw new IOException("artifact_directory_unreadable");
+                return Long.MAX_VALUE;
+            }
+            java.util.Set<String> pending = new java.util.HashSet<>();
+            for (java.util.Map.Entry<String, ?> entry : ShellRuntimeSession.prefs(context).getAll().entrySet()) {
+                if (!entry.getKey().startsWith("share_work_")) continue;
+                try {
+                    JSONObject saved = new JSONObject(String.valueOf(entry.getValue()));
+                    if (pendingShare(saved.optString("phase")))
+                        pending.add(entry.getKey().substring("share_work_".length()));
+                } catch (org.json.JSONException unreadableShare) { /* retainedArchives protects unknown archives. */ }
+            }
+            java.util.Set<String> retained = retainedArchives(context);
+            List<JSONObject> jobs = new ArrayList<>();
+            for (File directory : directories) {
+                String name = directory.getName();
+                if (!(logs ? name.startsWith("log-") || name.startsWith("upload-")
+                        : name.startsWith("configuration-"))) continue;
+                String type = name.substring(0, name.indexOf('-'));
+                String id = name.substring(type.length() + 1);
+                if (!id.matches("[A-Za-z0-9_-]{1,80}")) continue;
+                JSONObject hint = new JSONObject().put("name", name)
+                        .put("protected", pending.contains(id)
+                                || (id.endsWith("-upload") && pending.contains(id.substring(0, id.length() - 7))));
+                try {
+                    JSONObject expected = expected(context, directory);
+                    hint.put("stage", expected.optString("stage"))
+                            .put("createdAt", expected.optLong("createdAt"));
+                } catch (IOException absentOrLegacy) { /* Shell checks ownership and activity independently. */ }
+                jobs.add(hint);
+            }
+            long next = Long.MAX_VALUE;
+            long bytes = 0;
+            int removed = 0, checked = 0, kept = 0, cleaned = 0, reported = 0;
+            for (int from = 0; from < jobs.size(); from += 128) {
+                JSONArray batch = new JSONArray();
+                java.util.Set<String> batchRetained = new java.util.HashSet<>();
+                for (int i = from; i < Math.min(from + 128, jobs.size()); i++) {
+                    JSONObject job = jobs.get(i);
+                    batch.put(job);
+                    String prefix = new File(root, job.getString("name")).getAbsolutePath() + File.separator;
+                    for (String path : retained) if (path.startsWith(prefix)) batchRetained.add(path);
+                }
+                // A large chooser backlog must not reject otherwise independent jobs.
+                if (retained.contains("*") || batchRetained.size() > 256) {
+                    batchRetained.clear();
+                    batchRetained.add("*");
+                }
+                Bundle reply = InstrumentProxyManager.get(context).retireExportArtifacts(
+                        new JSONObject().put("jobs", batch).put("retained", new JSONArray(batchRetained)).toString(), from == 0);
+                JSONArray results = new JSONArray(reply.getString("results", "[]"));
+                for (int i = 0; i < results.length(); i++) {
+                    JSONObject result = results.getJSONObject(i);
+                    checked++;
+                    removed += result.optInt("files");
+                    if (result.optInt("files") > 0) cleaned++; else kept++;
+                    bytes += result.optLong("bytes");
+                    next = Math.min(next, result.optLong("next", Long.MAX_VALUE));
+                    String name = result.getString("name"), reason = result.getString("reason");
+                    if (result.optBoolean("settled") && name.startsWith("log-")) {
+                        String id = name.substring(4);
+                        logPins.remove(id);
+                        try {
+                            JSONObject expected = expected(context, new File(root, name));
+                            // Current observers own their result record; never overwrite it here.
+                            if (!terminal(expected.optString("stage"))
+                                    && (expected.optInt("version") != BuildConfig.VERSION_CODE
+                                    || "REGISTER_FAILED".equals(expected.optString("stage")))) {
+                                expected.put("stage", result.optString("state", "INTERRUPTED"));
+                                writeExpectation(context, expected);
+                            }
+                        } catch (IOException oldFormat) { /* No app record is needed to retire legacy artifacts. */ }
+                    }
+                    if (reported < 16 && (result.optInt("files") > 0 || (!"settled".equals(reason)
+                            && CLEANUP_REPORTED.size() < 256 && CLEANUP_REPORTED.add(name + ":" + reason)))) {
+                        reported++;
+                        AppEventLogger.event(context, "shell_export_cleanup id=" + name + " reason=" + reason
+                                + " files=" + result.optInt("files") + " bytes=" + result.optLong("bytes"));
+                    }
+                }
+            }
+            if (checked > 0) AppEventLogger.event(context, "shell_export_cleanup_summary jobs=" + checked
+                    + " cleaned=" + cleaned + " kept=" + kept + " files=" + removed + " bytes=" + bytes + " duration_ms="
+                    + (android.os.SystemClock.elapsedRealtime() - start));
+            return next;
+        }
+    }
 
     static boolean pinsDay(String day) {
         for (List<String> days : logPins.values()) if (days.contains(day)) return true;

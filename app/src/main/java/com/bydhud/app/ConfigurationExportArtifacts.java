@@ -84,6 +84,14 @@ final class ConfigurationExportArtifacts {
         for (File directory : directories(context)) {
             next = Math.min(next, sweep(directory, now, ACTIVE, log));
         }
+        if (ShellWorkEntryPoint.currentJob == null) {
+            try { next = Math.min(next, ShellWorkClient.retireExports(context, false)); }
+            catch (Exception error) {
+                log.accept("cleanup_failed shell=" + ShellExportCleanup.failure(error));
+                // Keep the persisted cleanup job: a temporary transport loss must not lose expiry.
+                next = Math.min(next, now + RETRY_MS);
+            }
+        }
         VehicleConfigurationExport.artifactsChecked(now);
         if (scheduled != null) scheduled.cancel(false);
         JobScheduler jobs = ShellWorkEntryPoint.currentJob == null ? context.getSystemService(JobScheduler.class) : null;
@@ -108,35 +116,38 @@ final class ConfigurationExportArtifacts {
         values.add(new File(context.getCacheDir(), "log-shares"));
         File external = context.getExternalCacheDir();
         if (external != null) values.add(new File(external, "log-shares"));
-        if (ShellWorkEntryPoint.currentJob == null) {
-            try {
-                File[] jobs = ShellWorkFiles.root(context).listFiles();
-                if (jobs != null) for (File job : jobs) {
-                    if (!job.getName().startsWith("configuration-")) continue;
-                    try {
-                        ShellWorkClient.expected(context, job);
-                        if (ShellWorkClient.terminal(
-                                ShellWorkClient.state(context, job).optString("state"))) {
-                            values.add(new File(job, "cache/log-shares"));
-                        }
-                    } catch (IOException untrustedOrUnavailable) { /* Keep artifacts unless trusted terminal state is known. */ }
-                }
-            } catch (IOException ignored) { }
-        }
         return values;
     }
 
     /** Pure filesystem boundary: names never supply paths outside the owned directory. */
     static long sweep(File directory, long now, Set<String> active, Consumer<String> log) {
+        return sweep(directory, now, active, log, new ExportArtifactFiles.Removed());
+    }
+
+    static long sweep(File directory, long now, Set<String> active, Consumer<String> log,
+            ExportArtifactFiles.Removed removed) {
+        if (active.contains("*")) return now + RETRY_MS;
+        try { ExportArtifactFiles.child(directory.getParentFile(), directory.getName()); }
+        catch (IOException error) {
+            log.accept("cleanup_failed symbolic_directory");
+            return now + RETRY_MS;
+        }
         File[] children = directory.listFiles();
-        if (children == null) return Long.MAX_VALUE;
+        if (children == null) {
+            if (!directory.exists()) return Long.MAX_VALUE;
+            log.accept("cleanup_failed directory_unreadable");
+            return now + RETRY_MS;
+        }
         Map<String, List<File>> groups = new TreeMap<>();
         long next = Long.MAX_VALUE;
         for (File file : children) {
             if (file.getName().matches("BYD-HUD-vehicle-config-elf-[0-9]+\\.zip\\.source\\.part")
                     && active.isEmpty() && file.isFile() && !Files.isSymbolicLink(file.toPath())) {
                 long size = file.length();
-                if (file.delete()) log.accept("cleanup partial=" + file.getName() + " bytes=" + size);
+                if (file.delete()) {
+                    removed.files++; removed.bytes += size;
+                    log.accept("cleanup partial=" + file.getName() + " bytes=" + size);
+                }
                 else {
                     log.accept("cleanup_failed file=" + file.getName());
                     next = Math.min(next, now + RETRY_MS);
@@ -148,12 +159,8 @@ final class ConfigurationExportArtifacts {
             if (file.isDirectory() && file.getName().endsWith(".staging")) {
                 File base = new File(directory, match.group(1));
                 if (active.contains(base.getAbsolutePath())) continue;
-                try (java.util.stream.Stream<java.nio.file.Path> tree = Files.walk(file.toPath())) {
-                    java.nio.file.Path root = file.toPath().toAbsolutePath().normalize();
-                    for (java.nio.file.Path path : (Iterable<java.nio.file.Path>) tree.sorted(Comparator.reverseOrder())::iterator) {
-                        if (!path.toAbsolutePath().normalize().startsWith(root)) throw new IOException("cleanup path escaped");
-                        Files.deleteIfExists(path);
-                    }
+                try {
+                    ExportArtifactFiles.delete(directory, file, removed);
                     log.accept("cleanup staging=" + file.getName());
                 } catch (IOException error) {
                     log.accept("cleanup_failed staging=" + file.getName());
@@ -207,20 +214,24 @@ final class ConfigurationExportArtifacts {
             }
             if (completed && now < expires) { next = Math.min(next, expires); continue; }
             long removedBytes = 0;
-            int removed = 0;
+            int removedFiles = 0;
             boolean failed = false;
             for (File file : files) {
                 if (file.equals(metadata)) continue;
                 long size = file.length();
-                if (file.delete() || !file.exists()) { removed++; removedBytes += size; }
-                else { failed = true; log.accept("cleanup_failed file=" + file.getName()); }
+                if (file.delete()) { removedFiles++; removedBytes += size; removed.files++; removed.bytes += size; }
+                else if (file.exists()) { failed = true; log.accept("cleanup_failed file=" + file.getName()); }
             }
-            if (!failed && metadata.exists() && !metadata.delete()) {
-                failed = true;
-                log.accept("cleanup_failed metadata=" + metadata.getName());
+            if (!failed && metadata.exists()) {
+                long size = metadata.length();
+                if (metadata.delete()) { removed.files++; removed.bytes += size; }
+                else {
+                    failed = true;
+                    log.accept("cleanup_failed metadata=" + metadata.getName());
+                }
             }
             if (failed) next = Math.min(next, now + RETRY_MS);
-            if (removed > 0) log.accept("cleanup archive=" + base.getName() + " files=" + removed
+            if (removedFiles > 0) log.accept("cleanup archive=" + base.getName() + " files=" + removedFiles
                     + " bytes=" + removedBytes + " expired=" + completed);
         }
         return next;

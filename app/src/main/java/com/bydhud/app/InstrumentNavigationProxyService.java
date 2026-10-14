@@ -622,7 +622,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             ParcelFileDescriptor[] snapshots) {
         enforceSession(requestGeneration);
         long identity = Binder.clearCallingIdentity();
-        try {
+        try (ShellWorkFiles.OperationLock admission = ShellWorkFiles.lockOperation(id)) {
             Context app = shellAppContext();
             int currentBoot = ShellWorkEntryPoint.bootCount();
             if (boot != currentBoot) throw new SecurityException("Shell job boot identity changed");
@@ -642,6 +642,8 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             if (descriptorCount != paths.length())
                 throw new SecurityException("Shell input snapshot count mismatch");
             File control = ShellWorkFiles.controlJob(id);
+            if (new File(control, "retired.json").exists())
+                throw new SecurityException("Retired operation cannot be registered again");
             File manifestFile = new File(control, "request.json");
             org.json.JSONObject manifest = manifestFile.isFile()
                     ? ShellWorkFiles.read(manifestFile) : null;
@@ -746,7 +748,7 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
     @Override public synchronized void launchWork(long requestGeneration, String id) {
         enforceSession(requestGeneration);
         long identity = Binder.clearCallingIdentity();
-        try {
+        try (ShellWorkFiles.OperationLock admission = ShellWorkFiles.lockOperation(id)) {
             Context app = shellAppContext();
             File control = ShellWorkFiles.controlJob(id);
             org.json.JSONObject request = ShellWorkFiles.read(new File(control, "request.json"));
@@ -830,6 +832,23 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
             return true;
         } catch (Exception error) { return false; }
         finally { Binder.restoreCallingIdentity(identity); }
+    }
+
+    @Override public Bundle retireExportArtifacts(long requestGeneration, String requestJson) {
+        enforceSession(requestGeneration);
+        long identity = Binder.clearCallingIdentity();
+        try {
+            if (requestJson == null || requestJson.getBytes(StandardCharsets.UTF_8).length > 256 * 1024)
+                throw new IOException("cleanup_batch_oversized");
+            org.json.JSONArray results = ShellExportCleanup.run(shellAppContext(), allowedUid,
+                    appVersionCode, new org.json.JSONObject(requestJson), workProcesses);
+            Bundle reply = new Bundle();
+            reply.putInt("schema", 1);
+            reply.putString("results", results.toString());
+            return reply;
+        } catch (Exception error) {
+            throw new IllegalStateException("Cannot retire export artifacts: " + error.getMessage(), error);
+        } finally { Binder.restoreCallingIdentity(identity); }
     }
 
     private Context shellAppContext() throws Exception {

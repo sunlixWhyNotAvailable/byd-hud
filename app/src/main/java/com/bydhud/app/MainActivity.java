@@ -277,10 +277,7 @@ public final class MainActivity extends ComponentActivity {
         }
         NavHudLiveSender.activateUserRuntime(this);
         HudGraphicPayload.setContext(this);
-        int staleShareArtifacts = LogShareZip.cleanupStaleArtifacts(this);
-        if (staleShareArtifacts > 0) {
-            AppEventLogger.event(this, "storage_share_cleanup files=" + staleShareArtifacts);
-        }
+        LogShareZip.cleanupStaleArtifactsAsync(this);
         NavigationLogStorage.cleanupRetiredStorageDaysAsync(this);
         BootCleanupGate.runWhenReady(this,
                 () -> HudRuntimeSupervisor.ensureStarted(this, "activity-create"));

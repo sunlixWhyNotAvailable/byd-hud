@@ -32,7 +32,6 @@ final class LogShareZip {
     private static final String CONFIG_ZIP_PREFIX = "BYD-HUD-vehicle-config-";
     private static final int BUFFER_BYTES = 64 * 1024;
     private static final long WRITER_CHECKPOINT_TIMEOUT_MS = 2_000L;
-    private static final long COMPLETED_ZIP_MIN_AGE_MS = 10L * 60L * 1000L;
     private static final AtomicBoolean CLEANUP_STARTED = new AtomicBoolean(false);
     private static final ThreadLocal<Consumer<Phase>> PROGRESS_LISTENER = new ThreadLocal<>();
 
@@ -405,84 +404,35 @@ final class LogShareZip {
         files.add(new SnapshotFile(file, name, file.length()));
     }
 
-    //Removes completed and partial archives left by the previous app process.
-    static int cleanupStaleArtifacts(Context context) {
-        if (context == null || !CLEANUP_STARTED.compareAndSet(false, true)) {
-            return 0;
-        }
+    static void cleanupStaleArtifactsAsync(Context context) {
+        if (context == null || !CLEANUP_STARTED.compareAndSet(false, true)) return;
         Context app = context.getApplicationContext();
-        List<File> parents = new ArrayList<>();
-        File external = app.getExternalCacheDir();
-        if (external != null) {
-            parents.add(new File(external, SHARE_DIR));
-        }
-        parents.add(new File(app.getCacheDir(), SHARE_DIR));
-        Set<String> retained = new HashSet<>();
-        try {
-            File[] jobs = ShellWorkFiles.root(app).listFiles();
-            if (jobs != null) for (File job : jobs) {
-                if (job == null || !job.isDirectory()) continue;
-                if (!job.getName().startsWith("upload-")
-                        && !job.getName().startsWith("log-")) continue;
-                try {
-                    JSONObject expected = ShellWorkClient.expected(app, job);
-                    String state = ShellWorkClient.state(app, job).optString("state");
-                    boolean settled = "SUCCEEDED".equals(state) || "FAILED".equals(state)
-                            || "CANCELLED".equals(state) || "INTERRUPTED".equals(state);
-                    if (job.getName().startsWith("upload-") && !settled) {
-                        JSONObject input = expected.optJSONObject("input");
-                        if (input != null && !input.optString("archive").isEmpty()) {
-                            retained.add(input.optString("archive"));
-                        }
-                    }
-                    if (job.getName().startsWith("log-") && settled) {
-                        parents.add(new File(job, "cache/log-shares"));
-                    }
-                } catch (Exception error) {
-                    AppEventLogger.event(app, "shell_share_retention_job_unavailable id="
-                            + job.getName() + " reason=" + error.getClass().getSimpleName());
-                }
-            }
-            for (java.util.Map.Entry<String, ?> entry : ShellRuntimeSession.prefs(app).getAll().entrySet()) {
-                if (!entry.getKey().startsWith("share_work_")) continue;
-                JSONObject saved = new JSONObject(String.valueOf(entry.getValue()));
-                if ("WAITING_FOR_SHARE".equals(saved.optString("phase")) || "OVERSIZED".equals(saved.optString("phase")))
-                    retained.add(saved.optString("file"));
-            }
-        } catch (Exception error) { AppEventLogger.event(app, "shell_share_retention_failed " + error); }
-        Set<String> visited = new HashSet<>();
-        int deleted = 0;
-        long now = System.currentTimeMillis();
-        for (File parent : parents) {
-            String canonical;
+        Thread worker = new Thread(() -> {
             try {
-                canonical = parent.getCanonicalPath();
-            } catch (IOException e) {
-                continue;
-            }
-            if (!visited.add(canonical)) {
-                continue;
-            }
-            File[] files = parent.listFiles();
-            if (files == null) {
-                continue;
-            }
-            for (File file : files) {
-                if (file == null || retained.contains(file.getAbsolutePath()) || !isShareArtifact(file.getName())) {
-                    continue;
-                }
-                boolean partial = file.isDirectory() || file.getName().endsWith(".part");
-                long ageMs = Math.max(0L, now - file.lastModified());
-                if (partial || ageMs >= COMPLETED_ZIP_MIN_AGE_MS) {
-                    boolean existed = file.exists();
-                    if (file.isDirectory()) deleteTree(file); else deleteArtifact(file);
-                    if (existed && !file.exists()) {
-                        deleted++;
+                Set<String> retained = ShellWorkClient.retainedArchives(app);
+                ExportArtifactFiles.Removed removed = new ExportArtifactFiles.Removed();
+                Set<String> visited = new HashSet<>();
+                List<File> parents = new ArrayList<>();
+                if (app.getExternalCacheDir() != null) parents.add(new File(app.getExternalCacheDir(), SHARE_DIR));
+                parents.add(new File(app.getCacheDir(), SHARE_DIR));
+                for (File parent : parents) {
+                    if (!visited.add(parent.getAbsolutePath())) continue;
+                    try { ExportArtifactFiles.logArchives(parent, retained, System.currentTimeMillis(), removed); }
+                    catch (IOException error) {
+                        AppEventLogger.event(app, "storage_share_cleanup_deferred reason="
+                                + ShellExportCleanup.failure(error));
                     }
                 }
+                if (removed.files > 0) AppEventLogger.event(app, "storage_share_cleanup files="
+                        + removed.files + " bytes=" + removed.bytes);
+                ShellWorkClient.retireExports(app, true);
+            } catch (Exception error) {
+                AppEventLogger.event(app, "shell_export_cleanup_deferred stage=startup reason="
+                        + ShellExportCleanup.failure(error));
             }
-        }
-        return deleted;
+        }, "BydHudExportCleanup");
+        worker.setPriority(Thread.MIN_PRIORITY);
+        worker.start();
     }
 
     private static List<String> checkedDays(List<String> selectedDays) throws IOException {

@@ -55,9 +55,35 @@ final class ShellWorkFiles {
         if (id == null || !id.matches("[A-Za-z0-9_-]{1,120}"))
             throw new IOException("Invalid shell operation ID");
         File root = controlRoot();
-        File job = new File(root, id).getCanonicalFile();
+        File job = ExportArtifactFiles.child(root, id).getCanonicalFile();
         if (!job.getParentFile().equals(root)) throw new IOException("Invalid private shell operation path");
         return job;
+    }
+
+    /** Serializes admission/launch/retirement across proxy processes, never the HUD monitor. */
+    static OperationLock lockOperation(String id) throws IOException {
+        File control = directory(controlJob(id));
+        return new OperationLock(ExportArtifactFiles.child(control, "operation.lock"));
+    }
+
+    static final class OperationLock implements AutoCloseable {
+        private final java.io.RandomAccessFile file;
+        private final java.nio.channels.FileLock lock;
+
+        OperationLock(File path) throws IOException {
+            file = new java.io.RandomAccessFile(path, "rw");
+            try {
+                lock = file.getChannel().tryLock();
+                if (lock == null) throw new IOException("operation_busy");
+            } catch (IOException | RuntimeException error) {
+                file.close();
+                throw new IOException("operation_busy", error);
+            }
+        }
+
+        @Override public void close() throws IOException {
+            try { lock.release(); } finally { file.close(); }
+        }
     }
 
     static File ownedPath(File root, String path) throws IOException {
