@@ -40,13 +40,3 @@ internal data class HudPresentationPreview(
     fun waitApplies(etaStreetEnabled: Boolean) = etaStreetEnabled
 
 }
-
-/** Recolor only text coverage against the approved (1,6,13) schematic background. */
-internal fun recolorHudTextPixel(pixel: Int, color: Int): Int {
-    val coverage = (((pixel ushr 8) and 255) - 6).coerceAtLeast(0) / 249f
-    if (coverage == 0f) return pixel
-    fun channel(shift: Int, background: Int) =
-        (background + (((color ushr shift) and 255) - background) * coverage).toInt().coerceIn(0, 255)
-    return (pixel and 0xFF000000.toInt()) or (channel(16, 1) shl 16) or
-        (channel(8, 6) shl 8) or channel(0, 13)
-}

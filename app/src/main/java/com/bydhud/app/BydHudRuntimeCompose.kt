@@ -122,7 +122,6 @@ import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.res.painterResource
-import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
@@ -8529,68 +8528,6 @@ private fun Section(
 private fun rowExplanation(text: String): String = text.trimEnd().removeSuffix(".")
 
 @Composable
-private fun MapOutputHelpImage(baseline: ImageBitmap, showMap: Boolean) {
-    val stockMap = if (showMap) ImageBitmap.imageResource(R.drawable.hud_help_map_denza) else null
-    Canvas(Modifier.fillMaxSize()) {
-        withTransform({ scale(size.width / 2172f, size.height / 724f, Offset.Zero) }) {
-            // Approved N9 help layout; map pixels come from the owner's stock capture.
-            drawRect(Color(0xFF01060D), size = Size(2172f, 724f))
-            drawImage(baseline, IntOffset(335, 320), IntSize(440, 200), IntOffset(335, 320), IntSize(440, 200))
-            drawImage(baseline, IntOffset(810, 440), IntSize(700, 100), IntOffset(325, 535), IntSize(525, 75))
-            drawImage(baseline, IntOffset(940, 180), IntSize(330, 130), IntOffset(940, 180), IntSize(330, 130))
-            drawImage(baseline, IntOffset(1700, 330), IntSize(190, 230), IntOffset(985, 350), IntSize(190, 230))
-            if (stockMap != null) {
-                drawImage(stockMap, IntOffset.Zero, IntSize(stockMap.width, stockMap.height),
-                    IntOffset(1450, 300), IntSize(450, 270))
-            }
-        }
-    }
-}
-
-@Composable
-private fun Sl07MapOutputHelpImage(baseline: ImageBitmap) {
-    val stockMap = ImageBitmap.imageResource(R.drawable.hud_help_map_denza)
-    Canvas(Modifier.fillMaxSize()) {
-        withTransform({ scale(size.width / 2172f, size.height / 724f, Offset.Zero) }) {
-            // SL07 example, using existing compressed HUD art and the retained OEM map.
-            // This is a layout illustration, not a new map source or an OEM pixel projection.
-            drawImage(baseline)
-            drawRect(Color(0xFF01060D), topLeft = Offset(810f, 438f), size = Size(700f, 102f))
-            drawImage(stockMap, IntOffset.Zero, IntSize(stockMap.width, stockMap.height),
-                IntOffset(1190, 320), IntSize(330, 198))
-        }
-    }
-}
-
-@Composable
-private fun NativeEtaHelpOverlay(mask: Int, language: Language) {
-    if (mask == 0) return
-    val arrival = "18:45"
-    val duration = when (language) {
-        Language.Ua -> "25 хв"
-        Language.En -> "25 min"
-        Language.Ru -> "25 мин"
-    }
-    val distance = when (language) {
-        Language.Ua, Language.Ru -> "12 км"
-        Language.En -> "12 km"
-    }
-    Canvas(Modifier.fillMaxSize()) {
-        val scaleX = size.width / 2172f
-        val scaleY = size.height / 724f
-        val paint = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color(0xFF00D8E7).toArgb()
-            textSize = 34f * scaleY
-            typeface = android.graphics.Typeface.create("sans-serif", android.graphics.Typeface.NORMAL)
-        }
-        val canvas = drawContext.canvas.nativeCanvas
-        if (mask and 1 != 0) canvas.drawText(arrival, 432f * scaleX, 524f * scaleY, paint)
-        if (mask and 2 != 0) canvas.drawText(duration, 548f * scaleX, 524f * scaleY, paint)
-        if (mask and 4 != 0) canvas.drawText(distance, 660f * scaleX, 524f * scaleY, paint)
-    }
-}
-
-@Composable
 private fun HudHelpOverlay(
     request: HudHelpRequest,
     language: Language,
@@ -8617,11 +8554,7 @@ private fun HudHelpOverlay(
     }
     val selectedEtaOutputMode = if (request.topic == HudHelpTopicId.EtaOutputMode) {
         localIndex.coerceIn(HudPrefs.ETA_OUTPUT_OFF, HudPrefs.ETA_OUTPUT_ALTERNATIVE)
-    } else {
-        request.etaOutputMode
-    }
-    val etaImage = HudHelpCatalog.etaImage(
-        request.etaStreet, helpEtaMask, localPresentation.streetFormat)
+    } else request.etaOutputMode
     val isEtaDisplayHelp = request.topic in setOf(
         HudHelpTopicId.EtaOutputMode,
         HudHelpTopicId.EtaMode,
@@ -8630,112 +8563,81 @@ private fun HudHelpOverlay(
         HudHelpTopicId.EtaOutput,
         HudHelpTopicId.RemainingTime,
         HudHelpTopicId.RemainingDistance
-    ) || (request.topic == HudHelpTopicId.TextColor
-        && request.colorSlot != HudTextColorSlot.Warning)
-    val showNativeEta = isEtaDisplayHelp
-        && selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE
-    val imageRes = when (request.topic) {
+    ) || (request.topic == HudHelpTopicId.TextColor && request.colorSlot != HudTextColorSlot.Warning)
+    val selectedFrame = when (request.topic) {
         HudHelpTopicId.BasicPng,
         HudHelpTopicId.BasicNative,
         HudHelpTopicId.BasicLanes,
         HudHelpTopicId.BasicStreet,
         HudHelpTopicId.BasicDistance,
         HudHelpTopicId.SmallDistanceClamp,
-        HudHelpTopicId.WazeAlerts -> topic.frames
-            .getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }.imageRes
+        HudHelpTopicId.EtaOutput,
+        HudHelpTopicId.RemainingTime,
+        HudHelpTopicId.RemainingDistance,
+        HudHelpTopicId.WazeAlerts -> topic.frames.getOrElse(if (localChecked) 1 else 0) { topic.frames.first() }
         HudHelpTopicId.BasicTransliteration,
         HudHelpTopicId.MapOutputMode,
         HudHelpTopicId.SpeedLimitNativeFallbackMode,
         HudHelpTopicId.SpeedLimitFallback,
         HudHelpTopicId.SpeedLimitCompositeField,
-        HudHelpTopicId.WazeAlertField -> topic.frames
-            .getOrElse(localIndex) { topic.frames.first() }.imageRes
-        HudHelpTopicId.EtaStreetFormat -> if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
-            HudHelpCatalog.etaImage(
-                true, helpEtaMask,
-                EtaStreetFormat.entries[localIndex.coerceIn(0, EtaStreetFormat.entries.lastIndex)])
-        } else {
-            R.drawable.hud_help_baseline
-        }
-        HudHelpTopicId.TextColor -> if (request.colorSlot == HudTextColorSlot.Warning) {
-            R.drawable.hud_help_warning_separate
-        } else if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
-            etaImage
-        } else {
-            R.drawable.hud_help_baseline
-        }
-        HudHelpTopicId.EtaOutputField -> if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
-            HudHelpCatalog.etaImage(
-                localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET,
-                previewEtaMask,
-                localPresentation.streetFormat)
-        } else {
-            R.drawable.hud_help_baseline
-        }
-        HudHelpTopicId.EtaMode -> if (selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE) {
-            etaImage
-        } else {
-            R.drawable.hud_help_baseline
-        }
-        HudHelpTopicId.EtaOutput,
-        HudHelpTopicId.RemainingTime,
-        HudHelpTopicId.RemainingDistance -> if (
-            selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE && helpEtaMask != 0
-        ) {
-            etaImage
-        } else {
-            R.drawable.hud_help_baseline
-        }
-        HudHelpTopicId.EtaOutputMode -> if (
-            selectedEtaOutputMode == HudPrefs.ETA_OUTPUT_ALTERNATIVE
-        ) {
-            HudHelpCatalog.etaImage(request.etaStreet, previewEtaMask, localPresentation.streetFormat)
-        } else {
-            R.drawable.hud_help_baseline
-        }
-        HudHelpTopicId.SpeedLimitMode -> when (localIndex.coerceIn(0, 6)) {
-            0 -> R.drawable.hud_help_baseline
-            1 -> R.drawable.hud_help_speed_native
-            2 -> R.drawable.hud_help_speed_native
-            3 -> R.drawable.hud_help_speed_maneuver
-            4 -> R.drawable.hud_help_speed_lanes
-            5 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
-                1 -> R.drawable.hud_help_speed_maneuver
-                2 -> R.drawable.hud_help_speed_lanes
-                else -> R.drawable.hud_help_baseline
-            }
-            else -> if (request.compositeFieldIndex % 2 == 1) {
-                R.drawable.hud_help_speed_composite_lanes
-            } else {
-                R.drawable.hud_help_speed_composite_maneuver
-            }
-        }
+        HudHelpTopicId.WazeAlertField,
+        HudHelpTopicId.EtaMode,
+        HudHelpTopicId.EtaOutputMode,
+        HudHelpTopicId.EtaOutputField,
+        HudHelpTopicId.EtaStreetFormat,
+        HudHelpTopicId.SpeedLimitMode -> topic.frames.getOrElse(localIndex) { topic.frames.first() }
+        HudHelpTopicId.TextColor,
         HudHelpTopicId.SpeedLimitCompositeManeuverSize,
-        HudHelpTopicId.SpeedLimitCompositeLaneSize -> R.drawable.hud_help_baseline
+        HudHelpTopicId.SpeedLimitCompositeLaneSize -> topic.frames.first()
     }
-    val sizeTopic = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
-        || request.topic == HudHelpTopicId.SpeedLimitCompositeLaneSize
-    val signBitmap = if (sizeTopic) ImageBitmap.imageResource(R.drawable.hud_help_baseline) else null
-    val warningImage = if (request.warningFieldIndex == HudPrefs.WAZE_ALERT_FIELD_EXPERIMENTAL) {
-        R.drawable.hud_help_warning_separate
-    } else {
-        R.drawable.hud_help_warning_maneuver
+    var scene = selectedFrame.scene
+    if (isEtaDisplayHelp) {
+        val etaStreet = when (request.topic) {
+            HudHelpTopicId.EtaOutputField -> localIndex == HudPrefs.ETA_OUTPUT_FIELD_STREET
+            HudHelpTopicId.EtaStreetFormat -> true
+            else -> request.etaStreet
+        }
+        val streetFormat = if (request.topic == HudHelpTopicId.EtaStreetFormat) {
+            EtaStreetFormat.entries[localIndex.coerceIn(0, EtaStreetFormat.entries.lastIndex)]
+        } else localPresentation.streetFormat
+        scene = scene.copy(
+            etaMode = selectedEtaOutputMode,
+            etaMask = if (etaMetricBit == 0) previewEtaMask else helpEtaMask,
+            etaStreet = etaStreet,
+            streetFormat = streetFormat
+        )
     }
-    val selectedImage = if (request.topic == HudHelpTopicId.WazeAlerts && localChecked) {
-        warningImage
-    } else {
-        imageRes
+    if (request.topic == HudHelpTopicId.SpeedLimitMode) {
+        scene = scene.copy(maneuver = true, nativeManeuver = true, lanes = true, speed = when (localIndex.coerceIn(0, 6)) {
+            0 -> HudHelpSpeed.None
+            1, 2 -> HudHelpSpeed.Native
+            3 -> HudHelpSpeed.Maneuver
+            4 -> HudHelpSpeed.Lanes
+            5 -> when (request.freeFieldOverlapIndex.coerceIn(0, 2)) {
+                1 -> HudHelpSpeed.Maneuver
+                2 -> HudHelpSpeed.Lanes
+                else -> HudHelpSpeed.None
+            }
+            else -> if (request.compositeFieldIndex % 2 == 1) HudHelpSpeed.CompositeLanes else HudHelpSpeed.CompositeManeuver
+        })
     }
-    val formattedImage = if (request.topic == HudHelpTopicId.EtaStreetFormat) {
-        // etaImage above already follows the modal's local dropdown choice.
-        selectedImage
-    } else {
-        HudHelpCatalog.streetFormatImage(selectedImage, localPresentation.streetFormat)
+    if (request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize || request.topic == HudHelpTopicId.SpeedLimitCompositeLaneSize) {
+        val maneuver = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
+        val nominal = if (maneuver) 64 else 36
+        val maximum = if (maneuver) 103 else 36
+        val value = localValue.coerceIn(1, maximum)
+        scene = scene.copy(
+            speed = if (maneuver) HudHelpSpeed.CompositeManeuver else HudHelpSpeed.CompositeLanes,
+            signSize = value * 68f / nominal
+        )
     }
-    val localizedImage = HudHelpCatalog.localizedImage(formattedImage, language)
-    val resources = androidx.compose.ui.platform.LocalContext.current.resources
-    val coloredImage = remember(localizedImage, localPresentation) {
-        tintedHudHelp(resources, localizedImage, localPresentation)
+    if (request.topic == HudHelpTopicId.WazeAlerts) {
+        scene = scene.copy(warning = if (!localChecked) HudHelpWarning.None else if (request.warningFieldIndex == HudPrefs.WAZE_ALERT_FIELD_EXPERIMENTAL) {
+            HudHelpWarning.Separate
+        } else HudHelpWarning.Maneuver)
+    }
+    if (request.topic == HudHelpTopicId.TextColor && request.colorSlot == HudTextColorSlot.Warning) {
+        scene = scene.copy(etaMode = HudPrefs.ETA_OUTPUT_OFF, warning = HudHelpWarning.Separate)
     }
     Dialog(
         onDismissRequest = onDismiss,
@@ -8766,39 +8668,13 @@ private fun HudHelpOverlay(
                     .border(1.dp, palette.borderStrong, RoundedCornerShape(6.dp)),
                 contentAlignment = Alignment.Center
             ) {
-                if (request.topic == HudHelpTopicId.MapOutputMode && localIndex == 2) {
-                    Sl07MapOutputHelpImage(coloredImage)
-                } else if (request.topic == HudHelpTopicId.MapOutputMode) {
-                    MapOutputHelpImage(coloredImage, showMap = localIndex == 1)
-                } else Image(
-                    bitmap = coloredImage,
+                HudHelpImage(
+                    scene = scene,
+                    language = language,
+                    presentation = localPresentation,
                     contentDescription = request.title,
-                    contentScale = ContentScale.Fit,
                     modifier = Modifier.fillMaxSize()
                 )
-                if (showNativeEta) NativeEtaHelpOverlay(helpEtaMask, language)
-                if (signBitmap != null) {
-                    Canvas(Modifier.fillMaxSize()) {
-                        val maneuver = request.topic == HudHelpTopicId.SpeedLimitCompositeManeuverSize
-                        val nominal = if (maneuver) 64 else 36
-                        val maximum = if (maneuver) 103 else 36
-                        val value = localValue.coerceIn(1, maximum)
-                        val signSize = value * 68f / nominal
-                        val scaleX = size.width / 2172f
-                        val scaleY = size.height / 724f
-                        val left = if (maneuver) 410f else 1360f
-                        val bottom = if (maneuver) 512f else 515f
-                        drawImage(
-                            image = signBitmap,
-                            srcOffset = IntOffset(1546, 347),
-                            srcSize = IntSize(110, 111),
-                            dstOffset = IntOffset((left * scaleX).roundToInt(),
-                                ((bottom - signSize) * scaleY).roundToInt()),
-                            dstSize = IntSize((signSize * scaleX).roundToInt().coerceAtLeast(1),
-                                (signSize * scaleY).roundToInt().coerceAtLeast(1))
-                        )
-                    }
-                }
             }
             if (request.kind == HudHelpControlKind.Switch) {
                 val switchControl = remember { mutableStateOf<SwitchExternalControl?>(null) }

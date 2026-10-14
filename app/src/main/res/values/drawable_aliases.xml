@@ -1,9 +1,0 @@
-<resources>
-    <item type="drawable" name="hud_help_distance_native">@drawable/hud_help_no_distance</item>
-    <item type="drawable" name="hud_help_eta_street_7">@drawable/hud_help_eta_street_3</item>
-    <item type="drawable" name="hud_help_eta_street_7_en">@drawable/hud_help_eta_street_3_en</item>
-    <item type="drawable" name="hud_help_eta_street_7_ru">@drawable/hud_help_eta_street_3_ru</item>
-    <item type="drawable" name="hud_help_eta_replace_7">@drawable/hud_help_eta_replace_3</item>
-    <item type="drawable" name="hud_help_eta_replace_7_en">@drawable/hud_help_eta_replace_3_en</item>
-    <item type="drawable" name="hud_help_eta_replace_7_ru">@drawable/hud_help_eta_replace_3_ru</item>
-</resources>

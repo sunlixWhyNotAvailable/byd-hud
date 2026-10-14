@@ -33,7 +33,7 @@ internal data class HudHelpFrame(
     val captionUa: String,
     val captionEn: String,
     val captionRu: String,
-    val imageRes: Int
+    val scene: HudHelpScene
 ) {
     fun label(language: Language): String = language.choose(labelUa, labelEn, labelRu)
     fun caption(language: Language): String = language.choose(captionUa, captionEn, captionRu)
@@ -56,103 +56,103 @@ internal object HudHelpCatalog {
             frame("Вимкнено", "Off", "Выключено",
                 "Приклад розташування на Denza N9",
                 "Example layout on Denza N9",
-                "Пример расположения на Denza N9", R.drawable.hud_help_baseline),
+                "Пример расположения на Denza N9", HudHelpScene(map = HudHelpMap.DenzaOff)),
             frame("Штатний", "Native", "Штатный",
                 "Мапа праворуч від швидкості. Приклад розташування на Denza N9",
                 "Map to the right of the speed. Example layout on Denza N9",
-                "Карта справа от скорости. Пример расположения на Denza N9", R.drawable.hud_help_baseline),
+                "Карта справа от скорости. Пример расположения на Denza N9", HudHelpScene(map = HudHelpMap.DenzaOn)),
             frame("Експериментальний", "Experimental", "Экспериментальный",
                 "Приклад для HUD SL07: мапа між автопілотом та обмеженням швидкості, без смуг. Позицію та масштаб можна налаштувати",
                 "SL07 HUD example: a map between autopilot and the speed limit, without lanes. Position and scale are adjustable",
-                "Пример для HUD SL07: карта между автопилотом и ограничением скорости, без полос. Положение и масштаб настраиваются", R.drawable.hud_help_baseline)),
+                "Пример для HUD SL07: карта между автопилотом и ограничением скорости, без полос. Положение и масштаб настраиваются", HudHelpScene(map = HudHelpMap.Sl07))),
         topic(HudHelpTopicId.EtaStreetFormat, "Формат ЕТА у полі вулиці", "ETA format in street field", "Формат ETA в поле улицы",
-            frame("Приставити", "Prepend", "Дополнять", "", "", "", R.drawable.hud_help_eta_street_1),
-            frame("Замінити", "Replace", "Заменять", "", "", "", R.drawable.hud_help_eta_replace_1)),
-        topic(HudHelpTopicId.TextColor, "Колір тексту", "Text color", "Цвет текста", frame("Колір", "Color", "Цвет", "", "", "", R.drawable.hud_help_eta_all)),
-        topic(HudHelpTopicId.BasicPng, "PNG", "PNG output", "Вывод PNG", frame("Вимкнено", "Off", "Выкл.", "OFF: PNG-вивід вимкнено.", "OFF: PNG output is disabled.", "OFF: вывод PNG отключён.", R.drawable.hud_help_no_maneuver), frame("Увімкнено", "On", "Вкл.", "ON: надсилати PNG маневру, коли зображення доступне.", "ON: send the maneuver PNG when an image is available.", "ON: передавать PNG манёвра, когда изображение доступно.")),
-        topic(HudHelpTopicId.BasicNative, "Штатний маневр", "Native output", "Штатный вывод", frame("Вимкнено", "Off", "Выкл.", "OFF: штатний динамічний вивід вимкнено.", "OFF: native dynamic output is disabled.", "OFF: штатный динамический вывод отключён.", R.drawable.hud_help_no_dynamic), frame("Увімкнено", "On", "Вкл.", "ON: надсилати штатне динамічне зображення, коли воно доступне.", "ON: send the native dynamic image when available.", "ON: передавать штатное динамическое изображение, когда оно доступно.")),
-        topic(HudHelpTopicId.BasicLanes, "Смуги", "Lane output", "Вывод полос", frame("Вимкнено", "Off", "Выкл.", "OFF: вивід смуг вимкнено.", "OFF: lane output is disabled.", "OFF: вывод полос отключён.", R.drawable.hud_help_no_lanes), frame("Увімкнено", "On", "Вкл.", "ON: надсилати смуги, коли навігація їх надала.", "ON: send lanes when navigation provides them.", "ON: передавать полосы, когда их предоставляет навигация.")),
-        topic(HudHelpTopicId.BasicStreet, "Вулиця", "Street output", "Вывод улицы", frame("Вимкнено", "Off", "Выкл.", "OFF: текст вулиці не надсилається.", "OFF: street text is not sent.", "OFF: текст улицы не передаётся.", R.drawable.hud_help_no_street), frame("Увімкнено", "On", "Вкл.", "ON: надсилати наступну дорогу або назву вулиці, коли доступна.", "ON: send the next road or street name when available.", "ON: передавать следующую дорогу или название улицы, когда они доступны.")),
-        topic(HudHelpTopicId.BasicTransliteration, "Транслітерація", "Text transliteration", "Транслитерация текста", frame("Вимкнено", "Off", "Выкл.", "OFF: джерельний текст залишається кириличним.", "OFF: source text remains Cyrillic.", "OFF: исходный текст остаётся кириллическим.", R.drawable.hud_help_street_cyrillic), frame("Українська", "Ukrainian", "Украинская", "Українська: приклад кириличного тексту, переданого латиницею.", "Ukrainian: example of Cyrillic text rendered in Latin characters.", "Украинская: пример передачи кириллического текста латиницей.", R.drawable.hud_help_baseline), frame("Універсальна", "Universal", "Универсальная", "Універсальна: для цього джерела використовується та сама латинська версія.", "Universal: this source uses the same Latin version.", "Универсальная: для этого источника используется та же латинская версия.", R.drawable.hud_help_baseline)),
-        topic(HudHelpTopicId.BasicDistance, "Дистанція", "Distance output", "Вывод дистанции", frame("Вимкнено", "Off", "Выкл.", "OFF: надсилається нульова дистанція, тому HUD показує штатний маркер «现在».", "OFF: zero distance is sent, so the HUD shows the native “现在” marker.", "OFF: передаётся нулевая дистанция, поэтому HUD показывает штатный маркер «现在».", R.drawable.hud_help_no_distance), frame("Увімкнено", "On", "Вкл.", "ON: надсилати дистанцію до маневру, коли доступна.", "ON: send distance to the maneuver when available.", "ON: передавать дистанцию до манёвра, когда она доступна.")),
-        topic(HudHelpTopicId.SmallDistanceClamp, "Мала дистанція", "Small distance clamp", "Малая дистанция", frame("Вимкнено", "Off", "Выкл.", "OFF: для raw 0–10 м залишається штатний маркер «现在».", "OFF: raw 0–10 m remains the native “现在” marker.", "OFF: для исходных 0–10 м остаётся штатный маркер «现在».", R.drawable.hud_help_distance_native), frame("Увімкнено", "On", "Вкл.", "ON: ті самі raw 0–10 м надсилаються як 11 м.", "ON: the same raw 0–10 m is sent as 11 m.", "ON: те же исходные 0–10 м передаются как 11 м.", R.drawable.hud_help_distance_clamped)),
+            frame("Приставити", "Prepend", "Дополнять", "", "", "", HudHelpScene(etaMode = 2, etaMask = 1, etaStreet = true)),
+            frame("Замінити", "Replace", "Заменять", "", "", "", HudHelpScene(etaMode = 2, etaMask = 1, etaStreet = true, streetFormat = EtaStreetFormat.Replace))),
+        topic(HudHelpTopicId.TextColor, "Колір тексту", "Text color", "Цвет текста", frame("Колір", "Color", "Цвет", "", "", "", HudHelpScene(etaMode = 2, etaMask = 7))),
+        topic(HudHelpTopicId.BasicPng, "PNG", "PNG output", "Вывод PNG", frame("Вимкнено", "Off", "Выкл.", "OFF: PNG-вивід вимкнено.", "OFF: PNG output is disabled.", "OFF: вывод PNG отключён.", HudHelpScene(maneuver = false)), frame("Увімкнено", "On", "Вкл.", "ON: надсилати PNG маневру, коли зображення доступне.", "ON: send the maneuver PNG when an image is available.", "ON: передавать PNG манёвра, когда изображение доступно.")),
+        topic(HudHelpTopicId.BasicNative, "Штатний маневр", "Native output", "Штатный вывод", frame("Вимкнено", "Off", "Выкл.", "OFF: штатний динамічний вивід вимкнено.", "OFF: native dynamic output is disabled.", "OFF: штатный динамический вывод отключён.", HudHelpScene(nativeManeuver = false)), frame("Увімкнено", "On", "Вкл.", "ON: надсилати штатне динамічне зображення, коли воно доступне.", "ON: send the native dynamic image when available.", "ON: передавать штатное динамическое изображение, когда оно доступно.")),
+        topic(HudHelpTopicId.BasicLanes, "Смуги", "Lane output", "Вывод полос", frame("Вимкнено", "Off", "Выкл.", "OFF: вивід смуг вимкнено.", "OFF: lane output is disabled.", "OFF: вывод полос отключён.", HudHelpScene(lanes = false)), frame("Увімкнено", "On", "Вкл.", "ON: надсилати смуги, коли навігація їх надала.", "ON: send lanes when navigation provides them.", "ON: передавать полосы, когда их предоставляет навигация.")),
+        topic(HudHelpTopicId.BasicStreet, "Вулиця", "Street output", "Вывод улицы", frame("Вимкнено", "Off", "Выкл.", "OFF: текст вулиці не надсилається.", "OFF: street text is not sent.", "OFF: текст улицы не передаётся.", HudHelpScene(street = HudHelpStreet.Hidden)), frame("Увімкнено", "On", "Вкл.", "ON: надсилати наступну дорогу або назву вулиці, коли доступна.", "ON: send the next road or street name when available.", "ON: передавать следующую дорогу или название улицы, когда они доступны.")),
+        topic(HudHelpTopicId.BasicTransliteration, "Транслітерація", "Text transliteration", "Транслитерация текста", frame("Вимкнено", "Off", "Выкл.", "OFF: джерельний текст залишається кириличним.", "OFF: source text remains Cyrillic.", "OFF: исходный текст остаётся кириллическим.", HudHelpScene(street = HudHelpStreet.Cyrillic)), frame("Українська", "Ukrainian", "Украинская", "Українська: приклад кириличного тексту, переданого латиницею.", "Ukrainian: example of Cyrillic text rendered in Latin characters.", "Украинская: пример передачи кириллического текста латиницей.", HudHelpScene()), frame("Універсальна", "Universal", "Универсальная", "Універсальна: для цього джерела використовується та сама латинська версія.", "Universal: this source uses the same Latin version.", "Универсальная: для этого источника используется та же латинская версия.", HudHelpScene())),
+        topic(HudHelpTopicId.BasicDistance, "Дистанція", "Distance output", "Вывод дистанции", frame("Вимкнено", "Off", "Выкл.", "OFF: надсилається нульова дистанція, тому HUD показує штатний маркер «现在».", "OFF: zero distance is sent, so the HUD shows the native “现在” marker.", "OFF: передаётся нулевая дистанция, поэтому HUD показывает штатный маркер «现在».", HudHelpScene(distance = HudHelpDistance.Native)), frame("Увімкнено", "On", "Вкл.", "ON: надсилати дистанцію до маневру, коли доступна.", "ON: send distance to the maneuver when available.", "ON: передавать дистанцию до манёвра, когда она доступна.")),
+        topic(HudHelpTopicId.SmallDistanceClamp, "Мала дистанція", "Small distance clamp", "Малая дистанция", frame("Вимкнено", "Off", "Выкл.", "OFF: для raw 0–10 м залишається штатний маркер «现在».", "OFF: raw 0–10 m remains the native “现在” marker.", "OFF: для исходных 0–10 м остаётся штатный маркер «现在».", HudHelpScene(distance = HudHelpDistance.Native)), frame("Увімкнено", "On", "Вкл.", "ON: ті самі raw 0–10 м надсилаються як 11 м.", "ON: the same raw 0–10 m is sent as 11 m.", "ON: те же исходные 0–10 м передаются как 11 м.", HudHelpScene(distance = HudHelpDistance.Clamped))),
         topic(HudHelpTopicId.EtaOutputMode,
             "Режим виводу ЕТА", "ETA output mode", "Режим вывода ETA",
             frame("Вимкнено", "Off", "Выключен",
                 "Не показувати час прибуття, залишкові час і дистанцію.",
                 "Hide arrival time, remaining time and distance.",
-                "Не показывать время прибытия, оставшиеся время и расстояние.", R.drawable.hud_help_baseline),
+                "Не показывать время прибытия, оставшиеся время и расстояние.", HudHelpScene(etaMode = 0, etaMask = 7)),
             frame("Штатний", "Native", "Штатный",
                 "Показувати ЕТА у штатних полях HUD та приборки. Розташування й вигляд залежать від автомобіля.",
                 "Show ETA in the native HUD and instrument cluster fields. Placement and appearance depend on the vehicle.",
-                "Показывать ETA в штатных полях HUD и приборки. Расположение и вид зависят от автомобиля.", R.drawable.hud_help_baseline),
+                "Показывать ETA в штатных полях HUD и приборки. Расположение и вид зависят от автомобиля.", HudHelpScene(etaMode = 1, etaMask = 7)),
             frame("Альтернативний", "Alternative", "Альтернативный",
                 "Показувати ЕТА у полі з назвою вулиці або в окремому блоці HUD. Місце, формат і кольори налаштовуються нижче.",
                 "Show ETA in the street-name field or a separate HUD block. Choose the location, format and colors below.",
-                "Показывать ETA в поле с названием улицы или в отдельном блоке HUD. Место, формат и цвета настраиваются ниже.", R.drawable.hud_help_eta_all)),
+                "Показывать ETA в поле с названием улицы или в отдельном блоке HUD. Место, формат и цвета настраиваются ниже.", HudHelpScene(etaMode = 2, etaMask = 7))),
         topic(HudHelpTopicId.EtaMode,
             "Режим показу ЕТА (час/дистанція)", "ETA display mode (time/distance)", "Режим показа ETA (время/расстояние)",
             frame("До зупинки", "Next stop", "До остановки",
                 "Час прибуття, залишкові час і дистанція до наступної проміжної або кінцевої точки маршруту.",
                 "Arrival time, remaining time and distance to the next intermediate or final stop.",
-                "Время прибытия, оставшиеся время и расстояние до следующей промежуточной или конечной точки маршрута.", R.drawable.hud_help_eta_all),
+                "Время прибытия, оставшиеся время и расстояние до следующей промежуточной или конечной точки маршрута.", HudHelpScene(etaMode = 2, etaMask = 7)),
             frame("Весь маршрут", "Entire route", "Весь маршрут",
                 "Час прибуття, залишкові час і дистанція до кінцевої точки маршруту. Waze передає значення всього маршруту, коли вони доступні, і окремо для кожного відсутнього показника використовує значення до наступної зупинки.",
                 "Arrival time, remaining time and distance to the final destination. Waze provides whole-route values when available and falls back to next-stop values separately for each missing metric.",
-                "Время прибытия, оставшиеся время и расстояние до конечной точки маршрута. Waze передаёт значения всего маршрута, когда они доступны, и отдельно для каждого отсутствующего показателя использует значения до следующей остановки.", R.drawable.hud_help_eta_all)),
+                "Время прибытия, оставшиеся время и расстояние до конечной точки маршрута. Waze передаёт значения всего маршрута, когда они доступны, и отдельно для каждого отсутствующего показателя использует значения до следующей остановки.", HudHelpScene(etaMode = 2, etaMask = 7))),
         topic(HudHelpTopicId.EtaOutputField, "Поле виводу ЕТА", "ETA output field", "Поле вывода ETA",
             frame("Вулиці", "Street", "Улица",
                 "Показувати ЕТА у полі з назвою вулиці.",
                 "Show ETA in the street-name field.",
-                "Показывать ETA в поле с названием улицы.", R.drawable.hud_help_eta_street_7),
+                "Показывать ETA в поле с названием улицы.", HudHelpScene(etaMode = 2, etaMask = 7, etaStreet = true)),
             frame("Експериментальне", "Experimental", "Экспериментальное",
                 "Показувати ЕТА в окремому блоці праворуч.",
                 "Show ETA in a separate block on the right.",
-                "Показывать ETA в отдельном блоке справа.", R.drawable.hud_help_eta_all)),
+                "Показывать ETA в отдельном блоке справа.", HudHelpScene(etaMode = 2, etaMask = 7))),
         topic(HudHelpTopicId.EtaOutput, "Показ ETA", "Show ETA", "Показывать ETA",
             frame("Вимкнено", "Off", "Выкл.", "Не показувати час прибуття.",
-                "Hide arrival time.", "Не показывать время прибытия.", R.drawable.hud_help_baseline),
+                "Hide arrival time.", "Не показывать время прибытия.", HudHelpScene()),
             frame("Увімкнено", "On", "Вкл.", "Показувати час прибуття у вибраному полі.",
-                "Show arrival time in the selected field.", "Показывать время прибытия в выбранном поле.", R.drawable.hud_help_eta_both_1)),
+                "Show arrival time in the selected field.", "Показывать время прибытия в выбранном поле.", HudHelpScene(etaMode = 2, etaMask = 1, etaStreet = true))),
         topic(HudHelpTopicId.RemainingTime, "Залишок часу", "Remaining time", "Оставшееся время",
             frame("Вимкнено", "Off", "Выкл.", "Не показувати залишок часу.",
-                "Hide remaining time.", "Не показывать оставшееся время.", R.drawable.hud_help_baseline),
+                "Hide remaining time.", "Не показывать оставшееся время.", HudHelpScene()),
             frame("Увімкнено", "On", "Вкл.", "Показувати залишок часу у вибраному полі.",
-                "Show remaining time in the selected field.", "Показывать оставшееся время в выбранном поле.", R.drawable.hud_help_eta_both_2)),
+                "Show remaining time in the selected field.", "Показывать оставшееся время в выбранном поле.", HudHelpScene(etaMode = 2, etaMask = 2, etaStreet = true))),
         topic(HudHelpTopicId.RemainingDistance, "Залишок дистанції", "Remaining distance", "Оставшееся расстояние",
             frame("Вимкнено", "Off", "Выкл.", "Не показувати залишок дистанції.",
-                "Hide remaining distance.", "Не показывать оставшееся расстояние.", R.drawable.hud_help_baseline),
+                "Hide remaining distance.", "Не показывать оставшееся расстояние.", HudHelpScene()),
             frame("Увімкнено", "On", "Вкл.", "Показувати залишок дистанції у вибраному полі.",
-                "Show remaining distance in the selected field.", "Показывать оставшееся расстояние в выбранном поле.", R.drawable.hud_help_eta_both_4)),
+                "Show remaining distance in the selected field.", "Показывать оставшееся расстояние в выбранном поле.", HudHelpScene(etaMode = 2, etaMask = 4, etaStreet = true))),
         topic(HudHelpTopicId.SpeedLimitMode, "Режим обмеження швидкості", "Speed limit output mode", "Режим вывода ограничения скорости",
             frame("Вимкнено", "Off", "Выкл.",
                 "Не показувати обмеження швидкості від навігатора. Штатний знак автомобіля залишається без змін.",
                 "Hide the navigator’s speed limit. Leave the vehicle’s native sign unchanged.",
-                "Не показывать ограничение скорости от навигатора. Штатный знак автомобиля остаётся без изменений.", R.drawable.hud_help_baseline),
+                "Не показывать ограничение скорости от навигатора. Штатный знак автомобиля остаётся без изменений.", HudHelpScene()),
             frame("Штатний/HUD", "Native/HUD", "Штатный/HUD",
                 "Показувати обмеження швидкості у штатному полі HUD. Підтримка й розташування залежать від автомобіля. Додаткові налаштування нижче не застосовуються.",
                 "Show the speed limit in the native HUD field. Support and placement depend on the vehicle. The additional settings below do not apply.",
-                "Показывать ограничение скорости в штатном поле HUD. Поддержка и расположение зависят от автомобиля. Дополнительные настройки ниже не применяются.", R.drawable.hud_help_speed_native),
+                "Показывать ограничение скорости в штатном поле HUD. Поддержка и расположение зависят от автомобиля. Дополнительные настройки ниже не применяются.", HudHelpScene(speed = HudHelpSpeed.Native)),
             frame("Штатний/ADAS", "Native/ADAS", "Штатный/ADAS",
                 "Показувати обмеження у штатному полі розпізнаних дорожніх знаків. Якщо воно не оновлюється, використовувати вибраний запасний спосіб показу.",
                 "Show the speed limit in the native field used for recognized road signs. If it does not update, use the selected fallback display mode.",
-                "Показывать ограничение в штатном поле распознанных дорожных знаков. Если оно не обновляется, использовать выбранный запасной способ показа.", R.drawable.hud_help_speed_native),
+                "Показывать ограничение в штатном поле распознанных дорожных знаков. Если оно не обновляется, использовать выбранный запасной способ показа.", HudHelpScene(speed = HudHelpSpeed.Native)),
             frame("Поле маневру", "Maneuver field", "Поле манёвра",
                 "Знак обмеження розміщено в полі маневру; штатний знак біля швидкості не змінюється.",
                 "The added speed sign is placed in the maneuver field; the native speed-limit glyph is separate.",
-                "Добавленный знак размещён в поле манёвра; штатный знак рядом со скоростью остаётся отдельно.", R.drawable.hud_help_speed_maneuver),
+                "Добавленный знак размещён в поле манёвра; штатный знак рядом со скоростью остаётся отдельно.", HudHelpScene(speed = HudHelpSpeed.Maneuver)),
             frame("Поле смуг", "Lane field", "Поле полос",
                 "Знак обмеження розміщено в полі смуг; штатний знак біля швидкості не змінюється.",
                 "The added speed sign is placed in the lane field; the native speed-limit glyph is separate.",
-                "Добавленный знак размещён в поле полос; штатный знак рядом со скоростью остаётся отдельно.", R.drawable.hud_help_speed_lanes),
+                "Добавленный знак размещён в поле полос; штатный знак рядом со скоростью остаётся отдельно.", HudHelpScene(speed = HudHelpSpeed.Lanes)),
             frame("Вільне поле", "Free field", "Свободное поле",
                 "Якщо поле маневру вільне, знак займає його. Штатний знак біля швидкості не змінюється.",
                 "If the maneuver field is empty, the sign uses it. The native sign beside vehicle speed stays unchanged.",
-                "Если поле манёвра свободно, знак занимает его. Штатный знак рядом со скоростью не меняется.", R.drawable.hud_help_speed_maneuver),
+                "Если поле манёвра свободно, знак занимает его. Штатный знак рядом со скоростью не меняется.", HudHelpScene(speed = HudHelpSpeed.Maneuver)),
             frame("Композитний", "Composite", "Композитный",
                 "Додати знак до зображення маневру або смуг у вибраному полі.",
                 "Add the sign to the maneuver or lane image in the selected field.",
-                "Добавить знак к изображению манёвра или полос в выбранном поле.", R.drawable.hud_help_speed_composite_maneuver)),
+                "Добавить знак к изображению манёвра или полос в выбранном поле.", HudHelpScene(speed = HudHelpSpeed.CompositeManeuver))),
         topic(HudHelpTopicId.SpeedLimitNativeFallbackMode,
             "Запасний режим виводу обмеження швидкості",
             "Fallback speed limit output mode",
@@ -161,33 +161,33 @@ internal object HudHelpCatalog {
                 "Запасний вивід вимкнено; використовується лише штатне поле.",
                 "Fallback output is disabled; only the native field is used.",
                 "Запасной вывод выключен; используется только штатное поле.",
-                R.drawable.hud_help_speed_native),
+                HudHelpScene(speed = HudHelpSpeed.Native)),
             frame("Поле маневру", "Maneuver field", "Поле манёвра",
                 "Якщо штатне поле не оновлюється, знак показується у полі маневру.",
                 "If the native field does not update, the sign is shown in the maneuver field.",
                 "Если штатное поле не обновляется, знак показывается в поле манёвра.",
-                R.drawable.hud_help_speed_maneuver),
+                HudHelpScene(speed = HudHelpSpeed.Maneuver)),
             frame("Поле смуг", "Lane field", "Поле полос",
                 "Якщо штатне поле не оновлюється, знак показується у полі смуг.",
                 "If the native field does not update, the sign is shown in the lane field.",
                 "Если штатное поле не обновляется, знак показывается в поле полос.",
-                R.drawable.hud_help_speed_lanes),
+                HudHelpScene(speed = HudHelpSpeed.Lanes)),
             frame("Вільне поле", "Free field", "Свободное поле",
                 "Якщо штатне поле не оновлюється, знак займає вільне поле.",
                 "If the native field does not update, the sign uses a free field.",
                 "Если штатное поле не обновляется, знак занимает свободное поле.",
-                R.drawable.hud_help_speed_maneuver),
+                HudHelpScene(speed = HudHelpSpeed.Maneuver)),
             frame("Композитний", "Composite", "Композитный",
                 "Якщо штатне поле не оновлюється, знак додається до bitmap-вмісту вибраного поля.",
                 "If the native field does not update, the sign is composed into the selected field bitmap.",
                 "Если штатное поле не обновляется, знак добавляется к bitmap-содержимому выбранного поля.",
-                R.drawable.hud_help_speed_composite_maneuver)),
-        topic(HudHelpTopicId.SpeedLimitFallback, "Накладання обмеження", "Speed limit fallback", "Наложение ограничения", frame("Без накладання", "No overlay", "Без наложения", "Обидва поля зайняті, накладання вимкнене: маневр і смуги залишаються без змін.", "Both fields are occupied and overlay is off: maneuver and lanes remain unchanged.", "Оба поля заняты, наложение выключено: манёвр и полосы остаются без изменений.", R.drawable.hud_help_baseline), frame("Маневр", "Maneuver", "Манёвр", "Коли обидва поля зайняті, знак тимчасово замінює маневр.", "When both fields are occupied, the sign temporarily replaces the maneuver.", "Когда оба поля заняты, знак временно заменяет манёвр.", R.drawable.hud_help_speed_maneuver), frame("Смуги", "Lanes", "Полосы", "Коли обидва поля зайняті, знак тимчасово замінює смуги.", "When both fields are occupied, the sign temporarily replaces the lanes.", "Когда оба поля заняты, знак временно заменяет полосы.", R.drawable.hud_help_speed_lanes)),
-        topic(HudHelpTopicId.SpeedLimitCompositeField, "Поле композитного знаку", "Composite output field", "Поле вывода в композитном режиме", frame("Маневр", "Maneuver", "Манёвр", "Композитний знак у полі маневру; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Composite sign in the maneuver field; position depends on bitmap content, and v4 is illustrative only.", "Композитный знак в поле манёвра; положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_maneuver), frame("Смуги", "Lanes", "Полосы", "Композитний знак у полі смуг; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Composite sign in the lane field; position depends on bitmap content, and v4 is illustrative only.", "Композитный знак в поле полос; положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_lanes), frame("Вільне або маневру", "Free or maneuver", "Свободное или манёвр", "Вільне поле має пріоритет; якщо обидва зайняті, знак додається до обраного зображення. Позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "A free field has priority; if both are occupied, the sign is composed into the selected image. Position depends on bitmap content, and v4 is illustrative only.", "Свободное поле имеет приоритет; если оба заняты, знак добавляется к выбранному изображению. Положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_maneuver), frame("Вільне або смуг", "Free or lanes", "Свободное или полосы", "Вільне поле має пріоритет; якщо обидва зайняті, знак додається до обраного зображення. Позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "A free field has priority; if both are occupied, the sign is composed into the selected image. Position depends on bitmap content, and v4 is illustrative only.", "Свободное поле имеет приоритет; если оба заняты, знак добавляется к выбранному изображению. Положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_lanes)),
-        topic(HudHelpTopicId.SpeedLimitCompositeManeuverSize, "Розмір знаку в маневрі", "Maneuver sign size", "Размер знака в манёвре", frame("Звичайний", "Normal", "Обычный", "Звичайний розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Normal size; position depends on bitmap content, and v4 is illustrative only.", "Обычный размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_maneuver), frame("Малий", "Small", "Маленький", "Малий розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Small size; position depends on bitmap content, and v4 is illustrative only.", "Маленький размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_maneuver_small)),
-        topic(HudHelpTopicId.SpeedLimitCompositeLaneSize, "Розмір знаку в смугах", "Lane sign size", "Размер знака в полосах", frame("Звичайний", "Normal", "Обычный", "Звичайний розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Normal size; position depends on bitmap content, and v4 is illustrative only.", "Обычный размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_lanes), frame("Малий", "Small", "Маленький", "Малий розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Small size; position depends on bitmap content, and v4 is illustrative only.", "Маленький размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", R.drawable.hud_help_speed_composite_lanes_small)),
-        topic(HudHelpTopicId.WazeAlerts, "Попередження Waze", "Waze alerts", "Предупреждения Waze", frame("Вимкнено", "Off", "Выкл.", "OFF: попередження не надсилаються.", "OFF: warnings are not sent.", "OFF: предупреждения не передаются.", R.drawable.hud_help_baseline), frame("Увімкнено", "On", "Вкл.", "ON: попередження займають вибране поле.", "ON: warnings use the selected field.", "ON: предупреждения занимают выбранное поле.", R.drawable.hud_help_warning_maneuver)),
-        topic(HudHelpTopicId.WazeAlertField, "Поле виводу попередження Waze", "Waze alert output field", "Поле вывода предупреждения Waze", frame("Маневру", "Maneuver", "Манёвр", "Попередження у полі маневру; маршрутна дистанція та вулиця тимчасово замінюються, смуги залишаються.", "Warnings use the maneuver field; route distance and street are temporarily replaced while lanes remain.", "Предупреждения в поле манёвра; дистанция маршрута и улица временно заменяются, полосы остаются.", R.drawable.hud_help_warning_maneuver), frame("Експериментальне", "Experimental", "Экспериментальное", "Попередження показано в окремому блоці ліворуч від смуг.", "The warning is shown in a separate block to the left of the lanes.", "Предупреждение показано в отдельном блоке слева от полос." , R.drawable.hud_help_warning_separate))
+                HudHelpScene(speed = HudHelpSpeed.CompositeManeuver))),
+        topic(HudHelpTopicId.SpeedLimitFallback, "Накладання обмеження", "Speed limit fallback", "Наложение ограничения", frame("Без накладання", "No overlay", "Без наложения", "Обидва поля зайняті, накладання вимкнене: маневр і смуги залишаються без змін.", "Both fields are occupied and overlay is off: maneuver and lanes remain unchanged.", "Оба поля заняты, наложение выключено: манёвр и полосы остаются без изменений.", HudHelpScene()), frame("Маневр", "Maneuver", "Манёвр", "Коли обидва поля зайняті, знак тимчасово замінює маневр.", "When both fields are occupied, the sign temporarily replaces the maneuver.", "Когда оба поля заняты, знак временно заменяет манёвр.", HudHelpScene(speed = HudHelpSpeed.Maneuver)), frame("Смуги", "Lanes", "Полосы", "Коли обидва поля зайняті, знак тимчасово замінює смуги.", "When both fields are occupied, the sign temporarily replaces the lanes.", "Когда оба поля заняты, знак временно заменяет полосы.", HudHelpScene(speed = HudHelpSpeed.Lanes))),
+        topic(HudHelpTopicId.SpeedLimitCompositeField, "Поле композитного знаку", "Composite output field", "Поле вывода в композитном режиме", frame("Маневр", "Maneuver", "Манёвр", "Композитний знак у полі маневру; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Composite sign in the maneuver field; position depends on bitmap content, and v4 is illustrative only.", "Композитный знак в поле манёвра; положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeManeuver)), frame("Смуги", "Lanes", "Полосы", "Композитний знак у полі смуг; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Composite sign in the lane field; position depends on bitmap content, and v4 is illustrative only.", "Композитный знак в поле полос; положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeLanes)), frame("Вільне або маневру", "Free or maneuver", "Свободное или манёвр", "Вільне поле має пріоритет; якщо обидва зайняті, знак додається до обраного зображення. Позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "A free field has priority; if both are occupied, the sign is composed into the selected image. Position depends on bitmap content, and v4 is illustrative only.", "Свободное поле имеет приоритет; если оба заняты, знак добавляется к выбранному изображению. Положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeManeuver)), frame("Вільне або смуг", "Free or lanes", "Свободное или полосы", "Вільне поле має пріоритет; якщо обидва зайняті, знак додається до обраного зображення. Позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "A free field has priority; if both are occupied, the sign is composed into the selected image. Position depends on bitmap content, and v4 is illustrative only.", "Свободное поле имеет приоритет; если оба заняты, знак добавляется к выбранному изображению. Положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeLanes))),
+        topic(HudHelpTopicId.SpeedLimitCompositeManeuverSize, "Розмір знаку в маневрі", "Maneuver sign size", "Размер знака в манёвре", frame("Звичайний", "Normal", "Обычный", "Звичайний розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Normal size; position depends on bitmap content, and v4 is illustrative only.", "Обычный размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeManeuver)), frame("Малий", "Small", "Маленький", "Малий розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Small size; position depends on bitmap content, and v4 is illustrative only.", "Маленький размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeManeuver, signSize = 36f))),
+        topic(HudHelpTopicId.SpeedLimitCompositeLaneSize, "Розмір знаку в смугах", "Lane sign size", "Размер знака в полосах", frame("Звичайний", "Normal", "Обычный", "Звичайний розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Normal size; position depends on bitmap content, and v4 is illustrative only.", "Обычный размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeLanes)), frame("Малий", "Small", "Маленький", "Малий розмір; позиція залежить від bitmap-вмісту, v4 — лише ілюстрація.", "Small size; position depends on bitmap content, and v4 is illustrative only.", "Маленький размер; положение зависит от содержимого изображения, v4 — только иллюстрация.", HudHelpScene(speed = HudHelpSpeed.CompositeLanes, signSize = 24f))),
+        topic(HudHelpTopicId.WazeAlerts, "Попередження Waze", "Waze alerts", "Предупреждения Waze", frame("Вимкнено", "Off", "Выкл.", "OFF: попередження не надсилаються.", "OFF: warnings are not sent.", "OFF: предупреждения не передаются.", HudHelpScene()), frame("Увімкнено", "On", "Вкл.", "ON: попередження займають вибране поле.", "ON: warnings use the selected field.", "ON: предупреждения занимают выбранное поле.", HudHelpScene(warning = HudHelpWarning.Maneuver))),
+        topic(HudHelpTopicId.WazeAlertField, "Поле виводу попередження Waze", "Waze alert output field", "Поле вывода предупреждения Waze", frame("Маневру", "Maneuver", "Манёвр", "Попередження у полі маневру; маршрутна дистанція та вулиця тимчасово замінюються, смуги залишаються.", "Warnings use the maneuver field; route distance and street are temporarily replaced while lanes remain.", "Предупреждения в поле манёвра; дистанция маршрута и улица временно заменяются, полосы остаются.", HudHelpScene(warning = HudHelpWarning.Maneuver)), frame("Експериментальне", "Experimental", "Экспериментальное", "Попередження показано в окремому блоці ліворуч від смуг.", "The warning is shown in a separate block to the left of the lanes.", "Предупреждение показано в отдельном блоке слева от полос." , HudHelpScene(warning = HudHelpWarning.Separate)))
     )
 
     private val byId = topics.associateBy(HudHelpTopic::id)
@@ -196,92 +196,6 @@ internal object HudHelpCatalog {
 
     // The app language is independent of Android's resource locale.
     // Native distance/street names are shared; ETA units and the alert sample follow it.
-    fun localizedImage(imageRes: Int, language: Language): Int = if (language == Language.Ru) when (imageRes) {
-        R.drawable.hud_help_eta_all -> R.drawable.hud_help_eta_all_ru
-        R.drawable.hud_help_eta_no_arrival -> R.drawable.hud_help_eta_no_arrival_ru
-        R.drawable.hud_help_eta_no_distance -> R.drawable.hud_help_eta_no_distance_ru
-        R.drawable.hud_help_eta_duration -> R.drawable.hud_help_eta_duration_ru
-        R.drawable.hud_help_eta_both_2 -> R.drawable.hud_help_eta_both_2_ru
-        R.drawable.hud_help_eta_street_2 -> R.drawable.hud_help_eta_street_2_ru
-        R.drawable.hud_help_eta_street_3 -> R.drawable.hud_help_eta_street_3_ru
-        R.drawable.hud_help_eta_street_6 -> R.drawable.hud_help_eta_street_6_ru
-        R.drawable.hud_help_eta_street_7 -> R.drawable.hud_help_eta_street_7_ru
-        R.drawable.hud_help_eta_replace_2 -> R.drawable.hud_help_eta_replace_2_ru
-        R.drawable.hud_help_eta_replace_3 -> R.drawable.hud_help_eta_replace_3_ru
-        R.drawable.hud_help_eta_replace_6 -> R.drawable.hud_help_eta_replace_6_ru
-        R.drawable.hud_help_eta_replace_7 -> R.drawable.hud_help_eta_replace_7_ru
-        R.drawable.hud_help_eta_both_replace_2 -> R.drawable.hud_help_eta_both_replace_2_ru
-        else -> imageRes
-    } else if (language == Language.Ua) imageRes else when (imageRes) {
-        R.drawable.hud_help_eta_all -> R.drawable.hud_help_eta_all_en
-        R.drawable.hud_help_eta_no_arrival -> R.drawable.hud_help_eta_no_arrival_en
-        R.drawable.hud_help_eta_no_duration -> R.drawable.hud_help_eta_no_duration_en
-        R.drawable.hud_help_eta_no_distance -> R.drawable.hud_help_eta_no_distance_en
-        R.drawable.hud_help_eta_duration -> R.drawable.hud_help_eta_duration_en
-        R.drawable.hud_help_eta_distance -> R.drawable.hud_help_eta_distance_en
-        R.drawable.hud_help_eta_both_2 -> R.drawable.hud_help_eta_both_2_en
-        R.drawable.hud_help_eta_both_4 -> R.drawable.hud_help_eta_both_4_en
-        R.drawable.hud_help_warning_separate -> R.drawable.hud_help_warning_separate_en
-        R.drawable.hud_help_warning_maneuver -> R.drawable.hud_help_warning_maneuver_en
-        R.drawable.hud_help_eta_street_2 -> R.drawable.hud_help_eta_street_2_en
-        R.drawable.hud_help_eta_street_3 -> R.drawable.hud_help_eta_street_3_en
-        R.drawable.hud_help_eta_street_4 -> R.drawable.hud_help_eta_street_4_en
-        R.drawable.hud_help_eta_street_5 -> R.drawable.hud_help_eta_street_5_en
-        R.drawable.hud_help_eta_street_6 -> R.drawable.hud_help_eta_street_6_en
-        R.drawable.hud_help_eta_street_7 -> R.drawable.hud_help_eta_street_7_en
-        R.drawable.hud_help_eta_replace_2 -> R.drawable.hud_help_eta_replace_2_en
-        R.drawable.hud_help_eta_replace_3 -> R.drawable.hud_help_eta_replace_3_en
-        R.drawable.hud_help_eta_replace_4 -> R.drawable.hud_help_eta_replace_4_en
-        R.drawable.hud_help_eta_replace_5 -> R.drawable.hud_help_eta_replace_5_en
-        R.drawable.hud_help_eta_replace_6 -> R.drawable.hud_help_eta_replace_6_en
-        R.drawable.hud_help_eta_replace_7 -> R.drawable.hud_help_eta_replace_7_en
-        R.drawable.hud_help_eta_both_replace_2 -> R.drawable.hud_help_eta_both_replace_2_en
-        R.drawable.hud_help_eta_both_replace_4 -> R.drawable.hud_help_eta_both_replace_4_en
-        else -> imageRes
-    }
-
-    fun etaImage(street: Boolean, mask: Int, format: EtaStreetFormat = EtaStreetFormat.Prefix): Int =
-        streetFormatImage(etaBaseImage(street, mask), format)
-
-    fun streetFormatImage(imageRes: Int, format: EtaStreetFormat): Int =
-        if (format == EtaStreetFormat.Prefix) imageRes else when (imageRes) {
-            R.drawable.hud_help_eta_street_1 -> R.drawable.hud_help_eta_replace_1
-            R.drawable.hud_help_eta_street_2 -> R.drawable.hud_help_eta_replace_2
-            R.drawable.hud_help_eta_street_3 -> R.drawable.hud_help_eta_replace_3
-            R.drawable.hud_help_eta_street_4 -> R.drawable.hud_help_eta_replace_4
-            R.drawable.hud_help_eta_street_5 -> R.drawable.hud_help_eta_replace_5
-            R.drawable.hud_help_eta_street_6 -> R.drawable.hud_help_eta_replace_6
-            R.drawable.hud_help_eta_street_7 -> R.drawable.hud_help_eta_replace_7
-            R.drawable.hud_help_eta_both_1 -> R.drawable.hud_help_eta_both_replace_1
-            R.drawable.hud_help_eta_both_2 -> R.drawable.hud_help_eta_both_replace_2
-            R.drawable.hud_help_eta_both_4 -> R.drawable.hud_help_eta_both_replace_4
-            else -> imageRes
-        }
-
-    private fun etaBaseImage(street: Boolean, mask: Int): Int = if (street) {
-        when (mask.coerceIn(0, 7)) {
-            1 -> R.drawable.hud_help_eta_street_1
-            2 -> R.drawable.hud_help_eta_street_2
-            3 -> R.drawable.hud_help_eta_street_3
-            4 -> R.drawable.hud_help_eta_street_4
-            5 -> R.drawable.hud_help_eta_street_5
-            6 -> R.drawable.hud_help_eta_street_6
-            7 -> R.drawable.hud_help_eta_street_7
-            else -> R.drawable.hud_help_baseline
-        }
-    } else {
-        when (mask.coerceIn(0, 7)) {
-            1 -> R.drawable.hud_help_eta_arrival
-            2 -> R.drawable.hud_help_eta_duration
-            3 -> R.drawable.hud_help_eta_no_distance
-            4 -> R.drawable.hud_help_eta_distance
-            5 -> R.drawable.hud_help_eta_no_duration
-            6 -> R.drawable.hud_help_eta_no_arrival
-            7 -> R.drawable.hud_help_eta_all
-            else -> R.drawable.hud_help_baseline
-        }
-    }
-
     private fun topic(id: HudHelpTopicId, titleUa: String, titleEn: String, titleRu: String, vararg frames: HudHelpFrame) =
         HudHelpTopic(id, titleUa, titleEn, titleRu, frames.toList())
 
@@ -292,6 +206,6 @@ internal object HudHelpCatalog {
         captionUa: String,
         captionEn: String,
         captionRu: String,
-        imageRes: Int = R.drawable.hud_help_baseline
-    ) = HudHelpFrame(labelUa, labelEn, labelRu, captionUa, captionEn, captionRu, imageRes)
+        scene: HudHelpScene = HudHelpScene()
+    ) = HudHelpFrame(labelUa, labelEn, labelRu, captionUa, captionEn, captionRu, scene)
 }
