@@ -69,6 +69,11 @@ final class VehicleTbtPublisher {
     private volatile String ownerPackage = "";
     private volatile long ownerGeneration = Long.MIN_VALUE;
     private volatile boolean routeActive;
+    private int routeManeuverCompatibilityProfile = ManeuverCompatibilityProfile.AMAP;
+    private int hudCheckManeuverCompatibilityProfile = ManeuverCompatibilityProfile.AMAP;
+    private int teardownManeuverCompatibilityProfile = ManeuverCompatibilityProfile.AMAP;
+    private boolean hudCheckProfileActive;
+    private String lastManeuverMappingLogKey = "";
     private boolean teardownEligible;
     private boolean ownerHasHudPriority;
     private volatile long routeToken;
@@ -155,6 +160,50 @@ final class VehicleTbtPublisher {
                 () -> handleInstrumentUnavailable(reason)));
     }
 
+    private void captureRouteManeuverCompatibilityProfile(String reason) {
+        routeManeuverCompatibilityProfile = ManeuverCompatibilityProfile.normalize(
+                HudPrefs.maneuverCompatibilityProfile(context));
+        hudCheckProfileActive = false;
+        lastManeuverMappingLogKey = "";
+        log("tbt_maneuver_profile profile="
+                + compatibilityProfileName(routeManeuverCompatibilityProfile)
+                + " owner=" + ownerPackage + " generation=" + ownerGeneration
+                + " reason=" + safe(reason));
+    }
+
+    private int compatibilityProfileFor(String owner, HudState manualState) {
+        if (!routeActive && ownerPackage.isEmpty() && safe(owner).equals(teardownOwner)) {
+            return teardownManeuverCompatibilityProfile;
+        }
+        if (MANUAL_OWNER.equals(owner)
+                && ((manualState != null && manualState.hudCheck != null)
+                || hudCheckProfileActive)) {
+            return hudCheckManeuverCompatibilityProfile;
+        }
+        return routeManeuverCompatibilityProfile;
+    }
+
+    private static String compatibilityProfileName(int profile) {
+        return ManeuverCompatibilityProfile.normalize(profile)
+                == ManeuverCompatibilityProfile.BAIDU ? "baidu" : "amap";
+    }
+
+    private void logManeuverMapping(Trace trace) {
+        if (trace == null || trace.mapping == null) return;
+        ManeuverCompatibilityProfile.Mapping mapping = trace.mapping;
+        String key = trace.compatibilityProfile + "|" + mapping.sourceIcon + "|"
+                + mapping.sourceRoundaboutExit + "|" + mapping.instrumentIcon + "|"
+                + mapping.broadcastIcon + "|" + mapping.broadcastRoundaboutExit
+                + "|" + mapping.supported;
+        if (key.equals(lastManeuverMappingLogKey)) return;
+        lastManeuverMappingLogKey = key;
+        log("tbt_maneuver profile=" + compatibilityProfileName(trace.compatibilityProfile)
+                + " source=" + mapping.sourceIcon + "/" + mapping.sourceRoundaboutExit
+                + " instrument=" + mapping.instrumentIcon + " broadcast="
+                + mapping.broadcastIcon + "/" + mapping.broadcastRoundaboutExit
+                + (mapping.supported ? "" : " mapped=false"));
+    }
+
     void beginRoute(String packageName, long generation, boolean switchDashboard) {
         beginRoute(packageName, generation, switchDashboard, false, "route-start");
     }
@@ -238,6 +287,7 @@ final class VehicleTbtPublisher {
         ownerPackage = owner;
         ownerGeneration = generation;
         routeActive = true;
+        captureRouteManeuverCompatibilityProfile(reason);
         instrument.setOutputDemand(true, "route:" + sourceForOwner(owner));
         handoffPendingInstrumentRecovery = false;
         hasInstrumentGuidance = false;
@@ -346,6 +396,18 @@ final class VehicleTbtPublisher {
     void publishManualFrame(String packageName, long generation,
             HudState state, String reason) {
         if (state == null || !routeActive || !matches(packageName, generation)) return;
+        if (state.hudCheck != null && !hudCheckProfileActive) {
+            hudCheckManeuverCompatibilityProfile = ManeuverCompatibilityProfile.normalize(
+                    HudPrefs.maneuverCompatibilityProfile(context));
+            hudCheckProfileActive = true;
+            lastManeuverMappingLogKey = "";
+            log("tbt_maneuver_profile profile="
+                    + compatibilityProfileName(hudCheckManeuverCompatibilityProfile)
+                    + " owner=" + ownerPackage + " generation=" + ownerGeneration
+                    + " reason=hud-check-start");
+        } else if (state.hudCheck == null) {
+            hudCheckProfileActive = false;
+        }
         latestHudCheck = state.hudCheck;
         if (state.hudCheck != null) {
             int lightIndex = state.hudCheck.mode == HudCheckState.Mode.BASIC
@@ -357,11 +419,14 @@ final class VehicleTbtPublisher {
         Trace trace = trace(packageName, generation, reason, null, state);
         int distance = Math.max(0, state.distanceToIntersection);
         String road = safe(state.roadName);
-        lastGuidanceHasAmapFallback = mapping.amapSupported;
+        logManeuverMapping(trace);
+        boolean publishBroadcast = mapping.amapSupported
+                || trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU;
+        lastGuidanceHasAmapFallback = publishBroadcast;
         sendInstrumentGuidance(
-                mapping.instrumentId, distance, road, trace.lanes, trace, true);
-        if (mapping.amapSupported) {
-            sendAmapFrame(mapping.amapManeuver, mapping.roundaboutExit,
+                trace.nativeId, distance, road, trace.lanes, trace, true);
+        if (publishBroadcast) {
+            sendAmapFrame(trace.amapIcon, trace.roundaboutExit,
                     distance, road, DirectTbtFrame.TravelMetrics.unavailable(), trace, true);
         } else {
             if (state.hudCheck != null) {
@@ -426,7 +491,9 @@ final class VehicleTbtPublisher {
         teardownOwner = endedOwner;
         teardownGeneration = endedGeneration;
         teardownReason = safe(reason);
+        teardownManeuverCompatibilityProfile = trace.compatibilityProfile;
         latestHudCheck = null;
+        hudCheckProfileActive = false;
         hudCheckDiagnostics.reset();
         instrument.setOutputDemand(false, "route-end:" + safe(reason));
     }
@@ -642,11 +709,10 @@ final class VehicleTbtPublisher {
     }
 
     private void sendInstrumentFrame(DirectTbtFrame frame, Trace trace) {
-        int icon = instrumentManeuverForAmap(
-                frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber());
+        logManeuverMapping(trace);
         int distance = Math.max(0, frame.getDistanceMeters());
         sendInstrumentGuidance(
-                icon, distance, roadTextForTest(frame), trace.lanes, trace, true);
+                trace.nativeId, distance, roadTextForTest(frame), trace.lanes, trace, true);
     }
 
     private void sendTerminalGuidanceClear(Trace trace) {
@@ -666,7 +732,10 @@ final class VehicleTbtPublisher {
             int icon, int distance, String road, LanePayload lanes,
             Trace trace, boolean deduplicate) {
         hasInstrumentGuidance = true;
-        int nextIcon = Math.max(0, Math.min(49, icon));
+        boolean extendedBaiduIcon = trace != null
+                && trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU
+                && ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon);
+        int nextIcon = extendedBaiduIcon ? icon : Math.max(0, Math.min(49, icon));
         int nextDistance = Math.max(-1, Math.min(2_000_000, distance));
         String normalizedRoad = preserveText(road);
         String nextRoad = normalizedRoad.length() <= 512
@@ -1224,10 +1293,15 @@ final class VehicleTbtPublisher {
         String arrivalText = amapOwnsNativeEta
                 ? amapString(etaSnapshot.formatted.etaText) : "-1";
         String nextRoad = preserveText(road);
-        String semanticKey = amapSemanticKey(amapIcon, roundaboutExit, distance,
+        int publishedIcon = trace == null ? amapIcon : trace.amapIcon;
+        int publishedRoundaboutExit = trace == null
+                ? roundaboutExit : trace.roundaboutExit;
+        String semanticKey = amapSemanticKey(publishedIcon, publishedRoundaboutExit, distance,
                 nextRoad, new DirectTbtFrame.TravelMetrics(
                         -1L, DirectTbtFrame.TravelMetrics.UNKNOWN_ZONE_OFFSET_SECONDS,
                         routeTime, routeDistance))
+                + "|maneuverProfile:" + (trace == null
+                        ? ManeuverCompatibilityProfile.AMAP : trace.compatibilityProfile)
                 + "|etaMode:" + nativeEtaOutputMode
                 + "|etaStrings:" + durationText + "|" + arrivalText
                 + (etaSnapshot == null ? "" : "|native:" + etaSnapshot.semanticKey
@@ -1245,16 +1319,17 @@ final class VehicleTbtPublisher {
         intent.putExtra("EXTRA_STATE", 0);
         intent.putExtra("EXTRA_IS_FOREGROUND", 0);
         intent.putExtra("IS_BYD_MAP", true);
-        intent.putExtra("IS_BYD_BAIDU_MAP", false);
-        intent.putExtra("NEW_ICON", amapIcon);
-        intent.putExtra("ROUNG_ABOUT_NUM", roundaboutExit);
+        intent.putExtra("IS_BYD_BAIDU_MAP", trace != null
+                && trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU);
+        intent.putExtra("NEW_ICON", publishedIcon);
+        intent.putExtra("ROUNG_ABOUT_NUM", publishedRoundaboutExit);
         intent.putExtra("SEG_REMAIN_DIS", distance);
         intent.putExtra("NEXT_ROAD_NAME", nextRoad);
         intent.putExtra("ROUTE_REMAIN_DIS", routeDistance);
         intent.putExtra("ROUTE_REMAIN_TIME", routeTime);
         intent.putExtra("ROUTE_REMAIN_TIME_AUTO", durationText);
         intent.putExtra("ETA_TEXT", arrivalText);
-        byte[] arguments = amapBytes(10001, amapIcon, roundaboutExit, distance,
+        byte[] arguments = amapBytes(10001, publishedIcon, publishedRoundaboutExit, distance,
                 nextRoad, routeDistance, routeTime);
         arguments = appendBytes(arguments, nativeEtaAmapBytes(
                 routeDistance, routeTime, durationText, arrivalText));
@@ -1273,7 +1348,8 @@ final class VehicleTbtPublisher {
         intent.putExtra("EXTRA_STATE", 9);
         intent.putExtra("EXTRA_IS_FOREGROUND", 1);
         intent.putExtra("IS_BYD_MAP", true);
-        intent.putExtra("IS_BYD_BAIDU_MAP", false);
+        intent.putExtra("IS_BYD_BAIDU_MAP", trace != null
+                && trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU);
         intent.putExtra("NEW_ICON", -1);
         intent.putExtra("SEG_REMAIN_DIS", -1);
         intent.putExtra("NEXT_ROAD_NAME", "");
@@ -1395,12 +1471,15 @@ final class VehicleTbtPublisher {
         String source = sourceForOwner(owner);
         Trace trace = new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(),
-                "proxy-ready-replay", lastInstrumentIcon, 0, 0,
+                "proxy-ready-replay", lastInstrumentIcon, 0, 0, 0,
                 lastInstrumentDistance, lastInstrumentRoad,
                 DirectTbtFrame.TravelMetrics.unavailable(),
                 DirectTbtFrame.TravelMetrics.unavailable(),
                 new LanePayload(lastInstrumentLaneDirections,
-                        lastInstrumentLaneRecommendations));
+                        lastInstrumentLaneRecommendations),
+                compatibilityProfileFor(owner, null),
+                new ManeuverCompatibilityProfile.Mapping(0, 0,
+                        lastInstrumentIcon, 0, 0, true));
         trace.routeToken = routeToken;
         trace.hudCheck = latestHudCheck;
         if (hasInstrumentStatus) {
@@ -1451,10 +1530,13 @@ final class VehicleTbtPublisher {
                 ? teardownGeneration : ownerGeneration;
         Trace trace = new Trace(sourceForOwner(owner), safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(),
-                "proxy-unavailable:" + safe(reason), lastInstrumentIcon, 0, 0,
+                "proxy-unavailable:" + safe(reason), lastInstrumentIcon, 0, 0, 0,
                 lastInstrumentDistance, lastInstrumentRoad,
                 DirectTbtFrame.TravelMetrics.unavailable(),
-                DirectTbtFrame.TravelMetrics.unavailable());
+                DirectTbtFrame.TravelMetrics.unavailable(), LanePayload.EMPTY,
+                compatibilityProfileFor(owner, null),
+                new ManeuverCompatibilityProfile.Mapping(0, 0,
+                        lastInstrumentIcon, 0, 0, true));
         trace.routeToken = routeToken;
         if (shouldPreserveAmapFallbackForTest(
                 routeActive, lastGuidanceHasAmapFallback)
@@ -1662,19 +1744,25 @@ final class VehicleTbtPublisher {
         ManualMapping manualMapping = manualState == null ? null
                 : manualMappingForTest(
                         manualState.turnBitmapId, manualState.maneuverId);
-        int nativeId = manualState != null
+        int legacyInstrumentIcon = manualState != null
                 ? manualMapping.instrumentId
                 : frame == null ? 0 : instrumentManeuverForAmap(
                         frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber());
         int intermediateAmapIcon = manualState != null
                 ? manualMapping.amapManeuver
                 : frame == null ? 0 : frame.getAmapManeuver();
-        int amapIcon = manualState != null
+        int sourceAmapIcon = manualState != null
                 ? manualMapping.amapManeuver
                 : frame == null ? 0 : frame.getAmapBroadcastManeuver();
-        int roundaboutExit = manualState != null
+        int sourceRoundaboutExit = manualState != null
                 ? manualMapping.roundaboutExit
                 : frame == null ? 0 : frame.getRoundaboutExitNumber();
+        int profile = compatibilityProfileFor(owner, manualState);
+        ManeuverCompatibilityProfile.Mapping mapping = ManeuverCompatibilityProfile.map(
+                profile, sourceAmapIcon, sourceRoundaboutExit, legacyInstrumentIcon);
+        int nativeId = mapping.instrumentIcon;
+        int amapIcon = mapping.broadcastIcon;
+        int roundaboutExit = mapping.broadcastRoundaboutExit;
         int distance = manualState != null ? manualState.distanceToIntersection
                 : frame == null ? -1 : frame.getDistanceMeters();
         String road = manualState != null ? safe(manualState.roadName)
@@ -1694,7 +1782,7 @@ final class VehicleTbtPublisher {
         Trace trace = new Trace(source, safe(owner), generation,
                 "tbt-" + transactionSequence.incrementAndGet(), safe(reason),
                 nativeId, intermediateAmapIcon, amapIcon, roundaboutExit,
-                distance, preserveText(road), route, next, lanes);
+                distance, preserveText(road), route, next, lanes, profile, mapping);
         trace.routeToken = routeToken;
         trace.hudCheck = manualState == null ? null : manualState.hudCheck;
         return trace;
@@ -1914,6 +2002,8 @@ final class VehicleTbtPublisher {
         final DirectTbtFrame.TravelMetrics route;
         final DirectTbtFrame.TravelMetrics next;
         final LanePayload lanes;
+        final int compatibilityProfile;
+        final ManeuverCompatibilityProfile.Mapping mapping;
         long routeToken = Long.MIN_VALUE;
         HudCheckState hudCheck;
 
@@ -1951,6 +2041,20 @@ final class VehicleTbtPublisher {
                 int roundaboutExit, int distanceMeters, String road,
                 DirectTbtFrame.TravelMetrics route,
                 DirectTbtFrame.TravelMetrics next, LanePayload lanes) {
+            this(source, owner, generation, transactionId, reason, nativeId,
+                    intermediateAmapIcon, amapIcon, roundaboutExit, distanceMeters,
+                    road, route, next, lanes, ManeuverCompatibilityProfile.AMAP,
+                    new ManeuverCompatibilityProfile.Mapping(amapIcon, roundaboutExit,
+                            nativeId, amapIcon, roundaboutExit, true));
+        }
+
+        Trace(String source, String owner, long generation, String transactionId,
+                String reason, int nativeId, int intermediateAmapIcon, int amapIcon,
+                int roundaboutExit, int distanceMeters, String road,
+                DirectTbtFrame.TravelMetrics route,
+                DirectTbtFrame.TravelMetrics next, LanePayload lanes,
+                int compatibilityProfile,
+                ManeuverCompatibilityProfile.Mapping mapping) {
             this.source = source;
             this.owner = owner;
             this.generation = generation;
@@ -1965,6 +2069,9 @@ final class VehicleTbtPublisher {
             this.route = route;
             this.next = next;
             this.lanes = lanes == null ? LanePayload.EMPTY : lanes;
+            this.compatibilityProfile = ManeuverCompatibilityProfile.normalize(
+                    compatibilityProfile);
+            this.mapping = mapping;
         }
     }
 

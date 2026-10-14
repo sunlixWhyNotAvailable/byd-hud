@@ -352,11 +352,15 @@ final class InstrumentNavigationProxyService extends IInstrumentNavigationProxy.
                 }
                 if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_SDK)) {
                     int first = operations.size();
-                    operations.add(invoke("instrument_sdk:sendSimpleGuidanceInfo",
-                            current == null ? null : current.simple, icon, distanceMeters));
+                    boolean extendedIcon = ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon);
+                    // The stock SDK rejects extended Baidu icons before reaching Binder.
+                    if (!extendedIcon) {
+                        operations.add(invoke("instrument_sdk:sendSimpleGuidanceInfo",
+                                current == null ? null : current.simple, icon, distanceMeters));
+                    }
                     operations.add(invoke("instrument_sdk:sendNextPathName",
                             current == null ? null : current.next, roadText));
-                    sdkSucceeded = succeeded(operations, first, 2);
+                    sdkSucceeded = !extendedIcon && succeeded(operations, first, 2);
                 }
                 if (hasCapability(InstrumentProxyContract.CAP_INSTRUMENT_LANES)) {
                     addLaneOperations(operations, directions, recommendations,

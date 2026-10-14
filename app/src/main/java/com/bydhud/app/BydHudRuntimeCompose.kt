@@ -2599,6 +2599,43 @@ private fun OptionsTab(
                     runAction { activity.composeSetNativeOutputEnabled(it) }
                 }
             }
+            row("maneuver-profile") {
+                SettingRow(
+                    language.choose(
+                        "Профіль сумісності маневрів",
+                        "Maneuver compatibility profile",
+                        "Профиль совместимости манёвров"
+                    ),
+                    language.choose(
+                        "Якщо штатна стрілка зависає або показує неправильний напрямок, спробуйте Baidu замість AMap.\nЗміна діятиме з наступного запуску виводу або тесту HUD.",
+                        "If the car's native arrow gets stuck or points the wrong way, try Baidu instead of AMap.\nThe change takes effect the next time you start output or a HUD test.",
+                        "Если штатная стрелка зависает или показывает неверное направление, попробуйте Baidu вместо AMap.\nИзменение применится при следующем запуске вывода или теста HUD."
+                    ),
+                    palette
+                ) {
+                    Segmented(
+                        "AMap",
+                        "Baidu",
+                        snapshot.maneuverCompatibilityProfile == ManeuverCompatibilityProfile.AMAP,
+                        palette,
+                        onLeft = {
+                            runAction {
+                                activity.composeSetManeuverCompatibilityProfile(
+                                    ManeuverCompatibilityProfile.AMAP
+                                )
+                            }
+                        },
+                        onRight = {
+                            runAction {
+                                activity.composeSetManeuverCompatibilityProfile(
+                                    ManeuverCompatibilityProfile.BAIDU
+                                )
+                            }
+                        },
+                        itemWidth = 90.dp
+                    )
+                }
+            }
             row("lane-output") {
                 SwitchRow(copy.laneOutput, copy.laneHint, snapshot.laneOutputEnabled, palette,
                     onHelp = { hudHelpRequest = switchHelp(HudHelpTopicId.BasicLanes, copy.laneOutput, snapshot.laneOutputEnabled) }) {

@@ -13,6 +13,7 @@ final class HudPrefs {
     private static final String KEY_SMALL_DISTANCE_CLAMP = "small_distance_clamp";
     private static final String KEY_OUTPUT_PNG = "output_png";
     private static final String KEY_OUTPUT_NATIVE = "output_native";
+    private static final String KEY_MANEUVER_COMPATIBILITY_PROFILE = "maneuver_compatibility_profile";
     private static final String KEY_OUTPUT_LANES = "output_lanes";
     private static final String KEY_OUTPUT_DISTANCE = "output_distance";
     private static final String KEY_OUTPUT_STREET = "output_street";
@@ -178,6 +179,16 @@ final class HudPrefs {
     static void setNativeOutputEnabled(Context context, boolean enabled) {
         prefs(context).edit().putBoolean(KEY_OUTPUT_NATIVE, enabled).apply();
         markOutputOptionChanged(KEY_OUTPUT_NATIVE);
+    }
+
+    static int maneuverCompatibilityProfile(Context context) {
+        return ManeuverCompatibilityProfile.normalize(prefs(context).getInt(
+                KEY_MANEUVER_COMPATIBILITY_PROFILE, ManeuverCompatibilityProfile.AMAP));
+    }
+
+    static void setManeuverCompatibilityProfile(Context context, int profile) {
+        prefs(context).edit().putInt(KEY_MANEUVER_COMPATIBILITY_PROFILE,
+                ManeuverCompatibilityProfile.normalize(profile)).apply();
     }
 
     //keeps this predicate explicit so safety checks can be audited without tracing callers.

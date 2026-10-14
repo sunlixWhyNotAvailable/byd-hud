@@ -673,6 +673,7 @@ public final class MainActivity extends ComponentActivity {
                 HudPrefs.isDetailedDebugArtifactsEnabled(this),
                 HudPrefs.isPngOutputEnabled(this),
                 HudPrefs.isNativeOutputEnabled(this),
+                HudPrefs.maneuverCompatibilityProfile(this),
                 HudPrefs.isLaneOutputEnabled(this),
                 HudPrefs.isDistanceOutputEnabled(this),
                 HudPrefs.isStreetOutputEnabled(this),
@@ -1335,6 +1336,11 @@ public final class MainActivity extends ComponentActivity {
     //keeps this step explicit so callers can rely on one documented behavior boundary.
     public void composeSetNativeOutputEnabled(boolean enabled) {
         setNativeOutputEnabled(enabled);
+    }
+
+    public void composeSetManeuverCompatibilityProfile(int profile) {
+        HudPrefs.setManeuverCompatibilityProfile(this, profile);
+        publishSharedUiStateChange();
     }
 
     //keeps this step explicit so callers can rely on one documented behavior boundary.
@@ -2611,6 +2617,7 @@ public final class MainActivity extends ComponentActivity {
         public final boolean detailedDebugArtifactsEnabled;
         public final boolean pngOutputEnabled;
         public final boolean nativeOutputEnabled;
+        public final int maneuverCompatibilityProfile;
         public final boolean laneOutputEnabled;
         public final boolean distanceOutputEnabled;
         public final boolean streetOutputEnabled;
@@ -2705,7 +2712,8 @@ public final class MainActivity extends ComponentActivity {
 
         ComposeSnapshot(String uiLanguage, boolean darkTheme, boolean bootEnabled,
                 boolean detailedDebugArtifactsEnabled,
-                boolean pngOutputEnabled, boolean nativeOutputEnabled, boolean laneOutputEnabled,
+                boolean pngOutputEnabled, boolean nativeOutputEnabled,
+                int maneuverCompatibilityProfile, boolean laneOutputEnabled,
                 boolean distanceOutputEnabled, boolean streetOutputEnabled,
                 int transliterationMode,
                 boolean textDirectionOutputEnabled, boolean wazeAlertsEnabled,
@@ -2766,6 +2774,8 @@ public final class MainActivity extends ComponentActivity {
             this.detailedDebugArtifactsEnabled = detailedDebugArtifactsEnabled;
             this.pngOutputEnabled = pngOutputEnabled;
             this.nativeOutputEnabled = nativeOutputEnabled;
+            this.maneuverCompatibilityProfile = ManeuverCompatibilityProfile.normalize(
+                    maneuverCompatibilityProfile);
             this.laneOutputEnabled = laneOutputEnabled;
             this.distanceOutputEnabled = distanceOutputEnabled;
             this.streetOutputEnabled = streetOutputEnabled;
@@ -2895,6 +2905,7 @@ public final class MainActivity extends ComponentActivity {
                     && detailedDebugArtifactsEnabled == other.detailedDebugArtifactsEnabled
                     && pngOutputEnabled == other.pngOutputEnabled
                     && nativeOutputEnabled == other.nativeOutputEnabled
+                    && maneuverCompatibilityProfile == other.maneuverCompatibilityProfile
                     && laneOutputEnabled == other.laneOutputEnabled
                     && distanceOutputEnabled == other.distanceOutputEnabled
                     && streetOutputEnabled == other.streetOutputEnabled
@@ -2990,7 +3001,8 @@ public final class MainActivity extends ComponentActivity {
         public int hashCode() {
             return Objects.hash(
                     uiLanguage, uaLanguage, darkTheme, bootEnabled, detailedDebugArtifactsEnabled,
-                    pngOutputEnabled, nativeOutputEnabled, laneOutputEnabled,
+                    pngOutputEnabled, nativeOutputEnabled, maneuverCompatibilityProfile,
+                    laneOutputEnabled,
                     distanceOutputEnabled, streetOutputEnabled, transliterationMode,
                     textDirectionOutputEnabled,
                     wazeAlertsEnabled, wazeAlertField, tbtWithoutHudOutputEnabled,

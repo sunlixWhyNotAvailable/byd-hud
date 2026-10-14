@@ -203,7 +203,8 @@ final class InstrumentProxyContract {
     }
 
     static boolean validGuidance(int icon, int distanceMeters, String road) {
-        return icon >= 0 && icon <= 49
+        return ((icon >= 0 && icon <= 49)
+                || ManeuverCompatibilityProfile.isBaiduInstrumentIcon(icon))
                 && distanceMeters >= -1 && distanceMeters <= 2_000_000
                 && preserveText(road).length() <= 512;
     }
