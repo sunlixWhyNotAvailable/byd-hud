@@ -7810,14 +7810,76 @@ private fun HudCheckTab(
                 }
             }
         } else if (state.mode == HudCheckState.Mode.EXTENDED) {
+            val extendedHud = state.toHudState()
+            val livePipeline = state.isLivePipelineCheck()
+            val legacyGeometry = state.isGeometryCheck()
+            val geometryCard = livePipeline || legacyGeometry
+            val liveGeometry = if (livePipeline) state.liveGeometry() else null
+            val selectedLabel = if (livePipeline && language == Language.Ru) {
+                state.extendedLabelRussian()
+            } else localizeHudCheckLabel(state.extendedLabel(ukrainian), language)
+            val liveFrameForBaseline = if (livePipeline) state.liveFrame() else null
+            val liveExitForBaseline = liveFrameForBaseline?.roundaboutExit
+            val baselineManeuverLabel = if (!livePipeline) language.choose("Прямо", "Straight", "Прямо") else when {
+                liveExitForBaseline != null && liveExitForBaseline.hasDirection() -> {
+                    val direction = when (liveExitForBaseline.direction.name) {
+                        "LEFT" -> language.choose("ліворуч", "left", "налево")
+                        "RIGHT" -> language.choose("праворуч", "right", "направо")
+                        "STRAIGHT" -> language.choose("прямо", "straight", "прямо")
+                        else -> liveExitForBaseline.direction.name.lowercase()
+                    }
+                    language.choose("Коло · $direction", "Roundabout · $direction", "Круг · $direction")
+                }
+                liveFrameForBaseline?.amapManeuver == 2 -> language.choose("Ліворуч", "Left", "Налево")
+                liveFrameForBaseline?.amapManeuver == 3 -> language.choose("Праворуч", "Right", "Направо")
+                else -> language.choose("Прямо", "Straight", "Прямо")
+            }
+            val nativeWord = language.choose("штатний", "native", "штатный")
+            val sourcePngId = if (livePipeline) extendedHud.turnBitmapId
+                else HudState.TURN_BITMAP_BLANK_SOURCE_ID
+            val baselineManeuver = "$baselineManeuverLabel · ${copy.stockImage} PNG $sourcePngId · $nativeWord ${extendedHud.maneuverId}"
+            val geometryHeading = liveGeometry?.heading
+                ?: if (legacyGeometry) HudCheckGeometry.heading(state.extendedIndex) else 0.0
+            val geometryName = liveGeometry?.name ?: "straight"
+            val geometryNameLabel = when (geometryName) {
+                "left" -> language.choose("ліворуч", "left", "налево")
+                "right" -> language.choose("праворуч", "right", "направо")
+                else -> language.choose("прямо", "straight", "прямо")
+            }
+            val geometryMetadata = if (livePipeline && liveGeometry != null) {
+                val frame = state.liveFrame()
+                val exit = frame?.roundaboutExit
+                val exitLabel = if (exit != null && exit.hasDirection()) {
+                    val direction = when (exit.direction.name) {
+                        "LEFT" -> language.choose("ліворуч", "left", "налево")
+                        "RIGHT" -> language.choose("праворуч", "right", "направо")
+                        "STRAIGHT" -> language.choose("прямо", "straight", "прямо")
+                        else -> exit.direction.name.lowercase()
+                    }
+                    language.choose(" · виїзд $direction", " · exit $direction", " · съезд $direction")
+                } else ""
+                language.choose(
+                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: ${frame?.bydManeuver ?: extendedHud.maneuverId} · f31: [] · f32: ${liveGeometry.heading}° · геометрія: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · піктограма TBT: ${frame?.amapBroadcastManeuver} · PNG ID: ${extendedHud.turnBitmapId} · джерело HUD_CHECK$exitLabel",
+                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: ${frame?.bydManeuver ?: extendedHud.maneuverId} · f31: [] · f32: ${liveGeometry.heading}° · geometry: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · TBT broadcast icon: ${frame?.amapBroadcastManeuver} · PNG ID: ${extendedHud.turnBitmapId} · source HUD_CHECK$exitLabel",
+                    "f19: ${liveGeometry.longitude} · f20: ${liveGeometry.latitude} · f28: ${frame?.bydManeuver ?: extendedHud.maneuverId} · f31: [] · f32: ${liveGeometry.heading}° · геометрия: $geometryNameLabel\nAMap: ${frame?.amapManeuver} · значок TBT: ${frame?.amapBroadcastManeuver} · PNG ID: ${extendedHud.turnBitmapId} · источник HUD_CHECK$exitLabel"
+                )
+            } else if (legacyGeometry) {
+                language.choose(
+                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: ${extendedHud.maneuverId} · f31: [] · f32: $geometryHeading°",
+                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: ${extendedHud.maneuverId} · f31: [] · f32: $geometryHeading°",
+                    "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: ${extendedHud.maneuverId} · f31: [] · f32: $geometryHeading°"
+                )
+            } else ""
             item(key = "hud-check-baseline") {
                 Section(copy.checkBaseline, palette, bodyPadding = 10.dp, headerVerticalPadding = 6.dp) {
                     val baseline = listOf(
                         "${copy.checkManeuvers} · ${copy.checkManeuversChannels}" to
-                            "${language.choose("Прямо", "Straight", "Прямо")} · ${copy.stockImage}",
+                            baselineManeuver,
                         copy.checkLanes to "S* | S | S* | S | S* · ${copy.stockImage}",
-                        copy.distanceMeters to if (state.isGeometryCheck()) "9" else "77",
-                        copy.streetText to "Continue straight"
+                        copy.distanceMeters to extendedHud.distanceToIntersection.toString(),
+                        copy.streetText to if (livePipeline) language.choose(
+                            "Продовжуйте прямо", "Continue straight", "Продолжайте прямо"
+                        ) else "Continue straight"
                     )
                     Row(horizontalArrangement = Arrangement.spacedBy(16.dp), modifier = Modifier.fillMaxWidth()) {
                         baseline.forEach { (title, value) ->
@@ -7828,10 +7890,10 @@ private fun HudCheckTab(
                             }
                         }
                     }
-                    if (state.isGeometryCheck()) {
+                    if (geometryCard) {
                         Spacer(Modifier.height(8.dp))
                         Text(
-                            "f19: ${HudCheckGeometry.LONGITUDE} · f20: ${HudCheckGeometry.LATITUDE} · f28: 11 · f31: []",
+                            geometryMetadata,
                             color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp
                         )
                     }
@@ -7847,23 +7909,22 @@ private fun HudCheckTab(
                         Box(Modifier.weight(1f)) {
                             Column(
                                 modifier = Modifier
-                                    .fillMaxWidth(if (state.isGeometryCheck()) 1f else 0.7f)
+                                    .fillMaxWidth(if (geometryCard) 1f else 0.7f)
                                     .heightIn(min = 100.dp)
                                     .clip(RoundedCornerShape(7.dp))
                                     .background(palette.field)
                                     .border(1.dp, palette.borderStrong, RoundedCornerShape(7.dp))
-                                    .padding(if (state.isGeometryCheck()) 8.dp else 12.dp),
+                                    .padding(if (geometryCard) 8.dp else 12.dp),
                                 verticalArrangement = Arrangement.Center
                             ) {
-                                if (state.isGeometryCheck()) {
+                                if (geometryCard) {
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                        Text(localizeHudCheckLabel(state.extendedLabel(ukrainian), language), color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
-                                        Text(
-                                            "f32: ${HudCheckGeometry.heading(state.extendedIndex)}°",
-                                            color = palette.accent, fontFamily = FontFamily.Monospace, fontSize = 18.sp
-                                        )
-                                        Text(state.extendedField(), color = palette.muted, fontFamily = FontFamily.Monospace, fontSize = 13.sp)
+                                        Text(selectedLabel, color = palette.text, fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                                        Text("f32: ${geometryHeading}°", color = palette.accent,
+                                            fontFamily = FontFamily.Monospace, fontSize = 16.sp)
                                     }
+                                    Text(state.extendedField(), color = palette.muted,
+                                        fontFamily = FontFamily.Monospace, fontSize = 12.sp)
                                     Spacer(Modifier.height(4.dp))
                                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                                         state.extendedValue().lines().chunked(4).forEachIndexed { column, points ->
@@ -7919,7 +7980,11 @@ private fun HudCheckTab(
                     }
                     Spacer(Modifier.height(8.dp))
                     Text(
-                        if (state.isGeometryCheck() && state.automatic) language.choose(
+                        if (livePipeline && state.automatic) language.choose(
+                            "Кожен наскрізний сценарій триває 10 секунд · передавання 1 Гц",
+                            "Each live pipeline scenario lasts 10 seconds · transmission rate: 1 Hz",
+                            "Каждый потоковый сценарий длится 10 секунд · передача 1 Гц"
+                        ) else if (legacyGeometry && state.automatic) language.choose(
                             "Кожен етап перевірки геометрії — 10 секунд · частота передачі — 1 Гц",
                             "Each geometry stage lasts 10 seconds · transmission rate: 1 Hz",
                             "Каждый этап проверки геометрии — 10 секунд · частота передачи — 1 Гц"
@@ -7927,7 +7992,11 @@ private fun HudCheckTab(
                         color = palette.text,
                         fontSize = 13.sp
                     )
-                    Text(if (state.isGeometryCheck()) language.choose(
+                    Text(if (livePipeline) language.choose(
+                        "Маневр, дистанція, штатна іконка, смуги та геометрія проходять через той самий форматтер Direct TBT · координати схематичні · GPS не змінюється",
+                        "Maneuver, distance, stock icon, lanes and geometry use the same Direct TBT formatter · coordinates are schematic · GPS stays unchanged",
+                        "Манёвр, дистанция, штатная иконка, полосы и геометрия проходят через тот же форматтер Direct TBT · координаты схематичные · GPS не меняется"
+                    ) else if (legacyGeometry) language.choose(
                         "Змінюється лише геометрія f30 · курс f32 та координати незмінні · GPS не змінюється",
                         "Only geometry f30 changes · heading f32 and position stay fixed · GPS stays unchanged",
                         "Меняется только геометрия f30 · курс f32 и координаты неизменны · GPS не меняется"

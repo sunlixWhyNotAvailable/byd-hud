@@ -53,6 +53,7 @@ public final class HudCheckPayload {
     /** Builds one real RoadInfo event with only the selected diagnostic fields. */
     public static byte[] buildRoadInfo(Context context, HudCheckState source) {
         HudCheckState state = source == null ? new HudCheckState() : source;
+        if (state.isLiveCheck()) return prepareLive(context, state).build(0);
         if (context != null) HudGraphicPayload.setContext(context);
         HudState hud = state.toHudState();
         boolean extended = state.mode == HudCheckState.Mode.EXTENDED;
@@ -79,6 +80,40 @@ public final class HudCheckPayload {
         writeExtendedNeutralFields(fields, extended ? "" : DIAGNOSTIC_GUIDE_LINE);
         if (extended) writeExtendedFields(fields, state.extendedIndex);
         return wrap(fields.toByteArray());
+    }
+
+    /** Prepares Basic and appended live-pipeline cases with the production TBT formatter. */
+    static DirectTbtPayload.Prepared prepareLive(Context context, HudCheckState source) {
+        HudCheckState state = source == null ? new HudCheckState() : source;
+        if (!state.isLiveCheck()) {
+            throw new IllegalArgumentException("HUD Check state is not a live-pipeline case");
+        }
+        if (context != null) HudGraphicPayload.setContext(context);
+
+        DirectTbtFrame frame = state.liveFrame();
+        HudState hud = state.toHudState();
+        boolean basic = state.mode == HudCheckState.Mode.BASIC;
+        byte[] maneuverPng = basic && state.maneuverBitmap
+                ? HudGraphicPayload.buildTurnPng(hud)
+                : HudGraphicPayload.buildOemTurnPng(basic
+                        ? HudState.TURN_BITMAP_BLANK_SOURCE_ID : hud.turnBitmapId);
+        byte[] lanePng = basic && state.laneBitmap
+                ? buildLanePngSafely(context, hud) : new byte[0];
+        List<DirectTbtFrame.Lane> lanes = new ArrayList<>();
+        for (HudLaneModel.LaneSpec lane : HudLaneModel.parse(hud)) {
+            lanes.add(new DirectTbtFrame.Lane(
+                    lane.instrumentCode(), lane.recommendationCode(), lane.label));
+        }
+        DirectTbtFrame laneGuidance = new DirectTbtFrame(-1, 0, 0, 0,
+                "", "", "", null, lanePng, lanes,
+                DirectTbtFrame.AlertOverlay.inactive());
+        frame = frame.withManeuverPng(maneuverPng).withLanesFrom(laneGuidance);
+        DirectTbtPayload.Options options =
+                new DirectTbtPayload.Options(true, true, true, true, true);
+        ByteArrayOutputStream baseline = new ByteArrayOutputStream();
+        writeExtendedNeutralFields(baseline, "");
+        return DirectTbtPayload.prepare(frame, options)
+                .withHudCheckBaseline(baseline.toByteArray());
     }
 
     /** Returns auxiliary events for the current extended case; Basic has none. */
@@ -200,7 +235,7 @@ public final class HudCheckPayload {
     }
 
     private static void writeExtendedFields(ByteArrayOutputStream out, int index) {
-        if (index >= 25 && index < HudCheckState.extendedCount()) {
+        if (index >= 25 && index < HudCheckLiveScenario.FIRST_EXTENDED_INDEX) {
             writeDoubleField(out, 19, HudCheckGeometry.LONGITUDE);
             writeDoubleField(out, 20, HudCheckGeometry.LATITUDE);
             writeDoubleField(out, 32, HudCheckGeometry.heading(index));

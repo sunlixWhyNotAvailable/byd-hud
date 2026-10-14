@@ -13,6 +13,23 @@ final class HudCheckDiagnostics {
         String line = "hud_check case=" + sampleKey(sample) + " plane=" + channel
                 + " result=" + (result > 0 ? "sent" : result < 0 ? "unavailable-or-error" : "waiting")
                 + " reason=" + token(reason);
+        if (sample.isLiveCheck()) {
+            DirectTbtFrame frame = sample.liveFrame();
+            HudManeuverGeometry.Selection geometry = sample.liveGeometry();
+            int pngSource = sample.mode == HudCheckState.Mode.BASIC && !sample.maneuverBitmap
+                    ? HudState.TURN_BITMAP_BLANK_SOURCE_ID : sample.toHudState().turnBitmapId;
+            line += " maneuver=" + frame.getBydManeuver()
+                    + " distance_m=" + frame.getDistanceMeters()
+                    + " amap=" + frame.getAmapManeuver()
+                    + " tbt_broadcast=" + frame.getAmapBroadcastManeuver()
+                    + " png_source=" + pngSource
+                    + " geometry=" + geometry.name + " source=HUD_CHECK"
+                    + " f19=" + geometry.longitude + " f20=" + geometry.latitude
+                    + " f32=" + geometry.heading;
+            if (frame.getRoundaboutExit().hasDirection()) {
+                line += " " + frame.getRoundaboutExit().diagnostics();
+            }
+        }
         if (line.equals(lastByPlane.put(channel, line))) return null;
         return line;
     }
@@ -24,6 +41,9 @@ final class HudCheckDiagnostics {
     static String sampleKey(HudCheckState sample) {
         if (sample == null) return "none";
         if (sample.mode == HudCheckState.Mode.EXTENDED) {
+            if (sample.isLivePipelineCheck()) {
+                return "extended-" + (sample.extendedIndex + 1) + "-" + sample.liveScenarioKey();
+            }
             return "extended-" + (sample.extendedIndex + 1);
         }
         return "basic-m" + sample.maneuverIndex + "-l" + sample.laneIndex

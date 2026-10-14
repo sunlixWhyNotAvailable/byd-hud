@@ -147,6 +147,7 @@ public final class GmapsWireParser {
         result.put("routeLegCount", routeLegs.size());
         result.put("stepCount", steps.size());
         result.put("currentStepIndex", currentIndex);
+        result.put("currentStepIndexPresent", currentLeg.currentIndexPresent);
         if (currentLeg.remainingSeconds >= 0L) {
             result.put("routeMetricSeconds", currentLeg.remainingSeconds);
             result.put("nextStopRemainingSeconds", currentLeg.remainingSeconds);
@@ -199,6 +200,7 @@ public final class GmapsWireParser {
         List<Field> routeState = parse(routeStateBytes);
         List<byte[]> steps = allBytes(routeState, 2);
         if (steps.size() > MAX_STEPS) throw new IOException("too many route steps");
+        boolean currentIndexPresent = hasVarint(routeState, 3);
         int currentIndex = checkedInt(
                 firstVarint(routeState, 3, 0L), "current step index");
         byte[] routeMetric = firstBytes(routeState, 4);
@@ -219,7 +221,7 @@ public final class GmapsWireParser {
             }
         }
         return new LegState(steps, currentIndex, remainingSeconds,
-                remainingDistanceMeters, distanceAvailable);
+                remainingDistanceMeters, distanceAvailable, currentIndexPresent);
     }
 
     private static void putWholeRouteMetrics(
@@ -483,6 +485,13 @@ public final class GmapsWireParser {
         return null;
     }
 
+    private static boolean hasVarint(List<Field> fields, int number) {
+        for (Field field : fields) {
+            if (field.number == number && field.hasVarint) return true;
+        }
+        return false;
+    }
+
     private static Integer firstFixed32(List<Field> fields, int number) {
         for (Field field : fields) {
             if (field.number == number && field.hasFixed32) return field.fixed32;
@@ -606,14 +615,17 @@ public final class GmapsWireParser {
         final long remainingSeconds;
         final long remainingDistanceMeters;
         final boolean distanceAvailable;
+        final boolean currentIndexPresent;
 
         LegState(List<byte[]> steps, int currentIndex, long remainingSeconds,
-                 long remainingDistanceMeters, boolean distanceAvailable) {
+                 long remainingDistanceMeters, boolean distanceAvailable,
+                 boolean currentIndexPresent) {
             this.steps = steps;
             this.currentIndex = currentIndex;
             this.remainingSeconds = remainingSeconds;
             this.remainingDistanceMeters = remainingDistanceMeters;
             this.distanceAvailable = distanceAvailable;
+            this.currentIndexPresent = currentIndexPresent;
         }
     }
 }

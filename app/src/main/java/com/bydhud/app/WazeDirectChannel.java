@@ -93,7 +93,7 @@ public final class WazeDirectChannel {
     private final HandlerThread channelThread = new HandlerThread(
             "WazeDirectChannel", Process.THREAD_PRIORITY_BACKGROUND);
     private final Handler channelHandler;
-    private final Map<Integer, byte[]> maneuverIcons = new HashMap<>();
+    private final Map<Integer, CachedManeuverIcon> maneuverIcons = new HashMap<>();
     private final Object tripStateLock = new Object();
     private final TreeSet<Long> pendingTripControls = new TreeSet<>();
     private final TreeSet<Long> pendingTripNormalizations = new TreeSet<>();
@@ -1049,17 +1049,20 @@ public final class WazeDirectChannel {
         }
         byte[] maneuverPng = renderIcon(step.maneuverIcon, "maneuver");
         if (step.rawType >= 0 && maneuverPng.length > 0) {
-            maneuverIcons.put(step.rawType, maneuverPng.clone());
+            maneuverIcons.put(step.rawType, new CachedManeuverIcon(step.roundaboutExit,
+                    step.roundaboutExitDirection.getRawAngleDegrees(), maneuverPng));
         } else if (step.rawType >= 0) {
-            byte[] cached = maneuverIcons.get(step.rawType);
-            maneuverPng = cached == null ? new byte[0] : cached.clone();
+            CachedManeuverIcon cached = maneuverIcons.get(step.rawType);
+            maneuverPng = cached == null ? new byte[0] : cached.bytesFor(step.roundaboutExit,
+                    step.roundaboutExitDirection.getRawAngleDegrees());
         }
 
         return new DirectTbtFrame(step.rawType, step.amap, step.byd,
                 distanceMeters, step.road, step.cue,
                 step.road.isEmpty() ? step.cue : step.road, maneuverPng, lanePng,
                 lanes, DirectTbtFrame.AlertOverlay.inactive(), tripMetrics)
-                .withVehicleTbt(step.amapBroadcast, step.roundaboutExit);
+                .withVehicleTbt(step.amapBroadcast, step.roundaboutExit,
+                        step.roundaboutExitDirection.withSourceMode(mode.name()));
     }
 
     private void emitFrame(String reason) {
@@ -2244,6 +2247,45 @@ public final class WazeDirectChannel {
         }
     }
 
+    static RoundaboutExit roundaboutExitDirection(Maneuver maneuver) {
+        if (maneuver == null) return RoundaboutExit.unknown();
+        int type = maneuver.getType();
+        boolean clockwise = type == Maneuver.TYPE_ROUNDABOUT_ENTER_AND_EXIT_CW_WITH_ANGLE;
+        boolean counterClockwise =
+                type == Maneuver.TYPE_ROUNDABOUT_ENTER_AND_EXIT_CCW_WITH_ANGLE;
+        if (!clockwise && !counterClockwise) return RoundaboutExit.unknown();
+
+        int angle;
+        try {
+            angle = maneuver.getRoundaboutExitAngle();
+        } catch (RuntimeException ignored) {
+            return RoundaboutExit.of(RoundaboutExit.Direction.UNKNOWN,
+                    RoundaboutExit.Source.WAZE_WITH_ANGLE, type, Double.NaN);
+        }
+        if (angle < 1 || angle > 360) {
+            return RoundaboutExit.of(RoundaboutExit.Direction.UNKNOWN,
+                    RoundaboutExit.Source.WAZE_WITH_ANGLE, type, Double.NaN);
+        }
+
+        // AndroidX reports the circulation angle, not a geometric curve. Keep exact
+        // straight/U-turn values distinct and represent every other value by side;
+        // this broad-side mapping cannot express the exit's precise shape.
+        RoundaboutExit.Direction direction;
+        if (angle == 180) {
+            direction = RoundaboutExit.Direction.STRAIGHT;
+        } else if (angle == 360) {
+            direction = RoundaboutExit.Direction.U_TURN;
+        } else if (angle < 180) {
+            direction = clockwise
+                    ? RoundaboutExit.Direction.LEFT : RoundaboutExit.Direction.RIGHT;
+        } else {
+            direction = clockwise
+                    ? RoundaboutExit.Direction.RIGHT : RoundaboutExit.Direction.LEFT;
+        }
+        return RoundaboutExit.of(direction, RoundaboutExit.Source.WAZE_WITH_ANGLE,
+                type, angle);
+    }
+
     static int mapWazeToAmapBroadcastForTest(int type) {
         return mapWazeToAmapBroadcast(type, mapWazeToAmap(type));
     }
@@ -2476,25 +2518,45 @@ public final class WazeDirectChannel {
         }
     }
 
+    static final class CachedManeuverIcon {
+        private final int exitNumber;
+        private final double exitAngle;
+        private final byte[] png;
+
+        CachedManeuverIcon(int exitNumber, double exitAngle, byte[] png) {
+            this.exitNumber = exitNumber;
+            this.exitAngle = exitAngle;
+            this.png = png.clone();
+        }
+
+        byte[] bytesFor(int number, double angle) {
+            // One raw circle type can represent different exit angles and ordinals.
+            return exitNumber == number && Double.compare(exitAngle, angle) == 0
+                    ? png.clone() : new byte[0];
+        }
+    }
+
     private static final class WazeStepData {
         final int rawType;
         final int amap;
         final int byd;
         final int amapBroadcast;
         final int roundaboutExit;
+        final RoundaboutExit roundaboutExitDirection;
         final String road;
         final String cue;
         final CarIcon maneuverIcon;
         final WazeLaneData lanes;
 
         private WazeStepData(int rawType, int amap, int byd, int amapBroadcast,
-                int roundaboutExit, String road, String cue, CarIcon maneuverIcon,
-                WazeLaneData lanes) {
+                int roundaboutExit, RoundaboutExit roundaboutExitDirection,
+                String road, String cue, CarIcon maneuverIcon, WazeLaneData lanes) {
             this.rawType = rawType;
             this.amap = amap;
             this.byd = byd;
             this.amapBroadcast = amapBroadcast;
             this.roundaboutExit = roundaboutExit;
+            this.roundaboutExitDirection = roundaboutExitDirection;
             this.road = road;
             this.cue = cue;
             this.maneuverIcon = maneuverIcon;
@@ -2509,7 +2571,8 @@ public final class WazeDirectChannel {
             return new WazeStepData(rawType, amap,
                     amap == 15 ? 99 : mapAmapToByd(amap),
                     maneuver == null ? 0 : mapWazeToAmapBroadcast(rawType, amap),
-                    roundaboutExitNumber(maneuver), text(step.getRoad()),
+                    roundaboutExitNumber(maneuver), roundaboutExitDirection(maneuver),
+                    text(step.getRoad()),
                     text(step.getCue()), maneuver == null ? null : maneuver.getIcon(),
                     WazeLaneData.from(step));
         }

@@ -420,7 +420,8 @@ final class VehicleTbtPublisher {
         int distance = Math.max(0, state.distanceToIntersection);
         String road = safe(state.roadName);
         logManeuverMapping(trace);
-        boolean publishBroadcast = mapping.amapSupported
+        boolean publishBroadcast = (state.hudCheck != null && state.hudCheck.isLiveCheck())
+                || mapping.amapSupported
                 || trace.compatibilityProfile == ManeuverCompatibilityProfile.BAIDU;
         lastGuidanceHasAmapFallback = publishBroadcast;
         sendInstrumentGuidance(
@@ -1741,20 +1742,23 @@ final class VehicleTbtPublisher {
     private Trace trace(String owner, long generation, String reason,
             DirectTbtFrame frame, HudState manualState) {
         String source = sourceForOwner(owner);
-        ManualMapping manualMapping = manualState == null ? null
+        boolean liveCheck = manualState != null && manualState.hudCheck != null
+                && manualState.hudCheck.isLiveCheck();
+        if (liveCheck) frame = manualState.hudCheck.liveFrame();
+        ManualMapping manualMapping = manualState == null || liveCheck ? null
                 : manualMappingForTest(
                         manualState.turnBitmapId, manualState.maneuverId);
-        int legacyInstrumentIcon = manualState != null
+        int legacyInstrumentIcon = manualMapping != null
                 ? manualMapping.instrumentId
                 : frame == null ? 0 : instrumentManeuverForAmap(
                         frame.getAmapBroadcastManeuver(), frame.getRoundaboutExitNumber());
-        int intermediateAmapIcon = manualState != null
+        int intermediateAmapIcon = manualMapping != null
                 ? manualMapping.amapManeuver
                 : frame == null ? 0 : frame.getAmapManeuver();
-        int sourceAmapIcon = manualState != null
+        int sourceAmapIcon = manualMapping != null
                 ? manualMapping.amapManeuver
                 : frame == null ? 0 : frame.getAmapBroadcastManeuver();
-        int sourceRoundaboutExit = manualState != null
+        int sourceRoundaboutExit = manualMapping != null
                 ? manualMapping.roundaboutExit
                 : frame == null ? 0 : frame.getRoundaboutExitNumber();
         int profile = compatibilityProfileFor(owner, manualState);

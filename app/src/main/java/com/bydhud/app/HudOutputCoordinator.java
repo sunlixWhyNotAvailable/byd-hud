@@ -190,6 +190,7 @@ final class HudOutputCoordinator {
     private DirectTbtFrame preparedOutputFrame;
     private final NativeHudSpeedLimit nativeHudSpeed = new NativeHudSpeedLimit();
     private String nativeHudSpeedDiagnostic = "";
+    private String maneuverGeometryDiagnostic = "";
     private DirectTbtPayload.Prepared preparedDirectPayload;
     private DirectTbtPayload.Prepared candidateDirectPayload;
     private DirectTbtPayload.Options preparedDirectOptions;
@@ -1486,6 +1487,8 @@ final class HudOutputCoordinator {
                 if (sourceChanged || !etaCacheKey.equals(preparedEtaCacheKey)) {
                     candidateDirectPayload = DirectTbtPayload.prepare(
                             preparedOutputFrame, preparedDirectOptions, nowWallTimeMs);
+                    logManeuverGeometry(directOwnerPackage, directOwnerSessionGeneration,
+                            candidateDirectPayload);
                     preparedDirectPayload = null;
                     preparedDirectBitmapSelection = directBitmapSelection;
                     preparedDirectBitmapTxLogger = directBitmapTxLogger;
@@ -1512,7 +1515,9 @@ final class HudOutputCoordinator {
                     .withMapPng(mapProfileCalibrationSession == manualMapLiveSession
                             && HudPrefs.mapSettings(context).mode == HudMapSettings.EXPERIMENTAL
                             ? navigatorMapPng : null);
-            return DirectTbtPayload.prepare(manualMapLiveFrame, options).build(0);
+            DirectTbtPayload.Prepared prepared = DirectTbtPayload.prepare(manualMapLiveFrame, options);
+            logManeuverGeometry("map-live", manualMapLiveSession, prepared);
+            return prepared.build(0);
         }
         HudState state = manualState.copy();
         if (state.hudCheck != null) {
@@ -1520,7 +1525,13 @@ final class HudOutputCoordinator {
                 hudCheckPendingClearTopics.addAll(hudCheckActiveTopics);
                 hudCheckActiveTopics.clear();
                 preparedHudCheck = state.hudCheck;
-                preparedHudCheckPayload = HudCheckPayload.buildRoadInfo(context, preparedHudCheck);
+                if (preparedHudCheck.isLiveCheck()) {
+                    DirectTbtPayload.Prepared prepared = HudCheckPayload.prepareLive(context, preparedHudCheck);
+                    preparedHudCheckPayload = prepared.build(0);
+                    logManeuverGeometry("hud-check:" + preparedHudCheck.liveScenarioKey(), generation, prepared);
+                } else {
+                    preparedHudCheckPayload = HudCheckPayload.buildRoadInfo(context, preparedHudCheck);
+                }
                 hudCheckPackets = HudCheckPayload.auxiliaryPackets(context, preparedHudCheck);
                 hudCheckHasAuxiliary = !hudCheckPackets.isEmpty();
                 hudCheckAuxiliarySentAtMs = 0L;
@@ -1540,6 +1551,14 @@ final class HudOutputCoordinator {
         if (hudCheckRoadResult == result) return;
         hudCheckRoadResult = result;
         MainActivity.publishSharedUiStateChange();
+    }
+
+    private void logManeuverGeometry(String owner, long session, DirectTbtPayload.Prepared payload) {
+        String key = "owner=" + owner + " session=" + session
+                + " f28=" + payload.nativeManeuver() + " " + payload.geometryDiagnostics();
+        if (key.equals(maneuverGeometryDiagnostic)) return;
+        maneuverGeometryDiagnostic = key;
+        log("maneuver_geometry prepared " + key + " distance=" + payload.distanceMeters());
     }
 
     private void recordHudCheck(String plane, int result, String reason) {
@@ -1972,6 +1991,7 @@ final class HudOutputCoordinator {
         byte[] payload = DirectTbtPayload.buildClear();
         int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
         logAsync("clear result=" + result + " reason=" + reason);
+        maneuverGeometryDiagnostic = "";
         if (!isPayloadSuccessResult(result)) {
             handleProtocolResult(kind, result);
             return false;
@@ -1991,6 +2011,7 @@ final class HudOutputCoordinator {
             int result = sendPayload(source, channelFor(source), kind, reason, payload, payload);
             long completedAtMs = SystemClock.elapsedRealtime();
             logAsync("clear result=" + result + " reason=" + reason);
+            maneuverGeometryDiagnostic = "";
             return result == 0 ? completedAtMs : -1L;
         } catch (RemoteException | RuntimeException e) {
             logAsync("clear failed reason=" + reason + " error=" + safe(e.getMessage()));

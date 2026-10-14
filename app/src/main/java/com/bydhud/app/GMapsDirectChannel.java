@@ -110,6 +110,7 @@ final class GMapsDirectChannel {
     private byte[] currentFallbackPng = new byte[0];
     private String lastBitmapDiagnosticKey = "";
     private DirectTbtFrame currentFrame;
+    private int activeCurrentStepIndex = -1;
 
     private static final class IdentityEvidenceRequest {
         final String channelId;
@@ -756,9 +757,33 @@ final class GMapsDirectChannel {
                         + " sha256=" + payloadDigest);
                 return;
             }
+            Integer stepIndex = integerValue(summary.get("currentStepIndex"));
+            boolean stepIndexPresent = Boolean.TRUE.equals(summary.get("currentStepIndexPresent"));
+            boolean stepRewound = stepIndexPresent && stepIndex != null && activeCurrentStepIndex >= 0
+                    && stepIndex < activeCurrentStepIndex;
+            if (stepRewound) {
+                // A different lower-index digest is accepted as a possible reroute or
+                // multi-leg transition; clear only circle context and keep the frame.
+                maneuverMap.reset();
+            }
+            boolean sameStep = stepIndexPresent && !stepRewound && currentFrame != null && stepIndex != null
+                    && stepIndex == activeCurrentStepIndex;
+            boolean maneuverPresent = summary.containsKey("maneuverEnum");
             int wireValue = intValue(summary.get("maneuverEnum"), -1);
-            int distance = Math.max(0, intValue(summary.get("distanceMeters"), 0));
-            GMapsDirectManeuverMap.Result mapping = maneuverMap.map(wireValue, distance > 0);
+            if (!maneuverPresent && sameStep
+                    && GmapsWireParser.maneuverName(currentFrame.getRawManeuverType()) != null) {
+                // A same-step partial update may omit the maneuver while refreshing
+                // distance or other fields. Keep its last explicit source enum.
+                wireValue = currentFrame.getRawManeuverType();
+            }
+            long distanceValue = longValue(summary.get("distanceMeters"), -1L);
+            int distance = distanceValue >= 0L && distanceValue <= Integer.MAX_VALUE
+                    ? (int) distanceValue
+                    : (sameStep ? currentFrame.getDistanceMeters() : 0);
+            GMapsDirectManeuverMap.Result mapping = maneuverMap.map(
+                    wireValue,
+                    stepIndex == null ? -1 : stepIndex,
+                    stepIndexPresent);
             String road = joinedLines(summary.get("cueLines"));
             if (road.isEmpty()) road = joinedLines(summary.get("longCueLines"));
             long frameAtMs = data.getLong(
@@ -791,7 +816,9 @@ final class GMapsDirectChannel {
                     lanes,
                     DirectTbtFrame.AlertOverlay.inactive(),
                     tripMetrics).withVehicleTbt(
-                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber);
+                    mapping.amapBroadcastManeuver, mapping.roundaboutExitNumber,
+                    mapping.roundaboutExit);
+            activeCurrentStepIndex = !stepIndexPresent || stepIndex == null ? -1 : stepIndex;
             boolean firstFrame = !firstStructuredFrame;
             if (!navigating) {
                 navigating = true;
@@ -940,6 +967,7 @@ final class GMapsDirectChannel {
         lastBitmapDiagnosticKey = "";
         currentFrame = null;
         firstStructuredFrame = false;
+        activeCurrentStepIndex = -1;
         maneuverBitmaps.clear();
         maneuverMap.reset();
         routePayloadFence.reset();

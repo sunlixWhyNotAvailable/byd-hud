@@ -9,21 +9,24 @@ public final class HudCheckState {
     public enum Field { MANEUVER, LANES, DISTANCE, STREET, TRAFFIC_LIGHT }
 
     private static final int EXTENDED_BASELINE_DISTANCE = 77;
+    private static final int LEGACY_GEOMETRY_FIRST_INDEX = 25;
+    private static final int LEGACY_GEOMETRY_END_INDEX = HudCheckLiveScenario.FIRST_EXTENDED_INDEX;
     private static final String EXTENDED_BASELINE_STREET = "Continue straight";
     private static final String EXTENDED_BASELINE_LANES = "S* | S | S* | S | S*";
 
     private static final Maneuver[] MANEUVERS = {
-            new Maneuver("Straight", "Прямо", 9, 11),
-            new Maneuver("Left", "Ліворуч", 2, 1),
-            new Maneuver("Right", "Праворуч", 3, 2),
-            new Maneuver("Slight left", "Плавно ліворуч", 4, 3),
-            new Maneuver("Slight right", "Плавно праворуч", 5, 5),
-            new Maneuver("Sharp left", "Різко ліворуч", 6, 1),
-            new Maneuver("Left U-turn", "Розворот ліворуч", 8, 7),
-            new Maneuver("Right U-turn", "Розворот праворуч", 19, 8),
-            new Maneuver("Roundabout right exit 2", "Коло, виїзд праворуч 2", 23, 11),
-            new Maneuver("Exit ramp left", "З’їзд ліворуч", 71, 1),
-            new Maneuver("Exit ramp right", "З’їзд праворуч", 70, 2)
+            new Maneuver("Straight", "Прямо", 9, 11, 9),
+            new Maneuver("Left", "Ліворуч", 2, 1, 2),
+            new Maneuver("Right", "Праворуч", 3, 2, 3),
+            new Maneuver("Slight left", "Плавно ліворуч", 4, 3, 4),
+            new Maneuver("Slight right", "Плавно праворуч", 5, 5, 5),
+            new Maneuver("Sharp left", "Різко ліворуч", 6, 1, 6),
+            new Maneuver("Left U-turn", "Розворот ліворуч", 8, 7, 8),
+            new Maneuver("Right U-turn", "Розворот праворуч", 19, 8, 19),
+            new Maneuver("Roundabout right exit 2", "Коло, виїзд праворуч 2", 26, 99, 22, 26,
+                    RoundaboutExit.Direction.RIGHT, 2),
+            new Maneuver("Exit ramp left", "З’їзд ліворуч", 71, 1, 2),
+            new Maneuver("Exit ramp right", "З’їзд праворуч", 70, 2, 3)
     };
 
     private static final String[] LANES = {
@@ -133,7 +136,7 @@ public final class HudCheckState {
         this.maneuverBitmap = maneuverBitmap;
         this.laneBitmap = laneBitmap;
         this.transliterate = transliterate;
-        this.extendedIndex = wrap(extendedIndex, EXTENDED.length);
+        this.extendedIndex = wrap(extendedIndex, extendedCount());
     }
 
     public HudCheckState selectMode(Mode value) {
@@ -262,18 +265,82 @@ public final class HudCheckState {
     }
 
     public String extendedLabel(boolean ukrainian) {
+        HudCheckLiveScenario live = liveScenario();
+        if (live != null) return ukrainian ? live.labelUk : live.labelEn;
         ExtendedSample sample = EXTENDED[extendedIndex];
         return ukrainian ? sample.uk : sample.en;
     }
 
+    public String extendedLabelRussian() {
+        HudCheckLiveScenario live = liveScenario();
+        return live == null ? extendedLabel(false) : live.labelRu;
+    }
+
     public String extendedField() {
+        if (isLivePipelineCheck()) return "RoadInfo · f9, f19–20, f28, f30–32";
         return EXTENDED[extendedIndex].field;
     }
 
-    public boolean isGeometryCheck() { return mode == Mode.EXTENDED && extendedIndex >= 25; }
+    public boolean isGeometryCheck() {
+        return mode == Mode.EXTENDED && extendedIndex >= LEGACY_GEOMETRY_FIRST_INDEX
+                && extendedIndex < LEGACY_GEOMETRY_END_INDEX;
+    }
+
+    public boolean isLivePipelineCheck() {
+        return mode == Mode.EXTENDED && liveScenario() != null;
+    }
+
+    /** Basic and appended live cases share the production Direct TBT input model. */
+    public boolean isLiveCheck() {
+        return mode == Mode.BASIC || isLivePipelineCheck();
+    }
+
+    /** Returns null for the isolated legacy Extended catalog and Shanghai mode. */
+    public DirectTbtFrame liveFrame() {
+        if (mode == Mode.BASIC) {
+            Maneuver maneuver = MANEUVERS[maneuverIndex];
+            return maneuver.frame(distance(), effectiveStreet());
+        }
+        HudCheckLiveScenario live = liveScenario();
+        return live == null ? null : live.frame();
+    }
+
+    HudManeuverGeometry.Selection liveGeometry() {
+        DirectTbtFrame frame = liveFrame();
+        return frame == null ? null : HudManeuverGeometry.select(frame, true, false);
+    }
+
+    String liveGeometrySummary() {
+        DirectTbtFrame frame = liveFrame();
+        HudManeuverGeometry.Selection geometry = liveGeometry();
+        if (frame == null || geometry == null) return "";
+        return "f19=" + geometry.longitude + " f20=" + geometry.latitude
+                + " f28=" + frame.getBydManeuver() + " f32=" + geometry.heading
+                + " geometry=" + geometry.name + " source=HUD_CHECK"
+                + (frame.getRoundaboutExit().hasDirection()
+                ? " " + frame.getRoundaboutExit().diagnostics() : "");
+    }
+
+    int liveNativeManeuver() {
+        DirectTbtFrame frame = liveFrame();
+        return frame == null ? -1 : frame.getBydManeuver();
+    }
+
+    int liveDistanceMeters() {
+        DirectTbtFrame frame = liveFrame();
+        return frame == null ? -1 : frame.getDistanceMeters();
+    }
+
+    String liveScenarioKey() {
+        HudCheckLiveScenario live = liveScenario();
+        return live == null ? "basic-m" + maneuverIndex : live.key;
+    }
 
     public String extendedValue() {
-        return isGeometryCheck() ? HudCheckGeometry.display(extendedIndex) : EXTENDED[extendedIndex].value;
+        HudCheckLiveScenario live = liveScenario();
+        return live != null ? live.value()
+                : isGeometryCheck() ? HudCheckGeometry.display(extendedIndex)
+                : EXTENDED[extendedIndex].value;
     }
 
     public String expected(boolean ukrainian) {
@@ -286,24 +353,26 @@ public final class HudCheckState {
 
     /** Number of bounded Extended fixtures exposed by the diagnostic UI. */
     public static int extendedCount() {
-        return EXTENDED.length;
+        return EXTENDED.length + HudCheckLiveScenario.count();
     }
 
     public HudState toHudState() {
         HudState state = new HudState();
-        boolean baseline = mode == Mode.EXTENDED;
+        HudCheckLiveScenario live = liveScenario();
+        boolean baseline = mode == Mode.EXTENDED && live == null;
         Maneuver maneuver = baseline ? MANEUVERS[0] : MANEUVERS[maneuverIndex];
-        String laneText = baseline ? EXTENDED_BASELINE_LANES : lanes();
-        int meters = isGeometryCheck() ? 9 : baseline ? EXTENDED_BASELINE_DISTANCE : distance();
-        String street = baseline ? EXTENDED_BASELINE_STREET : effectiveStreet();
+        String laneText = baseline || live != null ? EXTENDED_BASELINE_LANES : lanes();
+        int meters = live != null ? live.distanceMeters
+                : isGeometryCheck() ? 9 : baseline ? EXTENDED_BASELINE_DISTANCE : distance();
+        String street = baseline || live != null ? EXTENDED_BASELINE_STREET : effectiveStreet();
 
         state.hudCheck = this;
         state.distanceToIntersection = meters;
-        state.maneuverId = maneuver.nativeId;
+        state.maneuverId = live == null ? maneuver.nativeId : live.nativeManeuver;
         // Keep the semantic source ID available to manual mapping even when
         // Stock suppresses artwork. HudCheckPayload selects blank S72 for f8
         // independently; source identity must not be lost with the PNG.
-        state.turnBitmapId = maneuver.pngId;
+        state.turnBitmapId = live == null ? maneuver.pngId : live.bitmapId;
         state.turnBitmapMode = HudState.TURN_BITMAP_OEM;
         state.navigationStatus = 2;
         state.crossStatus = 2;
@@ -318,7 +387,7 @@ public final class HudCheckState {
         state.guidePoint = "";
         state.navigationRatio = 0.0d;
         state.includeNativeArrow = true;
-        state.includeLaneBitmap = !baseline && laneBitmap;
+        state.includeLaneBitmap = mode == Mode.BASIC && laneBitmap;
         state.turnBitmapHiddenLocked = false;
         return state;
     }
@@ -327,6 +396,11 @@ public final class HudCheckState {
                                   int trafficLight, int extended) {
         return new HudCheckState(mode, running, automatic, maneuver, lanes, distance, street,
                 trafficLight, maneuverBitmap, laneBitmap, transliterate, extended);
+    }
+
+    private HudCheckLiveScenario liveScenario() {
+        return mode == Mode.EXTENDED
+                ? HudCheckLiveScenario.forExtendedIndex(extendedIndex) : null;
     }
 
     private static int laneCount(String value) {
@@ -374,11 +448,36 @@ public final class HudCheckState {
     private static final class Maneuver extends Label {
         final int pngId;
         final int nativeId;
+        final int amapManeuver;
+        final int amapBroadcastManeuver;
+        final int roundaboutExitNumber;
+        final RoundaboutExit.Direction roundaboutDirection;
 
-        Maneuver(String en, String uk, int pngId, int nativeId) {
+        Maneuver(String en, String uk, int pngId, int nativeId, int amapManeuver) {
+            this(en, uk, pngId, nativeId, amapManeuver, amapManeuver,
+                    RoundaboutExit.Direction.UNKNOWN, 0);
+        }
+
+        Maneuver(String en, String uk, int pngId, int nativeId, int amapManeuver,
+                 int amapBroadcastManeuver,
+                 RoundaboutExit.Direction roundaboutDirection, int roundaboutExitNumber) {
             super(en, uk);
             this.pngId = pngId;
             this.nativeId = nativeId;
+            this.amapManeuver = amapManeuver;
+            this.amapBroadcastManeuver = amapBroadcastManeuver;
+            this.roundaboutDirection = roundaboutDirection;
+            this.roundaboutExitNumber = roundaboutExitNumber;
+        }
+
+        DirectTbtFrame frame(int distanceMeters, String roadText) {
+            DirectTbtFrame frame = new DirectTbtFrame(-1, amapManeuver, nativeId,
+                    distanceMeters, roadText, "", roadText, null, null,
+                    java.util.Collections.emptyList(), DirectTbtFrame.AlertOverlay.inactive())
+                    .withVehicleTbt(amapBroadcastManeuver, roundaboutExitNumber);
+            return roundaboutDirection == RoundaboutExit.Direction.UNKNOWN ? frame
+                    : frame.withRoundaboutExit(RoundaboutExit.of(roundaboutDirection,
+                    RoundaboutExit.Source.HUD_CHECK, -1, Double.NaN));
         }
     }
 

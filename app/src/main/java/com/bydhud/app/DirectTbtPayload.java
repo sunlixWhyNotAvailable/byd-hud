@@ -203,11 +203,19 @@ public final class DirectTbtPayload {
                 : alert.isActive() ? "alert"
                 : blankLaneManeuver || blankDestinationManeuver ? "blank_s72"
                 : navManeuverPng.length > 0 ? "current" : "empty";
+        HudManeuverGeometry.Selection geometry = HudManeuverGeometry.select(
+                safeFrame, safeOptions.nativeManeuver, alert.isActive());
+        if (blankLaneManeuver && safeOptions.nativeManeuver
+                && safeFrame.getAmapManeuver() != 22 && safeFrame.getAmapManeuver() != 25) {
+            geometry = HudManeuverGeometry.LANE_ONLY;
+        }
+        String geometryDiagnostics = "maneuverType=" + safeFrame.getRawManeuverType()
+                + " " + safeFrame.getRoundaboutExit().diagnostics() + " " + geometry.diagnostics();
 
         if (!render) {
             return new Prepared(new byte[0], maneuverMode, nativeManeuver,
                     distanceMeters, displayText, lanes.size(), 0, null,
-                    -1, -1, hasStreetEta, metrics.diagnostics);
+                    -1, -1, hasStreetEta, metrics.diagnostics, geometry, geometryDiagnostics);
         }
 
         // Only the compositor consumes these independent regions. Instrument/AMap
@@ -269,12 +277,12 @@ public final class DirectTbtPayload {
         }
         writeVarintField(fields, 28, Math.max(0, nativeManeuver));
         if (!lanes.isEmpty()) writeStringField(fields, 29, laneText(lanes));
-        writeStringField(fields, 30, HudCheckPayload.DIAGNOSTIC_GUIDE_LINE);
+        geometry.writeTo(fields);
         return new Prepared(fields.toByteArray(), maneuverMode, nativeManeuver,
                 distanceMeters, displayText, lanes.size(), lanePng.length,
                 maneuverPng, displayTextStart, displayTextEnd, hasStreetEta,
                 safeOptions.etaOutputMode == HudPrefs.ETA_OUTPUT_NATIVE
-                        ? nativeMetrics.diagnostics : metrics.diagnostics);
+                        ? nativeMetrics.diagnostics : metrics.diagnostics, geometry, geometryDiagnostics);
     }
 
     private static NativeEtaFormatter.Formatted nativeEta(
@@ -293,7 +301,7 @@ public final class DirectTbtPayload {
         writeVarintField(inner, 2, 2);
         writeVarintField(inner, 6, 255);
         writeVarintField(inner, 16, 1);
-        writeStringField(inner, 30, "");
+        HudManeuverGeometry.CLEAR.writeTo(inner);
         return wrap(inner.toByteArray());
     }
 
@@ -509,17 +517,20 @@ public final class DirectTbtPayload {
         private final int displayTextEnd;
         private final boolean hasStreetEta;
         private final String etaDiagnostics;
+        private final HudManeuverGeometry.Selection geometry;
+        private final String geometryDiagnostics;
 
         private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
                          int distanceMeters, String displayText, int laneCount,
                          int lanePngBytes, byte[] maneuverPng,
                          int displayTextStart, int displayTextEnd, boolean hasStreetEta,
-                         String etaDiagnostics) {
+                         String etaDiagnostics, HudManeuverGeometry.Selection geometry,
+                         String geometryDiagnostics) {
             this(fields, maneuverMode, nativeManeuver, distanceMeters, displayText,
                     laneCount, lanePngBytes, maneuverPng == null ? 0 : maneuverPng.length,
                     shortSha256(maneuverPng), pngWidth(maneuverPng), pngHeight(maneuverPng),
                     displayTextStart, displayTextEnd, hasStreetEta,
-                    etaDiagnostics);
+                    etaDiagnostics, geometry, geometryDiagnostics);
         }
 
         private Prepared(byte[] fields, String maneuverMode, int nativeManeuver,
@@ -527,7 +538,8 @@ public final class DirectTbtPayload {
                          int lanePngBytes, int maneuverPngBytes, String maneuverPngSha,
                          int maneuverPngWidth, int maneuverPngHeight,
                          int displayTextStart, int displayTextEnd, boolean hasStreetEta,
-                         String etaDiagnostics) {
+                         String etaDiagnostics, HudManeuverGeometry.Selection geometry,
+                         String geometryDiagnostics) {
             this.fields = fields == null ? new byte[0] : fields;
             this.maneuverMode = maneuverMode == null ? "empty" : maneuverMode;
             this.nativeManeuver = nativeManeuver;
@@ -543,6 +555,8 @@ public final class DirectTbtPayload {
             this.displayTextEnd = displayTextEnd;
             this.hasStreetEta = hasStreetEta;
             this.etaDiagnostics = etaDiagnostics == null ? "" : etaDiagnostics;
+            this.geometry = geometry;
+            this.geometryDiagnostics = geometryDiagnostics;
         }
 
         public String maneuverMode() {
@@ -593,6 +607,23 @@ public final class DirectTbtPayload {
             return etaDiagnostics;
         }
 
+        HudManeuverGeometry.Selection geometry() { return geometry; }
+
+        String geometryDiagnostics() { return geometryDiagnostics; }
+
+        /** HUD Check resets optional probe fields before the actual live fields override them. */
+        Prepared withHudCheckBaseline(byte[] baseline) {
+            byte[] combined = new byte[baseline.length + fields.length];
+            System.arraycopy(baseline, 0, combined, 0, baseline.length);
+            System.arraycopy(fields, 0, combined, baseline.length, fields.length);
+            return new Prepared(combined, maneuverMode, nativeManeuver, distanceMeters,
+                    displayText, laneCount, lanePngBytes, maneuverPngBytes, maneuverPngSha,
+                    maneuverPngWidth, maneuverPngHeight,
+                    displayTextStart < 0 ? -1 : displayTextStart + baseline.length,
+                    displayTextEnd < 0 ? -1 : displayTextEnd + baseline.length,
+                    hasStreetEta, etaDiagnostics, geometry, geometryDiagnostics);
+        }
+
         /** Replaces only serialized F10 while retaining all prepared PNG work and metadata. */
         public Prepared withDisplayText(String value) {
             String safeValue = value == null ? "" : value;
@@ -613,7 +644,7 @@ public final class DirectTbtPayload {
                     safeValue, laneCount, lanePngBytes, maneuverPngBytes, maneuverPngSha,
                     maneuverPngWidth, maneuverPngHeight, displayTextStart,
                     displayTextStart + textField.length, hasStreetEta,
-                    etaDiagnostics);
+                    etaDiagnostics, geometry, geometryDiagnostics);
         }
 
         public byte[] build(int counter) {

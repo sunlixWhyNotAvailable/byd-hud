@@ -989,7 +989,8 @@ final class NavHudLiveSender {
 
     static long hudCheckIntervalMs(HudCheckState state) {
         return state.mode == HudCheckState.Mode.EXTENDED && state.automatic
-                ? state.isGeometryCheck() ? 10_000L : HUD_CHECK_INTERVAL_MS : SEND_INTERVAL_MS;
+                ? state.isGeometryCheck() || state.isLivePipelineCheck()
+                        ? 10_000L : HUD_CHECK_INTERVAL_MS : SEND_INTERVAL_MS;
     }
 
     void startManual(HudState state, String reason) {
